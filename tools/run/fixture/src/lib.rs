@@ -2,8 +2,12 @@
 //! the `makepad` loader with its shims (feature `host-shims`); under `makepad run` Relax loads its
 //! source for the bin but binds the C-shaped non-generic fns below to the loader's code.
 //! `bound()` tells which side ran: only the loader's build has the feature.
+//! `provided_static.sh` covers marked shared statics (public, private, function-local, mutable,
+//! Cell-backed and arrays), per-side memo storage and thread-locals. Unmarked PLAIN_COUNT and
+//! layout-incompatible SHARED_LOG must be refused when reached from JIT code.
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use relax_api::{relax_api, string_from_words, string_to_words, vec_from_words, vec_to_words, Words};
 
@@ -13,8 +17,18 @@ pub fn bound() -> bool {
     cfg!(feature = "host-shims")
 }
 
+/// Only in the loader's build of the fixture (feature `wide`, which its own bins leave off): a
+/// fixture run builds the crate with fewer features than the loader, and runs with the loader's.
+#[cfg(feature = "wide")]
+#[relax_api(run)]
+pub fn wide_marker() -> u32 {
+    7
+}
+
 #[relax_api(run)]
 pub fn add(a: i32, b: i64) -> i64 {
+    #[cfg(feature = "wide")]
+    debug_assert_eq!(wide_marker(), 7);
     a as i64 + b
 }
 
@@ -70,6 +84,301 @@ pub fn sum(v: &[u32]) -> u64 {
 pub enum Kind {
     A = 1,
     B = 7,
+}
+
+#[relax_api(plain, run)]
+#[repr(align(16))]
+#[derive(Clone, Copy)]
+pub struct V(pub [f32; 4]);
+
+#[relax_api(plain, run)]
+#[derive(Clone, Copy)]
+pub struct Id(pub u64);
+
+// Concrete ops, so each Option spelling is exported and bound independently. The bin has
+// its own constructors and checksums; neither side uses the other's expected-value code.
+macro_rules! tagged_option_ops {
+    ($module:ident, $ty:ty, $seed:ident => $value:expr, $x:ident => $sum:expr) => {
+        pub mod $module {
+            use super::*;
+
+            fn make(present: bool, $seed: u64) -> Option<$ty> {
+                if present { Some($value) } else { None }
+            }
+
+            fn sum(value: &Option<$ty>) -> u64 {
+                match value { None => 17, Some($x) => 29u64.wrapping_add($sum) }
+            }
+
+            #[relax_api(handle, run)]
+            pub struct Holder {
+                pub guard: u64,
+                pub value: Option<$ty>,
+            }
+
+            #[relax_api(run)]
+            pub fn exchange(value: Option<$ty>, expected: u64, present: bool, seed: u64) -> Option<$ty> {
+                assert_eq!(sum(&value), expected, "native by-value input");
+                make(present, seed)
+            }
+
+            #[relax_api(run)]
+            pub fn by_ref(value: &Option<$ty>, expected: u64) -> &Option<$ty> {
+                assert_eq!(sum(value), expected, "native shared-reference input");
+                value
+            }
+
+            #[relax_api(run)]
+            pub fn by_mut(value: &mut Option<$ty>, expected: u64, present: bool, seed: u64) -> &mut Option<$ty> {
+                assert_eq!(sum(value), expected, "native mutable-reference input");
+                *value = make(present, seed);
+                value
+            }
+
+            #[relax_api(run)]
+            pub fn field(value: Holder, expected: u64, present: bool, seed: u64) -> Holder {
+                assert_eq!(value.guard, 0x1234_5678_9abc_def0, "native handle guard");
+                assert_eq!(sum(&value.value), expected, "native handle Option field");
+                Holder { guard: value.guard, value: make(present, seed) }
+            }
+
+            /// Reverse calls use the same memory-slot transport as an op shim, avoiding any
+            /// dependence on rustc's Rust ABI for Option or an improper C ABI for aggregates.
+            #[relax_api(run)]
+            pub fn reverse(callback: usize, present: bool, seed: u64) -> u64 {
+                // SAFETY: the bin supplies a live callback with exactly this C-unwind signature.
+                let call: extern "C-unwind" fn(*mut u8, u32, u64, bool, u64) -> u64 = unsafe { std::mem::transmute(callback) };
+                let mut total = 0u64;
+                for mode in 0..4 {
+                    let mut value = Holder { guard: 0x1234_5678_9abc_def0, value: make(present, seed) };
+                    let before = sum(&value.value);
+                    let data = if mode == 3 { (&mut value as *mut Holder).cast::<u8>() }
+                        else { (&mut value.value as *mut Option<$ty>).cast::<u8>() };
+                    let got = call(data, mode, before, !present, seed + 1);
+                    let expected = if mode == 1 { before } else { sum(&make(!present, seed + 1)) };
+                    assert_eq!(got, expected, "native checks caller checksum, mode {mode}");
+                    assert_eq!(sum(&value.value), expected, "native checks caller output bytes, mode {mode}");
+                    assert_eq!(value.guard, 0x1234_5678_9abc_def0, "caller preserves handle guard");
+                    total = total.wrapping_add(got.wrapping_mul(mode as u64 + 1));
+                }
+                total
+            }
+        }
+    };
+}
+
+tagged_option_ops!(option_u32, u32, seed => 0xfeed_0000 | seed as u32, x => *x as u64);
+tagged_option_ops!(option_f32, f32, seed => seed as f32 + 0.25, x => x.to_bits() as u64);
+tagged_option_ops!(option_u64, u64, seed => (seed << 40) | 0xabcd, x => x.rotate_left(13));
+tagged_option_ops!(option_u128, u128,
+    seed => ((seed as u128) << 100) | ((seed as u128) << 52) | 0xcafe,
+    x => ((*x >> 64) as u64).wrapping_mul(31).wrapping_add(*x as u64));
+tagged_option_ops!(option_v, V,
+    seed => V([seed as f32 + 0.25, seed as f32 + 0.5, seed as f32 + 0.75, seed as f32 + 1.0]),
+    x => x.0.iter().enumerate().map(|(i, v)| (2 * i as u64 + 1) * v.to_bits() as u64).sum::<u64>());
+tagged_option_ops!(option_id, Id, seed => Id((seed << 44) | 0xbeef), x => x.0.rotate_left(7));
+
+/// Primitive repr keeps Byte's u8 immediately after the tag, even with a u64 variant.
+/// The attribute above the mark must be visible to the layout exporter too.
+#[repr(u8)]
+#[relax_api(plain, run)]
+pub enum PlainEnumLayout {
+    Empty = 3,
+    Byte(u8),
+    Named { byte: u8, wide: u64 } = 1 << 4,
+    Last,
+}
+
+/// Owning payloads use the same export for handles. The loader also enables `wide`,
+/// checking both sides of the variant/field cfgs when it builds this fixture.
+#[relax_api(handle, run)]
+#[repr(u8)]
+pub enum OwnedEnumLayout {
+    Empty,
+    Words(Vec<u32>) = 5,
+    Boxed { byte: u8, value: Box<Site> },
+    Tuple(#[cfg(feature = "wide")] u64, u8),
+    // (a field cfg'd out always: a `not(feature)` cfg would make `wide` non-additive, provided.rs)
+    Named { #[cfg(any())] byte: u8, wide: u64 },
+    #[cfg(feature = "wide")]
+    Extra(u32),
+    Last,
+}
+
+#[relax_api(plain, run)]
+#[repr(u16, align(8))]
+pub enum WideEnumLayout {
+    Empty = 0x100,
+    Byte(u8),
+    Named { value: u64 } = 0x200,
+}
+
+/// repr(C, u8) shares one payload offset across variants: Byte starts after the
+/// padding for the payload union's u64 alignment, unlike PlainEnumLayout::Byte.
+#[relax_api(plain, run)]
+#[repr(C, u8)]
+pub enum CEnumLayout {
+    Empty,
+    Byte(u8),
+    Wide(u64),
+}
+
+/// Lifetime-only mirrors must keep lifetimes used even on unit variants or when a
+/// field is cfg'd out. Signed discriminants are sign-extended in the exported table.
+#[repr(i8)]
+#[relax_api(handle, run)]
+pub enum BorrowedEnumLayout<'a, 'b: 'a> {
+    Empty = -7,
+    Pair(&'a u8, &'b u64),
+    Named { #[cfg(feature = "wide")] text: &'a str, byte: u8 },
+    // (cfg_attr whose condition holds: removes the variant)
+    #[cfg_attr(all(), cfg(any()))]
+    Extra(&'b str),
+    Last,
+}
+
+/// ScriptPodTy's shape: plain enum payloads and a cycle through Vec/Box of a handle.
+#[relax_api(handle, run)]
+#[repr(u8)]
+#[derive(Default)]
+pub enum PodTy {
+    #[default]
+    Void,
+    Bool,
+    Vec(Kind),
+    Struct { align_of: usize, size_of: usize, fields: Vec<PodField> },
+    FixedArray { align_of: usize, size_of: usize, len: usize, ty: Box<PodField> },
+    /// Two owned fields let a partial move leave a separately counted payload behind.
+    Split { fields: Vec<PodField>, rest: Box<PodField> },
+}
+
+#[relax_api(handle, run)]
+pub struct PodField {
+    pub name: usize,
+    pub ty: PodTy,
+    pub token: PodDrop,
+}
+
+#[relax_api(handle, run)]
+pub struct PodDrop {
+    pub value: u32,
+}
+
+static POD_DROPS: AtomicU32 = AtomicU32::new(0);
+
+impl Drop for PodDrop {
+    fn drop(&mut self) {
+        POD_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[relax_api(run)]
+pub fn pod_drops() -> u32 {
+    POD_DROPS.load(Ordering::Relaxed)
+}
+
+#[relax_api(run)]
+pub fn pod_build(i: u32) -> PodTy {
+    match i {
+        0 => PodTy::Void,
+        1 => PodTy::Bool,
+        2 => PodTy::Vec(Kind::B),
+        3 => PodTy::Struct {
+            align_of: 8,
+            size_of: 64,
+            fields: vec![
+                PodField { name: 11, ty: PodTy::Vec(Kind::A), token: PodDrop { value: 101 } },
+                PodField { name: 13, ty: PodTy::Bool, token: PodDrop { value: 103 } },
+            ],
+        },
+        4 => PodTy::FixedArray {
+            align_of: 16,
+            size_of: 96,
+            len: 3,
+            ty: Box::new(PodField { name: 17, ty: PodTy::Vec(Kind::B), token: PodDrop { value: 107 } }),
+        },
+        5 => PodTy::Split {
+            fields: vec![
+                PodField { name: 11, ty: PodTy::Vec(Kind::A), token: PodDrop { value: 101 } },
+                PodField { name: 13, ty: PodTy::Bool, token: PodDrop { value: 103 } },
+            ],
+            rest: Box::new(PodField { name: 19, ty: PodTy::Bool, token: PodDrop { value: 109 } }),
+        },
+        _ => panic!("unknown pod variant"),
+    }
+}
+
+#[relax_api(run)]
+pub fn pod_field_checksum(field: &PodField) -> u64 {
+    17 * field.name as u64 + 19 * field.token.value as u64 + 23 * pod_checksum(&field.ty)
+}
+
+/// rustc reads every field, including every element's fields and nested enum tag.
+#[relax_api(run)]
+pub fn pod_checksum(value: &PodTy) -> u64 {
+    match value {
+        PodTy::Void => 3,
+        PodTy::Bool => 5,
+        PodTy::Vec(kind) => 7 + match kind { Kind::A => 11, Kind::B => 13 },
+        PodTy::Struct { align_of, size_of, fields } => {
+            let mut sum = 29 + 31 * *align_of as u64 + 37 * *size_of as u64 + 41 * fields.len() as u64;
+            for (i, field) in fields.iter().enumerate() {
+                sum += (i as u64 + 1) * 43 * pod_field_checksum(field);
+            }
+            sum
+        }
+        PodTy::FixedArray { align_of, size_of, len, ty } => {
+            47 + 53 * *align_of as u64 + 59 * *size_of as u64 + 61 * *len as u64 + 67 * pod_field_checksum(ty)
+        }
+        PodTy::Split { fields, rest } => {
+            let mut sum = 71 + 73 * fields.len() as u64 + 83 * pod_field_checksum(rest);
+            for (i, field) in fields.iter().enumerate() {
+                sum += (i as u64 + 1) * 79 * pod_field_checksum(field);
+            }
+            sum
+        }
+    }
+}
+
+#[relax_api(run)]
+pub fn pod_take(value: PodTy) -> u64 {
+    pod_checksum(&value)
+}
+
+#[relax_api(run)]
+pub fn pod_maybe(i: u32, present: bool) -> Option<PodTy> {
+    if present { Some(pod_build(i)) } else { None }
+}
+
+#[relax_api(run)]
+pub fn pod_option_take(value: Option<PodTy>) -> u64 {
+    match value { Some(value) => 1 + pod_checksum(&value), None => 0 }
+}
+
+#[relax_api(run)]
+pub fn pod_slice_checksum(values: &[PodTy]) -> u64 {
+    let mut sum = 0;
+    for (i, value) in values.iter().enumerate() {
+        sum += (i as u64 + 1) * pod_checksum(value);
+    }
+    sum
+}
+
+#[relax_api(run)]
+pub fn pod_field_build(i: u32) -> PodField {
+    PodField { name: 23, ty: pod_build(i), token: PodDrop { value: 113 } }
+}
+
+/// No primitive repr: construction must still be refused when this reaches a bound op.
+#[relax_api(handle, run)]
+pub enum RefusedPodTy {
+    Void,
+    Field { value: usize },
+}
+
+#[relax_api(run)]
+pub fn refused_pod_take(value: RefusedPodTy) -> usize {
+    match value { RefusedPodTy::Void => 0, RefusedPodTy::Field { value } => value }
 }
 
 #[relax_api(run)]
@@ -541,6 +850,166 @@ pub fn shared_log(line: &str) -> usize {
     l.push(line.to_string());
     l.len()
 }
+
+/// One marked instance: ops, plain fns compiled by the JIT and direct bin access all share it.
+#[relax_api]
+pub static SHARED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// An op: rustc's code adds `n` to SHARED_COUNT; the count after it.
+#[relax_api(run)]
+pub fn shared_count_add(n: u64) -> u64 {
+    SHARED_COUNT.fetch_add(n, Ordering::Relaxed) + n
+}
+
+/// Not an op: JIT code compiles it from source and bumps SHARED_COUNT.
+pub fn shared_count_bump(n: u64) -> u64 {
+    SHARED_COUNT.fetch_add(n, Ordering::Relaxed) + n
+}
+
+/// What rustc's code reads of SHARED_COUNT after either side writes it.
+#[relax_api(run)]
+pub fn shared_count() -> u64 {
+    SHARED_COUNT.load(Ordering::Relaxed)
+}
+
+#[relax_api(run)]
+pub fn shared_count_addr() -> usize {
+    (&raw const SHARED_COUNT) as usize
+}
+
+/// The loader's address and value together, for a JIT static holding a reference to it.
+#[relax_api(run)]
+pub fn shared_count_snapshot() -> [u64; 2] {
+    [(&raw const SHARED_COUNT) as usize as u64, SHARED_COUNT.load(Ordering::Relaxed)]
+}
+
+/// Private storage: the generated address accessor must be able to name it in this module.
+#[relax_api]
+static HIDDEN: AtomicU64 = AtomicU64::new(0);
+
+#[relax_api(run)]
+pub fn hidden_count_add(n: u64) -> u64 {
+    HIDDEN.fetch_add(n, Ordering::Relaxed) + n
+}
+
+pub fn hidden_count_bump(n: u64) -> u64 {
+    HIDDEN.fetch_add(n, Ordering::Relaxed) + n
+}
+
+#[relax_api(run)]
+pub fn hidden_count() -> u64 {
+    HIDDEN.load(Ordering::Relaxed)
+}
+
+pub fn hidden_count_read() -> u64 {
+    HIDDEN.load(Ordering::Relaxed)
+}
+
+#[relax_api(run)]
+pub fn hidden_count_addr() -> usize {
+    (&raw const HIDDEN) as usize
+}
+
+pub fn hidden_count_plain_addr() -> usize {
+    (&raw const HIDDEN) as usize
+}
+
+/// The op twin calls this same helper: one LOCAL, whose key includes `local_count_bump`.
+/// Calling with zero also reads it without changing the count.
+pub fn local_count_bump(n: u64) -> u64 {
+    #[relax_api]
+    static LOCAL: AtomicU64 = AtomicU64::new(0);
+    LOCAL.fetch_add(n, Ordering::Relaxed) + n
+}
+
+#[relax_api(run)]
+pub fn local_count_add(n: u64) -> u64 {
+    local_count_bump(n)
+}
+
+#[relax_api(run)]
+pub fn local_count() -> u64 {
+    local_count_bump(0)
+}
+
+/// Plain mutable data: the single-threaded fixture reads and writes the loader's one instance.
+#[relax_api]
+pub static mut RAW: u64 = 0;
+
+#[relax_api(run)]
+pub fn raw_set(v: u64) {
+    unsafe { RAW = v }
+}
+
+#[relax_api(run)]
+pub fn raw_count() -> u64 {
+    unsafe { RAW }
+}
+
+pub fn raw_read() -> u64 {
+    unsafe { RAW }
+}
+
+#[relax_api(run)]
+pub fn raw_addr() -> usize {
+    (&raw const RAW) as usize
+}
+
+pub struct Cells {
+    pub c: Cell<u64>,
+}
+
+// SAFETY: this fixture's Cell access is confined to the single thread running the statics mode.
+unsafe impl Sync for Cells {}
+
+#[relax_api]
+pub static CELLS: Cells = Cells { c: Cell::new(0) };
+
+#[relax_api(run)]
+pub fn cells_add(n: u64) -> u64 {
+    CELLS.c.set(CELLS.c.get() + n);
+    CELLS.c.get()
+}
+
+pub fn cells_bump(n: u64) -> u64 {
+    CELLS.c.set(CELLS.c.get() + n);
+    CELLS.c.get()
+}
+
+#[relax_api(run)]
+pub fn cells_count() -> u64 {
+    CELLS.c.get()
+}
+
+#[relax_api(run)]
+pub fn cells_addr() -> usize {
+    (&raw const CELLS) as usize
+}
+
+#[relax_api]
+pub static ARR: [AtomicU32; 4] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+
+#[relax_api(run)]
+pub fn arr_add(i: usize, n: u32) -> u32 {
+    ARR[i].fetch_add(n, Ordering::Relaxed) + n
+}
+
+pub fn arr_bump(i: usize, n: u32) -> u32 {
+    ARR[i].fetch_add(n, Ordering::Relaxed) + n
+}
+
+#[relax_api(run)]
+pub fn arr_count(i: usize) -> u32 {
+    ARR[i].load(Ordering::Relaxed)
+}
+
+#[relax_api(run)]
+pub fn arr_addr() -> usize {
+    (&raw const ARR) as usize
+}
+
+/// Layout-compatible but unmarked: direct JIT access still needs an explicit sharing mark.
+pub static PLAIN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     /// A `const` thread-local without drop glue (a `#[thread_local]` static under Relax).

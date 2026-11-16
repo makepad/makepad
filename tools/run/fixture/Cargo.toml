@@ -10,6 +10,9 @@ default-run = "relax-provided-fixture"
 [features]
 # the #[relax_api] wrappers and table entries; only the loader enables it
 host-shims = []
+# The loader builds with wide; the fixture's own bins do not, so every fixture run binds a
+# program whose features are a subset of the loader's.
+wide = []
 
 [dependencies]
 relax-api = { workspace = true }
@@ -36,6 +39,12 @@ path = "src/guard.rs"
 [[bin]]
 name = "relax-provided-fixture-arc-guard"
 path = "src/arc_guard.rs"
+
+# Primitive-repr enum layout, ownership and nesting across the provided boundary
+# (provided_script.sh); `refused` exercises the repr(Rust) remedy in its own lazy fn.
+[[bin]]
+name = "relax-provided-enum"
+path = "src/provided_enum.rs"
 
 # statics of the lib reached from JIT-compiled code: a per-side one works, rustc's one copy is
 # refused (provided_static.sh)

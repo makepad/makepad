@@ -1,0 +1,11 @@
+# Sandboxed modules whose const-context bodies (consts, statics, associated and trait consts,
+# array lengths, discriminants, const parameter defaults, repeat counts, inline consts) reach what
+# the sandbox refuses, loaded by a `makepad run` program (tools/run/fixture/modules_harness.rs).
+# Runs only under the runner (std::relax::Module).
+[package]
+name = "scb-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]

@@ -547,8 +547,7 @@ impl Builder<'_> {
         let ast = &self.root.cx.prog.files[file as usize].ast;
         let range = match self.root.scope_tree.scopes[region_scope.0 as usize].node {
             crate::region_scope::Node::Expr(e) => {
-                let e = ast.expr(crate::ast::ExprId(e));
-                Some((e.lo, e.hi))
+                Some(self.root.scope_tree.expr_span(ast, crate::ast::ExprId(e)))
             }
             crate::region_scope::Node::Block(b) => {
                 let b = ast.block(crate::ast::BlockId(b));

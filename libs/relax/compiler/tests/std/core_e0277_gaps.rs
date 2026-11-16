@@ -1,7 +1,6 @@
 // Impls real std has that the frontend's E0277 check found missing: Rc/Arc::make_mut on unsized
 // values (CloneToUninit), From<Ipv6Addr> for u128 (and the other Ip conversions), From<Box<T>> for
-// Rc<T> / Arc<T> including unsized T. (RangeBounds for ranges of references is held: see
-// local/agent_state/fast-rust/std-held/range_refs.patch and coord.md.)
+// Rc<T> / Arc<T> including unsized T. (RangeBounds for ranges of references is not added yet.)
 use std::cell::Cell;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;

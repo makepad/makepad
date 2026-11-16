@@ -1,5 +1,5 @@
 // A type alias of a module goes and an unchanged signature names it by its path (`a::Id`): refused
-// (E0412). It patched.
+// (E0425). It patched.
 mod a {
 }
 

@@ -52,17 +52,28 @@ impl Cx<'_> {
 
     fn mirror_expr_inner(&mut self, e: ast::ExprId) -> BuildResult<ExprId> {
         let two_phase = std::mem::take(&mut self.two_phase);
-        let span = self.espan(e);
-        let expr_scope = self.node_scope(Node::Expr(e.0), span)?;
-        let mut expr = self.make_mirror_unadjusted(e)?;
+        // rustc erases parentheses before assigning HIR scopes. Relax's typeck still keeps
+        // their adjustments, so apply those from the inside out under the inner node's scope.
+        let mut parens = Vec::new();
+        let mut inner = e;
+        while let A::Paren(x) = self.ast().expr(inner).kind {
+            parens.push(inner);
+            inner = x;
+        }
+        let span = self.espan(inner);
+        let expr_scope = self.node_scope(Node::Expr(inner.0), span)?;
+        let mut expr = self.make_mirror_unadjusted(inner)?;
         // Now apply adjustments, if any.
-        for adjustment in self.value_adjustments(e, expr.ty) {
-            expr = self.apply_adjustment(e, expr, adjustment, two_phase)?;
+        for node in std::iter::once(inner).chain(parens.into_iter().rev()) {
+            if node != inner { self.ety(node)?; }
+            for adjustment in self.value_adjustments(node, expr.ty) {
+                expr = self.apply_adjustment(node, expr, adjustment, two_phase && node == e)?;
+            }
         }
         // Finally, wrap this up in the expr's scope.
-        let (ty, temp_scope, bid) = (expr.ty, self.temp_scope(e), self.bid_scope(e));
+        let (ty, temp_scope, bid) = (expr.ty, self.temp_scope(inner), self.bid_scope(inner));
         let value = self.push(expr);
-        Ok(self.push(Expr { temp_scope, bid, ty, span, kind: ExprKind::Scope { region_scope: expr_scope, node: e.0, value } }))
+        Ok(self.push(Expr { temp_scope, bid, ty, span, kind: ExprKind::Scope { region_scope: expr_scope, node: inner.0, value } }))
     }
 
     pub(super) fn mirror_exprs(&mut self, list: &[ast::ExprId]) -> BuildResult<Box<[ExprId]>> {
@@ -84,7 +95,13 @@ impl Cx<'_> {
     /// The value-site adjustments of `e`: typeck stores a reference coercion without its leading
     /// builtin `Deref(None)`; insert it as rustc has it.
     fn value_adjustments(&self, e: ast::ExprId, source_ty: TyId) -> Vec<Adjustment> {
-        let Some(adj) = self.tb().adjustments(e.0) else { return Vec::new() };
+        self.value_adjustments_at(e.0, source_ty)
+    }
+
+    /// `value_adjustments` of an adjustments key (a node, or a synthetic key such as
+    /// `ASSIGN_VALUE_KEY`'s).
+    pub(super) fn value_adjustments_at(&self, key: u32, source_ty: TyId) -> Vec<Adjustment> {
+        let Some(adj) = self.tb().adjustments(key) else { return Vec::new() };
         let mut list: Vec<Adjustment> = adj.value.iter().copied().collect();
         if list.iter().any(|a| matches!(a.kind, Adjust::Borrow(_))) {
             if let TyKind::Ref(_, pointee, _) = *self.tcx().tys.kind(source_ty) {
@@ -102,7 +119,7 @@ impl Cx<'_> {
         matches!(self.prog().syms.str(self.prog().def(def).name), "deref_mut" | "index_mut")
     }
 
-    fn apply_adjustment(&mut self, e: ast::ExprId, expr: Expr, adjustment: Adjustment, two_phase: bool) -> BuildResult<Expr> {
+    pub(super) fn apply_adjustment(&mut self, e: ast::ExprId, expr: Expr, adjustment: Adjustment, two_phase: bool) -> BuildResult<Expr> {
         let (temp_scope, bid, span) = (expr.temp_scope, expr.bid, expr.span);
         let target = adjustment.target;
         let tcx = self.tcx();
@@ -258,11 +275,7 @@ impl Cx<'_> {
         let kind = match ast.expr(e).kind {
             A::MethodCall(recv, row) => return self.method_call(e, recv, *ast.row(row), expr_ty),
             A::Call(fun, args) => return self.call(e, fun, ast.list(args), expr_ty),
-            A::Paren(x) => {
-                // parentheses do not exist in HIR: the inner expression, with the paren node's adjustments
-                let inner = self.mirror_expr(x)?;
-                return Ok(self.thir.exprs[inner.0 as usize].clone());
-            }
+            A::Paren(_) => unreachable!("parentheses were removed before mirroring"),
             A::AddrOf(raw, mutable, x) => {
                 let arg = self.mirror_expr(x)?;
                 if raw {

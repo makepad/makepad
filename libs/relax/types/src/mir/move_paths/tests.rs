@@ -86,7 +86,8 @@ fn move_reinit_loop_and_storage_dead_history() {
     let uninit = MaybeUninitializedPlaces::new(&prog, &tcx, &b, &data); let u = iterate_to_fixpoint(&b, &uninit);
     bits(u.entry_state(BasicBlock(1)), &[0, 2]); after(&u, at(1, 0), &[0, 1]); after(&u, at(1, 1), &[0]);
     let ever = EverInitializedPlaces::new(&b, &data); let e = iterate_to_fixpoint(&b, &ever);
-    bits(e.entry_state(BasicBlock(1)), &[0, 2]); after(&e, at(1, 0), &[0, 1, 2]); after(&e, at(1, 2), &[0, 2]);
+    // the domain is locals (nightly): `_2`'s init is gone at its StorageDead, `_1`'s stays
+    bits(e.entry_state(BasicBlock(1)), &[1]); after(&e, at(1, 0), &[1, 2]); after(&e, at(1, 2), &[1]);
 }
 
 #[test]
@@ -119,7 +120,7 @@ fn maybe_join_of_moved_and_unmoved_branch() {
     let data = gather(&b, &prog, &tcx);
     let init = MaybeInitializedPlaces::new(&prog, &tcx, &b, &data); let i = iterate_to_fixpoint(&b, &init); bits(i.entry_state(BasicBlock(3)), &[1, 2]);
     let uninit = MaybeUninitializedPlaces::new(&prog, &tcx, &b, &data); let u = iterate_to_fixpoint(&b, &uninit); bits(u.entry_state(BasicBlock(3)), &[0, 1, 2]);
-    let ever = EverInitializedPlaces::new(&b, &data); let e = iterate_to_fixpoint(&b, &ever); bits(e.entry_state(BasicBlock(3)), &[0, 1]);
+    let ever = EverInitializedPlaces::new(&b, &data); let e = iterate_to_fixpoint(&b, &ever); bits(e.entry_state(BasicBlock(3)), &[1, 2]);
 }
 
 #[test]
@@ -134,7 +135,7 @@ fn call_moves_before_cleanup_and_inits_only_on_return() {
     let uninit = MaybeUninitializedPlaces::new(&prog, &tcx, &b, &data); let u = iterate_to_fixpoint(&b, &uninit);
     bits(u.entry_state(BasicBlock(1)), &[0, 1, 2]); bits(u.entry_state(BasicBlock(2)), &[0, 1, 2, 3]);
     let ever = EverInitializedPlaces::new(&b, &data); let e = iterate_to_fixpoint(&b, &ever);
-    bits(e.entry_state(BasicBlock(1)), &[0, 1, 2]); bits(e.entry_state(BasicBlock(2)), &[0, 1]);
+    bits(e.entry_state(BasicBlock(1)), &[1, 2, 3]); bits(e.entry_state(BasicBlock(2)), &[1, 2]);
     let mut diverging = b.clone();
     if let TerminatorKind::Call { target, .. } = &mut diverging.basic_blocks[0].terminator.as_mut().unwrap().kind { *target = None; }
     let data = gather(&diverging, &prog, &tcx); assert_eq!(data.inits.len(), 2); assert_eq!(data.moves.len(), 2);
@@ -331,7 +332,8 @@ fn filtered_arguments_and_untracked_writes() {
     assert_eq!(data.move_paths.len(), 1); assert_eq!(data.inits.len(), 1);
     assert_eq!(data.rev_lookup.find(&place(1)), LookupResult::Parent(None));
     assert!(data.init_loc_map[at(0, 0)].is_empty());
-    let ever = EverInitializedPlaces::new(&b, &data); let e = iterate_to_fixpoint(&b, &ever); bits(e.entry_state(BasicBlock(0)), &[0]);
+    // every argument starts initialized (nightly `args_iter`), tracked or not
+    let ever = EverInitializedPlaces::new(&b, &data); let e = iterate_to_fixpoint(&b, &ever); bits(e.entry_state(BasicBlock(0)), &[1, 2]);
     let init = MaybeInitializedPlaces::new(&prog, &tcx, &b, &data); let i = iterate_to_fixpoint(&b, &init); after(&i, at(0, 0), &[0]);
 }
 

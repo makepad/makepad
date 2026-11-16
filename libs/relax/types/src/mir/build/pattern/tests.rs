@@ -9,10 +9,13 @@ use crate::program::{DefId, Program};
 use crate::tcx::{EvalCx, EvalState, Tcx, TypingEnv};
 use crate::typeck;
 
+/// The line `program` puts before each source: spans count from the start of the file.
+pub(crate) const HEADER: &str = "#![no_std]\n";
+
 pub(crate) fn program(source: &str) -> (Program, Tcx) {
     // these bodies are built to MIR: they keep their user-written types (event::user_types_wanted)
     crate::borrowck::event::FORCE_USER_TYPES.with(|f| f.set(Some(true)));
-    let mut src = String::from("#![no_std]\n");
+    let mut src = String::from(HEADER);
     src.push_str(source);
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(

@@ -246,8 +246,18 @@ impl Program {
         let Some(target) = self.resolve_mod_path(def.scope, p.global(), &segs, edition < 2018, false) else {
             // the first segment that does not resolve
             let k = (1..=segs.len()).find(|&k| self.resolve_mod_path(def.scope, p.global(), &segs[..k], edition < 2018, false).is_none()).unwrap_or(1) - 1;
-            let name = self.syms.str(segs[k.min(segs.len() - 1)].1);
-            err(pos, format!("E0433: failed to resolve: cannot find module or crate `{name}` in the crate root"));
+            let written = ast.segs(p.segs);
+            let names: Vec<_> = written.iter().map(|s| self.files[def.file as usize].text(s.name)).collect();
+            // try_resolve_visibility, rustc_resolve/src/build_reduced_graph.rs:252-272:
+            // Rust 2015 prepends a root segment to an unqualified visibility path.
+            let global = p.global() || (edition < 2018 && first.0 == SegKind::Ident);
+            let parent = if k == 0 && global && edition < 2018 {
+                Some(self.mods[self.crates[def.krate as usize].root_mod as usize].def)
+            } else {
+                self.resolve_mod_path(def.scope, p.global(), &segs[..k], edition < 2018, false)
+            };
+            let message = self.path_resolution_message(def.scope, global, &names, k, parent);
+            err(written[k].name.lo, format!("E0433: {message}"));
             return;
         };
         let td = self.def(target);

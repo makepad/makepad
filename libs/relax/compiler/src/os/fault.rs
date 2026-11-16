@@ -51,6 +51,9 @@ impl Fault {
 pub enum Action {
     /// nothing (an interrupt that found nothing to do)
     Ignore,
+    /// the faulting instruction runs again (it touched code a trap fill had out of reach:
+    /// invalid.rs, its pages are back)
+    Retry,
     /// not ours: the handler we replaced, else the default action
     PassOn,
     /// the process ends: the default action; the instruction faults again
@@ -356,12 +359,69 @@ mod unix {
             crate::tui::fatal_drain(text.as_bytes());
         }
 
+        /// The abort of a JIT allocation the system refused (`handle_alloc_error` after
+        /// jit_oom::refused): says so, with the data limit, and ends the process with 101 as a
+        /// fatal compile error does. A crash report would need the memory that is not there (its
+        /// frames came out by address only). Async-signal-safe: a stack buffer, getrlimit, write.
+        unsafe fn out_of_memory(size: usize, thread: &[u8]) -> ! {
+            extern "C" {
+                fn getrlimit(resource: i32, rlim: *mut [u64; 2]) -> i32;
+                fn _exit(code: i32) -> !;
+            }
+            // (Linux and macOS alike; RLIM_INFINITY is all ones on Linux, i64::MAX on macOS)
+            const RLIMIT_DATA: i32 = 2;
+            let mut lim = [u64::MAX; 2];
+            let limited = getrlimit(RLIMIT_DATA, &mut lim) == 0 && lim[0] < i64::MAX as u64;
+            let mut out = [0u8; 640];
+            let mut k = 0;
+            let mut put = |b: &[u8]| {
+                for &c in b {
+                    if k < out.len() {
+                        out[k] = c;
+                        k += 1;
+                    }
+                }
+            };
+            let num = |mut n: u64, digits: &mut [u8; 20]| -> usize {
+                let mut i = digits.len();
+                loop {
+                    i -= 1;
+                    digits[i] = b'0' + (n % 10) as u8;
+                    n /= 10;
+                    if n == 0 {
+                        return i;
+                    }
+                }
+            };
+            let mut d = [0u8; 20];
+            put(b"relax: the JIT ran out of memory: the system refused it ");
+            let i = num(size as u64, &mut d);
+            put(&d[i..]);
+            put(b" bytes on thread '");
+            put(thread);
+            put(b"'. ");
+            if limited {
+                put(b"The JIT compiles in the program's process, so its memory counts against the data limit the program set (RLIMIT_DATA ");
+                let i = num(lim[0] >> 20, &mut d);
+                put(&d[i..]);
+                put(b" MB): give the JIT headroom above the program's own use (Relax's KNOWN_GAPS.md, 11).");
+            } else {
+                put(b"No data limit is set: the machine has no memory left for it.");
+            }
+            put(b" The run stops here.\n");
+            crate::os::fault::raw_stderr(&out[..k]);
+            _exit(101)
+        }
+
         /// Reports SIGABRT (on the aborting thread, before its handler restores the default
         /// action): a line on the real stderr, then the reporter's report. Async-signal-safe.
         pub unsafe fn report_abort(pc: u64, fp: u64) {
             let mut name = [0u8; 64];
             pthread_getname_np(pthread_self(), name.as_mut_ptr(), name.len());
             let len = name.iter().position(|&c| c == 0).unwrap_or(0);
+            if let Some(size) = crate::zone_alloc::jit_oom::refused_just_now() {
+                out_of_memory(size, &name[..len]);
+            }
             let mut line = [0u8; 128];
             let mut k = 0;
             for &c in b"relax: SIGABRT on thread '".iter().chain(&name[..len]).chain(b"'\n") {
@@ -473,8 +533,15 @@ mod imp {
     use super::{Action, Fault, Hooks};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// SIGUSR1: the hang watchdog's signal
-    pub const SIG_WATCHDOG: i32 = 10;
+    /// The hang watchdog's signal: SIGRTMIN+4, a real-time signal of the JIT's own (they queue:
+    /// one delivery per kick), so a program's SIGUSR1 stays the program's. inspect's capture
+    /// signal takes the first free one from SIGRTMIN+6.
+    pub fn watchdog_signal() -> i32 {
+        extern "C" {
+            fn __libc_current_sigrtmin() -> i32;
+        }
+        unsafe { __libc_current_sigrtmin() + 4 }
+    }
     /// the watchdog's signal handler runs on the looping thread itself
     pub const NEEDS_HANG_TRAMP: bool = false;
 
@@ -500,11 +567,58 @@ mod imp {
         size: usize,
     }
 
-    fn default_action(sig: i32) {
+    pub(crate) fn default_action(sig: i32) {
         let act = SigAction { handler: 0, mask: [0; 16], flags: 0, pad: 0, restorer: 0 };
         unsafe {
             sigaction(sig, &act, std::ptr::null_mut());
         }
+    }
+
+    /// The interrupted context's (pc, sp, fp, lr) (`uc`: a handler's third argument).
+    pub(crate) unsafe fn regs(uc: *mut u8) -> (u64, u64, u64, u64) {
+        let gregs = uc.add(40) as *const u64;
+        (*gregs.add(16), *gregs.add(15), *gregs.add(10), 0)
+    }
+
+    /// The fault's data address (`info`: a handler's second argument; 0 without one).
+    pub(crate) unsafe fn fault_addr(info: *const u8) -> u64 {
+        if info.is_null() { 0 } else { *(info.add(16) as *const u64) }
+    }
+
+    /// The calling thread's alternate signal stack, [lo, hi) ((0, 0): none on).
+    pub(crate) fn altstack() -> (u64, u64) {
+        const SS_DISABLE: i32 = 2;
+        let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
+        if unsafe { sigaltstack(std::ptr::null(), &mut old) } != 0 || old.flags & SS_DISABLE != 0 {
+            return (0, 0);
+        }
+        (old.sp as u64, old.sp as u64 + old.size as u64)
+    }
+
+    /// The faults whose handler the host keeps on top (`chain_behind`), the watchdog's signal and SIGABRT.
+    const HOST_FAULTS: [i32; 4] = [SIGILL, SIGBUS, SIGFPE, SIGSEGV];
+
+    /// progsig.rs's `set` of `sig` to handler `h` with `flags`: where `sig` is a fault of the
+    /// host's and the kernel runs our handler for it, that stays and `h` goes behind it (true);
+    /// else nothing changes (false: the caller sets the kernel's action).
+    pub(crate) unsafe fn chain_behind(sig: i32, h: usize, flags: i32) -> bool {
+        if !HOST_FAULTS.contains(&sig) && sig != watchdog_signal() && sig != SIGABRT {
+            return false;
+        }
+        let mut cur = SigAction { handler: 0, mask: [0; 16], flags: 0, pad: 0, restorer: 0 };
+        if sigaction(sig, std::ptr::null(), &mut cur) != 0 || cur.handler != on_signal as *const () as usize {
+            return false;
+        }
+        if h != on_signal as *const () as usize {
+            CHAINED[sig as usize][0].store(h, Ordering::SeqCst);
+            CHAINED[sig as usize][1].store(flags as usize, Ordering::SeqCst);
+        }
+        true
+    }
+
+    /// The flags of the handler chained behind ours for `sig`.
+    pub(crate) fn chained_flags(sig: i32) -> i32 {
+        CHAINED.get(sig as usize).map_or(0, |c| c[1].load(Ordering::SeqCst) as i32)
     }
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
@@ -513,13 +627,24 @@ mod imp {
             let _kept = crate::zone_alloc::kept();
             let gregs = uc.add(40) as *mut u64;
             if sig == SIGABRT {
-                report_abort(*gregs.add(16), *gregs.add(10));
+                super::note_abort(*gregs.add(16), *gregs.add(10));
+                let handled = super::program_abort(sig, info, uc);
+                if !crate::os::progsig::take_sent_on_abort() {
+                    report_abort(*gregs.add(16), *gregs.add(10));
+                }
+                if handled {
+                    return;
+                }
                 default_action(SIGABRT);
                 raise_abort();
                 return;
             }
+            if sig == watchdog_signal() && !crate::os::thread::take_kick() {
+                super::not_a_kick(sig, info, uc);
+                return;
+            }
             // RELAX_COMPILE_WATCH: the watcher asks a thread stuck in one step where it is
-            if sig == SIG_WATCHDOG && crate::jit::WATCH_DUMP.load(std::sync::atomic::Ordering::Relaxed) {
+            if sig == watchdog_signal() && crate::jit::WATCH_DUMP.load(std::sync::atomic::Ordering::Relaxed) {
                 let (pc, fp) = (*gregs.add(16), *gregs.add(10));
                 eprintln!("relax watch: stuck thread {:#x} at pc {:#x} ({}) fp {:#x}", crate::os::thread::current(), pc, crate::jit::fn_name_at(pc), fp);
                 return;
@@ -527,7 +652,7 @@ mod imp {
             let f = Fault { kind: kind(sig), sig, pc: *gregs.add(16), sp: *gregs.add(15), fp: *gregs.add(10), addr: *(info.add(16) as *const u64), lr: 0 };
             let chained = CHAINED[sig as usize][0].load(Ordering::SeqCst) > 1;
             match crate::jit::on_fault(&f, &Hooks { prepare: &|| {}, chained, debug: &|| {} }) {
-                Action::Ignore => {}
+                Action::Ignore | Action::Retry => {}
                 Action::PassOn => {
                     if !chain(sig, info, uc) {
                         default_action(sig);
@@ -572,7 +697,7 @@ mod imp {
         }
     }
 
-    const OUR_SIGNALS: [i32; 6] = [SIGILL, SIGBUS, SIGFPE, SIG_WATCHDOG, SIGSEGV, SIGABRT];
+    fn our_signals() -> [i32; 6] { [SIGILL, SIGBUS, SIGFPE, watchdog_signal(), SIGSEGV, SIGABRT] }
     const SA_SIGINFO: i32 = 4;
     /// SA_SIGINFO | SA_ONSTACK. No SA_NODEFER: the signal stays blocked while its handler runs,
     /// so a fault inside the handler is not handled again (the kernel kills the process).
@@ -580,7 +705,7 @@ mod imp {
 
     pub fn install() {
         unsafe {
-            for sig in OUR_SIGNALS {
+            for sig in our_signals() {
                 let act = SigAction { handler: on_signal as *const () as usize, mask: [0; 16], flags: OUR_FLAGS, pad: 0, restorer: 0 };
                 sigaction(sig, &act, std::ptr::null_mut());
             }
@@ -589,7 +714,7 @@ mod imp {
 
     /// Handlers a library of the program installed over ours (Chromium's in cef_initialize, as on
     /// macOS): (handler, flags) per signal, called for signals that are not faults in JIT code.
-    static CHAINED: [[AtomicUsize; 2]; 32] = [const { [const { AtomicUsize::new(0) }; 2] }; 32];
+    static CHAINED: [[AtomicUsize; 2]; 65] = [const { [const { AtomicUsize::new(0) }; 2] }; 65];
 
     /// A handler the ended run's program chained goes; a library's stays.
     pub(crate) unsafe fn reset_statics() {
@@ -611,7 +736,7 @@ mod imp {
     /// in JIT code after CEF started was Chromium's (a bare core dump, no report).
     pub fn reassert() {
         unsafe {
-            for sig in OUR_SIGNALS {
+            for sig in our_signals() {
                 let mut old = SigAction { handler: 0, mask: [0; 16], flags: 0, pad: 0, restorer: 0 };
                 sigaction(sig, std::ptr::null(), &mut old);
                 if old.handler != on_signal as *const () as usize {
@@ -635,7 +760,7 @@ mod imp {
     }
 
     /// Passes a signal that is not ours to the handler we replaced, if any. False: none.
-    unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
+    pub(crate) unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
         let h = CHAINED[sig as usize][0].load(Ordering::SeqCst);
         let flags = CHAINED[sig as usize][1].load(Ordering::SeqCst) as i32;
         if h <= 1 {
@@ -716,11 +841,58 @@ mod imp {
         size: usize,
     }
 
-    fn default_action(sig: i32) {
+    pub(crate) fn default_action(sig: i32) {
         let act = SigAction { handler: 0, mask: 0, flags: 0, pad: 0, restorer: 0 };
         unsafe {
             sigaction(sig, &act, std::ptr::null_mut());
         }
+    }
+
+    /// The interrupted context's (pc, sp, fp, lr) (`uc`: a handler's third argument).
+    pub(crate) unsafe fn regs(uc: *mut u8) -> (u64, u64, u64, u64) {
+        let reg = |i: usize| *(uc.add(OFFSETS[i]) as *const u64);
+        (reg(14), reg(13), reg(11), reg(12))
+    }
+
+    /// The fault's data address (`info`: a handler's second argument; 0 without one).
+    pub(crate) unsafe fn fault_addr(info: *const u8) -> u64 {
+        if info.is_null() { 0 } else { *(info.add(OFFSETS[7]) as *const u64) }
+    }
+
+    /// The calling thread's alternate signal stack, [lo, hi) ((0, 0): none on).
+    pub(crate) fn altstack() -> (u64, u64) {
+        const SS_DISABLE: i32 = 2;
+        let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
+        if unsafe { sigaltstack(std::ptr::null(), &mut old) } != 0 || old.flags & SS_DISABLE != 0 {
+            return (0, 0);
+        }
+        (old.sp as u64, old.sp as u64 + old.size as u64)
+    }
+
+    /// The faults whose handler the host keeps on top (`chain_behind`), and the watchdog's signal.
+    const HOST_FAULTS: [i32; 4] = [SIGILL, SIGBUS, SIGFPE, SIGSEGV];
+
+    /// progsig.rs's `set` of `sig` to handler `h` with `flags`: where `sig` is a fault of the
+    /// host's and the kernel runs our handler for it, that stays and `h` goes behind it (true);
+    /// else nothing changes (false: the caller sets the kernel's action).
+    pub(crate) unsafe fn chain_behind(sig: i32, h: usize, flags: i32) -> bool {
+        if !HOST_FAULTS.contains(&sig) && sig != watchdog_signal() {
+            return false;
+        }
+        let mut cur = SigAction { handler: 0, mask: 0, flags: 0, pad: 0, restorer: 0 };
+        if sigaction(sig, std::ptr::null(), &mut cur) != 0 || cur.handler != on_signal as *const () as usize {
+            return false;
+        }
+        if h != on_signal as *const () as usize {
+            CHAINED[sig as usize][0].store(h, Ordering::SeqCst);
+            CHAINED[sig as usize][1].store(flags as usize, Ordering::SeqCst);
+        }
+        true
+    }
+
+    /// The flags of the handler chained behind ours for `sig`.
+    pub(crate) fn chained_flags(sig: i32) -> i32 {
+        CHAINED.get(sig as usize).map_or(0, |c| c[1].load(Ordering::SeqCst) as i32)
     }
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
@@ -728,6 +900,10 @@ mod imp {
             // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
             let _kept = crate::zone_alloc::kept();
             let reg = |i: usize| uc.add(OFFSETS[i]) as *mut u64;
+            if sig == watchdog_signal() && !crate::os::thread::take_kick() {
+                super::not_a_kick(sig, info, uc);
+                return;
+            }
             // RELAX_COMPILE_WATCH: the watcher asks a thread stuck in one step where it is
             if sig == watchdog_signal() && crate::jit::WATCH_DUMP.load(std::sync::atomic::Ordering::Relaxed) {
                 let (pc, fp) = (*reg(14), *reg(11));
@@ -737,7 +913,7 @@ mod imp {
             let f = Fault { kind: kind(sig), sig, pc: *reg(14), sp: *reg(13), fp: *reg(11), addr: *(info.add(OFFSETS[7]) as *const u64), lr: *reg(12) };
             let chained = CHAINED[sig as usize][0].load(Ordering::SeqCst) > 1;
             match crate::jit::on_fault(&f, &Hooks { prepare: &|| {}, chained, debug: &|| {} }) {
-                Action::Ignore => {}
+                Action::Ignore | Action::Retry => {}
                 Action::PassOn => {
                     if !chain(sig, info, uc) {
                         default_action(sig);
@@ -868,7 +1044,7 @@ mod imp {
     }
 
     /// Passes a signal that is not ours to the handler we replaced, if any. False: none.
-    unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
+    pub(crate) unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
         let h = CHAINED[sig as usize][0].load(Ordering::SeqCst);
         let flags = CHAINED[sig as usize][1].load(Ordering::SeqCst) as i32;
         if h <= 1 {
@@ -901,8 +1077,10 @@ mod imp {
     use crate::jit::cur_unit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// SIGUSR1 (Darwin numbering): the hang watchdog's signal
-    pub const SIG_WATCHDOG: i32 = 30;
+    /// SIGEMT: the hang watchdog's signal. Darwin has no real-time signals; on Apple silicon
+    /// nothing raises SIGEMT and programs almost never handle it, so a program's SIGUSR1 stays the
+    /// program's. Two kicks pending at once are one delivery (`os::thread::take_kick`).
+    pub const SIG_WATCHDOG: i32 = 7;
     /// the watchdog's signal handler runs on the looping thread itself
     pub const NEEDS_HANG_TRAMP: bool = false;
 
@@ -944,11 +1122,59 @@ mod imp {
     const SS_PC: usize = SS + 256;
     const SS_SP: usize = SS + 248;
 
-    fn default_action(sig: i32) {
+    pub(crate) fn default_action(sig: i32) {
         let act = SigAction { handler: 0, mask: 0, flags: 0 };
         unsafe {
             sigaction(sig, &act, std::ptr::null_mut());
         }
+    }
+
+    /// The interrupted context's (pc, sp, fp, lr) (`uc`: a handler's third argument).
+    pub(crate) unsafe fn regs(uc: *mut u8) -> (u64, u64, u64, u64) {
+        let mc = *(uc.add(UC_MCONTEXT) as *const *const u8);
+        let reg = |off: usize| *(mc.add(off) as *const u64);
+        (reg(SS_PC), reg(SS_SP), reg(SS_FP), reg(SS + 240))
+    }
+
+    /// The fault's data address (`info`: a handler's second argument; 0 without one).
+    pub(crate) unsafe fn fault_addr(info: *const u8) -> u64 {
+        if info.is_null() { 0 } else { *(info.add(SI_ADDR) as *const u64) }
+    }
+
+    /// The calling thread's alternate signal stack, [lo, hi) ((0, 0): none on).
+    pub(crate) fn altstack() -> (u64, u64) {
+        const SS_DISABLE: i32 = 4;
+        let mut old = StackT { sp: std::ptr::null_mut(), size: 0, flags: 0 };
+        if unsafe { sigaltstack(std::ptr::null(), &mut old) } != 0 || old.flags & SS_DISABLE != 0 {
+            return (0, 0);
+        }
+        (old.sp as u64, old.sp as u64 + old.size as u64)
+    }
+
+    /// The faults whose handler the host keeps on top (`chain_behind`), the watchdog's signal and SIGABRT.
+    const HOST_FAULTS: [i32; 5] = [SIGILL, SIGTRAP, SIGBUS, SIGFPE, SIGSEGV];
+
+    /// progsig.rs's `set` of `sig` to handler `h` with `flags`: where `sig` is a fault of the
+    /// host's and the kernel runs our handler for it, that stays and `h` goes behind it (true);
+    /// else nothing changes (false: the caller sets the kernel's action).
+    pub(crate) unsafe fn chain_behind(sig: i32, h: usize, flags: i32) -> bool {
+        if !HOST_FAULTS.contains(&sig) && sig != SIG_WATCHDOG && sig != SIGABRT {
+            return false;
+        }
+        let mut cur = SigAction { handler: 0, mask: 0, flags: 0 };
+        if sigaction(sig, std::ptr::null(), &mut cur) != 0 || cur.handler != on_signal as *const () as usize {
+            return false;
+        }
+        if h != on_signal as *const () as usize {
+            CHAINED[sig as usize][0].store(h, Ordering::SeqCst);
+            CHAINED[sig as usize][1].store(flags as usize, Ordering::SeqCst);
+        }
+        true
+    }
+
+    /// The flags of the handler chained behind ours for `sig`.
+    pub(crate) fn chained_flags(sig: i32) -> i32 {
+        CHAINED.get(sig as usize).map_or(0, |c| c[1].load(Ordering::SeqCst) as i32)
     }
 
     /// RELAX_COMPILE_WATCH: the watcher asks a thread stuck in one step where it is (no lock:
@@ -1035,9 +1261,20 @@ mod imp {
             if sig == SIGABRT {
                 let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
                 let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
-                report_abort(*reg(SS_PC), *reg(SS_FP));
+                super::note_abort(*reg(SS_PC), *reg(SS_FP));
+                let handled = super::program_abort(sig, info, uc);
+                if !crate::os::progsig::take_sent_on_abort() {
+                    report_abort(*reg(SS_PC), *reg(SS_FP));
+                }
+                if handled {
+                    return;
+                }
                 default_action(SIGABRT);
                 raise_abort();
+                return;
+            }
+            if sig == SIG_WATCHDOG && !crate::os::thread::take_kick() {
+                super::not_a_kick(sig, info, uc);
                 return;
             }
             if sig == SIG_WATCHDOG && crate::jit::WATCH_DUMP.load(Ordering::Relaxed) {
@@ -1056,7 +1293,7 @@ mod imp {
             let debug = || fault_regs(uc);
             let chained = CHAINED[sig as usize][0].load(Ordering::SeqCst) > 1;
             match crate::jit::on_fault(&f, &Hooks { prepare: &prepare, chained, debug: &debug }) {
-                Action::Ignore => {}
+                Action::Ignore | Action::Retry => {}
                 Action::PassOn => {
                     if !chain(sig, info, uc) {
                         default_action(sig);
@@ -1164,7 +1401,7 @@ mod imp {
     }
 
     /// Passes a signal that is not ours to the handler we replaced, if any. False: none.
-    unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
+    pub(crate) unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
         let h = CHAINED[sig as usize][0].load(Ordering::SeqCst);
         let flags = CHAINED[sig as usize][1].load(Ordering::SeqCst) as i32;
         if h <= 1 {
@@ -1238,6 +1475,11 @@ mod imp {
         }
         // (the code of a run that ended and a thread of an ending run are this runtime's whatever
         // unit is current: the normal search cannot walk their frames)
+        // (code pages a trap fill has out of reach are waited for whoever touched them: a chained
+        // library's handler would take the access for its own)
+        if rec.code == EXCEPTION_ACCESS_VIOLATION && rec.n_params >= 2 && crate::jit::transit_retry(rec.info[1] as u64, pc) {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         if chained && !crate::jit::in_jit_code(pc) && !crate::stale::in_ended_run(pc) && !crate::domain::current_is_ending() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
@@ -1251,6 +1493,7 @@ mod imp {
         let f = Fault { kind: k, sig: rec.code as i32, pc, sp: ctx.get(CTX_RSP), fp: ctx.get(CTX_RBP), addr, lr: 0 };
         match crate::jit::on_fault(&f, &Hooks { prepare: &|| {}, chained: false, debug: &|| {} }) {
             Action::Ignore | Action::PassOn | Action::Die => EXCEPTION_CONTINUE_SEARCH,
+            Action::Retry => EXCEPTION_CONTINUE_EXECUTION,
             Action::Resume { pc, a0, a1 } => {
                 // leave(ctx, code) is Relax's convention: rdi, rsi
                 ctx.set(CTX_RIP, pc);
@@ -1376,8 +1619,67 @@ mod imp {
     pub(crate) unsafe fn reset_statics() {}
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 pub fn watchdog_signal() -> i32 { SIG_WATCHDOG }
+
+/// A delivery of the watchdog's signal that is no kick (`os::thread::take_kick`): the program's
+/// own, or another process's. The program's handler takes it, as natively; with none, its
+/// default action (it ends the process), and nothing when the program ignores it.
+#[cfg(unix)]
+unsafe fn not_a_kick(sig: i32, info: *mut u8, uc: *mut u8) {
+    if imp::chain(sig, info, uc) || imp::chained_handler(sig) == 1 {
+        return;
+    }
+    extern "C" {
+        fn raise(sig: i32) -> i32;
+    }
+    imp::default_action(sig);
+    // (blocked while this handler runs: it is delivered as the handler returns, by default)
+    raise(sig);
+}
+
+/// SIGABRT's site, quietly in the flight recorder (`signal.abort`: a = pc, b = fp, the frames' return
+/// addresses in its text) before the program's handler runs: one that ends the process, hangs or
+/// faults again still leaves where the abort came from. Signal context: a stack buffer and the
+/// recorder's lock-free ring.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn note_abort(pc: u64, fp: u64) {
+    if !crate::inspect::flightrec::on() {
+        return;
+    }
+    let mut raw = [0u64; 8];
+    let n = crate::jit::raw_frames_here(fp, &mut raw);
+    let mut text = [0u8; 168];
+    let mut k = 0;
+    let mut put = |b: u8| {
+        if k < text.len() {
+            text[k] = b;
+            k += 1;
+        }
+    };
+    b"SIGABRT, before the program's handler; frames".iter().for_each(|&b| put(b));
+    for &f in &raw[..n] {
+        put(b' ');
+        put(b'0');
+        put(b'x');
+        let digits = (16 - (f.leading_zeros() as usize / 4)).max(1);
+        for i in (0..digits).rev() {
+            let d = ((f >> (4 * i)) & 15) as u8;
+            put(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+        }
+    }
+    crate::inspect::flightrec::event("signal.abort", std::str::from_utf8(&text[..k]).unwrap_or("SIGABRT"), pc, fp);
+}
+
+/// SIGABRT: the handler the program (or a library) set runs first, as natively, so one that ends
+/// the process is the only one to speak (a relax that is the program makes its own report); once
+/// it returns, relax's report, and the delivery is over (true): raise(SIGABRT) goes on, and
+/// abort() ends the process itself (it sets the default action and raises again). Also true when
+/// the program ignores it. False: nothing set, the report and the default action end it.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+unsafe fn program_abort(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
+    imp::chain(sig, info, uc) || imp::chained_handler(sig) == 1
+}
 
 /// Starts the thread SIGABRT's report is made on (`unix::abort`), with the compiler's owner.
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -1510,6 +1812,68 @@ pub fn raw_stderr(b: &[u8]) {
     }
 }
 
+/// A program's allocation the allocator refused (Relax std's handle_alloc_error, std/core/heap.rs):
+/// rustc's `__rust_alloc_error_handler` with std's default hook (library/std/src/alloc.rs
+/// default_alloc_error_hook and rust_oom @1.100.0): std's message on the program's stderr, then
+/// the process ends with SIGABRT, as a rustc build's does; its cause is said, so no crash report
+/// follows. No allocation and no lock: the text is built on the stack. A second failure (two
+/// threads at once) skips the backtrace note, as std skips its backtrace. A sandboxed module's
+/// call of it is the fault its abort is (sandbox.rs c_policy).
+pub(crate) extern "C" fn relax_alloc_error(size: usize) -> ! {
+    let mut out = [0u8; 160];
+    let mut k = 0;
+    let mut put = |b: &[u8]| {
+        for &c in b {
+            if k < out.len() {
+                out[k] = c;
+                k += 1;
+            }
+        }
+    };
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    let mut n = size;
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    put(b"memory allocation of ");
+    put(&digits[i..]);
+    put(b" bytes failed\n");
+    if PREV_ALLOC_FAILURE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        put(b"skipping backtrace printing to avoid potential recursion\n");
+    } else {
+        // (Relax prints no backtraces: std's line for RUST_BACKTRACE unset)
+        put(b"note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n");
+    }
+    // the program's own stderr, as std writes it (not the fault reports' stream)
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+        }
+        let mut at = 0;
+        while at < k {
+            let w = write(2, out.as_ptr().add(at).cast(), k - at);
+            if w <= 0 {
+                break;
+            }
+            at += w as usize;
+        }
+    }
+    #[cfg(windows)]
+    raw_stderr(&out[..k]);
+    // SIGABRT (6 on Linux and macOS) by its default action
+    die_by(6)
+}
+
+/// std's PREV_ALLOC_FAILURE (default_alloc_error_hook)
+static PREV_ALLOC_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Ends the process by signal `sig` with its default action (exit status 128 + sig, as a
 /// rustc build's fault would), from normal context: a contained fault the policy found fatal.
 pub fn die_by(sig: i32) -> ! {
@@ -1531,6 +1895,48 @@ pub(crate) unsafe fn reset_statics() {
     imp::reset_statics();
 }
 
+/// The host's own code: the executable range of the image this crate is in, [lo, hi) ((0, 0):
+/// not read, or JIT code itself). progsig.rs routes a fault on a thread with no program state by
+/// it; read once, at the signal thread's start.
+#[cfg(unix)]
+static HOST_TEXT: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+#[cfg(unix)]
+pub(crate) fn note_host_text() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let Some((lo, hi)) = crate::inspect::symbols::text_of(note_host_text as *const () as u64) {
+        HOST_TEXT[0].store(lo, Relaxed);
+        HOST_TEXT[1].store(hi, Relaxed);
+    }
+}
+
+/// Is `pc` in the host's own code? True also where that is not known: a fault there is the
+/// host's crash, reported. Async-signal-safe.
+#[cfg(unix)]
+pub(crate) fn host_code(pc: u64) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (lo, hi) = (HOST_TEXT[0].load(Relaxed), HOST_TEXT[1].load(Relaxed));
+    hi == 0 || (lo <= pc && pc < hi)
+}
+
+/// The interrupted pc of a handler's context `uc`.
+#[cfg(unix)]
+pub(crate) unsafe fn pc_of(uc: *mut u8) -> u64 {
+    imp::regs(uc).0
+}
+
+/// The report of a signal the process ends by where nothing else reported it (progsig.rs's
+/// routing: a fault inside a compile, in the host's own code, or racing a disposition change),
+/// then the default action: the handler returns, the instruction faults again and the core holds
+/// the true context. No allocation, no lock.
+#[cfg(unix)]
+pub(crate) unsafe fn fatal_signal(sig: i32, info: *mut u8, uc: *mut u8, why: &str) {
+    let (pc, sp, fp, lr) = imp::regs(uc);
+    let f = Fault { kind: unix::kind(sig), sig, pc, sp, fp, addr: imp::fault_addr(info), lr };
+    crate::jit::raw_fatal_signal(&f, why, imp::altstack());
+    imp::default_action(sig);
+}
+
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 mod abort_tests {
     use std::io::BufRead;
@@ -1539,6 +1945,41 @@ mod abort_tests {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
         fn setrlimit(resource: i32, limit: *const [u64; 2]) -> i32;
+        fn getrlimit(resource: i32, limit: *mut [u64; 2]) -> i32;
+    }
+
+    /// Relax issue 231: under a data limit the program set (RLIMIT_DATA counts the JIT's memory),
+    /// an allocation of the JIT's that the system refused ended in `handle_alloc_error`'s abort()
+    /// and a crash report whose frames came out by address only. The abort that follows a refused
+    /// allocation of the JIT's says so, names the limit, and ends the process with 101, as a fatal
+    /// compile error does: no crash report.
+    #[test]
+    fn a_refused_jit_allocation_ends_the_run_with_its_reason() {
+        const CHILD: &str = "RELAX_REFUSED_ALLOCATION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            unsafe { setrlimit(4, &[0, 0]) };
+            // a data limit far above what the process uses: only the request below meets it
+            let mut lim = [0u64; 2];
+            unsafe { getrlimit(2, &mut lim) };
+            assert_eq!(unsafe { setrlimit(2, &[1 << 40, lim[1]]) }, 0);
+            super::install();
+            super::start_abort_reporter();
+            // what handle_alloc_error does after the allocator refuses an infallible request
+            let p = unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 60, 1).unwrap()) };
+            assert!(p.is_null());
+            std::process::abort();
+        }
+        let _slot = crate::test_child::slot();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "os::fault::abort_tests::a_refused_jit_allocation_ends_the_run_with_its_reason", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(101), "status {:?}:\n{err}", output.status);
+        assert!(err.contains("relax: the JIT ran out of memory: the system refused it 1152921504606846976 bytes on thread '"), "no reason:\n{err}");
+        assert!(err.contains("(RLIMIT_DATA 1048576 MB)") && err.contains("The run stops here."), "no data limit:\n{err}");
+        assert!(!err.contains("report:") && !err.contains("SIGABRT on thread"), "a crash report too:\n{err}");
     }
 
     /// A chain walked with no recorded stack bounds ends at the first word it cannot read, with

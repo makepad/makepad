@@ -7,6 +7,7 @@
 //! under Relax alike (Relax lowers these core::arch intrinsics to vector ops). Triangular probe
 //! loops and equality callbacks are monomorphized to inline key comparisons.
 
+use super::{TryReserveError, TryReserveErrorKind};
 use crate::heap::{self, Layout};
 use crate::marker::PhantomData;
 use crate::{mem, ptr};
@@ -210,13 +211,29 @@ fn h2(hash: u64) -> u8 {
 fn is_full(c: u8) -> bool { c & 0x80 == 0 }
 
 fn capacity_to_buckets(cap: usize) -> usize {
-    if cap == 0 { return 0; }
-    if cap < 8 { return if cap < 4 { 4 } else { 8 }; }
+    match try_capacity_to_buckets(cap) {
+        Ok(buckets) => buckets,
+        Err(e) => handle_reserve_error(e),
+    }
+}
+
+fn try_capacity_to_buckets(cap: usize) -> Result<usize, TryReserveError> {
+    if cap == 0 { return Ok(0); }
+    if cap < 8 { return Ok(if cap < 4 { 4 } else { 8 }); }
     let adjusted = match cap.checked_mul(8) {
         Some(x) => x / 7,
-        None => crate::panicking::panic_str("capacity overflow"),
+        None => return Err(TryReserveError::capacity_overflow()),
     };
-    adjusted.next_power_of_two()
+    adjusted.checked_next_power_of_two().ok_or_else(TryReserveError::capacity_overflow)
+}
+
+#[cold]
+#[inline(never)]
+fn handle_reserve_error(e: TryReserveError) -> ! {
+    match e.kind() {
+        TryReserveErrorKind::CapacityOverflow => crate::panicking::panic_str("capacity overflow"),
+        TryReserveErrorKind::AllocError { layout, .. } => heap::handle_alloc_error(layout),
+    }
 }
 
 fn bucket_mask_to_capacity(mask: usize) -> usize {
@@ -226,20 +243,27 @@ fn bucket_mask_to_capacity(mask: usize) -> usize {
 // The control pointer is also the end of the bucket array. Buckets run backwards
 // from it, so one pointer suffices for both regions, including over-aligned/ZST T.
 fn allocation_layout(size: usize, align: usize, buckets: usize) -> (Layout, usize) {
+    match try_allocation_layout(size, align, buckets) {
+        Ok(layout) => layout,
+        Err(e) => handle_reserve_error(e),
+    }
+}
+
+fn try_allocation_layout(size: usize, align: usize, buckets: usize) -> Result<(Layout, usize), TryReserveError> {
     let align = if align > Group::WIDTH { align } else { Group::WIDTH };
     let offset = match size.checked_mul(buckets).and_then(|n| n.checked_add(align - 1)) {
         Some(n) => n & !(align - 1),
-        None => crate::panicking::panic_str("capacity overflow"),
+        None => return Err(TryReserveError::capacity_overflow()),
     };
     let len = match offset.checked_add(buckets).and_then(|n| n.checked_add(Group::WIDTH)) {
         Some(n) => n,
-        None => crate::panicking::panic_str("capacity overflow"),
+        None => return Err(TryReserveError::capacity_overflow()),
     };
     let layout = match Layout::from_size_align(len, align) {
         Ok(l) => l,
-        Err(_) => crate::panicking::panic_str("capacity overflow"),
+        Err(_) => return Err(TryReserveError::capacity_overflow()),
     };
-    (layout, offset)
+    Ok((layout, offset))
 }
 
 // A trace cannot predict collisions in another address space: keys can contain
@@ -311,13 +335,20 @@ impl RawInner {
         RawInner { ctrl: ptr::null_mut(), bucket_count: 0, items: 0, growth_left: 0 }
     }
     fn alloc_buckets(&mut self, size: usize, align: usize, buckets: usize) {
-        if buckets == 0 { return; }
-        let (layout, offset) = allocation_layout(size, align, buckets);
-        let allocation = heap::alloc_or_abort(layout);
+        if let Err(e) = self.try_alloc_buckets(size, align, buckets) {
+            handle_reserve_error(e);
+        }
+    }
+    fn try_alloc_buckets(&mut self, size: usize, align: usize, buckets: usize) -> Result<(), TryReserveError> {
+        if buckets == 0 { return Ok(()); }
+        let (layout, offset) = try_allocation_layout(size, align, buckets)?;
+        let allocation = unsafe { heap::alloc(layout) };
+        if allocation.is_null() { return Err(TryReserveError::alloc_error(layout)); }
         self.ctrl = unsafe { allocation.add(offset) };
         self.bucket_count = buckets;
         self.growth_left = bucket_mask_to_capacity(buckets - 1);
         unsafe { ptr::write_bytes(self.ctrl, EMPTY, buckets + Group::WIDTH); }
+        Ok(())
     }
     /// Frees the allocation (the elements were dropped or moved out).
     fn free(&mut self, size: usize, align: usize) {
@@ -359,26 +390,35 @@ impl RawInner {
     /// half the capacity is tombstones, else move to a bigger allocation.
     #[relax(keep_reachable)]
     #[inline(never)]
-    fn reserve_rehash(&mut self, additional: usize, size: usize, align: usize, hasher: BucketHasher, drop: Option<unsafe fn(*mut u8)>) {
+    fn try_reserve_rehash(&mut self, additional: usize, size: usize, align: usize, hasher: BucketHasher, drop: Option<unsafe fn(*mut u8)>) -> Result<(), TryReserveError> {
         let needed = match self.items.checked_add(additional) {
             Some(n) => n,
-            None => crate::panicking::panic_str("capacity overflow"),
+            None => return Err(TryReserveError::capacity_overflow()),
         };
         let full_cap = if self.bucket_count == 0 { 0 } else { bucket_mask_to_capacity(self.bucket_count - 1) };
         if needed <= full_cap / 2 {
             self.rehash_in_place(size, hasher, drop);
         } else {
             let want = if needed > full_cap + 1 { needed } else { full_cap + 1 };
-            self.resize_to(capacity_to_buckets(want), size, align, hasher);
+            self.try_resize_to(try_capacity_to_buckets(want)?, size, align, hasher)?;
         }
+        Ok(())
     }
 
     #[relax(keep_reachable)]
     #[inline(never)]
     fn resize_to(&mut self, buckets: usize, size: usize, align: usize, hasher: BucketHasher) {
+        if let Err(e) = self.try_resize_to(buckets, size, align, hasher) {
+            handle_reserve_error(e);
+        }
+    }
+
+    #[relax(keep_reachable)]
+    #[inline(never)]
+    fn try_resize_to(&mut self, buckets: usize, size: usize, align: usize, hasher: BucketHasher) -> Result<(), TryReserveError> {
         // a hasher that panics leaves self as it was; the guard frees the new allocation
         let mut new = AllocGuard { t: RawInner::new(), size, align };
-        new.t.alloc_buckets(size, align, buckets);
+        new.t.try_alloc_buckets(size, align, buckets)?;
         let mut i = 0;
         while i < self.bucket_count {
             if self.is_full_at(i) {
@@ -395,6 +435,7 @@ impl RawInner {
         self.items = 0;
         // the guard now holds the old allocation (no items): it frees only that
         mem::swap(self, &mut new.t);
+        Ok(())
     }
 
     #[relax(keep_reachable)]
@@ -491,8 +532,6 @@ impl<T> RawTable<T> {
     }
     #[inline]
     pub(crate) fn len(&self) -> usize { self.inner.items }
-    #[inline]
-    pub(crate) fn buckets(&self) -> usize { self.inner.bucket_count }
     pub(crate) fn capacity(&self) -> usize { self.inner.items + self.inner.growth_left }
     pub(crate) fn ctrl(&self) -> &[u8] {
         if self.inner.bucket_count == 0 { return &[]; }
@@ -516,9 +555,16 @@ impl<T> RawTable<T> {
 
     #[relax(keep_reachable)]
     pub(crate) fn reserve(&mut self, additional: usize, hasher: &dyn Fn(&T) -> u64) {
-        if additional <= self.inner.growth_left { return; }
+        if let Err(e) = self.try_reserve(additional, hasher) {
+            handle_reserve_error(e);
+        }
+    }
+
+    #[relax(keep_reachable)]
+    pub(crate) fn try_reserve(&mut self, additional: usize, hasher: &dyn Fn(&T) -> u64) -> Result<(), TryReserveError> {
+        if additional <= self.inner.growth_left { return Ok(()); }
         let drop: Option<unsafe fn(*mut u8)> = if mem::needs_drop::<T>() { Some(drop_bucket::<T>) } else { None };
-        self.inner.reserve_rehash(additional, mem::size_of::<T>(), mem::align_of::<T>(), &|t: &RawInner, i: usize| hasher(unsafe { &*(t.bucket(i, mem::size_of::<T>()) as *const T) }), drop);
+        self.inner.try_reserve_rehash(additional, mem::size_of::<T>(), mem::align_of::<T>(), &|t: &RawInner, i: usize| hasher(unsafe { &*(t.bucket(i, mem::size_of::<T>()) as *const T) }), drop)
     }
 
     pub(crate) fn shrink_to(&mut self, min_capacity: usize, hasher: &dyn Fn(&T) -> u64) {
@@ -575,12 +621,41 @@ impl<T> RawTable<T> {
             i += 1;
         }
     }
+    pub(crate) fn extract_if(&mut self) -> ExtractIf<'_, T> {
+        let remaining = self.len();
+        ExtractIf { table: self, pos: 0, remaining }
+    }
     pub(crate) unsafe fn take_for_iter(&mut self, i: usize) -> T {
         self.inner.set_ctrl(i, EMPTY);
         self.inner.items -= 1;
         ptr::read(self.bucket_ptr(i))
     }
     pub(crate) fn reset_after_drain(&mut self) { self.clear(); }
+}
+
+/// Shared lazy removal cursor. Dropping it leaves every unvisited bucket in the table.
+pub(crate) struct ExtractIf<'a, T> {
+    table: &'a mut RawTable<T>,
+    pos: usize,
+    remaining: usize,
+}
+
+impl<'a, T> ExtractIf<'a, T> {
+    pub(crate) fn next<F: FnMut(&mut T) -> bool>(&mut self, mut pred: F) -> Option<T> {
+        while self.remaining != 0 {
+            let i = next_full(self.table.ctrl(), self.pos);
+            self.pos = i + 1;
+            self.remaining -= 1;
+            // Advance before calling the predicate, but keep the entry if it panics.
+            if pred(unsafe { self.table.get_mut(i) }) {
+                return Some(self.table.remove(i));
+            }
+        }
+        None
+    }
+    pub(crate) fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining))
+    }
 }
 
 impl<T: Clone> RawTable<T> {

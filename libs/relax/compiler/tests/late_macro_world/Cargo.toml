@@ -1,0 +1,5 @@
+# A proc-macro world's code compiled after the boot's flush, cached for the next run
+# (tools/run/fixture/modules_harness.rs). Under cargo the program expands both calls itself.
+[workspace]
+members = ["mac", "app"]
+resolver = "2"

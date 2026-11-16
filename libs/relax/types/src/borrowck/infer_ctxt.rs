@@ -140,10 +140,14 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
     }
 
     fn fully_perform_op<Op: TypeOp>(&self, out: &mut MirTypeckRegionConstraints, locations: Locations, category: ConstraintCategory, op: Op) -> Result<Op::Output, NoSolution> {
+        // `TypeOp::try_fast_path` (rustc asks it inside the op's scrape): its answer registers nothing,
+        // constrains no region, opens no universe and touches no opaque type, so the bookkeeping below
+        // has nothing to record for it.
+        if let Some(output) = op.try_fast_path(&self.infcx, self.prog) { return Ok(output); }
         let span = self.locations_span(locations);
         let before = self.infcx.universe();
         let input = op.input();
-        let input_dbg = input.clone();
+        let input_dbg = nosolution_trace().then(|| input.clone());
         let opaques_before = self.infcx.inner.borrow_mut().opaque_types().num_entries();
         let result = super::type_check::canonical::fully_perform_op_raw(self,
             self.universal_regions.as_ref().expect("MIR type ops require universal regions"), &self.region_bound_pairs,
@@ -153,9 +157,9 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         if result.is_err() {
             self.tainted_by_errors.set(true);
             self.type_op_failed.set(true);
-            if std::env::var_os("RELAX_NOSOLUTION_TRACE").is_some() {
+            if let Some(input_dbg) = &input_dbg {
                 let show = |t| crate::typeck::ty_to_string(false, self.prog, &self.tcx, t);
-                let what = match &input_dbg {
+                let what = match input_dbg {
                     crate::next_solver::type_op::TypeOpInput::Normalize(_, t) => format!("normalize {}", show(*t)),
                     crate::next_solver::type_op::TypeOpInput::ProvePredicate(_, p) => format!("prove {:?}", p.kind),
                     other => format!("{other:?}"),
@@ -251,6 +255,10 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
     }
     fn prove_trait_ref(&mut self, out: &mut MirTypeckRegionConstraints, trait_: LangItem, args: &[GenericArg], locations: Locations, category: ConstraintCategory) {
         let def = self.tcx.lang_items.get(trait_).unwrap_or_else(|| panic!("required trait lang item: {trait_:?}"));
+        // `try_fast_path`'s sizedness rule (prove_predicate.rs:13), asked before the predicate is built
+        if let (LangItem::Sized | LangItem::MetaSized, Some(&GenericArg::Type(ty))) = (trait_, args.first()) {
+            if crate::next_solver::eval_ctxt::fast_path::sizedness_holds(&self.infcx, self.prog, self.param_env_id(), def, trait_ == LangItem::MetaSized, ty) { return; }
+        }
         let op = ProvePredicate { predicate: crate::next_solver::collect::trait_predicate(def, args.to_vec()) };
         let _ = self.fully_perform_op(out, locations, category, ParamEnvAnd { param_env: self.param_env_id(), value: op });
     }
@@ -634,4 +642,11 @@ impl crate::types::fold::TypeFolder for FreeRegionsVisitor<'_, '_> {
         }
         ty
     }
+}
+
+/// RELAX_NOSOLUTION_TRACE=1: print each failed MIR type op's input. Read once, since
+/// `fully_perform_op` asks for every op and the copy of the input is made only when it is set.
+fn nosolution_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RELAX_NOSOLUTION_TRACE").is_some())
 }

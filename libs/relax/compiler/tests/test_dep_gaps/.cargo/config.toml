@@ -1,0 +1,6 @@
+# the two dependencies are this fixture's own registry crates (vendor/), never fetched
+[source.crates-io]
+replace-with = "vendored"
+
+[source.vendored]
+directory = "vendor"

@@ -54,6 +54,7 @@ fn run<R>(source: &str, name: &str, f: impl FnOnce(&mut Builder<'_>, &[Pat], &ty
         upvars: Vec::new(),
         upvar_env: None,
         var_debug_info: Vec::new(),
+        desugaring_let: false,
         unit_temp: None,
         allocs: AllocMap::default(),
     };
@@ -189,9 +190,11 @@ fn guards_fake_borrow_the_matched_places() {
         for (_, temp, _) in &built.fake_borrow_temps {
             assert!(matches!(b.local_decls[temp.0 as usize].local_info, LocalInfo::FakeBorrow));
         }
-        // no guard, no fake borrows
+        // no guard, no fake borrows: a second lowering starts from a block of its own (the first
+        // ended BasicBlock(0) with its switch)
         let none = pats.iter().map(|p| (p, HasMatchGuard::No)).collect();
-        let b2 = b.lower_match_tree(BasicBlock(0), Span::default(), &scrutinee, Span::default(), none, false).unwrap();
+        let start = b.cfg.start_new_block();
+        let b2 = b.lower_match_tree(start, Span::default(), &scrutinee, Span::default(), none, false).unwrap();
         assert!(b2.fake_borrow_temps.is_empty());
     });
 }

@@ -52,7 +52,7 @@
 //! (a cc/cmake build-dependency), unknown command-line flags.
 
 use crate::toml::{parse_toml, Toml, TomlTable};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// One dependency entry of a manifest (a key may have several: normal + build + per platform).
 #[derive(Clone, Debug)]
@@ -71,6 +71,10 @@ struct Dep {
     platform: Option<String>,
     /// a path package directory, or None for a registry or git package
     path: Option<String>,
+    /// `path` is the manifest's own `path` key (not the root workspace's [patch] or
+    /// [workspace.dependencies]): what a third-party manifest names is no path package of the
+    /// person's (`Graph::follow`)
+    own_path: bool,
     /// a git package's source
     git: Option<GitSrc>,
     /// the version requirement (`version = ..`; "*" when none)
@@ -317,8 +321,18 @@ enum Patch {
     Git(GitSrc),
 }
 
+/// A package in Cargo.lock, with its source and dependency entries.
+struct LockPkg {
+    name: String,
+    version: String,
+    /// the full source string, or None for a path package
+    source: Option<String>,
+    /// the dependency entries as Cargo.lock spells them
+    deps: Vec<String>,
+}
+
 /// The workspace: root manifest dir, `[workspace.dependencies]`, `[workspace.package]`,
-/// `[patch.crates-io]` / `[patch."<git url>"]`, Cargo.lock's registry versions and git commits.
+/// `[patch.crates-io]` / `[patch."<git url>"]`, Cargo.lock's packages, registry versions and git commits.
 struct Workspace {
     root: String,
     ws_deps: TomlTable,
@@ -328,6 +342,10 @@ struct Workspace {
     lock: HashMap<String, Vec<String>>,
     /// Cargo.lock's git sources with their commits
     lock_git: Vec<(GitSrc, crate::gitstore::Oid)>,
+    /// all packages in Cargo.lock, including their dependency edges
+    lock_pkgs: Vec<LockPkg>,
+    /// package name to indices in lock_pkgs
+    lock_by_name: HashMap<String, Vec<usize>>,
     members: Vec<String>,
     excludes: Vec<String>,
     /// the root manifest has a `[package]`: cargo makes the root package a member
@@ -372,6 +390,9 @@ pub struct Resolver {
     /// crates-io's replacement (a vendored directory or a git repository) and the config file
     /// that names it
     vendor: Option<(Vendor, String)>,
+    /// the registry/src folder of CARGO_HOME, or $HOME/.cargo without it, where locked registry
+    /// packages are unpacked; a field so tests can give their own
+    registry_src: String,
     /// registry packages fetched for a program with neither a vendored directory nor a locked
     /// version: name -> (version, sources, the requirements that chose it)
     fetched: std::cell::RefCell<HashMap<String, (String, String, Vec<String>)>>,
@@ -420,6 +441,8 @@ impl Workspace {
         }
         let mut lock: HashMap<String, Vec<String>> = HashMap::new();
         let mut lock_git = Vec::new();
+        let mut lock_pkgs = Vec::new();
+        let mut lock_by_name: HashMap<String, Vec<usize>> = HashMap::new();
         if let Ok(l) = read_toml(&format!("{}/Cargo.lock", root)) {
             if let Some(pkgs) = l.get("package").and_then(|p| p.as_array_of_tables()) {
                 for p in pkgs {
@@ -432,6 +455,11 @@ impl Workspace {
                         if !lock_git.iter().any(|x: &(GitSrc, crate::gitstore::Oid)| x.0.same(&g.0)) {
                             lock_git.push(g);
                         }
+                    }
+                    if let (Some(name), Some(version)) = (s(p, "name"), s(p, "version")) {
+                        let pkg = LockPkg { name, version, source: src, deps: strs(p, "dependencies") };
+                        lock_by_name.entry(pkg.name.clone()).or_default().push(lock_pkgs.len());
+                        lock_pkgs.push(pkg);
                     }
                 }
             }
@@ -446,6 +474,8 @@ impl Workspace {
             patches,
             lock,
             lock_git,
+            lock_pkgs,
+            lock_by_name,
         })
     }
 
@@ -549,29 +579,77 @@ impl Resolver {
     pub fn with(sess: &std::sync::Arc<crate::Session>, dir: &str, git: GitPlaces) -> Result<Resolver, String> {
         let offline = crate::git::cargo::offline(std::path::Path::new(dir))?;
         let git = std::cell::RefCell::new(GitDeps { places: git, pins: None, mounts: Vec::new(), found: HashMap::new() });
-        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), git, offline, owners: HashMap::new(), vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), // a check resolves C-compiling packages too: their scripts are not run without --allow-c
+        let home = std::env::var("CARGO_HOME").ok().or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.cargo", h))).unwrap_or_default();
+        let registry_src = format!("{}/registry/src", home);
+        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), git, offline, owners: HashMap::new(), vendor: vendor_dir(dir)?, registry_src, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), // a check resolves C-compiling packages too: their scripts are not run without --allow-c
             // (unitgraph::run_build_scripts) and a check links nothing (`const_fuel` is check-only)
             allow_c: sess.options.allow_c || sess.options.const_fuel, metadata: false })
     }
 
-    fn registry_dir(&self, name: &str, req: &str) -> Result<String, String> {
+    /// The registry version the requesting package's Cargo.lock edge names, if unambiguous and
+    /// accepted by the requirement. Missing or ambiguous edges leave requirement-based resolution.
+    fn locked_edge(&self, from: (&str, &str), dep: &str, req: &str) -> Option<String> {
+        let mut parents = self.ws.lock_by_name.get(from.0)?.iter().map(|&i| &self.ws.lock_pkgs[i]).filter(|p| p.version == from.1);
+        let parent = parents.next()?;
+        if parents.next().is_some() {
+            return None;
+        }
+        let targets = self.ws.lock_by_name.get(dep)?;
+        let mut versions = BTreeSet::new();
+        for edge in &parent.deps {
+            let (id, source) = match edge.split_once(" (") {
+                Some((id, source)) => {
+                    let Some(source) = source.strip_suffix(')') else { continue };
+                    (id, Some(source))
+                }
+                None => (edge.as_str(), None),
+            };
+            let mut parts = id.split_whitespace();
+            if parts.next() != Some(dep) {
+                continue;
+            }
+            let version = parts.next();
+            if parts.next().is_some() {
+                continue;
+            }
+            let mut named = targets.iter().map(|&i| &self.ws.lock_pkgs[i]).filter(|p| {
+                p.source.as_deref().is_some_and(|s| s.starts_with("registry+"))
+                    && (version.is_none() || version == Some(p.version.as_str()))
+                    && (source.is_none() || source == p.source.as_deref())
+            });
+            let Some(pkg) = named.next() else { continue };
+            if named.next().is_some() {
+                continue;
+            }
+            if crate::registry::Version::parse(&pkg.version).is_some_and(|ver| crate::registry::matches(req, &ver)) {
+                versions.insert(pkg.version.as_str());
+            }
+        }
+        if versions.len() == 1 { versions.into_iter().next().map(str::to_string) } else { None }
+    }
+
+    fn registry_dir(&self, name: &str, req: &str, from: Option<(&str, &str)>) -> Result<String, String> {
+        let exact = from.and_then(|from| self.locked_edge(from, name, req));
         match &self.vendor {
-            Some((Vendor::Dir(vdir), config)) => return self.vendored_dir(vdir, config, name),
+            Some((Vendor::Dir(vdir), config)) => return self.vendored_dir(vdir, config, name, req, exact.as_deref()),
             // the repository's package of that name (cargo's discovery, as for a git dependency)
             Some((Vendor::Git(src), config)) => return self.git_dir(src, name).map_err(|e| format!("{} (crates-io's replacement, {})", e, config)),
             None => {}
         }
-        let Some(vers) = self.ws.lock.get(name) else {
-            return self.fetched_dir(name, req);
+        let vers = if let Some(v) = exact {
+            vec![v]
+        } else {
+            let Some(vers) = self.ws.lock.get(name) else {
+                return self.fetched_dir(name, req);
+            };
+            // Cargo.lock may hold several versions of one package (bitflags 1 and 2 in one graph):
+            // only the ones the requirement accepts are candidates; without a parsable match, all.
+            let matching: Vec<String> = vers.iter().filter(|v| crate::registry::Version::parse(v).is_some_and(|ver| crate::registry::matches(req, &ver))).cloned().collect();
+            if matching.is_empty() { vers.clone() } else { matching }
         };
-        // Cargo.lock may hold several versions of one package (bitflags 1 and 2 in one graph):
-        // only the ones the requirement accepts are candidates; without a parsable match, all.
-        let matching: Vec<String> = vers.iter().filter(|v| crate::registry::Version::parse(v).is_some_and(|ver| crate::registry::matches(req, &ver))).cloned().collect();
-        let vers: &Vec<String> = if matching.is_empty() { vers } else { &matching };
-        let home = std::env::var("CARGO_HOME").ok().or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.cargo", h))).unwrap_or_default();
-        let src = format!("{}/registry/src", home);
-        for v in vers {
-            if let Ok(rd) = std::fs::read_dir(&src) {
+        let src = &self.registry_src;
+        for v in &vers {
+            if let Ok(rd) = std::fs::read_dir(src) {
                 for e in rd.flatten() {
                     let d = format!("{}/{}/{}-{}", src, e.file_name().to_string_lossy(), name, v);
                     if std::path::Path::new(&d).join("Cargo.toml").is_file() {
@@ -582,7 +660,7 @@ impl Resolver {
         }
         // the locked version from the crates.io index (registry.rs: cache first)
         let mut last = String::new();
-        for v in vers {
+        for v in &vers {
             match crate::registry::exact(name, v, self.offline).and_then(|r| crate::registry::sources(name, &r, self.offline)) {
                 Ok(d) => return Ok(d),
                 Err(e) => last = e,
@@ -609,9 +687,9 @@ impl Resolver {
     }
 
     /// Registry package `name` in the vendored directory `vdir`: `<name>` (one version) or
-    /// `<name>-<version>` (cargo vendor's names when it holds several); with Cargo.lock, the locked
-    /// version, without, the only one there.
-    fn vendored_dir(&self, vdir: &str, config: &str, name: &str) -> Result<String, String> {
+    /// `<name>-<version>` (cargo vendor's names when it holds several); only versions the requirement
+    /// accepts, with Cargo.lock, the locked version, without, the only matching one there.
+    fn vendored_dir(&self, vdir: &str, config: &str, name: &str, req: &str, exact: Option<&str>) -> Result<String, String> {
         let mut found: Vec<(String, String)> = Vec::new();
         for (entry, is_dir) in crate::vfs::read_dir(vdir).map_err(|e| format!("{} (crates-io's replacement, {}): {}", vdir, config, e))? {
             if !is_dir || !(entry == name || entry.strip_prefix(name).is_some_and(|r| r.starts_with('-') && r[1..].starts_with(|c: char| c.is_ascii_digit()))) {
@@ -625,6 +703,13 @@ impl Resolver {
                     }
                 }
             }
+        }
+        found.retain(|(v, _)| crate::registry::Version::parse(v).is_some_and(|ver| crate::registry::matches(req, &ver)));
+        if let Some(v) = exact {
+            return found.iter().find(|(version, _)| version == v).map(|(_, d)| d.clone()).ok_or_else(|| format!(
+                "registry package `{}` locked at {} is not vendored in {} (crates-io's replacement, {}): a vendored workspace never fetches from crates.io",
+                name, v, vdir, config
+            ));
         }
         let locked = self.ws.lock.get(name);
         let pick: Vec<&(String, String)> = match locked {
@@ -914,6 +999,7 @@ impl Resolver {
                 let package = s(&st, "package").unwrap_or_else(|| key.clone());
                 let mut git = git_src(&st, &format!("{}/Cargo.toml", dir), key)?;
                 let mut path = s(&st, "path").map(|p| join(&base_dir, &p));
+                let own_path = path.is_some() && !from_ws;
                 // the root workspace's [patch] of the dependency's source (crates-io or its repository)
                 if path.is_none() && (git.is_some() || !st.contains_key("registry")) {
                     let src = git.as_ref().map_or_else(|| "crates-io".to_string(), |g| canonical_url(&g.url));
@@ -935,6 +1021,7 @@ impl Resolver {
                     default_features: b(&st, "default-features").or_else(|| b(&st, "default_features")).unwrap_or(true),
                     features: strs(&st, "features"),
                     platform: platform.clone(),
+                    own_path,
                     path,
                     git,
                     req: s(&st, "version").unwrap_or_else(|| "*".to_string()),
@@ -985,7 +1072,7 @@ impl Resolver {
     /// The package directory a dependency entry names, and the package's source. A path inside a
     /// mounted repository is part of that git source (cargo: a git package's path dependencies
     /// in its repository share its source id).
-    fn dep_dir(&self, d: &Dep) -> Result<(String, Source), String> {
+    fn dep_dir(&self, d: &Dep, from: Option<(&str, &str)>) -> Result<(String, Source), String> {
         if let Some(p) = &d.path {
             let g = self.git.borrow();
             return Ok(match g.mounts.iter().find(|m| *p == m.1 || p.starts_with(&format!("{}/", m.1))) {
@@ -996,7 +1083,7 @@ impl Resolver {
         if let Some(src) = &d.git {
             return self.git_dir(src, &d.package).map(|r| (r, Source::Git(src.clone())));
         }
-        self.registry_dir(&d.package, &d.req).map(|r| (r, Source::Registry))
+        self.registry_dir(&d.package, &d.req, from).map(|r| (r, Source::Registry))
     }
 
     /// The folder of package `package` in the git source `src` (fetched and mounted once).
@@ -1210,14 +1297,19 @@ pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &
     let bins = enabled(&m.bins, bin_names)?;
     let tests = enabled(&m.tests, test_names)?;
     let examples = enabled(&m.examples, example_names)?;
-    let mut all_examples = Vec::new();
-    for t in &m.examples {
-        if t.enabled(&features, false)? {
-            all_examples.push((t.name.clone(), t.path.clone(), t.harness));
+    let every = |targets: &[Target]| -> Result<Vec<(String, String, bool)>, String> {
+        let mut out = Vec::new();
+        for t in targets {
+            if t.enabled(&features, false)? {
+                out.push((t.name.clone(), t.path.clone(), t.harness));
+            }
         }
-    }
-    all_examples.sort();
-    Ok(TestTargets { lib: m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests, examples, all_examples })
+        out.sort();
+        Ok(out)
+    };
+    let all_bins = every(&m.bins)?;
+    let all_examples = every(&m.examples)?;
+    Ok(TestTargets { lib: m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests, examples, all_bins, all_examples })
 }
 
 /// A package's targets as `cargo test` selects them (`test_targets`): the lib, and (name, source
@@ -1227,6 +1319,9 @@ pub struct TestTargets {
     pub bins: Vec<(String, String, bool)>,
     pub tests: Vec<(String, String, bool)>,
     pub examples: Vec<(String, String, bool)>,
+    /// every bin whose required features are on, `test = false` ones too: what cargo builds
+    /// beside an integration test (its CARGO_BIN_EXE_<name>)
+    pub all_bins: Vec<(String, String, bool)>,
     /// every example whose required features are on (`--examples`, cargo's "all example targets")
     pub all_examples: Vec<(String, String, bool)>,
 }
@@ -1291,6 +1386,27 @@ pub fn run_env_refused(name: &str) -> bool {
     let tool = |t: &str| n == t || n.starts_with(&format!("{t}_")) || n.ends_with(&format!("_{t}"));
     ["RELAX_", "LD_", "DYLD_", "RUSTC", "RUSTFLAGS", "RUSTDOC", "CARGO"].iter().any(|p| n.starts_with(p))
         || ["CC", "CXX", "AR", "LINKER", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS"].iter().any(|t| tool(t))
+}
+
+/// What a confined build script's `rustc-env` says of a refused name (`script_env_refused`).
+pub const SCRIPT_ENV_PRINCIPLE: &str = "a third-party build script sets variables for the program, never for Relax, makepad, the loader or the tools they start";
+
+/// The names a confined build script's `rustc-env` may not set. The value lands in the host
+/// process, which the program shares with Relax, makepad, the dynamic loader and every tool they
+/// start (a rebuild's scripts, a self-exec run, git, ssh, a linker): a third-party script sets
+/// variables for the program, never for them (SCRIPT_ENV_PRINCIPLE). So every name that steers
+/// one of them is refused: `run_env_refused`'s, the program search (`PATH`, the Windows loader's
+/// too), the loader's (`LD_*`, `DYLD_*`), Relax's and makepad's (`RELAX_*`, `MAKEPAD_*`), cargo's,
+/// rustc's and rustup's (`CARGO*`, `RUSTC*`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTUP_*`), git's and
+/// ssh's (`GIT_*`, `SSH_*`), the home and temp folders (`HOME`, `TMPDIR`, `TMP`, `TEMP`,
+/// `XDG_*`), the shell (`SHELL`) and the network's route (`HTTP_PROXY`, `HTTPS_PROXY`,
+/// `ALL_PROXY`, `NO_PROXY`). Without case: a Windows name has none, and the proxies are read in
+/// either.
+pub fn script_env_refused(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    run_env_refused(name)
+        || ["LD_", "DYLD_", "RELAX_", "MAKEPAD_", "CARGO", "RUSTC", "RUSTUP_", "GIT_", "SSH_", "XDG_"].iter().any(|p| n.starts_with(p))
+        || ["PATH", "RUSTFLAGS", "RUSTDOCFLAGS", "HOME", "TMPDIR", "TMP", "TEMP", "SHELL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].contains(&n.as_str())
 }
 
 /// The folders of a repository's tree (a commit's path table) whose Cargo.toml cargo's package
@@ -1444,8 +1560,11 @@ pub fn cargo_config_files(dir: &str) -> Vec<(String, String)> {
 /// field, and a string in one file against a table in another is an error. A `relative` value is
 /// joined to the folder of the file its `value` comes from (Path::join: unnormalized, an absolute
 /// value stands). An entry applies when it is `force`d or the process environment lacks the
-/// variable. CARGO_HOME, RUSTUP_HOME and RUSTUP_TOOLCHAIN may not be set there.
-pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
+/// variable. CARGO_HOME, RUSTUP_HOME and RUSTUP_TOOLCHAIN may not be set there. Nor are Relax's
+/// own names (`RELAX_*`, progenv `reserved`): a repository's configuration does not set what a
+/// Relax host or a build script's host reads, such as its trust settings; each is left out and
+/// named in the second list (`<file>: [env] `<name>``), for the run to say so.
+pub fn cargo_env(dir: &str) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     // a plain string, or the table's (value and its file's folder, force, relative)
     enum Entry { Plain(String), Options(Option<(String, String)>, Option<bool>, Option<bool>) }
     let mut env: BTreeMap<String, (Entry, String)> = BTreeMap::new();
@@ -1484,10 +1603,14 @@ pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
             }
         }
     }
-    let mut out = Vec::new();
+    let (mut out, mut ignored) = (Vec::new(), Vec::new());
     for (k, (e, path)) in env {
         if ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"].contains(&k.as_str()) {
             return Err(format!("{}: setting the `{}` environment variable is not supported in the `[env]` configuration table", path, k));
+        }
+        if crate::progenv::reserved(k.as_bytes()) {
+            ignored.push(format!("{}: [env] `{}`", path, k));
+            continue;
         }
         let (value, force) = match e {
             Entry::Plain(value) => (value, false),
@@ -1499,7 +1622,7 @@ pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
         };
         if force || std::env::var_os(&k).is_none() { out.push((k, value)); }
     }
-    Ok(out)
+    Ok((out, ignored))
 }
 
 /// What a cargo profile sets that changes what a program's code does: `debug-assertions`
@@ -1906,7 +2029,7 @@ fn cfg_holds(expr: &str, cfg: &crate::cfg::CfgSet) -> bool {
 
 /// One node of the feature resolution: a package on one side (host = build-dependency / proc
 /// macro side).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Node {
     features: BTreeSet<String>,
     /// optional dependency keys switched on
@@ -2206,7 +2329,23 @@ impl<'a> Feat<'a> {
                 return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): it {}", m.name, m.version, c, relax_session::options::C_GATE));
             }
         }
-        let (dir, source) = self.r.dep_dir(d)?;
+        let m = &self.r.manifests[k.0];
+        let (dir, mut source) = self.r.dep_dir(d, Some((&m.name, &m.version)))?;
+        // a path dependency a third-party manifest names is third-party too: a registry package's
+        // in its vendored folder is a registry package (its build script and macros confined as
+        // its owner's are); one anywhere else, or a git package's outside its repository (a mount
+        // keeps the ones inside git: dep_dir), would make a folder of this machine the person's
+        // own package, unconfined, so it is an error
+        let owner = &self.r.manifests[k.0];
+        if d.own_path && source == Source::Path && owner.source != Source::Path {
+            let vendored = matches!(&self.r.vendor, Some((Vendor::Dir(v), _)) if dir.starts_with(&format!("{}/", v)));
+            if owner.source != Source::Registry || !vendored {
+                return Err(format!("{} package `{}` {} names the path dependency `{}` ({}), outside its {}: a third-party package's path dependency is never a package of the person's",
+                    if owner.source == Source::Registry { "registry" } else { "git" }, owner.name, owner.version, d.key, dir,
+                    if owner.source == Source::Registry { "vendored folder" } else { "repository" }));
+            }
+            source = Source::Registry;
+        }
         let t = self.r.load(&dir, source)?;
         if self.r.manifests[t].name != d.package {
             return Err(format!("{}/Cargo.toml: dependency `{}` names package `{}`, but {} holds `{}`", self.r.manifests[k.0].dir, d.key, d.package, dir, self.r.manifests[t].name));
@@ -2310,6 +2449,67 @@ impl<'a> Feat<'a> {
         }
         Ok(())
     }
+
+    /// The program's resolution unified with the loader's build ([`Unify`]): every target-side
+    /// package of a provided crate's closure, once that crate's own target-side node is active,
+    /// gets the features the loader's build turned on, to a fixpoint (a feature can switch on a
+    /// dependency that reaches another provided crate). A feature the package's manifest no
+    /// longer defines is skipped, and a unification that does not resolve leaves the program's
+    /// own resolution as it was: either is a source change of the provided crate, which the
+    /// source check reports (relax-compiler provided.rs). Returns what was added to the packages
+    /// the program's own resolution reached.
+    fn unify(&mut self, unify: &[Unify]) -> Result<Vec<Unified>, String> {
+        if unify.is_empty() {
+            return Ok(Vec::new());
+        }
+        let before: HashMap<(usize, bool), BTreeSet<String>> = self.nodes.iter().filter(|(_, n)| n.active).map(|(k, n)| (*k, n.features.clone())).collect();
+        let saved = (self.nodes.clone(), self.order.clone());
+        let mut asked: HashSet<((usize, bool), String)> = HashSet::new();
+        let outcome = loop {
+            let ids: Vec<((usize, bool), (String, String))> = self.order.iter().filter(|k| !k.1).map(|k| {
+                let m = &self.r.manifests[k.0];
+                (*k, (m.name.replace('-', "_"), m.version.clone()))
+            }).collect();
+            let on: HashSet<&(String, String)> = ids.iter().map(|(_, id)| id).collect();
+            let mut want: HashMap<&(String, String), Vec<&String>> = HashMap::new();
+            for g in unify.iter().filter(|g| on.contains(&g.root)) {
+                for (p, fs) in &g.pkgs {
+                    want.entry(p).or_default().extend(fs);
+                }
+            }
+            for (k, id) in &ids {
+                let Some(fs) = want.get(id) else { continue };
+                let m = &self.r.manifests[k.0];
+                for f in fs {
+                    let defined = m.features.contains_key(*f) || (m.is_optional_dep(f) && !m.dep_syntax(f));
+                    if defined && asked.insert((*k, (*f).clone())) {
+                        self.work.push((*k, Req::Feature((*f).clone())));
+                    }
+                }
+            }
+            if self.work.is_empty() {
+                break Ok(());
+            }
+            if let Err(e) = self.run() {
+                break Err(e);
+            }
+        };
+        if outcome.is_err() {
+            self.work.clear();
+            (self.nodes, self.order) = saved;
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for (k, had) in &before {
+            let added: Vec<String> = self.nodes[k].features.difference(had).cloned().collect();
+            if !added.is_empty() {
+                let m = &self.r.manifests[k.0];
+                out.push(Unified { name: m.name.clone(), version: m.version.clone(), dir: m.dir.clone(), host: k.1, features: added });
+            }
+        }
+        out.sort_by(|a, b| (&a.name, &a.version, a.host).cmp(&(&b.name, &b.version, b.host)));
+        Ok(out)
+    }
 }
 
 /// One unit of a unit graph: the fields of cargo's `--unit-graph` JSON unit that Relax reads.
@@ -2346,6 +2546,47 @@ pub struct Units {
     pub roots: Vec<usize>,
     /// binary target names of the root package when building integration tests (`CARGO_BIN_EXE_<name>`)
     pub bins: Vec<String>,
+    /// a build script's units: its parent confined its run, with these folders (`relax_script`)
+    pub script: Option<ScriptFolders>,
+    /// what the loader's build added to the packages the program's own resolution reached
+    /// ([`Unify`]); empty for a graph resolved without it
+    pub unified: Vec<Unified>,
+}
+
+/// A provided crate's closure as the loader's own build resolved it: the JIT binds the crate to
+/// the loader's compiled copy, so the program's graph builds the closure's packages with the
+/// loader's features, as cargo unifies a package's features across a workspace with the program
+/// and the loader as members. The crate and each package are (name with `_` for `-`, version);
+/// the features are the loader's target-side ones, `host-shims` aside (srchash.rs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unify {
+    pub root: (String, String),
+    pub pkgs: Vec<((String, String), Vec<String>)>,
+}
+
+/// A package of the program's graph and the features [`Unify`] turned on in it that the program's
+/// own resolution left off. Only packages that resolution reached: one that only the added
+/// features bring in is code the program never had another build of.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unified {
+    pub name: String,
+    pub version: String,
+    pub dir: String,
+    pub host: bool,
+    pub features: Vec<String>,
+}
+
+/// The folders of a confined build script's run, as its parent names them (relax-front
+/// unitgraph.rs `script_units`): a store's or a folder mount's path stays virtual. OUT_DIR, the
+/// one it writes, is its environment's.
+#[derive(Clone, Debug, Default)]
+pub struct ScriptFolders {
+    /// its package's source root, which it reads
+    pub read: Vec<String>,
+    /// folders it never reaches (the run's target folder, Relax's dir)
+    pub excluded: Vec<String>,
+    /// its current folder at the start (its package's)
+    pub cwd: String,
 }
 
 impl Units {
@@ -2393,7 +2634,8 @@ impl Units {
             pending.extend(units[i].deps.iter().map(|d| d.0));
         }
         let roots = j.get("roots").map(|r| r.arr().iter().map(|x| x.num() as usize).collect()).unwrap_or_default();
-        Ok(Units { units, roots, bins: Vec::new() })
+        let script = j.get("relax_script").map(|r| ScriptFolders { read: list(r.get("read")), excluded: list(r.get("excluded")), cwd: s(r.get("cwd")) });
+        Ok(Units { units, roots, bins: Vec::new(), script, unified: Vec::new() })
     }
 }
 
@@ -2654,15 +2896,22 @@ pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, packag
 
 /// `unit_graph` with git dependencies kept in `git` (tests: a private home and pin file).
 pub fn unit_graph_with(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String], git: GitPlaces) -> Result<Units, String> {
-    graph_of(sess, workspace, package, &parse_flags(flags)?, git)
+    graph_of(sess, workspace, package, &parse_flags(flags)?, git, &[])
+}
+
+/// A run's (`check`: `makepad check`'s) unit graph with the features of the provided crates'
+/// closures unified with the loader's build ([`Unify`]; empty: none).
+pub fn unit_graph_for(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String], check: bool, unify: &[Unify]) -> Result<Units, String> {
+    let o = if check { parse_check_flags(flags)? } else { parse_flags(flags)? };
+    graph_of(sess, workspace, package, &o, GitPlaces::run(), unify)
 }
 
 /// `makepad check`'s unit graph: its target flags are cargo check's (parse_check_flags).
 pub fn check_unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String]) -> Result<Units, String> {
-    graph_of(sess, workspace, package, &parse_check_flags(flags)?, GitPlaces::run())
+    graph_of(sess, workspace, package, &parse_check_flags(flags)?, GitPlaces::run(), &[])
 }
 
-fn graph_of(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, o: &Options, git: GitPlaces) -> Result<Units, String> {
+fn graph_of(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, o: &Options, git: GitPlaces, unify: &[Unify]) -> Result<Units, String> {
     let mut r = Resolver::with(sess, workspace, git)?;
     r.offline |= o.offline;
     let root = r.find_member(package)?;
@@ -2674,8 +2923,11 @@ fn graph_of(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &st
     let m = &f.r.manifests[root];
     f.work.extend(feature_requests(&m.features, &m.implicit_features(), o).into_iter().map(|req| (rk, req)));
     f.run()?;
+    let unified = f.unify(unify)?;
     let (nodes, order) = (std::mem::take(&mut f.nodes), std::mem::take(&mut f.order));
-    emit(&r, &nodes, &order, root, o)
+    let mut units = emit(&r, &nodes, &order, root, o)?;
+    units.unified = unified;
+    Ok(units)
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -3010,7 +3262,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 if u.host { "host" } else { "target" }, u.name, u.mode, u.features.join(","), deps.join(","));
         }
     }
-    Ok(Units { units: out, roots, bins })
+    Ok(Units { units: out, roots, bins, script: None, unified: Vec::new() })
 }
 
 #[cfg(test)]
@@ -3280,6 +3532,49 @@ required-features = ["b", "manual"]
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The features of a provided crate's closure unified with the loader's build (Unify): a
+    /// program that builds the crate with fewer features gets the loader's, as cargo unifies a
+    /// workspace's, and what that added to its own packages is recorded for the additivity check.
+    #[test]
+    fn provided_closure_features_unify_with_the_loaders() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = tree("unify", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nspare = []\n[dependencies]\nprov = { path = \"../prov\" }\n"),
+            ("app/src/lib.rs", ""),
+            ("prov/Cargo.toml", "[package]\nname = \"prov\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[features]\ndefault = []\nwide = [\"dep:wide-dep\"]\nbroken = [\"nodep/x\"]\n[dependencies]\nwide-dep = { path = \"../wide-dep\", optional = true }\n"),
+            ("prov/src/lib.rs", ""),
+            ("wide-dep/Cargo.toml", "[package]\nname = \"wide-dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[features]\nfast = []\n"),
+            ("wide-dep/src/lib.rs", ""),
+        ]);
+        let id = |n: &str, v: &str| (n.to_string(), v.to_string());
+        let feats = |fs: &[&str]| fs.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+        let group = |fs: &[&str]| Unify { root: id("prov", "1.0.0"), pkgs: vec![
+            (id("prov", "1.0.0"), feats(fs)), (id("wide_dep", "1.0.0"), feats(&["fast"])), (id("gone", "1.0.0"), feats(&["x"])),
+        ] };
+        // a crate the program does not reach unifies nothing, even with a package it does reach
+        let absent = Unify { root: id("absent", "1.0.0"), pkgs: vec![(id("app", "0.1.0"), feats(&["spare"]))] };
+        let graph = |unify: &[Unify]| unit_graph_for(sess, &root, "app", &[], false, unify).unwrap_or_else(|e| panic!("{e}"));
+        let unit = |g: &Units, name: &str| g.units.iter().find(|u| u.name == name).map(|u| u.features.clone());
+        let plain = graph(&[]);
+        assert_eq!(unit(&plain, "prov"), Some(feats(&["default"])), "the program's own resolution");
+        assert!(unit(&plain, "wide_dep").is_none() && plain.unified.is_empty());
+
+        let g = graph(&[group(&["default", "wide", "retired"]), absent.clone()]);
+        assert_eq!(unit(&g, "prov"), Some(feats(&["default", "wide"])), "the loader's features, one the manifest no longer defines skipped");
+        assert_eq!(unit(&g, "wide_dep"), Some(feats(&["fast"])), "a dependency the added feature switches on gets the loader's features too");
+        assert_eq!(unit(&g, "app"), Some(Vec::new()), "a group whose crate the program does not reach changes nothing");
+        assert_eq!(g.unified.len(), 1, "only packages the program reached are recorded: {:?}", g.unified);
+        assert_eq!((g.unified[0].name.as_str(), g.unified[0].features.clone(), g.unified[0].host), ("prov", feats(&["wide"]), false));
+        assert!(g.unified[0].dir.ends_with("prov"), "{}", g.unified[0].dir);
+
+        // a unification that does not resolve (a source change of the provided crate, which the
+        // source check reports) leaves the program's own resolution
+        let g = graph(&[group(&["wide", "broken"])]);
+        assert_eq!((unit(&g, "prov"), unit(&g, "wide_dep"), g.unified.len()), (Some(feats(&["default"])), None, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A registry package's feature value `x/f` naming one of its dev-dependencies (vsss-rs 6.0.1:
     /// `alloc = ["rand/alloc"]` with rand a dev-dependency): cargo accepts it and enables nothing
     /// (cargo core/resolver/features.rs activate_dep_feature: no activated dependency `x`).
@@ -3303,6 +3598,112 @@ required-features = ["b", "manual"]
         let _ = std::fs::write(format!("{root}/vendor/shares/Cargo.toml"), "[package]\nname = \"shares\"\nversion = \"6.0.1\"\nedition = \"2021\"\n[features]\ndefault = [\"nope/alloc\"]\n");
         let e = unit_graph(sess, &root, "app", &[]).err().unwrap();
         assert!(e.contains("names no dependency"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Vendored versions must meet each dependency's requirement, even when several majors are locked.
+    #[test]
+    fn vendored_majors_resolve_per_requirement() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let app = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nold = { package = \"bitflags\", version = \"1\" }\nnew = { package = \"bitflags\", version = \"2\" }\n";
+        let root = tree("vendored-majors", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            (".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n"),
+            ("Cargo.lock", "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"bitflags 1.3.2\", \"bitflags 2.4.0\"]\n\n[[package]]\nname = \"bitflags\"\nversion = \"1.3.2\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"bitflags\"\nversion = \"2.4.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"),
+            ("app/Cargo.toml", app),
+            ("app/src/lib.rs", ""),
+            ("vendor/bitflags-1.3.2/Cargo.toml", "[package]\nname = \"bitflags\"\nversion = \"1.3.2\"\nedition = \"2021\"\n"),
+            ("vendor/bitflags-1.3.2/.cargo-checksum.json", "{\"files\":{},\"package\":null}"),
+            ("vendor/bitflags-1.3.2/src/lib.rs", ""),
+            ("vendor/bitflags-2.4.0/Cargo.toml", "[package]\nname = \"bitflags\"\nversion = \"2.4.0\"\nedition = \"2021\"\n"),
+            ("vendor/bitflags-2.4.0/.cargo-checksum.json", "{\"files\":{},\"package\":null}"),
+            ("vendor/bitflags-2.4.0/src/lib.rs", ""),
+        ]);
+        let g = unit_graph(sess, &root, "app", &[]).unwrap_or_else(|e| panic!("vendored majors did not resolve: {e}"));
+        let paths: BTreeSet<_> = g.units.iter().filter(|u| u.name == "bitflags").map(|u| u.src_path.clone()).collect();
+        assert_eq!(paths, BTreeSet::from([
+            normalize(&format!("{root}/vendor/bitflags-1.3.2/src/lib.rs")),
+            normalize(&format!("{root}/vendor/bitflags-2.4.0/src/lib.rs")),
+        ]), "each renamed dependency must resolve to its requested major");
+        std::fs::write(format!("{root}/app/Cargo.toml"), app.replace("version = \"2\"", "version = \"3\"")).unwrap();
+        assert!(unit_graph(sess, &root, "app", &[]).is_err(), "a vendored version that does not satisfy the requirement must not be a fallback");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A package's lock edge chooses among matching registry versions, in the vendor folder and cache.
+    #[test]
+    fn a_lock_edge_picks_among_matching_versions() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let one = "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
+        let two = "[package]\nname = \"dep\"\nversion = \"2.0.0\"\nedition = \"2021\"\n";
+        let root = tree("lock-edge", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            (".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n"),
+            ("Cargo.lock", "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"dep 2.0.0\"]\n\n[[package]]\nname = \"dep\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"dep\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndep = \">=1, <3\"\n"),
+            ("app/src/lib.rs", ""),
+            ("vendor/dep-1.0.0/Cargo.toml", one),
+            ("vendor/dep-1.0.0/.cargo-checksum.json", "{\"files\":{},\"package\":null}"),
+            ("vendor/dep-1.0.0/src/lib.rs", ""),
+            ("vendor/dep-2.0.0/Cargo.toml", two),
+            ("vendor/dep-2.0.0/.cargo-checksum.json", "{\"files\":{},\"package\":null}"),
+            ("vendor/dep-2.0.0/src/lib.rs", ""),
+            ("cache/index.test-0/dep-1.0.0/Cargo.toml", one),
+            ("cache/index.test-0/dep-2.0.0/Cargo.toml", two),
+        ]);
+        let g = unit_graph(sess, &root, "app", &[]).unwrap_or_else(|e| panic!("the vendored lock edge did not resolve: {e}"));
+        let paths: Vec<_> = g.units.iter().filter(|u| u.name == "dep").map(|u| u.src_path.clone()).collect();
+        assert_eq!(paths, vec![normalize(&format!("{root}/vendor/dep-2.0.0/src/lib.rs"))], "the vendored dependency must use the version named by the requesting package's lock edge");
+
+        std::fs::remove_file(format!("{root}/.cargo/config.toml")).unwrap();
+        let mut r = Resolver::new(sess, &root).unwrap();
+        r.registry_src = format!("{root}/cache");
+        assert_eq!(r.registry_dir("dep", ">=1, <3", Some(("app", "0.1.0"))).unwrap(), format!("{root}/cache/index.test-0/dep-2.0.0"), "the cached dependency must use the version named by the requesting package's lock edge");
+        assert_eq!(r.registry_dir("dep", ">=1, <3", None).unwrap(), format!("{root}/cache/index.test-0/dep-1.0.0"), "without a requesting package the first matching locked version must still win");
+
+        std::fs::write(format!("{root}/Cargo.lock"), "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"dep\"]\n\n[[package]]\nname = \"dep\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n").unwrap();
+        let mut r = Resolver::new(sess, &root).unwrap();
+        r.registry_src = format!("{root}/cache");
+        assert_eq!(r.registry_dir("dep", ">=1, <3", Some(("app", "0.1.0"))).unwrap(), format!("{root}/cache/index.test-0/dep-1.0.0"), "a bare dependency name must resolve to its only locked registry package");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A path dependency a third-party manifest names is third-party too. A vendored registry
+    /// package's, inside the vendored folder, is a registry package (its pkg_id is what makes a
+    /// unit third-party: its build script and macros run confined under `makepad run`); one
+    /// outside it is an error. It was a path package, the person's own: a vendored tree (the
+    /// repository's content) ran a build script of its choosing unconfined.
+    #[test]
+    fn a_third_party_manifests_path_dependency_is_no_path_package() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let vend = |dep: &str| format!("[package]\nname = \"vend\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[dependencies]\n{dep}\n");
+        let pkg = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nedition = \"2021\"\n");
+        let checksum = "{\"files\":{},\"package\":null}";
+        let (vend_inner, inner, outer) = (vend("inner = { path = \"../inner\" }"), pkg("inner"), pkg("outer"));
+        let root = tree("third-party-path", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            (".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nvend = \"1\"\n"),
+            ("app/src/lib.rs", ""),
+            ("vendor/vend/Cargo.toml", vend_inner.as_str()),
+            ("vendor/vend/.cargo-checksum.json", checksum),
+            ("vendor/vend/src/lib.rs", ""),
+            ("vendor/inner/Cargo.toml", inner.as_str()),
+            ("vendor/inner/build.rs", "fn main() {}\n"),
+            ("vendor/inner/.cargo-checksum.json", checksum),
+            ("vendor/inner/src/lib.rs", ""),
+            ("outer/Cargo.toml", outer.as_str()),
+            ("outer/build.rs", "fn main() {}\n"),
+            ("outer/src/lib.rs", ""),
+        ]);
+        let g = unit_graph(sess, &root, "app", &[]).unwrap_or_else(|e| panic!("{e}"));
+        let ids: Vec<&str> = g.units.iter().map(|u| u.pkg_id.as_str()).collect();
+        let inner: Vec<&&str> = ids.iter().filter(|id| id.contains("inner")).collect();
+        assert!(inner.len() >= 2 && inner.iter().all(|id| id.starts_with("registry+")), "the vendored path dependency, its lib and its build script, is a registry package: {ids:?}");
+        assert!(ids.iter().any(|id| id.starts_with("path+") && id.contains("/app#")), "the member stays the person's: {ids:?}");
+        let _ = std::fs::write(format!("{root}/vendor/vend/Cargo.toml"), vend("outer = { path = \"../../outer\" }"));
+        let e = unit_graph(sess, &root, "app", &[]).err().unwrap_or_else(|| panic!("a vendored package's path dependency outside the vendored folder resolved"));
+        assert!(e.contains("registry package `vend` 1.0.0 names the path dependency `outer`") && e.contains("outside its vendored folder"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

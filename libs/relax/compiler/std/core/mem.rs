@@ -112,6 +112,7 @@ impl<T> crate::fmt::Debug for Discriminant<T> {
 /// Inhibits the compiler from calling `T`'s destructor (the lang item has no drop glue); like real core a
 /// struct, so `ManuallyDrop<dyn Trait>` is a dynamically sized type.
 #[repr(transparent)]
+#[rustc_pub_transparent]
 #[lang = "manually_drop"]
 #[rustc_diagnostic_item = "ManuallyDrop"]
 pub struct ManuallyDrop<T: ?Sized> {
@@ -176,7 +177,8 @@ impl<T: ?Sized> crate::ops::DerefMut for ManuallyDrop<T> {
 
 // ---------------------------------------------------------------- MaybeUninit
 
-#[repr(C)]
+#[repr(transparent)]
+#[rustc_pub_transparent]
 #[lang = "maybe_uninit"]
 pub union MaybeUninit<T> {
     uninit: (),

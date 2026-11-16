@@ -164,6 +164,40 @@ impl Drop for BudgetJob {
     }
 }
 
+/// The compiler's account of a compile job while it waits for a CPU token: `lift` says whether it
+/// lifted the thread's job (relax-compiler's JobIdle), `back` takes that.
+static JOB_LIFT: std::sync::OnceLock<(fn() -> bool, fn(bool))> = std::sync::OnceLock::new();
+
+pub fn set_job_lift(lift: fn() -> bool, back: fn(bool)) {
+    let _ = JOB_LIFT.set((lift, back));
+}
+
+/// A job lifted for a token wait; its drop takes it back.
+struct Lifted(Option<(fn(bool), bool)>);
+impl Drop for Lifted {
+    fn drop(&mut self) {
+        if let Some((back, lifted)) = self.0.take() { back(lifted); }
+    }
+}
+
+/// A job's wait for its token (`admission`: its place in the budget's queue), polled, with the
+/// budget's park between polls. From its first park to its readmission the job is lifted for the
+/// compiler: a pause the compiler makes (a fork, an allocator swap) waits for its running jobs, and
+/// the jobs it holds at their start keep their permits, so a job counted as running while it waited
+/// for one of those tokens kept the pause waiting for good (a teardown test's fork, 2026-11-14). A
+/// wait that never parks is not lifted. The caller drops the `Lifted` once the permit is the job's
+/// again: a job held at its return while a pause runs holds its permit, not a place in the queue.
+fn readmit(job: &JobClass, mut admission: budget::Admission) -> (u32, Lifted) {
+    let mut lifted = Lifted(None);
+    loop {
+        if let Some(p) = admission.poll(job.class(), budget::JIT, job.label) { return (p, lifted); }
+        if lifted.0.is_none() {
+            lifted = Lifted(JOB_LIFT.get().map(|&(lift, back)| (back, lift())));
+        }
+        budget::park_admission(job.class());
+    }
+}
+
 /// A pass boundary. UI-thread lazy builds have no pool permit and do nothing here.
 pub fn checkpoint(extra_locks: u32, extra_site: &str) {
     let job = CURRENT.try_with(|c| c.borrow().clone()).ok().flatten();
@@ -175,11 +209,17 @@ pub fn checkpoint(extra_locks: u32, extra_site: &str) {
     if let Some(p) = permit {
         budget::reclass(p, job.class());
         let site = if extra_locks != 0 { extra_site.to_owned() } else { site.map_or_else(String::new, |s| format!("{}:{}", s.file(), s.line())) };
-        let p = budget::checkpoint_following(p, held, &site, job.desired.as_ptr());
+        let mut admission = budget::Admission::default();
+        let (p, lifted) = match admission.checkpoint(p, held, &site) {
+            Some(p) => (p, Lifted(None)),
+            None => readmit(&job, admission),
+        };
         let mut slot = job.permit.lock().unwrap_or_else(|e| e.into_inner());
         budget::reclass(p, job.class());
         budget::set_thread_class(job.class());
         *slot = Some(p);
+        drop(slot);
+        drop(lifted);
     }
 }
 
@@ -234,11 +274,13 @@ impl Drop for BudgetWait {
         if self.lent { budget::take_back(); }
         if let Some(job) = &self.job {
             let _kept = zone_alloc::kept();
-            let p = budget::admit_following(job.desired.as_ptr(), budget::JIT, job.label);
+            let (p, lifted) = readmit(job, budget::Admission::default());
             let mut slot = job.permit.lock().unwrap_or_else(|e| e.into_inner());
             budget::reclass(p, job.class());
             budget::set_thread_class(job.class());
             *slot = Some(p);
+            drop(slot);
+            drop(lifted);
         }
     }
 }
@@ -246,6 +288,16 @@ impl Drop for BudgetWait {
 pub fn wait<'a, T>(cv: &Condvar, mutex: &'a Mutex<T>, guard: relax_session::sync::MutexGuard<'a, T>)
     -> std::sync::LockResult<relax_session::sync::MutexGuard<'a, T>>
 {
+    // a task of this thread's section that got no thread (`Scope::spawn`): what this thread waits
+    // for may be that task, so it runs it here first; the caller then checks again, as after any
+    // wakeup
+    if let Some(task) = refused_here() {
+        drop(guard);
+        let paused = suspend();
+        run_refused(task);
+        drop(paused);
+        return mutex.lock();
+    }
     let paused = suspend();
     let result = cv.wait(guard);
     drop(result);
@@ -298,11 +350,21 @@ struct Pool {
     dying: Mutex<Vec<Arc<Worker>>>,
     started: AtomicUsize,
     alive: AtomicUsize,
+    /// Starts worker `id`'s thread (`start_thread`).
+    start: fn(usize, Arc<Worker>) -> std::io::Result<std::thread::JoinHandle<()>>,
+}
+
+/// A worker's thread, on the compiler's stack.
+fn start_thread(id: usize, w: Arc<Worker>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().name(format!("run-jit-{id}")).stack_size(crate::run_threads::COMPILER_STACK).spawn(move || worker_main(w))
 }
 
 impl Pool {
     const fn new() -> Pool {
-        Pool { idle: Mutex::new(Vec::new()), dying: Mutex::new(Vec::new()), started: AtomicUsize::new(0), alive: AtomicUsize::new(0) }
+        Pool::starting(start_thread)
+    }
+    const fn starting(start: fn(usize, Arc<Worker>) -> std::io::Result<std::thread::JoinHandle<()>>) -> Pool {
+        Pool { idle: Mutex::new(Vec::new()), dying: Mutex::new(Vec::new()), started: AtomicUsize::new(0), alive: AtomicUsize::new(0), start }
     }
     /// (workers started, workers alive) so far.
     fn stats(&self) -> (usize, usize) {
@@ -343,6 +405,14 @@ fn worker_main(w: Arc<Worker>) {
         // the task catches its own panics; a panic that escapes it (a result dropped in the task
         // itself) is handled the same way (its `Done` finished the task while unwinding)
         let done = std::panic::catch_unwind(AssertUnwindSafe(task)).ok();
+        // tasks of the same section the OS refused a thread for: this worker runs them before it
+        // idles, while none panics (its section cannot end meanwhile: this task is not finished)
+        while !TASK_PANICKED.with(|p| p.get()) {
+            match done.as_ref().and_then(|d| d.0.as_ref()).and_then(|data| data.take_refused()) {
+                Some(t) => run_refused(t),
+                None => break,
+            }
+        }
         // (a thread the task left at the OS's idle policy cannot leave it: the next task, one a
         // section waits for, would run below every other thread)
         if done.is_none() || TASK_PANICKED.with(|p| p.replace(false)) || budget::thread_idle() {
@@ -382,8 +452,7 @@ fn dispatch(pool: &'static Pool, task: Task) -> Result<(), (Task, std::io::Error
         let w = Arc::new(Worker { slot: Mutex::new(Slot::Task(task)), wake: Condvar::new(), handle: Mutex::new(None), pool });
         let id = pool.started.fetch_add(1, Ordering::Relaxed);
         pool.alive.fetch_add(1, Ordering::Relaxed);
-        let w2 = w.clone();
-        let spawned = std::thread::Builder::new().name(format!("run-jit-{id}")).stack_size(crate::run_threads::COMPILER_STACK).spawn(move || worker_main(w2));
+        let spawned = (pool.start)(id, w.clone());
         (w, spawned)
     };
     match spawned {
@@ -452,9 +521,63 @@ struct ScopeData {
     panicked: AtomicBool,
     lock: Mutex<()>,
     done: Condvar,
+    /// Tasks the OS refused a thread for (a thread limit, or a data limit the program set, which
+    /// counts each worker's stack): the section's waiting threads and its workers run them.
+    refused: Mutex<std::collections::VecDeque<(usize, Task)>>,
+}
+
+/// Whether the OS refusing a worker thread was said (once a run).
+static REFUSAL_SAID: AtomicBool = AtomicBool::new(false);
+
+/// What this module holds of a run, as a fresh process has it (`run_end`): the next run in place
+/// says a refused thread again, in its own output. (POOL's idle workers end in retire_idle.)
+pub(crate) unsafe fn reset_statics() {
+    relax_session::reset_static(&REFUSAL_SAID, AtomicBool::new(false));
+}
+
+thread_local! {
+    /// The innermost section this thread opened or runs a task of: the one `wait` helps.
+    static INNERMOST: RefCell<Option<Arc<ScopeData>>> = const { RefCell::new(None) };
+}
+
+/// Makes `data` this thread's innermost section until dropped (then the one before is again).
+struct Innermost(Option<Arc<ScopeData>>);
+impl Innermost {
+    fn enter(data: &Arc<ScopeData>) -> Innermost {
+        Innermost(INNERMOST.try_with(|c| c.replace(Some(data.clone()))).ok().flatten())
+    }
+}
+impl Drop for Innermost {
+    fn drop(&mut self) {
+        let before = self.0.take();
+        let _ = INNERMOST.try_with(|c| *c.borrow_mut() = before);
+    }
+}
+
+/// A refused task of this thread's innermost section.
+fn refused_here() -> Option<Task> {
+    INNERMOST.try_with(|c| c.borrow().as_ref().and_then(|data| data.take_refused())).ok().flatten()
+}
+
+/// Runs a refused task on this thread, as a worker runs its task: it catches its own panic (its
+/// `Done` finishes it in its section either way).
+fn run_refused(task: Task) {
+    drop(std::panic::catch_unwind(AssertUnwindSafe(task)));
 }
 
 impl ScopeData {
+    /// The oldest refused task.
+    fn take_refused(&self) -> Option<Task> {
+        let mut q = self.refused.lock().unwrap_or_else(|e| e.into_inner());
+        if q.is_empty() { None } else { q.pop_front().map(|(_, t)| t) }
+    }
+    /// The refused task of the handle with packet `id`, when no thread took it yet.
+    fn take_refused_of(&self, id: usize) -> Option<Task> {
+        let mut q = self.refused.lock().unwrap_or_else(|e| e.into_inner());
+        let i = q.iter().position(|(p, _)| *p == id)?;
+        q.remove(i).map(|(_, t)| t)
+    }
+
     fn finish_one(&self) {
         if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
             // under the lock, so the waiter is either before its check (and sees 0) or asleep
@@ -520,10 +643,13 @@ where
         panicked: AtomicBool::new(false),
         lock: Mutex::new(()),
         done: Condvar::new(),
+        refused: Mutex::new(std::collections::VecDeque::new()),
     }));
     let scope = Scope { pool, data, scope: PhantomData, env: PhantomData, class: current_class(), parent: CURRENT.try_with(|c| c.borrow().clone()).ok().flatten() };
+    let innermost = Innermost::enter(&scope.data);
     let result = catch_unwind(AssertUnwindSafe(|| f(&scope)));
     scope.data.wait_all();
+    drop(innermost);
     match result {
         Err(e) => resume_unwind(e),
         Ok(_) if scope.data.panicked.load(Ordering::Acquire) => panic!("a scoped thread panicked"),
@@ -547,6 +673,7 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         let main = move || {
             // finishes the task whatever happens below, also when dropping a result panics; on a
             // normal return the worker drops it once it is idle again
+            let innermost = Innermost::enter(&data);
             let done = Done(Some(data));
             let r = catch_unwind(AssertUnwindSafe(|| {
                 let _budget = match parent {
@@ -566,6 +693,7 @@ impl<'scope, 'env> Scope<'scope, 'env> {
             p.ready.notify_all();
             // everything the task borrowed or returned is released before the scope may end
             drop(p);
+            drop(innermost);
             done
         };
         let boxed: Box<dyn FnOnce() -> Done + Send + 'scope> = zone_alloc::kept_with(|| Box::new(main));
@@ -574,10 +702,13 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         // handle; the erased lifetime is never used past that point.
         let task: Task = unsafe { std::mem::transmute::<Box<dyn FnOnce() -> Done + Send + 'scope>, Task>(boxed) };
         if let Err((task, e)) = dispatch(self.pool, task) {
-            // like std::thread::scope: no thread, no task; the section must not wait for it
-            drop(task);
-            self.data.pending.fetch_sub(1, Ordering::Relaxed);
-            panic!("failed to spawn thread: {e}");
+            // no idle worker and the OS refused a new thread: the task waits for a thread of its
+            // section (a worker done with its task, or one that waits, `wait`); slower, never lost
+            if !REFUSAL_SAID.swap(true, Ordering::Relaxed) {
+                eprintln!("relax: the OS refused the JIT a worker thread ({e}): its work runs on the JIT's other threads");
+            }
+            let _k = zone_alloc::kept();
+            self.data.refused.lock().unwrap_or_else(|e| e.into_inner()).push_back((Arc::as_ptr(&packet) as usize, task));
         }
         ScopedJoinHandle { packet, scope: PhantomData }
     }
@@ -586,6 +717,11 @@ impl<'scope, 'env> Scope<'scope, 'env> {
 impl<'scope, T> ScopedJoinHandle<'scope, T> {
     /// Waits for the task; `Err` is its panic.
     pub fn join(self) -> Result<T, Box<dyn Any + Send + 'static>> {
+        // its task got no thread and none took it yet: it runs here, now (what this thread does
+        // after the join cannot be what the task waits for, as with a thread of its own)
+        if let Some(task) = self.packet.scope.take_refused_of(Arc::as_ptr(&self.packet) as usize) {
+            run_refused(task);
+        }
         let mut r = self.packet.result.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if let Some(v) = r.take() {
@@ -649,6 +785,65 @@ mod tests {
         });
         assert!(data.iter().all(|&x| x == 2));
         assert_eq!(total.load(Ordering::Relaxed), 128);
+    }
+
+    /// No thread for a task (EAGAIN under a thread or data limit the program set, relax issue 231):
+    /// the section still runs every task, where `spawn` panicked. A joined task runs on its joiner,
+    /// the others on a thread that waits (`wait`, the section's end) or a worker done with its own;
+    /// a task waiting for a later one, and the section's thread waiting for a task, get it run.
+    #[test]
+    fn tasks_the_os_refuses_a_thread_for_still_run() {
+        let _s = crate::zone_alloc::test_serial();
+        fn refuse(_: usize, _: Arc<Worker>) -> std::io::Result<std::thread::JoinHandle<()>> {
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        }
+        static FIRST: AtomicUsize = AtomicUsize::new(0);
+        fn one_then_refuse(id: usize, w: Arc<Worker>) -> std::io::Result<std::thread::JoinHandle<()>> {
+            if FIRST.fetch_add(1, Ordering::Relaxed) == 0 { start_thread(id, w) } else { refuse(id, w) }
+        }
+        static NONE: Pool = Pool::starting(refuse);
+        static ONE: Pool = Pool::starting(one_then_refuse);
+        for (pool, label) in [(&NONE, "no thread at all"), (&ONE, "one worker, then none")] {
+            let mut data = vec![1u64; 64];
+            let ready = (Mutex::new(None::<u64>), Condvar::new());
+            let made = (Mutex::new(None::<u64>), Condvar::new());
+            let (first, joined, waited) = scope_in(pool, |s| {
+                // the first task waits for a later one's value
+                let first = s.spawn(|| {
+                    let mut g = ready.0.lock().unwrap();
+                    while g.is_none() {
+                        g = wait(&ready.1, &ready.0, g).unwrap();
+                    }
+                    g.unwrap() * 2
+                });
+                for chunk in data.chunks_mut(8) {
+                    s.spawn(move || chunk.iter_mut().for_each(|x| *x += 1));
+                }
+                s.spawn(|| {
+                    *ready.0.lock().unwrap() = Some(21);
+                    ready.1.notify_all();
+                });
+                let joined = s.spawn(|| 40 + 2).join().unwrap();
+                // the section's own thread waits for a task's value
+                s.spawn(|| {
+                    *made.0.lock().unwrap() = Some(7);
+                    made.1.notify_all();
+                });
+                let waited = {
+                    let mut g = made.0.lock().unwrap();
+                    while g.is_none() {
+                        g = wait(&made.1, &made.0, g).unwrap();
+                    }
+                    g.unwrap()
+                };
+                (first.join().unwrap(), joined, waited)
+            });
+            assert!(data.iter().all(|&x| x == 2), "{label}: every chunk task ran");
+            assert_eq!(joined, 42, "{label}: a joined task ran");
+            assert_eq!(first, 42, "{label}: the waiting task got the later task's value");
+            assert_eq!(waited, 7, "{label}: the section's thread got its task's value");
+        }
+        retire_idle_in(&ONE);
     }
 
     #[test]

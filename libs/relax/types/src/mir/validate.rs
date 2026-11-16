@@ -17,11 +17,15 @@ pub struct ValidationError {
 }
 
 pub fn validate(body: &Body, tcx: &Tcx) -> Vec<ValidationError> {
-    validate_with_annotations(body, tcx, body.user_type_annotations.len())
+    // From Analysis(PostCleanup) the annotations are gone (rustc cleanup_post_borrowck.rs:79 clears
+    // them) and the indices constants and aggregates keep name nothing: rustc's validator checks none.
+    let annotations = (body.phase < MirPhase::Analysis(AnalysisPhase::PostCleanup)).then_some(body.user_type_annotations.len());
+    validate_with_annotations(body, tcx, annotations)
 }
-/// `annotations`: the user type annotations a constant may name. A promoted body has none of its
-/// own and shares its root's (rustc_borrowck type_check: `user_type_annotations`).
-fn validate_with_annotations(body: &Body, tcx: &Tcx, annotations: usize) -> Vec<ValidationError> {
+/// `annotations`: the user type annotations a constant may name (None: no longer checked). A
+/// promoted body has none of its own and shares its root's (rustc_borrowck type_check:
+/// `user_type_annotations`).
+fn validate_with_annotations(body: &Body, tcx: &Tcx, annotations: Option<usize>) -> Vec<ValidationError> {
     let mut checker = Checker { body, tcx, errors: Vec::new(), at: None, next_promoted: 0, annotations };
     checker.check_body();
     checker.errors
@@ -32,7 +36,7 @@ struct Checker<'a> {
     errors: Vec<ValidationError>,
     at: Option<Location>,
     next_promoted: u32,
-    annotations: usize,
+    annotations: Option<usize>,
 }
 impl Checker<'_> {
     fn fail(&mut self, message: &str) {
@@ -198,7 +202,7 @@ impl Visitor for Checker<'_> {
         }
     }
     fn visit_user_type_index(&mut self, user: &UserTypeAnnotationIndex) {
-        if user.0 as usize >= self.annotations {
+        if self.annotations.is_some_and(|n| user.0 as usize >= n) {
             self.fail("user type annotation is out of range");
         }
     }

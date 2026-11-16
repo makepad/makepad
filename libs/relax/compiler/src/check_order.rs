@@ -30,6 +30,14 @@ pub(crate) const MIR_PROMOTED: u8 = 2;
 pub(crate) const MIR_UNUSED_MUT: u8 = 3;
 pub(crate) const MIR_BORROWCK: u8 = 4;
 pub(crate) const MIR_LIVENESS: u8 = 5;
+
+/// Whether a lint's reports at one place keep the order they were reported in: a body's liveness
+/// lints (the analysis's order), and a constant's long_running_const_eval lint and progress
+/// warnings (the order rustc's evaluation meets them, const_eval machine.rs
+/// increment_const_eval_counter).
+pub(crate) fn keeps_report_order(stage: Stage, lint: &str) -> bool {
+    (stage.phase == Phase::Mir && stage.step == MIR_LIVENESS) || lint == "long_running_const_eval"
+}
 /// The steps of misc_checking_3: check_private_in_public, check_mod_deathness, the late lint
 /// pass, clashing_extern_declarations, check_mod_privacy, check_expectations.
 pub(crate) const LATE_PRIVATE_IN_PUBLIC: u8 = 0;
@@ -62,7 +70,7 @@ pub(crate) fn stage_of_code(code: &str) -> Option<Stage> {
         "E0252" | "E0254" | "E0255" | "E0259" | "E0260" | "E0430" | "E0431" | "E0432" => (Phase::Resolve, 1),
         "E0106" | "E0261" | "E0401" | "E0403" | "E0408" | "E0409" | "E0415" | "E0416" | "E0426" | "E0433" | "E0434" | "E0435" | "E0437" | "E0438" | "E0637" => (Phase::Resolve, 3),
         // (use_injections: the smart-resolve errors are reported once resolution is done)
-        "E0404" | "E0405" | "E0411" | "E0412" | "E0422" | "E0423" | "E0424" | "E0425" | "E0531" | "E0532" | "E0573" | "E0574" | "E0575" | "E0576" => (Phase::Resolve, 4),
+        "E0404" | "E0405" | "E0411" | "E0422" | "E0423" | "E0424" | "E0425" | "E0531" | "E0532" | "E0573" | "E0574" | "E0575" | "E0576" => (Phase::Resolve, 4),
         "E0659" => (Phase::Resolve, 5),
         "E0603" => (Phase::Resolve, 6),
         "E0446" => (Phase::Late, LATE_PRIVATE_IN_PUBLIC),

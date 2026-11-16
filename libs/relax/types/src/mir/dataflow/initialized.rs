@@ -1,7 +1,7 @@
-//! rustc_mir_dataflow/src/impls/initialized.rs:21,139,229,315,367,504,624.
+//! rustc_mir_dataflow/src/impls/initialized.rs:21,139,229,315,367,504,600,686 (nightly 8d1a764).
 use super::*;
 use crate::mir::drop_flag_effects::*;
-use crate::mir::move_paths::{InitKind, InitLocation, LookupResult, MoveData};
+use crate::mir::move_paths::{Init, InitKind, InitLocation, LookupResult, MoveData};
 use crate::tcx::Tcx;
 use crate::types::TyKind;
 use crate::program::Program;
@@ -159,35 +159,78 @@ impl Analysis for MaybeUninitializedPlaces<'_> {
     }
 }
 
-/// The domain is Init indices, not MovePath indices. StorageDead ends the root's
-/// initialization history; moving a value out does not erase its history.
+/// rustc initialized.rs:686 (nightly 8d1a764): the domain is the body's locals. Only an init of a
+/// whole local sets its bit and StorageDead clears it; moving a value out does not erase its
+/// history. The init that reached a point is found on the error path (init_reaches_location).
 pub struct EverInitializedPlaces<'a> { body: &'a Body, move_data: &'a MoveData }
 impl<'a> EverInitializedPlaces<'a> {
     pub fn new(body: &'a Body, move_data: &'a MoveData) -> Self { Self { body, move_data } }
+
+    /// rustc initialized.rs:600. Whether `init` of `local` may have executed on a path that
+    /// reaches `target` with no StorageDead(local) after it.
+    pub fn init_reaches_location(body: &Body, local: Local, init: &Init, target: Location) -> bool {
+        let init_loc = match init.location {
+            InitLocation::Argument(_) => return true,
+            InitLocation::Statement(init_loc) => init_loc,
+        };
+        let start = |block: BasicBlock| Location { block, statement_index: 0 };
+        let successors = |data: &BasicBlockData| super::super::transform::simplify::successors(&data.terminator.as_ref().expect("unfinished MIR block").kind);
+        let mut queue = Vec::new();
+        let init_block_data = &body.basic_blocks[init_loc.block.0 as usize];
+        if init_loc.statement_index < init_block_data.statements.len() {
+            queue.push(Location { block: init_loc.block, statement_index: init_loc.statement_index + 1 });
+        } else if init.kind == InitKind::NonPanicPathOnly {
+            let TerminatorEdges::AssignOnReturn { return_, .. } = TerminatorEdges::for_terminator(init_block_data.terminator.as_ref().unwrap()) else {
+                panic!("`NonPanicPathOnly` should only be seen on terminators with return edges");
+            };
+            queue.extend(return_.map(start));
+        } else {
+            queue.extend(successors(init_block_data).into_iter().map(start));
+        }
+        let mut visited = crate::fxhash::HashSet::default();
+        'outer: while let Some(loc) = queue.pop() {
+            if !visited.insert((loc.block.0, loc.statement_index)) { continue; }
+            let block_data = &body.basic_blocks[loc.block.0 as usize];
+            for statement_index in loc.statement_index..=block_data.statements.len() {
+                if target == (Location { block: loc.block, statement_index }) { return true; }
+                if let Some(Statement { kind: StatementKind::StorageDead(dead), .. }) = block_data.statements.get(statement_index) {
+                    if *dead == local { continue 'outer; }
+                }
+            }
+            queue.extend(successors(block_data).into_iter().map(start));
+        }
+        false
+    }
+
+    /// The local an init sets the bit of: only an init of a whole local (rustc `as_local`).
+    fn local_of(&self, init: usize) -> Option<usize> {
+        let place = &self.move_data.move_paths[self.move_data.inits[init].path].place;
+        place.projection.is_empty().then_some(place.local.0 as usize)
+    }
 }
 impl Analysis for EverInitializedPlaces<'_> {
-    fn bottom_value(&self, _: &Body) -> BitSet { BitSet::new_empty(self.move_data.inits.len()) }
-    fn initialize_start_block(&self, _: &Body, state: &mut BitSet) {
-        for (index, init) in self.move_data.inits.iter().enumerate() {
-            if matches!(init.location, InitLocation::Argument(_)) { state.insert(index); }
-        }
+    fn bottom_value(&self, body: &Body) -> BitSet { BitSet::new_empty(body.local_decls.len()) }
+    fn initialize_start_block(&self, body: &Body, state: &mut BitSet) {
+        for arg in 1..=body.arg_count as usize { state.insert(arg); }
     }
     fn apply_primary_statement_effect(&self, state: &mut BitSet, stmt: &Statement, loc: Location) {
-        for &init in &self.move_data.init_loc_map[loc] { state.insert(init); }
-        if let StatementKind::StorageDead(local) = stmt.kind {
-            if let Some(path) = self.move_data.rev_lookup.find_local(local) {
-                for &init in &self.move_data.init_path_map[path] { state.remove(init); }
-            }
+        for &init in &self.move_data.init_loc_map[loc] {
+            if let Some(local) = self.local_of(init) { state.insert(local); }
         }
+        if let StatementKind::StorageDead(local) = stmt.kind { state.remove(local.0 as usize); }
     }
     fn apply_primary_terminator_effect<'a>(&self, state: &mut BitSet, term: &'a Terminator, loc: Location) -> TerminatorEdges<'a> {
-        for &index in &self.move_data.init_loc_map[loc] {
-            if self.move_data.inits[index].kind != InitKind::NonPanicPathOnly { state.insert(index); }
+        for &init in &self.move_data.init_loc_map[loc] {
+            if self.move_data.inits[init].kind == InitKind::NonPanicPathOnly { continue; }
+            if let Some(local) = self.local_of(init) { state.insert(local); }
         }
         TerminatorEdges::for_terminator(term)
     }
     fn apply_call_return_effect(&self, state: &mut BitSet, block: BasicBlock, _: CallReturnPlaces<'_>) {
         let loc = Location { block, statement_index: self.body.basic_blocks[block.0 as usize].statements.len() };
-        for &init in &self.move_data.init_loc_map[loc] { state.insert(init); }
+        for &init in &self.move_data.init_loc_map[loc] {
+            if self.move_data.inits[init].kind != InitKind::NonPanicPathOnly { continue; }
+            if let Some(local) = self.local_of(init) { state.insert(local); }
+        }
     }
 }

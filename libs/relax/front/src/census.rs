@@ -1,5 +1,4 @@
-//! Census of constructs outside the Relax subset (rules in local/plans/fast-rust.md),
-//! counted per crate from the syntax tree.
+//! Census of constructs outside the Relax subset, counted per crate from the syntax tree.
 
 use crate::ast::*;
 use crate::lexer::T;
@@ -677,7 +676,7 @@ impl<'p, 'a> Walker<'p, 'a> {
         for s in p.ast.list(blk.stmts) {
             match s {
                 Stmt::Let(r) => {
-                    let LetStmt { attrs, pat, ty, init, else_ } = p.ast.row(*r);
+                    let LetStmt { attrs, pat, ty, init, else_, .. } = p.ast.row(*r);
                     if !crate::cfg::active(crate::cfg::Src { src: p.src, plain: p.toks.as_slice(), ext: &[], parts: None }, p.ast.list(*attrs), self.cfg) {
                         continue;
                     }

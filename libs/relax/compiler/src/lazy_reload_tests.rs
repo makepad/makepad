@@ -46,7 +46,7 @@ fn deferred_reexport_signatures() {
         let mut tcx = crate::tcx::Tcx::new();
         tcx.collect(&prog);
         let misses = crate::program::collect_misses_take();
-        assert!(tcx.errors.iter().any(|e| e.contains("E0412")), "{:?}", tcx.errors);
+        assert!(tcx.errors.iter().any(|e| e.contains("E0425: cannot find type")), "{:?}", tcx.errors);
         let modules = prog.misses_to_load(&misses);
         assert_eq!(modules.len(), 1, "{misses:?}");
         assert!(prog.skipped_files[&modules[0]].0.ends_with(suffix));
@@ -66,6 +66,59 @@ fn deferred_reexport_signatures() {
         let value = prog.lookup_in_scope(module, name, false).unwrap();
         assert_eq!(prog.def_path(value), "lazy_reexport::fallback::T");
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// RELAX_LIVE_LOG edit items (relax issue 226): a body that ran before the edit (on its own or
+/// inlined into its caller) had code before it, one never called had none -- the edit's own
+/// install of it does not count. In a process of its own: its unit tiers up as a session's does,
+/// tier-up state is one per process, and the unit it leaves would refuse the next one there (a
+/// rerun of this test in a warm test process failed with "a second unit with O3").
+#[test]
+fn live_edit_first_code_before_patch() {
+    isolated_test!(live_edit_first_code_before_patch);
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-first-code-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lib.rs").to_string_lossy().into_owned();
+    let source = "pub fn called(out: &mut u32) { *out = helper(); }\nfn helper() -> u32 { 11 }\npub fn never(out: &mut u32) { *out = 5; }\n";
+    std::fs::write(&path, source).unwrap();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &path, "first_code", false).unwrap();
+    let named = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (called, helper, never) = (named("called"), named("helper"), named("never"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let entry = crate::owner::call(crate::owner::Class::Program, || {
+        let id = u.fn_id(crate::jit::FnKey::Inst(called, vec![]));
+        u.entry(id)
+    });
+    let run = |expected| {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }
+            .unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, expected);
+    };
+    run(11);
+    let file = u.prog.def(called).file;
+    let edited_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit {
+        file, path, src: source.replace("11", "12").replace("5;", "6;").into_bytes(),
+    }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    assert_eq!(outcome.first_code.len(), outcome.bodies.len(), "every changed body has a snapshot");
+    let helper_code = outcome.first_code.iter().find(|(d, _)| *d == helper).expect("helper changed").1;
+    let (time, _) = helper_code.expect("helper had code, directly or inlined into called");
+    assert!(time > 0 && time <= edited_at, "helper's first code {time} must be in 1..={edited_at}");
+    assert_eq!(outcome.first_code.iter().find(|(d, _)| *d == never).expect("never changed").1, None,
+        "patch installs must not count as code before the edit");
+    run(12);
+    std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2486,7 +2539,11 @@ fn a_live_edit_reaches_both_crates_of_a_lib_test_root() {
 /// forwarders per closure (the lineage's cell jumps to the newest version, the previous newest to
 /// the cell) and copies no code into the older versions; every older version reaches the newest in
 /// at most two jumps; a build of an older version's own body never lands in it (a tier-up would
-/// bring back old code); a rolled-back patch brings back the forwarders it replaced.
+/// bring back old code); a rolled-back patch brings back the forwarders it replaced. From the
+/// third edit on, an edit also builds again the once shim of the version it replaces (the edit
+/// that made that version built it with the body inline; its copy would run the old body): an
+/// edit installs exactly make, the code holding a copy of make and that shim, however many came
+/// before.
 #[test]
 fn stored_closure_follows_edits_with_flat_work() {
     const CHILD: &str = "RELAX_STORED_CLOSURE_TEST";
@@ -2554,14 +2611,38 @@ pub fn value(out: &mut u32) {{
     let first = versions(&u)[0];
     let mut files = vec![u.prog.def(value).file];
     let mut undo = None;
-    let mut names_first: Option<Vec<String>> = None;
     for i in 2..=6u32 {
         let before = u.forwards.len();
+        // the once shims (`FnOnce::call_once` through a box's vtable) holding a copy of the version
+        // this edit replaces, and their code before it
+        let replaced = *versions(&u).last().unwrap();
+        let shims: Vec<(u32, u64)> = u.fns[replaced as usize].history().inlined_into.iter()
+            .filter(|&&h| u.fns[h as usize].name.contains(" - once shim(")).map(|&h| (h, u.fns[h as usize].code)).collect();
+        let shim_names = |u: &Unit| shims.iter().map(|&(h, _)| format!("{}#{h}", u.fns[h as usize].name)).collect::<Vec<_>>();
+        // the code holding a copy of make (value's closure, while it inlines make)
+        let make_holders: Vec<u32> = u.fns[make_slot as usize].history().inlined_into.clone();
         let o = unsafe { apply(up, vec![Edit { file: *files.last().unwrap(), path: app.clone(), src: src(i).into_bytes() }]) };
         assert_eq!(o.rung, Rung::Patch, "edit {i}: {:?}", o.lines);
-        // (make, and value's closure while it inlines make)
-        let first_names = names_first.get_or_insert_with(|| o.names.clone());
-        assert!(o.names.iter().all(|n| first_names.contains(n)), "edit {i}: more fns installed than by the first edit: {:?}", o.names);
+        // exactly make and the code holding a copy of it (value's closure, while it inlines make),
+        // and from the third edit on the once shim holding a copy of the version this edit replaces
+        let mut want: Vec<String> = std::iter::once(make_slot).chain(make_holders.iter().copied()).map(|s| u.fns[s as usize].name.to_string()).collect();
+        if i == 2 {
+            assert!(!make_holders.is_empty(), "edit 2: value's closure inlines make");
+            // the first version's shims were never built: no code to build again
+            assert!(shims.is_empty(), "edit 2: once shims hold a copy of the first version: {:?}", shim_names(&u));
+        } else {
+            // the previous edit built the replaced version's once shim with its body inline; this
+            // edit builds it again, calling that version (its forwarder runs the new one)
+            assert_eq!(shims.len(), 1, "edit {i}: the once shims holding a copy of the replaced version: {:?}", shim_names(&u));
+            let (shim, code) = shims[0];
+            want.push(u.fns[shim as usize].name.to_string());
+            assert_ne!(u.fns[shim as usize].code, code, "edit {i}: the replaced version's once shim was not built again");
+            assert!(!u.fns[replaced as usize].history().inlined_into.contains(&shim), "edit {i}: the shim built again still holds a copy of the replaced version");
+        }
+        let mut got = o.names.clone();
+        want.sort();
+        got.sort();
+        assert_eq!(got, want, "edit {i}: installs exactly make, the code holding a copy of it and the once shim of the version it replaces");
         files.push(o.files[0]);
         assert_eq!(run(), 15 + i, "edit {i}: the box stored at the first run runs the edited closure");
         assert_eq!(u.forwards.len() - before, if i == 2 { 1 } else { 2 }, "edit {i}: forwarders installed (the cell, the previous version)");
@@ -2581,7 +2662,7 @@ pub fn value(out: &mut u32) {{
     assert_eq!(run(), 21);
     // edit 6 rolled back: the cell jumps to edit 5's closure again, which runs its own code
     let previous = versions(&u)[versions(&u).len() - 2];
-    unsafe { crate::reload::rollback(up, undo.take().unwrap(), "test") };
+    unsafe { crate::reload::rollback(up, undo.take().unwrap(), "test") }.unwrap();
     files.pop();
     assert_eq!(run(), 20, "after the rollback the stored box runs edit 5's closure");
     assert_eq!(u.forward_of(first), Some((previous, true)));
@@ -2664,6 +2745,863 @@ pub fn value(out: &mut u32) {{
     assert!(held.len() == 1 && held[0].contains("make`") && held[0].contains("keep its old code (its captures or signature changed)"), "the stored closure, and only it, waits for a restart: {:?}", o.lines);
     // the stored box keeps its old code; `sum` runs its new one
     assert_eq!(run(), 1609);
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A thread runs a closure whose captures an edit changed: the closure keeps its old code there
+/// (a slot of a replaced text: the edit's new closure is another slot). Its frame holds a value of
+/// `S`, made by that old code, which it hands to `read` once its loop ends. A field added to `S`
+/// would rebuild `read` for the new layout under that frame, so the layout patch must refuse it,
+/// naming the closure: while its parent fn is the program's and uses `S` (its closures are rebuilt
+/// with it), once the parent's text no longer names `S` (only the closure edit 1 kept does: the
+/// record, Unit::kept_old), and once an edit replaced the parent too (renamed: its slots stay for
+/// the code in flight, and nothing checks them against the new definitions: reload::retired_text)
+/// (JP-L T3, T3c T1).
+#[test]
+fn a_thread_in_a_closure_an_edit_replaced_blocks_a_layout_patch() {
+    isolated_test!(a_thread_in_a_closure_an_edit_replaced_blocks_a_layout_patch);
+    use crate::jit::{FnKey, Unit};
+    use crate::reload::{apply, Edit, Rung};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-retired-frame-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    // flags: [0] go on, [1] in the loop, [2] what `read` gave the thread, [3] the thread is done
+    let src_of = |name: &str, fields: &str, made: &str, captured: &str, read: &str| format!(r#"use std::sync::atomic::{{AtomicU64, Ordering}};
+pub struct S {{ {fields} }}
+#[inline(never)]
+pub fn read(s: &S) -> u64 {{ s.n }}
+pub fn {name}(p: *mut u64) {{
+    let at = p as usize;
+    {captured}
+    std::thread::spawn(move || {{
+        let a = unsafe {{ &*(at as *const [AtomicU64; 4]) }};
+        let s = {made};
+        a[1].store(1, Ordering::SeqCst);
+        while a[0].load(Ordering::SeqCst) == 0 {{ std::hint::spin_loop(); }}
+        a[2].store({read}, Ordering::SeqCst);
+        a[3].store(1, Ordering::SeqCst);
+    }});
+}}
+"#);
+    let named_src = |name: &str, fields: &str, made: &str, captured: &str, used: &str| src_of(name, fields, &format!("S {{ {made} }}"), captured, &format!("read(&s){used}"));
+    let src = |fields: &str, made: &str, captured: &str, used: &str| named_src("start", fields, made, captured, used);
+    std::fs::write(dir.join("app/src/lib.rs"), src("pub n: u64", "n: 5", "", "")).unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "retired_frame_app", false).unwrap();
+    let start = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == "start").then_some(id)
+    }).unwrap();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, core);
+    // (no tier-up: a frame in a replaced version of the same text is another case, JP-L T1)
+    u.tier1 = None;
+    let up = &mut *u as *mut Unit;
+    let (start_slot, entry) = crate::owner::call(crate::owner::Class::Program, || { let f = u.fn_id(FnKey::Inst(start, vec![])); (f, u.entry(f)) });
+    let flags: Box<[AtomicU64; 4]> = Box::default();
+    let wait = |k: usize| {
+        let t0 = std::time::Instant::now();
+        while flags[k].load(Ordering::SeqCst) == 0 {
+            assert!(t0.elapsed().as_secs() < 30, "flag {k} never came");
+            std::thread::yield_now();
+        }
+    };
+    unsafe { crate::jit::call_jit(up, entry, flags.as_ptr() as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    wait(1);
+    let closures = |u: &Unit| -> Vec<u32> {
+        (0..u.fns.len() as u32).filter(|&s| matches!(u.fns[s as usize].key, FnKey::Closure(_, _, p) if p == start_slot) && u.fns[s as usize].compiled).collect()
+    };
+    let old = closures(&u);
+    assert_eq!(old.len(), 1, "the thread's closure has code");
+    let old_name = u.fns[old[0] as usize].name.to_string();
+    let file = u.prog.def(start).file;
+    let apply_text = |text: String| unsafe { apply(up, vec![Edit { file, path: app.clone(), src: text.into_bytes() }]) };
+    // edit 1: the closure captures another value -- the running one keeps its old code
+    let o = apply_text(src("pub n: u64", "n: 5", "let k = 0u64;", " + k"));
+    assert_eq!(o.rung, Rung::Patch, "the captures edit applies: {:?}", o.lines);
+    assert!(closures(&u).contains(&old[0]) && u.fns[old[0] as usize].code != 0, "the thread's closure keeps its code: {:?}", o.lines);
+    // a field added to S, whose value the old closure's frame holds
+    let refused = |o: &crate::reload::Outcome| o.rung == Rung::Restart && o.lines.iter().any(|l| l.contains("struct `S` changed its layout") && l.contains(&old_name));
+    let o = apply_text(src("pub m: u64, pub n: u64", "m: 0, n: 5", "let k = 0u64;", " + k"));
+    let parent_kept = (refused(&o), format!("{:?} {:?}", o.rung, o.lines));
+    // the closure's text no longer makes an S (edit 2): its parent's text names S nowhere, only
+    // the old closure's does (the closure edit 1 kept: Unit::kept_old)
+    let o = apply_text(src_of("start", "pub n: u64", "5u64", "let k = 0u64;", "s + k"));
+    assert_eq!(o.rung, Rung::Patch, "the closure without S applies: {:?}", o.lines);
+    let o = apply_text(src_of("start", "pub m: u64, pub n: u64", "5u64", "let k = 0u64;", "s + k"));
+    let parent_clean = (refused(&o), format!("{:?} {:?}", o.rung, o.lines));
+    // the parent renamed (edit 3): its slots and the old closure's are no longer the program's
+    // (S as the program has it now: with `m` if the patch above applied)
+    let (fields, made) = if parent_clean.0 { ("pub n: u64", "n: 5") } else { ("pub m: u64, pub n: u64", "m: 0, n: 5") };
+    let o = apply_text(named_src("begin", fields, made, "let k = 0u64;", " + k"));
+    assert_eq!(o.rung, Rung::Patch, "the rename applies: {:?}", o.lines);
+    let o = apply_text(named_src("begin", &format!("pub z: u64, {fields}"), &format!("z: 0, {made}"), "let k = 0u64;", " + k"));
+    let parent_gone = (refused(&o), format!("{:?} {:?}", o.rung, o.lines));
+    flags[0].store(1, Ordering::SeqCst);
+    wait(3);
+    let got = flags[2].load(Ordering::SeqCst);
+    assert!(parent_kept.0, "while its parent is the program's, a frame in the closure edit 1 replaced refuses the layout patch, naming it (`{old_name}`): {}", parent_kept.1);
+    assert!(parent_clean.0, "once its parent's text no longer names S, the closure edit 1 kept refuses it still, naming it (`{old_name}`): {}", parent_clean.1);
+    assert!(parent_gone.0, "once its parent was renamed too, the frame refuses it still, naming it (`{old_name}`): {}; the thread then read {got}", parent_gone.1);
+    assert_eq!(got, 5, "the thread's value, read by the code it was made for");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The T3c rig: crate `app` of `files` (lib.rs first) in a unit with no tier-up, its fns
+/// `names` (each `fn(p: *mut u64)`, called with four flags: [0] go on, [1] ready, [2] the value,
+/// [3] done), and text substitutions applied live.
+struct KeptRig {
+    dir: std::path::PathBuf,
+    // (process exit owns the runtime's teardown, as in live_app: never dropped)
+    unit: std::mem::ManuallyDrop<Box<crate::jit::Unit>>,
+    up: *mut crate::jit::Unit,
+    texts: Vec<(String, String)>,
+    names: Vec<&'static str>,
+    entries: Vec<u64>,
+    flags: Box<[std::sync::atomic::AtomicU64; 4]>,
+}
+
+impl KeptRig {
+    fn new(tag: &str, files: &[(&str, &str)], names: &[&'static str]) -> KeptRig {
+        // (O1 inlines no callee by its size: a closure called directly runs in a frame of its
+        // own code, which the frame rules read; its RIR is not kept, so O3 inlines none either)
+        KeptRig::with(tag, files, names, |o| o.inline_src = Some(0))
+    }
+
+    /// `new`, with the session's options as `set` leaves them.
+    fn with(tag: &str, files: &[(&str, &str)], names: &[&'static str], set: impl FnOnce(&mut crate::options::Options)) -> KeptRig {
+        use std::sync::atomic::Ordering;
+        crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        let dir = std::env::temp_dir().join(format!("relax-kept-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+        std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        for (f, text) in files {
+            std::fs::write(dir.join("app/src").join(f), text).unwrap();
+        }
+        let lib = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+        let mut session = crate::Session::default();
+        set(&mut session.options);
+        let session = Arc::new(session);
+        let (prog, core, app_crate) = crate::load_with_std(&session, &lib, "kept_app", false).unwrap();
+        let defs: Vec<_> = names.iter().map(|name| prog.defs.iter().enumerate().find_map(|(i, d)| {
+            let id = crate::program::DefId(i as u32);
+            (d.krate == app_crate && prog.name(id) == *name).then_some(id)
+        }).unwrap_or_else(|| panic!("no fn `{name}`"))).collect();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut unit = crate::jit::Unit::new(prog, tcx, core);
+        unit.tier1 = None;
+        let up = &mut *unit as *mut crate::jit::Unit;
+        let entries: Vec<u64> = crate::owner::call(crate::owner::Class::Program, || defs.iter().map(|&d| { let f = unit.fn_id(crate::jit::FnKey::Inst(d, vec![])); unit.entry(f) }).collect());
+        let texts = files.iter().map(|(f, t)| (dir.join("app/src").join(f).to_string_lossy().into_owned(), t.to_string())).collect();
+        KeptRig { dir, unit: std::mem::ManuallyDrop::new(unit), up, texts, names: names.to_vec(), entries, flags: Box::default() }
+    }
+
+    fn call(&self, name: &str) {
+        let entry = self.entries[self.names.iter().position(|n| *n == name).unwrap()];
+        unsafe { crate::jit::call_jit(self.up, entry, self.flags.as_ptr() as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    }
+
+    fn flag(&self, k: usize) -> u64 {
+        self.flags[k].load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn wait(&self, k: usize) {
+        let t0 = std::time::Instant::now();
+        while self.flag(k) == 0 {
+            assert!(t0.elapsed().as_secs() < 30, "flag {k} never came");
+            std::thread::yield_now();
+        }
+    }
+
+    /// Lets the thread go on and waits for it to end: what it read.
+    fn release(&self) -> u64 {
+        self.flags[0].store(1, std::sync::atomic::Ordering::SeqCst);
+        self.wait(3);
+        self.flag(2)
+    }
+
+    /// Substitutions in `file`'s text as the rig last set it, applied live.
+    fn edit(&mut self, file: &str, subs: &[(&str, &str)]) -> crate::reload::Outcome {
+        let mut text = self.texts.iter().find(|(p, _)| p.ends_with(&format!("/{file}"))).unwrap().1.clone();
+        for (from, to) in subs {
+            assert!(text.contains(from), "{file}: {from}");
+            text = text.replacen(from, to, 1);
+        }
+        self.set(file, &text)
+    }
+
+    /// `file`'s whole text, applied live.
+    fn set(&mut self, file: &str, text: &str) -> crate::reload::Outcome {
+        let (path, kept) = self.texts.iter_mut().find(|(p, _)| p.ends_with(&format!("/{file}"))).unwrap();
+        *kept = text.to_string();
+        let path = path.clone();
+        let index = self.unit.prog.current_source_files(|q| q == path)[&path];
+        unsafe { crate::reload::apply(self.up, vec![crate::reload::Edit { file: index, path, src: text.as_bytes().to_vec() }]) }
+    }
+
+    /// O3 code for every instance of generic fn `name` that has code (tiering is otherwise off:
+    /// no count reaches the threshold): their slots.
+    fn tier_up(&mut self, name: &str) -> Vec<u32> {
+        let session = unsafe { crate::jit::unit_session(self.up) };
+        self.unit.tier1 = crate::jit::Tier1Cfg::from_options(&session.options).map(|mut t| { t.threshold = u64::MAX; t });
+        let u = &self.unit;
+        let slots: Vec<u32> = (0..u.fns.len() as u32).filter(|&s| u.fns[s as usize].compiled && matches!(&u.fns[s as usize].key, crate::jit::FnKey::Inst(d, a) if u.prog.name(*d) == name && !a.is_empty())).collect();
+        for &s in &slots {
+            assert!(unsafe { crate::jit::compile_tier1(self.up, s) }, "O3 code for `{}`", self.unit.fns[s as usize].name);
+        }
+        slots
+    }
+
+    /// The compiled closures of fn `parent`.
+    fn closures(&self, parent: &str) -> Vec<u32> {
+        use crate::jit::FnKey;
+        let u = &self.unit;
+        (0..u.fns.len() as u32).filter(|&s| u.fns[s as usize].compiled && matches!(u.fns[s as usize].key, FnKey::Closure(_, _, p)
+            if matches!(&u.fns[p as usize].key, FnKey::Inst(d, _) if u.prog.name(*d) == parent))).collect()
+    }
+
+    fn name(&self, slot: u32) -> String {
+        self.unit.fns[slot as usize].name.to_string()
+    }
+}
+
+impl Drop for KeptRig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn refused_with(o: &crate::reload::Outcome, all: &[&str]) -> (bool, String) {
+    (o.rung == crate::reload::Rung::Restart && o.lines.iter().any(|l| all.iter().all(|x| l.contains(x))), format!("{:?} {:?}", o.rung, o.lines))
+}
+
+const KEPT_FLAGS: &str = r#"use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+static AT: AtomicUsize = AtomicUsize::new(0);
+fn flags() -> &'static [AtomicU64; 4] { unsafe { &*(AT.load(Ordering::SeqCst) as *const [AtomicU64; 4]) } }
+fn spin(a: &[AtomicU64; 4]) {
+    a[1].store(1, Ordering::SeqCst);
+    while a[0].load(Ordering::SeqCst) == 0 { std::hint::spin_loop(); }
+}
+pub struct S { pub n: u64 }
+#[inline(never)]
+pub fn read(s: &S) -> u64 { s.n }
+"#;
+
+/// T3c T2: a thread runs a closure whose text edit 1 removed (its parent's new text has no
+/// closure at its place: a keep no line reports). The record takes every closure a patch does
+/// not rebind, so a field added to `S`, a value of which the closure's frame holds, is refused
+/// naming the closure and edit 1, and the thread reads its value with the code it was made for.
+#[test]
+fn a_thread_in_a_closure_an_edit_removed_blocks_a_layout_patch() {
+    isolated_test!(a_thread_in_a_closure_an_edit_removed_blocks_a_layout_patch);
+    let lib = format!("{KEPT_FLAGS}{}", r#"pub fn worker() {
+    let a = flags();
+    let c = move || { let s = S { n: 5 }; spin(a); read(&s) };
+    a[2].store(c(), Ordering::SeqCst);
+    a[3].store(1, Ordering::SeqCst);
+}
+pub fn start(p: *mut u64) {
+    AT.store(p as usize, Ordering::SeqCst);
+    std::thread::spawn(worker);
+}
+"#);
+    let mut rig = KeptRig::new("removed", &[("lib.rs", &lib)], &["start"]);
+    rig.call("start");
+    rig.wait(1);
+    let old = rig.closures("worker");
+    assert_eq!(old.len(), 1, "the thread's closure has code");
+    let name = rig.name(old[0]);
+    let o = rig.edit("lib.rs", &[("    let c = move || { let s = S { n: 5 }; spin(a); read(&s) };\n    a[2].store(c(), Ordering::SeqCst);", "    a[2].store(0, Ordering::SeqCst);")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "the closure's removal applies: {:?}", o.lines);
+    let o = rig.edit("lib.rs", &[("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
+    let refused = refused_with(&o, &["struct `S` changed its layout", &name, "patch gen 1 kept it on"]);
+    let got = rig.release();
+    assert!(refused.0, "a frame in the closure edit 1 removed refuses the layout patch, naming it (`{name}`) and edit 1: {}", refused.1);
+    assert_eq!(got, 5, "the thread's value, read by the code it was made for");
+}
+
+/// T3c T3: a generic fn over a closure an edit kept on its old code waits between two calls of
+/// it on its own thread: no frame is in the closure, but the instance can call it after the
+/// install. Edit 1 changes the closure's captures, edit 2 takes `S` out of the text; a field
+/// added to `S` is refused naming the instance and the closure. The instance's O3 code, built
+/// before edit 1 with the closure inline (no build takes in a kept closure's body), is then the
+/// frame of a second wait: refused naming the copy. Both second calls read 5. (O1 inlines nothing
+/// into `pump` and no closure anywhere, so its first code calls the closure; O3 inlines as a
+/// session does.)
+#[test]
+fn a_frame_over_a_kept_closure_blocks_a_layout_patch() {
+    isolated_test!(a_frame_over_a_kept_closure_blocks_a_layout_patch);
+    let lib = format!("{KEPT_FLAGS}{}", r#"fn gate(a: &[AtomicU64; 4], n: u64) {
+    a[1].store(n, Ordering::SeqCst);
+    while a[0].load(Ordering::SeqCst) < n { std::hint::spin_loop(); }
+}
+#[inline(never)]
+pub fn pump<F: Fn() -> u64>(f: &F, a: &[AtomicU64; 4], n: u64) -> u64 {
+    let first = f();
+    gate(a, n);
+    first * 0 + f()
+}
+pub fn worker() {
+    let a = flags();
+    let k = 0u64;
+    let c = move || { let s = S { n: 5 }; read(&s) + k };
+    let x = pump(&c, a, 1);
+    a[2].store(x + pump(&c, a, 2), Ordering::SeqCst);
+    a[3].store(1, Ordering::SeqCst);
+}
+pub fn start(p: *mut u64) {
+    AT.store(p as usize, Ordering::SeqCst);
+    std::thread::spawn(worker);
+}
+"#);
+    use std::sync::atomic::Ordering;
+    let mut rig = KeptRig::with("over", &[("lib.rs", &lib)], &["start"], |o| {
+        o.noinl = Some("pump".to_string());
+        o.noinl_callee = Some("{closure#".to_string());
+    });
+    let at = |rig: &KeptRig, n: u64| {
+        let t0 = std::time::Instant::now();
+        while rig.flag(1) != n {
+            assert!(t0.elapsed().as_secs() < 30, "gate {n} never came");
+            std::thread::yield_now();
+        }
+    };
+    rig.call("start");
+    at(&rig, 1);
+    let old = rig.closures("worker");
+    assert_eq!(old.len(), 1, "the closure has code");
+    let name = rig.name(old[0]);
+    // (the frame of the first wait stays in the instance's first code)
+    let pumps = rig.tier_up("pump");
+    assert_eq!(pumps.len(), 1, "one instance of pump");
+    let o3 = rig.unit.fns[pumps[0] as usize].code;
+    let copied = rig.unit.code.read().unwrap().inlined_at(o3).is_some_and(|l| l.contains(&old[0]));
+    assert!(copied, "the instance's O3 code holds a copy of the closure");
+    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "the captures edit applies: {:?}", o.lines);
+    let o = rig.edit("lib.rs", &[("{ let s = S { n: 5 }; read(&s) + k + j }", "5u64 + k + j")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "the closure without S applies: {:?}", o.lines);
+    let o = rig.edit("lib.rs", &[("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
+    let refused = refused_with(&o, &["struct `S` changed its layout", "pump", "can still call", &name, "patch gen 1 kept"]);
+    let kept = rig.unit.fns[pumps[0] as usize].code == o3;
+    rig.flags[0].store(1, Ordering::SeqCst);
+    at(&rig, 2);
+    // (the refused text again)
+    let o = rig.edit("lib.rs", &[("pub struct S { pub m: u64, pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
+    let tiered = refused_with(&o, &["struct `S` changed its layout", "pump", "holds a copy of", &name, "patch gen 1 kept"]);
+    rig.flags[0].store(2, Ordering::SeqCst);
+    rig.wait(3);
+    assert!(refused.0, "a frame of an instance over the closure edit 1 kept refuses the layout patch, naming it and the closure (`{name}`): {}", refused.1);
+    assert!(kept, "the edits leave the instance's O3 code in place");
+    assert!(tiered.0, "a frame in the instance's O3 code, which holds a copy of the closure, refuses it naming the copy: {}", tiered.1);
+    assert_eq!(rig.flag(2), 10, "the second calls, by the code the closure was made with");
+}
+
+/// T3c T4: a closure an edit kept on its old code is stored as a trait object, and no thread
+/// runs it. Edit 1 changes its captures, edit 2 takes `S` out of the text; a field added to `S`
+/// is refused naming edit 1 (a stored value runs that code at its next call), and the call
+/// made after reads 5.
+#[test]
+fn a_stored_kept_closure_blocks_a_layout_patch() {
+    isolated_test!(a_stored_kept_closure_blocks_a_layout_patch);
+    let lib = format!("{KEPT_FLAGS}{}", r#"static mut STORED: Option<Box<dyn Fn() -> u64>> = None;
+pub fn start(_p: *mut u64) {
+    let k = 0u64;
+    let c: Box<dyn Fn() -> u64> = Box::new(move || { let s = S { n: 5 }; read(&s) + k });
+    unsafe { STORED = Some(c); }
+}
+pub fn later(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    a[2].store(unsafe { (*std::ptr::addr_of!(STORED)).as_ref().unwrap()() }, Ordering::SeqCst);
+}
+"#);
+    let mut rig = KeptRig::new("stored", &[("lib.rs", &lib)], &["start", "later"]);
+    rig.call("start");
+    rig.call("later");
+    assert_eq!(rig.flag(2), 5, "the stored closure runs");
+    let old = rig.closures("start");
+    assert_eq!(old.len(), 1, "the stored closure has code");
+    let name = rig.name(old[0]);
+    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "the captures edit applies: {:?}", o.lines);
+    let o = rig.edit("lib.rs", &[("{ let s = S { n: 5 }; read(&s) + k + j }", "5u64 + k + j")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "the closure without S applies: {:?}", o.lines);
+    let o = rig.edit("lib.rs", &[("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
+    let refused = refused_with(&o, &["struct `S` changed its layout", "trait objects", &name, "patch gen 1 kept"]);
+    rig.flags[2].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.call("later");
+    assert!(refused.0, "a stored value of the closure edit 1 kept refuses the layout patch, naming it (`{name}`) and edit 1: {}", refused.1);
+    assert_eq!(rig.flag(2), 5, "the stored closure's call after it");
+}
+
+/// T3c T10: two closures stored behind `pump::<C>`, whose O3 code holds each one's body inline:
+/// one never called on its own (its body exists only in its copies), one also called through a
+/// trait object (code of its own). Edit 1 changes both bodies, which rebinds both: the next calls
+/// through `pump` run the new bodies. Edit 2 adds a field to `S`, which the bodies make: it
+/// applies, and the calls give the new bodies' values from the new layout.
+#[test]
+fn a_rebound_closure_inline_in_a_host_runs_its_new_body() {
+    isolated_test!(a_rebound_closure_inline_in_a_host_runs_its_new_body);
+    let lib = format!("{KEPT_FLAGS}{}", r#"pub trait Run { fn run(&self) -> u64; }
+pub struct Pumped<F>(pub F);
+#[inline(never)]
+pub fn pump<F: Fn() -> u64>(f: &F) -> u64 { f() }
+impl<F: Fn() -> u64> Run for Pumped<F> { fn run(&self) -> u64 { pump(&self.0) } }
+static mut ONLY: Option<Box<dyn Run>> = None;
+static mut OWN: Option<Box<dyn Run>> = None;
+pub fn start(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let k = 0u64;
+    let only = move || { let s = S { n: 5 }; read(&s) + k };
+    let own = move || { let s = S { n: 7 }; read(&s) + k };
+    let d: &dyn Fn() -> u64 = std::hint::black_box(&own);
+    a[1].store(d(), Ordering::SeqCst);
+    unsafe { ONLY = Some(Box::new(Pumped(only))); OWN = Some(Box::new(Pumped(own))); }
+}
+pub fn later(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    a[2].store(unsafe { (*std::ptr::addr_of!(ONLY)).as_ref().unwrap().run() }, Ordering::SeqCst);
+    a[3].store(unsafe { (*std::ptr::addr_of!(OWN)).as_ref().unwrap().run() }, Ordering::SeqCst);
+}
+"#);
+    // (O1 inlines small callees, closures among them, as a session does)
+    let mut rig = KeptRig::with("rebound", &[("lib.rs", &lib)], &["start", "later"], |_| {});
+    rig.call("start");
+    rig.call("later");
+    let pumps = rig.tier_up("pump");
+    rig.call("later");
+    let tiered = (rig.flag(2), rig.flag(3));
+    // (the closures of `start`: the stored ones' slots, with code or not, and what pump's O3 code holds)
+    let (copies, only_code) = {
+        use crate::jit::FnKey;
+        let u = &rig.unit;
+        let of_start: Vec<u32> = (0..u.fns.len() as u32).filter(|&s| matches!(u.fns[s as usize].key, FnKey::Closure(_, _, p)
+            if matches!(&u.fns[p as usize].key, FnKey::Inst(d, _) if u.prog.name(*d) == "start"))).collect();
+        let code = u.code.read().unwrap();
+        let copies: Vec<u32> = pumps.iter().flat_map(|&p| code.inlined_at(u.fns[p as usize].code).map(|v| v.to_vec()).unwrap_or_default()).filter(|c| of_start.contains(c)).collect();
+        let only_code = of_start.iter().filter(|&&c| !u.fns[c as usize].compiled).count();
+        (copies, only_code)
+    };
+    let edit1 = rig.edit("lib.rs", &[("S { n: 5 }; read(&s) + k }", "S { n: 5 }; read(&s) + k + 1 }"), ("S { n: 7 }; read(&s) + k }", "S { n: 7 }; read(&s) + k + 1 }")]);
+    rig.call("later");
+    let rebound = (rig.flag(2), rig.flag(3));
+    let edit2 = rig.edit("lib.rs", &[("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }"), ("S { n: 5 }", "S { m: 0, n: 5 }"), ("S { n: 7 }", "S { m: 0, n: 7 }")]);
+    rig.flags[2].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.flags[3].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.call("later");
+    let layout = (rig.flag(2), rig.flag(3));
+    assert_eq!((pumps.len(), copies.len(), only_code, tiered), (2, 2, 1, (5, 7)), "both instances of pump have O3 code holding their closure's body, one closure has no code of its own");
+    assert_eq!(edit1.rung, crate::reload::Rung::Patch, "the bodies' edit applies: {:?}", edit1.lines);
+    assert_eq!(rebound, (6, 8), "the calls through pump's hosts run the new bodies (the one only inline, the one with code): {:?}", edit1.lines);
+    assert_eq!(edit2.rung, crate::reload::Rung::Patch, "the field applies: {:?}", edit2.lines);
+    assert_eq!(layout, (6, 8), "the calls after the field, by the new bodies in the new layout");
+}
+
+/// T3c T11 (Q2, I3): a closure a patch retired is never built again from its text. Phase 1: the
+/// closure ran in its parent only (no stored value, no frame) and an edit of its captures retired
+/// it; then a field its old text reads goes from `U`: the layout patch applies with no build
+/// error, and the retired closure keeps its code. Phase 2, not a layout: the same for a closure
+/// whose old text reads a constant, then the constant's value changes (its readers are rebuilt):
+/// the retired closure keeps its code, built while its text was the program's. The new texts run
+/// after each. T5's addition: the layout patch left the retired closure on code of the layout
+/// before, so rolling the retiring group back under it is a restart, and changes nothing; newest
+/// first, every group rolls back and the boot text runs again.
+#[test]
+fn a_retired_closure_is_never_built_again_from_its_text() {
+    isolated_test!(a_retired_closure_is_never_built_again_from_its_text);
+    let lib = r#"use std::sync::atomic::{AtomicU64, Ordering};
+pub struct U { pub a: u64, pub b: u64 }
+pub const K: u32 = 4;
+pub fn fields(p: *mut u64) {
+    let f = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let k = 0u64;
+    let c = move || { let u = U { a: 2, b: 3 }; u.a + u.b + k };
+    f[2].store(c(), Ordering::SeqCst);
+}
+pub fn konst(p: *mut u64) {
+    let f = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let k = 0u64;
+    let c = move || { let x = K + 1; x as u64 + k };
+    f[2].store(c(), Ordering::SeqCst);
+}
+"#;
+    use std::sync::atomic::Ordering;
+    let mut rig = KeptRig::new("retired", &[("lib.rs", lib)], &["fields", "konst"]);
+    let errors = |o: &crate::reload::Outcome| o.lines.iter().filter(|l| l.contains("error")).cloned().collect::<Vec<_>>();
+    // one phase: run `parent`, retire its closure by an edit of its captures, then `change`; what
+    // ran before and after, and the retired closure's slots (in the record, code unchanged)
+    let phase = |rig: &mut KeptRig, parent: &str, captures: &[(&str, &str)], change: &[(&str, &str)]| {
+        rig.call(parent);
+        let before = rig.flag(2);
+        let old = rig.closures(parent);
+        let mut retire = rig.edit("lib.rs", captures);
+        let retired = !old.is_empty() && old.iter().all(|o| rig.unit.kept_old.contains_key(o));
+        let code: Vec<u64> = old.iter().map(|&o| rig.unit.fns[o as usize].code).collect();
+        let mut o = rig.edit("lib.rs", change);
+        let kept_code = old.iter().zip(&code).all(|(&s, &c)| rig.unit.fns[s as usize].code == c);
+        rig.flags[2].store(0, Ordering::SeqCst);
+        rig.call(parent);
+        let undos = (retire.undo.take(), o.undo.take(), old);
+        ((before, retire.rung, retired, o.rung, errors(&o), format!("{:?}", o.lines), kept_code, rig.flag(2)), undos)
+    };
+    let (fields, (retire1, layout2, old1)) = phase(&mut rig, "fields",
+        &[("let k = 0u64;\n    let c = move || { let u", "let k = 0u64;\n    let j = 0u64;\n    let c = move || { let u"), ("u.a + u.b + k }", "u.a + u.b + k + j }")],
+        &[("pub struct U { pub a: u64, pub b: u64 }", "pub struct U { pub b: u64 }"), ("U { a: 2, b: 3 }; u.a + u.b + k + j", "U { b: 3 }; u.b + k + j")]);
+    let (konst, (retire3, const4, _)) = phase(&mut rig, "konst",
+        &[("let k = 0u64;\n    let c = move || { let x", "let k = 0u64;\n    let j = 0u64;\n    let c = move || { let x"), ("x as u64 + k }", "x as u64 + k + j }")],
+        &[("pub const K: u32 = 4;", "pub const K: u32 = 6;")]);
+    for (what, (before, retire, retired, rung, errs, lines, kept_code, after), now) in [("a field gone", fields, 3), ("a const's new value", konst, 7)] {
+        assert_eq!(before, 5, "{what}: the closure ran");
+        assert!(retire == crate::reload::Rung::Patch && retired, "{what}: the captures edit applies and retires the closure ({retire:?})");
+        assert!(rung == crate::reload::Rung::Patch && errs.is_empty(), "{what}: applies with no build error (the retired closure's old text is never built): {rung:?} {lines}");
+        assert!(kept_code, "{what}: the retired closure keeps its code");
+        assert_eq!(after, now, "{what}: the new text runs");
+    }
+    // T5's addition. Newest first down to the layout patch, then the retiring group under it
+    let run = |rig: &KeptRig, parent: &str| { rig.flags[2].store(0, Ordering::SeqCst); rig.call(parent); rig.flag(2) };
+    let back = |rig: &KeptRig, undo: Option<crate::reload::Undo>| unsafe { crate::reload::rollback(rig.up, undo.expect("an undo record"), "test") };
+    let (g1, g2) = (retire1.as_ref().map(|x| x.group), layout2.as_ref().map(|x| x.group));
+    back(&rig, const4).expect("the const's group rolls back");
+    back(&rig, retire3).expect("the second retiring group rolls back: no layout patch after it");
+    let konst_back = run(&rig, "konst");
+    let refused = back(&rig, retire1);
+    let (refused, retire1) = match refused {
+        Err(r) => (Some(r.why), Some(r.undo)),
+        Ok(names) => panic!("rolling gen {g1:?} back under the layout patch {g2:?} must be a restart, it rolled back {names:?}"),
+    };
+    let still_kept = old1.iter().all(|o| rig.unit.kept_old.contains_key(o));
+    let fields_still = run(&rig, "fields");
+    back(&rig, layout2).expect("the layout patch rolls back");
+    back(&rig, retire1).expect("then the retiring group rolls back");
+    let (fields_boot, konst_boot) = (run(&rig, "fields"), run(&rig, "konst"));
+    assert_eq!(konst_back, 5, "konst's groups rolled back: its boot text runs");
+    let why = refused.unwrap_or_default();
+    assert!(why.contains("restart the app") && why.contains(&rig.name(old1[0])), "the refusal names the retired closure and asks for a restart: {why}");
+    assert!(still_kept && fields_still == 3, "a refused rollback changes nothing: the closure stays retired ({still_kept}), the new text runs ({fields_still})");
+    assert_eq!(fields_boot, 5, "newest first, the layout patch and then the retiring group roll back: the boot text runs");
+    assert_eq!(konst_boot, 5, "konst too");
+}
+
+const KEPT_U: &str = r#"pub struct U { pub a: u64 }
+#[inline(never)]
+pub fn tick() -> u64 { let u = U { a: 1 }; u.a }
+"#;
+
+/// T3c T5: the record follows rollbacks. A thread runs a closure edit 1 kept on its old code;
+/// edit 2 rebuilds its parent again (it keeps the same closure: the entry keeps edit 1). A field
+/// added to an unrelated struct `U` is refused; rolling edit 2 back leaves it refused (the entry
+/// is edit 1's); rolling edit 1 back makes the closure its parent's again, and the field applies.
+#[test]
+fn the_kept_closure_record_follows_rollbacks() {
+    isolated_test!(the_kept_closure_record_follows_rollbacks);
+    let lib = format!("{KEPT_FLAGS}{KEPT_U}{}", r#"pub fn worker() {
+    let a = flags();
+    let k = 7u64;
+    let c = move || { spin(a); k };
+    a[2].store(c() + tick() * 0, Ordering::SeqCst);
+    a[3].store(1, Ordering::SeqCst);
+}
+pub fn start(p: *mut u64) {
+    AT.store(p as usize, Ordering::SeqCst);
+    std::thread::spawn(worker);
+}
+"#);
+    let t0 = lib.clone();
+    let t1 = t0.replacen("let k = 7u64;", "let k = 7u64;\n    let j = 0u64;", 1).replacen("spin(a); k }", "spin(a); k + j }", 1);
+    let t2 = t1.replacen("tick() * 0", "tick() * 0 + 0", 1);
+    let with_field = |t: &str| t.replacen("pub struct U { pub a: u64 }", "pub struct U { pub b: u64, pub a: u64 }", 1).replacen("U { a: 1 }", "U { b: 0, a: 1 }", 1);
+    let mut rig = KeptRig::new("rollback", &[("lib.rs", &lib)], &["start"]);
+    rig.call("start");
+    rig.wait(1);
+    let old = rig.closures("worker");
+    assert_eq!(old.len(), 1, "the thread's closure has code");
+    let name = rig.name(old[0]);
+    let mut o1 = rig.set("lib.rs", &t1);
+    assert_eq!(o1.rung, crate::reload::Rung::Patch, "edit 1 (captures) applies: {:?}", o1.lines);
+    let mut o2 = rig.set("lib.rs", &t2);
+    assert_eq!(o2.rung, crate::reload::Rung::Patch, "edit 2 (the parent again) applies: {:?}", o2.lines);
+    let o = rig.set("lib.rs", &with_field(&t2));
+    let both = refused_with(&o, &["struct `U` changed its layout", &name, "patch gen 1 kept it on"]);
+    unsafe { crate::reload::rollback(rig.up, o2.undo.take().unwrap(), "test") }.unwrap();
+    let o = rig.set("lib.rs", &with_field(&t1));
+    let one = refused_with(&o, &["struct `U` changed its layout", &name, "patch gen 1 kept it on"]);
+    unsafe { crate::reload::rollback(rig.up, o1.undo.take().unwrap(), "test") }.unwrap();
+    let o = rig.set("lib.rs", &with_field(&t0));
+    let none = (o.rung == crate::reload::Rung::Patch, format!("{:?} {:?}", o.rung, o.lines));
+    let got = rig.release();
+    assert!(both.0, "after edits 1 and 2 the closure edit 1 kept refuses the layout patch, naming it and edit 1: {}", both.1);
+    assert!(one.0, "edit 2 rolled back, the entry is edit 1's and still refuses: {}", one.1);
+    assert!(none.0, "edit 1 rolled back too, the closure is its parent's again and the field applies: {}", none.1);
+    assert_eq!(got, 7, "the thread's value");
+}
+
+const KEPT_SPARE: &str = r#"use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+pub struct U { pub a: u64 }
+#[inline(never)]
+pub fn make_u() -> U { U { a: 1 } }
+pub static mut STORED: Option<Box<dyn Fn() -> u64>> = None;
+pub static mut KEPT: Option<Box<dyn Fn() -> u64>> = None;
+static mut HELD: Option<Pin<Box<dyn Future<Output = u64>>>> = None;
+macro_rules! plus { ($k:expr) => { move |y: u64| y + $k } }
+pub struct Yield(pub bool);
+impl Future for Yield {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 { Poll::Ready(()) } else { self.0 = true; Poll::Pending }
+    }
+}
+fn noop_raw() -> RawWaker {
+    fn clone(_: *const ()) -> RawWaker { noop_raw() }
+    fn noop(_: *const ()) {}
+    static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    RawWaker::new(std::ptr::null(), &VT)
+}
+pub async fn job() -> u64 {
+    let k = other::K2;
+    Yield(false).await;
+    k + other::K2 + 10
+}
+pub fn spare() -> u64 { 1 }
+pub fn twice(x: u64) -> u64 { let k = 1u64; let c = move |y: u64| y + k; c(x) + c(x) }
+pub fn start(_p: *mut u64) {
+    let k = other::K;
+    let m = plus!(k);
+    let base = m(0) + twice(0) * 0;
+    let c: Box<dyn Fn() -> u64> = Box::new(move || base + 1);
+    unsafe { STORED = Some(c); }
+    other::keep();
+    let mut f: Pin<Box<dyn Future<Output = u64>>> = Box::pin(job());
+    let waker = unsafe { Waker::from_raw(noop_raw()) };
+    let _ = f.as_mut().poll(&mut Context::from_waker(&waker));
+    unsafe { HELD = Some(f); }
+}
+pub fn later(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    a[2].store(unsafe { (*std::ptr::addr_of!(STORED)).as_ref().unwrap()() }, Ordering::SeqCst);
+    a[3].store(unsafe { (*std::ptr::addr_of!(KEPT)).as_ref().unwrap()() }, Ordering::SeqCst);
+}
+pub fn resume(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let mut f = unsafe { (*std::ptr::addr_of_mut!(HELD)).take().unwrap() };
+    let waker = unsafe { Waker::from_raw(noop_raw()) };
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut Context::from_waker(&waker)) {
+            a[1].store(v, Ordering::SeqCst);
+            break;
+        }
+    }
+}
+"#;
+
+const KEPT_OTHER: &str = r#"pub const K: u64 = 1;
+pub const K2: u64 = 1;
+pub fn spare() -> u64 { 1 }
+pub fn keep() {
+    let a = crate::make_u().a;
+    let c: Box<dyn Fn() -> u64> = Box::new(move || a + 100);
+    unsafe { crate::KEPT = Some(c); }
+}
+"#;
+
+/// T3c T6: no refusal where no superseded code can run. Stored values of three closures, none
+/// of them in a frame: one of a fn whose constant read changes (its text the same), one of a fn
+/// in another file that uses `U`, and a suspended async fn. Each edit is followed by a field
+/// added to `U`, which applies: (i) another fn of the closures' file; (ii) a closure called only
+/// inside its parent, which returned, its captures changed (its record entry is the only one);
+/// (iii) the constant the first closure's parent reads, which rebuilds the parent in a version
+/// it moved to without being rebuilt; (iv) the constant the async fn reads; (v) another fn of
+/// the file of `U`'s user, which the field then rebuilds. The stored values run the current
+/// text, and no parent was rebuilt before its closures had their current lowering.
+#[test]
+fn layout_patches_apply_where_no_kept_code_can_run() {
+    isolated_test!(layout_patches_apply_where_no_kept_code_can_run);
+    let lib = format!("mod other;\n{KEPT_FLAGS}{KEPT_SPARE}");
+    let mut rig = KeptRig::new("none", &[("lib.rs", &lib), ("other.rs", KEPT_OTHER)], &["start", "later", "resume"]);
+    rig.call("start");
+    rig.call("later");
+    assert_eq!((rig.flag(2), rig.flag(3)), (2, 101), "the stored closures run");
+    let twice = rig.closures("twice");
+    assert_eq!(twice.len(), 1, "twice's closure has code");
+    let mut fields = String::from("pub a: u64");
+    let mut made = String::from("a: 1");
+    let mut add = |rig: &mut KeptRig, f: &str| {
+        let (old_fields, old_made) = (fields.clone(), made.clone());
+        fields = format!("pub {f}: u64, {fields}");
+        made = format!("{f}: 0, {made}");
+        let (a, b) = (format!("pub struct U {{ {old_fields} }}"), format!("pub struct U {{ {fields} }}"));
+        let (c, d) = (format!("U {{ {old_made} }}"), format!("U {{ {made} }}"));
+        let o = rig.edit("lib.rs", &[(a.as_str(), b.as_str()), (c.as_str(), d.as_str())]);
+        let u = &rig.unit;
+        let stray: Vec<String> = u.kept_old.iter().filter(|e| !twice.contains(e.0)).map(|(&s, e)| format!("`{}` ({})", u.fns[s as usize].name, e.1)).collect();
+        (o.rung == crate::reload::Rung::Patch && stray.is_empty(), format!("{:?} {:?}, entries of closures its parent's lowering makes: {stray:?}", o.rung, o.lines))
+    };
+    // (i) another fn of the closures' file
+    let o = rig.edit("lib.rs", &[("pub fn spare() -> u64 { 1 }", "pub fn spare() -> u64 { 2 }")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "(i) the edit elsewhere applies: {:?}", o.lines);
+    let i = add(&mut rig, "b");
+    // (ii) a closure called only in its parent's frame, which returned
+    let o = rig.edit("lib.rs", &[("let k = 1u64; let c = move |y: u64| y + k;", "let k = 1u64; let j = 0u64; let c = move |y: u64| y + k + j;")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "(ii) the captures edit applies: {:?}", o.lines);
+    let ii = add(&mut rig, "c");
+    let ii_kept: Vec<u32> = rig.unit.kept_old.keys().copied().collect();
+    // (iii) the constant the stored closure's parent reads, its text unchanged
+    let o = rig.edit("other.rs", &[("K: u64 = 1", "K: u64 = 2")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "(iii) the constant's edit applies: {:?}", o.lines);
+    let iii = add(&mut rig, "d");
+    rig.call("later");
+    let iii_run = (rig.flag(2), rig.flag(3));
+    // (iv) the constant the suspended async fn reads
+    let o = rig.edit("other.rs", &[("K2: u64 = 1", "K2: u64 = 2")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "(iv) the async fn's constant applies: {:?}", o.lines);
+    let iv = add(&mut rig, "e");
+    rig.call("resume");
+    let iv_run = rig.flag(1);
+    // (v) another fn of the file of U's user, which the field rebuilds
+    let o = rig.edit("other.rs", &[("pub fn spare() -> u64 { 1 }", "pub fn spare() -> u64 { 2 }")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "(v) the edit elsewhere applies: {:?}", o.lines);
+    let v = add(&mut rig, "f");
+    rig.flags[2].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.flags[3].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.call("later");
+    let v_run = (rig.flag(2), rig.flag(3));
+    let unlowered = crate::reload::UNLOWERED_PARENTS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(i.0, "(i) a closure of a fn no edit rebuilt, in a file edited elsewhere: the field applies: {}", i.1);
+    assert!(ii.0, "(ii) a kept closure no frame runs and no value stores: the field applies: {}", ii.1);
+    assert_eq!(ii_kept, twice, "(ii) the record holds the closure whose captures changed");
+    assert!(iii.0, "(iii) the stored closure's parent rebuilt for its constant: the field applies: {}", iii.1);
+    assert_eq!(iii_run, (2, 101), "(iii) the stored values, by the current text");
+    assert!(iv.0, "(iv) the suspended async fn's constant: the field applies: {}", iv.1);
+    assert_eq!(iv_run, 13, "(iv) the suspended async fn resumes in the current text (the constant read after the await is the new one)");
+    assert!(v.0, "(v) U's user, in a file edited earlier, rebuilt by the field itself: the field applies: {}", v.1);
+    assert_eq!(v_run, (2, 101), "(v) the stored values, by the current text");
+    assert_eq!(unlowered, 0, "no rebuilt parent without its closures' current lowering");
+}
+
+/// T3c T8: a patch's checks see the closures it keeps itself. One edit changes the captures
+/// of a stored closure and adds a field to `S`, which its old text makes: refused naming the
+/// closure and this edit (its stored value would run the old text on the new layout), and the
+/// record holds nothing after; the call made after reads 5.
+#[test]
+fn a_layout_edit_that_keeps_a_stored_closure_is_refused() {
+    isolated_test!(a_layout_edit_that_keeps_a_stored_closure_is_refused);
+    let lib = format!("{KEPT_FLAGS}{}", r#"static mut STORED: Option<Box<dyn Fn() -> u64>> = None;
+pub fn start(_p: *mut u64) {
+    let k = 0u64;
+    let c: Box<dyn Fn() -> u64> = Box::new(move || { let s = S { n: 5 }; read(&s) + k });
+    unsafe { STORED = Some(c); }
+}
+pub fn later(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    a[2].store(unsafe { (*std::ptr::addr_of!(STORED)).as_ref().unwrap()() }, Ordering::SeqCst);
+}
+"#);
+    let mut rig = KeptRig::new("selfkeep", &[("lib.rs", &lib)], &["start", "later"]);
+    rig.call("start");
+    rig.call("later");
+    assert_eq!(rig.flag(2), 5, "the stored closure runs");
+    let old = rig.closures("start");
+    assert_eq!(old.len(), 1, "the stored closure has code");
+    let name = rig.name(old[0]);
+    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }"), ("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }"), ("S { n: 5 }", "S { m: 0, n: 5 }")]);
+    let refused = refused_with(&o, &["struct `S` changed its layout", "trait objects", &name, "patch gen 1 kept"]);
+    let left = rig.unit.kept_old.len();
+    rig.flags[2].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.call("later");
+    assert!(refused.0, "the closure this edit keeps refuses its layout change, naming it (`{name}`) and the edit: {}", refused.1);
+    assert_eq!(left, 0, "a refused patch leaves no record entry");
+    assert_eq!(rig.flag(2), 5, "the stored closure's call after it");
+}
+
+/// T3c T9: a patch's frame check sees the closures it rebinds. A thread runs a closure its
+/// parent spawned (the parent returned); one edit takes `S` out of the closure's text, its
+/// captures the same (rebound), and adds a field to `S`, which the frame holds: refused naming
+/// the closure, and the thread reads 5.
+#[test]
+fn a_layout_edit_that_rebinds_a_running_closure_is_refused() {
+    isolated_test!(a_layout_edit_that_rebinds_a_running_closure_is_refused);
+    let lib = format!("{KEPT_FLAGS}{}", r#"pub fn start(p: *mut u64) {
+    AT.store(p as usize, Ordering::SeqCst);
+    std::thread::spawn(move || { let a = flags(); let s = S { n: 5 }; spin(a); a[2].store(read(&s), Ordering::SeqCst); a[3].store(1, Ordering::SeqCst); });
+}
+"#);
+    let mut rig = KeptRig::new("selfbind", &[("lib.rs", &lib)], &["start"]);
+    rig.call("start");
+    rig.wait(1);
+    let old = rig.closures("start");
+    assert_eq!(old.len(), 1, "the thread's closure has code");
+    let name = rig.name(old[0]);
+    let o = rig.edit("lib.rs", &[("let s = S { n: 5 }; spin(a); a[2].store(read(&s), Ordering::SeqCst);", "spin(a); a[2].store(5, Ordering::SeqCst);"), ("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
+    let refused = refused_with(&o, &["struct `S` changed its layout", &name, "is running on thread"]);
+    let got = rig.release();
+    assert!(refused.0, "a frame in the closure this edit rebinds refuses its layout change, naming it (`{name}`): {}", refused.1);
+    assert_eq!(got, 5, "the thread's value, read by the code it was made for");
+}
+
+/// A type's inherent methods split over several `impl` blocks, in its own file and in another:
+/// an edit that adds methods to one block (plain, then with a doc comment and a `cfg`), or a new
+/// block before the others, patches, and every other block's methods stay the type's, for
+/// callers in unchanged files too (a
+/// landing that added `cfg`'d methods to the first of two `impl Cx` blocks lost the second
+/// block's methods: "no method named `dispatch_a11y_action` found for `&mut Cx`", 11-16).
+#[test]
+fn methods_added_to_one_impl_block_keep_the_other_blocks() {
+    isolated_test!(methods_added_to_one_impl_block_keep_the_other_blocks);
+    use crate::jit::{FnKey, Unit};
+    use crate::reload::{apply, Edit, Rung};
+    crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-impl-blocks-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    let lib_with = |first: &str, added: &str, used: &str| format!("mod other;\nmod split;\npub struct C {{ pub k: u32 }}\n{first}impl C {{\n    pub fn a(&self) -> u32 {{ self.k }}\n{added}}}\nimpl C {{\n    pub fn b(&self) -> u32 {{ self.k * 2 }}\n}}\npub fn value(out: &mut u32) {{\n    let c = C {{ k: 1 }};\n    *out = other::call(&c) * 100 + c.a() * 10 + c.d(){used};\n}}\n");
+    let lib = |added: &str, used: &str| lib_with("", added, used);
+    let src = dir.join("app/src");
+    std::fs::write(src.join("lib.rs"), lib("", "")).unwrap();
+    std::fs::write(src.join("other.rs"), "pub fn call(c: &super::C) -> u32 { c.b() }\n").unwrap();
+    std::fs::write(src.join("split.rs"), "impl super::C {\n    pub fn d(&self) -> u32 { self.k + 2 }\n}\n").unwrap();
+    let app = src.join("lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "impl_blocks_app", false).unwrap();
+    let value = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == "value").then_some(id)
+    }).unwrap();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    let entry = crate::owner::call(crate::owner::Class::Program, || { let f = u.fn_id(FnKey::Inst(value, vec![])); u.entry(f) });
+    let run = || {
+        let mut out = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut out as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        out
+    };
+    assert_eq!(run(), 213, "b (second block, called from other.rs) 2, a (first block) 1, d (split.rs) 3");
+    let edit = |what: &str, text: String, expect: u32| {
+        let file = unsafe { &*up }.prog.def(value).file;
+        let o = unsafe { apply(up, vec![Edit { file, path: app.clone(), src: text.into_bytes() }]) };
+        assert_eq!(o.rung, Rung::Patch, "{what}: {:?}", o.lines);
+        assert_eq!(run(), expect, "{what}: every block's methods after the edit");
+    };
+    edit("a plain method added to the first block", lib("    pub fn e(&self) -> u32 { 4 }\n", " + c.e() * 1000"), 4213);
+    edit("a documented, cfg'd method added to the first block",
+        lib("    pub fn e(&self) -> u32 { 4 }\n    /// The fifth.\n    #[cfg(not(target_arch = \"wasm32\"))]\n    pub fn f(&self) -> u32 { 5 }\n", " + c.e() * 1000 + c.f() * 10000"), 54213);
+    edit("a new block before the others",
+        lib_with("impl C {\n    pub fn g(&self) -> u32 { 6 }\n}\n", "    pub fn e(&self) -> u32 { 4 }\n    /// The fifth.\n    #[cfg(not(target_arch = \"wasm32\"))]\n    pub fn f(&self) -> u32 { 5 }\n", " + c.e() * 1000 + c.f() * 10000 + c.g() * 100000"), 654213);
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -2821,7 +3759,7 @@ fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
     assert_eq!(o.rung, Rung::Patch, "a new fn and its first use in another crate, saved together: {:?}", o.lines);
     assert_eq!(run(), 29, "the dependent crate's new code calls the new fn");
     unsafe extern "C" fn no_panic(_: *mut *const u8, _: *mut usize) {}
-    crate::provided::register("parts", Default::default(), Default::default(), Default::default(), Default::default(), no_panic, 0, &[]);
+    crate::provided::register("parts", Default::default(), Default::default(), Default::default(), Default::default(), Default::default(), no_panic, 0, &[], Vec::new());
     let use_later = || vec![Edit { file: app_file, path: app_path.clone(), src: app_src("later").into_bytes() }];
     let o = unsafe { apply(up, use_later()) };
     assert_eq!(o.rung, Rung::Refuse, "a fn the provided crate lacks, with relax's inputs unchanged: {:?}", o.lines);

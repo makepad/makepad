@@ -207,8 +207,20 @@ pub fn capture(prog: &Program, owner: DefId, d: &Diag) -> BorrowError {
 fn snapshot(prog: &Program, span: Span, text: String, primary: bool) -> Label {
     let file = &prog.files[span.file as usize];
     let src = &file.src[..file.src_len as usize];
-    let lo = (span.lo as usize).min(src.len());
-    let hi = (span.hi as usize).clamp(lo, src.len());
+    // a position in a macro's expansion is blamed on the macro call that wrote it (rustc keeps
+    // the call site's span): clamped to the end of the text, it named the file's first call
+    // and its last line
+    let (lo, hi) = if file.token_input {
+        (span.lo, span.hi)
+    } else if span.lo >= file.src_len {
+        file.diagnostic_span(span.lo)
+    } else if span.hi > file.src_len {
+        (span.lo, file.diagnostic_pos(span.hi).max(span.lo))
+    } else {
+        (span.lo, span.hi)
+    };
+    let lo = (lo as usize).min(src.len());
+    let hi = (hi as usize).clamp(lo, src.len());
     let (line, col) = file.line_col(lo as u32);
     let (end_line, end_col) = if hi <= lo { (line, col + 1) } else { file.line_col(hi as u32) };
     let line_start = lo.saturating_sub(col - 1);
@@ -256,6 +268,8 @@ impl<'a> DiagCx<'a> {
         if let Some(v) = self.body.var_debug_info.iter().find(|v| v.place == *place && !v.place.projection.is_empty()) {
             return Some(v.name.clone());
         }
+        // append_local_to_string: a desugaring's local is a temporary to the reader
+        if self.body.local_decls[place.local.0 as usize].from_compiler_desugaring() { return None; }
         let mut s = self.local_name(place.local)?.to_string();
         let mut ty = self.body.local_decls[place.local.0 as usize].ty;
         let mut variant = 0u32;

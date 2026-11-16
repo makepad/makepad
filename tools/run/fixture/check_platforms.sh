@@ -8,6 +8,8 @@
 #   default packages: counter (the smallest app: platform + draw + widgets), calculator, clock (network + AI hub client),
 #   xr-stream (the XR stream's serving side), score-live (the Score composer: audio synth + score player)
 #   targets: CHECK_TARGETS, default every shipped one whose std is installed here (a missing one is reported, not failed)
+#   a package whose `[package.metadata.makepad] platforms` leaves a target's platform out is not checked for it (as in CI)
+# Errors and compiler warnings fail it.
 # From a lane worktree use check_platforms_all.sh: it runs the Apple targets on the mini and the rest on the Linux pool, in parallel.
 # Prints "PLATFORMS-OK <targets> (<s> s)" or "PLATFORMS-FAIL: <target: first error>..."; exit 0 / 1.
 set -u
@@ -28,20 +30,66 @@ done
 [ -n "$missing" ] && echo "not installed here (skipped):$missing"
 # targets asked for by name must be there: a node without them is a failed check, not a pass
 if [ -n "${CHECK_TARGETS:-}" ] && [ -n "$missing" ]; then echo "PLATFORMS-FAIL: targets not installed on this node:$missing (tools/run/fixture/install_xtool.sh)"; exit 1; fi
-pargs=""; for p in $pkgs; do pargs="$pargs -p $p"; done
+# a package's `[package.metadata.makepad] platforms` (desktop, web, mobile; CI reads the same list,
+# libs/devhub/src/orch/ci.rs declared_platforms): it is not checked for a target of a platform it does not list. No
+# list, or one with a word that names no platform, checks it for every target.
+platform_of() { case $1 in wasm32-*) echo web ;; *-android|*-androideabi|*-ios|*-ios-sim|*-tvos|*-tvos-sim) echo mobile ;; *) echo desktop ;; esac; }
+declared() { # declared <package>: the platforms its manifest lists, nothing for all
+  for f in $(git ls-files '*Cargo.toml' | xargs grep -l -x "name = \"$1\"" 2>/dev/null); do
+    [ "$(sed -n 's/^name = "\(.*\)"$/\1/p' "$f" | head -1)" = "$1" ] || continue
+    words=$(sed -n '/^\[package\.metadata\.makepad\]/,/^\[/s/^platforms *= *\[\(.*\)\].*/\1/p' "$f" | tr -d '"' | tr ',' ' ')
+    for w in $words; do case $w in desktop|web|mobile) ;; *) return ;; esac; done
+    echo $words
+    return
+  done
+}
+decl=(); for p in $pkgs; do decl+=("$(declared "$p")"); done
+pkgs_for() { # pkgs_for <target>: the -p words of the packages built for its platform
+  pl=$(platform_of "$1"); i=0; out=""
+  for p in $pkgs; do
+    d=${decl[$i]}; i=$((i + 1))
+    if [ -z "$d" ] || [[ " $d " == *" $pl "* ]]; then out="$out -p $p"; else echo "$p: not checked for $1 (its platforms: $d)" >&2; fi
+  done
+  echo "$out"
+}
+# one cargo invocation per set of packages: the targets that check the same set share it
+keys=(); tg=()
+for t in $targets; do
+  k=$(pkgs_for "$t")
+  [ -n "$k" ] || continue
+  found=""
+  for i in "${!keys[@]}"; do [ "${keys[$i]}" = "$k" ] && { tg[$i]="${tg[$i]} --target $t"; found=1; break; }; done
+  [ -n "$found" ] || { keys+=("$k"); tg+=("--target $t"); }
+done
 t0=$(date +%s)
+: > "$log/check"
+rc=0
 # -j: the mini has 10 cores and is also the arm64 bench box; the lease budget holds it to one build job
-cargo check --release -j 8 $args $pargs --message-format short > "$log/check" 2>&1
-rc=$?
+for i in "${!keys[@]}"; do
+  cargo check --release -j 8 ${tg[$i]} ${keys[$i]} --message-format short >> "$log/check" 2>&1 || rc=$?
+done
 secs=$(( $(date +%s) - t0 ))
 fail=""
-if [ $rc != 0 ]; then
+# compiler warnings fail the check too (a validated revision has none on any target it ships)
+warn=$(grep -E '^[^ ]+:[0-9]+:[0-9]+: warning' "$log/check" | sort -u)
+if [ $rc != 0 ] || [ -n "$warn" ]; then
   grep -E ': error(\[E[0-9]+\])?: |^error(\[E[0-9]+\])?: ' "$log/check" | grep -vE '^error: (could not compile|aborting|[0-9]+ targets? failed)' | sort -u | head -30
-  # cargo does not name the target of an error: re-check each one alone (the passing units are fresh now)
+  [ -n "$warn" ] && printf '%s\n' "$warn" | head -30
+  # cargo does not name the target of an error or a warning: re-check each one alone (the passing units are fresh
+  # now, and cargo replays their warnings)
   for t in $targets; do
-    cargo check --release -j 8 --target $t $pargs --message-format short > "$log/one" 2>&1 && continue
-    fail="$fail $t"
-    echo "$t: $(grep -E ': error|^error' "$log/one" | grep -vE '^error: (could not compile|aborting)' | head -1 | cut -c1-200)"
+    k=$(pkgs_for "$t" 2>/dev/null)
+    [ -n "$k" ] || continue
+    cargo check --release -j 8 --target $t $k --message-format short > "$log/one" 2>&1; one=$?
+    w=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: warning' "$log/one")
+    [ $one = 0 ] && [ "$w" = 0 ] && continue
+    if [ $one != 0 ]; then
+      fail="$fail $t"
+      echo "$t: $(grep -E ': error|^error' "$log/one" | grep -vE '^error: (could not compile|aborting)' | head -1 | cut -c1-200)"
+    else
+      fail="$fail $t($w warnings)"
+      echo "$t: $(grep -E '^[^ ]+:[0-9]+:[0-9]+: warning' "$log/one" | head -1 | cut -c1-200)"
+    fi
   done
   [ -z "$fail" ] && fail=" rc$rc($(grep -E '^error' "$log/check" | head -1 | cut -c1-160))"
 fi

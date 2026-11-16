@@ -2380,6 +2380,7 @@ impl Builder<'_> {
                 opt_match_place,
                 pat_span,
                 introductions: Vec::new(),
+                from_desugaring: self.desugaring_let,
             })),
         };
         self.local_decls.push(local);

@@ -51,9 +51,59 @@ static STUCK: AtomicUsize = AtomicUsize::new(0);
 pub fn stuck_threads() -> usize {
     STUCK.load(Ordering::Acquire)
 }
-const CAP: usize = 1 << 14;
-static RANGES: [AtomicPtr<Range>; CAP] = [const { AtomicPtr::new(std::ptr::null_mut()) }; CAP];
+/// The registered ranges in order, in segments: segment `s` holds `SEG0 << s` entries, made by the
+/// first `add` that reaches it and never freed, so the table grows with the run and an access into
+/// any range of it reports by name. (A fixed table of 16384 entries left a stale access past it
+/// to the fault policy's generic crash, unnamed: a session of layout patches had 29k groups.)
+const SEG0: usize = 1 << 10;
+const SEGS: usize = 40;
+static RANGES: [AtomicPtr<AtomicPtr<Range>>; SEGS] = [const { AtomicPtr::new(std::ptr::null_mut()) }; SEGS];
+/// Entries published: each is stored before N counts it (`add`).
 static N: AtomicUsize = AtomicUsize::new(0);
+/// One `add` at a time (the segments' writer; readers take no lock).
+static ADDING: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
+
+/// Entry `k`'s segment and its place in it.
+fn seg_of(k: usize) -> (usize, usize) {
+    let s = (k / SEG0 + 1).ilog2() as usize;
+    (s, k - SEG0 * ((1 << s) - 1))
+}
+
+/// Entry `k` (signal-safe: atomic loads only). None: its segment is not made.
+fn entry(k: usize) -> Option<&'static AtomicPtr<Range>> {
+    let (s, off) = seg_of(k);
+    let seg = RANGES.get(s)?.load(Ordering::Acquire);
+    (!seg.is_null()).then(|| unsafe { &*seg.add(off) })
+}
+
+/// The range of entry `k` (signal-safe).
+fn range_at(k: usize) -> Option<&'static Range> {
+    let p = entry(k)?.load(Ordering::Acquire);
+    (!p.is_null()).then(|| unsafe { &*p })
+}
+
+/// The first of the first `n` entries' ranges that `f` picks (signal-safe: a segment at a time).
+fn find(n: usize, f: impl Fn(&Range) -> bool) -> Option<&'static Range> {
+    let mut start = 0;
+    for (s, seg) in RANGES.iter().enumerate() {
+        if start >= n {
+            break;
+        }
+        let len = (SEG0 << s).min(n - start);
+        let seg = seg.load(Ordering::Acquire);
+        if !seg.is_null() {
+            for off in 0..len {
+                let p = unsafe { &*seg.add(off) }.load(Ordering::Acquire);
+                // (freed a whole run after it leaves the table)
+                if !p.is_null() && f(unsafe { &*p }) {
+                    return Some(unsafe { &*p });
+                }
+            }
+        }
+        start += SEG0 << s;
+    }
+    None
+}
 
 /// Registers a retired range (before it turns inaccessible). Entries go only with a run's end. Also
 /// a `stale.retire` flight-recorder event (`a` = lo, `b` = hi), found again by `retired_ns`.
@@ -77,47 +127,34 @@ fn add(lo: u64, hi: u64, kind: &'static str, name: String, version: u64, reason:
     start_watcher();
     let retired_ns = crate::clock::wall_ns();
     crate::inspect::flightrec::event("stale.retire", &format!("{} {} v{}: {}", kind, name, version, reason), lo, hi);
-    let k = N.fetch_add(1, Ordering::AcqRel);
-    if k >= CAP {
-        // (beyond the table a stale access is still a crash: the fault policy's generic path)
-        return;
+    let _adding = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+    let k = N.load(Ordering::Acquire);
+    let (s, off) = seg_of(k);
+    let mut seg = RANGES[s].load(Ordering::Acquire);
+    if seg.is_null() {
+        let made: Box<[AtomicPtr<Range>]> = crate::zone_alloc::kept_with(|| (0..SEG0 << s).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect());
+        seg = Box::into_raw(made) as *mut AtomicPtr<Range>;
+        RANGES[s].store(seg, Ordering::Release);
     }
     let r = crate::zone_alloc::kept_with(|| Box::into_raw(Box::new(Range { lo, hi, kind, name, version, reason, retired_ns, run_end })));
-    RANGES[k].store(r, Ordering::Release);
+    unsafe { &*seg.add(off) }.store(r, Ordering::Release);
+    N.store(k + 1, Ordering::Release);
 }
 
 /// The retired range holding `addr` (signal-safe: atomic loads only).
 pub fn lookup(addr: u64) -> Option<&'static Range> {
-    let n = N.load(Ordering::Acquire).min(CAP);
-    for r in &RANGES[..n] {
-        let p = r.load(Ordering::Acquire);
-        if !p.is_null() {
-            // (freed a whole run after it leaves the table)
-            let r: &'static Range = unsafe { &*p };
-            if addr >= r.lo && addr < r.hi {
-                return Some(r);
-            }
-        }
-    }
-    None
+    find(N.load(Ordering::Acquire), |r| addr >= r.lo && addr < r.hi)
 }
 
 /// Whether [lo, hi) touches a retired range (code readers -- disassembly, stub following -- skip
 /// such bytes: reading them faults like any stale access).
 pub fn overlaps(lo: u64, hi: u64) -> bool {
-    let n = N.load(Ordering::Acquire).min(CAP);
-    RANGES[..n].iter().any(|r| {
-        let p = r.load(Ordering::Acquire);
-        !p.is_null() && {
-            let r: &Range = unsafe { &*p };
-            lo < r.hi && hi > r.lo
-        }
-    })
+    find(N.load(Ordering::Acquire), |r| lo < r.hi && hi > r.lo).is_some()
 }
 
 /// Retired ranges registered.
 pub fn count() -> usize {
-    N.load(Ordering::Acquire).min(CAP)
+    N.load(Ordering::Acquire)
 }
 
 // ------------------------------------------------------------------ the fault side
@@ -477,6 +514,12 @@ fn site_of(frames: &[u64]) -> String {
 /// What the watcher told, for `makepad inspect <pid> stale`: (verdict line, report JSON).
 static ANSWERS: relax_session::sync::Mutex<Vec<(String, String)>> = relax_session::sync::Mutex::new(Vec::new());
 
+/// The verdicts of the stale accesses reported so far (a test waits for its access's).
+#[cfg(test)]
+pub(crate) fn verdicts() -> Vec<String> {
+    ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|a| a.0.clone()).collect()
+}
+
 /// Where in a retired range `addr` was (what kind of data the stale pointer pointed to; for
 /// code, which fn's code version and what invalidated it: invalid.rs).
 fn where_in(r: &Range, addr: u64) -> String {
@@ -554,12 +597,7 @@ pub fn cmd(req: &crate::inspect::Req, out: &mut crate::inspect::Out) {
     let n = req.num("n", 8) as usize;
     let total = count();
     out.line(&format!("retired ranges: {} (never reused){}", total, if total > n { format!(", the last {}", n) } else { String::new() }));
-    for slot in &RANGES[total.saturating_sub(n)..total] {
-        let p = slot.load(Ordering::Acquire);
-        if p.is_null() {
-            continue;
-        }
-        let r = unsafe { &*p };
+    for r in (total.saturating_sub(n)..total).filter_map(range_at) {
         out.line(&format!("  [{:#x}, {:#x}) {} `{}` v{}: {} (at {} ns)", r.lo, r.hi, r.kind, r.name, r.version, r.reason, r.retired_ns));
     }
 }
@@ -595,15 +633,18 @@ pub(crate) unsafe fn reset_statics() {
     for p in gone.drain(..) {
         drop(Box::from_raw(p.0));
     }
-    let n = N.load(Ordering::Acquire).min(CAP);
+    let _adding = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+    let n = N.load(Ordering::Acquire);
     let mut kept = 0;
     for k in 0..n {
-        let p = RANGES[k].swap(std::ptr::null_mut(), Ordering::AcqRel);
+        let Some(e) = entry(k) else { continue };
+        let p = e.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if p.is_null() {
             continue;
         }
         if (*p).run_end {
-            RANGES[kept].store(p, Ordering::Release);
+            // (entry `kept` is at or before `k`: its segment is made)
+            entry(kept).expect("an earlier entry's segment").store(p, Ordering::Release);
             kept += 1;
         } else {
             gone.push(GoneRange(p));
@@ -641,6 +682,25 @@ mod tests {
         assert!(crate::inspect::events::parked_now().is_empty(), "nothing waits for a decision");
         assert_eq!(super::stuck_threads(), 0, "the app can still hand its state over");
         assert!(crate::reload::restart_pending().iter().any(|p| p == &held[0]), "the restart is offered: {:?}", crate::reload::restart_pending());
+    }
+
+    /// A stale access past 16384 retired ranges still reports by name: the table grows (a fixed
+    /// table of 16384 left it to the generic crash, unnamed; a session of layout patches had 29k
+    /// groups).
+    #[test]
+    fn a_range_past_16384_still_reports_by_name() {
+        isolated_test!(a_range_past_16384_still_reports_by_name);
+        let n = (1usize << 14) + 100;
+        let at = |k: usize| 0x7f00_0000_0000u64 + k as u64 * 0x100;
+        for k in 0..n {
+            super::register(at(k), at(k) + 0x80, "invalidated code", format!("fn{k}"), 1, "a test".to_string());
+        }
+        assert_eq!(super::count(), n, "every range is counted");
+        let last = n - 1;
+        assert_eq!(super::lookup(at(last) + 0x10).map(|r| r.name.clone()), Some(format!("fn{last}")), "the last range is found by name");
+        assert!(super::lookup(at(last) + 0x90).is_none(), "the gap after a range is no range");
+        assert!(super::overlaps(at(last), at(last) + 1), "overlaps reaches past 16384 ranges");
+        assert!(!super::overlaps(at(n), at(n) + 0x80), "and past the last range there is none");
     }
 
     /// A thread parked at a stale access blocks the handover while it waits, and no longer once

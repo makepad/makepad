@@ -411,7 +411,7 @@ fn hosted_program(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> boo
             _ => flags.push(w.clone()),
         }
     }
-    let Ok(units) = unitgraph::unit_graph(sess, &workspace, &package, &flags) else { return false };
+    let Ok(units) = unitgraph::unit_graph(sess, &workspace, &package, &flags, false, &unify_for(sess, &package, false)) else { return false };
     let hal = units.units.iter().any(|u| unitgraph::window_host(&unitgraph::manifest_dir_of(&u.src_path)));
     *BOOT_UNITS.lock().unwrap() = Some((package, flags, units));
     hal
@@ -590,7 +590,7 @@ fn offer_boot_update(package: &str, change: crate::provided::ProvidedChange) -> 
         crate::first_frame::no_window(package, &e);
         return 1;
     }
-    let seen = HAL_RUN.load(Ordering::Acquire) && live_session() && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
+    let seen = HAL_RUN.load(Ordering::Acquire) && live_session() && !crate::progenv::unseen_run();
     if !seen {
         return crate::reload::host::apply_at_boot(&change);
     }
@@ -651,6 +651,33 @@ fn with_sysroot_proc_macro(mut units: unitgraph::Units, std_dir: &str) -> unitgr
     units
 }
 
+/// Whether a resolve of `package` binds the provided crates (host code built for the machine),
+/// and the one crate a test harness binds (Some: provided::HARNESS_BINDS). Only a program read
+/// for the machine binds: one read for another target (RELAX_CHECK_TARGET) has a different crate
+/// graph (makepad-script-std reaches makepad-windows-sys on Windows) and only type-checks, so
+/// every provided crate is read from source. `makepad check` runs none of the crates' code
+/// either, whatever source the loader was built from (an identity mismatch refused to check);
+/// its boundary audit (`check --boundary`) binds as a run does, since what it reports is what
+/// JIT-compiled code reaches past the bound ops. A test harness (`makepad test`) binds only the CPU budget: its crates are the tests'
+/// subject, built from their source as `cargo test` builds them, internals and all; the budget's
+/// own tests build it from source too.
+fn binds(sess: &std::sync::Arc<crate::Session>, package: &str, check_only: bool) -> (bool, Option<&'static str>) {
+    let machine = crate::cfg::CfgSet::machine(sess, &[]).triple();
+    let only = HARNESS_RUN.load(Ordering::Acquire).then_some(crate::provided::HARNESS_BINDS);
+    let bind = crate::cfg::CfgSet::host(sess, &[]).triple() == machine && (!check_only || crate::boundary::requested())
+        && only.is_none_or(|o| package.replace('-', "_") != o);
+    (bind, only)
+}
+
+/// The provided crates' closures whose features a resolve of `package` unifies with the loader's
+/// build: those it binds (`binds`), none for a resolve that binds nothing.
+pub(crate) fn unify_for(sess: &std::sync::Arc<crate::Session>, package: &str, check_only: bool) -> Vec<unitgraph::Unify> {
+    match binds(sess, package, check_only) {
+        (true, only) => crate::provided::unify_groups(only),
+        (false, _) => Vec::new(),
+    }
+}
+
 pub(crate) fn resolve_package(
     sess: &std::sync::Arc<crate::Session>,
     workspace: &str,
@@ -676,23 +703,35 @@ pub(crate) fn resolve_package(
     let pre = if boot {
         BOOT_UNITS.lock().unwrap().take()
     } else { None };
+    let unify = unify_for(sess, package, check_only);
     let units = if let Some((_, _, units)) = pre.filter(|(p, f, _)| units_json.is_empty() && p == package && f == cargo_flags) {
         Ok(units)
-    } else if units_json.is_empty() && check_only {
-        unitgraph::check_unit_graph(sess, workspace, package, cargo_flags)
     } else if units_json.is_empty() {
-        unitgraph::unit_graph(sess, workspace, package, cargo_flags)
+        unitgraph::unit_graph(sess, workspace, package, cargo_flags, check_only, &unify)
     } else {
         std::fs::read(units_json).map_err(|e| format!("{}: {}", units_json, e)).and_then(|d| unitgraph::Units::from_json(&d))
     }?;
+    // what the loader's features add to the program's own packages only adds code, as
+    // cargo's feature unification assumes of every feature
+    for u in &units.unified {
+        for f in &u.features {
+            if let Some(why) = crate::provided::non_additive_use(&u.dir, f) {
+                return Err(format!("{} {} is built into this JIT with its feature `{f}`, which the program's own build leaves off: the program would be built with it on, but `{f}` changes code that builds without it ({why}). Turn `{f}` on in the program's build, or build the JIT without it (tools/run/Cargo.toml)", u.name, u.version).into());
+            }
+        }
+    }
     let resolved_units = units.clone();
     let units = with_sysroot_proc_macro(units, std_dir);
     let t_load = Instant::now();
-    let mut g = unitgraph::load(&units, check_only)?;
+    let mut g = unitgraph::load(&units, check_only, options.allow_c)?;
     // cargo's `[env]` configuration of the workspace, for every crate's compile-time environment
     // and every build script (a build script's own run has it in its process environment)
     if std::env::var_os("RELAX_SCRIPT_DEPTH").is_none() {
-        crate::crates::set_config_env(crate::resolve::cargo_env(workspace)?);
+        let (env, ignored) = crate::resolve::cargo_env(workspace)?;
+        for entry in ignored {
+            eprintln!("{}: {entry} is ignored: RELAX_* names are Relax's own settings, never a cargo configuration's", crate::tool_name());
+        }
+        crate::crates::set_config_env(env);
     }
     let t_loaded = Instant::now();
     // The graph is enough to choose the host. Its window opens now, beside the rest of the
@@ -732,7 +771,7 @@ pub(crate) fn resolve_package(
     let t_inputs = Instant::now();
     let live_inputs = (watches && options.live).then(|| {
         let mut inputs = crate::reload::Inputs::collect(&g, std_dir, workspace);
-        inputs.set_graph(workspace, package, cargo_flags, &resolved_units);
+        inputs.set_graph(workspace, package, cargo_flags, &resolved_units, unify);
         inputs
     });
     let t_subst = Instant::now();
@@ -743,7 +782,7 @@ pub(crate) fn resolve_package(
     // checks as cargo test builds it, its host units (build scripts, proc macros and what they use)
     // with the profile's build-override. Relax's std crates (the sysroot's proc_macro too) keep
     // their own.
-    let profile = TEST_PROFILE.get().map(|p| crate::resolve::profile(workspace, p)).transpose()?;
+    let profile = unitgraph::test_profile().map(|p| crate::resolve::profile(workspace, p)).transpose()?;
     let ours = |dir: &str| crate::vfs::relative_path(dir, std_dir).is_none();
     let host_checks: Vec<Vec<String>> = g.pkg.iter().zip(&g.crates).map(|((dir, name, version), c)| match &profile {
         Some(p) if ours(dir) => p.checks(dir, name, version, c.registry, true).cfgs().map(str::to_string).collect(),
@@ -755,29 +794,16 @@ pub(crate) fn resolve_package(
             u.host_checks = Some(p.checks(&u.pkg.0, &u.pkg.1, &u.pkg.2, !u.path_source, true));
         }
         // and what each script is told of the profile its package builds for (PROFILE, OPT_LEVEL,
-        // DEBUG; a host-only package's: the build-override's)
+        // DEBUG; a host-only package's, and a host side's run: the build-override's)
         for bs in g.build_scripts.iter_mut() {
             let ((dir, name, version), c) = (&g.pkg[bs.krate], &g.crates[bs.krate]);
-            bs.profile = p.script(dir, name, version, c.registry, c.host_only || c.proc_macro);
+            bs.profile = p.script(dir, name, version, c.registry, bs.host || c.host_only || c.proc_macro);
         }
     }
     {
         // The loader's provided crates are host code built for the machine: their shims bind
-        // only where the program is read for the machine too. A program read for another target
-        // (RELAX_CHECK_TARGET) has a different crate graph (makepad-script-std reaches
-        // makepad-windows-sys on Windows) and only type-checks: it never runs the crates' code,
-        // so nothing binds and every provided crate is read from source.
-        // `makepad check` runs none of it either: every provided crate is read from source,
-        // whatever source the loader was built from (an identity mismatch refused to check).
-        // The boundary audit (`check --boundary`) binds as a run does: what it reports is what
-        // JIT-compiled code reaches past the bound ops.
-        let machine = crate::cfg::CfgSet::machine(sess, &[]).triple();
-        // A test harness (`makepad test`) binds only the CPU budget (provided::HARNESS_BINDS): its
-        // crates are the tests' subject, built from their source as `cargo test` builds them,
-        // internals and all. The budget's own tests build it from source too.
-        let only = HARNESS_RUN.load(Ordering::Acquire).then_some(crate::provided::HARNESS_BINDS);
-        let bind = crate::cfg::CfgSet::host(sess, &[]).triple() == machine && (!check_only || crate::boundary::requested())
-            && only.is_none_or(|o| package.replace('-', "_") != o);
+        // where `binds` says, and their sources must be what the loader was built from.
+        let (bind, only) = binds(sess, package, check_only);
         // The sources are hashed while the build scripts run (and, for a run's boot, while the
         // program loads): they share nothing (the hash reads the provided packages, the scripts
         // write the graph's cfgs and env).
@@ -837,7 +863,9 @@ pub(crate) fn resolve_package(
                 (None, Some(r)) if boot && native_request.is_some() => Some(unitgraph::Inherit::Binary(r)),
                 _ => None,
             };
-            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_mode, check_only, inherit, hook);
+            // (what runs the scripts: read only when there are any, its std walk is a millisecond)
+            let tool = if g.build_scripts.is_empty() { 0 } else { crate::std_source::script_tool() };
+            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, tool, native_mode, check_only, inherit, hook);
             let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
             let t_wait = Instant::now();
             (sources.map(|h| h.join().expect("provided source check")), scripts, scripts_ms, t_wait.elapsed().as_secs_f64() * 1e3)
@@ -952,9 +980,34 @@ fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::S
 }
 
 
+/// std's folder in one spelling, its canonical one, set back at the loader's start, after the
+/// inherited mounts are installed and before any thread runs (a set_var races every thread that
+/// reads the environment; a run's compile thread runs beside its host's). std's source paths --
+/// what its panic locations and file!() hold -- are spelled from it, and a RELAX_STD through the
+/// workspace's own folder (`<workspace>/../../std`) put that folder's text in them, so the record
+/// of std's code refused each data object holding one (the checkout's path: cache data_entry) and
+/// every warm start built that code again. (Not lexically: past a symbolic link `..` names the
+/// link target's parent.) The canonical spelling is the VFS's: a std in a repository's mount
+/// (std_source::select's choice for a mounted workspace, which a build script's child inherits)
+/// is on no disk. One that is no folder stays as written: a run refuses it (cmd_run_inner).
+pub fn canonical_std_env() {
+    let Some(v) = std::env::var_os("RELAX_STD").filter(|v| !v.is_empty()) else { return };
+    let Ok(c) = crate::vfs::canonicalize(&v) else { return };
+    let c = c.to_string_lossy().into_owned();
+    // (Windows: the plain spelling of a drive path, not its \\?\ form)
+    let c = match c.strip_prefix(r"\\?\") { Some(p) if p.as_bytes().get(1) == Some(&b':') => p.to_string(), _ => c };
+    if v.as_os_str() != std::ffi::OsStr::new(&c) {
+        // (an automatic choice stays marked as one: std_source::select)
+        if std::env::var_os("RELAX_STD_AUTO").as_deref() == Some(v.as_os_str()) {
+            std::env::set_var("RELAX_STD_AUTO", &c);
+        }
+        std::env::set_var("RELAX_STD", &c);
+    }
+}
+
 fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session: Option<&mut Option<crate::serve::Session>>) -> i32 {
     // Restore before resolution so a failed replacement compile is a JIT verdict too.
-    if crate::run_end::run_input("MAKEPAD_JIT_RECOVERY").is_some() {
+    if crate::run_end::run_input("RELAX_JIT_RECOVERY").is_some() {
         crate::hot_failure::enable();
         crate::hot_failure::restore();
     }
@@ -962,6 +1015,18 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     ERRORS_SEEN.store(0, Ordering::Relaxed);
     crate::clock::mark_process_start();
     jit::begin_startup_phase();
+    // the code a user's checkouts share (Target B, cache.rs shared_code)
+    crate::cache::set_shared_code(crate::cache::shared_code(crate::sandbox::policy(), crate::dirs::override_dir().is_some(), || {
+        let dir = crate::cache::shared_code_root();
+        let made = crate::pack::ensure_private_dir(&dir).and_then(|_| crate::pack::ensure_private_dir(&dir.join("cache")));
+        if let Err(e) = &made {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                eprintln!("relax: the shared code folder {} is refused ({e}): this run shares no code with other checkouts", dir.display());
+            }
+        }
+        made.map(|_| dir)
+    }));
     let mut driver_options = sess.options.clone();
     crate::registry_net::install();
     crate::pmhost::install();
@@ -973,6 +1038,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if let Some(v) = std::env::var_os("RELAX_AHEAD") {
         if v.to_str().and_then(crate::options::AheadLevel::parse).is_none() {
             eprintln!("relax: RELAX_AHEAD={} is not a level: minimal, balanced, aot-max or aot-min", v.to_string_lossy());
+            return 2;
+        }
+    }
+    // (canonical_std_env spelled it at the loader's start)
+    if let Some(v) = std::env::var_os("RELAX_STD").filter(|v| !v.is_empty()) {
+        if let Err(e) = crate::vfs::canonicalize(&v) {
+            eprintln!("relax: RELAX_STD={} is no folder ({e}): point it at std's sources (<checkout>/libs/relax/compiler/std)", v.to_string_lossy());
             return 2;
         }
     }
@@ -1031,7 +1103,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             }
             "--self-exec" => self_exec = true,
             "--profile" if i + 1 < args.len() => {
-                let _ = TEST_PROFILE.set(args[i + 1].clone());
+                unitgraph::set_test_profile(args[i + 1].clone());
                 i += 1;
             }
             "--live" => live_tests = true,
@@ -1065,7 +1137,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             }
             "--verbose" => driver_options.verbose = true,
             // read into the session (session_from_env)
-            "--no-asm" | "--allow-c" => {}
+            a if a == "--no-asm" || crate::options::is_grant_word(a) => {}
             "--report-to" if i + 1 < args.len() => {
                 if let Err(e) = report_open(&args[i + 1]) {
                     eprintln!("relax: {}", e);
@@ -1143,7 +1215,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             // with --check: list every site only relaxed mode accepts (what rustc would reject)
             "--strict-report" => crate::relaxed::STRICT_REPORT.store(true, Ordering::Relaxed),
             // `--boundary a,b`: with --check, audit what JIT-compiled code reaches inside
-            // crates a, b (boundary.rs)
+            // crates a, b (boundary.rs); `options`: the declaration-only Option guard.
             "--boundary" => {
                 crate::boundary::REQUESTED.store(true, Ordering::Relaxed);
                 i += 1;
@@ -1158,9 +1230,18 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if i >= args.len() {
         return usage();
     }
+    let boundary_options = boundary.as_ref().is_some_and(|b| b.len() == 1 && b[0] == "options");
+    let boundary_target = (boundary_options && crate::cfg::CfgSet::host(sess, &[]).triple() != crate::cfg::CfgSet::machine(sess, &[]).triple())
+        .then(|| crate::cfg::CfgSet::host(sess, &[]).triple());
+    if boundary.is_some() && !check { return usage(); }
     if also_requested && (!check || watch || root_only || selftest || session.is_some()) { return usage(); }
-    // a profile is a test's: `makepad run` builds as the release profile does
-    if TEST_PROFILE.get().is_some() && !harness && !plain_test { return usage(); }
+    // a profile is a test's: `makepad run` builds as the release profile does. A test's start of
+    // its package's binary (CARGO_BIN_EXE_<name>, which names it in RELAX_ARG0) has the test's, as
+    // cargo builds the binary with the test (relax issue 207), and so has that binary's run of
+    // itself again (from its run's link), and the check `makepad test` makes of the package's bins
+    // (test_pkg.rs start_bin_check)
+    let test_binary = || std::env::var_os("RELAX_ARG0").is_some() || std::env::current_exe().and_then(|e| e.canonicalize()).is_ok_and(|e| crate::selfexe::is_link(&e));
+    if unitgraph::test_profile().is_some() && !harness && !plain_test && !check && !test_binary() { return usage(); }
     driver_options.verbose &= !silent();
     VERBOSE.store(driver_options.verbose, Ordering::Relaxed);
     if driver_options.verbose { crate::tui::track_for_verbose(); }
@@ -1329,7 +1410,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         return 2;
     }
     let own = (!check && !embedded).then(|| std::env::current_exe().and_then(|e| e.canonicalize()).map_err(|e| e.to_string()).and_then(|exe| {
-        crate::selfexe::link(&exe, &crate::selfexe::program_name(&cargo_flags, &package), harness || plain_test)
+        // a test's links' folder is its launchers' words' (selfexe test_key: unitgraph.rs writes them)
+        let test = (harness || plain_test).then(|| {
+            let (profile, grants, ws) = (unitgraph::test_profile().unwrap_or(""), crate::options::grant_words(&sess.options, &sess.runtime).join(" "), workspace_dir());
+            let words: Vec<&str> = [package.as_str(), profile, grants.as_str(), ws.as_str()].into_iter().chain(cargo_flags.iter().map(String::as_str)).collect();
+            crate::selfexe::test_key(&words)
+        });
+        crate::selfexe::link(&exe, &crate::selfexe::program_name(&cargo_flags, &package), test.as_deref())
     }));
     if let Some(Err(why)) = &own {
         eprintln!("relax run: the program's own executable could not be made ({why}): a spawn of it runs the loader, not the program");
@@ -1794,16 +1881,18 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         eprintln!("boot-trace: proc-macro world cache flush {:.1} ms; {}", tf.elapsed().as_secs_f64() * 1e3, crate::pmhost::cache_line());
     }
     // the program's files are loaded: the macro world goes (hot reload or a run-time module
-    // builds it again from its disk cache). A live test session whose own crates ran hosted
-    // macros keeps it: the reload of an edited file of theirs runs those macros again, and the
-    // first edit would build the world again (CPU several times a later edit's; relax issue 144).
-    // The session holds it from then on either way.
+    // builds it again from its disk cache). A live test session whose own crates can reach a
+    // hosted macro keeps a world that exists: the reload of an edited file of theirs runs those
+    // macros again, and the first edit would build the world again (CPU several times a later
+    // edit's; relax issues 144 and 223). It reads the registered graph, the same however the load
+    // went: a load that restored those crates ran no hosted macro of theirs. No world: nothing to
+    // keep, and none is built for it. The session holds it from then on either way.
     let keep_world = live_tests && {
         let own: Vec<&str> = crate::check::workspace_crates(&prog, crate_of[subject_ci]).into_iter().map(|k| prog.syms.str(prog.crates[k as usize].name)).collect();
-        crate::pmhost::hosted_caller(|k| own.contains(&k))
+        crate::macro_reg::hosted_reachable(&own)
     };
-    if keep_world && crate::preload::trace() {
-        eprintln!("boot-trace: macro world kept: the live session's own crates run hosted macros");
+    if keep_world && crate::preload::trace() && crate::pmhost::world_alive() {
+        eprintln!("boot-trace: macro world kept: the live session's own crates can reach hosted macros");
     }
     let pm0 = crate::memstat::live_of(crate::memstat::Tag::PmHost);
     let freed = !keep_world && crate::pmhost::free_world();
@@ -1921,12 +2010,23 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
 
     drop(mem_g);
     let mem_g = crate::memstat::tag(crate::memstat::Tag::Sigs);
+    // A boundary guard reads every declaration of the audited crates, including modules
+    // a run's demand selection left out. Cross-target options use registered names only;
+    // on the machine resolve the same matched registry as Unit::new.
+    let boundary_provided = if boundary.is_some() && boundary_target.is_none() { crate::provided::take_for(&prog) } else { Vec::new() };
+    let boundary_crates = if let Some(names) = &boundary {
+        match crate::boundary::crates(&prog, &boundary_provided, names, boundary_target.is_some()) {
+            Ok(crates) => crates,
+            Err(e) => { eprintln!("relax: {e}"); return 2; }
+        }
+    } else { Vec::new() };
+    for (k, _) in &boundary_provided { prog.crates[*k as usize].rustc_laid = true; }
     // ---- signatures, layouts, impl tables
     let t = Instant::now();
     // A check reports validation errors of its crates' impl headers and field types, which
     // declaration collection lowers: the crates are marked before it runs (a run marks its app's
     // crates below).
-    let checked = if check {
+    let checked = if check && !boundary_options {
         crate::check::checked_crates(&prog, root, watch || root_only || session.is_some(), selftest || workspace_check, &also)
     } else { Vec::new() };
     // a one-shot check reuses the verdicts of the crates whose inputs did not change since a
@@ -1956,18 +2056,22 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // parsed) are written now, on the writer's thread beside the check, as a run's are after its
     // first present -- not after the check, which then waited seconds for them at its end
     // (record_check_front)
-    if check && !selftest && front_recordable() { crate::cache::start_deferred_front(); }
-    if check {
+    if check && !selftest && front_recordable() { crate::cache::start_deferred_front("the check's load"); }
+    if check && !boundary_options {
         let mut own = vec![false; prog.crates.len()];
         for &k in &checked { prog.crates[k as usize].validate = true; own[k as usize] = true; }
-        // rustc's import resolution replayed over the checked crates: the glob ambiguities it finds
-        // answer the name lookups of the declarations collected next
+        // rustc's import resolution replayed over the checked crates whose verdicts are not reused:
+        // the glob ambiguities it finds answer the name lookups of the declarations collected next.
+        // A crate whose verdict is reused is a finished crate, read as rustc reads one from its
+        // metadata (rsim.rs ExtTable, privacy.rs glob_ambiguity_in): a crate's import resolution
+        // rests only on its dependencies' bindings, so the replay of the others is the same
         prog.own_crates = own.clone();
         relax_types::lint::enable();
         let t = Instant::now();
-        prog.run_import_sim(&own);
+        let replay: Vec<bool> = (0..own.len()).map(|k| own[k] && !reuse.as_ref().is_some_and(|r| r.is_hit(k as u32))).collect();
+        prog.run_import_sim(&replay);
         if std::env::var_os("RELAX_CHECK_TIMES").is_some() {
-            eprintln!("relax check: import resolution replayed over {} crates in {:.1} ms", checked.len(), t.elapsed().as_secs_f64() * 1e3);
+            eprintln!("relax check: import resolution replayed over {} of {} crates in {:.1} ms", replay.iter().filter(|x| **x).count(), checked.len(), t.elapsed().as_secs_f64() * 1e3);
         }
     }
     // `makepad test`: the crates under test are checked as `cargo test` compiles them before any
@@ -2001,7 +2105,20 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // (a closure miss): load those files and collect again, until nothing is missing.
     let mut deferred_errors: Vec<String> = Vec::new();
     loop {
-        let mods = prog.misses_to_load(&crate::program::collect_misses_take());
+        // These declarations are lazy queries. Force them before draining misses, so a
+        // signature in an unreachable item can demand its dependency's skipped modules.
+        for (i, def) in prog.defs.iter().enumerate().filter(|(_, d)| boundary_crates.contains(&d.krate)) {
+            match def.kind {
+                DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => { tcx.fn_sig(&prog, DefId(i as u32)); }
+                DefKind::Static | DefKind::ForeignStatic => { tcx.const_ty(&prog, DefId(i as u32)); }
+                DefKind::Const if boundary_target.is_some() => { tcx.const_ty(&prog, DefId(i as u32)); }
+                _ => {}
+            }
+        }
+        let mut mods = prog.misses_to_load(&crate::program::collect_misses_take());
+        mods.extend(prog.skipped_files.keys().copied().filter(|m| boundary_crates.contains(&prog.mods[*m as usize].krate)));
+        mods.sort_unstable();
+        mods.dedup();
         if mods.is_empty() { break; }
         if std::env::var_os("RELAX_DEFERRED_TRACE").is_some() {
             eprintln!("relax deferred: signatures name types in {} skipped file(s): loaded before main", mods.len());
@@ -2036,6 +2153,22 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
     }
 
+    if boundary_options {
+        let (report, missing) = crate::boundary::options(&prog, &tcx, &boundary_crates, boundary_target);
+        // Signatures, statics and typed markers are lazy declaration queries. Do not let a failed query
+        // turn an incomplete scan into a passing guard.
+        let mut declaration_errors = Vec::new();
+        for (i, def) in prog.defs.iter().enumerate().filter(|(_, d)| boundary_crates.contains(&d.krate)) {
+            if matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn | DefKind::Static | DefKind::ForeignStatic)
+                || (boundary_target.is_some() && def.kind == DefKind::Const)
+            {
+                declaration_errors.extend_from_slice(tcx.signature_errors(&prog, DefId(i as u32)));
+            }
+        }
+        for error in &declaration_errors { eprintln!("{error}"); }
+        print!("{report}");
+        return i32::from(missing > 0 || !load_clean || !declaration_errors.is_empty() || !watch_load_errors.is_empty() || !crate::macro_reg::derive_failures().is_empty());
+    }
     if check {
         // a check runs no program: a constant that cannot be evaluated is a reported error
         // (E0080), as for `makepad test` / `live`, not the end of the process
@@ -2100,7 +2233,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             print!("{}", rep);
             std::mem::forget(u);
             if violations > 0 {
-                eprintln!("relax check --boundary: {} provided-crate violation(s) (`violation` rows)", violations);
+                eprintln!("relax check --boundary: {} provided-crate violation(s) (violation or option-entry rows)", violations);
                 return 1;
             }
             return 0;
@@ -2141,6 +2274,23 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 None => foreign.push((name, n)),
             }
         }
+        // A check type-checks Relax's std as its target reads it too. No run compiles all of it: a
+        // run compiles what it calls, and no JIT on this machine compiles another target's code
+        // (std's process_windows.rs on Linux), so a type error there waited for the first caller
+        // or the first run on that platform. Its bodies are checked as a run's app check checks
+        // the app's (a clean crate's verdict is stored, so an unchanged std costs nothing the
+        // next time); std is not linted.
+        if !selftest {
+            let t = Instant::now();
+            let std_crates = crate::check::std_crates(&u.prog);
+            let errors = crate::check::run_check_crates(&mut *u, &std_crates);
+            for e in &errors {
+                if crate::diag::enabled() { crate::diag::emit(&crate::diag::from_legacy(e, "typeck")); } else { eprintln!("{e}"); }
+            }
+            if !errors.is_empty() { foreign.push(("std".to_string(), errors.len())); }
+            phase("std check", t);
+            verbose!("relax check: std for the target: {} crates, {} body owners checked, {} errors", std_crates.len(), crate::check::RUN_CHECK[1].load(Ordering::Relaxed), errors.len());
+        }
         for (name, n) in &foreign {
             eprintln!("error: could not compile `{name}` due to {n} previous error{}", if *n == 1 { "" } else { "s" });
             if crate::check::published_crate(&u.prog, name) {
@@ -2154,7 +2304,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let t = Instant::now();
         if !selftest { record_check_front(&mut u, options, boot_cache); }
         phase("record check front", t);
-        if let (Some(r), Some((pre, graph))) = (reuse.as_ref().filter(|r| r.complete()), early_next.as_ref()) {
+        // (a failed check records nothing for the next: its std errors, say, are no app crate's
+        // verdict, and the next check would replay a pass)
+        if let (0, Some(r), Some((pre, graph))) = (code, reuse.as_ref().filter(|r| r.complete()), early_next.as_ref()) {
             let t = Instant::now();
             record_early(&u.prog, r, pre, *graph, args);
             phase("record early", t);
@@ -2253,6 +2405,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             Err(crate::provided::SourceCheckError::Invalid(e)) => {
                 if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "resolve")); }
                 eprintln!("relax: {e}");
+                // a launcher following the start (--report-to) learns why it ended, as from the resolve
+                report_failed(&e, 1);
                 return 1;
             }
             Ok(()) => {}
@@ -2532,6 +2686,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
     }
     if prelinked > 0 {
+        // a warm start: the watcher (started below) takes edits once no demand compile runs
+        jit::prelinked_start();
         if let Some(c) = unsafe { (*up).cache.as_ref() } {
             let s = &c.stats;
             let ms = |ns: u64| ns as f64 / 1e6;
@@ -2666,6 +2822,43 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         eprintln!("error: no test ran: a path dependency does not compile (`{tool} test` fails as `cargo test` does on code rustc rejects)", tool = crate::tool_name());
         return 101;
     }
+    // a build script's run (relax-front unitgraph.rs run_one): confined when its parent and this
+    // run, deciding over the same units (`script_confined`), both say so; a run where the two
+    // differ is refused
+    if std::env::var_os("RELAX_SCRIPT_DEPTH").is_some() || units.script.is_some() || crate::progenv::script_env_handed() {
+        match (unitgraph::script_confined(&g.raw), &units.script) {
+            (true, Some(folders)) => {
+                let roots = match (main_def, crate::sandbox::script::roots_of(folders)) {
+                    (Some(main_def), Ok(roots)) => (main_def, roots),
+                    (None, _) => {
+                        eprintln!("relax: a confined build script has no main: refused");
+                        return 1;
+                    }
+                    (_, Err(e)) => {
+                        eprintln!("relax: the confined build script cannot run: {e}");
+                        return 1;
+                    }
+                };
+                boot_over();
+                let code = unsafe { crate::sandbox::script::run_main(up, root, roots.0, &roots.1) };
+                flush_errors(true);
+                return code;
+            }
+            (true, None) => {
+                eprintln!("relax: this build script's run is confined (a registry or git package is among its units) and its parent named no folders for it: refused");
+                return 1;
+            }
+            (false, Some(_)) => {
+                eprintln!("relax: this build script's parent confined its run, and this run finds no registry or git package among its units under its policy: refused");
+                return 1;
+            }
+            (false, None) if crate::progenv::script_env_handed() => {
+                eprintln!("relax: this build script's run was handed a confined script's environment, and its units hold no registry or git package under its policy: refused");
+                return 1;
+            }
+            (false, None) => {}
+        }
+    }
     // the platform's start code runs the program's constructors before its entry (sections.rs)
     if !entry_defs.is_empty() || harness || !exports_mode && !HAL_RUN.load(Ordering::Acquire) {
         // the program's own code runs on this thread from here (its constructors, then its
@@ -2728,6 +2921,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let code = crate::harness::run(u, up, &[(label(subject_ci), root)]);
         let code = crate::check::finish_test_deps(code);
         flush_errors(true);
+        failed_bodies_line();
         return code;
     }
     let main_def = main_def.expect("a run without --exports has main");
@@ -2913,8 +3107,8 @@ pub(crate) fn note_native_bundle(handle: usize, path: &str) {
     }
 }
 
-/// (tests) The native libraries noted so far.
-#[cfg(test)]
+/// (tests) The native libraries noted so far (reload_host's test of the next run, unix only).
+#[cfg(all(test, unix))]
 pub(crate) fn native_bundle_count() -> usize {
     NATIVE_BUNDLES.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
@@ -2946,29 +3140,66 @@ pub(crate) fn native_definition(name: &str) -> Option<u64> {
 /// loader's crates, `crates`: a domain's own, None: any); a symbol no fn defines is the error a
 /// linker would report, except in a program that links only some of the library's packages
 /// (`partial`): there the C that calls it is a package's the program does not link, and its slot
-/// stays unbound (relax issue 174).
+/// stays unbound (relax issue 174). So does a symbol only archive members call that a linker
+/// would not take for the program: the library links every member, the program's imports pick
+/// the ones it needs as a linker's do (native_stub member_table, relax issue 197).
 fn native_callbacks(prog: &crate::program::Program, n: &crate::native::NativeLib, handle: usize, crates: Option<&std::collections::HashSet<u32>>) -> Result<NativeCallbacks, String> {
     let names = crate::os::proc::symbol_in(handle, crate::native_stub::NAMES);
     let slots = crate::os::proc::symbol_in(handle, crate::native_stub::SLOTS);
     if names == 0 || slots == 0 {
         return Ok(NativeCallbacks::default());
     }
-    let exports = crate::global_asm::exported_fns_of(prog, |k| crates.is_none_or(|c| c.contains(&k)));
-    let mut out = Vec::new();
-    let mut at = names as *const std::ffi::c_char;
-    let mut slot = slots;
+    let in_crates = |k: u32| crates.is_none_or(|c| c.contains(&k));
+    let exports = crate::global_asm::exported_fns_of(prog, in_crates);
+    // the NUL-terminated strings of the names table, one by one
+    fn read(at: &mut *const u8) -> String {
+        let s = unsafe { std::ffi::CStr::from_ptr(*at as *const std::ffi::c_char) };
+        *at = unsafe { at.add(s.to_bytes().len() + 1) };
+        s.to_string_lossy().into_owned()
+    }
+    let mut at = names as *const u8;
+    let mut stubs = Vec::new();
     loop {
-        let name = unsafe { std::ffi::CStr::from_ptr(at) }.to_string_lossy().into_owned();
+        let name = read(&mut at);
         if name.is_empty() {
             break;
         }
-        at = unsafe { at.add(name.len() + 1) };
-        let here = slot;
-        slot += 8;
-        match exports.get(&name) {
-            Some(&d) => out.push((here, d, name)),
-            None if n.partial => {}
-            None => return Err(format!("cannot load {} (--allow-c native library of {}): its C code calls `{}`, which no library and no `#[no_mangle]` fn of the program defines", n.path, n.crates.join(", "), name)),
+        stubs.push(name);
+    }
+    let mut out = Vec::new();
+    let mut needed: Option<std::collections::HashSet<String>> = None;
+    for (i, name) in stubs.iter().enumerate() {
+        let here = slots + 8 * i;
+        if let Some(&d) = exports.get(name) {
+            out.push((here, d, name.clone()));
+            continue;
+        }
+        if n.partial {
+            continue;
+        }
+        // read once, at the first symbol no fn defines: a library linked before the table has
+        // every callback needed
+        let needed = needed.get_or_insert_with(|| {
+            let magic = crate::native_stub::MEMBERS.as_bytes();
+            // compared byte by byte: after an old library's names come the traps' messages, which have no NUL
+            let has_table = (0..=magic.len()).all(|k| unsafe { *at.add(k) } == magic.get(k).copied().unwrap_or(0));
+            if !has_table {
+                return stubs.iter().cloned().collect();
+            }
+            read(&mut at);
+            let mut table = Vec::new();
+            loop {
+                let t = read(&mut at);
+                if t.is_empty() {
+                    break;
+                }
+                table.push(t);
+            }
+            let imports = crate::global_asm::foreign_names_of(prog, in_crates);
+            crate::native_stub::needed_callbacks(&table, &stubs, &|s| imports.contains(s))
+        });
+        if needed.contains(name) {
+            return Err(format!("cannot load {} (--allow-c native library of {}): its C code calls `{}`, which no library and no `#[no_mangle]` fn of the program defines", n.path, n.crates.join(", "), name));
         }
     }
     Ok(NativeCallbacks { lib: n.path.clone(), crates: n.crates.join(", "), slots: out })
@@ -3015,12 +3246,13 @@ pub(crate) fn bind_native_callbacks(u: &Unit, cb: &NativeCallbacks, owner: Optio
     Ok(())
 }
 
-/// Loads the libraries the build scripts link and the ones `#[link]` blocks of files from
+/// Loads the libraries the build scripts link (one a confined script named never from the working
+/// folder: os/proc.rs `load_library_outside_cwd`) and the ones `#[link]` blocks of files from
 /// `first_file` on name: (how many, the optional ones not found, the native library's callbacks
 /// to bind once the unit is made). A native bundle's load failure is fatal, with the loader's
 /// diagnostic and the crates it carries, and so is a callback the program does not define.
 /// The native library's callbacks are the fns of `crates` (a domain's; None: any).
-pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool)], native: Option<&crate::native::NativeLib>, first_file: usize, crates: Option<&std::collections::HashSet<u32>>) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
+pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool, bool)], native: Option<&crate::native::NativeLib>, first_file: usize, crates: Option<&std::collections::HashSet<u32>>) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
     let mut missing = Vec::new();
     // no-codegen mode: nothing is linked at run time -- native code is the host binary's, and
     // the program reaches only the symbols the host exports (jit.rs foreign_addr)
@@ -3039,8 +3271,9 @@ pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(Strin
         callbacks = loaded.inspect_err(|_| { let _ = std::fs::remove_file(&n.path); })?;
     }
     let provided_static = |name: &str| native.is_some_and(|n| n.statics.iter().any(|s| s == name));
-    for (name, fw) in link_libs {
-        if !crate::os::proc::load_library(name, *fw) && (*fw || !crate::os::proc::load_library_versioned(name)) {
+    for (name, fw, outside_cwd) in link_libs {
+        let loaded = if *outside_cwd { crate::os::proc::load_library_outside_cwd(name, *fw) } else { crate::os::proc::load_library(name, *fw) };
+        if !loaded && (*fw || !crate::os::proc::load_library_versioned(name)) {
             missing.push(name.clone());
         }
     }
@@ -3098,11 +3331,6 @@ pub(crate) fn host_thread() -> u64 {
 }
 /// `makepad run --harness` (`makepad test`): the program is a test harness.
 static HARNESS_RUN: AtomicBool = AtomicBool::new(false);
-
-/// `makepad test`'s cargo profile (`--profile <name>`, test_pkg.rs): the debug assertions and
-/// overflow checks the program's crates build with, as cargo test builds them (relax issue 141).
-/// None: a run, built as cargo's release profile leaves the code (no checks).
-static TEST_PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// A package binary its integration test started (CARGO_BIN_EXE_<name>): the receipt of the native
 /// build the test's run made (unitgraph `Inherit::Binary`, relax issue 151).
@@ -3209,9 +3437,12 @@ fn run_dir_receipt(name: &str, receipt: String, run_dir: &str) -> Option<String>
 
 pub(crate) const RUN_STATE_VARS: [&str; 8] = ["RELAX_STARTUP_T0", "RELAX_MAIN_MS", "RELAX_CACHE_STATE", "RELAX_LIVE_LOG", "RELAX_REPORT_TO", "RELAX_SELF_EXEC", "RELAX_SELF_EXEC_SILENT_ADDED", "RELAX_RUN_NATIVE"];
 
-/// Locations only: anchors_key covers workspace, run and std dirs, VFS content hashes cover
-/// edits, and the read log changes no checked input. Their spellings can leave env_key.
-pub(crate) const RUN_LOCATING_VARS: [&str; 5] = ["RELAX_WORKSPACE", "RELAX_EDITS", "RELAX_CACHE_DIR", "RELAX_READ_LOG", "RELAX_STD"];
+/// Locations only: the keys hold the workspace's, the run dir's and std's paths in their anchored
+/// spelling (a crate's root and files, std's among them), VFS content hashes cover edits, the read
+/// log changes no checked input, RELAX_STD_AUTO is RELAX_STD's spelling of an automatic choice, and
+/// the loader's executable is where its build lies (codegen_id is the build). Their spellings can
+/// leave env_key.
+pub(crate) const RUN_LOCATING_VARS: [&str; 7] = ["RELAX_WORKSPACE", "RELAX_EDITS", "RELAX_CACHE_DIR", "RELAX_READ_LOG", "RELAX_STD", "RELAX_STD_AUTO", "RELAX_LOADER"];
 
 static HAL_RUN: AtomicBool = AtomicBool::new(false);
 static APP_DOMAIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -3309,6 +3540,15 @@ pub(crate) fn link_attr_libs(prog: &crate::program::Program, first_file: usize) 
 /// with its code; std::process::__relax_lang_start::<T>(main) does the same.
 /// (a `#[no_main]` crate's `extern "C" fn main(argc, argv) -> c_int` is called as before)
 pub(crate) fn main_call(u: &mut Unit, main_def: DefId, entry: u64) -> Result<(u64, u64), String> {
+    Ok(match lang_start_slot(u, main_def)? {
+        Some(sid) => (u.entry(sid), entry),
+        None => (entry, 0),
+    })
+}
+
+/// The slot of std's start for a `main` that returns a value (it takes main as a fn value and
+/// reports an error); None for a main that returns nothing (it is entered itself).
+pub(crate) fn lang_start_slot(u: &mut Unit, main_def: DefId) -> Result<Option<u32>, String> {
     let main_ret = u.tcx.fn_sig(&u.prog, main_def).filter(|s| !s.header.abi.is_c_like()).map(|s| s.ret);
     match main_ret {
         Some(ret) if ret != u.tcx.tys.unit => {
@@ -3321,14 +3561,11 @@ pub(crate) fn main_call(u: &mut Unit, main_def: DefId, entry: u64) -> Result<(u6
                         && matches!(u.prog.def_path(*d).as_str(), "std::process::__relax_lang_start" | "std::process::imp::__relax_lang_start")
                 });
             match start {
-                Some(sd) => {
-                    let sid = u.fn_id(FnKey::Inst(sd, vec![ret]));
-                    Ok((u.entry(sid), entry))
-                }
+                Some(sd) => Ok(Some(u.fn_id(FnKey::Inst(sd, vec![ret])))),
                 None => Err("`fn main` returns a value but std has no process::__relax_lang_start".to_string()),
             }
         }
-        _ => Ok((entry, 0)),
+        _ => Ok(None),
     }
 }
 
@@ -3397,6 +3634,89 @@ fn start_ahead(up: *mut Unit, defs: Vec<DefId>) {
     }
 }
 
+/// The compile errors this process reported, by `reported_key`: a failed build's stub install and
+/// the run's flushes (each error once), the background check (typeck_bg.rs), and the launcher
+/// report of a compile error a test met (jit.rs rt_catch_panic; its own key space).
+static REPORTED: relax_session::sync::Mutex<Option<std::collections::HashSet<u64>>> = relax_session::sync::Mutex::new(None);
+
+/// An error's key: its diagnostic's first line, without the `compile error in <fn>: ` a failed
+/// build's note puts before it, so the stub's note and the background check's report of one body
+/// meet.
+fn reported_key(space: u8, text: &str) -> u64 {
+    let line = text.lines().next().unwrap_or("");
+    let line = line.strip_prefix("compile error in ").and_then(|r| r.split_once(": ").map(|(_, d)| d)).unwrap_or(line);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&(space, line), &mut h);
+    std::hash::Hasher::finish(&h)
+}
+
+/// Whether `text` is reported for the first time in this process (and from now on it is).
+/// `space` 0: the error itself; 1: its launcher `report:` line.
+pub(crate) fn first_report(space: u8, text: &str) -> bool {
+    let key = reported_key(space, text);
+    let _k = crate::zone_alloc::kept();
+    REPORTED.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(std::collections::HashSet::new).insert(key)
+}
+
+/// Bodies whose build failed and got the stub that panics when called (jit.rs install_error), in
+/// order: a test run's end names each once.
+static FAILED_BODIES: relax_session::sync::Mutex<Vec<String>> = relax_session::sync::Mutex::new(Vec::new());
+
+pub(crate) fn note_failed_body(name: &str) {
+    let mut v = FAILED_BODIES.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|n| n == name) {
+        let _k = crate::zone_alloc::kept();
+        v.push(name.to_string());
+    }
+}
+
+/// A test run's last line about its compile errors (each printed in full when it happened): the
+/// bodies that did not compile, each once.
+fn failed_bodies_line() {
+    let v = FAILED_BODIES.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.is_empty() {
+        eprintln!("relax: {} bod{} did not compile (the error{} above): {}", v.len(), if v.len() == 1 { "y" } else { "ies" }, if v.len() == 1 { " is" } else { "s are" }, v.join(", "));
+    }
+}
+
+/// Launcher reports of errors printed on the owner (`print_new_errors`), written by the next flush.
+static PENDING_REPORTS: relax_session::sync::Mutex<Vec<String>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// Prints the run unit's compile errors noted since the last print, each once (`first_report`); on
+/// the owner. What the launcher is to get is returned (the report file may be a FIFO a slow
+/// reader drains: written off the owner).
+fn print_errors_since(u: &mut Unit) -> Vec<String> {
+    let seen = ERRORS_SEEN.load(Ordering::Relaxed) as usize;
+    if u.errors.iter().skip(seen).any(|e| e.contains("internal compiler error")) {
+        crate::tui::keep_log();
+    }
+    // printed with --quiet as well: an error no call ever panics on (a constant's, which the
+    // program reads as a stand-in value) reaches the user only here
+    let mut new = Vec::new();
+    for e in u.errors.iter().skip(seen) {
+        if first_report(0, e) {
+            eprintln!("relax: [t={:.0} ms] {}", crate::clock::ms_since_start(), e);
+            new.push(e.to_string());
+        }
+    }
+    ERRORS_SEEN.store(u.errors.len() as u64, Ordering::Relaxed);
+    if reporting() || crate::run_state::observed() { new } else { Vec::new() }
+}
+
+/// A failed build's stub was installed (jit.rs install_error, on the owner): its error is printed
+/// now, not at the run's end.
+pub(crate) fn print_new_errors(u: &mut Unit) {
+    // (a proc-macro host's or a build script's unit: not the run's)
+    if !std::ptr::eq(u as *const Unit, unsafe { RUN_UNIT } as *const Unit) {
+        return;
+    }
+    let reports = print_errors_since(u);
+    if !reports.is_empty() {
+        let _k = crate::zone_alloc::kept();
+        PENDING_REPORTS.lock().unwrap_or_else(|p| p.into_inner()).extend(reports);
+    }
+}
+
 /// Prints new compile errors as they happen (each failed fn panics only if it is called).
 fn flush_errors(block: bool) {
     let up = unsafe { RUN_UNIT };
@@ -3414,25 +3734,15 @@ fn flush_errors(block: bool) {
         FLUSHED.store(crate::owner::SERVED.load(Ordering::Relaxed), Ordering::Relaxed);
         let u = unsafe { &mut *up };
         u.flush_query_errors(false);
-        let seen = ERRORS_SEEN.load(Ordering::Relaxed) as usize;
-        if u.errors.iter().skip(seen).any(|e| e.contains("internal compiler error")) {
-            crate::tui::keep_log();
-        }
-        // printed with --quiet as well: an error no call ever panics on (a constant's, which the
-        // program reads as a stand-in value) reaches the user only here
-        for e in u.errors.iter().skip(seen) {
-            eprintln!("relax: [t={:.0} ms] {}", crate::clock::ms_since_start(), e);
-        }
-        // the report file may be a FIFO a slow reader drains: written after the owner thread releases it
-        let to_report: Vec<String> = if u.errors.len() > seen && (reporting() || crate::run_state::observed()) { u.errors.iter().skip(seen).map(|e| e.to_string()).collect() } else { Vec::new() };
-        ERRORS_SEEN.store(u.errors.len() as u64, Ordering::Relaxed);
-        to_report
+        print_errors_since(u)
     };
-    let to_report = if block {
+    let mut to_report = if block {
         crate::owner::call(crate::owner::Class::Program, body)
     } else {
         crate::owner::publish(body)
     };
+    // the report file may be a FIFO a slow reader drains: written after the owner thread releases it
+    to_report.splice(0..0, std::mem::take(&mut *PENDING_REPORTS.lock().unwrap_or_else(|p| p.into_inner())));
     for e in to_report {
         report("error", &e);
     }
@@ -3485,13 +3795,31 @@ static DOMAIN_PRESENT_WALL: AtomicU64 = AtomicU64::new(0);
 /// ... and which domain that was (its package and id), for the settle rebuild's give-up line
 static DOMAIN_PRESENT_NAME: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
 
+/// The latest start a settle round follows: the program's first present, a domain's, or the
+/// quiet start of a program that never presents (jit::QUIET_START_NS); 0 before any.
+fn latest_present() -> u64 {
+    FIRST_PRESENT_WALL.load(Ordering::Acquire).max(DOMAIN_PRESENT_WALL.load(Ordering::Acquire)).max(jit::QUIET_START_NS.load(Ordering::Acquire))
+}
+
+/// A program that never presents rebuilds (the settle rebuild) only once it has lived this long past
+/// its quiet start: a CLI tool or a test run that ends soon after it would pay the rebuild's encode
+/// and restore (0.1 s off the program's threads for a small program, 1-2.5 s for a large one) just
+/// before its exit gives the memory back anyway. The wait only delays a rebuild, it never refuses one.
+const HEADLESS_REBUILD_AFTER_NS: u64 = 5_000_000_000;
+
+/// A program that never presents, quiet at its start since `quiet_start` (0: not yet), is too young
+/// at `now` to rebuild (HEADLESS_REBUILD_AFTER_NS).
+fn headless_too_young(quiet_start: u64, now: u64) -> bool {
+    quiet_start == 0 || now < quiet_start.saturating_add(HEADLESS_REBUILD_AFTER_NS)
+}
+
 pub(crate) fn domain_present(name: String) {
     *DOMAIN_PRESENT_NAME.lock().unwrap_or_else(|e| e.into_inner()) = name;
     DOMAIN_PRESENT_WALL.fetch_max(jit::wall_ns().max(1), Ordering::Release);
 }
 
-/// The settle rebuild of this round stopped trying (every try said not now): the run goes on with
-/// its state as it is. Logged and in the flight recorder, with the domain whose first frame
+/// The settle rebuild of this round stopped trying (every try said not now, or a costly one failed
+/// as the last one had: settle_rebuild::Round): the run goes on with its state as it is. Logged and in the flight recorder, with the domain whose first frame
 /// started the round.
 fn settle_gave_up(tries: u32, why: &str) {
     let domain = if DOMAIN_PRESENT_WALL.load(Ordering::Acquire) > FIRST_PRESENT_WALL.load(Ordering::Acquire) {
@@ -3548,13 +3876,14 @@ const MONITOR_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
 const MONITOR_QUIET: u32 = 50;
 
 /// What the monitor's duties follow: when none of it changes, there is nothing to do soon.
-fn monitor_activity() -> [u64; 7] {
+fn monitor_activity() -> [u64; 8] {
     [
         jit::COMPILED_FNS.load(Ordering::Relaxed) + jit::TIER1_INSTALLS.load(Ordering::Relaxed),
         jit::reclaim_generation(),
         jit::demand_compiled(),
         FIRST_PRESENT_WALL.load(Ordering::Relaxed),
         DOMAIN_PRESENT_WALL.load(Ordering::Relaxed),
+        jit::QUIET_START_NS.load(Ordering::Relaxed),
         crate::cache::RECORDS.load(Ordering::Relaxed),
         crate::borrowck::lazy::checked(),
     ]
@@ -3660,9 +3989,10 @@ fn try_settle(drops: &mut jit::SettleDrops, trim: bool) -> bool {
         let pending = u.cache.as_ref().map_or(0, |c| c.pending_bytes());
         let spill = u.cache.as_mut().and_then(|c| c.spill_take());
         let at = crate::clock::ms_since_start();
-        let present = FIRST_PRESENT_WALL.load(Ordering::Acquire).max(DOMAIN_PRESENT_WALL.load(Ordering::Acquire));
+        let present = latest_present();
         let landmark = if present == 0 { "before first present".to_owned() } else {
-            format!("latest first present +{:.0} ms", jit::wall_ns().saturating_sub(present) as f64 / 1e6)
+            let what = if jit::presented() { "latest first present" } else { "quiet start (no present)" };
+            format!("{what} +{:.0} ms", jit::wall_ns().saturating_sub(present) as f64 / 1e6)
         };
         Some((drops, pending, spill, at, landmark, retired))
     })) else { return false };
@@ -3736,9 +4066,9 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         let settle_stress = std::env::var("RELAX_SETTLE_STRESS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&ms| ms > 0);
         let mut last_stress = Instant::now();
         // the settle rebuild (jit settle_rebuild.rs): once per first present, retried while its
-        // preconditions fail
+        // preconditions fail (settle_rebuild::Round: how often)
         let (mut rebuild_over, mut rebuild_round, mut rebuild_done) = (!jit::settle_rebuild::enabled(), None, false);
-        let (mut rebuild_next, mut rebuild_tries, mut rebuild_said) = (Instant::now(), 0u32, String::new());
+        let (mut rebuild_next, mut rebuild, mut rebuild_said) = (Instant::now(), jit::settle_rebuild::Round::default(), String::new());
         let mut present_bytes = Vec::new();
         let (mut quiet, mut seen, mut trimmed) = (0u32, 0u64, 0u64);
         // growth relief (below): the resident size after the last trim and when it ran
@@ -3760,7 +4090,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         loop {
             // idle: one look a second (a settle request wakes it at once)
             let idle = still >= MONITOR_QUIET && present.is_none() && mem_snapshot.is_none() && settle_stress.is_none()
-                && !mid_busy.load(Ordering::Relaxed) && FIRST_PRESENT_WALL.load(Ordering::Relaxed) != 0;
+                && !mid_busy.load(Ordering::Relaxed) && latest_present() != 0;
             if idle { std::thread::park_timeout(MONITOR_IDLE) } else { std::thread::sleep(MONITOR_TICK) }
             if crate::run_threads::ending() { return; }
             // inspect's timeline names the monitor's work (its owner requests and its own time)
@@ -3813,7 +4143,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             let start = MAIN_START_WALL.load(Ordering::Relaxed);
             let since = main_ms.saturating_sub(mid_last);
             // also with no new code: the manifest whose window closed, the collected program
-            let left = !MID_MANIFEST_DONE.load(Ordering::Relaxed) && jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed)
+            let left = !MID_MANIFEST_DONE.load(Ordering::Relaxed) && jit::started() && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed)
                 || !COLLECTED_CURRENT.load(Ordering::Relaxed) && !MID_COLLECTED_TRIED.load(Ordering::Relaxed)
                 || jit::live_startup_done() && crate::cache::front_graph_pending();
             // the warm record (manifest, front graph, collected program) is written as soon
@@ -3852,9 +4182,10 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                     busy.store(false, Ordering::SeqCst);
                 });
             }
-            // the program's teardown is built ahead once the first frame has been up for 1 s
-            // (jit::prepare_teardown): a quit then runs it instead of compiling it
-            let presented = jit::FIRST_PRESENT_NS.load(Ordering::Acquire);
+            // the program's teardown is built ahead once the first frame has been up for 1 s (a
+            // program that never presents: 1 s after its quiet start) (jit::prepare_teardown): a
+            // quit then runs it instead of compiling it
+            let presented = jit::started_ns();
             if !teardown_started && presented != 0 && jit::wall_ns().saturating_sub(presented) >= 1_000_000_000 {
                 teardown_started = true;
                 let up = unsafe { RUN_UNIT };
@@ -3868,7 +4199,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             // the deferred cache records of this tick's installs (rule I-PUB: bounded publishes)
             if jit::records_due() { let _s = crate::inspect::timeline::span("run-monitor cache records"); jit::drain_records_bounded(); }
             if settle_on {
-                let present = FIRST_PRESENT_WALL.load(Ordering::Acquire).max(DOMAIN_PRESENT_WALL.load(Ordering::Acquire));
+                let present = latest_present();
                 if present != settle_present {
                     settle_present = present;
                     settle_watch.settled = None;
@@ -3897,7 +4228,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 // main-thread request between two of them. None once the run quits: the process
                 // gives its memory back as it ends, and the app's shutdown has the owner
                 let now_ns = jit::wall_ns();
-                let settled_d = if !jit::QUIT_SEEN.load(Ordering::Relaxed) && (FIRST_PRESENT_WALL.load(Ordering::Acquire) != 0 || reclaim_requested)
+                let settled_d = if !jit::QUIT_SEEN.load(Ordering::Relaxed) && (latest_present() != 0 || reclaim_requested)
                     && (reclaimed != Some(n) && now_ns.saturating_sub(last_drop_ns) >= SETTLE_DROP_EVERY_NS || reclaim_requested) {
                     last_drop_ns = now_ns;
                     let _s = crate::inspect::timeline::span("run-monitor settle sweep");
@@ -3961,11 +4292,12 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             if settled.is_some() && rebuild_round != Some(settle_present) {
                 rebuild_round = Some(settle_present);
                 rebuild_done = false;
-                rebuild_tries = 0;
+                rebuild = jit::settle_rebuild::Round::default();
                 rebuild_next = Instant::now();
             }
             let rebuild_block: Option<&'static str> = if rebuild_over || rebuild_done || Instant::now() < rebuild_next { Some("") }
                 else if settled.is_none() { Some("not settled") }
+                else if !jit::presented() && headless_too_young(jit::QUIET_START_NS.load(Ordering::Acquire), jit::wall_ns()) { Some("under 5 s since the quiet start of a program that never presents") }
                 else if !(COLLECTED_CURRENT.load(Ordering::Relaxed) || COLLECTED_RESTORED.load(Ordering::Relaxed)) { Some("the collected image is not current") }
                 else if COLLECTED_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).is_some() { Some("the collected image's tables are not adopted yet") }
                 else if !MID_MANIFEST_DONE.load(Ordering::Relaxed) { Some("the mid-run manifest is not written") }
@@ -3981,26 +4313,30 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             if rebuild_block.is_none() {
                 let up = unsafe { RUN_UNIT };
                 if !up.is_null() {
-                    rebuild_tries += 1;
+                    rebuild.tries += 1;
+                    let tries = rebuild.tries;
                     let _s = crate::inspect::timeline::span("run-monitor settle rebuild");
-                    match jit::settle_rebuild::run(up, settle_stress.is_none() && rebuild_tries <= jit::settle_rebuild::TAIL_WAIT) {
+                    match jit::settle_rebuild::run(up, settle_stress.is_none() && tries <= jit::settle_rebuild::TAIL_WAIT) {
                         jit::settle_rebuild::Outcome::Done => rebuild_done = true,
                         jit::settle_rebuild::Outcome::Refused(why) => {
-                            crate::inspect::flightrec::event("settle.refused", &why, rebuild_tries as u64, 0);
+                            crate::inspect::flightrec::event("settle.refused", &why, tries as u64, 0);
                             verbose!("relax settle rebuild refused: {why}");
                             rebuild_over = true;
                         }
-                        jit::settle_rebuild::Outcome::Retry(why) => {
-                            rebuild_next = Instant::now() + std::time::Duration::from_secs(1);
-                            if rebuild_tries >= jit::settle_rebuild::TAIL_WAIT + 40 {
-                                rebuild_done = true;
-                                settle_gave_up(rebuild_tries, &why);
+                        retry => {
+                            let why = retry.why();
+                            match rebuild.wait(&retry) {
+                                Some(wait) => rebuild_next = Instant::now() + wait,
+                                None => {
+                                    rebuild_done = true;
+                                    settle_gave_up(tries, why);
+                                }
                             }
                             if why != rebuild_said {
                                 // each new reason once: why a run's rebuild waits shows without --verbose
-                                crate::inspect::flightrec::event("settle.deferred", &why, rebuild_tries as u64, 0);
-                                verbose!("relax settle rebuild deferred (try {rebuild_tries}): {why}");
-                                rebuild_said = why;
+                                crate::inspect::flightrec::event("settle.deferred", why, tries as u64, 0);
+                                verbose!("relax settle rebuild deferred (try {tries}): {why}");
+                                rebuild_said = why.to_string();
                             }
                         }
                     }
@@ -4069,7 +4405,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 }
             }
             if runtime.mem_trim {
-                let n = if FIRST_PRESENT_WALL.load(Ordering::Acquire) != 0 {
+                let n = if latest_present() != 0 {
                     jit::reclaim_generation()
                 } else {
                     jit::COMPILED_FNS.load(Ordering::Relaxed) + jit::TIER1_INSTALLS.load(Ordering::Relaxed)
@@ -4206,9 +4542,8 @@ static DONE: AtomicBool = AtomicBool::new(false);
 
 fn finish_run(why: &'static str, code: Option<i32>) {
     jit::exec_check();
-    crate::borrowck::lazy::stop();
-    let Some(exit) = EXIT_SUMMARY.get() else { return };
-    if DONE.swap(true, Ordering::AcqRel) { return; }
+    let Some(exit) = EXIT_SUMMARY.get() else { crate::borrowck::lazy::stop(); return };
+    if DONE.swap(true, Ordering::AcqRel) { crate::borrowck::lazy::stop(); return; }
     // ending on the owner thread itself (an initializer's process::exit): it cannot serve the
     // exit worker while it waits for it
     EXIT_CALLER_HOLDS.store(crate::owner::is_owner(), Ordering::SeqCst);
@@ -4225,6 +4560,11 @@ fn finish_run(why: &'static str, code: Option<i32>) {
         }
         verbose!("relax quit: the quit write's last passes before the exit took {:.1} ms", start.elapsed().as_secs_f64() * 1e3);
     }
+    // the background borrow checks stop after the quit write: their stop ends every preemptible
+    // step (preempt::stop_all), and from then on the cache makes no slot key -- a last pass that
+    // ran after it kept the startup manifest of the run's first seconds (record_manifest), so the
+    // next launch linked the rest of the session on the UI thread at each first call
+    crate::borrowck::lazy::stop();
     jit::begin_exit();
     jit::solver_work_report_at_exit();
     // a JIT thread that panicked during the run is said once more at its end (inspect threads has the rows)
@@ -4366,9 +4706,13 @@ static MID_YIELDS: AtomicU64 = AtomicU64::new(0);
 fn mid_yielded() {
     MID_YIELDS.fetch_add(1, Ordering::Relaxed);
 }
-/// The manifest's slot count when a mid-run write last recorded it: the quit write records it
-/// again with the session's later installs
+/// The install order's length when a mid-run write last recorded the manifest (or its tail): the
+/// quit write records the session's later installs as its tail
 static MID_MANIFEST_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The last mid-run write found an in-session rebuild of the startup image due (cache
+/// image_refresh_due): the next one opens the stores spills wrote first, as the image takes their
+/// entries
+static IMAGE_REFRESH_WANTED: AtomicBool = AtomicBool::new(false);
 
 /// Compile totals since boot, the startup list for the aot levels, and the JSON report.
 /// jit::wall_ns() when main was called (RELAX_MAIN_COMPILE_LOG's time base)
@@ -4443,6 +4787,13 @@ static QUIT_WRITE_RUNNING: AtomicBool = AtomicBool::new(false);
 /// finish_run waits for the quit write: its passes come back to back, and the first whole one is
 /// its last.
 static QUIT_WRITE_FINISHING: AtomicBool = AtomicBool::new(false);
+/// A write's manifest and crate records give the owner back to a waiting request -- except in the
+/// quit write's last passes, which the exit waits for once the window is gone: a request then is
+/// the end of a thread that outlives the window, and a pass that gave way to it was followed by the
+/// exit, the whole session's manifest dropped.
+fn quit_write_gives_way() -> bool {
+    !QUIT_WRITE_FINISHING.load(Ordering::SeqCst) && crate::owner::request_waiting()
+}
 /// Ends QUIT_WRITE_RUNNING when the quit write's thread ends, however it ends.
 struct QuitWriteEnds;
 impl Drop for QuitWriteEnds {
@@ -4458,7 +4809,7 @@ fn quit_mark() {
     // the quit write and the exit's commit without waiting on the disk (store.rs Slot::tail)
     crate::store::set_exiting();
     if ONCE.swap(true, Ordering::SeqCst) || unsafe { RUN_UNIT }.is_null() { return; }
-    if jit::FIRST_PRESENT.load(Ordering::Acquire) {
+    if jit::started() {
         jit::ORDER_UNTIL_NS.fetch_min(jit::wall_ns(), Ordering::Relaxed);
     }
     { let _k = crate::zone_alloc::kept();
@@ -4489,6 +4840,9 @@ fn quit_mark() {
             let ms = if QUIT_WRITE_FINISHING.load(Ordering::SeqCst) { 1 } else if r.is_some() { 100 } else { 10 };
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
+        // the macro world alive now (kept by a live session, or built again for an edit or a
+        // run-time module): what it compiled since the boot's flush (relax PR 222)
+        crate::pmhost::flush_cache();
         // the generations the write replaced go now: the exit summary may never run (a harness
         // kills the app, a framework ends the process)
         if r.is_some() { crate::cache::retire_replaced_in_use(); }
@@ -4574,7 +4928,7 @@ fn record_check_front(u: &mut Unit, options: &crate::options::Options, boot: Opt
         Ok(c) => c,
         Err(e) => { verbose!("relax check: front images not written: {}", e); return; }
     };
-    let n = push_front_images(&u.prog, &mut c);
+    let (n, _) = push_front_images(&u.prog, &mut c, &|| false);
     c.record_front_crates(&u.prog);
     let written = match c.spill_take() {
         Some(s) => s.write().map(|_| ()),
@@ -4610,20 +4964,28 @@ fn record_early(prog: &crate::program::Program, reuse: &crate::check_reuse::Reus
 static CHECK_RECORDS_COLLECTED: AtomicBool = AtomicBool::new(false);
 
 /// References to the images of the program's files (and their parts) that their crate stores
-/// do not have yet (front.rs: each image was written when its file or part was published);
-/// the count queued.
-pub(crate) fn push_front_images(prog: &crate::program::Program, c: &mut crate::cache::Cache) -> usize {
+/// do not have yet (front.rs: each image was written when its file or part was published):
+/// the count queued, and whether every file's were taken. Each file's images are taken once
+/// (Cache::front_file_taken): a mid-run write made two keys for each of the program's files
+/// every time, 16-43 ms on the owner while a frame's install waited. `stop`: a waiting request
+/// goes first, and a later write takes the files left (false: not all were taken).
+pub(crate) fn push_front_images(prog: &crate::program::Program, c: &mut crate::cache::Cache, stop: &dyn Fn() -> bool) -> (usize, bool) {
     let mut n = 0;
+    let mut taken = 0u32;
     for i in 0..prog.files.len() {
         // (a live edit's version: an eager parse, whose ids are not a boot parse's -- cache enc_file)
         if prog.is_edit_version(i as u32) { continue; }
         let f = &prog.files[i];
         let (Some(path), Some(&krate)) = (prog.file_paths.get(i), prog.file_crate.get(i)) else { continue };
         let part = f.part.get().and_then(|p| p.image.as_ref());
-        if f.image.is_none() && part.is_none() { continue; }
+        let images = f.image.is_some() as u8 | (part.is_some() as u8) << 1;
+        if images == 0 || c.front_file_taken(i) & images == images { continue; }
+        if taken % 16 == 15 && stop() { return (n, false); }
+        taken += 1;
         n += c.push_front_refs(krate, path, f.source_hash(path), f.image.as_ref(), part);
+        c.set_front_file_taken(i, images);
     }
-    n
+    (n, true)
 }
 
 /// (verbose) a background owner request's longest stretch between two of its yield checks (the
@@ -4632,7 +4994,28 @@ struct YieldProbe(std::sync::Mutex<(Option<Instant>, f64, &'static str, u32, &'s
 /// (YieldProbe) the section of a background owner request running now: a gap between two
 /// checks is reported by the section it began in
 pub(crate) static YIELD_SECTION: relax_session::sync::Mutex<&'static str> = relax_session::sync::Mutex::new("");
-pub(crate) fn yield_section(s: &'static str) { *YIELD_SECTION.lock().unwrap_or_else(|e| e.into_inner()) = s; }
+/// What an owner-thread step made and no longer needs (an image build's working set), freed by the
+/// cache writer after it gave the owner back (drop_later_now): freeing it there held the owner
+/// ~30 ms past the step's last yield check.
+static DROP_LATER: std::sync::Mutex<Vec<Box<dyn std::any::Any + Send>>> = std::sync::Mutex::new(Vec::new());
+pub(crate) fn drop_later(b: Box<dyn std::any::Any + Send>) {
+    DROP_LATER.lock().unwrap_or_else(|e| e.into_inner()).push(b);
+}
+fn drop_later_now() {
+    let v = std::mem::take(&mut *DROP_LATER.lock().unwrap_or_else(|e| e.into_inner()));
+    drop(v);
+}
+/// Names the section of a background owner request running now (YieldProbe); a recording
+/// timeline (`pf`, `timeline`) shows each section as a span inside the owner's service, so a
+/// frame that waited for the owner names the section that held it.
+pub(crate) fn yield_section(s: &'static str) {
+    let prev = std::mem::replace(&mut *YIELD_SECTION.lock().unwrap_or_else(|e| e.into_inner()), s);
+    // (on the owner thread, inside its service span: every section is set and cleared there)
+    if crate::owner::is_owner() && crate::inspect::timeline::recording() {
+        if !prev.is_empty() { crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanEnd, prev, 0, 0); }
+        if !s.is_empty() { crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanBegin, s, 0, 0); }
+    }
+}
 impl YieldProbe {
     fn new() -> Self { Self(std::sync::Mutex::new((None, 0.0, "", 0, ""))) }
     fn start(&self) { self.0.lock().unwrap_or_else(|e| e.into_inner()).0 = Some(Instant::now()); }
@@ -4698,8 +5081,8 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     jit::drain_records_bounded();
     // the stores earlier spills wrote, opened here when the startup manifest may be recorded below
     // (cache.rs open_written): its image takes their entries, and the request only indexes them
-    if jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed)
-        && (!MID_MANIFEST_DONE.load(Ordering::Relaxed) || jit::QUIT_SEEN.load(Ordering::Relaxed)) {
+    if jit::started() && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed)
+        && (!MID_MANIFEST_DONE.load(Ordering::Relaxed) || jit::QUIT_SEEN.load(Ordering::Relaxed) || IMAGE_REFRESH_WANTED.load(Ordering::Relaxed)) {
         let dir = MID_CACHE_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(dir) = dir { crate::cache::open_written(&dir); }
     }
@@ -4723,29 +5106,41 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         probe.tick("records");
         yield_section("manifest");
         // the startup manifest, once its window has closed (first present + 5 s after main):
-        // what the exit recorded before, so a killed or force-quit app starts warm too; the exit
-        // writes it again only if O2 code replaced startup code since (record_manifest)
-        // (the quit write records it again when the session installed more since: the whole
-        // session's order, linked ahead by the next launch)
-        let again = jit::QUIT_SEEN.load(Ordering::Relaxed) && MID_MANIFEST_DONE.load(Ordering::Relaxed) && u.start_order.len() > MID_MANIFEST_LEN.load(Ordering::Relaxed);
-        if u.cache.is_some() && jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed) && (!MID_MANIFEST_DONE.swap(true, Ordering::Relaxed) || again) {
-            MID_MANIFEST_LEN.store(u.start_order.len(), Ordering::Relaxed);
-            let (order, present) = jit::manifest_order(u.start_order.clone(), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
+        // what the exit recorded before, so a killed or force-quit app starts warm too. Later in
+        // the session its image is made again once a twentieth of its code was replaced (a cold
+        // run tiers up for minutes: cache image_refresh_due), and the quit write records the
+        // session's later installs as the manifest's tail (record_tail), linked ahead by the next
+        // launch, without making the image again
+        let done = MID_MANIFEST_DONE.load(Ordering::Relaxed);
+        let quit = jit::QUIT_SEEN.load(Ordering::Relaxed);
+        let tail = quit && done && u.start_order.len() > MID_MANIFEST_LEN.load(Ordering::Relaxed);
+        let refresh = !quit && done && u.cache.as_ref().is_some_and(|c| c.image_refresh_due());
+        if u.cache.is_some() && jit::started() && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed) && (!done || tail || refresh) {
+            MID_MANIFEST_DONE.store(true, Ordering::Relaxed);
+            let len = u.start_order.len();
+            yield_section("manifest order");
+            let (order, present) = jit::manifest_order(&*u, u.start_order.clone(), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
             let mut cache = u.cache.take();
             if let Some(c) = cache.as_mut() {
                 // a waiting request (a frame's lazy compile, a live patch, a back end's Job) goes
                 // first: the manifest is made again by a later write
-                let stop = || { probe.tick("manifest"); crate::owner::request_waiting() };
-                if !c.record_manifest(u, crate::layout::root_crate(), &order, present, &stop) {
-                    MID_MANIFEST_DONE.store(false, Ordering::Relaxed);
+                let stop = || { probe.tick("manifest"); quit_write_gives_way() };
+                let root = crate::layout::root_crate();
+                let made = if tail { c.record_tail(u, root, &order, &stop) } else { c.record_manifest(u, root, &order, present, &stop) };
+                if made {
+                    MID_MANIFEST_LEN.store(len, Ordering::Relaxed);
+                } else {
+                    MID_MANIFEST_DONE.store(done, Ordering::Relaxed);
                     mid_yielded();
                     verbose!("relax cache: startup manifest yielded to a waiting request; retried later");
                 }
             }
             u.cache = cache;
         }
+        IMAGE_REFRESH_WANTED.store(!quit && u.cache.as_ref().is_some_and(|c| c.image_refresh_due()), Ordering::Relaxed);
         parts[0] = held.elapsed().as_secs_f64() * 1e3;
         let Some(c) = u.cache.as_mut() else {
+            yield_section("");
             return None;
         };
         yield_section("borrowck keys");
@@ -4756,12 +5151,15 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         probe.tick("borrowck keys");
         if front_recordable() {
             yield_section("front images");
-            n_imgs += push_front_images(&u.prog, c);
+            let stop = || { probe.tick("front images"); quit_write_gives_way() };
+            let (pushed, all_taken) = push_front_images(&u.prog, c, &stop);
+            n_imgs += pushed;
             parts[1] = held.elapsed().as_secs_f64() * 1e3;
             yield_section("crate records");
             probe.tick("front images");
-            let stop = || { probe.tick("crate records"); crate::owner::request_waiting() };
-            let complete = c.record_front_crates_until(&u.prog, &stop);
+            let stop = || { probe.tick("crate records"); quit_write_gives_way() };
+            // (front images left for a later write: a request waits, the crate records wait too)
+            let complete = all_taken && c.record_front_crates_until(&u.prog, &stop);
             parts[2] = held.elapsed().as_secs_f64() * 1e3;
             yield_section("spill take");
             probe.tick("crate records");
@@ -4775,7 +5173,8 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     };
     yield_section("");
     Some((held, spill))
-    }) else { yield_section(""); return None };
+    }) else { yield_section(""); drop_later_now(); return None };
+    drop_later_now();
     probe.report("mid write");
     let held1 = held.elapsed().as_secs_f64() * 1e3;
     let n = match spill {
@@ -4834,8 +5233,8 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
                 // write runs after the owner thread is released, before the record's commit)
                 if wait && u.prog.files.len() != imaged_files && front_recordable() {
                     if stop() { crates_left = true; mid_yielded(); } else if let Some(c) = u.cache.as_mut() {
-                        push_front_images(&u.prog, c);
-                        crates_left = !c.record_front_crates_until(&u.prog, &stop);
+                        let (_, all_taken) = push_front_images(&u.prog, c, &stop);
+                        crates_left = !(all_taken && c.record_front_crates_until(&u.prog, &stop));
                         late_spill = c.spill_take();
                         if !crates_left { imaged_files = u.prog.files.len(); }
                     }
@@ -4904,7 +5303,7 @@ fn summary_inner(why: &str) {
     if why != "stats" && std::env::var_os("RELAX_CACHE_FP").is_some() {
         let late = crate::sip::late_inputs();
         for (c, k, n, h) in &late {
-            verbose!("relax cache: late {} {}{} {} {:032x}", c, if crate::sip::late_base(*k) == crate::sip::LATE_FILE { "file" } else { "env" }, if *k & crate::sip::LATE_HOLE != 0 { " body" } else if *k & crate::sip::LATE_ITEMS != 0 { " items" } else { "" }, n, h);
+            verbose!("relax cache: late {} {}{} {} {:032x}", c, crate::sip::late_kind_name(*k), if *k & crate::sip::LATE_HOLE != 0 { " body" } else if *k & crate::sip::LATE_ITEMS != 0 { " items" } else { "" }, n, h);
         }
         verbose!("relax cache: {} late inputs", late.len());
     }
@@ -4960,7 +5359,8 @@ fn summary_inner(why: &str) {
             let u = unsafe { &mut *up };
             jit::record_queued_at_exit(u);
             u.flush_cache_records();
-            let (order, present) = jit::manifest_order(std::mem::take(&mut u.start_order), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
+            let order = std::mem::take(&mut u.start_order);
+            let (order, present) = jit::manifest_order(&*u, order, jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
             let mut cache = u.cache.take();
             if let Some(c) = cache.as_mut() {
                 c.record_manifest(u, crate::layout::root_crate(), &order, present, &|| false);
@@ -4976,7 +5376,7 @@ fn summary_inner(why: &str) {
                 // front images of the files the store does not have yet (front.rs) and the crate
                 // records: a run quit before its first mid-run write has all of them left
                 if front_recordable() {
-                    push_front_images(&u.prog, c);
+                    push_front_images(&u.prog, c, &|| false);
                     c.record_front_crates(&u.prog);
                 }
                 exit_mark("front images");
@@ -4986,6 +5386,10 @@ fn summary_inner(why: &str) {
                 // demand parts/graph and finally its collected image. Trying the
                 // graph first can fail on a missing crate store and skip the very
                 // flush that would make it recordable (also on boot-only exits).
+                // The macro world alive at the exit (a run-time module's load built it again and
+                // keeps it) is never dropped: what it compiled since the boot's flush is written
+                // here (relax PR 222; on the owner already, so its requests run inline).
+                crate::pmhost::flush_cache();
                 let r = c.flush().and_then(|written| {
                     crate::cache::Cache::flush_front_graphs()?;
                     Ok(written)
@@ -5007,9 +5411,10 @@ fn summary_inner(why: &str) {
                 if let Err(e) = &r { verbose!("relax cache: write: {}", e); }
                 let st = &c.stats;
                 verbose!(
-                    "relax cache: {} hits, {} misses, {} link failures, {} refused by their dependency certificate (per-item cpu: body digests {:.1} ms, certificates written {:.1} ms, checked {:.1} ms) (link {:.1} ms wall with the lock; by speculative workers {} hits {:.1} ms), {} recorded, {} not storable {:?}; written {:?} in {:.1} ms",
-                    st.hits, st.misses, st.link_fail, st.cert_rejects, st.body_ns as f64 / 1e6, st.cert_write_ns as f64 / 1e6, st.cert_check_ns as f64 / 1e6, st.link_ns as f64 / 1e6, st.spec_hits, st.spec_link_ns as f64 / 1e6, st.recorded, st.unencodable, c.why_unencodable, r, t.elapsed().as_secs_f64() * 1e3
+                    "relax cache: {} hits, {} misses, {} link failures, {} refused by their dependency certificate (per-item cpu: body digests {:.1} ms, certificates written {:.1} ms, checked {:.1} ms) (link {:.1} ms wall with the lock; by speculative workers {} hits {:.1} ms), {} recorded ({} in a wider crate's store, {} made from the program's {} sealed crates alone; shared stores: {} recorded, {} linked, {} kept out by a late input; {} not recorded for the checkout's path in their data), {} not storable {:?}; written {:?} in {:.1} ms",
+                    st.hits, st.misses, st.link_fail, st.cert_rejects, st.body_ns as f64 / 1e6, st.cert_write_ns as f64 / 1e6, st.cert_check_ns as f64 / 1e6, st.link_ns as f64 / 1e6, st.spec_hits, st.spec_link_ns as f64 / 1e6, st.recorded, st.wider_store, st.sealed_records, st.sealed_crates, st.shared_records, st.shared_hits, st.shared_kept_out, st.checkout_text, st.unencodable, c.why_unencodable, r, t.elapsed().as_secs_f64() * 1e3
                 );
+                verbose!("{}", jit::install_ahead_line());
                 if let Some(s) = crate::front::summary() {
                     verbose!("{}", s);
                 }
@@ -5131,7 +5536,8 @@ fn summary_inner(why: &str) {
             verbose!("relax: ahead until the first present: {} bodies checked, workers cpu {:.0} ms; {} lowered ({} taken by builds), cpu {:.0} ms", p(0), p(4) as f64 / 1e6, p(5), p(6), p(7) as f64 / 1e6);
         }
         if s.ctfe_data + s.ctfe_code > 0 && !silent() {
-            verbose!("relax: constant initializers: {} evaluated to data, {} compiled and run; evaluation cpu {:.1} ms", s.ctfe_data, s.ctfe_code, s.ctfe_ns as f64 / 1e6);
+            let (twins, bytes, ms) = crate::ctfe_twin::census(u);
+            verbose!("relax: constant initializers: {} evaluated to data, {} compiled and run ({} constant-evaluation twins, {:.1} KB, built in {:.1} ms); evaluation cpu {:.1} ms", s.ctfe_data, s.ctfe_code, twins, bytes as f64 / 1024.0, ms, s.ctfe_ns as f64 / 1e6);
         }
         // RELAX_MAIN_COMPILE_LOG=<path>: the main thread's compiles, ms since main started: app
         // execution vs compile on the critical path. Per line: start end slot how typeck_ahead
@@ -5183,10 +5589,10 @@ fn summary_inner(why: &str) {
         let q = jit::TIER_QUEUED.load(Ordering::Relaxed);
         if q > 0 {
             verbose!(
-                "relax: O3 (ahead {}): {} hot, {} counted again before their build (gone cold), {} installed ({} rebuild requests), {} dropped {:?}; {} RIRs rebuilt ({:.0} ms); snapshots {:.0} ms cpu on the owner (root {:.0}, candidates {:.0}, take tails {:.0}, singles + counts {:.0} ms; callee scans {:.0}, assembly {:.0} ms off it; {} inline candidates built there, {:.0} ms; {} fronts off it, {:.0} ms cpu; {} optimised off it, {:.0} ms cpu, {} panics, {} bails), back ends {:.0} ms cpu off it; bottom-up preparation {:.0} ms cpu ({} bodies simplified, {} kept, {} shared, {} of the simplified had disagreeing shared ones: body {} attrs {} presence {} preparation {} single {}); {} code bytes",
+                "relax: O3 (ahead {}): {} hot, {} left the queue at their pick (gone cold), {} installed ({} rebuild requests), {} dropped {:?}; {} RIRs rebuilt ({:.0} ms); snapshots {:.0} ms cpu on the owner (root {:.0}, candidates {:.0}, take tails {:.0}, singles + counts {:.0} ms; callee scans {:.0}, assembly {:.0} ms off it; {} inline candidates built there, {:.0} ms; {} fronts off it, {:.0} ms cpu; {} optimised off it, {:.0} ms cpu, {} panics, {} bails), back ends {:.0} ms cpu off it; bottom-up preparation {:.0} ms cpu ({} bodies simplified, {} kept, {} shared, {} of the simplified had disagreeing shared ones: body {} attrs {} presence {} preparation {} single {}); {} code bytes",
                 jit::ahead_level().name(),
                 q,
-                jit::TIER_REVALIDATED.load(Ordering::Relaxed),
+                jit::TIER_LEFT.load(Ordering::Relaxed),
                 s.tier1_installed,
                 s.tier1_retier,
                 s.tier1_dropped,
@@ -5283,6 +5689,7 @@ fn summary_inner(why: &str) {
                     FnKey::Glue(g, _) => (if *g == jit::GLUE_DROP { "drop" } else { "glue" }, "-".to_string(), true),
                     FnKey::Sandbox(_) => ("sandbox", "-".to_string(), false),
                     FnKey::Plain(_) => ("plain", "-".to_string(), false),
+                    FnKey::Ctfe(_) => ("ctfe", "-".to_string(), false),
                 };
                 let src = jit::src_size(u, idx as u32);
                 let (origin, tr, selfty) = report_origin(u, &f.key);
@@ -5402,7 +5809,7 @@ fn report_origin(u: &jit::Unit, key: &FnKey) -> (&'static str, String, String) {
             };
             (origin, tr, selfty)
         }
-        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => ("-", String::new(), String::new()),
+        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) | FnKey::Ctfe(_) => ("-", String::new(), String::new()),
     }
 }
 
@@ -5457,7 +5864,10 @@ mod settle_tests {
     }
 }
 
-/// The memory-throttled compile mode (mobile; local/plans/memory-use.md): RELAX_MEM_BUDGET_MB set.
+/// The memory-throttled compile mode, for devices with little memory (phones): RELAX_MEM_BUDGET_MB
+/// set. The cold preload then scans and parses at most one crate past the one the load has taken
+/// (preload's `through`), so the front ends written to their images and mapped one by one bound
+/// the peak.
 /// Desktop default: unset, full parallelism -- the cold preload then runs ahead over all crates
 /// and write-then-map only frees each crate's front end after its load.
 fn mem_budget_mode() -> bool {
@@ -5471,6 +5881,9 @@ pub(crate) unsafe fn reset_statics() {
     reset(&PHASES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&MAIN_START_MS, AtomicU64::new(0));
     reset(&ERRORS_SEEN, AtomicU64::new(0));
+    reset(&REPORTED, relax_session::sync::Mutex::new(None));
+    reset(&FAILED_BODIES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&PENDING_REPORTS, relax_session::sync::Mutex::new(Vec::new()));
     reset(&LIVE_SESSION, AtomicBool::new(false));
     reset(&VERBOSE, AtomicBool::new(false));
     reset(&STARTUP_PATH, relax_session::sync::Mutex::new(String::new()));
@@ -5506,6 +5919,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&MID_COLLECTED_TRIED, AtomicBool::new(false));
     reset(&MID_MANIFEST_DONE, AtomicBool::new(false));
     reset(&MID_MANIFEST_LEN, std::sync::atomic::AtomicUsize::new(0));
+    reset(&IMAGE_REFRESH_WANTED, AtomicBool::new(false));
     reset(&MID_CACHE_DIR, relax_session::sync::Mutex::new(None));
     reset(&MAIN_START_WALL, AtomicU64::new(0));
     reset(&QUIT_WRITE_DONE, AtomicBool::new(false));
@@ -5520,4 +5934,7 @@ pub(crate) unsafe fn reset_statics() {
     // extern blocks bound the ended run's C after an edit to a native package
     reset(&TESTS_NATIVE, std::sync::OnceLock::new());
     reset(&NATIVE_BUNDLES, std::sync::Mutex::new(Vec::new()));
+    // an image build's working set the cache writer had not freed yet (drop_later_now): the run's,
+    // freed here with the run's other statics (the owner thread has stopped)
+    reset(&DROP_LATER, std::sync::Mutex::new(Vec::new()));
 }

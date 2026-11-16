@@ -296,7 +296,10 @@ fn program_code(h: usize) -> bool {
 
 /// Sets signal `sig` (its entry locked) to `a`: a program handler goes in the entry first and the
 /// trampoline to the kernel second; anything else goes to the kernel first and the entry is
-/// emptied second. Then the signal thread learns the new set.
+/// emptied second. Then the signal thread learns the new set. Where the kernel runs the host's
+/// fault handler for `sig`, that stays and what the program gave goes behind it
+/// (`fault::chain_behind`): the host's policy (a trap fill's retry, a stale access, containment)
+/// keeps seeing every fault, as the run monitor's `reassert` would make it again a tick later.
 unsafe fn set(e: &Entry, sig: i32, a: &Act) -> i32 {
     let bit = 1u64 << (sig - 1);
     let r = if program_code(handler(a)) {
@@ -304,7 +307,7 @@ unsafe fn set(e: &Entry, sig: i32, a: &Act) -> i32 {
         let mut k = *a;
         set_handler(&mut k, trampoline_addr());
         set_flags(&mut k, (flags(a) | SA_SIGINFO) & !SA_RESETHAND);
-        let r = kernel(sig, &k, std::ptr::null_mut());
+        let r = if crate::os::fault::chain_behind(sig, trampoline_addr(), flags(&k)) { 0 } else { kernel(sig, &k, std::ptr::null_mut()) };
         if r == 0 {
             PROGRAM_SET.fetch_or(bit, Relaxed);
         } else {
@@ -316,7 +319,7 @@ unsafe fn set(e: &Entry, sig: i32, a: &Act) -> i32 {
         if handler(&a) == trampoline_addr() {
             set_handler(&mut a, 0);
         }
-        let r = kernel(sig, &a, std::ptr::null_mut());
+        let r = if crate::os::fault::chain_behind(sig, handler(&a), flags(&a)) { 0 } else { kernel(sig, &a, std::ptr::null_mut()) };
         if r == 0 {
             e.set_act(&DFL);
             PROGRAM_SET.fetch_and(!bit, Relaxed);
@@ -347,8 +350,21 @@ pub(crate) unsafe fn sigaction(sig: i32, act: *const u8, old: *mut u8, domain: u
         let mut cur = DFL;
         let mut r = kernel(sig, std::ptr::null(), &mut cur);
         let entry = e.act();
-        // what the program sees: its own action while the kernel runs the trampoline for it
-        let prev = if handler(&entry) != 0 && shows_trampoline(sig, &cur) { entry } else { cur };
+        // what the program sees: its own action while the kernel runs the trampoline for it, and
+        // what is chained behind the host's fault handler (never the host's handler itself)
+        let prev = if handler(&entry) != 0 && shows_trampoline(sig, &cur) {
+            entry
+        } else if handler(&cur) == crate::os::fault::host_handler() {
+            let mut p = DFL;
+            let behind = crate::os::fault::chained_handler(sig);
+            if behind != trampoline_addr() {
+                set_handler(&mut p, behind);
+                set_flags(&mut p, crate::os::fault::chained_flags(sig));
+            }
+            p
+        } else {
+            cur
+        };
         if r == 0 && !act.is_null() {
             let a = std::ptr::read_unaligned(act as *const Act);
             if !e.orig_set.load(Relaxed) {
@@ -414,6 +430,7 @@ pub(crate) fn give_back(bases: &[u64]) -> u32 {
 /// trampoline for it, the disposition goes back to what the program saw before its first change
 /// (SIG_DFL when that was code of an ended run too).
 pub(crate) unsafe fn reset_statics() {
+    ABRT_SENT_ON.store(0, Relaxed);
     let stale = |h: usize| h > 1 && crate::stale::lookup(h as u64).is_some();
     for sig in 1..NSIG as i32 {
         let e = &TABLE[sig as usize];
@@ -448,6 +465,8 @@ pub(crate) unsafe fn reset_statics() {
 pub(crate) struct SigState {
     /// compiles the thread is in (`Compiling`)
     depth: AtomicU32,
+    /// the slot of the outermost of them (a fault report names it)
+    slot: AtomicU32,
     /// signals that waited for the compile to end (bit sig-1), and since when (monotonic ns)
     deferred: AtomicU64,
     since: AtomicU64,
@@ -502,7 +521,7 @@ pub(crate) fn program_thread() -> ProgramThread {
     }
     let s = {
         let _kept = crate::zone_alloc::kept();
-        Box::into_raw(Box::new(SigState { depth: AtomicU32::new(0), deferred: AtomicU64::new(0), since: AtomicU64::new(0), last: AtomicI32::new(0) }))
+        Box::into_raw(Box::new(SigState { depth: AtomicU32::new(0), slot: AtomicU32::new(0), deferred: AtomicU64::new(0), since: AtomicU64::new(0), last: AtomicI32::new(0) }))
     };
     unsafe { sys::pthread_setspecific(k, s as *mut u8) };
     ProgramThread(s)
@@ -522,6 +541,56 @@ impl Drop for ProgramThread {
     }
 }
 
+/// A thread at its first lazy compile with no state (one a native library started, running a
+/// callback of the program's) becomes a program thread until it ends, as natively the program's
+/// handlers run on it; and its compiles count, so a signal in one waits for its end. Not the
+/// compiler's owner, which runs constant initializers and stays a host thread (`rt_compile_in`
+/// asks). Normal context.
+pub(crate) fn adopt() {
+    if !state().is_null() {
+        return;
+    }
+    let _kept = crate::zone_alloc::kept();
+    let _ = ADOPTED.try_with(|a| {
+        if a.0.get().is_null() {
+            let p = program_thread();
+            a.0.set(p.0);
+            std::mem::forget(p);
+        }
+    });
+}
+
+/// The state `adopt` gave the thread, ended with it.
+struct Adopted(std::cell::Cell<*mut SigState>);
+
+impl Drop for Adopted {
+    fn drop(&mut self) {
+        drop(ProgramThread(self.0.replace(std::ptr::null_mut())));
+    }
+}
+
+thread_local! {
+    static ADOPTED: Adopted = const { Adopted(std::cell::Cell::new(std::ptr::null_mut())) };
+}
+
+/// (tests) The handler the kernel runs for `sig`.
+/// What the program set for `sig`, for a fault report: (its handler, 0 when none; the domain that
+/// changed it last; how many times its entry changed). Lock-free.
+pub(crate) fn program_disposition(sig: i32) -> (usize, u64, u32) {
+    if sig <= 0 || sig as usize >= NSIG {
+        return (0, 0, 0);
+    }
+    let e = &TABLE[sig as usize];
+    let (seq, h, _) = e.read();
+    (h, e.domain.load(Relaxed), seq / 2)
+}
+
+pub(crate) fn kernel_handler(sig: i32) -> usize {
+    let mut cur = DFL;
+    unsafe { kernel(sig, std::ptr::null(), &mut cur) };
+    handler(&cur)
+}
+
 /// While it lives, the calling thread is in a compile (or another host runtime entry): a signal
 /// for a program handler that comes meanwhile waits for its end. The outermost one's end unblocks
 /// what waited, and the kernel delivers it again.
@@ -530,10 +599,23 @@ pub(crate) struct Compiling(*const SigState, u32);
 pub(crate) fn compiling(slot: u32) -> Compiling {
     let s = state();
     if !s.is_null() {
-        unsafe { (*s).depth.fetch_add(1, Relaxed) };
+        unsafe {
+            if (*s).depth.load(Relaxed) == 0 {
+                (*s).slot.store(slot, Relaxed);
+            }
+            (*s).depth.fetch_add(1, Relaxed)
+        };
         compiler_fence(SeqCst);
     }
     Compiling(s, slot)
+}
+
+/// The calling thread as a fault report names it: None, a thread with no program state (a host
+/// thread, or one a native library started that never ran JIT code); else its compile depth and
+/// the slot of the outermost compile. Async-signal-safe.
+pub(crate) fn thread_class() -> Option<(u32, u32)> {
+    let s = state();
+    if s.is_null() { None } else { unsafe { Some(((*s).depth.load(Relaxed), (*s).slot.load(Relaxed))) } }
 }
 
 impl Drop for Compiling {
@@ -630,6 +712,7 @@ unsafe fn route(sig: i32, info: *mut u8, uc: *mut u8, chained: bool) -> bool {
         if h == 0 {
             // a disposition change raced this delivery: the kernel runs something else for it now
             if chained {
+                crate::os::fault::fatal_signal(sig, info, uc, "the program's handler went while its signal was on the way");
                 return false;
             }
             if !resend_process(sig, info) {
@@ -639,20 +722,24 @@ unsafe fn route(sig: i32, info: *mut u8, uc: *mut u8, chained: bool) -> bool {
         }
         let st = state();
         if synchronous(sig, info) {
-            if !st.is_null() && (*st).depth.load(Relaxed) == 0 {
+            let depth = if st.is_null() { 0 } else { (*st).depth.load(Relaxed) };
+            // (the compiler's owner is the host's wherever it faults: it may be inside a compile)
+            if runs_handler(!st.is_null(), depth, || crate::owner::is_owner() || crate::os::fault::host_code(crate::os::fault::pc_of(uc))) {
                 run(sig, h, info, uc, st);
                 return true;
             }
-            // the host's crash: its default action, at the instruction that faults again
-            if !chained {
-                kernel(sig, &DFL, std::ptr::null_mut());
-            }
+            // the host's crash: its report, then its default action at the instruction that
+            // faults again
+            crate::os::fault::fatal_signal(sig, info, uc, if st.is_null() { "a fault in the host's own code" } else { "a fault inside a compile" });
             return false;
         }
         if st.is_null() {
             hold(bit, uc);
             if resend_process(sig, info) {
                 COUNTS[sig as usize][DEFLECTED].fetch_add(1, Relaxed);
+                if sig == SIGABRT && chained {
+                    ABRT_SENT_ON.fetch_add(1, Relaxed);
+                }
             } else {
                 lost(sig);
             }
@@ -667,6 +754,9 @@ unsafe fn route(sig: i32, info: *mut u8, uc: *mut u8, chained: bool) -> bool {
             st.last.store(sig, Relaxed);
             if resend_self(sig, info) {
                 COUNTS[sig as usize][DEFERRED].fetch_add(1, Relaxed);
+                if sig == SIGABRT && chained {
+                    ABRT_SENT_ON.fetch_add(1, Relaxed);
+                }
             } else {
                 lost(sig);
             }
@@ -681,8 +771,20 @@ unsafe fn route(sig: i32, info: *mut u8, uc: *mut u8, chained: bool) -> bool {
     }
 }
 
+/// Whether a fault the kernel raised at an instruction runs the program's handler: on a program
+/// thread outside any compile, or on a thread with no program state at a pc outside the host's
+/// own image (a native library's thread in JIT code it called back: natively the program's
+/// handler would run). Inside a compile it is the compiler's fault, and the program's handler
+/// there is the hang this module exists to prevent; in the host's code with no state it is the
+/// host's.
+pub(crate) fn runs_handler(state: bool, depth: u32, host_pc: impl FnOnce() -> bool) -> bool {
+    if state { depth == 0 } else { !host_pc() }
+}
+
 unsafe fn run(sig: i32, h: usize, info: *mut u8, uc: *mut u8, st: *const SigState) {
-    (*st).last.store(sig, Relaxed);
+    if !st.is_null() {
+        (*st).last.store(sig, Relaxed);
+    }
     COUNTS[sig as usize][RAN].fetch_add(1, Relaxed);
     // three arguments always (a one-argument handler ignores the others)
     let h: extern "C" fn(i32, *mut u8, *mut u8) = std::mem::transmute(h);
@@ -697,12 +799,21 @@ unsafe fn reset_hand(e: &Entry, seq: u32, sig: i32, bit: u64) -> bool {
         return false;
     }
     fence(Release);
-    kernel(sig, &DFL, std::ptr::null_mut());
+    if !crate::os::fault::chain_behind(sig, 0, 0) {
+        kernel(sig, &DFL, std::ptr::null_mut());
+    }
     e.set_act(&DFL);
     PROGRAM_SET.fetch_and(!bit, Relaxed);
     e.unlock(seq + 1);
     resync();
     true
+}
+
+/// Blocks `sig` on the calling thread from now on (its end: `os::thread::kicks_done`).
+pub(crate) fn block_here(sig: i32) {
+    let mut set = [0u64; 16];
+    set[0] = 1u64 << (sig - 1);
+    unsafe { sys::pthread_sigmask(SIG_BLOCK, &set, std::ptr::null_mut()) };
 }
 
 /// The signal stays blocked on this thread: in the interrupted context once the handler returns
@@ -721,6 +832,18 @@ unsafe fn hold(bit: u64, uc: *mut u8) {
     let mut set = [0u64; 16];
     set[0] = bit;
     sys::pthread_sigmask(SIG_BLOCK, &set, std::ptr::null_mut());
+}
+
+/// SIGABRT deliveries sent on (held for a compile, or deflected from a thread with no program
+/// state) instead of running the program's handler: their next delivery is the same SIGABRT,
+/// reported then (`take_sent_on_abort`).
+static ABRT_SENT_ON: AtomicU32 = AtomicU32::new(0);
+const SIGABRT: i32 = 6;
+
+/// A SIGABRT the host's handler chained here was sent on (true, counted off): not reported now,
+/// its next delivery is.
+pub(crate) fn take_sent_on_abort() -> bool {
+    ABRT_SENT_ON.try_update(Relaxed, Relaxed, |n| n.checked_sub(1)).is_ok()
 }
 
 /// The signal again, at this thread (Linux: with its siginfo).
@@ -786,6 +909,7 @@ pub(crate) fn start() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         let _ = key();
+        crate::os::fault::note_host_text();
         let _kept = crate::zone_alloc::kept();
         let _ = std::thread::Builder::new().name("run-signals".into()).spawn(|| loop {
             let g = GEN.load(Acquire);
@@ -843,7 +967,8 @@ pub(crate) fn applied_mask(want: impl Fn(u64) -> bool) -> u64 {
 /// thread (jit.rs `test_signal_in_compile`): signal `sig` `to` this thread (`self`), the process
 /// (`process`), this thread with the program's handler put straight into the kernel (`raw-self`,
 /// what the trampoline never allows: the re-entry check's case), or three times queued with the
-/// values 1, 2, 3 (`rt3-self`, Linux). `block`: the compile then never ends (a hung compile).
+/// values 1, 2, 3 (`rt3-self`, Linux); or makes a fault there (`fault`). `block`: the compile then
+/// never ends (a hung compile).
 pub(crate) unsafe fn test_send(sig: i32, to: &str, block: bool, name: &str) {
     match to {
         "self" => {
@@ -873,6 +998,19 @@ pub(crate) unsafe fn test_send(sig: i32, to: &str, block: bool, name: &str) {
                 let tid = sys::syscall(SYS_GETTID);
                 sys::syscall(SYS_RT_TGSIGQUEUEINFO, sys::getpid() as i64, tid, sig as i64, p);
             }
+        }
+        // a fault the kernel raises at an instruction, inside the compile (`sig` unused: SIGSEGV):
+        // a write into an inaccessible page, made by the C library's code (under the JIT this
+        // code is JIT code, whose own faults the host contains)
+        "fault" => {
+            extern "C" {
+                fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+                fn memset(d: *mut core::ffi::c_void, c: i32, n: usize) -> *mut core::ffi::c_void;
+            }
+            let anon = if cfg!(target_vendor = "apple") { 0x1002 } else { 0x22 };
+            let page = mmap(std::ptr::null_mut(), 1 << 16, 0, anon, -1, 0);
+            eprintln!("relax test: a fault at {:#x} in the compile of `{name}`", page as usize);
+            memset(page.cast(), 1, std::hint::black_box(1));
         }
         _ => panic!("RELAX_TEST_SIGNAL_IN_COMPILE: unknown target `{to}`"),
     }

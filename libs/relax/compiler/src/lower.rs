@@ -217,6 +217,11 @@ pub struct Lcx<'a> {
     /// SPEC-V: this body is unverified code: calls that pass `&mut` beside another pointer-holding
     /// argument go to the callee's unverified-mode twin
     plain_calls: bool,
+    /// the body of a constant-evaluation twin (ctfe_twin.rs): its source loops count rustc's
+    /// const-eval steps (`back_edge`)
+    ctfe_steps: bool,
+    /// lowering a promoted call of such a body (`promoted_call`): its steps are its own already
+    in_promoted: bool,
     /// Relaxed Rust D3: the run-time disjoint-index checks of this body's clean verdict ((earlier,
     /// later) index expressions), and the slot each earlier index is kept in (by its span).
     d3: Option<std::sync::Arc<Vec<(relax_types::mir::Span, relax_types::mir::Span)>>>,
@@ -249,6 +254,13 @@ pub struct Lcx<'a> {
     /// Body-local answers, discarded if nested constant evaluation re-collects types.
     query_epoch: u64,
     layouts: HashMap<TyId, &'static Layout>,
+    /// the layouts answered so far (jit.rs frame_missing) by type, with the coroutines whose frame
+    /// each is missing; and the slots whose size came from one. A coroutine body publishes its
+    /// frame only when none of its saved slots did (finish).
+    partial_tys: HashMap<TyId, Vec<TyId>>,
+    partial_slots: HashMap<u32, Vec<TyId>>,
+    /// the coroutines whose layout so far this coroutine body's own upvars hold (always saved)
+    partial_upvars: Vec<TyId>,
     /// Repeated uses of a type need the same cleanup decision.
     drop_types: HashMap<TyId, bool>,
     /// Trait dispatch is fully monomorphized here; repeated calls in this body share it.
@@ -259,6 +271,16 @@ pub struct Lcx<'a> {
     drop_flags: Vec<Option<VReg>>,
     /// scope depth a `let` declared each local at (its drop flag registers there)
     decl_depth: Vec<Option<usize>>,
+    /// a coroutine body's slots whose type holds a coroutine by value, in creation order: (the
+    /// slot, the address it was made with, the scope depth its storage lives to; None: a
+    /// temporary of the statement that made it). Where that storage ends, lowering emits
+    /// `Inst::StorageDead` (rustc's StorageDead), which the coroutine transform reads to leave the
+    /// slot out of the frame where nothing reaches it any more
+    sd: Vec<(u32, VReg, Option<usize>)>,
+    /// per scope: `sd`'s length when it was pushed
+    sd_scope_marks: Vec<usize>,
+    /// a type -> whether it holds a coroutine by value
+    holds_coro_memo: HashMap<TyId, bool>,
     /// an async fn's pattern parameter's bindings, declared right after the parameter's whole
     /// argument rather than at their own number (typeck numbers them after every parameter):
     /// binding local -> (the argument's local, its order among the pattern's bindings)
@@ -332,6 +354,9 @@ pub struct Lcx<'a> {
     temp_moved: HashMap<u32, Vec<(Vec<(u32, u32)>, VReg)>>,
     /// operands of `&` in extending position, mapped to the initializing let's scope
     extend_ops: HashMap<u32, usize>,
+    /// `super let` statements (by statement index) in extending position, mapped to the scope of
+    /// the `let` that extends them (rustc region.rs `extended_super_lets`)
+    extended_super_lets: HashMap<u32, usize>,
     /// field path (variant, field)* from `match_root`'s local to the place the pattern being
     /// bound matches; None below a dereference (nothing can be moved out there)
     pat_path: Option<Vec<(u32, u32)>>,
@@ -355,6 +380,10 @@ pub struct Lcx<'a> {
     /// into the drops after it, never into itself
     pad_fixed: Option<Option<u32>>,
     building_pad: bool,
+    /// a drop at a scope's or a temporary's exit (emit_drop_act), not one in the middle of a
+    /// local's life: in a coroutine body its drop glue gets the address as the call's own
+    /// memory (Coro::call_private)
+    exit_drop: bool,
     /// the last cleanup pad and the drop-state hash it was made for (consecutive calls of a
     /// statement mostly share their drop state)
     last_pad: Option<(u64, u32)>,
@@ -442,6 +471,7 @@ pub fn fn_name(u: &Unit, key: &FnKey) -> String {
         FnKey::Sandbox(b) if *b == u32::MAX => "sandbox:invalid-fn-pointer".to_string(),
         FnKey::Sandbox(b) => format!("sandbox:{}", u.fns[*b as usize].name),
         FnKey::Plain(b) => format!("{} [unverified]", u.fns[*b as usize].name),
+        FnKey::Ctfe(b) => format!("ctfe:{}", u.fns[*b as usize].name),
     }
 }
 
@@ -497,6 +527,7 @@ impl<'a> Lcx<'a> {
         // SPEC-V: unverified code (no clean verdict yet, or an unverified-mode twin) sends its
         // aliasing-prone calls to unverified-mode twins
         let plain_calls = crate::jit::PLAIN_LOWER.with(|c| c.get()).is_some_and(|p| p.0 == cur_fn) || ((cur_fn as usize) < u.fns.len() && !u.verdict_clean(cur_fn));
+        let ctfe_steps = crate::ctfe_twin::lowering(cur_fn);
         let mut f = Func::new(name, b.file);
         let entry = f.block();
         let n = b.locals.len();
@@ -514,6 +545,8 @@ impl<'a> Lcx<'a> {
             u,
             cur_fn,
             plain_calls,
+            ctfe_steps,
+            in_promoted: false,
             d3,
             d3_slots: HashMap::default(),
             b,
@@ -530,11 +563,17 @@ impl<'a> Lcx<'a> {
             errors: Vec::new(),
             query_epoch: u.tcx.collect_epoch.load(std::sync::atomic::Ordering::Relaxed),
             layouts: HashMap::default(),
+            partial_tys: HashMap::default(),
+            partial_slots: HashMap::default(),
+            partial_upvars: Vec::new(),
             drop_types: HashMap::default(),
             trait_methods: HashMap::default(),
             scopes: vec![Vec::new()],
             drop_flags: vec![None; n],
             decl_depth: vec![None; n],
+            sd: Vec::new(),
+            sd_scope_marks: vec![0],
+            holds_coro_memo: HashMap::default(),
             decl_after: HashMap::default(),
             decl_follow: None,
             entry_inits: Vec::new(),
@@ -564,11 +603,12 @@ impl<'a> Lcx<'a> {
             indirect_tracked: false,
             simd_consts: HashMap::default(),
             extend_ops: Default::default(),
+            extended_super_lets: Default::default(),
             pat_path: None,
             field_moved: HashMap::default(),
             want_mut: false,
             const_init: false,
-            // the crate's profile (cfg(overflow_checks): `makepad test`'s, run.rs TEST_PROFILE);
+            // the crate's profile (cfg(overflow_checks): `makepad test`'s, unitgraph.rs TEST_PROFILE);
             // a run's crates, and Relax's std, build without checks
             overflow_checks: u.prog.file_crate.get(b.file as usize).and_then(|&k| u.prog.crates.get(k as usize)).is_some_and(|c| c.cfg.holds("overflow_checks")),
             foreign: vec![false; n],
@@ -577,6 +617,7 @@ impl<'a> Lcx<'a> {
             pad_cache: HashMap::default(),
             pad_fixed: None,
             building_pad: false,
+            exit_drop: false,
             last_pad: None,
             coro: None,
             tree_cx: None,
@@ -597,44 +638,22 @@ impl<'a> Lcx<'a> {
             }
             if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.u.provided_rustc_layout(*d) && !self.relax_only_instance(t) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                self.provided_err(krate, format!("a field of `{}` is read from JIT-compiled code, but `{}` lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: call a method of the crate instead", ts, ts));
+                let detail = crate::provided::option_layout_reason(&self.u.prog, &self.u.tcx, t).map_or(String::new(), |reason| format!(". {reason}"));
+                self.provided_err(krate, format!("a field of `{}` is read from JIT-compiled code, but `{}` lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: call a method of the crate instead{}", ts, ts, detail));
             }
         }
     }
 
-    /// A provided crate's static lives in the loader; Relax's copy of it would be a second one.
-    /// Plain immutable data (trusted, no interior mutability) may be read from the copy, and a
-    /// static the crate marks `#[relax_api(per_side)]` (a memo of values each side makes and reads
-    /// itself) is JIT code's own instance. Any other is rustc's one copy, laid out by rustc's std:
-    /// JIT code cannot read it with Relax's layouts.
-    fn check_provided_static(&mut self, d: DefId, t: TyId) {
-        let krate = self.u.prog.def(d).krate;
-        let Some((_, p)) = self.u.provided.iter().find(|(k, _)| *k == krate) else { return };
-        if crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) {
-            return;
+    /// Classify a provided static and return the loader's address when it is shared.
+    fn check_provided_static(&mut self, d: DefId, t: TyId) -> Option<usize> {
+        match crate::provided::static_use(self.u, d, t) {
+            crate::provided::StaticUse::Shared(addr) => Some(addr),
+            crate::provided::StaticUse::Refused(msg) => {
+                self.provided_err(self.u.prog.def(d).krate, msg);
+                None
+            }
+            _ => None,
         }
-        let name = self.u.prog.def_path(d);
-        if p.per_side.contains(&crate::provided::norm(&name)) || self.thread_local_storage(d, t) {
-            return;
-        }
-        let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-        self.provided_err(krate, format!("static `{}` is read from JIT-compiled code, but it lives in a provided crate (built by rustc into the loader), where its one copy is laid out by rustc's std (`{}` is not the same bytes on both sides): call a fn of the crate that is an op (#[relax_api]), or mark the static #[relax_api(per_side)] when each side may keep its own instance (a cache of values only that side makes)", name, ts));
-    }
-
-    /// Static `d` (of type `t`) is a thread-local's storage: a `#[thread_local]` static, or the
-    /// runtime key `thread_local!` keeps for a value with drop glue or a lazy initialiser (a
-    /// `std::thread::LazyKey` static). Each side has its own per-thread storage by construction
-    /// (rustc's lives in its TLS, laid out by its std; Relax's in the JIT's), so JIT code compiled
-    /// from a provided crate's source keeps its own: a thread-local is never shared across the
-    /// boundary, whatever its type (native_vec::LANES on an app's model thread, 10-30).
-    fn thread_local_storage(&self, d: DefId, t: TyId) -> bool {
-        let prog = &self.u.prog;
-        let def = prog.def(d);
-        let ast = &prog.files[def.file as usize].ast;
-        if crate::lang_items::has_attr(prog, def.file, ast.list(ast.item(def.item).attrs), "thread_local") {
-            return true;
-        }
-        matches!(self.u.tcx.tys.kind(t), TyKind::Adt(a, _, _) if matches!(prog.def_path(*a).as_str(), "std::thread::local::LazyKey" | "std::thread::LazyKey"))
     }
 
     /// A type only JIT-compiled code makes: no bound fn's signature reaches it
@@ -647,8 +666,9 @@ impl<'a> Lcx<'a> {
         if let TyKind::Adt(d, _, _) = self.u.tcx.tys.kind(t) {
             let krate = self.u.prog.def(*d).krate;
             if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.u.provided_rustc_layout(*d) && !self.relax_only_instance(t) {
-                let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                self.provided_err(krate, format!("`{}` is built in JIT-compiled code, but values of it reach the rustc-built code of its provided crate (a bound fn takes or returns it) and its layout is not C-shaped: build it with a fn of the crate, or keep it out of bound signatures", ts));
+                let ts = crate::typeck::type_name(&self.u.prog, &self.u.tcx, t);
+                let remedy = self.provided_layout_remedy(*d, t);
+                self.provided_err(krate, format!("`{}` is built in JIT-compiled code, but values of it reach the rustc-built code of its provided crate (a bound fn takes or returns it) and {}", ts, remedy));
             }
         }
     }
@@ -705,14 +725,31 @@ impl<'a> Lcx<'a> {
         !self.u.provided_shared_contains(t)
     }
 
+    /// Only called after a refusal: binding already recorded the layout or field-byte failure.
+    fn provided_layout_remedy(&self, d: DefId, t: TyId) -> String {
+        if let Some(reason) = crate::provided::option_layout_reason(&self.u.prog, &self.u.tcx, t) {
+            return reason;
+        }
+        if self.u.tcx.adts.get(&d).is_some_and(|a| a.is_enum && a.repr_int.is_none() && a.variants.iter().any(|v| !v.fields.is_empty())) {
+            return "its data variants have no primitive repr. Mark it #[repr(u8)] so both compilers lay it out alike, or use a fn of the crate".into();
+        }
+        let reason = self.u.provided_layout_reasons.get(&d).map(String::as_str).unwrap_or("no layout was exported by #[relax_api]");
+        if !self.u.provided_types.contains_key(&d) {
+            return format!("its layout remains opaque ({}). Mark it #[relax_api(handle)], or use a fn of the crate", reason);
+        }
+        format!("its layout remains opaque ({}). Use a fn of the crate", reason)
+    }
+
     /// An opaque provided enum (provided.rs; rustc's layout, no tag known to Relax) cannot be
-    /// matched on or built by variant in JIT-compiled code.
+    /// matched on or built by variant in JIT-compiled code, unless its layout and field bytes
+    /// agree with rustc's (`provided_rustc_layout`).
     fn check_provided_opaque_enum(&mut self, t: TyId, what: &str) {
         if let TyKind::Adt(d, a, _) = self.kind(t) {
-            if a.is_empty() && self.u.provided_types.contains_key(&d) {
-                let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
+            if a.is_empty() && self.u.provided_types.contains_key(&d) && !self.u.provided_rustc_layout(d) {
+                let ts = crate::typeck::type_name(&self.u.prog, &self.u.tcx, t);
                 let krate = self.u.prog.def(d).krate;
-                self.provided_err(krate, format!("`{}` is {} by variant in JIT-compiled code, but it lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: use a method of the crate (e.g. a fieldless kind)", ts, what));
+                let remedy = self.provided_layout_remedy(d, t);
+                self.provided_err(krate, format!("`{}` is {} by variant in JIT-compiled code, but it lives in a provided crate (built by rustc into the loader) and {}", ts, what, remedy));
             }
         }
     }
@@ -742,12 +779,15 @@ impl<'a> Lcx<'a> {
                             let opaque = |a| self.u.provided_types.contains_key(&a);
                             if let Some(reason) = crate::provided::unbound_reason(&self.u.prog, &self.u.tcx, krate, d, &opaque) {
                                 msg.push_str(&format!(" (`{}` of {} is #[relax_api] but runs here as JIT code: {}", key, name, reason));
-                                if reason == "signature not C-shaped" {
+                                if matches!(reason, "signature not C-shaped" | "Option layout mismatch") {
                                     if let Some(t) = crate::provided::first_untrusted_signature_type(&self.u.prog, &self.u.tcx, krate, d, &opaque) {
                                         msg.push_str(&format!(": `{}` does not cross the boundary", crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t)));
                                         let path = crate::provided::untrusted_path(&self.u.prog, &self.u.tcx, krate, t);
                                         if !path.is_empty() {
                                             msg.push_str(&format!(" (at {})", path));
+                                        }
+                                        if let Some(detail) = crate::provided::option_layout_reason(&self.u.prog, &self.u.tcx, t) {
+                                            msg.push_str(&format!(": {}", detail));
                                         }
                                     }
                                 }
@@ -1083,7 +1123,8 @@ impl<'a> Lcx<'a> {
             Some(&l) => (l, false),
             None => {
                 let erased = u.tcx.tys.erase_regions(t);
-                let l = u.layout_of(erased);
+                let (l, served) = u.layout_of_served(erased);
+                if served.is_empty() { self.partial_tys.remove(&t); } else { self.partial_tys.insert(t, served); }
                 self.check_explicit_discriminants(t);
                 let too_big = u.lay.is_too_big(erased);
                 if !too_big { self.layouts.insert(t, l); }
@@ -1267,13 +1308,101 @@ impl<'a> Lcx<'a> {
     fn new_slot_flagged_at(&mut self, t: TyId, arg: bool, ret: bool) -> (VReg, u32) {
         let l = self.layout(t);
         let s = self.f.slot(l.size, l.align);
+        if let Some(d) = self.partial_tys.get(&t) {
+            self.partial_slots.insert(s, d.clone());
+        }
         let sl = &mut self.f.slots[s as usize];
         sl.born = self.coro.is_none();
         sl.arg = arg;
         sl.ret = ret;
         let d = self.f.vreg(Cls::I);
         self.emit(Inst::SlotAddr(d, s));
+        self.track_storage(s, d, t);
         (d, s)
+    }
+
+    /// A coroutine body's slot of type `t` made at address `a`: its storage ends are marked when
+    /// it holds a coroutine by value (`sd`).
+    fn track_storage(&mut self, s: u32, a: VReg, t: TyId) {
+        if self.coro.is_none() {
+            return;
+        }
+        // a layout so far is a coroutine's (or a type holding one): its slot must be tracked, or
+        // the frame would save it where its storage has ended (E0733 where rustc accepts)
+        let partial = self.partial_slots.contains_key(&s);
+        let holds = self.holds_coro(t, 0);
+        debug_assert!(!partial || holds, "a slot of a layout so far whose type holds no coroutine");
+        if partial || holds {
+            self.sd.push((s, a, None));
+        }
+    }
+
+    /// Does a value of type `t` hold a coroutine by value (in a field, an element or a capture,
+    /// at any depth, not behind a pointer)? A type the walk does not see into answers yes.
+    fn holds_coro(&mut self, t: TyId, depth: u32) -> bool {
+        if let Some(&x) = self.holds_coro_memo.get(&t) {
+            return x;
+        }
+        if depth > 24 {
+            return true;
+        }
+        let u = self.u;
+        let r = match u.tcx.tys.kind(t).clone() {
+            TyKind::Closure(file, ce, _) if u.tcx.coroutines.contains(&(file, ce)) => true,
+            TyKind::Closure(..) => u.closure_storage(t).fields.iter().any(|&x| self.holds_coro(x, depth + 1)),
+            TyKind::Adt(d, args, _) => match u.tcx.adts.get(&d) {
+                Some(adt) => {
+                    let shape: Vec<usize> = adt.variants.iter().map(|v| v.fields.len()).collect();
+                    let args = u.tcx.tys.list(args);
+                    let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
+                    shape.iter().enumerate().any(|(vi, &nf)| (0..nf).any(|fi| {
+                        let ft = u.tcx.field_ty(&u.prog, env, d, vi as u32, fi as u32, args);
+                        self.holds_coro(ft, depth + 1)
+                    }))
+                }
+                None => true,
+            },
+            TyKind::Tuple(v) => u.tcx.tys.list(v).iter().any(|&x| self.holds_coro(x, depth + 1)),
+            TyKind::Array(e, _) | TyKind::Slice(e) => self.holds_coro(e, depth + 1),
+            TyKind::Bool | TyKind::Char | TyKind::Str | TyKind::Int(_) | TyKind::Float(_) | TyKind::Never | TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::FnDef(..) | TyKind::Foreign(_) | TyKind::Dyn(..) => false,
+            _ => true,
+        };
+        self.holds_coro_memo.insert(t, r);
+        r
+    }
+
+    /// The storage of the tracked slot made at address `a` lives to scope depth `depth` (a
+    /// local's, a temporary a local takes over whole: `whole` its size), unless it has a depth.
+    fn storage_lives_to(&mut self, a: VReg, depth: usize, whole: Option<u32>) {
+        let slots = &self.f.slots;
+        if let Some(e) = self.sd.iter_mut().rev().find(|e| e.1 == a) {
+            if e.2.is_none() && whole.map_or(true, |n| slots[e.0 as usize].size == n) {
+                e.2 = Some(depth);
+            }
+        }
+    }
+
+    /// The storage of the tracked slots made since `from` (`sd`'s length then) whose depth
+    /// `ends` names ends here, after the drops (none in a cleanup pad, which only unwinds).
+    fn end_storage(&mut self, from: usize, ends: impl Fn(Option<usize>) -> bool) {
+        if self.coro.is_none() || self.building_pad || self.dead_blk == Some(self.cur) || from >= self.sd.len() {
+            return;
+        }
+        for j in (from..self.sd.len()).rev() {
+            let (s, _, life) = self.sd[j];
+            if ends(life) {
+                self.emit(Inst::StorageDead(s));
+            }
+        }
+    }
+
+    /// Leaving the scopes from depth `from` on: the storage of the tracked slots made in them
+    /// that live no longer ends, and with `exit` (a break, continue or return out of them) that
+    /// of their statements' temporaries too. A scope's normal end leaves its temporaries to
+    /// their statement's end (a pre-2024 block tail's live to the enclosing statement's).
+    fn end_scope_storage(&mut self, from: usize, exit: bool) {
+        let lo = self.sd_scope_marks.get(from).copied().unwrap_or(self.sd.len());
+        self.end_storage(lo, |life| life.map_or(exit, |l| l >= from));
     }
 
     // ------------------------------------------------------------ values and places
@@ -1552,7 +1681,8 @@ impl<'a> Lcx<'a> {
                         let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
                         let fs = fdef.map_or(String::new(), |(name, _)| format!(" (`{}: {}`)", self.u.prog.syms.str(name), crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, ft)));
                         let krate = self.u.prog.def(*d).krate;
-                        self.provided_err(krate, format!("a field of `{}`{} is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and that field's bytes are rustc's alone (only plain data, pointers and the crate's handles are reached at rustc's offsets): call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash)", ts, fs, ts));
+                        let detail = crate::provided::option_layout_reason(&self.u.prog, &self.u.tcx, ft).map_or(String::new(), |reason| format!(". {reason}"));
+                        self.provided_err(krate, format!("a field of `{}`{} is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and that field's bytes are rustc's alone (only plain data, pointers and the crate's handles are reached at rustc's offsets): call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash){}", ts, fs, ts, detail));
                         // the fn fails with the error above; lowering goes on over a scratch place of
                         // the field's type so nothing after it trips over a shapeless one
                         let a = self.new_slot_for(ft);
@@ -1683,6 +1813,9 @@ impl<'a> Lcx<'a> {
             (Some(leaves), false) => LocalSt::Regs(self.fresh_leaves(leaves)),
             _ => {
                 let a = self.new_slot_for(t);
+                if let Some(d) = self.decl_depth[li as usize] {
+                    self.storage_lives_to(a, d, None);
+                }
                 LocalSt::Slot(a)
             }
         };
@@ -1900,28 +2033,36 @@ impl<'a> Lcx<'a> {
                 s.born = false;
             }
             let ptr_bytes = self.pb();
-            match coroutine_transform(&mut self.f, &c, ptr_bytes, &tys) {
-                Ok((sz, al, shape)) => {
+            match coroutine_transform(&mut self.f, &c, ptr_bytes, &tys, &self.partial_slots) {
+                Ok((sz, al, shape, mut deps)) => {
                     let area = (sz, al);
+                    for t in std::mem::take(&mut self.partial_upvars) {
+                        if !deps.contains(&t) { deps.push(t); }
+                    }
                     if self.errors.is_empty() {
-                        if self.u.tcx.coro_shapes.get(&c.ct).is_none() {
-                            self.u.tcx.coro_shapes.insert(c.ct, shape);
-                        }
                         if self.u.tcx.coro_slot_ty.get(&self.cur_fn).is_none() {
                             self.u.tcx.coro_slot_ty.insert(self.cur_fn, c.ct);
                         }
-                        match self.u.tcx.coro_frames.get(&c.ct) {
-                            Some(prev) if prev != area => {
-                                // the second lowering of a future that asked for its own layout
-                                // (jit.rs coro_frame) saved a local of its own type across a suspension
-                                if self.u.coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).contains(&c.ct) {
-                                    self.err(self.pos, "recursion in an async fn or block requires boxing: the future would contain itself (E0733)".to_string());
-                                } else {
+                        if !deps.is_empty() {
+                            // what it saves got its size from coroutines whose frames are not known
+                            // yet: no frame now (jit.rs coro_frame lowers it again once they are),
+                            // unless those wait for this one, a future that holds itself
+                            if crate::jit::coro_defer(self.u, c.ct, deps).is_err() {
+                                self.err(self.pos, "recursion in an async fn or block requires boxing: the future would contain itself (E0733)".to_string());
+                            }
+                        } else {
+                            match self.u.tcx.coro_frames.get(&c.ct) {
+                                // a frame is published only from complete layouts, so every lowering
+                                // gives the same one
+                                Some(prev) if prev != area => {
                                     self.err(self.pos, format!("internal: coroutine saved locals {:?} lowered again as {:?}", prev, area));
                                 }
+                                Some(_) => {}
+                                None => {
+                                    self.u.tcx.coro_shapes.insert(c.ct, shape);
+                                    self.u.tcx.coro_frames.insert(c.ct, area);
+                                }
                             }
-                            Some(_) => {}
-                            None => self.u.tcx.coro_frames.insert(c.ct, area),
                         }
                     }
                 }
@@ -2394,7 +2535,8 @@ impl<'a> Lcx<'a> {
         self.f.params.push(env);
         let cx = self.f.vreg(Cls::I);
         self.f.params.push(cx);
-        let ul = self.u.closure_storage_layout(up);
+        let (ul, served) = self.u.closure_storage_layout_served(up);
+        self.partial_upvars = served;
         let caps = self.storage_for_closure(ce).roots.clone();
         let storage = self.u.closure_storage(up);
         let nfields = storage.fields.len();
@@ -3094,6 +3236,9 @@ impl<'a> Lcx<'a> {
             }
             // this statement's temporaries (an enclosing statement's stay pending)
             let mark = self.stmt_temps.len();
+            let sd_mark = self.sd.len();
+            // the depth a `let` extends its temporaries to (and a `super let`'s)
+            let mut sd_extend: Option<usize> = None;
             if i + 1 == n && matches!(s, Stmt::Expr(false, _)) && edition < 2024 {
                 if let Some(t) = self.tail_marks.last_mut() {
                     *t = Some(mark);
@@ -3101,7 +3246,7 @@ impl<'a> Lcx<'a> {
             }
             match s {
                 Stmt::Let(r) => {
-                    let crate::ast::LetStmt { attrs, pat, init, else_, .. } = ast.row(*r);
+                    let crate::ast::LetStmt { attrs, pat, init, else_, super_, .. } = ast.row(*r);
                     if !self.active(*attrs) {
                         continue;
                     }
@@ -3110,7 +3255,25 @@ impl<'a> Lcx<'a> {
                     // made later in a nested one (`let y; if c { y = v; }`: y lives to the block end)
                     let mut lis = Vec::new();
                     self.pat_binding_locals(*pat, &mut lis);
-                    let depth = self.scopes.len() - 1;
+                    // rustc region.rs resolve_local: a `super let` a parent `let` extends belongs to
+                    // that `let`'s scope, and its initializer extends as a `let`'s does; any other
+                    // belongs to the enclosing temporary scope and extends nothing
+                    let extended = if *super_ { self.extended_super_lets.remove(&(blk.stmts.lo + i as u32)) } else { None };
+                    let extend = !*super_ || extended.is_some();
+                    let depth = extended.unwrap_or(self.scopes.len() - 1);
+                    if *super_ {
+                        sd_extend = Some(depth);
+                    }
+                    if *super_ && !extend {
+                        // the enclosing temporary scope is the statement's, not a scope of locals: only
+                        // the formatting macros write `super let`, and their bindings have no drop glue
+                        for &li in &lis {
+                            let lt = self.monomorphize(self.b.locals[li as usize].ty);
+                            if self.needs_drop_glue(lt) {
+                                self.err(init.get().map_or(self.pos, |e| ast.expr(e).lo), "a `super let` binding with drop glue outside an extending `let` is not supported".to_string());
+                            }
+                        }
+                    }
                     if !self.probe_pts.is_empty() {
                         self.probe_scope.extend(lis.iter().copied());
                     }
@@ -3191,9 +3354,18 @@ impl<'a> Lcx<'a> {
                         Some(e) => {
                             self.pos = ast.expr(*e).lo;
                             let mut ext = Vec::new();
-                            self.collect_extending(*e, &mut ext);
+                            if extend {
+                                let mut super_lets = Vec::new();
+                                self.collect_extending(*e, &mut ext, &mut super_lets);
+                                for st in super_lets {
+                                    self.extended_super_lets.insert(st, depth);
+                                }
+                            }
                             for x in &ext {
                                 self.extend_ops.insert(*x, depth);
+                            }
+                            if !ext.is_empty() {
+                                sd_extend = Some(depth);
                             }
                             let sc_mark = self.scope_temps.last().map_or(0, |v| v.len());
                             let place_else = if else_.is_some()
@@ -3399,11 +3571,24 @@ impl<'a> Lcx<'a> {
             // (Reference destructors.scope.temporary.edition2024); before, its temporaries
             // live to the end of the enclosing temporary scope
             let is_tail = i + 1 == n && matches!(s, Stmt::Expr(false, _));
-            if !is_tail || edition >= 2024 {
+            // a `super let` has no statement scope: its temporaries belong to the enclosing one
+            // (rustc region.rs resolve_stmt)
+            let super_let = matches!(s, Stmt::Let(r) if ast.row(*r).super_);
+            // a `let` that extends temporaries: every tracked slot it made lives to its scope's
+            // end, not the statement's
+            if let Some(d) = sd_extend {
+                for e in &mut self.sd[sd_mark..] {
+                    if e.2.is_none() {
+                        e.2 = Some(d);
+                    }
+                }
+            }
+            if (!is_tail || edition >= 2024) && !super_let {
                 if is_tail {
                     result = self.settle_before_temp_drop(result, self.body_ty(match s { Stmt::Expr(_, e) => *e, _ => ExprId(0) }), mark);
                 }
                 self.drop_stmt_temps_from(mark);
+                self.end_storage(sd_mark, |life| life.is_none());
             }
         }
         result
@@ -3560,7 +3745,6 @@ impl<'a> Lcx<'a> {
         let exit = self.f.block();
         self.goto(head);
         self.switch(head);
-        self.const_fuel_tick();
         let self_t = self.u.tcx.tys.intern(TyKind::Ref(true, iter_t, crate::types::RegionId::ERASED));
         let r = self.emit_instance(instance, vec![(Val::L(vec![iter_addr]), self_t)], opt_t);
         let rpl = self.val_to_place(r);
@@ -3589,7 +3773,7 @@ impl<'a> Lcx<'a> {
         self.loops.pop();
         self.pop_scope();
         self.stmt_temps.truncate(iter_temp);
-        self.goto(head);
+        self.back_edge(head);
         self.switch(exit);
         // the iterator itself is dropped after the loop
         self.drop_at(iter_addr, iter_t);
@@ -3661,6 +3845,23 @@ impl<'a> Lcx<'a> {
             // outside a drop sequence (emit_drop_seq) the drop state may still list this value;
             // a drop that cannot unwind (std types all the way down) needs no pad
             let plain = self.pad_fixed.is_none() || !self.u.drop_may_unwind(t);
+            // An exit drop in a coroutine body: the glue gets the address as the call's own
+            // memory (what the value holds flows, the address does not), on a vreg of its own so
+            // the place's other uses stay what they are. The place's storage ends right after it,
+            // which ends the borrow the drop makes (rustc: StorageDead after the Drop, so
+            // MaybeBorrowedLocals no longer holds it). A drop in the middle of a local's life
+            // (an assignment's, drop_local_before_rebind) stays an ordinary argument.
+            let addr = match self.coro.is_some() && self.exit_drop {
+                true => {
+                    let p = self.f.vreg(Cls::I);
+                    self.emit(Inst::Mov(p, addr));
+                    if let Some(c) = self.coro.as_mut() {
+                        c.call_private.insert(p);
+                    }
+                    p
+                }
+                false => addr,
+            };
             self.nounwind += plain as u32;
             self.emit(Inst::Call(Callee::Fn(id), vec![addr], Vec::new()));
             self.nounwind -= plain as u32;
@@ -3858,7 +4059,8 @@ impl<'a> Lcx<'a> {
     /// owned here (a local, a by-value capture this body owns, a temporary) and may be moved.
     fn illegal_move(&mut self, e: ExprId) -> Option<String> {
         let ast = self.ast();
-        let ts = |l: &Self, t: TyId| crate::typeck::ty_to_string(false, &l.u.prog, &l.u.tcx, t);
+        // as rustc's diagnostics print a type (`Vec<String>` for `Vec<String, Global>`)
+        let ts = |l: &Self, t: TyId| crate::typeck::ty_to_diag_string(&l.u.prog, &l.u.tcx, t);
         match &ast.expr(e).kind {
             ExprKind::Paren(x) => self.illegal_move(*x),
             ExprKind::Path(_) => match self.b.res.get(&e.0).copied() {
@@ -3911,6 +4113,133 @@ impl<'a> Lcx<'a> {
             }
             _ => None,
         }
+    }
+
+    /// A Box's type arguments: T, then its allocator.
+    fn box_args(&self, t: TyId) -> Vec<TyId> {
+        match self.kind(t) {
+            TyKind::Adt(_, a, _) => self.u.tcx.tys.list(a).to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The leaves of the pointer a value `v` of type `t` (a reference, a raw pointer or a Box) is to
+    /// its `pointee`: the address, and the metadata when the pointee is unsized. A Box's allocator
+    /// follows its pointer (in its leaves, or in memory when it is too big for registers).
+    fn pointer_leaves(&mut self, v: Val, t: TyId, pointee: TyId) -> Vec<VReg> {
+        let n = if self.unsized_ty(pointee) { 2 } else { 1 };
+        let mut p = match v {
+            // (its pointer is its first field)
+            Val::M(base, off) if self.box_inner(t).is_some() && self.layout(t).leaves.is_none() => {
+                let at = off + self.layout(t).fields.first().copied().unwrap_or(0) as i32;
+                let ft = self.struct_field_tys(t).first().copied().unwrap_or(t);
+                let v = self.load_val(base, at, ft);
+                self.to_leaves(v, ft)
+            }
+            v => self.to_leaves(v, t),
+        };
+        p.truncate(n);
+        p
+    }
+
+    /// The field types of a struct `t` (its only variant), in declaration order.
+    fn struct_field_tys(&self, t: TyId) -> Vec<TyId> {
+        let TyKind::Adt(d, a, _) = self.kind(t) else { return Vec::new() };
+        let n = self.u.tcx.adts.get(&d).and_then(|x| x.variants.first()).map_or(0, |v| v.fields.len());
+        let env = crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog);
+        (0..n).map(|f| self.u.tcx.field_ty(&self.u.prog, env, d, 0, f as u32, self.u.tcx.tys.list(a))).collect()
+    }
+
+    /// The arguments of `box_free_after_move::<T, A>(ptr, alloc)` for the Box `b` of type `t`
+    /// (its fields: the pointer, the marker, the allocator), passed as a call passes them: a
+    /// Box in registers is its leaves; one in memory (an allocator too big for registers) its
+    /// pointer's leaves, then its allocator's or the address of a private copy of it. The first
+    /// is the pointer to the contents.
+    fn box_free_args(&mut self, b: Val, t: TyId) -> Vec<VReg> {
+        if self.layout(t).leaves.is_some() {
+            return self.to_leaves(b, t);
+        }
+        let Val::M(base, off) = b else { return Vec::new() };
+        let fields = &self.layout(t).fields;
+        let mut args = Vec::new();
+        for (i, ft) in self.struct_field_tys(t).into_iter().enumerate() {
+            let at = off + fields[i] as i32;
+            let fl = self.layout(ft);
+            if fl.leaves.is_some() {
+                let v = self.load_val(base, at, ft);
+                args.extend(self.to_leaves(v, ft));
+            } else {
+                let tmp = self.new_arg_slot_for(ft);
+                let src = self.addr_add(base, at);
+                if fl.size > 0 {
+                    self.emit(Inst::Copy(tmp, src, fl.size));
+                }
+                if let Some(c) = self.coro.as_mut() {
+                    c.call_private.insert(tmp);
+                }
+                args.push(tmp);
+            }
+        }
+        args
+    }
+
+    /// Where the pointer an unsizing coercion from `src` to `dst` changes lies in a struct
+    /// (rustc coerce_unsized: the one field whose type changes is coerced, the others are kept,
+    /// as a Box's allocator): the field, the leaves of the fields before it, and the pointer's
+    /// index among the field's own leaves. None when `src` is the pointer itself (a reference,
+    /// a raw pointer).
+    fn coerced_field(&mut self, src: TyId, dst: TyId) -> Option<(usize, usize, usize)> {
+        let (TyKind::Adt(d, ..), TyKind::Adt(e, ..)) = (self.kind(src), self.kind(dst)) else { return None };
+        if d != e {
+            return None;
+        }
+        let (fs, gs) = (self.struct_field_tys(src), self.struct_field_tys(dst));
+        let mut before = 0;
+        for (i, (a, b)) in fs.into_iter().zip(gs).enumerate() {
+            let l = self.layout(a);
+            if a != b && l.size > 0 {
+                let inner = self.coerced_field(a, b).map_or(0, |(_, x, y)| x + y);
+                return Some((i, before, inner));
+            }
+            before += l.leaves.as_ref().map_or(0, |v| v.len());
+        }
+        None
+    }
+
+    /// `v` of `src` as the pointer type `dst` it unsizes to: `edit` turns the leaves of the
+    /// coerced pointer (at the index it is given) into the target's ([T; N] -> [T] adds the
+    /// length, T -> dyn the vtable, an upcast replaces the vtable); a struct's other fields are
+    /// kept (a Box's allocator). None when `edit` finds no such pointer.
+    fn coerce_ptr_leaves(&mut self, v: Val, src: TyId, dst: TyId, edit: &mut dyn FnMut(&mut Self, &mut Vec<VReg>, usize) -> bool) -> Option<Val> {
+        let at = self.coerced_field(src, dst);
+        let in_regs = self.layout(src).leaves.is_some();
+        let Some((f, _, inner)) = at.filter(|_| !in_regs) else {
+            let mut p = self.to_leaves(v, src);
+            let i = at.map_or(0, |(_, before, inner)| before + inner);
+            return edit(self, &mut p, i).then_some(Val::L(p));
+        };
+        // a struct in memory (an allocator too big for registers): field by field
+        let Val::M(base, off) = v else { return None };
+        let (sf, df) = (&self.layout(src).fields, &self.layout(dst).fields);
+        let out = self.new_slot_for(dst);
+        for (i, (a, b)) in self.struct_field_tys(src).into_iter().zip(self.struct_field_tys(dst)).enumerate() {
+            if i == f {
+                let fv = self.load_val(base, off + sf[i] as i32, a);
+                let mut p = self.to_leaves(fv, a);
+                if !edit(self, &mut p, inner) {
+                    return None;
+                }
+                self.store_val(out, df[i] as i32, b, Val::L(p));
+            } else {
+                let size = self.layout(a).size;
+                if size > 0 {
+                    let s = self.addr_add(base, off + sf[i] as i32);
+                    let d = self.addr_add(out, df[i] as i32);
+                    self.emit(Inst::Copy(d, s, size));
+                }
+            }
+        }
+        Some(Val::M(out, 0))
     }
 
     /// T of `Box<T>`; rustc_middle/src/ty/adt.rs:374 identifies the owning ADT by flag.
@@ -4042,14 +4371,17 @@ impl<'a> Lcx<'a> {
                 // the allocation without dropping them again
                 let mut sub = prefix.to_vec();
                 sub.push((BOX_STEP, 0));
-                // Read the Box's complete pointer layout, including metadata when present.
+                // Read the Box's complete pointer layout, including metadata when present, and
+                // its allocator.
                 let pointer = self.load_val(addr, 0, t);
-                let pointer = self.to_leaves(pointer, t);
-                let ptr = pointer[0];
-                self.drop_tree(entries, ptr, inner, &sub);
-                if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
-                    let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
-                    self.tree_leaf_call_may(Callee::Fn(id), pointer, false);
+                let pointer = self.box_free_args(pointer, t);
+                if let Some(&ptr) = pointer.first() {
+                    self.drop_tree(entries, ptr, inner, &sub);
+                    if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
+                        // all the Box's arguments (its allocator's too)
+                        let id = self.u.fn_id(FnKey::Inst(free, self.box_args(t)));
+                        self.tree_leaf_call_may(Callee::Fn(id), pointer, false);
+                    }
                 }
                 if let Some(j) = skip {
                     self.goto(j);
@@ -4211,6 +4543,7 @@ impl<'a> Lcx<'a> {
             self.scope_drop_acts(i, &mut seq);
         }
         self.emit_drop_seq(seq);
+        self.end_scope_storage(from, false);
     }
 
     /// An early exit to scope depth `scope_from` / statement-temporary depth `temps_from`:
@@ -4223,6 +4556,7 @@ impl<'a> Lcx<'a> {
         }
         let acts = self.exit_actions(scope_from, temps_from);
         self.emit_drop_seq(acts);
+        self.end_scope_storage(scope_from, true);
     }
 
     /// The drops an exit to scope depth `scope_from` / statement-temporary depth `temps_from`
@@ -4278,11 +4612,13 @@ impl<'a> Lcx<'a> {
     }
 
     fn emit_drop_act(&mut self, a: &DropAct) {
+        let was = std::mem::replace(&mut self.exit_drop, true);
         match *a {
             DropAct::Local(li) => self.drop_local_if_live(li),
             DropAct::Temp(p, t, None) => self.drop_at(p, t),
             DropAct::Temp(p, t, Some(f)) => self.drop_flagged_temp(p, t, f),
         }
+        self.exit_drop = was;
     }
 
     /// What a drop action's code depends on (cleanup pads are shared by it).
@@ -4369,6 +4705,7 @@ impl<'a> Lcx<'a> {
         self.scope_temp_pos.push(Vec::new());
         self.scope_marks.push(self.stmt_temps.len());
         self.tail_marks.push(None);
+        self.sd_scope_marks.push(self.sd.len());
     }
 
     fn pop_scope(&mut self) {
@@ -4379,29 +4716,30 @@ impl<'a> Lcx<'a> {
         self.scope_temp_pos.pop();
         self.scope_marks.pop();
         self.tail_marks.pop();
+        self.sd_scope_marks.pop();
     }
 
     /// `&` operands in extending position of a `let` initializer (rustc's temporary lifetime
     /// extension): `&e`, and through tuples, arrays, struct literals, tuple struct and variant
     /// constructor calls, casts, parens, block tails, if branches and match arms.
-    fn collect_extending(&self, e: ExprId, out: &mut Vec<u32>) {
+    fn collect_extending(&self, e: ExprId, out: &mut Vec<u32>, super_lets: &mut Vec<u32>) {
         let ast = self.ast();
         match &ast.expr(e).kind {
             ExprKind::AddrOf(_, _, x) => {
                 let x = strip_paren(ast, *x);
                 out.push(x.0);
                 self.extend_place_operands(x, out);
-                self.collect_extending(x, out);
+                self.collect_extending(x, out, super_lets);
             }
-            ExprKind::Paren(x) | ExprKind::Cast(x, _) => self.collect_extending(*x, out),
+            ExprKind::Paren(x) | ExprKind::Cast(x, _) => self.collect_extending(*x, out, super_lets),
             ExprKind::Tuple(v) | ExprKind::Array(v) => {
                 for x in ast.list(*v) {
-                    self.collect_extending(*x, out);
+                    self.collect_extending(*x, out, super_lets);
                 }
             }
             ExprKind::Struct(row) => {
                 for f in ast.list(ast.row(*row).fields) {
-                    self.collect_extending(f.expr, out);
+                    self.collect_extending(f.expr, out, super_lets);
                 }
             }
             // a tuple struct's or variant's constructor call extends its arguments, as typeck's
@@ -4411,24 +4749,33 @@ impl<'a> Lcx<'a> {
                 if matches!(self.b.res.get(&strip_paren(ast, *f).0), Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct)) =>
             {
                 for x in ast.list(*args) {
-                    self.collect_extending(*x, out);
+                    self.collect_extending(*x, out, super_lets);
                 }
             }
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) => {
-                if let Some(Stmt::Expr(false, x)) = ast.stmts(*b).last() {
-                    self.collect_extending(*x, out);
-                }
-            }
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) => self.collect_extending_block(*b, out, super_lets),
             ExprKind::If(_, then, els) => {
-                if let Some(Stmt::Expr(false, x)) = ast.stmts(*then).last() {
-                    self.collect_extending(*x, out);
-                }
-                if let Some(x) = els.get() { self.collect_extending(x, out); }
+                self.collect_extending_block(*then, out, super_lets);
+                if let Some(x) = els.get() { self.collect_extending(x, out, super_lets); }
             }
             ExprKind::Match(_, arms) => {
-                for arm in ast.list(*arms) { self.collect_extending(arm.body, out); }
+                for arm in ast.list(*arms) { self.collect_extending(arm.body, out, super_lets); }
             }
             _ => {}
+        }
+    }
+
+    /// A block in extending position: its tail, and its `super let`s, which live as long as the
+    /// extended value (`{ super let .. = E&; .. }`; region_scope.rs extend_block)
+    fn collect_extending_block(&self, b: BlockId, out: &mut Vec<u32>, super_lets: &mut Vec<u32>) {
+        let ast = self.ast();
+        if let Some(Stmt::Expr(false, x)) = ast.stmts(b).last() {
+            self.collect_extending(*x, out, super_lets);
+        }
+        let stmts = ast.block(b).stmts;
+        for (i, s) in ast.list(stmts).iter().enumerate() {
+            if matches!(s, Stmt::Let(r) if ast.row(*r).super_) {
+                super_lets.push(stmts.lo + i as u32);
+            }
         }
     }
 
@@ -4508,6 +4855,10 @@ impl<'a> Lcx<'a> {
                     if let (Val::M(base, off), None) = (&v, &self.locals[li as usize]) {
                         let l = self.layout(t);
                         if l.leaves.is_none() {
+                            if *off == 0 {
+                                let depth = self.decl_depth[li as usize].unwrap_or(self.scopes.len() - 1);
+                                self.storage_lives_to(*base, depth, Some(l.size));
+                            }
                             let a = self.addr_add(*base, *off);
                             self.locals[li as usize] = Some(LocalSt::Slot(a));
                             self.own_local(li);
@@ -5964,6 +6315,8 @@ impl<'a> Lcx<'a> {
             ExprKind::Array(v) | ExprKind::Tuple(v) => ast.list(v).iter().all(|x| self.value_unqualified(*x)),
             // (qualifs.rs in_rvalue: a repeat is qualified by its operand)
             ExprKind::Repeat(x, _) => self.value_unqualified(x),
+            // (qualifs.rs in_place: a field's type may hold a qualif, then its base's value decides)
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => self.value_unqualified(x),
             ExprKind::Path(_) => match self.b.res.get(&e.0).copied() {
                 Some(Res::Def(d)) => match self.u.prog.def(d).kind {
                     DefKind::Const | DefKind::AssocConst => self.const_promotable(e),
@@ -6057,6 +6410,15 @@ impl<'a> Lcx<'a> {
             ExprKind::Closure(_) => matches!(self.kind_ref(t), TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: captures, .. })
                 if matches!(self.kind_ref(*captures), TyKind::Tuple(ts) if ts.is_empty())),
             ExprKind::AddrOf(false, false, x) => self.promotable(x),
+            // rustc_mir_transform/src/promote_consts.rs: Validator::validate_place: a field of a
+            // promotable temporary (`&[C.id, 6]` reads `C`'s temporary), not of a union; a Deref
+            // projection (an autoderef) is not promoted
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                let bt = self.body_ty(x);
+                self.b.field_idx.get(&e.0).is_some_and(|&(d, _)| d == 0)
+                    && !matches!(self.kind(bt), TyKind::Adt(d, ..) if self.u.tcx.adts.get(&d).is_some_and(|a| a.is_union()))
+                    && self.promotable(x)
+            }
             ExprKind::Call(f, args) => {
                 let ctor = matches!(self.b.res.get(&strip_paren(ast, f).0), Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
                 // rustc_mir_transform/src/promote_consts.rs: Validator::validate_call.
@@ -6136,8 +6498,20 @@ impl<'a> Lcx<'a> {
                 }
             }
         }
+        // a const or static initializer's borrowed call of a const fn is rustc's promoted
+        // (promote_consts.rs validate_call: promote_all_fn), a constant evaluated on its own: in
+        // a constant-evaluation twin its steps are counted apart from the initializer's
+        let own = shared && self.ctfe_steps && self.const_init && !self.in_promoted && self.promoted_call(x);
+        if own {
+            self.in_promoted = true;
+            self.promoted_steps(true);
+        }
         let (blk0, at0) = (self.cur, self.f.blocks[self.cur as usize].insts.len());
         let v = self.lower_expr(x);
+        if own {
+            self.promoted_steps(false);
+            self.in_promoted = false;
+        }
         let l = self.layout(xt);
         if l.size == 0 {
             // a promoted zero-sized value has no storage: its address is its alignment (as
@@ -6635,6 +7009,9 @@ impl<'a> Lcx<'a> {
                         self.moved_field(li, &path);
                     }
                 }
+                // rustc's `a = lhs0`: the part coerces to the assignee's type (`&Box<T>` to `&T`)
+                let at = self.body_ty(a);
+                let v = self.apply_coercion_at(a.0 | crate::typeck::ASSIGN_VALUE_KEY, t, v, at);
                 self.assign_to(a, v);
             }
         }
@@ -6722,14 +7099,21 @@ impl<'a> Lcx<'a> {
     }
 
     fn apply_coercion(&mut self, e: ExprId, v: Val, target: TyId) -> Val {
-        match self.b.coerce(e.0) {
+        let src = self.body_ty(e);
+        self.apply_coercion_at(e.0, src, v, target)
+    }
+
+    /// The coercion typeck recorded under `key` (an expression's id, or a synthetic key such as
+    /// `ASSIGN_VALUE_KEY`'s) applied to `v` of type `from`.
+    fn apply_coercion_at(&mut self, key: u32, from: TyId, v: Val, target: TyId) -> Val {
+        match self.b.coerce(key) {
             None | Some(Coerce::MutToConst | Coerce::RefToRaw(_)) => v,
             Some(Coerce::Never) => {
                 // a `!` value used as another type (`fn f(x: !) -> T { x }`): control never gets
                 // here; the rest is emitted into a dead block with a placeholder of T's shape
                 // (the target may be unknown here -- a block tail passes its own type -- so the
                 // placeholder is memory, which reads as any shape)
-                if self.is_never(self.body_ty(e)) && self.dead_blk != Some(self.cur) {
+                if self.is_never(from) && self.dead_blk != Some(self.cur) {
                     self.term(Term::Unreachable);
                     self.dead();
                     let a = if self.is_never(target) {
@@ -6747,7 +7131,7 @@ impl<'a> Lcx<'a> {
             Some(Coerce::Unsize) => {
                 // [T; N] -> [T] behind a pointer (&, *const/*mut) or a smart pointer (Box, Rc, ..):
                 // the thin pointer gets the length N
-                let src = self.body_ty(e);
+                let src = from;
                 let len = match (self.kind(src), self.kind(target)) {
                     (TyKind::Ref(_, a, _) | TyKind::Ptr(_, a), TyKind::Ref(_, b, _) | TyKind::Ptr(_, b)) => self.unsize_len(a, b),
                     // Box<[T; N]> / Box<S<[T; N]>> -> Box<[T]> / Box<S<[T]>>
@@ -6757,24 +7141,29 @@ impl<'a> Lcx<'a> {
                 // a block tail passes its own type as the target: the length is the array's in
                 // the source (the only array an unsizing can come from)
                 let len = if len == 0 && target == src { self.array_len_in(src, 0) } else { len };
-                let p = self.to_leaves(v, src);
-                if p.len() != 1 {
-                    self.err(self.pos, "unsizing `[T; N]` to `[T]` needs a single-pointer value".to_string());
-                    return self.unit();
+                // the thin pointer gets its length; a smart pointer's other fields stay
+                let mut add_len = |me: &mut Self, p: &mut Vec<VReg>, i: usize| {
+                    if i >= p.len() {
+                        return false;
+                    }
+                    let l = me.iconst(len as i64);
+                    p.insert(i + 1, l);
+                    true
+                };
+                match self.coerce_ptr_leaves(v, src, target, &mut add_len) {
+                    Some(v) => v,
+                    None => {
+                        self.err(self.pos, "unsizing `[T; N]` to `[T]` needs a pointer value".to_string());
+                        self.unit()
+                    }
                 }
-                let l = self.iconst(len as i64);
-                Val::L(vec![p[0], l])
             }
             Some(Coerce::ToDyn(src, dy)) => {
                 let src = self.monomorphize(src);
                 let dy = self.monomorphize(dy);
-                // thin pointer (alone in its wrapper) -> (data, vtable)
-                let st = self.body_ty(e);
-                let p = self.to_leaves(v, st);
-                if p.len() != 1 {
-                    self.err(self.pos, "unsizing to `dyn` needs a single-pointer value".to_string());
-                    return self.unit();
-                }
+                // thin pointer -> (data, vtable); a smart pointer's other fields stay (a Box's
+                // allocator)
+                let st = from;
                 let vt = self.f.vreg(Cls::I);
                 match self.u.vtable_shared(src, dy) {
                     Ok(Some(addr)) => {
@@ -6788,8 +7177,20 @@ impl<'a> Lcx<'a> {
                         return self.unit();
                     }
                 }
-                let _ = target;
-                Val::L(vec![p[0], vt])
+                let mut add_vt = |_: &mut Self, p: &mut Vec<VReg>, i: usize| {
+                    if i >= p.len() {
+                        return false;
+                    }
+                    p.insert(i + 1, vt);
+                    true
+                };
+                match self.coerce_ptr_leaves(v, st, target, &mut add_vt) {
+                    Some(v) => v,
+                    None => {
+                        self.err(self.pos, "unsizing to `dyn` needs a pointer value".to_string());
+                        self.unit()
+                    }
+                }
             }
             Some(Coerce::Upcast(sd, dd)) => {
                 let sd = self.monomorphize(sd);
@@ -6798,21 +7199,29 @@ impl<'a> Lcx<'a> {
                 // dropped) keeps its vtable (rustc codegen unsized_info): the value is unchanged,
                 // whatever holds the pointer (`Ref<'_, dyn Any>` passed on as `Ref<'_, T>`).
                 let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else { return v };
-                // (data, vtable of Sub) -> (data, Sub's stored vtable for Super)
-                let st = self.body_ty(e);
-                let p = self.to_leaves(v, st);
-                if p.len() != 2 {
-                    self.err(self.pos, "internal: trait object upcast of a value without a vtable -- Relax bug, report it".to_string());
-                    return self.unit();
+                // (data, vtable of Sub) -> (data, Sub's stored vtable for Super); a smart
+                // pointer's other fields stay (a Box's allocator)
+                let st = from;
+                let mut swap_vt = |me: &mut Self, p: &mut Vec<VReg>, i: usize| {
+                    if i + 1 >= p.len() {
+                        return false;
+                    }
+                    let vt = me.f.vreg(Cls::I);
+                    let pm = me.pmem();
+                    me.emit(Inst::Load(pm, vt, p[i + 1], (slot * me.pb() as usize) as i32));
+                    p[i + 1] = vt;
+                    true
+                };
+                match self.coerce_ptr_leaves(v, st, target, &mut swap_vt) {
+                    Some(v) => v,
+                    None => {
+                        self.err(self.pos, "internal: trait object upcast of a value without a vtable -- Relax bug, report it".to_string());
+                        self.unit()
+                    }
                 }
-                let vt = self.f.vreg(Cls::I);
-                let pm = self.pmem();
-                self.emit(Inst::Load(pm, vt, p[1], (slot * self.pb() as usize) as i32));
-                let _ = target;
-                Val::L(vec![p[0], vt])
             }
             Some(Coerce::DerefRef(n)) => {
-                let st = self.body_ty(e);
+                let st = from;
                 let (inner, m) = match self.kind(st) {
                     TyKind::Ref(m, i, _) => (i, m),
                     _ => return v,
@@ -6823,7 +7232,7 @@ impl<'a> Lcx<'a> {
                 let saved = self.want_mut;
                 self.want_mut = m;
                 for k in 0..n {
-                    let (a, b) = self.deref_place(e.0 | crate::typeck::DEREF_COERCE_KEY, k, pl, pt);
+                    let (a, b) = self.deref_place(key | crate::typeck::DEREF_COERCE_KEY, k, pl, pt);
                     pl = a;
                     pt = b;
                 }
@@ -6840,7 +7249,7 @@ impl<'a> Lcx<'a> {
                 }
             }
             Some(Coerce::ReifyFn) => {
-                let t = self.body_ty(e);
+                let t = from;
                 if let TyKind::FnDef(d, args, _) = self.kind(t) {
                     // `<T as Trait>::method` as a value: the impl's method (or the default body)
                     let r = self.fn_item_addr(d, self.u.tcx.tys.list(args).to_vec());
@@ -6851,7 +7260,7 @@ impl<'a> Lcx<'a> {
             Some(Coerce::UnsafeFn) => v,
             Some(Coerce::ClosureFn) => {
                 // rustc_codegen_ssa/src/mir/rvalue.rs:536-550.
-                let instance = Instance::resolve_closure(&self.u.tcx, &self.u.prog, self.body_ty(e), relax_types::upvar::ClosureKind::FnOnce);
+                let instance = Instance::resolve_closure(&self.u.tcx, &self.u.prog, from, relax_types::upvar::ClosureKind::FnOnce);
                 let id = self.u.instance_fn_id(instance);
                 let r = self.f.vreg(Cls::I);
                 self.emit(Inst::FnAddr(r, id));
@@ -6980,10 +7389,11 @@ impl<'a> Lcx<'a> {
                     {
                         let inner = self.box_inner(xt).unwrap();
                         let b = self.lower_expr(*x);
-                        let b = self.to_leaves(b, xt);
-                        let v = self.read_place(&Place::Mem(b[0], 0), inner);
+                        let b = self.box_free_args(b, xt);
+                        let Some(&ptr) = b.first() else { return self.unit() };
+                        let v = self.read_place(&Place::Mem(ptr, 0), inner);
                         if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
-                            let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
+                            let id = self.u.fn_id(FnKey::Inst(free, self.box_args(xt)));
                             self.nounwind += 1;
                             self.emit(Inst::Call(Callee::Fn(id), b, Vec::new()));
                             self.nounwind -= 1;
@@ -7228,7 +7638,6 @@ impl<'a> Lcx<'a> {
                 let exit = self.f.block();
                 self.goto(head);
                 self.switch(head);
-                self.const_fuel_tick();
                 let outer = self.scopes.len();
                 self.push_scope();
                 let mark = self.stmt_temps.len();
@@ -7246,7 +7655,7 @@ impl<'a> Lcx<'a> {
                 self.lower_block_tscope(*b);
                 self.loops.pop();
                 self.drop_scopes_from(outer);
-                self.goto(head);
+                self.back_edge(head);
                 self.switch(fail);
                 self.drop_scopes_from(outer);
                 self.goto(exit);
@@ -7255,6 +7664,7 @@ impl<'a> Lcx<'a> {
                 self.scope_temp_pos.truncate(outer);
                 self.scope_marks.truncate(outer);
                 self.tail_marks.truncate(outer);
+                self.sd_scope_marks.truncate(outer);
                 self.switch(exit);
                 self.unit()
             }
@@ -7264,13 +7674,12 @@ impl<'a> Lcx<'a> {
                 let res = self.result_place(t);
                 self.goto(head);
                 self.switch(head);
-                self.const_fuel_tick();
 
                 let l = label.map(|x| self.lifetime_sym(x));
                 self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: Some((res.clone(), t)), scope_depth: self.scopes.len(), temps_depth: self.stmt_temps.len() });
                 self.lower_block_tscope(*b);
                 self.loops.pop();
-                self.goto(head);
+                self.back_edge(head);
                 self.switch(exit);
                 if self.is_never(t) {
                     self.term(Term::Unreachable);
@@ -7310,7 +7719,7 @@ impl<'a> Lcx<'a> {
                     let td = self.loops[i].temps_depth;
                     self.exit_scopes(depth, td);
                     let c = self.loops[i].cont;
-                    self.goto(c);
+                    self.back_edge(c);
                 }
                 self.dead();
                 self.unit()
@@ -7650,7 +8059,11 @@ impl<'a> Lcx<'a> {
     /// Builds a struct/tuple value from field values (registers when it fits).
     fn build_record(&mut self, t: TyId, vi: u32, vals: Vec<(Val, TyId)>) -> Val {
         let storage = matches!(self.kind(t), TyKind::Closure(..));
-        let l = if storage { self.u.closure_storage_layout(t) } else { self.layout(t).clone() };
+        let (l, partial) = if storage {
+            self.u.closure_storage_layout_served(t)
+        } else {
+            (self.layout(t).clone(), self.partial_tys.get(&t).cloned().unwrap_or_default())
+        };
         match l.leaves {
             Some(ref leaves) => {
                 let mut out = Vec::with_capacity(leaves.len());
@@ -7663,8 +8076,12 @@ impl<'a> Lcx<'a> {
             None => {
                 let a = if storage {
                     let slot = self.f.slot(l.size, l.align);
+                    if !partial.is_empty() {
+                        self.partial_slots.insert(slot, partial);
+                    }
                     let address = self.f.vreg(Cls::I);
                     self.emit(Inst::SlotAddr(address, slot));
+                    self.track_storage(slot, address, t);
                     address
                 } else {
                     self.new_slot_for(t)
@@ -7758,11 +8175,15 @@ impl<'a> Lcx<'a> {
                 self.const_val(d, args, t)
             }
             DefKind::Static => {
-                crate::boundary::note_static(self.u, self.b.def, &self.b.args, d);
-                if !self.u.provided.is_empty() {
-                    self.check_provided_static(d, t);
-                }
-                let p = self.static_ptr(d);
+                crate::boundary::note_static(self.u, self.b.def, &self.b.args, d, t);
+                let p = if let Some(addr) = self.check_provided_static(d, t) {
+                    let sym = self.u.shared_static_sym(d, addr);
+                    let p = self.f.vreg(Cls::I);
+                    self.emit(Inst::Addr(p, sym));
+                    p
+                } else {
+                    self.static_ptr(d)
+                };
                 self.read_place(&Place::Mem(p, 0), t)
             }
             // a section bound the linker defines (`__start_<name>`): the program's own static
@@ -8033,7 +8454,20 @@ impl<'a> Lcx<'a> {
         };
         let root = self.field_move_path(bx);
         let mark = self.stmt_temps.len();
-        let (bp, bt) = self.lower_place(bx);
+        // a field of a value expression (`..make().leaf`): the place lies in one temporary that
+        // owns the whole value (rustc expr_as_place: as_temp of the base). The update moves its
+        // fields out of that temporary, which drops the rest (the given fields' old values, the
+        // siblings) at its scope's end, as a field read out of it does (rvalue_proj).
+        let mut temp = None;
+        let (bp, bt) = match self.rvalue_proj(bx) {
+            Some((r, path)) if root.is_none() && self.needs_drop_glue(self.body_ty(r)) => {
+                let (ta, rt, f, pl, pt) = self.lower_rvalue_proj(r, &path);
+                self.stmt_temps.push((ta, rt, Some(f)));
+                temp = Some((f, path));
+                (pl, pt)
+            }
+            _ => self.lower_place(bx),
+        };
         for fi in 0..nf as u32 {
             if given.iter().any(|g| g.0 == fi) {
                 continue;
@@ -8047,10 +8481,14 @@ impl<'a> Lcx<'a> {
                     let mut p = path.clone();
                     p.push((vi, fi));
                     self.moved_field(*li, &p);
+                } else if let Some((f, path)) = &temp {
+                    let mut p = path.clone();
+                    p.push((vi, fi));
+                    self.moved_temp_part(*f, &p);
                 }
             }
         }
-        if root.is_none() && !self.base_is_borrowed_place(bx) {
+        if root.is_none() && temp.is_none() && !self.base_is_borrowed_place(bx) {
             // a temporary base: its fields that were not taken are dropped with it
             // (the base temporary itself is not dropped as a whole: its taken fields moved)
             let ba = self.place_addr(&bp, bt);
@@ -8103,11 +8541,15 @@ impl<'a> Lcx<'a> {
                     (self.local_place(li), lt)
                 }
                 Some(Res::Def(d)) if self.u.prog.def(d).kind == DefKind::Static => {
-                    crate::boundary::note_static(self.u, self.b.def, &self.b.args, d);
-                    if !self.u.provided.is_empty() {
-                        self.check_provided_static(d, t);
-                    }
-                    let p = self.static_ptr(d);
+                    crate::boundary::note_static(self.u, self.b.def, &self.b.args, d, t);
+                    let p = if let Some(addr) = self.check_provided_static(d, t) {
+                        let sym = self.u.shared_static_sym(d, addr);
+                        let p = self.f.vreg(Cls::I);
+                        self.emit(Inst::Addr(p, sym));
+                        p
+                    } else {
+                        self.static_ptr(d)
+                    };
                     (Place::Mem(p, 0), t)
                 }
                 Some(Res::Def(d)) if self.u.prog.def(d).kind == DefKind::ForeignStatic && self.u.is_section_bound(d) => {
@@ -8142,7 +8584,7 @@ impl<'a> Lcx<'a> {
                 let saved = std::mem::replace(&mut self.want_mut, false);
                 let p = self.lower_expr(*x);
                 self.want_mut = saved;
-                let p = self.to_leaves(p, xt);
+                let p = self.pointer_leaves(p, xt, t);
                 if self.unsized_ty(t) {
                     return (Place::Regs(p), t);
                 }
@@ -10008,6 +10450,7 @@ impl<'a> Lcx<'a> {
             self.scope_temp_pos.truncate(depth);
             self.scope_marks.truncate(depth);
             self.tail_marks.truncate(depth);
+            self.sd_scope_marks.truncate(depth);
         }
         if known == Some(true) {
             self.term(Term::Unreachable);
@@ -10485,12 +10928,34 @@ impl<'a> Lcx<'a> {
         self.read_place(&res, t)
     }
 
-    /// A loop head in a checked program counts one iteration of the constant being evaluated
-    /// (see Options::const_fuel).
-    fn const_fuel_tick(&mut self) {
-        if !self.u.prog.session.options.const_fuel { return; }
-        let rt = self.u.syms.intern(crate::syms::SymKind::Rt("const_fuel"), const_fuel_addr());
+    /// The jump back to source loop `head` (the end of its body, a `continue`). In a constant-
+    /// evaluation twin's body it counts one step first, as rustc's CtfeLimit counts the block a
+    /// successor of which dominates it (rustc_mir_transform/src/ctfe_limit.rs:16-40). Only source
+    /// loops count: loops the lowering makes for what MIR does in one statement (an array repeat)
+    /// are not steps.
+    /// Is `x` a call of a const fn on promotable operands: in a const or static initializer,
+    /// rustc's promoted (promote_consts.rs validate_call: promote_all_fn)? (Not its check that the
+    /// call's block is no dead code: what this decides is only whose steps the call's are.)
+    fn promoted_call(&mut self, x: ExprId) -> bool {
+        let ast = self.ast();
+        let ExprKind::Call(f, args) = ast.expr(strip_paren(ast, x)).kind.clone() else { return false };
+        let TyKind::FnDef(d, ..) = self.kind(self.body_ty(f)) else { return false };
+        self.u.tcx.fn_sig(&self.u.prog, d).is_some_and(|s| s.is_const) && ast.list(args).iter().all(|a| self.promotable(*a))
+    }
+
+    /// The begin or end of a promoted's steps in a constant-evaluation twin (`promoted_call`).
+    fn promoted_steps(&mut self, begin: bool) {
+        let (name, addr) = if begin { ("const_fuel_promoted", const_fuel_promoted_addr()) } else { ("const_fuel_promoted_end", const_fuel_promoted_end_addr()) };
+        let rt = self.u.syms.intern(crate::syms::SymKind::Rt(name), addr);
         self.emit(Inst::Call(Callee::Host(rt), Vec::new(), Vec::new()));
+    }
+
+    fn back_edge(&mut self, head: u32) {
+        if self.ctfe_steps {
+            let rt = self.u.syms.intern(crate::syms::SymKind::Rt("const_fuel"), const_fuel_addr());
+            self.emit(Inst::Call(Callee::Host(rt), Vec::new(), Vec::new()));
+        }
+        self.goto(head);
     }
 
     fn lower_for(&mut self, p: PatId, it: ExprId, b: BlockId, label: Option<Ident>) {
@@ -10845,8 +11310,12 @@ impl<'a> Lcx<'a> {
                 let once = matches!(self.u.tcx.lang_items.by_def.get(&selected.trait_def), Some(LangItem::FnOnce | LangItem::AsyncFnOnce));
                 let mutable = matches!(self.u.tcx.lang_items.by_def.get(&selected.trait_def), Some(LangItem::FnMut | LangItem::AsyncFnMut));
                 let (recv, recv_ty) = if once && selected.derefs == 0 { (self.lower_expr(f), ft) } else {
+                    // an FnMut callee is borrowed mutably: its overloaded derefs and indices are
+                    // `deref_mut` / `index_mut` (typeck place_op.rs made them so), a Fn one's stay shared
+                    let saved = std::mem::replace(&mut self.want_mut, mutable);
                     let (mut place, mut pt) = self.lower_place(f);
                     for k in 0..selected.derefs { (place, pt) = self.deref_place(e.0, k, place, pt); }
+                    self.want_mut = saved;
                     if once { (self.read_place(&place, pt), pt) } else {
                         let receiver = if self.unsized_ty(pt) {
                             match place { Place::Regs(regs) => Val::L(regs), _ => panic!("unsized callable metadata") }
@@ -12156,14 +12625,15 @@ impl<'a> Lcx<'a> {
                     return self.dummy_val(t);
                 };
                 // the static as a place, as a path to it lowers (lower_def_value)
-                crate::boundary::note_static(self.u, self.b.def, &self.b.args, s);
-                if !self.u.provided.is_empty() {
-                    self.check_provided_static(s, a);
-                }
-                let addr = self.static_addr(s);
-                let addr = self.u.syms.intern(crate::syms::SymKind::Static(s), addr);
+                crate::boundary::note_static(self.u, self.b.def, &self.b.args, s, a);
+                let sym = if let Some(addr) = self.check_provided_static(s, a) {
+                    self.u.shared_static_sym(s, addr)
+                } else {
+                    let addr = self.static_addr(s);
+                    self.u.syms.intern(crate::syms::SymKind::Static(s), addr)
+                };
                 let p = self.f.vreg(Cls::I);
-                self.emit(Inst::Addr(p, addr));
+                self.emit(Inst::Addr(p, sym));
                 let r = self.u.tcx.tys.intern(TyKind::Ref(false, a, crate::types::RegionId::ERASED));
                 args.insert(0, (Val::L(vec![p]), r));
                 self.u.fn_id(FnKey::Inst(shim, vec![a]))
@@ -13338,7 +13808,7 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
                 }
                 _ => raw,
             };
-            if !remap || adt.tag_pin.is_none() || tag.len() != 1 {
+            if !remap || adt.tag_pin.is_none() {
                 return Some(tag);
             }
             // a live edit kept the running values' tags (M10): each tag is mapped to its variant's
@@ -13348,7 +13818,8 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
             push_at(f, b, pos, Inst::Iconst(d, variant_disc(u, adt, n.checked_sub(1)?)?));
             for v in (0..n - 1).rev() {
                 let c = f.vreg(Cls::I);
-                let tv = adt.tag_for_variant(&u.tcx, &u.prog, v)?.signed_value() as i64;
+                let pinned = adt.tag_for_variant(&u.tcx, &u.prog, v)?;
+                let tv = pinned.signed_value() as i64;
                 if tv == tv as i32 as i64 {
                     push_at(f, b, pos, Inst::ICmpI(Cond::Eq, false, c, tag[0], tv));
                 } else {
@@ -13357,6 +13828,16 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
                     push_at(f, b, pos, Inst::Iconst(kr, tv));
                     push_at(f, b, pos, Inst::ICmp(Cond::Eq, false, c, tag[0], kr));
                 }
+                let c = if tag.len() == 2 {
+                    // Alignment widening can make a pinned repr(Rust) tag 16 bytes too.
+                    let kh = f.vreg(Cls::I);
+                    let hi = f.vreg(Cls::I);
+                    let both = f.vreg(Cls::I);
+                    push_at(f, b, pos, Inst::Iconst(kh, (pinned.val >> 64) as i64));
+                    push_at(f, b, pos, Inst::ICmp(Cond::Eq, false, hi, tag[1], kh));
+                    push_at(f, b, pos, Inst::IBin(IOp::And, U64, both, c, hi));
+                    both
+                } else { c };
                 let k = f.vreg(Cls::I);
                 push_at(f, b, pos, Inst::Iconst(k, variant_disc(u, adt, v)?));
                 let nd = f.vreg(Cls::I);
@@ -14066,13 +14547,37 @@ fn slot_addrs(f: &Func) -> std::collections::HashMap<u32, (u32, i32)> {
 }
 
 /// `tys`: the types of the body's locals by slot and by register (coro_local_tys), for the state's shape.
-fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::collections::HashMap<u32, Vec<TyId>>, std::collections::HashMap<u32, TyId>)) -> Result<(u32, u32, u64), String> {
+/// Lays the body's saved slots and values out in the coroutine's state area: its (size, align), the
+/// state's shape (M5), and the coroutines whose layout so far gave a saved slot its size
+/// (`partial`: Lcx::partial_slots).
+fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::collections::HashMap<u32, Vec<TyId>>, std::collections::HashMap<u32, TyId>), partial: &HashMap<u32, Vec<TyId>>) -> Result<(u32, u32, u64, Vec<TyId>), String> {
     use relax_backend::regalloc::{term_uses, uses_defs};
     // RELAX_TRACE=coro: the transform's sizes and phase times (coro-transform line)
     let tr = coro_transform_trace();
     let t_start = std::time::Instant::now();
     let mut t_ph: Vec<(&str, f64)> = Vec::new();
     let mut mark = |name: &'static str| if tr { t_ph.push((name, t_start.elapsed().as_secs_f64() * 1e3)); };
+    // the storage ends lowering marked (`Inst::StorageDead`) are read here and removed, so no
+    // other pass sees one: per block, (the index of the inst each stood before, its slot)
+    let mut dead_at: Vec<Vec<(usize, u32)>> = vec![Vec::new(); f.blocks.len()];
+    let mut marked = vec![false; f.slots.len()];
+    for (bi, b) in f.blocks.iter_mut().enumerate() {
+        if !b.insts.iter().any(|i| matches!(i, Inst::StorageDead(_))) {
+            continue;
+        }
+        let pos = std::mem::take(&mut b.pos);
+        for (k, i) in std::mem::take(&mut b.insts).into_iter().enumerate() {
+            if let Inst::StorageDead(s) = i {
+                dead_at[bi].push((b.insts.len(), s));
+                marked[s as usize] = true;
+                continue;
+            }
+            if let Some(&p) = pos.get(k) {
+                b.pos.push(p);
+            }
+            b.insts.push(i);
+        }
+    }
     // drop flags whose value is known where they are tested (a value moved out before a
     // suspension point: rustc's maybe-initialized analysis) -- the dead drop would keep the
     // value's slot saved across it
@@ -14171,10 +14676,15 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
         }
         v
     };
+    // (only the blocks still reachable after the flag fold: unreachable code reads and stores
+    // nothing, as a drop of a value moved out before it)
     let mut changed = true;
     while changed {
         changed = false;
-        for b in &f.blocks {
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if !seen_g[bi] {
+                continue;
+            }
             for i in &b.insts {
                 // what memory at the slots `base` points to may hold (unknown memory: U)
                 let read_through = |pts: &[u64], content: &[u64], uset: &[u64], base: VReg| -> Vec<u64> {
@@ -14312,6 +14822,9 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
     let mut touched: Vec<Vec<u32>> = vec![Vec::new(); ns];
     let mut written: Vec<Vec<u32>> = vec![Vec::new(); ns];
     for (bi, b) in f.blocks.iter().enumerate() {
+        if !seen_g[bi] {
+            continue;
+        }
         let mut mark = vec![false; ns];
         let mut wmark = vec![false; ns];
         for i in &b.insts {
@@ -14520,6 +15033,9 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
             r
         };
         for (bi, b) in f.blocks.iter().enumerate() {
+            if !seen_g[bi] {
+                continue;
+            }
             let mut g = vec![0u64; wd];
             let mut k = vec![0u64; wd];
             for i in b.insts.iter().rev() {
@@ -14640,6 +15156,127 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
         seen
     };
     mark("gen/kill");
+    // rustc's StorageDead: once a slot's storage has ended (its local's scope, its temporary's
+    // statement), every borrow of it has too, and what still points into it is never used again;
+    // only lowering's own values reach it after that, through its address and offsets from it.
+    // `direct`: the slot a vreg holds such an address in (NO_SLOT; MANY: any of its points-to
+    // set). `alive_in`: per block, the marked slots touched through one since their storage last
+    // ended, on some path to it (a may-dataflow from the entry, along the suspension edges too)
+    const NO_SLOT: u32 = u32::MAX;
+    const MANY: u32 = u32::MAX - 1;
+    let marked_list: Vec<usize> = (0..ns).filter(|s| marked[*s]).collect();
+    let mut midx = vec![usize::MAX; ns];
+    for (j, &s) in marked_list.iter().enumerate() {
+        midx[s] = j;
+    }
+    let mw = (marked_list.len() + 63) / 64;
+    let mut direct = vec![NO_SLOT; if marked_list.is_empty() { 0 } else { nv }];
+    let mut alive_in = vec![0u64; nb * mw];
+    if !marked_list.is_empty() {
+        let join = |x: &mut u32, y: u32| -> bool {
+            if y == NO_SLOT || *x == y || *x == MANY {
+                return false;
+            }
+            *x = if *x == NO_SLOT { y } else { MANY };
+            true
+        };
+        let mut grow = true;
+        while grow {
+            grow = false;
+            for b in &f.blocks {
+                for i in &b.insts {
+                    let (d, a, x) = match *i {
+                        Inst::SlotAddr(d, s) => {
+                            grow |= join(&mut direct[d.0 as usize], s);
+                            continue;
+                        }
+                        Inst::Mov(d, a) => (d, a, None),
+                        Inst::IBinI(_, it, d, a, _) if it.bits as u32 >= ptr_bytes * 8 => (d, a, None),
+                        Inst::IBin(_, it, d, a, x) if it.bits as u32 >= ptr_bytes * 8 => (d, a, Some(x)),
+                        Inst::Sel(d, _, a, x) => (d, a, Some(x)),
+                        _ => continue,
+                    };
+                    let y = direct[a.0 as usize];
+                    grow |= join(&mut direct[d.0 as usize], y);
+                    if let Some(x) = x {
+                        let y = direct[x.0 as usize];
+                        grow |= join(&mut direct[d.0 as usize], y);
+                    }
+                }
+            }
+        }
+        // per block: the marked slots whose last event in it is a touch (gen) or an end (kill)
+        fn ev(on: &mut [u64], off: &mut [u64], j: usize) {
+            on[j / 64] |= 1 << (j % 64);
+            off[j / 64] &= !(1 << (j % 64));
+        }
+        let mut bgen = vec![0u64; nb * mw];
+        let mut bkill = vec![0u64; nb * mw];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            let (g, kl) = (&mut bgen[bi * mw..][..mw], &mut bkill[bi * mw..][..mw]);
+            let touch = |v: VReg, g: &mut [u64], kl: &mut [u64]| match direct[v.0 as usize] {
+                NO_SLOT => {}
+                MANY => {
+                    for s in bits(&pts[v.0 as usize * wd..][..wd]) {
+                        if midx[s] != usize::MAX {
+                            ev(g, kl, midx[s]);
+                        }
+                    }
+                }
+                s => {
+                    if midx[s as usize] != usize::MAX {
+                        ev(g, kl, midx[s as usize]);
+                    }
+                }
+            };
+            let de = &dead_at[bi];
+            let mut e = 0;
+            for (k, i) in b.insts.iter().enumerate() {
+                while e < de.len() && de[e].0 <= k {
+                    ev(kl, g, midx[de[e].1 as usize]);
+                    e += 1;
+                }
+                if let Inst::SlotAddr(_, s) = i {
+                    if midx[*s as usize] != usize::MAX {
+                        ev(g, kl, midx[*s as usize]);
+                    }
+                }
+                uses_defs(i, &mut us, &mut ds);
+                for u in &us {
+                    touch(*u, g, kl);
+                }
+            }
+            for &(_, s) in &de[e..] {
+                ev(kl, g, midx[s as usize]);
+            }
+            term_uses(&b.term, &mut us);
+            for u in &us {
+                touch(*u, g, kl);
+            }
+        }
+        let mut out = vec![0u64; nb * mw];
+        let mut queued = vec![true; nb];
+        let mut work: Vec<usize> = (0..nb).rev().collect();
+        let mut cur = vec![0u64; mw];
+        while let Some(b) = work.pop() {
+            queued[b] = false;
+            for w in 0..mw {
+                cur[w] = (alive_in[b * mw + w] & !bkill[b * mw + w]) | bgen[b * mw + w];
+            }
+            if cur[..] == out[b * mw..][..mw] {
+                continue;
+            }
+            out[b * mw..][..mw].copy_from_slice(&cur);
+            for t in f.blocks[b].term.succs().into_iter().chain(susp_to[b].iter().copied()) {
+                let t = t as usize;
+                if or(&mut alive_in[t * mw..][..mw], &cur) && !queued[t] {
+                    queued[t] = true;
+                    work.push(t);
+                }
+            }
+        }
+    }
+    mark("storage");
     // RELAX_CORO_TRACE=2: why each slot is saved at each point (3: slots of 1 MB and more)
     let coro_why = coro_trace_level();
     for (k, &(pend, resume, cancel)) in c.suspends.iter().enumerate() {
@@ -14685,6 +15322,38 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
                 }
             }
         }
+        // the marked slots whose storage ended on every path here and that no value live across
+        // the point reaches directly: not saved (what still points into them is a borrow that
+        // ended with them)
+        let mut dead_here = vec![0u64; if marked_list.is_empty() { 0 } else { wd }];
+        if !marked_list.is_empty() {
+            let mut reached = vec![0u64; wd];
+            for v in &vs {
+                match direct[v.0 as usize] {
+                    NO_SLOT => {}
+                    MANY => {
+                        let _ = or(&mut reached, &pts[v.0 as usize * wd..][..wd]);
+                    }
+                    s => reached[s as usize / 64] |= 1 << (s % 64),
+                }
+            }
+            let a = &alive_in[pend as usize * mw..][..mw];
+            for (j, &s) in marked_list.iter().enumerate() {
+                if a[j / 64] & (1 << (j % 64)) == 0 && reached[s / 64] & (1 << (s % 64)) == 0 {
+                    dead_here[s / 64] |= 1 << (s % 64);
+                }
+            }
+        }
+        let drop_dead = |sv: &mut [u64], how: &str| {
+            for s in bits(&dead_here) {
+                if sv[s / 64] & (1 << (s % 64)) != 0 {
+                    sv[s / 64] &= !(1 << (s % 64));
+                    if coro_why == 2 {
+                        eprintln!("coro {:?} point {} slot {} size {}: not saved, its storage ended ({})", c.ct, k, s, f.slots[s].size, how);
+                    }
+                }
+            }
+        };
         // the suspension is at the start of `pend`: what runs before it are its predecessors
         let before = reach(&preds[pend as usize].clone(), true);
         for s in 0..ns {
@@ -14701,6 +15370,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
                 if f.slots[s].size >= 1 << 20 || coro_why == 2 { for &bi in written[s].iter().chain(touched[s].iter()).take(6) { eprintln!("  b{}: {:?} -> {:?}", bi, f.blocks[bi as usize].insts.iter().filter(|i| format!("{:?}", i).contains("Call") || format!("{:?}", i).contains("SlotAddr")).take(12).collect::<Vec<_>>(), f.blocks[bi as usize].term); } }
             }
         }
+        drop_dead(&mut sv, "saved for itself");
         let mut grow = true;
         while grow {
             grow = false;
@@ -14708,6 +15378,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
                 grow |= or(&mut sv, &content[s * wd..][..wd]);
             }
         }
+        drop_dead(&mut sv, "a saved slot holds its address");
         for s in bits(&sv) {
             saved_at[s].push(k);
         }
@@ -14729,6 +15400,15 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
     for &(lo, hi, k) in &c.poll_scratch {
         for s in lo..hi.min(ns as u32) {
             saved_at[s as usize].retain(|x| *x != k);
+        }
+    }
+    // the frame's provenance: what a layout so far sized of what is saved
+    let mut deps: Vec<TyId> = Vec::new();
+    for (s, d) in partial {
+        if saved_at.get(*s as usize).is_some_and(|k| !k.is_empty()) {
+            for t in d {
+                if !deps.contains(t) { deps.push(*t); }
+            }
         }
     }
     // a vreg live across a point that only ever holds one saved slot's address is made again
@@ -15129,7 +15809,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
         }
         h.finish()
     };
-    Ok((size, align, shape))
+    Ok((size, align, shape, deps))
 }
 
 /// Integer constants of drop-flag-like vregs (every definition an `Iconst`) per block, forward
@@ -15828,6 +16508,11 @@ pub(crate) fn intern_lazy_rt(u: &mut Unit, name: &str) -> Option<relax_backend::
         "divrem128" => { let f: rt_fn_ty!(fn(u64, u64, u64, u64, u64) -> WideRet) = rt_divrem128; ("divrem128", f as usize as u64) }
         // the loop counters' helper (a trampoline in the code area)
         "loop_hot" => return Some(crate::jit::loop_hot_sym(u)),
+        // a constant-evaluation twin's steps (ctfe_twin.rs steps, promoted_steps, back_edge): a
+        // twin linked from the disk cache names them before any twin of the run was built
+        "const_fuel" => ("const_fuel", const_fuel_addr()),
+        "const_fuel_promoted" => ("const_fuel_promoted", const_fuel_promoted_addr()),
+        "const_fuel_promoted_end" => ("const_fuel_promoted_end", const_fuel_promoted_end_addr()),
         // the combined sin/cos routine the optimiser pairs sin and cos calls into (note_sincos)
         "__sincos_stret" | "__sincosf_stret" | "relax_sincos_pair" | "relax_sincosf_pair" => {
             let k = ["__sincos_stret", "__sincosf_stret", "relax_sincos_pair", "relax_sincosf_pair"].into_iter().find(|k| *k == name)?;
@@ -15906,9 +16591,24 @@ fn rt_cannot_unwind() {
 }
 
 rt_fn! {
-/// A loop head of a checked program (Options::const_fuel).
+/// One step of the constant being evaluated (a constant-evaluation twin's call or loop back
+/// edge: ctfe_twin.rs).
 fn rt_const_fuel() {
     crate::jit::const_fuel_tick();
+}
+}
+
+rt_fn! {
+/// A promoted's steps begin inside a constant's evaluation (`promoted_call`).
+fn rt_const_fuel_promoted() {
+    crate::jit::const_fuel_promoted(true);
+}
+}
+
+rt_fn! {
+/// They end: the constant's steps go on.
+fn rt_const_fuel_promoted_end() {
+    crate::jit::const_fuel_promoted(false);
 }
 }
 
@@ -15922,6 +16622,16 @@ fn rt_sb_alloca(size: u64, align: u64) -> u64 {
 
 pub fn const_fuel_addr() -> u64 {
     let f: rt_fn_ty!(fn()) = rt_const_fuel;
+    f as usize as u64
+}
+
+fn const_fuel_promoted_addr() -> u64 {
+    let f: rt_fn_ty!(fn()) = rt_const_fuel_promoted;
+    f as usize as u64
+}
+
+fn const_fuel_promoted_end_addr() -> u64 {
+    let f: rt_fn_ty!(fn()) = rt_const_fuel_promoted_end;
     f as usize as u64
 }
 

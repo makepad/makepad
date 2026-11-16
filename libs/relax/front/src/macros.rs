@@ -3465,8 +3465,9 @@ impl<'a> Parser<'a> {
         if t.kind != m.kind {
             return false;
         }
-        // a forwarded statement is one opaque nonterminal, not its first written token
-        if !self.stmt_frags.is_empty() && self.stmt_frags.contains(&{ t.lo }) {
+        // a forwarded fragment is one opaque nonterminal (rustc's invisible group), not its first
+        // written token; ident, lifetime and tt fragments forward as their tokens and still match
+        if self.forwarded_kind(t.lo).is_some() {
             return false;
         }
         match t.kind {
@@ -3578,7 +3579,9 @@ impl<'a> Parser<'a> {
                     }),
                     // `...` is no type start (rustc Token::can_begin_type): only a C-variadic parameter
                     Frag::Ty if k == T::DotDotDot => Err(crate::parser::PErr { pos: self.toks.at(i).lo, msg: "expected a type".to_string() }),
-                    Frag::Ty => self.ty().map(|_| ()),
+                    // rustc_parse nonterminal.rs: `ty` is parse_ty_no_question_mark_recover, `+`
+                    // bounds allowed (a bare `Display + Send` is one type)
+                    Frag::Ty => self.ty_plus().map(|_| ()),
                     Frag::Pat => self.pat_top().map(|_| ()),
                     Frag::PatParam => self.pat_no_or().map(|_| ()),
                     Frag::Path => self.path(false).map(|_| ()),
@@ -3641,6 +3644,10 @@ impl<'a> Parser<'a> {
     /// whatever its first token; None for written tokens and the kinds that forward as their
     /// tokens (ident, lifetime, tt).
     fn forwarded_kind(&self, lo: u32) -> Option<Frag> {
+        // nothing forwarded in this parse, or a written token: no per-kind lookups
+        if self.fwd_starts.is_empty() || !self.fwd_starts.contains(&lo) {
+            return None;
+        }
         // an outer statement stays a statement when it begins with a captured expression
         if !self.stmt_frags.is_empty() && self.stmt_frags.contains(&lo) {
             return Some(Frag::Stmt);
@@ -3968,6 +3975,13 @@ impl<'a> Parser<'a> {
                             // a path inside a type-macro call subsequently matched as tt.
                             if let Some((end, flags)) = self.fragment_group(t.lo) {
                                 groups.push((end, out.start(t.kind, &text, Some(t.lo)), flags));
+                            } else if let Some(&kind) = self.meta_frags.get(&{ t.lo }) {
+                                // a one-token expression or literal inside the copy stays one: its
+                                // kind, and a proc macro's invisible group (builtins.rs
+                                // group_fragments; const_format's `__str_const!` passes on the block
+                                // holding `formatcp!`'s `"b"` argument)
+                                let kind = if kind == "expr" { EXPR_FRAG } else { LIT_FRAG };
+                                groups.push((t.hi, out.start(t.kind, &text, Some(t.lo)), kind | META_ONLY));
                             }
                             out.push(t.kind, &text, Some(t.lo), u32::MAX);
                             while groups.last().is_some_and(|&(end, _, _)| end == t.hi) {

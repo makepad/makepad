@@ -49,8 +49,10 @@ impl<'a> PanicHookInfo<'a> {
     pub fn location(&self) -> Option<&Location<'_>> {
         Some(self.location)
     }
+    /// rustc's: whether the panic may unwind. A Relax panic unwinds to its catch point (a panic
+    /// raised while one is being handled runs no hook).
     pub fn can_unwind(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -65,7 +67,7 @@ impl<'a> fmt::Debug for PanicHookInfo<'a> {
         f.debug_struct("PanicHookInfo")
             .field("payload", &self.payload_as_str())
             .field("location", &self.location)
-            .field("can_unwind", &false)
+            .field("can_unwind", &true)
             .field("force_no_backtrace", &false)
             .finish()
     }
@@ -75,7 +77,7 @@ type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 static HOOK: RwLock<Option<Hook>> = RwLock::new(None);
 
-fn trampoline(message: &str, location: &Location<'_>) {
+pub(crate) fn trampoline(message: &str, location: &Location<'_>) {
     #[cfg(not(relax_web))]
     {
         let payload = take_payload();
@@ -98,17 +100,24 @@ fn run_hook(payload: &(dyn Any + Send), message: &str, location: &Location<'_>) 
     }
 }
 
-/// Real std's default hook output.
+/// Real std's default hook output: the backtrace note only with the process's first panic
+/// (std's FIRST_PANIC).
 fn default_hook(info: &PanicHookInfo<'_>) {
+    static FIRST_PANIC: crate::sync::atomic::AtomicBool = crate::sync::atomic::AtomicBool::new(true);
     let thread = crate::thread::current();
     let name = match thread.name() {
         Some(n) => n,
         None => "<unnamed>",
     };
+    let note = if FIRST_PANIC.swap(false, crate::sync::atomic::Ordering::Relaxed) {
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+    } else {
+        ""
+    };
     let mut err = crate::io::stderr().lock();
     let _ = crate::io::Write::write_fmt(
         &mut err,
-        format_args!("\nthread '{}' ({}) panicked at {}:\n{}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n", name, sys::os::thread_os_id(), info.location, info.message),
+        format_args!("\nthread '{}' ({}) panicked at {}:\n{}\n{}", name, sys::os::thread_os_id(), info.location, info.message, note),
     );
 }
 
@@ -211,7 +220,7 @@ pub(crate) fn prepare_payload() {
 
 /// Runs `f`; Err(payload) if it panicked, with real std's payload (see record_payload).
 pub fn catch_unwind<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R, Box<dyn Any + Send + 'static>> {
-    // the panic this catches is the program's to handle: the runtime's report says `(caught)`
+    // the panic this catches is the program's to handle: the runtime adds no report to std's message
     #[cfg(not(relax_web))]
     {
         extern "C" { fn __relax_catch_caught(); }
@@ -221,7 +230,7 @@ pub fn catch_unwind<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R, Box<dyn
 }
 
 /// catch_unwind for std's own boundaries, where a panic ends what runs (the test harness: it
-/// fails the test): the runtime's report of it is no `(caught)` one.
+/// fails the test): the runtime reports it after std's message.
 pub(crate) fn catch_boundary<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R, Box<dyn Any + Send + 'static>> {
     let mut slot: (Option<F>, Option<R>) = (Some(f), None);
     prepare_payload();

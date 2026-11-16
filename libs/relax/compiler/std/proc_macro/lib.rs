@@ -841,7 +841,29 @@ pub mod __relax {
         }
     }
 
+    /// rustc's proc_macro (library/proc_macro/src/bridge/client.rs maybe_install_panic_hook):
+    /// the default panic output is hidden within expansions. A panic that leaves the macro is the
+    /// host's to report, with its message; one the macro catches says nothing, as under rustc
+    /// (and in a sandboxed host, std's hook would reach a C write the sandbox refuses). A hook
+    /// the macro sets itself replaces this one, as there. rustc's hook also prints a panic that
+    /// cannot unwind (`!info.can_unwind()`); a Relax panic always unwinds to its catch point (a
+    /// panic raised while one is being handled runs no hook), so that case never reaches a hook
+    /// here, and this file stays free of the unstable `panic_can_unwind` for the stable rustc
+    /// build that includes it (relax-base's tests/pm_bridge.rs).
+    fn hide_panics_during_expansion() {
+        static HIDE_PANICS_DURING_EXPANSION: std::sync::Once = std::sync::Once::new();
+        HIDE_PANICS_DURING_EXPANSION.call_once(|| {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(std::boxed::Box::new(move |info| {
+                if !is_available() {
+                    prev(info)
+                }
+            }));
+        });
+    }
+
     pub fn bridge(io: *mut BridgeIo) {
+        hide_panics_during_expansion();
         let io = unsafe { &mut *io };
         let inp = unsafe { std::slice::from_raw_parts(io.inp, io.inp_len) };
         let mut r = Reader { b: inp, i: 0 };

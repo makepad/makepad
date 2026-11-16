@@ -281,6 +281,10 @@ impl<T, const N: usize> IntoIter<T, N> {
     pub fn as_slice(&self) -> &[T] {
         unsafe { im::slice_from_raw(im::ptr_add(self.base(), self.start), self.end - self.start) }
     }
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        let (start, len) = (self.start, self.end - self.start);
+        unsafe { im::slice_from_raw_mut(im::ptr_add_mut(self.base_mut(), start), len) }
+    }
 }
 
 impl<T, const N: usize> Iterator for IntoIter<T, N> {

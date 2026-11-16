@@ -147,6 +147,9 @@ pub enum StmtKind {
         /// The `let` statement's AST node.
         node: u32,
         span: Span,
+        /// `super let` (only the built-in formatting macros write one): its bindings come from a
+        /// desugaring.
+        super_: bool,
     },
 }
 

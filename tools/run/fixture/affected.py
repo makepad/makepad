@@ -268,6 +268,12 @@ def run_units(packages, members, touched, workspace, jit, retry):
     gate = {by_name[name] for name in GATE_PACKAGES if by_name.get(name) in reached}
     if workspace or jit:
         gate |= {by_name[name] for name in SMOKE + JIT_CHECKS if name in by_name}
+    # and the JIT's own package when the diff reaches what it is built from: its targets (--test modules,
+    # confined_macros, confined_scripts) run the compiler on their fixtures. Selected only when tools/run
+    # itself changed, a day of relax-compiler landings went in with --test modules unrun and a regression
+    # unseen (11-16). Here only, after the landing: no pre-land gate runs them.
+    if jit and JIT_PACKAGE in by_name:
+        gate.add(by_name[JIT_PACKAGE])
     has_tests = {d for d in members if any(t.get("test", True) for t in packages[d]["targets"])}
     names = {packages[d]["name"] for d in (touched | gate) & has_tests}
     names |= {words[1] for words in retry if words[0] in ("tests", "test") and by_name.get(words[1]) in has_tests}

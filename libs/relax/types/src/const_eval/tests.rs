@@ -256,3 +256,24 @@ fn an_anonymous_constant_typed_before_its_holder_is_lowered() {
         assert_eq!(tcx.const_ty(&prog, consts[0]), Some(tcx.tys.usize_), "{holder}: the type its holder gives it");
     }
 }
+
+// A constant whose paths carry user types (`W::K`, `P::<u32> { .. }`, `id::<u32>`) keeps their
+// indices in its MIR after borrowck's cleanup clears the annotations, as rustc's does: the shape
+// the interpreter evaluates (ctfe_shape) still takes the body.
+#[test]
+fn a_constant_whose_paths_carry_user_types_is_evaluated() {
+    use crate::const_eval::interp::{check_item, Outcome};
+    let (prog, tcx) = program(br#"#![no_std]
+        pub struct W;
+        impl W { pub const K: u32 = 5; }
+        pub struct P<T> { pub x: T }
+        pub const fn id<T>(t: T) -> T { t }
+        pub const A: u32 = W::K + <W>::K;
+        pub const B: u32 = P::<u32> { x: 7 }.x;
+        pub const C: u32 = id::<u32>(3);
+    "#);
+    for name in ["A", "B", "C"] {
+        let checked = check_item(&prog, &tcx, named(&prog, name));
+        assert!(matches!(checked.outcome, Outcome::Ok), "{name}: {:?}", checked.outcome);
+    }
+}

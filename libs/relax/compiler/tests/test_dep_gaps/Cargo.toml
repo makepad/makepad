@@ -1,0 +1,10 @@
+[package]
+name = "test-dep-gaps"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+rdg-bad = "0.1"
+rdg-good = "0.1"

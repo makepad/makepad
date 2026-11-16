@@ -196,6 +196,17 @@ fn hdr(align: usize) -> usize {
     }
 }
 
+/// The tag of the block that starts at `block` in a Relax arena (its header's last byte), for an
+/// arena walk (`zone_alloc::compiler_old_census`): `N_TAGS` when accounting is off or the byte is
+/// no tag. A block aligned wider than 16 bytes has its tag further in, so it reads as no tag.
+pub fn block_tag(block: usize) -> usize {
+    if !on() {
+        return N_TAGS;
+    }
+    let t = unsafe { std::ptr::read_volatile((block + HDR - 1) as *const u8) } as usize;
+    t.min(N_TAGS)
+}
+
 /// live blocks per (tag, log2 size class): what kind of allocations a tag holds
 static SIZE_LIVE: [[AtomicI64; 16]; N_TAGS] = [const { [const { AtomicI64::new(0) }; 16] }; N_TAGS];
 
@@ -457,8 +468,13 @@ impl Counting {
 #[inline(always)]
 fn outside_domains<R>(f: impl FnOnce() -> R) -> R {
     if relax_session::phase::in_run() {
-        let _kept = relax_session::phase::kept();
-        return f();
+        let r = {
+            let _kept = relax_session::phase::kept();
+            f()
+        };
+        // (the block is a provided crate's op's: a refusal is the program's, not the JIT's)
+        crate::zone_alloc::jit_oom::forget();
+        return r;
     }
     f()
 }
@@ -609,7 +625,7 @@ pub fn process_rss() -> (u64, u64, String) {
             }
         }
         let extra = format!(
-            "anon {} MB, file {} MB; malloc: sbrk/arenas {} MB, mmapped {} MB, in use {} MB, free held {} MB",
+            "anon {} MB, file {} MB; malloc: sbrk/arenas {} MB, mmapped {} MB, in use {} MB, free chunks {} MB (trimmed pages included: no resident size)",
             mb(kb("RssAnon:")),
             mb(kb("RssFile:")),
             mb(m.arena as u64),

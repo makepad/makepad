@@ -90,25 +90,163 @@ const DENIED: &[&str] = &[
     "core::str::from_utf8_unchecked", "core::cell::UnsafeCell",
 ];
 
+/// The arguments a body owner is checked at, its own parameters: a fn's from its signature
+/// (borrowck::identity_args), a const's, static's or associated const's from its generics (they
+/// have no fn signature, and their bodies were never type-checked here).
+pub(crate) fn owner_identity_args(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, d: DefId) -> Option<Vec<crate::types::TyId>> {
+    match prog.def(d).kind {
+        DefKind::Const | DefKind::AssocConst | DefKind::Static => Some(tcx.generic_indices_of(prog, d).identity_types_consts(&tcx.tys)),
+        _ => crate::borrowck::identity_args(tcx, prog, d),
+    }
+}
+
+/// The first crate of a module load whose front end runs with the refusal on (u32::MAX: none):
+/// the crates it adds are a sandboxed module's before the load registers them as one, and an
+/// initializer of theirs that the front end evaluates passes `initializer_refusal` first.
+static CHECKING_FROM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Whether a module load's front end with the refusal on is running (one atomic load: run_init
+/// asks before every initializer).
+pub(crate) fn checking_front() -> bool {
+    CHECKING_FROM.load(std::sync::atomic::Ordering::Acquire) != u32::MAX
+}
+
+/// What `initializer_refusal` refused while a front end ran: the load's own errors, ahead of
+/// those that follow from the missing values (a type whose array length could not be evaluated).
+static FRONT_REFUSALS: relax_session::sync::Mutex<Vec<String>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// Ends a front end's CHECKING_FROM, whichever way it returns.
+struct CheckingFront;
+impl CheckingFront {
+    fn begin(first_crate: u32) -> CheckingFront {
+        FRONT_REFUSALS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        CHECKING_FROM.store(first_crate, std::sync::atomic::Ordering::Release);
+        CheckingFront
+    }
+
+    /// The refusals so far, first, then the other errors not among them.
+    fn lead(errs: Vec<String>) -> Vec<String> {
+        let mut out = std::mem::take(&mut *FRONT_REFUSALS.lock().unwrap_or_else(|e| e.into_inner()));
+        for e in errs {
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+        out
+    }
+}
+impl Drop for CheckingFront {
+    fn drop(&mut self) {
+        CHECKING_FROM.store(u32::MAX, std::sync::atomic::Ordering::Release);
+        FRONT_REFUSALS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// Syntax verdicts of a module crate's running files (the files of its modules now), kept: an
+/// initializer evaluation asks again for every constant of the crate.
+static SYNTAX_VERDICTS: relax_session::sync::Mutex<Vec<(u32, Vec<u32>, Vec<String>)>> = relax_session::sync::Mutex::new(Vec::new());
+
+fn sandbox_syntax_kept(prog: &crate::program::Program, krate: u32) -> Vec<String> {
+    let files: Vec<u32> = prog.mods.iter().filter(|m| m.krate == krate).map(|m| m.file).collect::<std::collections::BTreeSet<u32>>().into_iter().collect();
+    if let Some(v) = SYNTAX_VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, f, _)| *k == krate && *f == files) {
+        return v.2.clone();
+    }
+    let out = sandbox_syntax(prog, krate);
+    crate::zone_alloc::kept_with(|| SYNTAX_VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).push((krate, files, out.clone())));
+    out
+}
+
+/// What refuses a sandboxed module's const-context body (a const, static, associated const or
+/// anonymous constant: an array length, a discriminant, a const parameter's default, a repeat
+/// count) before anything evaluates it: its type errors, the refusal (its module's syntax, the
+/// std paths its body reaches) and rustc's const check (check_consts: E0015 and the rest).
+/// Empty: it may be evaluated.
+pub(crate) fn const_body_refusal(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, d: DefId, args: &[crate::types::TyId]) -> Vec<String> {
+    let def = prog.def(d);
+    let state = crate::tcx::EvalState::new();
+    let cx = crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &state);
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Vec<String> {
+        let body = match def.kind {
+            DefKind::AnonConst => (*tcx.typeck(prog, d)).clone(),
+            DefKind::Const | DefKind::AssocConst | DefKind::Static => crate::typeck::checked_body(&cx, prog, tcx, d, args),
+            _ => return Vec::new(),
+        };
+        if !body.errors.is_empty() {
+            return body.errors.to_vec();
+        }
+        let mut out = sandbox_syntax_kept(prog, def.krate);
+        out.extend(sandbox_paths(prog, tcx, &[&body]));
+        if !out.is_empty() {
+            return out;
+        }
+        let errors = match (def.kind, prog.def_id_to_node_id.get(&d)) {
+            (DefKind::AnonConst, Some((_, relax_front::def_collector::NodeId::AnonConst(expr)))) => crate::borrowck::check_anon_const(&cx, prog, tcx, &body, *expr),
+            (DefKind::AnonConst, _) => Vec::new(),
+            _ => crate::borrowck::check_body(&cx, prog, tcx, &body).errors,
+        };
+        errors.iter().map(|e| e.one_line()).collect()
+    }));
+    checked.unwrap_or_else(|_| vec![format!("internal compiler error checking {} -- Relax bug, report it", prog.def_path(d))])
+}
+
+/// `const_body_refusal` for an initializer the JIT is about to evaluate (jit.rs run_init), when
+/// it is a sandboxed module's -- one being loaded, or loaded -- and the refusal is on. None: it
+/// may run.
+pub(crate) fn initializer_refusal(u: &Unit, d: DefId, args: &[crate::types::TyId]) -> Option<Vec<String>> {
+    let krate = u.prog.def(d).krate;
+    let loading = krate >= CHECKING_FROM.load(std::sync::atomic::Ordering::Acquire);
+    if !loading && (u.prog.session.options.sandbox_nocheck || !crate::sandbox::is_sandboxed_crate_key(&u.sandbox, &u.prog, &FnKey::Inst(d, args.to_vec()))) {
+        return None;
+    }
+    let errs = const_body_refusal(&u.prog, &u.tcx, d, args);
+    if loading && !errs.is_empty() {
+        crate::zone_alloc::kept_with(|| {
+            let mut kept = FRONT_REFUSALS.lock().unwrap_or_else(|e| e.into_inner());
+            for e in &errs {
+                if !kept.contains(e) {
+                    kept.push(e.clone());
+                }
+            }
+        });
+    }
+    (!errs.is_empty()).then_some(errs)
+}
+
 /// The sandbox's compile-time refusal (§12.2) over a loaded module: syntax that escapes the
 /// language's safety (after macro expansion: the trees are expanded) and std paths outside
 /// the allowed surface (resolved, never by spelling). One line per violation.
 pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, krate: u32, bodies: &[&crate::typeck::Body]) -> Vec<String> {
+    let mut out = sandbox_syntax(prog, krate);
+    out.extend(sandbox_paths(prog, tcx, bodies));
+    out
+}
+
+fn site_of(prog: &crate::program::Program, f: u32, pos: u32) -> String {
+    let (l, c) = prog.files[f as usize].line_col(pos);
+    format!("{}:{}:{}", prog.file_paths[f as usize], l, c)
+}
+
+/// The refusal's syntax half: the module's running files, every tree of them (needs no types, so
+/// it runs before the module's bodies are type-checked).
+fn sandbox_syntax(prog: &crate::program::Program, krate: u32) -> Vec<String> {
     use crate::ast::{ExprKind, ItemKind, Ty};
     let mut out = Vec::new();
-    let at = |f: u32, pos: u32| -> String {
-        let (l, c) = prog.files[f as usize].line_col(pos);
-        format!("{}:{}:{}", prog.file_paths[f as usize], l, c)
-    };
+    let at = |f: u32, pos: u32| site_of(prog, f, pos);
     // The running versions only. Do not rescan all defs for every retired stream prefix.
     // Retired and refused definitions remain in `defs` for old frames; their source must
     // not poison a later valid edit. Module records track the currently installed files.
     let files: std::collections::BTreeSet<u32> = prog.mods.iter().filter(|m| m.krate == krate).map(|m| m.file).collect();
     for &f in &files {
         let pf = &prog.files[f as usize];
+        // every fn body, those the load skipped too: a `makepad run` parses a body a later parse
+        // can do alone on its first need, into the part that continues the file's tree. All of
+        // them are parsed here, before any of the module's code can run, and read with the tree.
+        let _ = pf.part(&prog.crates[krate as usize].cfg);
         let ast = &pf.ast;
-        let tok = |i: u32| -> &[u8] { pf.toks.get(i as usize).map_or(&[][..], |t| &pf.src[t.lo as usize..t.hi as usize]) };
-        for it in &ast.items {
+        let trees: Vec<&crate::ast::Ast> = std::iter::successors(Some(ast), |t| t.part.get().map(|p| &**p)).collect();
+        // (the accessors of `ast` read the part's ids too)
+        let tok = |i: u32| -> &[u8] { let t = pf.tok(i); pf.bytes(t.lo, t.hi) };
+        for it in trees.iter().flat_map(|t| &t.items) {
             for a in ast.list(it.attrs) {
                 if a.toks.hi > a.toks.lo {
                     let n = tok(a.toks.lo);
@@ -132,29 +270,35 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
                 out.push(format!("{}: {} is not allowed in a sandboxed module -- use safe code and the host's API", at(f, it.lo), b));
             }
         }
-        for e in &ast.exprs {
+        for e in trees.iter().flat_map(|t| &t.exprs) {
             match &e.kind {
                 ExprKind::Unsafe(_) => out.push(format!("{}: `unsafe` is not allowed in a sandboxed module -- use safe code and the host's API", at(f, e.lo))),
-                ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_args.get(ast.row(*m).args as usize).map_or(false, |a| a.asm.is_some()) => {
+                ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_arg(ast.row(*m).args).asm.is_some() => {
                     out.push(format!("{}: `asm!` is not allowed in a sandboxed module", at(f, e.lo)))
                 }
                 _ => {}
             }
         }
-        for t in &ast.tys {
-            if let Ty::Ptr(..) = t {
-                out.push(format!("{}: raw pointers are not allowed in a sandboxed module -- use references", at(f, 0)));
-                break;
-            }
+        if trees.iter().flat_map(|t| &t.tys).any(|t| matches!(t, Ty::Ptr(..))) {
+            out.push(format!("{}: raw pointers are not allowed in a sandboxed module -- use references", at(f, 0)));
         }
-        // built-in macros that read the host's files or environment (expanded before the tree)
-        for (i, t) in pf.toks.iter().enumerate() {
-            let w = &pf.src[t.lo as usize..t.hi as usize];
-            if matches!(w, b"include_bytes" | b"include_str" | b"include" | b"env" | b"option_env" | b"asm" | b"global_asm") && tok(i as u32 + 1) == b"!" {
+        // built-in macros that read the host's files or environment (expanded before the tree):
+        // the file's tokens with its expansions, then those of its lazily parsed bodies
+        let part_toks = pf.parts().flat_map(|p| p.toks.iter().enumerate().map(move |(j, t)| (p.tok_base + j as u32, t)));
+        for (i, t) in pf.toks.iter().enumerate().map(|(i, t)| (i as u32, t)).chain(part_toks) {
+            let w = pf.bytes(t.lo, t.hi);
+            if matches!(w, b"include_bytes" | b"include_str" | b"include" | b"env" | b"option_env" | b"asm" | b"global_asm") && tok(i + 1) == b"!" {
                 out.push(format!("{}: `{}!` is not allowed in a sandboxed module", at(f, t.lo), String::from_utf8_lossy(w)));
             }
         }
     }
+    out
+}
+
+/// The refusal's path half: resolved uses of std outside the allowed surface in `bodies`.
+fn sandbox_paths(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, bodies: &[&crate::typeck::Body]) -> Vec<String> {
+    let mut out = Vec::new();
+    let at = |f: u32, pos: u32| site_of(prog, f, pos);
     // resolved uses of std outside the allowed surface
     let std_crates: Vec<u32> = (0..prog.crates.len() as u32).filter(|&c| matches!(prog.syms.str(prog.crates[c as usize].name), "core" | "alloc" | "std" | "proc_macro")).collect();
     for b in bodies {
@@ -247,7 +391,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
         crate::run::preserve_collected_boot(u);
         u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // parsed on this thread (no parse workers for one small crate)
-        crate::preload::SINGLE.with(|s| s.set(true));
+        let single_before = crate::preload::SINGLE.with(|s| s.replace(true));
         let mut failed = None;
         for (done, nc) in new.iter().enumerate() {
             if domain.is_some() { crate::run_state::progress(domain, crate::run_state::Phase::Parse,
@@ -275,7 +419,8 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
                 }
             }
         }
-        crate::preload::SINGLE.with(|s| s.set(false));
+        // as it was: a world build's single-thread load may hold it (pmhost SingleLoad)
+        crate::preload::SINGLE.with(|s| s.set(single_before));
         marks.push(("parse", std::time::Instant::now()));
         if let Some(e) = failed {
             u.prog.reclaim_caches();
@@ -350,22 +495,33 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
     let cfg = crate::program_cfg(sess, &[]);
     let tr = module_trace();
     let mut marks: Vec<(&str, std::time::Instant)> = vec![("", std::time::Instant::now())];
-    let added = add_crates(up, &[NewCrate { name: crate::crates::own_crate_name(name.to_string()), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None)?;
+    // the crates this load adds are a sandboxed module's from here on: an initializer of theirs
+    // the front end evaluates (a type's array length, a discriminant) is checked first
+    let _checking = sandbox.then(|| CheckingFront::begin((*up).prog.crates.len() as u32));
+    let added = match add_crates(up, &[NewCrate { name: crate::crates::own_crate_name(name.to_string()), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None) {
+        Ok(a) => a,
+        Err(e) => return Err(if _checking.is_some() { CheckingFront::lead(e) } else { e }),
+    };
     let u = &mut *up;
     let Added { crates, defs, d0, e0, f0, mut errs } = added;
     let krate = crates[0];
     if errs.is_empty() {
         errs.extend(check_orphans(u, krate, &defs));
     }
+    // the refusal's syntax half before any body is type-checked (a type check can evaluate)
+    if errs.is_empty() && sandbox {
+        errs.extend(sandbox_syntax_kept(&u.prog, krate));
+    }
     let root_file = (f0 as u32..u.prog.files.len() as u32).find(|&f| u.prog.file_paths[f as usize] == path).unwrap_or(f0 as u32);
     let mut bodies: Vec<crate::typeck::Body> = Vec::new();
     if errs.is_empty() {
-        // every fn of the module, generic bodies included, type-checks
+        // every fn, const, static and associated const of the module, generic bodies included,
+        // type-checks
         for &d in &defs {
             if !matches!(u.prog.def(d).kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst) {
                 continue;
             }
-            if let Some(a) = crate::borrowck::identity_args(&u.tcx, &u.prog, d) {
+            if let Some(a) = owner_identity_args(&u.prog, &u.tcx, d) {
                 let b = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::typeck::checked_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, d, &a)));
                 match b {
                     Ok(b) => {
@@ -383,7 +539,19 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
     }
     marks.push(("typeck", std::time::Instant::now()));
     if errs.is_empty() && sandbox {
-        errs.extend(sandbox_check(&u.prog, &u.tcx, krate, &bodies.iter().collect::<Vec<_>>()));
+        errs.extend(sandbox_paths(&u.prog, &u.tcx, &bodies.iter().collect::<Vec<_>>()));
+    }
+    // every const-context body (the items', and the anonymous constants of signatures: array
+    // lengths, discriminants, const parameter defaults) passes the const check too, evaluated or not
+    if errs.is_empty() && sandbox {
+        let anons = crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, krate);
+        for b in bodies.iter().filter(|b| matches!(u.prog.def(b.def).kind, DefKind::Const | DefKind::Static | DefKind::AssocConst)).map(|b| (b.def, b.args.to_vec())).chain(anons.into_iter().map(|d| (d, Vec::new()))).collect::<Vec<_>>() {
+            for e in const_body_refusal(&u.prog, &u.tcx, b.0, &b.1) {
+                if !errs.contains(&e) {
+                    errs.push(e);
+                }
+            }
+        }
     }
     marks.push(("check", std::time::Instant::now()));
     if tr {
@@ -392,6 +560,9 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
             line.push_str(&format!(" {} {:.2}", w[1].0, (w[1].1 - w[0].1).as_secs_f64() * 1e3));
         }
         eprintln!("{} ms ({} defs)", line, u.prog.defs.len() - d0);
+    }
+    if _checking.is_some() {
+        errs = CheckingFront::lead(errs);
     }
     if !errs.is_empty() {
         drop_defs(up, &defs);
@@ -439,7 +610,7 @@ fn root_fns(u: &Unit, defs: &[DefId]) -> Vec<DefId> {
     defs.iter().copied().filter(|d| matches!(u.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn) && u.tcx.fn_sig(&u.prog, *d).map_or(false, |s| s.n_generics == 0)).collect()
 }
 
-/// Loads a trusted module (RELAX_MODULES_TRUSTED=1; on the owner thread): it runs as host code.
+/// Loads a trusted module (`--allow-host-modules`; on the owner thread): it runs as host code.
 unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: bool) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
     let (krate, root_file, defs) = front(up, name, path, deps, sandbox)?;
     note_module_crate(krate);
@@ -811,7 +982,8 @@ fn wrapper_source(u: &Unit, krate: u32, modname: &str, idx: u32, defs: &[DefId])
         } else {
             let n = ty_src(u, rt);
             let boxed = match u.tcx.tys.kind(rt) {
-                TyKind::Adt(d, a, _) if u.tcx.adts.get(d).is_some_and(|adt| adt.is_box()) && !a.is_empty() => match u.tcx.tys.kind(u.tcx.tys.list(*a)[0]) {
+                // (a Box in the global allocator: the host frees it as one)
+                TyKind::Adt(d, a, _) if u.tcx.adts.get(d).is_some_and(|adt| adt.is_box()) && !a.is_empty() && u.tcx.tys.list(*a)[1..].iter().all(|x| crate::provided::is_global_alloc(&u.tcx, *x)) => match u.tcx.tys.kind(u.tcx.tys.list(*a)[0]) {
                     TyKind::Adt(d, _, _) => u.prog.def(*d).krate == krate,
                     _ => false,
                 },
@@ -853,7 +1025,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let sess = &session;
     let runtime = &sess.runtime;
     let options = &sess.options;
-    // RELAX_SANDBOX_NOCHECK=1 (tests of the memory confinement alone): no compile-time refusal
+    // --allow-unchecked-modules (tests of the memory confinement alone): no compile-time refusal
     let check = !options.sandbox_nocheck;
     let t0 = std::time::Instant::now();
     let (krate, root_file, mut defs) = front(up, name, path, deps, check)?;
@@ -899,21 +1071,24 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let u = &mut *up;
     let roots: Vec<u32> = root_fns(u, &wdefs).into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
     let fns0 = u.fns.len();
+    let cached0 = jit::CACHE_AHEAD.load(std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = compile_all(up, roots, &|_, _| true, &|u, id| crate::reload::module_own(u, id)) {
         drop_defs(up, &wdefs);
         crate::sandbox::free_arena(&*up, &arena);
         return Err(fail(up, &defs, e));
     }
+    let cached = jit::CACHE_AHEAD.load(std::sync::atomic::Ordering::Relaxed) - cached0;
     // RELAX_MODULE_TRACE=1: where a load's time goes
     if module_trace() {
         eprintln!(
-            "relax module: {} loaded in {:.2} ms: front {:.2} (parse, resolve, typeck, check), wrapper {:.2}, compile {:.2} ({} slots)",
+            "relax module: {} loaded in {:.2} ms: front {:.2} (parse, resolve, typeck, check), wrapper {:.2}, compile {:.2} ({} slots, {} linked from the disk cache)",
             name,
             t0.elapsed().as_secs_f64() * 1e3,
             t_front.as_secs_f64() * 1e3,
             t_wrap.as_secs_f64() * 1e3,
             t2.elapsed().as_secs_f64() * 1e3,
-            (*up).fns.len() - fns0
+            (*up).fns.len() - fns0,
+            cached
         );
     }
     defs.extend(wdefs);
@@ -1016,6 +1191,39 @@ pub extern "C" fn __relax_module_stream(h: u64, src: *const u8, slen: usize, kep
     }
 }
 
+/// std::relax Module::stream_settled: 0 when the live watcher has nothing left of the module's
+/// stream, 1 when nothing would settle it (the reason: __relax_module_error).
+pub extern "C" fn __relax_module_stream_settled(h: u64) -> u32 {
+    let _kept = crate::zone_alloc::kept();
+    let up = jit::current_unit();
+    if up.is_null() {
+        set_error("no running unit".to_string());
+        return 1;
+    }
+    match crate::reload::module_stream_settled(up, h) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(e);
+            1
+        }
+    }
+}
+
+/// std::relax Module::hold_stream (`on` 1) and its release (`on` 0): 0, or 1 when the module is
+/// not loaded (the reason: __relax_module_error).
+pub extern "C" fn __relax_module_stream_hold(h: u64, on: u32) -> u32 {
+    let _kept = crate::zone_alloc::kept();
+    let up = jit::current_unit();
+    if up.is_null() {
+        set_error("no running unit".to_string());
+        return 1;
+    }
+    if crate::reload::hold_module_stream(up, h, on != 0) { 0 } else {
+        set_error("the module was unloaded".to_string());
+        1
+    }
+}
+
 // ------------------------------------------------------------ the program's entries (std::relax)
 
 /// Loads the module at `path` as crate `name`, depending on the running program's crates
@@ -1071,7 +1279,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
     }
     let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
-    // RELAX_MODULES_TRUSTED=1: a trusted module (host code, no sandbox; diagnosis only)
+    // --allow-host-modules: a trusted module (host code, no sandbox; diagnosis only)
     let trusted = options.modules_trusted;
     let fix = |t: String| -> String {
         match &temp {
@@ -1394,6 +1602,8 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
         b"__relax_module_load_src" => __relax_module_load_src as *const () as usize,
         b"__relax_module_load_stream" => __relax_module_load_stream as *const () as usize,
         b"__relax_module_stream" => __relax_module_stream as *const () as usize,
+        b"__relax_module_stream_settled" => __relax_module_stream_settled as *const () as usize,
+        b"__relax_module_stream_hold" => __relax_module_stream_hold as *const () as usize,
         b"__relax_module_get" => __relax_module_get as *const () as usize,
         b"__relax_module_replace" => __relax_module_replace as *const () as usize,
         b"__relax_module_unload" => __relax_module_unload as *const () as usize,
@@ -1412,4 +1622,8 @@ pub(crate) unsafe fn reset_statics() {
     reset(&MODULES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&MODULE_CRATES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&ANY_MODULE_CRATE, std::sync::atomic::AtomicBool::new(false));
+    reset(&CHECKING_FROM, std::sync::atomic::AtomicU32::new(u32::MAX));
+    reset(&FRONT_REFUSALS, relax_session::sync::Mutex::new(Vec::new()));
+    // (keyed by crate and file numbers, which the next run's program numbers anew)
+    reset(&SYNTAX_VERDICTS, relax_session::sync::Mutex::new(Vec::new()));
 }

@@ -5,8 +5,6 @@ use crate::mir::{AggregateKind, AssertKind, BinOp, CastKind, PointerCoercion, Un
 
 impl Interp<'_> {
     pub(super) fn step(&mut self) -> R<()> {
-        self.steps += 1;
-        if self.steps > STEP_LIMIT { return unsupported("step limit"); }
         let (body, block, stmt) = { let f = self.frames.last().unwrap(); (f.body.clone(), f.block, f.stmt) };
         let bb = &body.basic_blocks[block.0 as usize];
         if stmt < bb.statements.len() {
@@ -57,7 +55,8 @@ impl Interp<'_> {
                     self.copy(self.ptr_of(&s, 0)?, self.ptr_of(&d, 0)?, elem, self.int_of(&n)? as u64, true)
                 }
             },
-            StatementKind::FakeRead(..) | StatementKind::PlaceMention(_) | StatementKind::AscribeUserType(..) | StatementKind::ConstEvalCounter
+            StatementKind::ConstEvalCounter => self.count_step(),
+            StatementKind::FakeRead(..) | StatementKind::PlaceMention(_) | StatementKind::AscribeUserType(..)
             | StatementKind::Nop | StatementKind::BackwardIncompatibleDropHint { .. } => Ok(()),
         }
     }

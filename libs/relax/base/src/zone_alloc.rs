@@ -125,6 +125,10 @@ mod disabled {
     pub fn states() -> [usize; 29] {
         [0; 29]
     }
+    pub fn old_census(_: &dyn Fn(usize) -> usize, _: &mut [[usize; 3]; 64]) -> [usize; 4] {
+        [0; 4]
+    }
+    pub const GRANULE_BYTES: usize = 4 << 10;
     pub fn detail() -> (usize, usize, usize, usize) {
         (0, 0, 0, 0)
     }
@@ -320,6 +324,14 @@ pub fn arena_census() -> ([usize; 11], [usize; 11]) {
 /// The compiler and burst arenas' chunk states with resident bytes (arena.rs `states`).
 pub fn arena_states() -> ([usize; 29], [usize; 29]) {
     (compiler::states(), burst::states())
+}
+
+/// The granule the arenas commit, release and count residency in.
+pub const GRANULE: usize = compiler::GRANULE_BYTES;
+
+/// The compiler arena's old chunks, block by block (arena.rs `old_census`).
+pub fn compiler_old_census(key: &dyn Fn(usize) -> usize, per_key: &mut [[usize; 3]; 64]) -> [usize; 4] {
+    compiler::old_census(key, per_key)
 }
 
 /// The compiler arena's committed chunks are old from now on (`arena_states`' old row).
@@ -527,6 +539,52 @@ pub fn give_back() {
 
 pub struct RelaxAlloc;
 
+/// The JIT's own allocations the system refuses (a data limit the program set: RLIMIT_DATA counts
+/// the JIT's memory, KNOWN_GAPS.md 11). The JIT's code allocates infallibly almost everywhere, so a
+/// refusal goes on to `handle_alloc_error`, whose abort() the compiler's SIGABRT handler turns into
+/// a report that says so (`refused_just_now`), instead of a crash report it would need memory to
+/// build. The note is the thread's own and is read only by an abort of the same thread right
+/// after the refusal (the path from a refused infallible allocation to abort() allocates nothing
+/// and waits for nothing); a fallible caller (`try_reserve`, std's `fs::read`) that goes on leaves
+/// a note no later abort of its thread takes for its own. A provided crate's op allocates for the
+/// program (the run phase): its refusals are the program's and leave no note.
+pub mod jit_oom {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    thread_local! {
+        // const, no destructor: written in the allocator, read in a signal handler
+        static REFUSED: Cell<Option<(usize, Instant)>> = const { Cell::new(None) };
+    }
+
+    /// The window in which an abort is the refusal's own (`handle_alloc_error` aborts at once).
+    const RIGHT_AFTER: Duration = Duration::from_millis(500);
+
+    /// The system refused this thread an allocation of `size` bytes.
+    #[cold]
+    #[inline(never)]
+    pub fn refused(size: usize) {
+        if relax_session::phase::in_run() {
+            return;
+        }
+        let _ = REFUSED.try_with(|r| r.set(Some((size, Instant::now()))));
+    }
+
+    /// A refusal of the run phase's routing switch (memstat's counted blocks go outside the domain
+    /// heaps): the program's, not the JIT's.
+    #[inline]
+    pub fn forget() {
+        let _ = REFUSED.try_with(|r| r.set(None));
+    }
+
+    /// The size the system refused this thread just now, if it did: its abort is that refusal's.
+    /// Async-signal-safe.
+    pub fn refused_just_now() -> Option<usize> {
+        let (size, at) = REFUSED.try_with(|r| r.get()).ok()??;
+        (at.elapsed() < RIGHT_AFTER).then_some(size)
+    }
+}
+
 /// glibc: the bytes of the system heap this allocator holds (the loader's own kept blocks, and the
 /// native code's it serves), as malloc counts its chunks. A JIT program's own allocations never
 /// come through here (the program allocator ABI goes to the program's allocator or its domain
@@ -694,6 +752,37 @@ mod zone {
 unsafe impl GlobalAlloc for RelaxAlloc {
     #[inline]
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = self.alloc_routed(l);
+        if p.is_null() {
+            jit_oom::refused(l.size());
+        }
+        p
+    }
+    #[inline]
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        let p = self.alloc_zeroed_routed(l);
+        if p.is_null() {
+            jit_oom::refused(l.size());
+        }
+        p
+    }
+    #[inline]
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        self.dealloc_routed(p, l)
+    }
+    #[inline]
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
+        let q = self.realloc_routed(p, l, size);
+        if q.is_null() {
+            jit_oom::refused(size);
+        }
+        q
+    }
+}
+
+impl RelaxAlloc {
+    #[inline(always)]
+    unsafe fn alloc_routed(&self, l: Layout) -> *mut u8 {
         if in_slots() {
             let p = slots::alloc(l);
             if !p.is_null() {
@@ -733,8 +822,8 @@ unsafe impl GlobalAlloc for RelaxAlloc {
         system_held::add(p);
         p
     }
-    #[inline]
-    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+    #[inline(always)]
+    unsafe fn alloc_zeroed_routed(&self, l: Layout) -> *mut u8 {
         if in_slots() {
             let p = slots::alloc_zeroed(l);
             if !p.is_null() {
@@ -775,8 +864,8 @@ unsafe impl GlobalAlloc for RelaxAlloc {
         system_held::add(p);
         p
     }
-    #[inline]
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+    #[inline(always)]
+    unsafe fn dealloc_routed(&self, p: *mut u8, l: Layout) {
         // The compiler arena first: one address-range test decides the common free. The arenas
         // reserve disjoint ranges, so the order among them does not change who owns a block.
         if compiler::owns(p) {
@@ -802,8 +891,8 @@ unsafe impl GlobalAlloc for RelaxAlloc {
         system_held::sub(p);
         System.dealloc(p, l)
     }
-    #[inline]
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
+    #[inline(always)]
+    unsafe fn realloc_routed(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
         // Slot data keeps its arena even when a history grows in a compile job or kept phase.
         // On allocation failure, return null and leave the original block intact.
         if slots::owns(p) {

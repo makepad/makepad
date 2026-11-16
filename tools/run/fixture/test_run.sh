@@ -8,7 +8,8 @@
 # GATE_FULL=1 runs every package's whatever the diff (the full bucket, daily). A failing test fails
 # its unit alone and says the command that runs it (GATEREPRO); GATE_PROVEN skips a proven unit; GATE_RETRY runs a
 # red one whatever the diff reaches. The units run slowest first by their last measures (GATE_TIMES), one not
-# measured yet at the median; a package measured past GATE_SPLIT_S runs a unit per test target. With GATE_QUEUE=1 a
+# measured yet at the median; a package measured past GATE_SPLIT_S runs a unit per test target, and so does one whose
+# Cargo.toml runs a target under cargo (native-tests), that target's unit under `cargo test`. With GATE_QUEUE=1 a
 # shard takes them from its run's one queue a unit per free slot (a stub of the master's dealer here), and runs none
 # of a queue not its own. A unit whose processes do nothing (HUNG_QUIET, short here) is stopped and
 # fails HUNG, naming the test it still ran (after a child's own run of a test inside its target's), while the
@@ -68,7 +69,7 @@ path = "src/main.rs"'
 put tools/run/src/main.rs '// `makepad test <package> [<target>] [-- --list]` from the workspace root: one test, failing when its source says BROKEN,
 // two, the second never ending, when it says HANGS (the first run again in a child of its own before it, as the
 // harness self-exec says it: its own `running 1 test` to `test result:` inside the target; its pid in
-// TEST_RUN_LOG.pids), working 6 s when it says BUSY;
+// TEST_RUN_LOG.pids), working 6 s when it says BUSY, its build failing before any test when it says UNBUILT;
 // each run is said in TEST_RUN_LOG. `makepad inspect <pid> <question>`: a stub answer.
 use std::io::Write;
 fn main() {
@@ -77,9 +78,9 @@ fn main() {
         println!("{{\"verdict\":\"blocked\",\"why\":\"main is blocked: the stub waits\"}}");
         return;
     }
-    // the gate builds release, as makepad tests its own code (`makepad test` alone: the test profile)
-    assert!(args.iter().any(|a| a == "--release"), "not the release profile: {args:?}");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--release").collect();
+    // the gate tests under the profile devhub test runs: release with the checks (land_gate.sh TP)
+    assert_eq!(args.get(3..5), Some(&["--profile".to_string(), "release-checks".to_string()][..]), "not the checked release profile: {args:?}");
+    let args: Vec<String> = args[..3].iter().chain(&args[5..]).cloned().collect();
     let pkg = args.get(2).cloned().unwrap_or_default();
     let list = args.iter().any(|a| a == "--list");
     let dir = format!("libs/{}", pkg.trim_start_matches("test-run-"));
@@ -87,6 +88,13 @@ fn main() {
     if list {
         println!("tests::it: test\ntests::stuck: test\n\n2 tests, 0 benchmarks");
         return;
+    }
+    // as makepad_test writes the artifacts of a test: <root>/<package>/<test>/, its app home inside
+    if let Some(root) = std::env::var_os("MAKEPAD_TEST_ARTIFACTS") {
+        let test = std::path::Path::new(&root).join(&pkg).join("tests_it");
+        std::fs::create_dir_all(test.join("home")).unwrap();
+        std::fs::write(test.join("run.log"), "ran\n").unwrap();
+        std::fs::write(test.join("home").join("state"), "an app home\n").unwrap();
     }
     let log = std::env::var("TEST_RUN_LOG").ok();
     if let Some(log) = &log {
@@ -96,6 +104,12 @@ fn main() {
         // (writeln! writes its pieces one by one, and two runs merged their lines)
         let line = format!("{}\n", std::iter::once(pkg.as_str()).chain(sel).collect::<Vec<_>>().join(" "));
         f.write_all(line.as_bytes()).unwrap();
+    }
+    if src.contains("UNBUILT") {
+        // (a build takes its time: the watch of the unit looks at it, its peak said)
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        println!("error[E0063]: missing field `x` in initializer of `Plan`\n  --> {dir}/src/lib.rs:1:1");
+        std::process::exit(1);
     }
     if src.contains("BROKEN") {
         // as the JIT fails two tests: the caught panic of a passing test first, a long assertion, a report alone
@@ -199,9 +213,25 @@ order=$(echo "$gate_out" | grep -oE '^GATEUNIT ok test [a-z-]+' | paste -sd' ' -
 # a dealer whose queue is another's: the shard runs none of it and fails, saying so; no lease telling it: it fails
 GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 GATE_TIMES=$times gate stale shape fail "" "testrun: the dealer's queue 000000000000 is not this shard's|NODEGATE-FAIL: queue"
 GATE_QUEUE=1 gate untold shape fail "" "NODEGATE-FAIL: queue (no \$DEVHUB_TOLD"
-gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan --release|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one"
+gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one"
 # every failing test named, each with its own panic whole (a passing test's caught one is no failure's)
 ! echo "$gate_out" | grep -qE 'lib.rs:9:9|its second line' || fail="$fail plan(a passing test's panic or a second line said)"
+# a failed unit's test artifacts stay in the lease's keep, its app home aside; a passing unit's are not kept
+keep=$dir/keep
+DEVHUB_KEEP=$keep MAKEPAD_TEST_ARTIFACTS=$dir/artifacts GATE_RETRY="test test-run-shape" gate kept plan fail "test-run-plan test-run-shape" "GATEUNIT fail test test-run-plan|GATEUNIT ok test test-run-shape|test test-run-plan: its test artifacts kept as artifacts-test-run-plan (1 files)"
+[ "$(cat "$keep/artifacts-test-run-plan/tests_it/run.log" 2>/dev/null)" = ran ] || fail="$fail kept(the failed unit's artifacts)"
+[ ! -e "$keep/artifacts-test-run-plan/tests_it/home" ] || fail="$fail kept(its app home)"
+[ ! -e "$keep/artifacts-test-run-shape" ] || fail="$fail kept(a passing unit's)"
+# a red unit whose tests ran is a measure; one whose build failed before its tests started is none, its seconds nor
+# its peak (a failed build's time stood for a 20-38 min unit's, and the next run's watch read it against that, 11-16)
+echo "$gate_out" | grep -q "^GATETIME test test-run-plan " || fail="$fail kept(a red unit's seconds are no measure)"
+g checkout -q -b unbuilt "$base"
+lib libs/plan test-run-plan '// UNBUILT
+pub fn floor(w: u32) -> u32 { test_run_shape::area(w) }' '[dependencies]
+test-run-shape = { path = "../shape" }'
+g commit -q -am unbuilt
+HUNG_LOOK=1 gate unbuilt unbuilt fail "test-run-plan" "GATEUNIT fail test test-run-plan|missing field|NODEGATE-FAIL: test:test-run-plan"
+! echo "$gate_out" | grep -qE "^GATE(TIME|PEAK) test test-run-plan " || fail="$fail unbuilt(a failed build's seconds or peak are a measure)"
 GATE_PROVEN="test makepad-draw;check test-run-shape" gate proven shape ok "test-run-shape" "GATEUNIT proven test makepad-draw|GATEUNIT ok test test-run-shape"
 GATE_RETRY="test test-run-other" gate retry plan fail "test-run-other test-run-plan" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan"
 # every test runs under the JIT: a change to it runs its own tests and those of the smoke set and the JIT checks
@@ -228,6 +258,14 @@ order=$(echo "$gate_out" | grep -oE '^GATESTART test [a-z-]+' | cut -d' ' -f3 | 
 # runs and its tests/more.rs was proven; tests/heavy.rs needs a feature its defaults lack, so `makepad test` of the
 # package skips it, and named alone it is an error: no unit
 GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=700" GATE_PROVEN="test test-run-other --test more" gate split shape ok "makepad-draw test-run-other --lib test-run-shape" "GATEUNIT ok test test-run-other --lib|GATEUNIT proven test test-run-other --test more|GATETIME test test-run-other --lib |GATESTART test test-run-other --lib |NODEGATE-OK testrun 3 packages"
+# the other's Cargo.toml runs its tests/more.rs under cargo (native-tests): the package runs a unit per target, its lib
+# under the JIT and more under `cargo test`, never the JIT, whose red says the cargo command that shows it; a
+# declared target the package lacks is said
+g checkout -q -b native "$base"
+printf '\n[package.metadata.makepad.native-tests]\n"test:more" = "it runs its own binary"\n"test:gone" = "no such target"\n' >> "$dir/repo/libs/other/Cargo.toml"
+put libs/other/tests/more.rs '#[test] fn more() { panic!("red under cargo") }'
+g commit -q -am native
+gate native native fail "test-run-other --lib" "test test-run-other --test more: under cargo, as its Cargo.toml's native-tests says: it runs its own binary|GATEUNIT ok test test-run-other --lib|GATEUNIT fail test test-run-other --test more|red under cargo|GATEREPRO test test-run-other --test more :: cargo test --release -p test-run-other --test more|testrun: test-run-other's native-tests names test:gone, which is none of its test targets|NODEGATE-FAIL: test:test-run-other---test-more"
 # the plan hangs in its second test while the shape works past the quiet: the plan alone is stopped, HUNG. Four
 # units two at a time (in this order by their measures): the other ends first, and the draw waits on the plan and
 # the shape, the other's pid no longer among those it waits on (a `wait -n` given an ended job's pid again returns at once: the gate's shell
@@ -239,7 +277,7 @@ lib libs/plan test-run-plan '// HANGS
 pub fn floor(w: u32) -> u32 { test_run_shape::area(w) }' '[dependencies]
 test-run-shape = { path = "../shape" }'
 g commit -q -am hang
-GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=40;test test-run-plan=30;test test-run-shape=20;test makepad-draw=10" HUNG_QUIET=3 HUNG_LOOK=1 gate hang hang fail "makepad-draw test-run-other test-run-plan test-run-shape" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan|HUNG: tests::stuck; its stacks: testrun-test-run-plan.hung|main is blocked: the stub waits|GATEREPRO test test-run-plan :: makepad test test-run-plan --release -- tests::stuck --exact|GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-plan"
+GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=40;test test-run-plan=30;test test-run-shape=20;test makepad-draw=10" HUNG_QUIET=3 HUNG_LOOK=1 gate hang hang fail "makepad-draw test-run-other test-run-plan test-run-shape" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan|HUNG: tests::stuck; its stacks: testrun-test-run-plan.hung|main is blocked: the stub waits|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks -- tests::stuck --exact|GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-plan"
 [ "$gate_ticks" -lt 100 ] || fail="$fail hang(the gate's shell took $gate_ticks ticks of CPU: it spun while its units ran)"
 ! echo "$gate_out" | grep -q "^GATETIME test test-run-plan " || fail="$fail hang(a hung unit's seconds are no measure)"
 echo "$gate_out" | grep -q "^GATETIME test test-run-shape " || fail="$fail hang(no measure of the busy unit)"

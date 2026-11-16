@@ -257,7 +257,7 @@ impl Program {
                 if segs.is_empty() {
                     continue;
                 }
-                let pos = f.tok(first_i).lo;
+                let mut pos = f.tok(first_i).lo;
                 if segs.len() == 1 && !global {
                     let target = targets.get(ai).copied().unwrap_or(3);
                     match (segs[0], target) {
@@ -323,15 +323,11 @@ impl Program {
                         continue;
                     }
                     let first = segs[0];
-                    let kind = |k: &str| match k { "crate" => SegKind::Crate, "self" => SegKind::SelfValue, "super" => SegKind::Super, _ => SegKind::Ident };
-                    let path: Vec<(SegKind, Sym)> = match segs.iter().map(|s| self.syms.get(s).map(|y| (kind(s), y))).collect::<Option<Vec<_>>>() {
-                        Some(p) => p,
-                        None => {
-                            // a name never interned anywhere resolves nowhere
-                            out.push(self.record_error(fi as u32, pos, "resolve", format!("E0433: failed to resolve: use of unresolved module or unlinked crate `{first}`")));
-                            continue;
-                        }
-                    };
+                    let kind = |k: &str| match k { "crate" => SegKind::Crate, "self" => SegKind::SelfValue, "super" => SegKind::Super, "Self" => SegKind::SelfType, _ => SegKind::Ident };
+                    // Like path_segs, an uninterned name cannot resolve. Keep it in the path
+                    // so report_path_resolution_error diagnoses that segment, not always the first
+                    // (rustc_resolve/src/diagnostics/impls.rs:3027-3067).
+                    let path: Vec<(SegKind, Sym)> = segs.iter().map(|s| (kind(s), self.syms.get(s).unwrap_or(u32::MAX))).collect();
                     let edition = self.crates[krate as usize].edition;
                     let mut cur = None;
                     let mut fail = None;
@@ -344,16 +340,22 @@ impl Program {
                             }
                         }
                     }
+                    if let Some(k) = fail { pos = f.tok(first_i + u32::from(global) + 2 * k as u32).lo; }
+                    if let Some(k) = fail.filter(|_| path.iter().any(|s| s.1 == u32::MAX)) {
+                        let message = self.path_resolution_message(module, global, &segs, k, cur);
+                        out.push(self.record_error(fi as u32, pos, "resolve", format!("E0433: {message}")));
+                        continue;
+                    }
                     match fail {
                         None => continue,
-                        Some(0) => format!("E0433: failed to resolve: use of unresolved module or unlinked crate `{first}`"),
+                        Some(0) => format!("E0433: {}", self.path_resolution_message(module, global, &segs, 0, None)),
                         Some(k) => {
                             // a macro of another crate's module, or of this one: not a type-namespace item
                             let container = cur.unwrap_or(NO_DEF);
                             // `#[core::bench]`: a name the std crate's root has no macro of
                             if k == 1 && container != NO_DEF && self.def(container).kind == DefKind::Mod && matches!(first, "core" | "std" | "alloc")
                                 && self.def(container).krate != krate && !self.lookup_macro_in_container(container, path[1].1) {
-                                out.push(self.record_error(fi as u32, f.tok(first_i + 2).lo, "resolve", format!("E0433: failed to resolve: cannot find `{}` in `{}`", segs[1], first)));
+                                out.push(self.record_error(fi as u32, pos, "resolve", format!("E0433: {}", self.path_resolution_message(module, global, &segs, k, cur))));
                                 continue;
                             }
                             if container == NO_DEF || self.def(container).krate != krate {
@@ -362,7 +364,7 @@ impl Program {
                             if self.def(container).kind == DefKind::Mod && self.lookup_macro_in_container(container, path[k].1) {
                                 continue;
                             }
-                            format!("E0433: failed to resolve: could not find `{}` in `{}`", segs[k], segs[k - 1])
+                            format!("E0433: {}", self.path_resolution_message(module, global, &segs, k, cur))
                         }
                     }
                 };

@@ -1,6 +1,6 @@
 # Contributing to Relax
 
-Relax is a Rust JIT from the Makepad project: it parses, type-checks and compiles Rust from source at run time.
+Relax is a developer JIT for Rust code from the Makepad project: it parses, type-checks and compiles Rust from source at run time.
 The crates are in libs/relax (front end, types, codegen, backend, compiler) and the command-line
 runner, `relax`, is in tools/run/runner. Open gaps with repros: KNOWN_GAPS.md.
 
@@ -115,6 +115,14 @@ in `reasons`. Move the `since` cursor past every event, the patch errors include
 Shrink it to the smallest program that still differs from rustc. A counting `Drop` impl shows
 drop-order and double-free bugs. An `eprintln!` in a vendored copy of the failing crate finds where
 the behaviour diverges. Put that small program in the PR as a test file.
+
+## Scope
+
+Relax is an experimental developer JIT: it runs, checks and tests Rust from source, in memory, for
+fast development iteration. It never writes executables, libraries or other build output, and it is
+not an ahead-of-time compiler. Release builds use rustc and cargo. Turning Relax into a compiler is
+permanently out of scope: a pull request that adds binary or library output, or a launcher that
+stands in for one, is closed. A test that needs a built binary runs under cargo, not Relax.
 
 ## Rules
 

@@ -48,8 +48,8 @@ impl u8 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: u8) -> u8 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: u8) -> u8 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: u8) -> u8 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: u8) -> u8 { self - rhs }
     pub const fn wrapping_mul(self, rhs: u8) -> u8 { self * rhs }
     pub const fn wrapping_neg(self) -> u8 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: u8) -> u8 { self.overflowing_div(rhs).0 }
@@ -170,8 +170,8 @@ impl u16 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: u16) -> u16 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: u16) -> u16 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: u16) -> u16 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: u16) -> u16 { self - rhs }
     pub const fn wrapping_mul(self, rhs: u16) -> u16 { self * rhs }
     pub const fn wrapping_neg(self) -> u16 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: u16) -> u16 { self.overflowing_div(rhs).0 }
@@ -292,8 +292,8 @@ impl u32 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: u32) -> u32 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: u32) -> u32 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: u32) -> u32 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: u32) -> u32 { self - rhs }
     pub const fn wrapping_mul(self, rhs: u32) -> u32 { self * rhs }
     pub const fn wrapping_neg(self) -> u32 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: u32) -> u32 { self.overflowing_div(rhs).0 }
@@ -414,8 +414,8 @@ impl u64 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: u64) -> u64 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: u64) -> u64 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: u64) -> u64 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: u64) -> u64 { self - rhs }
     pub const fn wrapping_mul(self, rhs: u64) -> u64 { self * rhs }
     pub const fn wrapping_neg(self) -> u64 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: u64) -> u64 { self.overflowing_div(rhs).0 }
@@ -550,8 +550,8 @@ impl u128 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: u128) -> u128 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: u128) -> u128 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: u128) -> u128 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: u128) -> u128 { self - rhs }
     pub const fn wrapping_mul(self, rhs: u128) -> u128 { self * rhs }
     pub const fn wrapping_neg(self) -> u128 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: u128) -> u128 { self.overflowing_div(rhs).0 }
@@ -673,8 +673,8 @@ impl usize {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: usize) -> usize { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: usize) -> usize { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: usize) -> usize { self + rhs }
+    pub const fn wrapping_sub(self, rhs: usize) -> usize { self - rhs }
     pub const fn wrapping_mul(self, rhs: usize) -> usize { self * rhs }
     pub const fn wrapping_neg(self) -> usize { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: usize) -> usize { self.overflowing_div(rhs).0 }
@@ -796,8 +796,8 @@ impl usize {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: usize) -> usize { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: usize) -> usize { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: usize) -> usize { self + rhs }
+    pub const fn wrapping_sub(self, rhs: usize) -> usize { self - rhs }
     pub const fn wrapping_mul(self, rhs: usize) -> usize { self * rhs }
     pub const fn wrapping_neg(self) -> usize { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: usize) -> usize { self.overflowing_div(rhs).0 }
@@ -919,8 +919,8 @@ impl i8 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: i8) -> i8 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: i8) -> i8 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: i8) -> i8 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: i8) -> i8 { self - rhs }
     pub const fn wrapping_mul(self, rhs: i8) -> i8 { self * rhs }
     pub const fn wrapping_neg(self) -> i8 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: i8) -> i8 { self.overflowing_div(rhs).0 }
@@ -969,6 +969,9 @@ impl i8 {
     pub const fn rem_euclid(self, rhs: i8) -> i8 { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: i8) -> i8 { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> u8 { self as u8 }
+    pub const fn checked_isqrt(self) -> Option<i8> { if self < 0 { None } else { Some((self as u8).isqrt() as i8) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> i8 { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: u8) -> (i8, bool) { let rhs = rhs as i8; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: u8) -> Option<i8> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: u8) -> i8 { match self.checked_add_unsigned(rhs) { Some(v) => v, None => i8::MAX } }
@@ -1043,8 +1046,8 @@ impl i16 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: i16) -> i16 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: i16) -> i16 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: i16) -> i16 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: i16) -> i16 { self - rhs }
     pub const fn wrapping_mul(self, rhs: i16) -> i16 { self * rhs }
     pub const fn wrapping_neg(self) -> i16 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: i16) -> i16 { self.overflowing_div(rhs).0 }
@@ -1093,6 +1096,9 @@ impl i16 {
     pub const fn rem_euclid(self, rhs: i16) -> i16 { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: i16) -> i16 { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> u16 { self as u16 }
+    pub const fn checked_isqrt(self) -> Option<i16> { if self < 0 { None } else { Some((self as u16).isqrt() as i16) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> i16 { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: u16) -> (i16, bool) { let rhs = rhs as i16; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: u16) -> Option<i16> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: u16) -> i16 { match self.checked_add_unsigned(rhs) { Some(v) => v, None => i16::MAX } }
@@ -1167,8 +1173,8 @@ impl i32 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: i32) -> i32 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: i32) -> i32 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: i32) -> i32 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: i32) -> i32 { self - rhs }
     pub const fn wrapping_mul(self, rhs: i32) -> i32 { self * rhs }
     pub const fn wrapping_neg(self) -> i32 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: i32) -> i32 { self.overflowing_div(rhs).0 }
@@ -1217,6 +1223,9 @@ impl i32 {
     pub const fn rem_euclid(self, rhs: i32) -> i32 { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: i32) -> i32 { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> u32 { self as u32 }
+    pub const fn checked_isqrt(self) -> Option<i32> { if self < 0 { None } else { Some((self as u32).isqrt() as i32) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> i32 { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: u32) -> (i32, bool) { let rhs = rhs as i32; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: u32) -> Option<i32> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: u32) -> i32 { match self.checked_add_unsigned(rhs) { Some(v) => v, None => i32::MAX } }
@@ -1294,8 +1303,8 @@ impl i64 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: i64) -> i64 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: i64) -> i64 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: i64) -> i64 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: i64) -> i64 { self - rhs }
     pub const fn wrapping_mul(self, rhs: i64) -> i64 { self * rhs }
     pub const fn wrapping_neg(self) -> i64 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: i64) -> i64 { self.overflowing_div(rhs).0 }
@@ -1344,6 +1353,9 @@ impl i64 {
     pub const fn rem_euclid(self, rhs: i64) -> i64 { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: i64) -> i64 { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> u64 { self as u64 }
+    pub const fn checked_isqrt(self) -> Option<i64> { if self < 0 { None } else { Some((self as u64).isqrt() as i64) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> i64 { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: u64) -> (i64, bool) { let rhs = rhs as i64; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: u64) -> Option<i64> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: u64) -> i64 { match self.checked_add_unsigned(rhs) { Some(v) => v, None => i64::MAX } }
@@ -1427,8 +1439,8 @@ impl i128 {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: i128) -> i128 { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: i128) -> i128 { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: i128) -> i128 { self + rhs }
+    pub const fn wrapping_sub(self, rhs: i128) -> i128 { self - rhs }
     pub const fn wrapping_mul(self, rhs: i128) -> i128 { self * rhs }
     pub const fn wrapping_neg(self) -> i128 { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: i128) -> i128 { self.overflowing_div(rhs).0 }
@@ -1477,6 +1489,9 @@ impl i128 {
     pub const fn rem_euclid(self, rhs: i128) -> i128 { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: i128) -> i128 { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> u128 { self as u128 }
+    pub const fn checked_isqrt(self) -> Option<i128> { if self < 0 { None } else { Some((self as u128).isqrt() as i128) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> i128 { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: u128) -> (i128, bool) { let rhs = rhs as i128; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: u128) -> Option<i128> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: u128) -> i128 { match self.checked_add_unsigned(rhs) { Some(v) => v, None => i128::MAX } }
@@ -1555,8 +1570,8 @@ impl isize {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: isize) -> isize { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: isize) -> isize { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: isize) -> isize { self + rhs }
+    pub const fn wrapping_sub(self, rhs: isize) -> isize { self - rhs }
     pub const fn wrapping_mul(self, rhs: isize) -> isize { self * rhs }
     pub const fn wrapping_neg(self) -> isize { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: isize) -> isize { self.overflowing_div(rhs).0 }
@@ -1605,6 +1620,9 @@ impl isize {
     pub const fn rem_euclid(self, rhs: isize) -> isize { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: isize) -> isize { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> usize { self as usize }
+    pub const fn checked_isqrt(self) -> Option<isize> { if self < 0 { None } else { Some((self as usize).isqrt() as isize) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> isize { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: usize) -> (isize, bool) { let rhs = rhs as isize; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: usize) -> Option<isize> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: usize) -> isize { match self.checked_add_unsigned(rhs) { Some(v) => v, None => isize::MAX } }
@@ -1680,8 +1698,8 @@ impl isize {
         while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
         let r = acc.overflowing_mul(base); (r.0, over | r.1)
     }
-    pub const fn wrapping_add(self, rhs: isize) -> isize { self.overflowing_add(rhs).0 }
-    pub const fn wrapping_sub(self, rhs: isize) -> isize { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_add(self, rhs: isize) -> isize { self + rhs }
+    pub const fn wrapping_sub(self, rhs: isize) -> isize { self - rhs }
     pub const fn wrapping_mul(self, rhs: isize) -> isize { self * rhs }
     pub const fn wrapping_neg(self) -> isize { self.overflowing_neg().0 }
     pub const fn wrapping_div(self, rhs: isize) -> isize { self.overflowing_div(rhs).0 }
@@ -1730,6 +1748,9 @@ impl isize {
     pub const fn rem_euclid(self, rhs: isize) -> isize { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
     pub const fn div_euclid(self, rhs: isize) -> isize { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
     pub const fn cast_unsigned(self) -> usize { self as usize }
+    pub const fn checked_isqrt(self) -> Option<isize> { if self < 0 { None } else { Some((self as usize).isqrt() as isize) } }
+    #[track_caller]
+    pub const fn isqrt(self) -> isize { match self.checked_isqrt() { Some(sqrt) => sqrt, None => crate::panicking::panic_str("argument of integer square root cannot be negative") } }
     pub const fn overflowing_add_unsigned(self, rhs: usize) -> (isize, bool) { let rhs = rhs as isize; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
     pub const fn checked_add_unsigned(self, rhs: usize) -> Option<isize> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
     pub const fn saturating_add_unsigned(self, rhs: usize) -> isize { match self.checked_add_unsigned(rhs) { Some(v) => v, None => isize::MAX } }

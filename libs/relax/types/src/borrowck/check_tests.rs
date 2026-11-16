@@ -369,7 +369,7 @@ fn a_variable_mutated_by_the_closure_it_is_moved_into_is_used_mut() {
         StatementKind::Assign(p(2), Rvalue::Aggregate(Box::new(AggregateKind::Closure(id, vec![])), vec![Operand::Move(p(1))]))], TerminatorKind::Return)]);
     b.arg_count = 0;
     b.local_decls[1].local_info = LocalInfo::User(BindingForm::Var(VarBindingForm { binding_mode: BindingMode(ByRef::No, Mutability::Mut), opt_ty_info: None,
-        opt_match_place: None, pat_span: Span::default(), introductions: vec![] }));
+        opt_match_place: None, pat_span: Span::default(), introductions: vec![], from_desugaring: false }));
     let moves = gather(&tcx, &b);
     let run = |nested: NestedUsedMut| {
         let mut regions = compute_regions(&tcx, &test_prog(), &b, input(&b, &[]), false);

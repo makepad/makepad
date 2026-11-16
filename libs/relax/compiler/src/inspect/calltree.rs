@@ -30,12 +30,39 @@ fn expand_pcs(pcs: &[u64], partial: &mut Vec<String>) -> HashMap<u64, Vec<XFrame
     let jit: Vec<u64> = pcs.iter().copied().filter(|&pc| crate::jit::in_jit_code(pc)).collect();
     let up = crate::jit::current_unit();
     if !jit.is_empty() && !up.is_null() {
-        let r = crate::owner::call_within(crate::owner::Class::Job, 3000, move || {
-            let u = unsafe { &*up };
-            let mut res = super::codever::Resolver::new();
-            jit.iter()
-                .map(|&pc| {
-                    let v = match super::codever::describe_pc(u, &mut res, pc) {
+        // The pcs are named on the owner in steps that give it back: a step ends after STEP, or
+        // as soon as a program request waits (a frame's lazy install among them), and the next
+        // step is asked for only once no program request has waited for QUIET, so a frame's
+        // burst of first-call installs (hundreds, back to back) is served without a step between
+        // them. One job for every pc of a 1 kHz recording held the owner 100-290 ms, and each
+        // frame whose install queued behind it was a hitch of the app being profiled; steps
+        // asked for between a burst's installs still added 82 ms to its frame. The resolver's
+        // memo goes from step to step. (On the owner itself the steps run back to back: there is
+        // nothing to give back to.)
+        const STEP: std::time::Duration = std::time::Duration::from_millis(2);
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(5);
+        let on_owner = crate::owner::is_owner();
+        let mut res = super::codever::Resolver::new();
+        let mut done = 0;
+        let mut busy_at: Option<std::time::Instant> = None;
+        while done < jit.len() {
+            while !on_owner {
+                if crate::owner::program_waiting() {
+                    busy_at = Some(std::time::Instant::now());
+                } else if busy_at.map_or(true, |t| t.elapsed() >= QUIET) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            let rest = &jit[done..];
+            let res = &mut res;
+            let r = crate::owner::call_within(crate::owner::Class::Job, 3000, move || {
+                let u = unsafe { &*up };
+                let t = std::time::Instant::now();
+                let mut named = Vec::new();
+                let mut gave_way = false;
+                for &pc in rest {
+                    let v = match super::codever::describe_pc(u, res, pc) {
                         Some(c) => {
                             let tier = c.kind.tier_name().to_string();
                             let own = super::display_name(u, c.slot, 0);
@@ -56,13 +83,29 @@ fn expand_pcs(pcs: &[u64], partial: &mut Vec<String>) -> HashMap<u64, Vec<XFrame
                             None => vec![XFrame { name: format!("jit {:#x}", pc), tier: "jit".into(), at: String::new(), gen: 0 }],
                         },
                     };
-                    (pc, v)
-                })
-                .collect::<Vec<_>>()
-        });
-        match r {
-            Some(v) => out.extend(v),
-            None => partial.push(format!("JIT frames unnamed: the owner was busy ({})", crate::owner::serving_note())),
+                    named.push((pc, v));
+                    if !on_owner {
+                        gave_way = crate::owner::program_waiting();
+                        if gave_way || t.elapsed() >= STEP {
+                            break;
+                        }
+                    }
+                }
+                (named, gave_way)
+            });
+            match r {
+                Some((v, gave_way)) => {
+                    if gave_way {
+                        busy_at = Some(std::time::Instant::now());
+                    }
+                    done += v.len();
+                    out.extend(v);
+                }
+                None => {
+                    partial.push(format!("JIT frames unnamed: the owner was busy ({})", crate::owner::serving_note()));
+                    break;
+                }
+            }
         }
     }
     for &pc in pcs {

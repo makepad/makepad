@@ -227,7 +227,7 @@ pub(crate) fn worthy(u: &Unit, id: u32) -> bool {
         FnKey::Inst(_, args) => !args.is_empty(),
         FnKey::Closure(_, _, parent) => (*parent as usize) < u.fns.len() && *parent != id && worthy(u, *parent),
         FnKey::Glue(..) | FnKey::Shim(_) | FnKey::Plain(_) => true,
-        FnKey::Sandbox(_) => false,
+        FnKey::Sandbox(_) | FnKey::Ctfe(_) => false,
     }
 }
 

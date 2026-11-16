@@ -2505,9 +2505,11 @@ pub const VARIANT_SIZE_DIFFERENCES: Lint = lint::lint("variant_size_differences"
 
 /// rustc_lint types.rs `VariantSizeDifferences`: a tagged enum whose largest variant is more than
 /// three times larger than the second largest (sizes without the tag).
-/// `defs`: one checked crate's definitions.
-pub fn variant_size_differences(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
+/// `defs`: one checked crate's definitions; `lay`: `lint_dead::finish`'s shared `layout_of` memo,
+/// reusing layouts across items and crates like rustc, with one caller-local `LayoutCx` here.
+pub fn variant_size_differences(prog: &Program, tcx: &Tcx, defs: &[DefId], lay: &crate::layout::Layouts) {
     if !lint::enabled() { return; }
+    let lcx = crate::layout::LayoutCx::new(prog);
     for &d in defs {
         let def = prog.def(d);
         if def.kind != DefKind::Enum || lint::generated(prog, d) { continue; }
@@ -2521,8 +2523,6 @@ pub fn variant_size_differences(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
         let env = crate::tcx::TypingEnv::fully_monomorphized(prog);
         if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(crate::types::TypeFlags::HAS_ALIAS) && tcx.try_normalize_erasing_regions(prog, env, f.ty).is_err())) { continue; }
         let ty = tcx.tys.intern(TyKind::Adt(d, tcx.tys.mk_list(&[]), adt.region_params));
-        let lcx = crate::layout::LayoutCx::new(prog);
-        let lay = crate::layout::Layouts::new();
         let l = lay.of(&lcx, tcx, ty);
         if adt.variants.len() < 2 { continue; }
         let (Some((_, mem)), crate::layout::TagEnc::Direct) = (l.tag, l.enc) else { continue };
@@ -2549,62 +2549,6 @@ pub fn variant_size_differences(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
             let Some(v) = ast.list(ast.row(r).variants).get(li) else { continue };
             if lint::external(prog, def.file, v.name.lo) { continue; }
             lint::emit(prog, d, &VARIANT_SIZE_DIFFERENCES, def.file, v.name.lo, &format!("enum variant is more than three times larger ({} bytes) than the next largest", largest));
-        }
-    }
-}
-
-pub const REPR_TRANSPARENT_NON_ZST_FIELDS: Lint = lint::lint("repr_transparent_non_zst_fields");
-
-/// rustc_hir_analysis check.rs `check_transparent`, the lint half: a zero-sized field of a
-/// `repr(transparent)` struct that contains a `repr(C)` type, next to a non-zero-sized field.
-/// `defs`: one checked crate's definitions.
-pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, defs: &[DefId]) {
-    if !lint::enabled() { return; }
-    fn contains_repr_c(prog: &Program, tcx: &Tcx, t: TyId, depth: u32) -> bool {
-        if depth > 16 { return false; }
-        match *tcx.tys.kind(t) {
-            TyKind::Tuple(l) => tcx.tys.list(l).iter().any(|&x| contains_repr_c(prog, tcx, x, depth + 1)),
-            TyKind::Array(e, _) => contains_repr_c(prog, tcx, e, depth + 1),
-            TyKind::Adt(d, args, _) => {
-                let Some(adt) = tcx.adts.get(&d) else { return false };
-                if adt.repr_c { return true; }
-                adt.variants.iter().any(|v| v.fields.iter().any(|f| contains_repr_c(prog, tcx, tcx.tys.subst(f.ty, tcx.tys.list(args)), depth + 1)))
-            }
-            _ => false,
-        }
-    }
-    for &d in defs {
-        let def = prog.def(d);
-        if def.kind != DefKind::Struct || lint::generated(prog, d) { continue; }
-        let pf = &prog.files[def.file as usize];
-        let ast = &pf.ast;
-        let item = ast.item(def.item);
-        let transparent = ast.list(item.attrs).iter().any(|a| lint::attr_path(prog, def.file, a) == b"repr" && lint::attr_text(prog, def.file, a).contains("transparent"));
-        if !transparent { continue; }
-        let Some(adt) = tcx.adts.get(&d) else { continue };
-        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
-        let Some(v) = adt.variants.first() else { continue };
-        if v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad)) { continue; }
-        let ItemKind::Struct(r) = item.kind else { continue };
-        let fields: Vec<FieldDef> = match ast.row(r).data { VariantData::Unit => Vec::new(), VariantData::Tuple(l) | VariantData::Struct(l) => ast.list(l).to_vec() };
-        if fields.len() != v.fields.len() { continue; }
-        let lcx = crate::layout::LayoutCx::new(prog);
-        let lay = crate::layout::Layouts::new();
-        let trivial: Vec<bool> = v.fields.iter().map(|f| {
-            let l = lay.of(&lcx, tcx, f.ty);
-            !lay.is_unsized(&lcx, tcx, f.ty) && l.size == 0 && l.align == 1
-        }).collect();
-        let non_trivial = trivial.iter().filter(|t| !**t).count();
-        let mut prev = false;
-        for (k, f) in v.fields.iter().enumerate() {
-            if !trivial[k] || !contains_repr_c(prog, tcx, f.ty, 0) { continue; }
-            if non_trivial > 0 || prev {
-                let pos = fields[k].name.get().map_or(fields[k].ty_span.0, |n| n.lo);
-                if lint::external(prog, def.file, pos) { continue; }
-                lint::emit(prog, d, &REPR_TRANSPARENT_NON_ZST_FIELDS, def.file, pos, "zero-sized fields in `repr(transparent)` cannot contain `repr(C)` types");
-            } else {
-                prev = true;
-            }
         }
     }
 }
@@ -2637,10 +2581,17 @@ pub fn async_fn_in_trait(prog: &Program, defs: &[DefId], reach: &crate::lint_dea
 /// destructor, no raw pointer field, no `Iterator` impl, at most 256 bytes and only `Copy`
 /// fields could implement `Copy`.
 /// `defs`: one checked crate's definitions; `reach`: that crate's.
-pub fn missing_copy_implementations(prog: &Program, tcx: &Tcx, defs: &[DefId], reach: &crate::lint_dead::Reach) {
+/// `lay` and `copy_memo` belong to `lint_dead::finish`: rustc's `layout_of` and `is_copy_raw`
+/// memos reuse layouts across items and crates, and Copy answers across one crate's items (rustc's
+/// is_copy_raw memo lives in one crate's session: the item's crate decides the impls in view and
+/// the recursion limit). Copy keys are the crate, the param env and the region-erased type; the
+/// typing mode is always non-body analysis. One `LayoutCx` serves
+/// this call; each ADT builds its inference context only for a Copy miss or the Iterator check.
+pub fn missing_copy_implementations(prog: &Program, tcx: &Tcx, defs: &[DefId], reach: &crate::lint_dead::Reach, lay: &crate::layout::Layouts, copy_memo: &crate::conc::MemoMap<(u32, crate::tcx::ParamEnvId, TyId), bool>) {
     if !lint::enabled() { return; }
     let Some(copy) = tcx.copy_trait else { return };
     let iter = tcx.lang_items.get(LangItem::Iterator);
+    let lcx = crate::layout::LayoutCx::new(prog);
     for &d in defs {
         let def = prog.def(d);
         if !matches!(def.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) { continue; }
@@ -2654,18 +2605,22 @@ pub fn missing_copy_implementations(prog: &Program, tcx: &Tcx, defs: &[DefId], r
         if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad))) { continue; }
         let ty = tcx.tys.intern(TyKind::Adt(d, tcx.tys.mk_list(&[]), adt.region_params));
         let env = tcx.param_env_id(prog, d);
-        let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), d);
+        let infcx = std::cell::OnceCell::new();
         let implements = |tr: DefId, t: TyId| {
+            let infcx = infcx.get_or_init(|| crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), d));
             let predicate = crate::next_solver::collect::trait_predicate(tr, vec![crate::consts::GenericArg::Type(t)]);
             infcx.evaluate_obligation(prog, crate::next_solver::Goal { param_env: env, predicate }).must_apply_modulo_regions()
         };
-        if implements(copy, ty) { continue; }
+        let is_copy = |t: TyId| {
+            let key = (def.krate, env, tcx.tys.erase_regions(t));
+            copy_memo.get(&key).unwrap_or_else(|| copy_memo.insert_first(key, implements(copy, t)))
+        };
+        if is_copy(ty) { continue; }
         if iter.is_some_and(|it| implements(it, ty)) { continue; }
         if tcx.tys.flags(ty).intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR) { continue; }
-        let lay = crate::layout::Layouts::new();
-        if lay.of(&crate::layout::LayoutCx::new(prog), tcx, ty).size > 256 { continue; }
+        if lay.of(&lcx, tcx, ty).size > 256 { continue; }
         // every field must be Copy
-        let all_copy = adt.variants.iter().all(|v| v.fields.iter().all(|f| implements(copy, f.ty)));
+        let all_copy = adt.variants.iter().all(|v| v.fields.iter().all(|f| is_copy(f.ty)));
         if !all_copy { continue; }
         let ast = &prog.files[def.file as usize].ast;
         let item = ast.item(def.item);

@@ -66,7 +66,8 @@ fn live_bytes() -> usize {
 fn assert_back_to(live: usize, chunks: usize) {
     compiler_trim();
     assert_eq!(live_bytes(), live, "live bytes after every block was freed");
-    assert!(compiler_stats().2 <= chunks, "chunks {} > {chunks} after the trim", compiler_stats().2);
+    let exits = |i: usize| compiler::EXIT_COUNTS[i].load(Ordering::Relaxed);
+    assert!(compiler_stats().2 <= chunks, "chunks {} > {chunks} after the trim (thread exits so far: {} armed, {} run; chunk states {:?})", compiler_stats().2, exits(0), exits(1), compiler::states());
 }
 
 #[test]

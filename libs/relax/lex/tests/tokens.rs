@@ -122,3 +122,18 @@ fn span_join_rejects_distinct_files_and_keeps_outer_endpoints() {
     assert_eq!(b.join(Span { file: 0, ..a }), None);
     assert_eq!(Span::DUMMY.file, 0);
 }
+
+/// `str::parse` lexes by itself, as rustc's does: nothing installs a lexer first. A native macro
+/// that parsed before its process had read a source file got a LexError for any text.
+#[test]
+fn str_parse_lexes_as_rustc_without_a_host() {
+    let ts: TokenStream = "f32 , f32".parse().expect("valid tokens lex");
+    assert_eq!(ts.clone().into_iter().count(), 3, "three trees: {ts}");
+    let source = "fn r#type<'a>(x: &'a str) -> Vec<Vec<u8>> { x::f([1, 2.0f32]) }";
+    let parsed: TokenStream = source.parse().expect("an item lexes");
+    assert_eq!(atoms(&parsed.to_string()), atoms(source), "parse keeps the tokens");
+    assert!("(a".parse::<TokenStream>().is_err(), "an unclosed group is a LexError");
+    assert!("a)".parse::<TokenStream>().is_err(), "a stray close is a LexError");
+    assert!("\"open".parse::<TokenStream>().is_err(), "an unterminated string is a LexError");
+    assert!("".parse::<TokenStream>().is_ok_and(|t| t.is_empty()), "empty text is an empty stream");
+}

@@ -107,11 +107,17 @@ pub(super) struct Queue {
     /// the run quits (`quit`): no check or lowering ahead, O2 or speculative build nobody waits for
     /// is queued
     quitting: bool,
+    /// the open interval of the hold ledger (`note_hold`)
+    hold: Option<Hold>,
 }
+/// An open interval of the hold ledger: since `since` (wall ns) a free worker found the best queued
+/// tier-up held for `HOLD_REASONS[reason]`, `queued` tier-ups in the queue, before or after the
+/// first present.
+struct Hold { reason: usize, after: bool, since: u64, queued: u64 }
 impl Queue {
     fn new() -> Self {
         Self { entries: Vec::new(), running: Vec::new(), serial: 0, waiters: HashMap::default(), plan: std::array::from_fn(|_| std::array::from_fn(|_| BTreeSet::new())), indices: HashMap::default(), by_slot: HashMap::default(), refresh_cursor: 0, ahead_class: budget::BACKGROUND, ahead_len: 0,
-            tick_at: Instant::now(), tick_queued: false, timer: None, inbox: Vec::new(), quitting: false }
+            tick_at: Instant::now(), tick_queued: false, timer: None, inbox: Vec::new(), quitting: false, hold: None }
     }
     /// Queues `job`; returns whether it can start now.
     pub(super) fn push(&mut self, job: Job, at: u64) -> bool {
@@ -172,21 +178,41 @@ impl Queue {
         self.sync_ahead();
         if self.entries.is_empty() { return; }
         self.refresh_cursor %= self.entries.len();
-        let entry = &mut self.entries[self.refresh_cursor];
+        let i = self.refresh_cursor;
         self.refresh_cursor += 1;
-        if entry.job.tier() == 0 { return; }
-        self.plan[entry.job.tier()][entry.class as usize].remove(&order(entry.key, entry.serial));
+        self.rekey(i, now);
+    }
+    /// Entry `i`'s class and key sampled again, its place in the plan with them. True: either moved.
+    fn rekey(&mut self, i: usize, now: &HeatNow) -> bool {
+        let entry = &mut self.entries[i];
+        if entry.job.tier() == 0 { return false; }
         let class = if entry.promoted { entry.class } else { job_class(&entry.job, now) };
+        let key = key(entry, now);
+        if class == entry.class && key == entry.key { return false; }
+        self.plan[entry.job.tier()][entry.class as usize].remove(&order(entry.key, entry.serial));
         if class != entry.class {
             budget::queued(entry.class, budget::JIT, -1);
             budget::queued(class, budget::JIT, 1);
             entry.class = class;
         }
-        entry.key = key(entry, now);
+        entry.key = key;
         self.plan[entry.job.tier()][entry.class as usize].insert(order(entry.key, entry.serial));
+        true
     }
+    /// The entry to start now. An O3 entry's heat is live (its slot's record is charged until the
+    /// build), so the one chosen has its key read again: moved since its last sample (code that
+    /// stopped running, or got hotter), it goes to its place and the pick runs again. Each entry
+    /// moves at most once per pick (its key is then current).
     fn head(&mut self, now: &HeatNow, takes: Takes) -> Option<usize> {
         self.refresh(now);
+        // (a key read twice at one `now` is the same unless the program charged the record in
+        // between: the walk ends after one pass over the entries whatever happens)
+        for _ in 0..self.entries.len() {
+            let i = self.first_for(takes)?;
+            if !matches!(self.entries[i].job, Job::O3(_)) || !self.rekey(i, now) {
+                return Some(i);
+            }
+        }
         self.first_for(takes)
     }
     /// The entry to start now, in rank order (head without its heat sample): the first class whose
@@ -276,6 +302,40 @@ impl Queue {
             Job::O2(_, _, O2Kind::Verified) if !past_startup() => Some("startup"),
             _ => None,
         }
+    }
+    /// Why the best queued tier-up (O2, O3) does not start at this pick: its gate (`class_blocked`,
+    /// `entry_blocked`), else "idle lane" when only the other kind of worker may start it
+    /// (`takes`), else "budget" when the admission refused the head (`head_refused`). None when no
+    /// tier-up is queued or nothing holds it.
+    fn tier_up_hold(&self, head_refused: bool, takes: Takes) -> Option<usize> {
+        if (COUNTS[1].load(Ordering::Relaxed) + COUNTS[2].load(Ordering::Relaxed)) == 0 { return None; }
+        let policy = self.policy();
+        let (_, tier, class, serial) = [1usize, 2].into_iter()
+            .flat_map(|tier| self.plan[tier].iter().enumerate().filter_map(move |(stored, bucket)| bucket.iter().next().map(|&(key, serial)| (tier, stored as u8, key, serial))))
+            .map(|(tier, stored, key, serial)| {
+                let class = self.bucket_class(tier, stored);
+                (rank(class, key.0, serial), tier, class, serial)
+            })
+            .min_by_key(|r| r.0)?;
+        let why = self.class_blocked(class, tier, &policy).or_else(|| self.entry_blocked(&self.entries[self.indices[&serial]]));
+        let reason = match why {
+            Some(why) => why,
+            None if !takes.takes(tier) => "idle lane",
+            None if head_refused => "budget",
+            None => return None,
+        };
+        Some(HOLD_REASONS.iter().position(|r| *r == reason).unwrap_or(HOLD_REASONS.len() - 1))
+    }
+    /// The hold ledger at a pick that parks or starts a tier-up: the open interval ends when its
+    /// reason, the phase (the first present) or the queued tier-ups' count changed, or a tier-up
+    /// starts (`reason` None); its wall goes to `HELD_NS` and that times the queued count to
+    /// `HELD_QUEUED_NS`. Under the queue lock: a clock read and two atomics per interval.
+    fn note_hold(&mut self, reason: Option<usize>, now: u64) {
+        let after = past_startup();
+        let queued = (COUNTS[1].load(Ordering::Relaxed) + COUNTS[2].load(Ordering::Relaxed)) as u64;
+        if matches!(&self.hold, Some(h) if Some(h.reason) == reason && h.after == after && h.queued == queued) { return; }
+        if let Some(h) = self.hold.take() { h.close(now); }
+        self.hold = reason.map(|reason| Hold { reason, after, since: now, queued });
     }
     fn ordered(&self, limit: usize) -> Vec<(usize, Option<&'static str>)> {
         let policy = self.policy();
@@ -394,6 +454,37 @@ const TIER_NAMES: [&str; TIERS] = ["ahead", "O2", "O3", "spec", "tick", "check"]
 /// What the jobs of each tier took so far, the CPU of the threads running them (makepad inspect `jit spent`).
 static JOB_CPU: [AtomicU64; TIERS] = [const { AtomicU64::new(0) }; TIERS];
 static JOB_RUNS: [AtomicU64; TIERS] = [const { AtomicU64::new(0) }; TIERS];
+/// The hold ledger's reasons: what holds a runnable tier-up back while a worker is free. The gates'
+/// own (`class_blocked`, `entry_blocked`), then "idle lane" (only a worker of the other kind may
+/// start it: idle_tiers), "budget" (the admission refused the head) and "other" (a gate this list
+/// does not name yet).
+const HOLD_REASONS: [&str; 11] = ["UI burst", "first-compile reserve", "visible reserve", "startup tier width", "demand compiles", "O3 stopped", "startup", "same slot running", "idle lane", "budget", "other"];
+/// Per reason, before the first present ([0]) and after it ([1]): the wall ns a free worker found the
+/// best queued tier-up held for it, and those ns times the tier-ups queued then (build-ns waiting).
+static HELD_NS: [[AtomicU64; HOLD_REASONS.len()]; 2] = [const { [const { AtomicU64::new(0) }; HOLD_REASONS.len()] }; 2];
+static HELD_QUEUED_NS: [[AtomicU64; HOLD_REASONS.len()]; 2] = [const { [const { AtomicU64::new(0) }; HOLD_REASONS.len()] }; 2];
+impl Hold {
+    fn close(&self, now: u64) {
+        let ns = now.saturating_sub(self.since);
+        HELD_NS[self.after as usize][self.reason].fetch_add(ns, Ordering::Relaxed);
+        HELD_QUEUED_NS[self.after as usize][self.reason].fetch_add(ns.saturating_mul(self.queued), Ordering::Relaxed);
+    }
+}
+/// The hold ledger (makepad inspect `jit`): per reason the seconds a free worker found the best queued
+/// tier-up held, and the build-seconds the queued tier-ups waited meanwhile, before the first present
+/// and after it, the open interval counted to now.
+pub(super) fn held_line() -> String {
+    let open = { let q = lock(); q.hold.as_ref().map(|h| (h.reason, h.after, wall_ns().saturating_sub(h.since), h.queued)) };
+    let phase = |after: bool| {
+        let rows: Vec<String> = HOLD_REASONS.iter().enumerate().filter_map(|(i, name)| {
+            let (mut ns, mut queued) = (HELD_NS[after as usize][i].load(Ordering::Relaxed), HELD_QUEUED_NS[after as usize][i].load(Ordering::Relaxed));
+            if let Some((reason, a, extra, n)) = open { if reason == i && a == after { ns += extra; queued += extra.saturating_mul(n); } }
+            (ns > 0).then(|| format!("{name} {:.2} s ({:.1} build-s)", ns as f64 / 1e9, queued as f64 / 1e9))
+        }).collect();
+        if rows.is_empty() { "none".to_string() } else { rows.join(", ") }
+    };
+    format!("tier-ups held while a worker was free: before the first present {}; after {}", phase(false), phase(true))
+}
 /// The same per slot for its O2 and O3 jobs: O2 ns, O2 jobs, O3 ns, O3 jobs.
 static SLOT_CPU: relax_session::sync::Mutex<Option<HashMap<u32, [u64; 4]>>> = relax_session::sync::Mutex::new(None);
 /// A worker's park state, on its own cache line (each worker writes its flag at every job).
@@ -702,13 +793,6 @@ pub(super) fn tiers_where(keep: impl Fn(&TierEntry) -> bool) -> Vec<TierEntry> {
     drain_tier_inbox();
     lock().entries.iter().filter_map(|e| if let Job::O3(t) = e.job { keep(&t).then_some(t) } else { None }).collect()
 }
-/// Takes the O3 entries `gone` off the queue (tier_revalidate). By the whole entry, not by slot: hot
-/// code counted again is queued again within microseconds, and that new entry stays.
-pub(super) fn drop_tiers(gone: Vec<TierEntry>) {
-    if !gone.is_empty() {
-        lock().drop_tiers(&gone.into_iter().collect());
-    }
-}
 fn note_job(tier: usize, slot: Option<u32>, ns: u64) {
     JOB_CPU[tier].fetch_add(ns, Ordering::Relaxed);
     JOB_RUNS[tier].fetch_add(1, Ordering::Relaxed);
@@ -763,12 +847,6 @@ impl Queue {
             if !self.entries[i].promoted { gone.push(self.remove(i)); }
         }
         gone
-    }
-    fn drop_tiers(&mut self, gone: &std::collections::HashSet<TierEntry>) {
-        let mut i = 0;
-        while i < self.entries.len() {
-            if matches!(&self.entries[i].job, Job::O3(e) if gone.contains(e)) { self.remove(i); } else { i += 1; }
-        }
     }
     /// Promotes slot `id`'s queued and running jobs to their waiters' class; returns whether a
     /// queued one can start now.
@@ -966,6 +1044,16 @@ fn worker_loop(index: usize) {
                     let more = q.runnable();
                     Some((e, job, more, go_idle))
                 });
+                // the hold ledger: a tier-up that starts ends the open interval; a worker that parks
+                // finds why the best queued one does not start (other work started leaves it open)
+                match &picked {
+                    Some((e, ..)) if is_tier_up(e.job.tier()) => if q.hold.is_some() { q.note_hold(None, wall_ns()) },
+                    Some(_) => {}
+                    None => {
+                        let hold = q.tier_up_hold(head.is_some(), takes);
+                        q.note_hold(hold, wall_ns());
+                    }
+                }
                 // idle, or held back by the budget: parked until a wake, the timer worker until
                 // the tick is due
                 picked.ok_or_else(|| ((!q.tick_queued && q.timer.is_none()).then(|| {
@@ -1081,36 +1169,6 @@ pub(super) fn view(n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_queued_slot_keeps_the_heat_it_was_queued_at() {
-        const S: u64 = 1_000_000_000;
-        let mut q = Queue::new();
-        let now = 1000 * S;
-        let (cold, hot, old_cold) = ((u32::MAX - 1, 0, now, 1 << 15), (u32::MAX - 2, 0, now, 1 << 34), (u32::MAX - 3, 0, now - 40 * S, 1 << 15));
-        for e in [cold, hot, old_cold] {
-            q.push(Job::O3(e), e.2);
-        }
-        let keys = [0, 1, 2].map(|i| q.entries[i].key);
-        assert!(keys[1] > keys[2] && keys[2] > keys[0], "the hottest first, then what waited longest: {keys:?}");
-        q.drop_tiers(&[cold, hot, old_cold].into_iter().collect());
-    }
-
-    #[test]
-    fn a_slot_queued_again_keeps_its_new_entry() {
-        let mut q = Queue::new();
-        let (old, new, other) = ((7, 0, 100, 5), (7, 0, 200, 5), (8, 0, 100, 5));
-        for e in [old, other, new] {
-            q.push(Job::O3(e), e.2);
-        }
-        q.drop_tiers(&[old].into_iter().collect());
-        let left: Vec<TierEntry> = q.entries.iter().filter_map(|e| if let Job::O3(t) = e.job { Some(t) } else { None }).collect();
-        assert_eq!(left.len(), 2);
-        assert!(left.contains(&new) && left.contains(&other), "only the entry counted again goes: {left:?}");
-        for e in [new, other] {
-            q.drop_tiers(&[e].into_iter().collect());
-        }
-    }
 
     #[test]
     fn a_jobs_cpu_goes_to_its_tier_and_slot() {
@@ -1335,6 +1393,8 @@ pub(crate) unsafe fn reset_statics() {
     reset(&RUNNING, [const { AtomicUsize::new(0) }; TIERS]);
     reset(&JOB_CPU, [const { AtomicU64::new(0) }; TIERS]);
     reset(&JOB_RUNS, [const { AtomicU64::new(0) }; TIERS]);
+    reset(&HELD_NS, [const { [const { AtomicU64::new(0) }; HOLD_REASONS.len()] }; 2]);
+    reset(&HELD_QUEUED_NS, [const { [const { AtomicU64::new(0) }; HOLD_REASONS.len()] }; 2]);
     reset(&SLOT_CPU, relax_session::sync::Mutex::new(None));
     reset(&THREADS, OnceLock::new());
     reset(&NEXT_WORKER, AtomicUsize::new(0));

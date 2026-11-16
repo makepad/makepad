@@ -152,7 +152,7 @@ pub(crate) fn runtime_function(u: &Unit, slot: u32) -> bool {
     match u.fns[slot as usize].key {
         crate::jit::FnKey::Inst(d, _) => !matches!(u.prog.def(d).kind,
             DefKind::Const | DefKind::AssocConst | DefKind::AnonConst | DefKind::Static),
-        crate::jit::FnKey::Plain(base) | crate::jit::FnKey::Sandbox(base) => runtime_function(u, base),
+        crate::jit::FnKey::Plain(base) | crate::jit::FnKey::Sandbox(base) | crate::jit::FnKey::Ctfe(base) => runtime_function(u, base),
         _ => true,
     }
 }
@@ -272,6 +272,7 @@ pub unsafe fn functions(up: *const Unit) -> Vec<FnCoverage> {
                 crate::jit::FnKey::Glue(..) => ("glue", String::new()),
                 crate::jit::FnKey::Sandbox(_) => ("sandbox", String::new()),
                 crate::jit::FnKey::Plain(_) => ("plain", String::new()),
+                crate::jit::FnKey::Ctfe(_) => ("ctfe", String::new()),
             };
             out.push(FnCoverage { key: crate::jit::slot_key(u, r.slot), kind, krate, file, line, col, blocks: 0, hit: Vec::new() });
             seen.push(Default::default());

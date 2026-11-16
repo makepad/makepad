@@ -122,6 +122,21 @@ impl OsString {
     pub fn reserve(&mut self, additional: usize) {
         self.inner.reserve(additional)
     }
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.inner.reserve_exact(additional)
+    }
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), core::collections::TryReserveError> {
+        self.inner.try_reserve(additional)
+    }
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), core::collections::TryReserveError> {
+        self.inner.try_reserve_exact(additional)
+    }
+    pub fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit()
+    }
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        self.inner.shrink_to(min_capacity)
+    }
     pub fn into_boxed_os_str(self) -> Box<OsStr> {
         let b = self.inner.into_boxed_slice();
         unsafe { Box::from_raw(Box::into_raw(b) as *mut OsStr) }

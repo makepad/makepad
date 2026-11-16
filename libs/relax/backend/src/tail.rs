@@ -59,10 +59,9 @@ impl Arch {
 /// Per block: the index of its call made as a jump (what follows it -- moves of the results, the
 /// jumps to the Ret, the Ret -- is not emitted). Empty when the function has none.
 pub fn sibling_calls(options: &relax_session::Options, f: &Func, reach: &[bool], arch: Arch) -> Vec<Option<usize>> {
-    // a checked program's constants run as native code whose recursion ends in a stack overflow
-    // the checker reports (rustc: the interpreter's frame limit); a sibling call would make an
-    // endless recursion an endless loop (loop heads count fuel, calls do not)
-    if f.naked || options.const_fuel || crate::stats::opt_off(options, "-tailcall") {
+    // a constant's evaluation (Func::keep_frames) ends an endless recursion in a stack overflow
+    // (rustc: the interpreter's frame limit); a sibling call would turn it into an endless loop
+    if f.naked || f.keep_frames || crate::stats::opt_off(options, "-tailcall") {
         return Vec::new();
     }
     let mut cands = Vec::new();

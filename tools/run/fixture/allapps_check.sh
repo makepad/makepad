@@ -21,4 +21,6 @@ for toml in apps/*/Cargo.toml apps/*/*/Cargo.toml examples/*/Cargo.toml wm/Cargo
 done
 # the smoke apps' and the WM's provided-crate boundary (`makepad check --boundary all`, provided_sweep.sh audits only)
 RUNS=0 SWEEP_OUT=${TMPDIR:-/tmp}/allapps-sweep bash tools/run/fixture/provided_sweep.sh 2>&1 | grep -E "^audit |^provided_sweep|^violation" | head -40
+echo "audit makepad-platform"
+$B check --boundary all makepad-platform 2>&1 | grep -A1 '^violation' | head -20
 echo "allapps done"

@@ -108,6 +108,14 @@ pub fn app_crates(prog: &crate::program::Program, root: u32) -> Vec<u32> {
     (0..prog.crates.len() as u32).filter(|&k| k == root || crate::borrowck::event::app_crate(prog, k)).collect()
 }
 
+/// The crates of Relax's std the program reads for its target (core, alloc, std and what the std
+/// folder provides), proc_macro aside: the proc-macro world is this machine's.
+pub fn std_crates(prog: &crate::program::Program) -> Vec<u32> {
+    (0..prog.crates.len() as u32)
+        .filter(|&k| std_crate(prog, k) && !prog.crates[k as usize].proc_macro && prog.syms.str(prog.crates[k as usize].name) != "proc_macro")
+        .collect()
+}
+
 /// One selection for declaration validation, diagnostics and body checks.
 pub fn checked_crates(prog: &crate::program::Program, root: u32, root_only: bool, workspace: bool, also: &[u32]) -> Vec<u32> {
     let mut crates = if root_only { vec![root] } else if workspace { workspace_crates(prog, root) } else { app_crates(prog, root) };
@@ -1043,7 +1051,7 @@ pub(crate) fn live_lints(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, 
         .map(|r| {
             let stage = crate::check_order::stage_of_lint(r.lint, r.def);
             // (a body's liveness lints keep the order its analysis reports them in, as the check's)
-            let seq = if stage.phase == crate::check_order::Phase::Mir && stage.step == crate::check_order::MIR_LIVENESS { r.seq } else { 0 };
+            let seq = if crate::check_order::keeps_report_order(stage, r.lint) { r.seq } else { 0 };
             Entry::new(stage, seq, if r.level >= relax_types::lint::Level::Deny { Out::Error(r.line) } else { Out::Warning(r.line) })
         })
         .collect();
@@ -1333,6 +1341,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         if !out.errors.is_empty() { out.needs_load = true; }
         out
     };
+    // the cache files' pages the load touched (the front's arrays: sources, tokens, the ASTs of
+    // every crate) leave the check's resident set: they are read-only file pages, and the ones a
+    // body reads again come back from the page cache (a minor fault)
+    crate::pack::release_resident();
     relax_types::body_facts::begin(&fresh);
     relax_types::body_facts::open();
     for (d, f) in replay { relax_types::body_facts::replay(&u.prog, d, f); }
@@ -1350,8 +1362,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some((owner, generic)) = fns.get(i) else { break };
                         local.push((i, check_one(owner, *generic, true)));
-                        // return the allocator's free pages as the check goes (a large app held 4.6 GB)
-                        if i % 20_000 == 19_999 { crate::memstat::trim(); }
+                        // return the allocator's free pages as the check goes (a large app held 4.6 GB),
+                        // and the cache mappings' resident pages (pack::release_resident)
+                        if i % 20_000 == 19_999 { crate::memstat::trim(); crate::pack::release_resident(); }
                     }
                     results.lock().unwrap().extend(local);
                 }).expect("check worker");
@@ -1654,7 +1667,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         if !late_ok && late { continue; }
         let stage = if r.lint.is_empty() { Stage::new(Phase::Attrs, 0) } else { crate::check_order::stage_of_lint(r.lint, r.def) };
         // (a body's liveness lints keep the order its analysis reports them in: rustc's)
-        let seq = if stage.phase == Phase::Mir && stage.step == crate::check_order::MIR_LIVENESS { r.seq } else { 0 };
+        let seq = if crate::check_order::keeps_report_order(stage, r.lint) { r.seq } else { 0 };
         entries.push(Entry::new(stage, seq, if r.level >= relax_types::lint::Level::Deny { Out::Error(r.line) } else { Out::Warning(r.line) }));
         flags.push(if late { crate::check_reuse::LATE } else { 0 } | if wf_reports.contains(&i) { crate::check_reuse::WF } else { 0 });
     }
@@ -1705,7 +1718,8 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
             st.rir_insts,
             st.code_bytes / 1024
         );
-        eprintln!("relax check: constant initializers: {} evaluated to data, {} compiled and run; evaluation cpu {:.1} ms", st.ctfe_data, st.ctfe_code, st.ctfe_ns as f64 / 1e6);
+        let (twins, bytes, ms) = crate::ctfe_twin::census(unsafe { &*up });
+        eprintln!("relax check: constant initializers: {} evaluated to data, {} compiled and run ({} constant-evaluation twins, {:.1} KB, built in {:.1} ms); evaluation cpu {:.1} ms", st.ctfe_data, st.ctfe_code, twins, bytes as f64 / 1024.0, ms, st.ctfe_ns as f64 / 1e6);
     }
     unsafe { crate::jit::backend_bench(up) };
     if std::env::var("RELAX_PASS_TIMES").is_ok() || std::env::var("RELAX_OPT_HIST").is_ok() {
@@ -1908,7 +1922,7 @@ fn function_origin(u: &Unit, mut id: u32) -> Option<(u32,u32)> {
         match &u.fns[id as usize].key {
             FnKey::Inst(d,_) => { let d = u.prog.def(*d); return Some((d.file,u.prog.files[d.file as usize].ast.item(d.item).lo)); }
             FnKey::Closure(f,e,_) => return Some((*f,u.prog.files[*f as usize].ast.expr(crate::ast::ExprId(*e)).lo)),
-            FnKey::Sandbox(parent) | FnKey::Plain(parent) => id = *parent,
+            FnKey::Sandbox(parent) | FnKey::Plain(parent) | FnKey::Ctfe(parent) => id = *parent,
             FnKey::Shim(shim) => { let d = u.prog.def(shim.kind.def_id()); return Some((d.file, u.prog.files[d.file as usize].ast.item(d.item).lo)); }
             FnKey::Glue(_,t) => {
                 if let crate::types::TyKind::Adt(d,_, _) = u.tcx.tys.kind(*t) {
@@ -2014,7 +2028,9 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
             crate::owner::call(crate::owner::Class::Program, || unsafe {
                 let t2 = std::time::Instant::now();
                 let u = &mut *up;
-                if is_static { u.static_addr(d); } else { u.const_addr(d, Vec::new()); }
+                if is_static {
+                    if !u.static_is_shared(d) { u.static_addr(d); }
+                } else { u.const_addr(d, Vec::new()); }
                 inner.store(t2.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             })
         });

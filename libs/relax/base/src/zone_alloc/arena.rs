@@ -321,8 +321,14 @@ fn program_tls_fill() -> &'static DomainTls {
 /// Hands the thread's chunks back when it ends, however it was started (a thread without
 /// `compiler_thread()` that allocated in the compiler phase would otherwise keep them for good).
 struct ExitGuard;
+/// Threads whose exit destructor was armed (`register_exit`) and that ran it (`ExitGuard`): a
+/// test that finds chunks left after its threads ended says which of the two steps was missing.
+#[cfg(test)]
+pub static EXIT_COUNTS: [std::sync::atomic::AtomicUsize; 2] = [const { std::sync::atomic::AtomicUsize::new(0) }; 2];
 impl Drop for ExitGuard {
     fn drop(&mut self) {
+        #[cfg(test)]
+        EXIT_COUNTS[1].fetch_add(1, Ordering::Relaxed);
         DEFAULT.detach_thread();
         let _ = EXITED.try_with(|e| e.set(true));
     }
@@ -1799,6 +1805,78 @@ impl Arena {
         }
         c
     }
+    /// Exact census of the live blocks in the chunks marked old (`mark_old`), by `key(block)` (the
+    /// caller's 0..64; memstat passes its tag byte): per key [blocks, slot bytes, granules its blocks
+    /// keep], then [old chunks walked, their blocks, distinct granules kept, old chunks attached to a
+    /// thread (not walked: their free list is the owner's)]. A slot is live when it is off the
+    /// chunk's free list and its granule is resident (a granule given back holds no live block), so
+    /// the count is exact, where `heap top` samples one block per 64 KB.
+    pub fn old_census(&self, key: &dyn Fn(usize) -> usize, per_key: &mut [[usize; 3]; 64]) -> [usize; 4] {
+        let mut total = [0usize; 4];
+        let base = self.base.load(Ordering::Relaxed);
+        if base == 0 {
+            return total;
+        }
+        const GRANULES: usize = CHUNK / GRANULE;
+        for (index, h) in self.headers.iter().enumerate() {
+            if !h.old.load(Ordering::Relaxed) {
+                continue;
+            }
+            let s = lock(&h.state);
+            if s.committed == 0 || s.stride == 0 || s.released {
+                continue;
+            }
+            if s.attached {
+                total[3] += 1;
+                continue;
+            }
+            let (chunk, stride, carved) = (base + index * CHUNK, s.stride, s.bump.min(CHUNK));
+            let nslots = carved / stride;
+            // (no allocation: this holds the chunk's lock)
+            let mut free = [0u64; (CHUNK / 16) / 64];
+            let mut p = s.free;
+            let mut steps = 0;
+            while p != 0 && steps < nslots {
+                if p < chunk || p >= chunk + nslots * stride || (p - chunk) % stride != 0 {
+                    break;
+                }
+                let k = (p - chunk) / stride;
+                free[k / 64] |= 1 << (k % 64);
+                p = unsafe { std::ptr::read_volatile(p as *const usize) };
+                steps += 1;
+            }
+            let mut resident = [0u64; GRANULES.div_ceil(64)];
+            for g in 0..carved.div_ceil(GRANULE) {
+                if unsafe { os::resident(chunk + g * GRANULE, GRANULE) } != 0 {
+                    resident[g / 64] |= 1 << (g % 64);
+                }
+            }
+            let bit = |m: &[u64], i: usize| m[i / 64] >> (i % 64) & 1 == 1;
+            // granules kept, per key and in all
+            let mut kept = [[0u64; GRANULES.div_ceil(64)]; 64];
+            let mut any = [0u64; GRANULES.div_ceil(64)];
+            for k in 0..nslots {
+                let at = k * stride;
+                if bit(&free, k) || !bit(&resident, at / GRANULE) {
+                    continue;
+                }
+                let t = key(chunk + at).min(63);
+                per_key[t][0] += 1;
+                per_key[t][1] += stride;
+                total[1] += 1;
+                for g in at / GRANULE..=(at + stride - 1) / GRANULE {
+                    kept[t][g / 64] |= 1 << (g % 64);
+                    any[g / 64] |= 1 << (g % 64);
+                }
+            }
+            for t in 0..64 {
+                per_key[t][2] += kept[t].iter().map(|w| w.count_ones() as usize).sum::<usize>();
+            }
+            total[0] += 1;
+            total[2] += any.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        }
+        total
+    }
     /// Bytes of the granules of `[chunk, chunk + carved)` whose slots are all on the free list
     /// starting at `head` (`states`' census; the list may change under a racy read: a link
     /// outside the carved slots ends the walk).
@@ -2111,6 +2189,8 @@ impl Arena {
     #[cold]
     fn register_exit(&self) {
         if !EXIT_REGISTERED.with(|r| r.replace(true)) {
+            #[cfg(test)]
+            EXIT_COUNTS[0].fetch_add(1, Ordering::Relaxed);
             // first access arms the destructor; it may allocate (the flag is set: no recursion)
             let _ = EXIT_GUARD.try_with(|_| {});
         }
@@ -3137,6 +3217,10 @@ pub fn census() -> [usize; 11] {
 pub fn states() -> [usize; 29] {
     DEFAULT.states()
 }
+pub fn old_census(key: &dyn Fn(usize) -> usize, per_key: &mut [[usize; 3]; 64]) -> [usize; 4] {
+    DEFAULT.old_census(key, per_key)
+}
+pub const GRANULE_BYTES: usize = GRANULE;
 pub fn mark_old() {
     DEFAULT.mark_old()
 }

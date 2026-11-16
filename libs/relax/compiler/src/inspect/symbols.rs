@@ -58,6 +58,14 @@ fn dladdr_name(pc: u64) -> Option<(String, u64)> {
 
 // ------------------------------------------------------------------ loaded images
 
+/// The executable range [lo, hi) of the loaded image holding `addr` (None: no image holds it,
+/// JIT code). Allocates: normal context only.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+pub(crate) fn text_of(addr: u64) -> Option<(u64, u64)> {
+    let _kept = crate::zone_alloc::kept();
+    enumerate().iter().find(|i| addr >= i.lo && addr < i.hi).map(|i| (i.lo, i.hi))
+}
+
 /// glibc's `struct dl_phdr_info` (the members used)
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[repr(C)]

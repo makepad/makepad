@@ -1466,8 +1466,8 @@ pub fn _mm512_castsi512_si128(a: __m512i) -> __m128i {
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
 #[rustc_legacy_const_generics(1)]
-pub fn _mm512_extracti32x4_epi32<const IMM8: i32>(a: __m512i) -> __m128i {
-    let idx = ((IMM8 & 3) as usize) * 2;
+pub fn _mm512_extracti32x4_epi32<const IMM2: i32>(a: __m512i) -> __m128i {
+    let idx = ((IMM2 & 3) as usize) * 2;
     __m128i([a.0[idx], a.0[idx + 1]])
 }
 
@@ -4814,9 +4814,9 @@ pub fn _mm_cmpneq_ps(a: __m128, b: __m128) -> __m128 {
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f,avx512vl"))]
 #[rustc_legacy_const_generics(1)]
-pub fn _mm_srai_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
+pub fn _mm_srai_epi64<const IMM8: u32>(a: __m128i) -> __m128i {
     unsafe {
-        vx::vx_unary(a, 3, 64, IMM8)
+        vx::vx_unary(a, 3, 64, IMM8 as i32)
     }
 }
 

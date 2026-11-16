@@ -2,6 +2,7 @@
 //! M0 defines the representation only; producers and consumers migrate in later steps.
 
 pub mod dataflow;
+pub(crate) mod dominators;
 pub mod drop_flag_effects;
 pub mod move_paths;
 pub mod build;
@@ -245,6 +246,11 @@ pub struct VarBindingForm {
     pub pat_span: Span,
     /// A binding can be introduced several times by or-patterns (mod.rs:934).
     pub introductions: Vec<VarBindingIntroduction>,
+    /// Written by a compiler desugaring (rustc reads it from the span, mod.rs:1180
+    /// `from_compiler_desugaring`: DesugaringKind::FormatLiteral for format_args!'s `super let
+    /// args`). Relax's spans carry no expansion kind, so the binding records it: the `super let`s
+    /// of the built-in formatting macros, the only ones the parser takes.
+    pub from_desugaring: bool,
 }
 /// rustc_middle/src/mir/mod.rs:934.
 #[derive(Clone, Copy, Debug)]
@@ -281,15 +287,20 @@ pub struct BlockTailInfo {
 impl VarBindingForm {
     /// A plain `let x = ...` of an immutable by-value binding with no extra facts.
     pub fn plain(binding_mode: BindingMode, pat_span: Span) -> Self {
-        Self { binding_mode, opt_ty_info: None, opt_match_place: None, pat_span, introductions: Vec::new() }
+        Self { binding_mode, opt_ty_info: None, opt_match_place: None, pat_span, introductions: Vec::new(), from_desugaring: false }
     }
 }
 impl LocalInfo {
     pub fn user_var(binding_mode: BindingMode, opt_match_place: Option<(Option<Place>, Span)>, pat_span: Span) -> Self {
-        LocalInfo::User(BindingForm::Var(VarBindingForm { binding_mode, opt_ty_info: None, opt_match_place, pat_span, introductions: Vec::new() }))
+        LocalInfo::User(BindingForm::Var(VarBindingForm { binding_mode, opt_ty_info: None, opt_match_place, pat_span, introductions: Vec::new(), from_desugaring: false }))
     }
 }
 impl LocalDecl {
+    /// rustc_middle/src/mir/mod.rs:1180: a local a compiler desugaring declared (see
+    /// VarBindingForm::from_desugaring); borrowck names it as a temporary.
+    pub fn from_compiler_desugaring(&self) -> bool {
+        matches!(&self.local_info, LocalInfo::User(BindingForm::Var(VarBindingForm { from_desugaring: true, .. })))
+    }
     /// rustc_middle/src/mir/mod.rs:1117: a binding that can itself be made mutable by adding `mut`.
     pub fn can_be_made_mutable(&self) -> bool {
         matches!(

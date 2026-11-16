@@ -429,7 +429,8 @@ impl<'a> Parser<'a> {
             }
             end_generics = j + 1;
             for p in params {
-                // drop attributes and defaults
+                // Evaluate cfg before dropping attributes and defaults.
+                let mut keep = true;
                 let mut toks: Vec<usize> = Vec::new();
                 let mut k = 0;
                 let mut ad = 0i32;
@@ -451,12 +452,17 @@ impl<'a> Parser<'a> {
                         // #[..]
                         let mut d = 0;
                         k += 1;
+                        let lo = p[k] as u32 + 1;
                         while k < p.len() {
                             match self.toks.at(p[k]).kind {
                                 T::OpenBracket => d += 1,
                                 T::CloseBracket => {
                                     d -= 1;
                                     if d == 0 {
+                                        if toks.is_empty() {
+                                            let a = Attr { inner: false, toks: TokRange { lo, hi: p[k] as u32 } };
+                                            keep &= self.cfg_present(&[a]);
+                                        }
                                         k += 1;
                                         break;
                                     }
@@ -473,7 +479,7 @@ impl<'a> Parser<'a> {
                     toks.push(p[k]);
                     k += 1;
                 }
-                if toks.is_empty() {
+                if !keep || toks.is_empty() {
                     continue;
                 }
                 if toks[0] == GT {

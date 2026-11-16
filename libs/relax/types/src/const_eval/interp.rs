@@ -1,6 +1,6 @@
 // ported from N:rustc_const_eval/src/interpret/{memory.rs,step.rs,operator.rs,cast.rs,discriminant.rs,intern.rs,validity.rs}
 // ported from N:rustc_middle/src/mir/interpret/allocation.rs (+ provenance_map.rs, init_mask.rs) @8d1a764
-//! The check-mode const-eval interpreter (design: local/agent_state/relax-campaign/suite/consteval.DESIGN.md).
+//! The check-mode const-eval interpreter.
 //!
 //! `makepad check` only, diagnostics only: a constant's value still comes from ctfe.rs / the JIT. The
 //! interpreter runs the constant's MIR with rustc's CTFE memory model -- allocations with an init mask,
@@ -8,6 +8,11 @@
 //! the shared-reference bit of a pointer's provenance -- and reports the undefined behaviour rustc's
 //! CompileTimeMachine reports (E0080), then interns and validates the final value. An operation not
 //! ported yet ends the run as `Unsupported`, which reports nothing.
+//!
+//! Its step count is rustc's: the `ConstEvalCounter` statements of the bodies it runs, placed by
+//! the CtfeLimit pass on rustc's mir_for_ctfe shape (mir::transform::ctfe_shape), with the
+//! `long_running_const_eval` lint at the limit and the progress warnings past it
+//! (const_eval/machine.rs increment_const_eval_counter).
 //!
 //! Locals live in allocations of their own (rustc keeps scalar locals as immediates; the verdicts and
 //! the root-frame span are the same).
@@ -27,6 +32,48 @@ pub enum Outcome {
     Error(mir::Span, String),
     /// an operation the interpreter does not have yet (`RELAX_INTERP_TRACE=1` prints it)
     Unsupported(String),
+    /// the evaluation reached the step limit with `long_running_const_eval` at deny or forbid:
+    /// stopped there, the lint is its error (`Checked::long_running`)
+    LongRunning,
+}
+
+/// A `long_running_const_eval` report of one evaluation (rustc const_eval/machine.rs
+/// increment_const_eval_counter); the caller reports them, in this order.
+#[derive(Clone, Debug)]
+pub enum LongRunning {
+    /// The lint, at the step limit, at `span` (what the evaluator was interpreting: the counter's
+    /// block's terminator). Its level is the lint's at `scope` (machine.rs best_lint_scope: the
+    /// outermost frame's lint root, here its body owner and the (file, position) the frame is at);
+    /// at deny or forbid the evaluation stopped.
+    Lint { span: mir::Span, scope: (DefId, u32, u32) },
+    /// The warning at each power of two of steps past the progress start, whatever the lint's
+    /// level (machine.rs LongRunningWarn: no lint).
+    Progress { span: mir::Span },
+}
+
+/// What a check of one constant found, and the long-running reports of its evaluation.
+#[derive(Debug)]
+pub struct Checked {
+    pub outcome: Outcome,
+    pub long_running: Vec<LongRunning>,
+    /// the steps its evaluation counted (nested constants and promoteds count their own)
+    pub steps: u64,
+}
+
+/// const_eval/machine.rs LINT_TERMINATOR_LIMIT: the step at which `long_running_const_eval` fires.
+pub const LINT_TERMINATOR_LIMIT: u64 = 2_000_000;
+/// machine.rs TINY_LINT_TERMINATOR_LIMIT (`-Z tiny-const-eval-limit`: the limit and the start of
+/// the progress warnings; Options::tiny_const_eval_limit).
+pub const TINY_LINT_TERMINATOR_LIMIT: u64 = 20;
+/// machine.rs PROGRESS_INDICATOR_START: past it, a warning at every power of two of steps.
+pub const PROGRESS_INDICATOR_START: u64 = 4_000_000;
+/// rustc's text of the lint and of the progress warning (const_eval diagnostics.rs LongRunning,
+/// LongRunningWarn).
+pub const LONG_RUNNING_MESSAGE: &str = "constant evaluation is taking a long time";
+
+/// (the lint's step limit, the step past which progress warnings start) of `prog`'s session.
+pub fn step_limits(prog: &Program) -> (u64, u64) {
+    if prog.session.options.tiny_const_eval_limit { (TINY_LINT_TERMINATOR_LIMIT, TINY_LINT_TERMINATOR_LIMIT) } else { (LINT_TERMINATOR_LIMIT, PROGRESS_INDICATOR_START) }
 }
 
 enum Stop {
@@ -37,6 +84,8 @@ enum Stop {
     Unsupported(String),
     /// a constant this one reads failed (its own check reports it; rustc: "erroneous constant")
     Referenced,
+    /// the deny-level `long_running_const_eval` at the step limit (Interp::long_running has it)
+    LongRunning,
 }
 type R<T> = Result<T, Stop>;
 
@@ -164,13 +213,25 @@ struct Frame {
     root: bool,
 }
 
+/// Where `f` is: the span of the statement it is at, or its block's terminator.
+fn frame_span(f: &Frame) -> Option<mir::Span> {
+    let bb = &f.body.basic_blocks[f.block.0 as usize];
+    Some(if f.stmt < bb.statements.len() { bb.statements[f.stmt].source_info.span } else { bb.terminator.as_ref()?.source_info.span })
+}
+
 struct Interp<'a> {
     prog: &'a Program,
     tcx: &'a Tcx,
     lay: crate::layout::Layouts,
     allocs: Vec<Alloc>,
     frames: Vec<Frame>,
+    /// the `ConstEvalCounter`s this evaluation ran (a nested constant's or promoted's evaluation
+    /// counts its own, from 0: rustc evaluates each with an interpreter of its own)
     steps: u64,
+    /// step_limits
+    limits: (u64, u64),
+    /// the evaluation's long-running reports (a nested constant's are its own check's)
+    long_running: Vec<LongRunning>,
     /// constants already evaluated by this run: their final allocation (or failure)
     consts: HashMap<(DefId, Vec<TyId>), Result<u32, ()>>,
     ps: u64,
@@ -192,28 +253,30 @@ struct Interp<'a> {
     bodies: HashMap<(DefId, Vec<TyId>), Rc<Body>>,
 }
 
-/// rustc machine.rs LINT_TERMINATOR_LIMIT: past it the JIT path reports long_running_const_eval.
-const STEP_LIMIT: u64 = 2_000_000;
-
 /// Checks the initializer of const/static `def` (non-generic) of a validated crate.
-pub fn check_item(prog: &Program, tcx: &Tcx, def: DefId) -> Outcome {
+pub fn check_item(prog: &Program, tcx: &Tcx, def: DefId) -> Checked {
     let is_static = prog.def(def).kind == DefKind::Static;
-    let mut it = Interp { prog, tcx, lay: crate::layout::Layouts::new(), allocs: Vec::new(), frames: Vec::new(), steps: 0, consts: HashMap::new(), ps: tcx.tys.ptr_bytes as u64, frames_root_ty: None, nesting: 0,
+    let mut it = Interp { prog, tcx, lay: crate::layout::Layouts::new(), allocs: Vec::new(), frames: Vec::new(), steps: 0, limits: step_limits(prog), long_running: Vec::new(), consts: HashMap::new(), ps: tcx.tys.ptr_bytes as u64, frames_root_ty: None, nesting: 0,
         statics: HashMap::new(), static_root: is_static.then_some(def), mut_global_ok: is_static, in_progress: if is_static { vec![def] } else { Vec::new() }, validating: false, bodies: HashMap::new() };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| it.eval_const(def, &[], true, is_static)));
     let _ = &r;
     let span_of_item = || { let d = prog.def(def); let lo = prog.files[d.file as usize].ast.item(d.item).lo; mir::Span { file: d.file, lo, hi: lo } };
-    match r {
+    let outcome = match r {
         Ok(Ok(_)) => Outcome::Ok,
         Ok(Err(Stop::Ub(msg))) => Outcome::Error(it.root_span().unwrap_or_else(span_of_item), format!("E0080: {msg}")),
         Ok(Err(Stop::Item(msg))) => Outcome::Error(span_of_item(), msg),
         Ok(Err(Stop::Unsupported(w))) => Outcome::Unsupported(w),
         Ok(Err(Stop::Referenced)) => Outcome::Ok,
+        Ok(Err(Stop::LongRunning)) => Outcome::LongRunning,
         Err(p) => {
             if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); }
             Outcome::Unsupported("interpreter panic".into())
         }
-    }
+    };
+    // (an evaluation the interpreter could not finish has no verdict: its reports would be the
+    // native run's to make)
+    let long_running = if matches!(outcome, Outcome::Unsupported(_)) { Vec::new() } else { std::mem::take(&mut it.long_running) };
+    Checked { outcome, long_running, steps: it.steps }
 }
 
 /// valtrees.rs const_to_valtree_inner over the value of non-generic constant `def`.
@@ -228,7 +291,7 @@ pub enum ValtreeWalk {
     Unknown,
 }
 pub fn valtree_of_const(prog: &Program, tcx: &Tcx, def: DefId) -> ValtreeWalk {
-    let mut it = Interp { prog, tcx, lay: crate::layout::Layouts::new(), allocs: Vec::new(), frames: Vec::new(), steps: 0, consts: HashMap::new(), ps: tcx.tys.ptr_bytes as u64, frames_root_ty: None, nesting: 0,
+    let mut it = Interp { prog, tcx, lay: crate::layout::Layouts::new(), allocs: Vec::new(), frames: Vec::new(), steps: 0, limits: step_limits(prog), long_running: Vec::new(), consts: HashMap::new(), ps: tcx.tys.ptr_bytes as u64, frames_root_ty: None, nesting: 0,
         statics: HashMap::new(), static_root: None, mut_global_ok: false, in_progress: Vec::new(), validating: false, bodies: HashMap::new() };
     let Some(ty) = tcx.const_ty(prog, def) else { return ValtreeWalk::Unknown };
     let mut adts = Vec::new();
@@ -334,13 +397,37 @@ impl<'a> Interp<'a> {
         let mut mir = match build_mir(&root, owner) { Ok(m) => m, Err(e) => return unsupported(format!("build: {:?}", e.reason)) };
         let provider = crate::mir::build::driver::BuildProvider { prog, tcx, memo: Default::default() };
         if let Err(e) = crate::mir::transform::mir_promoted(prog, tcx, env, &provider, &mut mir) { return unsupported(format!("promote: {}", e.0)); }
+        // rustc's mir_for_ctfe: the analysis-to-runtime passes that shape the CFG, then CtfeLimit's
+        // step counters (the promoteds get the passes, not the counters)
+        // (on the instantiated body: monomorphic, so the post-analysis queries of a monomorphic env)
+        if let Err(e) = crate::mir::transform::ctfe_shape(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &mut mir) { return unsupported(format!("ctfe shape: {e:?}")); }
         Ok(Rc::new(mir))
     }
 
     fn root_span(&self) -> Option<mir::Span> {
-        let f = self.frames.first()?;
-        let bb = &f.body.basic_blocks[f.block.0 as usize];
-        Some(if f.stmt < bb.statements.len() { bb.statements[f.stmt].source_info.span } else { bb.terminator.as_ref()?.source_info.span })
+        frame_span(self.frames.first()?)
+    }
+
+    /// machine.rs increment_const_eval_counter, at a `ConstEvalCounter`: the lint at the limit
+    /// (deny or forbid ends the evaluation there), a progress warning at each power of two past
+    /// the start. No other limit: an allowed evaluation runs as long as it runs, as rustc's does.
+    fn count_step(&mut self) -> R<()> {
+        let Some(n) = self.steps.checked_add(1) else { return Ok(()) };
+        self.steps = n;
+        let (limit, start) = self.limits;
+        if n == limit {
+            let span = self.frames.last().and_then(frame_span).unwrap_or_default();
+            let root = self.frames.first().unwrap();
+            let at = frame_span(root).unwrap_or(span);
+            let scope = (root.body.source.owner, at.file, at.lo);
+            self.long_running.push(LongRunning::Lint { span, scope });
+            let lint = &crate::lint::LONG_RUNNING_CONST_EVAL;
+            if crate::lint::level_at(self.prog, scope.0, &[], lint, scope.1, scope.2).level >= crate::lint::Level::Deny { return Err(Stop::LongRunning); }
+        } else if n > start && n.is_power_of_two() {
+            let span = self.frames.last().and_then(frame_span).unwrap_or_default();
+            self.long_running.push(LongRunning::Progress { span });
+        }
+        Ok(())
     }
 
     /// Evaluates a constant (or static) item to its interned allocation. `root`: the item checked
@@ -351,15 +438,17 @@ impl<'a> Interp<'a> {
         if self.nesting > 16 { return unsupported("nested constants"); }
         let body = self.body_of(def, args)?;
         if root { self.frames_root_ty = Some(body.local_decls[0].ty); }
-        // (a nested constant runs on a stack of its own; the root's failing frames stay for its span)
+        // (a nested constant runs on a stack of its own; the root's failing frames stay for its span;
+        // it counts its own steps, and its long-running reports are its own check's)
         let saved = if root { Vec::new() } else { std::mem::take(&mut self.frames) };
+        let saved_count = if root { (0, Vec::new()) } else { (std::mem::take(&mut self.steps), std::mem::take(&mut self.long_running)) };
         self.nesting += 1;
         let r = self.run_body(body).and_then(|a| if root { self.intern_and_validate(a, is_static).map(|_| a) } else { Ok(a) });
         self.nesting -= 1;
-        if !root { self.frames = saved; }
+        if !root { self.frames = saved; (self.steps, self.long_running) = saved_count; }
         match r {
             Ok(a) => { if !root { self.intern_nested(a, def, is_static); } self.consts.insert(key, Ok(a)); Ok(a) }
-            Err(Stop::Ub(_)) if !root => { self.consts.insert(key, Err(())); Err(Stop::Referenced) }
+            Err(Stop::Ub(_) | Stop::LongRunning) if !root => { self.consts.insert(key, Err(())); Err(Stop::Referenced) }
             Err(e) => Err(e),
         }
     }
@@ -824,7 +913,11 @@ impl<'a> Interp<'a> {
                         let body = self.frames.last().unwrap().body.clone();
                         let Some(pb) = body.promoted.get(pi.0 as usize) else { return unsupported("promoted") };
                         let pb = Rc::new(pb.clone());
-                        let a = self.run_body(pb)?;
+                        // (a promoted is an evaluation of its own: its count starts at 0)
+                        let outer = std::mem::take(&mut self.steps);
+                        let a = self.run_body(pb);
+                        self.steps = outer;
+                        let a = a?;
                         self.allocs[a as usize].mutable = false;
                         a
                     }

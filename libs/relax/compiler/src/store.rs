@@ -491,8 +491,11 @@ pub fn base_path(p: &Path) -> PathBuf {
 /// Highest generation seen per store (generation 0 path), and the folders listed for it.
 static GENS: relax_session::sync::Mutex<Option<(std::collections::HashMap<PathBuf, u32>, std::collections::HashSet<PathBuf>)>> = relax_session::sync::Mutex::new(None);
 
-/// Lists `dir` into GENS (each store's highest generation present).
+/// Lists `dir` into GENS (each store's highest generation present), in place of what was known of
+/// it: a generation deleted since (a cleared cache, a folder removed and made again) is gone from
+/// GENS too, so the store's next write is its lowest free generation, not one above the deleted.
 fn list_gens(dir: &Path, gens: &mut std::collections::HashMap<PathBuf, u32>) {
+    gens.retain(|k, _| k.parent() != Some(dir));
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let n = e.file_name();
         let Some(n) = n.to_str() else { continue };
@@ -786,14 +789,53 @@ pub fn append<T: Entry>(path: &Path, entries: Vec<T>, drop_all: bool) -> std::io
 /// `append`; `ordered`: with the write barrier before its commit (else as an exit commits).
 fn append_as<T: Entry>(path: &Path, entries: Vec<T>, drop_all: bool, ordered: bool) -> std::io::Result<()> {
     let base = base_path(path);
-    let r = append_inner(&base, entries, drop_all, ordered);
+    let r = append_inner(&base, entries, drop_all, ordered, None).map(|_| ());
     if r.is_ok() {
         mark_live(&base, &base, false);
     }
     r
 }
 
-fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, ordered: bool) -> std::io::Result<()> {
+/// The merge of a store's ledger under its lock (append_ledgered): its key, and what makes the
+/// ledger entry written with a batch from the one on disk (None: the batch is not written).
+pub type LedgerMerge<'a, T> = (u128, &'a mut dyn FnMut(Option<&[u8]>) -> Option<T>);
+
+/// `append` for a store whose ledger (the entry under `ledger_key`) is merged under the store's lock,
+/// so two processes never write a batch over a ledger they did not check (the shared code stores of
+/// Target B): `merge` gets the ledger payload on disk now (None: no store, or no ledger in it) and
+/// gives the ledger entry to commit with `entries`, or None: nothing is written and `entries` come
+/// back (Ok(Some)). Such a store is never replaced whole on a stale finding.
+pub fn append_ledgered<T: Entry>(path: &Path, entries: Vec<T>, ledger_key: u128, merge: &mut dyn FnMut(Option<&[u8]>) -> Option<T>) -> std::io::Result<Option<Vec<T>>> {
+    let base = base_path(path);
+    let r = append_inner(&base, entries, false, ordered(), Some((ledger_key, merge)));
+    if matches!(r, Ok(None)) {
+        mark_live(&base, &base, false);
+    }
+    r
+}
+
+/// The batch with the merged ledger entry in place of any it held, in key order; None: the merge
+/// refused it.
+fn with_ledger<T: Entry>(mut entries: Vec<T>, merge: &mut Option<LedgerMerge<'_, T>>, disk: Option<&[u8]>) -> Result<Vec<T>, Vec<T>> {
+    let Some((key, f)) = merge.as_mut() else { return Ok(entries) };
+    let Some(ledger) = f(disk) else { return Err(entries) };
+    let key = *key;
+    entries.retain(|e| e.key() != key);
+    entries.push(ledger);
+    entries.sort_by_key(|a| a.key());
+    Ok(entries)
+}
+
+/// Entry `e`'s payload read from the locked store file, its checksum verified; None: it does not match.
+fn read_payload(f: &mut std::fs::File, e: &Ix) -> std::io::Result<Option<Vec<u8>>> {
+    let mut b = vec![0u8; e.len as usize];
+    f.seek(SeekFrom::Start(e.off))?;
+    f.read_exact(&mut b)?;
+    Ok((sum64(&b) == e.sum).then_some(b))
+}
+
+/// Ok(None): written; Ok(Some): the ledger merge refused the batch, which comes back unwritten.
+fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, ordered: bool, mut merge: Option<LedgerMerge<'_, T>>) -> std::io::Result<Option<Vec<T>>> {
     // newest first within this batch: a stable sort keeps the first of equal keys
     entries.sort_by_key(|a| a.key());
     entries.dedup_by(|b, a| a.key() == b.key());
@@ -807,7 +849,10 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, orde
         let (g, path) = current_gen(base);
         let f = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
             Ok(f) => f,
-            Err(_) => return rewrite(base, dir, Vec::new(), None, entries, ordered),
+            Err(_) => {
+                let entries = match with_ledger(entries, &mut merge, None) { Ok(e) => e, Err(e) => return Ok(Some(e)) };
+                return rewrite(base, dir, Vec::new(), None, entries, ordered).map(|_| None);
+            }
         };
         f.lock()?;
         if !gen_path(base, g + 1).exists() {
@@ -827,13 +872,34 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, orde
         // not all reach the disk (they are written over)
         Ok(usable_slot(&mut f, &h, len).map(|(k, ix)| (h, k, ix)))
     })()?;
+    // a merged ledger: the one on disk now, under the lock (a payload that fails its checksum
+    // refuses the batch: the merge would drop what it held)
+    let entries = if merge.is_some() {
+        let lk = merge.as_ref().map_or(0, |m| m.0);
+        let disk = match &r {
+            Some((_, _, old)) => match old.iter().find(|e| { let k = e.key; k == lk }) {
+                Some(e) => match read_payload(&mut f, e)? {
+                    Some(b) => Some(b),
+                    None => { let _ = f.unlock(); return Ok(Some(entries)); }
+                },
+                None => None,
+            },
+            None => None,
+        };
+        match with_ledger(entries, &mut merge, disk.as_deref()) {
+            Ok(e) => e,
+            Err(e) => { let _ = f.unlock(); return Ok(Some(e)); }
+        }
+    } else {
+        entries
+    };
     let (h, k, mut old) = match r {
         Some(x) if !drop_all => x,
         // unreadable or stale: replaced whole
         _ => {
             let res = rewrite(path, dir, Vec::new(), None, entries, ordered);
             let _ = f.unlock();
-            return res;
+            return res.map(|_| None);
         }
     };
     let Slot { end, tail, .. } = h.slots[k as usize];
@@ -844,7 +910,7 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, orde
     if merged_n as u64 > h.cap as u64 {
         let res = rewrite(path, dir, old, Some(&f), entries, ordered);
         let _ = f.unlock();
-        return res;
+        return res.map(|_| None);
     }
     // A bounded buffer coalesces small fields; large code/image slices go straight to disk.
     let mut off = end;
@@ -863,7 +929,7 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, orde
     if dead * 4 > live && dead > 1 << 20 {
         let res = rewrite::<T>(path, dir, ix, Some(&f), Vec::new(), ordered);
         let _ = f.unlock();
-        return res;
+        return res.map(|_| None);
     }
     crate::memstat::print_tag("cache append", crate::memstat::Tag::CacheStore);
     let ib = encode_index(&ix);
@@ -881,7 +947,7 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, orde
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&nh.bytes())?;
     let _ = f.unlock();
-    Ok(())
+    Ok(None)
 }
 
 /// RELAX_PROFILE is set: the load timeline's spans for the image writes.
@@ -1287,6 +1353,12 @@ pub fn hold_build(dir: &Path) {
         return;
     }
     let p = live_lock(dir, this_build());
+    // a missing store folder is made owner-only, as a run makes its cache folder: made by the
+    // create_dir_all below it took the umask's mode, group-writable under umask 002, and the store
+    // then refused the folder it had just made (a test's first lookup)
+    if !dir.exists() && crate::pack::ensure_private_dir(dir).is_err() {
+        return;
+    }
     loop {
         if std::fs::create_dir_all(dir.join("live")).is_err() {
             return;

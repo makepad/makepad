@@ -1,4 +1,4 @@
-// A struct goes and a field of another (derived) struct still names it: refused (E0412 at the
+// A struct goes and a field of another (derived) struct still names it: refused (E0425 at the
 // field, once).
 #[derive(Clone, Copy)]
 pub struct Held {

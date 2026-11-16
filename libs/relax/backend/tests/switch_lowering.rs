@@ -148,10 +148,11 @@ fn rand_arms(r: &mut Rng, span: u64, signed: bool) -> Vec<Vec<Vec<T>>> {
                 0..=3 => vec![T { cond: Cond::Eq, signed, k }],
                 4..=5 => {
                     let w = r.below(span / 3 + 1) as i64;
-                    vec![T { cond: Cond::Ge, signed, k }, T { cond: Cond::Le, signed, k: k + w }]
+                    // a base near i64::MAX takes the range's end past it: the bound wraps, as a case
+                    vec![T { cond: Cond::Ge, signed, k }, T { cond: Cond::Le, signed, k: k.wrapping_add(w) }]
                 }
                 6 => vec![T { cond: if r.below(2) == 0 { Cond::Lt } else { Cond::Gt }, signed, k }],
-                _ => vec![T { cond: Cond::Ne, signed, k }, T { cond: Cond::Lt, signed, k: k + 3 }],
+                _ => vec![T { cond: Cond::Ne, signed, k }, T { cond: Cond::Lt, signed, k: k.wrapping_add(3) }],
             };
             alts.push(alt);
         }

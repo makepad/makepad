@@ -1,5 +1,5 @@
 //! Boundary audit: what code compiled by Relax reaches inside a set of crates that would be
-//! built by rustc into the embedder ("provided crates", local/plans/loader-core.md section 8).
+//! built by rustc into the embedder ("provided crates": provided.rs).
 //!
 //! `makepad check --boundary <crate>[,<crate>..]|all <package>` lowers every non-generic fn of the
 //! crates that depend on them, then every generic instance those reach (to a fixpoint), and
@@ -17,6 +17,11 @@
 //! row; one into an audited crate fails the check (exit 1). It is the error a run reports only
 //! when the code that reaches it first runs (an app's deck reached `shell::Shared::global`
 //! through the unmarked `makepad_hal::screens`); the gates run the audit over the apps.
+//!
+//! An independent declaration scan reports missing or mismatched tagged Option entries as
+//! `option-entry` failures, including unreachable items. `--boundary options` runs only
+//! this scan for every bound provided crate, before creating a JIT unit. On another check
+//! target it scans registered crates from source and checks their typed Option markers.
 
 use crate::types::AliasTyKind;
 use crate::types::{AliasTy};
@@ -32,11 +37,14 @@ struct Entry {
     sites: u32,
     callers: BTreeSet<String>,
     sample: String,
+    /// a static's row: how lowering treats it (`static_class`)
+    class: String,
 }
 
 #[derive(Default)]
 struct Audit {
     crates: Vec<u32>,
+    option_entries: Vec<String>,
     /// (kind, item) -> entry; kind: "call", "generic", "field", "static"
     rec: BTreeMap<(&'static str, String), Entry>,
     /// call key -> (param types, return type) as printed
@@ -55,25 +63,55 @@ pub(crate) fn requested() -> bool {
     REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Starts an audit of the named crates (before lowering anything); `all`: every provided crate
-/// the loader binds in this program.
-pub fn start(u: &Unit, names: &[String]) -> Result<(), String> {
+/// Resolve the audited crate set; cross-target options use registry names without binding.
+pub(crate) fn crates(prog: &crate::program::Program, provided: &[(u32, crate::provided::ProvidedCrate)], names: &[String], cross_options: bool) -> Result<Vec<u32>, String> {
     let mut crates = Vec::new();
-    if names.len() == 1 && names[0] == "all" {
-        crates.extend(u.provided.iter().map(|(k, _)| *k));
+    if names.len() == 1 && matches!(names[0].as_str(), "all" | "options") {
+        if cross_options {
+            crates.extend(crate::provided::registered_in(prog));
+        } else {
+            crates.extend(provided.iter().map(|(k, _)| *k));
+        }
         if crates.is_empty() {
-            return Err("--boundary all: no provided crate binds in this program (is the loader built from this source?)".into());
+            if cross_options {
+                return Err("--boundary options: no registered provided crate in this program".to_string());
+            }
+            return Err(format!("--boundary {}: no provided crate binds in this program (is the loader built from this source?)", names[0]));
+        }
+    } else {
+        for n in names {
+            let n2 = n.replace('-', "_");
+            match prog.crates.iter().position(|c| prog.syms.str(c.name) == n2) {
+                Some(i) => crates.push(i as u32),
+                None => return Err(format!("--boundary: no crate `{}` in the graph", n)),
+            }
         }
     }
-    for n in names.iter().filter(|n| n.as_str() != "all") {
-        let n2 = n.replace('-', "_");
-        match u.prog.crates.iter().position(|c| u.prog.syms.str(c.name) == n2) {
-            Some(i) => crates.push(i as u32),
-            None => return Err(format!("--boundary: no crate `{}` in the graph", n)),
-        }
-    }
-    *AUDIT.lock().unwrap() = Some(Audit { crates, ..Default::default() });
+    crates.sort_unstable();
+    crates.dedup();
+    Ok(crates)
+}
+
+/// Start the static guard before the audit lowers any bodies.
+pub fn start(u: &Unit, names: &[String]) -> Result<(), String> {
+    let crates = crates(&u.prog, &u.provided, names, false)?;
+    let option_entries = u.provided.iter().filter(|(k, _)| crates.contains(k))
+        .flat_map(|(k, _)| crate::provided::option_entry_rows(&u.prog, &u.tcx, *k, None)).collect();
+    *AUDIT.lock().unwrap() = Some(Audit { crates, option_entries, ..Default::default() });
     Ok(())
+}
+
+/// Declaration-only audit, before a program's JIT unit is created.
+pub(crate) fn options(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crates: &[u32], target: Option<&str>) -> (String, usize) {
+    // One set for all the crates, as the loader's map is one: an entry any provided crate
+    // lists covers the type wherever it crosses
+    let covered = target.map(|_| crates.iter().flat_map(|&k| crate::provided::option_listed_types(prog, tcx, k)).collect());
+    let mut rows: Vec<_> = crates.iter().flat_map(|&k| crate::provided::option_entry_rows(prog, tcx, k, covered.as_ref())).collect();
+    rows.sort();
+    let missing = rows.len();
+    let target = target.map_or(String::new(), |t| format!(" ({t})"));
+    rows.push(format!("relax check --boundary options{target}: {} missing Option entries in {} provided crates", missing, crates.len()));
+    (rows.join("\n") + "\n", missing)
 }
 
 #[inline]
@@ -175,8 +213,8 @@ pub fn note_violation(u: &Unit, krate: u32, body: u32, error: &str) {
     a.violations.insert((krate, u.fns[body as usize].name.to_string(), error.lines().next().unwrap_or("").to_string()));
 }
 
-/// A static `d` read or borrowed in the body of (`def`, `args`).
-pub fn note_static(u: &Unit, def: DefId, args: &[TyId], d: DefId) {
+/// A static `d` (of type `t`) read or borrowed in the body of (`def`, `args`).
+pub fn note_static(u: &Unit, def: DefId, args: &[TyId], d: DefId, t: TyId) {
     if !on() {
         return;
     }
@@ -191,6 +229,26 @@ pub fn note_static(u: &Unit, def: DefId, args: &[TyId], d: DefId) {
     if e.sample.is_empty() {
         e.sample = u.prog.def_path(def);
     }
+    if e.class.is_empty() {
+        e.class = static_class(u, d, t);
+    }
+}
+
+/// The provided-static classifier's answer, alongside `static mut` and `Freeze`.
+fn static_class(u: &Unit, d: DefId, t: TyId) -> String {
+    let prog = &u.prog;
+    let def = prog.def(d);
+    let ast = &prog.files[def.file as usize].ast;
+    let item = ast.item(def.item);
+    let is_mut = matches!(item.kind, crate::ast::ItemKind::Static(true, ..));
+    let freeze = u.tcx.is_freeze(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), t);
+    let class = match crate::provided::static_use(u, d, t) {
+        crate::provided::StaticUse::Shared(_) => "shared",
+        crate::provided::StaticUse::OwnInstance | crate::provided::StaticUse::NotProvided => "own",
+        crate::provided::StaticUse::Copy => "copy",
+        crate::provided::StaticUse::Refused(_) => "refused",
+    };
+    format!("class={class} mut={} freeze={}", is_mut as u8, freeze as u8)
 }
 
 /// The C shape of a type at the boundary.
@@ -217,7 +275,10 @@ fn shape(u: &mut Unit, a: &Audit, t: TyId) -> String {
                 format!("vm-{}{}:{}", if k == DefKind::Enum { "enum" } else { "struct" }, if copy { "" } else { "(non-Copy)" }, n)
             } else if u.tcx.lang_items.get(LangItem::Option) == Some(d) || u.tcx.adts.get(&d).is_some_and(|adt| adt.is_box()) || matches!(n.as_str(), "Result" | "Vec" | "Rc" | "Arc") {
                 let n = if u.tcx.lang_items.get(LangItem::Option) == Some(d) { "Option" } else if u.tcx.adts.get(&d).is_some_and(|adt| adt.is_box()) { "Box" } else { &n };
-                let inner: Vec<String> = u.tcx.tys.list(args).to_vec().into_iter().map(|x| shape(u, a, x)).collect();
+                // the element types; a Global allocator says nothing of the shape (another one
+                // is shaped as itself: never representable)
+                let elems: Vec<TyId> = u.tcx.tys.list(args).iter().copied().filter(|x| !crate::provided::is_global_alloc(&u.tcx, *x)).collect();
+                let inner: Vec<String> = elems.into_iter().map(|x| shape(u, a, x)).collect();
                 format!("{}<{}>", n, inner.join(","))
             } else {
                 n
@@ -322,7 +383,7 @@ pub fn run(up: *mut Unit, root: u32) -> (String, usize) {
                 // drop glue: a provided type's Drop impl (and what it calls) runs from here
                 // when JIT-compiled code drops a value of it (a handle's release, a guard)
                 FnKey::Glue(..) => true,
-                FnKey::Shim(_) | FnKey::Sandbox(_) | FnKey::Plain(_) => false,
+                FnKey::Shim(_) | FnKey::Sandbox(_) | FnKey::Plain(_) | FnKey::Ctfe(_) => false,
             };
             if !lower_it {
                 continue;
@@ -360,6 +421,9 @@ pub fn run(up: *mut Unit, root: u32) -> (String, usize) {
     fails.sort();
     for f in &fails {
         let _ = writeln!(out, "{}", f);
+    }
+    for row in &a.option_entries {
+        let _ = writeln!(out, "{}", row);
     }
     // the audited crates' violations fail the check; another provided crate's are listed
     let crate_name = |k: u32| u.prog.syms.str(u.prog.crates[k as usize].name).to_string();
@@ -477,11 +541,14 @@ pub fn run(up: *mut Unit, root: u32) -> (String, usize) {
                 sig = format!("({}) -> {}={}", parts.join(", "), crate::typeck::ty_to_string(false, &u.prog, &u.tcx, *r), rs);
             }
         }
+        if *kind == "static" {
+            sig = e.class.clone();
+        }
         let _ = writeln!(out, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", kind, if bad.is_empty() { "ok" } else { "CLEANUP" }, e.sites, name, sig, bad.join(" "), e.callers.iter().cloned().collect::<Vec<_>>().join(","), e.sample);
     }
     let _ = writeln!(out, "# shapes (distinct fns, call sites):");
     for (s, (n, sites)) in &shapes {
         let _ = writeln!(out, "#   {:<40} {:>5} {:>6} {}", s, n, sites, if c_representable(s.trim_start_matches("ret ")) { "" } else { "CLEANUP" });
     }
-    (out, failing)
+    (out, failing + a.option_entries.len())
 }

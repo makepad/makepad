@@ -14,8 +14,16 @@ pub type c_short = i16;
 pub type c_ushort = u16;
 pub type c_int = i32;
 pub type c_uint = u32;
+// `long` is 64 bits only on 64-bit targets other than Windows (LLP64) and on wasm32 Linux; at least
+// 32 everywhere else (core's c_long_definition)
+#[cfg(any(all(target_pointer_width = "64", not(windows)), all(target_arch = "wasm32", target_os = "linux")))]
 pub type c_long = i64;
+#[cfg(any(all(target_pointer_width = "64", not(windows)), all(target_arch = "wasm32", target_os = "linux")))]
 pub type c_ulong = u64;
+#[cfg(not(any(all(target_pointer_width = "64", not(windows)), all(target_arch = "wasm32", target_os = "linux"))))]
+pub type c_long = i32;
+#[cfg(not(any(all(target_pointer_width = "64", not(windows)), all(target_arch = "wasm32", target_os = "linux"))))]
+pub type c_ulong = u32;
 pub type c_longlong = i64;
 pub type c_ulonglong = u64;
 pub type c_float = f32;

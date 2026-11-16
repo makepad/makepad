@@ -41,8 +41,8 @@ done
 cat > "$T/expected" <<'EXPECTED'
 {"severity":"error","code":"E0432","message":"unresolved import `crate::Widgte`","file":"main.rs","line":3,"col":12,"end_line":3,"end_col":18,"phase":"resolve","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",3,12,3,18,"Widget"]}}
 {"severity":"error","code":"RM0001","message":"cannot find macro `greetign` in this scope","file":"main.rs","line":9,"col":1,"end_line":9,"end_col":9,"phase":"macro","notes":[],"suggestion":null}
-{"severity":"error","code":"E0412","message":"cannot find type `Widgte` in this scope","file":"main.rs","line":4,"col":11,"end_line":4,"end_col":17,"phase":"typeck","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",4,11,4,17,"Widget"]}}
-{"severity":"error","code":"E0412","message":"cannot find type `Missing` in this scope","file":"main.rs","line":6,"col":1,"end_line":6,"end_col":7,"phase":"typeck","notes":[],"suggestion":null}
+{"severity":"error","code":"E0425","message":"cannot find type `Widgte` in this scope","file":"main.rs","line":4,"col":11,"end_line":4,"end_col":17,"phase":"typeck","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",4,11,4,17,"Widget"]}}
+{"severity":"error","code":"E0425","message":"cannot find type `Missing` in this scope","file":"main.rs","line":6,"col":1,"end_line":6,"end_col":7,"phase":"typeck","notes":[],"suggestion":null}
 {"type":"summary","errors":4,"warnings":0,"ms":0}
 {"type":"summary","errors":0,"warnings":0,"ms":0}
 EXPECTED

@@ -221,50 +221,25 @@ impl Builder {
             None => None,
         };
         let my_thread = Thread::new(cname);
-        let their_thread = my_thread.clone();
         let my_packet: Arc<Packet<'a, T>> = Arc::new(Packet { scope: scope_data, result: UnsafeCell::new(None), _marker: PhantomData });
-        // The thread's reference to the packet lives in `finish`, never in `main`: a panic resets
-        // the stack without dropping main's captures (R11), and a leaked packet reference would
-        // keep a scope waiting for this thread forever.
-        let their_packet = my_packet.clone();
-        let result_ptr = SendPtr(Arc::as_ptr(&their_packet) as *const u8);
         if let Some(scope) = &my_packet.scope {
             scope.increment_num_running_threads();
         }
-        let main = move || {
-            crate::panic::prepare_payload();
-            let r = f();
-            let packet = result_ptr;
-            unsafe { *(*(packet.0 as *const Packet<'a, T>)).result.get() = Some(Ok(r)) };
-        };
-        let finish = move |panicked: bool| {
-            if panicked {
-                let payload: Box<dyn Any + Send> = crate::panic::take_payload();
-                unsafe { *their_packet.result.get() = Some(Err(payload)) };
-            }
-            drop(their_packet);
-        };
-        let main: Box<dyn FnOnce() + Send + 'a> = Box::new(main);
-        let finish: Box<dyn FnOnce(bool) + Send + 'a> = Box::new(finish);
         // lifetime erased: the thread is joined before 'a ends (scope) or 'a is 'static
-        let main: Box<dyn FnOnce() + Send + 'static> = core::mem::transmute(main);
-        let finish: Box<dyn FnOnce(bool) + Send + 'static> = core::mem::transmute(finish);
+        let their_packet: Arc<Packet<'static, T>> = core::mem::transmute(my_packet.clone());
         #[cfg(not(relax_web))]
         let test = unsafe { __relax_test_inherit() };
         let start = Box::new(ThreadStart {
-            thread: their_thread, main: Some(main), finish: Some(finish),
             #[cfg(not(relax_web))]
             test,
+            thread: my_thread.clone(), main: Some(f), packet: their_packet,
         });
-        match spawn_native(stack_size, start) {
-            Ok(native) => Ok(JoinInner { native, thread: my_thread, packet: my_packet }),
-            Err(e) => {
-                if let Some(scope) = &my_packet.scope {
-                    scope.decrement_num_running_threads(false);
-                }
-                Err(e)
-            }
-        }
+        // a refused thread drops its start (and its packet reference) in spawn_native; the last
+        // reference, `my_packet` here, then tells the scope this thread is not running (Packet's
+        // Drop, as in std: no decrement of its own, which counted the thread out twice and left
+        // the scope waiting forever)
+        let native = spawn_native(stack_size, start)?;
+        Ok(JoinInner { native, thread: my_thread, packet: my_packet })
     }
 }
 
@@ -281,27 +256,25 @@ extern "C" {
     fn __relax_test_cancel(token: usize);
 }
 
-struct ThreadStart {
+/// What a new thread starts with, in one allocation (with its handle and its packet, as many as
+/// std's spawn makes): the program's closure and the thread's reference to the packet. The packet
+/// reference is the start's, never the closure's: a panic resets the stack without dropping the
+/// closure's captures (R11), and a leaked packet reference would keep a scope waiting for this
+/// thread forever. Declaration order is drop order: the packet goes last.
+struct ThreadStart<F, T> {
     #[cfg(not(relax_web))]
     test: usize,
     thread: Thread,
-    main: Option<Box<dyn FnOnce() + Send + 'static>>,
-    /// Runs after main, with whether it panicked: stores the panic's payload, then drops the
-    /// thread's packet reference (which tells a scope this thread is done).
-    finish: Option<Box<dyn FnOnce(bool) + Send + 'static>>,
+    main: Option<F>,
+    packet: Arc<Packet<'static, T>>,
 }
 
-impl Drop for ThreadStart {
+impl<F, T> Drop for ThreadStart<F, T> {
     fn drop(&mut self) {
         #[cfg(not(relax_web))]
         unsafe { __relax_test_cancel(self.test); }
     }
 }
-
-/// A raw pointer moved into a thread's main closure (the packet outlives it: `finish` holds it).
-#[derive(Clone, Copy)]
-struct SendPtr(*const u8);
-unsafe impl Send for SendPtr {}
 
 /// Relax's code needs more stack per call than rustc's: a frame holds what LLVM keeps in
 /// registers or shares between slots (a type parser 1000 generics deep, rustc 1 MiB, Relax over
@@ -310,12 +283,12 @@ unsafe impl Send for SendPtr {}
 /// pages are committed as they are touched.
 const STACK_SCALE: usize = 4;
 
-fn spawn_native(stack_size: usize, start: Box<ThreadStart>) -> io::Result<sys::NativeThread> {
+fn spawn_native<F: FnOnce() -> T + Send, T: Send>(stack_size: usize, start: Box<ThreadStart<F, T>>) -> io::Result<sys::NativeThread> {
     let arg = Box::into_raw(start) as *mut u8;
-    match sys::spawn_thread(stack_size.saturating_mul(STACK_SCALE), thread_start, arg) {
+    match sys::spawn_thread(stack_size.saturating_mul(STACK_SCALE), thread_start::<F, T>, arg) {
         Ok(native) => Ok(native),
         Err(r) => {
-            drop(unsafe { Box::from_raw(arg as *mut ThreadStart) });
+            drop(unsafe { Box::from_raw(arg as *mut ThreadStart<F, T>) });
             #[cfg(target_family = "wasm")]
             let _ = r;
             #[cfg(target_family = "wasm")]
@@ -326,15 +299,18 @@ fn spawn_native(stack_size: usize, start: Box<ThreadStart>) -> io::Result<sys::N
     }
 }
 
-fn run_main(p: *mut u8) {
-    let slot = unsafe { &mut *(p as *mut Option<Box<dyn FnOnce() + Send + 'static>>) };
-    if let Some(main) = slot.take() {
-        main();
+/// The program's closure, under the thread's recovery point: its value goes to the packet.
+fn run_main<F: FnOnce() -> T, T>(p: *mut u8) {
+    let start = unsafe { &mut *(p as *mut ThreadStart<F, T>) };
+    crate::panic::prepare_payload();
+    if let Some(f) = start.main.take() {
+        let r = f();
+        unsafe { *start.packet.result.get() = Some(Ok(r)) };
     }
 }
 
-fn thread_start(arg: *mut u8) {
-    let mut start = unsafe { Box::from_raw(arg as *mut ThreadStart) };
+fn thread_start<F: FnOnce() -> T, T>(arg: *mut u8) {
+    let mut start = unsafe { Box::from_raw(arg as *mut ThreadStart<F, T>) };
     #[cfg(not(relax_web))]
     unsafe { __relax_test_adopt(crate::mem::replace(&mut start.test, 0)); }
     if let Some(name) = &start.thread.inner.name {
@@ -346,12 +322,11 @@ fn thread_start(arg: *mut u8) {
         }
     }
     set_current(start.thread.clone());
-    let mut main = start.main.take();
-    let panicked = sys::rt::catch_panic(run_main, &mut main as *mut Option<Box<dyn FnOnce() + Send + 'static>> as *mut u8);
-    if let Some(finish) = start.finish.take() {
-        finish(panicked);
+    let panicked = sys::rt::catch_panic(run_main::<F, T>, &mut *start as *mut ThreadStart<F, T> as *mut u8);
+    if panicked {
+        let payload: Box<dyn Any + Send> = crate::panic::take_payload();
+        unsafe { *start.packet.result.get() = Some(Err(payload)) };
     }
-    drop(main);
     drop(start);
 }
 
@@ -482,14 +457,17 @@ where
         scope: PhantomData,
         env: PhantomData,
     };
-    let result = f(&scope);
+    // std's scope: a panic of `f` (a spawn the OS refused, say) waits for the threads it started
+    // too, which borrow from the frames the panic leaves; it goes on once they are done
+    let result = crate::panic::catch_unwind(crate::panic::AssertUnwindSafe(|| f(&scope)));
     while scope.data.num_running_threads.load(SeqCst) != 0 {
         park();
     }
-    if scope.data.a_thread_panicked.load(Relaxed) {
-        panic!("a scoped thread panicked");
+    match result {
+        Err(e) => crate::panic::resume_unwind(e),
+        Ok(_) if scope.data.a_thread_panicked.load(Relaxed) => panic!("a scoped thread panicked"),
+        Ok(result) => result,
     }
-    result
 }
 
 impl<'scope, 'env> Scope<'scope, 'env> {

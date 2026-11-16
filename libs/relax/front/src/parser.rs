@@ -116,6 +116,8 @@ pub struct Parser<'a> {
     pub token_input: bool,
     pub sources: Option<std::sync::Arc<SourceRegistry>>,
     exp_depth: u32,
+    /// inside the expansion of a built-in formatting macro (fmtmac), whose text may hold `super let`
+    builtin_exp: u32,
     /// the file's written `#![recursion_limit]`, read on the first macro call
     rec_limit: std::cell::Cell<Option<Option<u32>>>,
     /// every `use` of the tokens so far, for `name_imported`'s quick answer
@@ -151,6 +153,9 @@ pub struct Parser<'a> {
     pub(crate) stmt_frags: crate::fxhash::HashSet<u32>,
     /// Offsets of the parens a transcription added around multi-token `$e:expr` fragments.
     pub(super) synth_parens: crate::fxhash::HashSet<u32>,
+    /// Every start the sets above ever held (never removed): one lookup that rules out a written
+    /// token before `forwarded_kind` looks at each kind, in the macro matcher's inner loop.
+    pub(super) fwd_starts: crate::fxhash::HashSet<u32>,
     /// file context for built-in macros (file!, module_path!, env!, cfg of derive inputs)
     pub bctx: Option<std::rc::Rc<crate::builtins::FileCtx>>,
     /// names of the inline `mod x { }` blocks being parsed (module_path!)
@@ -250,6 +255,7 @@ impl<'a> Parser<'a> {
             token_input: false,
             sources: None,
             exp_depth: 0,
+            builtin_exp: 0,
             rec_limit: std::cell::Cell::new(None),
             import_summary: Default::default(),
             rules_exp: Default::default(),
@@ -265,6 +271,7 @@ impl<'a> Parser<'a> {
             block_frags: Default::default(),
             stmt_frags: Default::default(),
             synth_parens: Default::default(),
+            fwd_starts: Default::default(),
             bctx: None,
             mod_stack: Vec::new(),
             scope_stack: Vec::new(),
@@ -352,7 +359,7 @@ impl<'a> Parser<'a> {
     /// rustc_span `Ident::is_reserved` of a lifetime/label name (without its quote): the special
     /// identifiers (`_`), the keywords used always or reserved always, and the edition keywords
     /// (`async`/`await`/`dyn`/`try` from 2018, `gen` from 2024).
-    fn reserved_name(name: &[u8], edition: u16) -> bool {
+    pub(crate) fn reserved_name(name: &[u8], edition: u16) -> bool {
         match name {
             b"_" | b"as" | b"break" | b"const" | b"continue" | b"crate" | b"else" | b"enum" | b"extern" | b"false"
             | b"fn" | b"for" | b"if" | b"impl" | b"in" | b"let" | b"loop" | b"match" | b"mod" | b"move" | b"mut"
@@ -642,9 +649,12 @@ impl<'a> Parser<'a> {
             let k = self.toks.kind_at(i);
             // parse_part has no invisible type/path/statement boundaries (rustc_parse
             // interpolated nonterminals): consume these while their expansion's metadata is live.
+            // Nor a one-token expression or literal fragment (meta_frags), which is one invisible
+            // group as well (builtins.rs group_fragments).
             if (!self.ty_frags.is_empty() && self.ty_frags.contains(&{ self.toks.at(i).lo }))
                 || (!self.path_frags.is_empty() && self.path_frags.contains(&{ self.toks.at(i).lo }))
-                || (!self.stmt_frags.is_empty() && self.stmt_frags.contains(&{ self.toks.at(i).lo })) {
+                || (!self.stmt_frags.is_empty() && self.stmt_frags.contains(&{ self.toks.at(i).lo }))
+                || (!self.meta_frags.is_empty() && self.meta_frags.contains_key(&{ self.toks.at(i).lo })) {
                 return BodyOutline::Eager(5);
             }
             // Nor the invisible parentheses of an expression fragment (synth_parens): there a false
@@ -1930,7 +1940,11 @@ impl<'a> Parser<'a> {
                     // `made`'s `pub(crate) use seven_inner as seven;`). That call is a lookup that
                     // found nothing, left for the load's parse with the crate outline, as
                     // `made::inner::seven!()` is; a plain name's scope is the module's own.
-                    if qual.is_none() && !path.global() { self.macro_scope_miss.set(seg.name.lo); }
+                    // A prelude macro's name the crate imports in another module (`use
+                    // input::ime_config as cfg;`, a module in its own namespace) is still the
+                    // prelude's macro here, as rustc resolves it: no miss for it.
+                    let prelude = self.no_prelude == 0 && STD_PRELUDE_MACROS.contains(&name.as_str());
+                    if qual.is_none() && !path.global() && !prelude { self.macro_scope_miss.set(seg.name.lo); }
                     return None;
                 }
                 let q2 = match q.as_str() {
@@ -2182,7 +2196,10 @@ impl<'a> Parser<'a> {
         let base = (self.src.len() + self.ext.len()) as u32;
         if crate::macros::uses::recording() {
             let offs = crate::macros::uses::synth_take();
-            for &off in &offs { self.synth_parens.insert(base + off); }
+            for &off in &offs {
+                self.synth_parens.insert(base + off);
+                self.fwd_starts.insert(base + off);
+            }
             crate::macros::uses::synth_flush(self.bctx.as_ref().map_or("", |c| c.path.as_str()), base, offs);
         }
         for (off, o, n) in origins {
@@ -2192,6 +2209,10 @@ impl<'a> Parser<'a> {
             if b & crate::macros::EMPTY_VIS != 0 {
                 *self.empty_vis.entry(base + a).or_insert(0) += 1;
                 continue;
+            }
+            const FORWARDED: u32 = crate::macros::TY_FRAG | crate::macros::PATH_FRAG | crate::macros::BLOCK_FRAG | crate::macros::STMT_FRAG | crate::macros::WRAP_PAREN;
+            if b & FORWARDED != 0 {
+                self.fwd_starts.insert(base + a);
             }
             // Nested groups with the same start are emitted inner first; keep the outer kind.
             if b & crate::macros::TY_FRAG != 0 {
@@ -2408,21 +2429,21 @@ impl<'a> Parser<'a> {
             rec_limit: _, import_summary: _,
             toks, pos, edition, ast, item_start, lazy_bodies, lazy_auto, lazy_part, hole_body, item_macro, lazy_mods, macros, krate,
             ext, exp_map, tok_origin, token_origins, token_input, exp_depth, rules_exp, body_origin,
-            pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, stmt_frags, synth_parens,
+            pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, stmt_frags, synth_parens, fwd_starts,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, foreign_rules, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
             include_as_expr, foreign_abi, cfg_out, lit_errs, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape, macro_scope_miss,
-            cfg_select_ends,
+            cfg_select_ends, builtin_exp,
         } = self;
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
         let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
         let frags = (sorted(frag_groups.iter().collect::<Vec<_>>()), sorted(ty_frags.iter().collect::<Vec<_>>()), sorted(path_frags.iter().collect::<Vec<_>>()),
-            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(stmt_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), sorted(empty_vis.iter().collect::<Vec<_>>()));
+            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(stmt_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), sorted(fwd_starts.iter().collect::<Vec<_>>()), sorted(empty_vis.iter().collect::<Vec<_>>()));
         let interp = sorted(interp.iter().map(|(k, e)| (*k, e.0)).collect::<Vec<_>>());
         let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), pm_editions.len(), foreign_rules.len());
         let shapes: Vec<_> = pending_shape.iter().map(|(r, e)| (*r, e.as_ref().map(|e| (e.pos, e.msg.clone())))).collect();
         format!("toks {toks:?}\npos {pos} edition {edition} lazy {lazy_bodies} {lazy_auto} {lazy_part} {lazy_mods:?} hole {hole_body} {item_macro} macros {} krate {krate}\n\
-            tables {tables:?} token_input {token_input} exp_depth {exp_depth} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
+            tables {tables:?} token_input {token_input} exp_depth {exp_depth} builtin_exp {builtin_exp} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
             mods {mod_stack:?} scopes {scope_stack:?} {next_scope} {rule_scopes:?} no_prelude {no_prelude} range_dots {range_dots}\n\
             items {item_start:?} {extra_items:?} {extra_assoc_items:?} {pending_inner:?} {in_assoc} {in_trait} {foreign_abi:?}\n\
             stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} {:?} {lit_errs:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
@@ -3885,8 +3906,8 @@ impl<'a> Parser<'a> {
     }
 
     fn ty_impl_header(&mut self) -> PResult<TyId> {
-        // bare trait path in 2015 may be `impl Trait + Send`; rare. dyn handled by ty().
-        self.ty()
+        // An impl's self type allows `+` bounds, including bare trait objects before 2021.
+        self.ty_plus()
     }
 
     // ------------------------------------------------------------ use trees
@@ -4346,7 +4367,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A const generic argument: a constant's body (`anon_const`).
     fn const_arg(&mut self) -> PResult<ExprId> {
+        self.anon_const(Self::const_arg_here)
+    }
+
+    /// `f` parsing a constant's body: an array length, a repeat count, an inline `const` block, a
+    /// const generic argument. Inside a fn body it is evaluated apart from the body (a generic
+    /// fn's inline const where the fn is instantiated, in whichever crate), so the late inputs it
+    /// reads are no hole reads (sip LATE_HOLE), as an item's are not (`item`): they stay in the
+    /// check verdict keys of the crates above.
+    fn anon_const<R>(&mut self, f: impl FnOnce(&mut Self) -> PResult<R>) -> PResult<R> {
+        let outer = std::mem::replace(&mut self.hole_body, false);
+        let r = f(self);
+        self.hole_body = outer;
+        r
+    }
+
+    fn const_arg_here(&mut self) -> PResult<ExprId> {
         let lo = self.lo();
         match self.kind() {
             T::OpenBrace => {
@@ -4403,7 +4441,8 @@ impl<'a> Parser<'a> {
     pub fn ty(&mut self) -> PResult<TyId> {
         self.ty_inner(false)
     }
-    fn ty_plus(&mut self) -> PResult<TyId> {
+    /// rustc parse_ty: a type where `+` bounds may follow (a `$t:ty` fragment, a generic argument)
+    pub(crate) fn ty_plus(&mut self) -> PResult<TyId> {
         self.ty_inner(true)
     }
 
@@ -4512,7 +4551,7 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 let elem = self.ty_plus()?;
                 if self.eat(T::Semi) {
-                    let n = self.expr()?;
+                    let n = self.anon_const(Self::expr)?;
                     self.expect(T::CloseBracket)?;
                     Ty::Array(elem, n)
                 } else {
@@ -4577,14 +4616,15 @@ impl<'a> Parser<'a> {
                     { let m = self.ast.push_row(MacCall { path, delim, toks, args }); Ty::Mac(m) }
                 } else {
                     let path = self.path(false)?;
-                    if plus && self.kind() == T::Plus && matches!(self.nth(1), T::Lifetime | T::Ident | T::PathSep | T::Question) {
-                        // bare trait object `Trait + Send` (pre-2021)
+                    if plus && self.eat_plus() {
+                        // rustc parse_remaining_bounds: a path followed by `+` is a bare trait
+                        // object (even a trailing `+`); its edition is checked when lowering.
                         let mut b = vec![Bound::Trait { hrtb: List::EMPTY, maybe: false, konst: false, async_: false, path }];
-                        while self.eat(T::Plus) {
-                            if !self.at_bound_start() {
+                        while self.at_bound_start() {
+                            b.push(self.bound()?);
+                            if !self.eat_plus() {
                                 break;
                             }
-                            b.push(self.bound()?);
                         }
                         Ty::DynTrait(self.ast.push_list(b), false)
                     } else {
@@ -5015,6 +5055,12 @@ impl<'a> Parser<'a> {
 
     /// Interpolated statements already carry their boundary, including a let without `;`.
     fn stmt_after_attrs(&mut self, attrs: Vec<Attr>, interpolated: bool) -> PResult<Stmt> {
+        // `super let`: only the expansion of a built-in formatting macro writes one (rustc's
+        // format_args! lowering); in written code it stays unstable syntax rustc gates
+        let super_ = self.builtin_exp > 0 && self.kind() == T::KwSuper && self.nth(1) == T::KwLet;
+        if super_ {
+            self.pos += 1;
+        }
         if self.kind() == T::KwLet {
             self.pos += 1;
             let pat = self.pat_top()?;
@@ -5041,7 +5087,7 @@ impl<'a> Parser<'a> {
                 self.expect(T::Semi)?;
             }
             let attrs = self.ast.push_list(attrs);
-            let r = self.ast.push_row(LetStmt { attrs, pat, ty: OptTyId::from(ty), init: OptExprId::from(init), else_: OptBlockId::from(else_) });
+            let r = self.ast.push_row(LetStmt { attrs, pat, ty: OptTyId::from(ty), init: OptExprId::from(init), else_: OptBlockId::from(else_), super_ });
             return Ok(Stmt::Let(r));
         }
         if self.at_item_start() {
@@ -5127,7 +5173,7 @@ impl<'a> Parser<'a> {
         // rustc_parse parser/stmt.rs: parse_stmt_path_start accepts a struct
         // literal after a captured path here. In expression-fragment position
         // parse_expr_bottom returns the path alone instead.
-        let e = if self.path_frags.contains(&{ self.tok().lo }) {
+        let e = if self.at_path_frag() {
             let path = self.path(true)?;
             let e = if self.kind() == T::OpenBrace {
                 self.struct_expr(path, lo)?
@@ -5658,12 +5704,19 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The cursor starts a forwarded `$p:path`. An expression a built-in macro spliced in
+    /// (`T::Interp`, e.g. an `assert_eq!` operand) keeps its authored span, which can be such a
+    /// start, but it is parsed already: it is no path syntax.
+    fn at_path_frag(&self) -> bool {
+        self.kind() != T::Interp && self.path_frags.contains(&{ self.tok().lo })
+    }
+
     fn primary(&mut self, r: u8) -> PResult<ExprId> {
         if self.at_stmt_frag() { return self.err("expected expression, found statement metavariable"); }
         let lo = self.lo();
         // rustc_parse parser/expr.rs: parse_expr_bottom returns a Path expression
         // for MetaVarKind::Path; calls follow, but `{ .. }` and `::` do not extend it.
-        if self.path_frags.contains(&{ self.tok().lo }) {
+        if self.at_path_frag() {
             let path = self.path(true)?;
             return Ok(self.mk_expr(ExprKind::Path(path), lo));
         }
@@ -5714,7 +5767,7 @@ impl<'a> Parser<'a> {
                 let first = self.list_elem(0, false)?;
                 if let Some(f) = first {
                     if self.eat(T::Semi) {
-                        let n = self.expr()?;
+                        let n = self.anon_const(Self::expr)?;
                         self.expect(T::CloseBracket)?;
                         return Ok(self.mk_expr(ExprKind::Repeat(f, n), lo));
                     }
@@ -5744,7 +5797,7 @@ impl<'a> Parser<'a> {
             }
             T::KwConst if self.nth(1) == T::OpenBrace => {
                 self.pos += 1;
-                let b = self.block()?;
+                let b = self.anon_const(Self::block)?;
                 Ok(self.mk_expr(ExprKind::ConstBlock(b), lo))
             }
             // (`try` is a keyword from 2018 on; feature_gate.rs gates the block)
@@ -6034,7 +6087,7 @@ impl<'a> Parser<'a> {
                     let segs = self.mk_segs(vec![PathSeg::new(SegKind::Ident, name, GenericArgsId::NONE)], false);
                     let path = Path { segs, lo: blo };
                     let tail = self.mk_expr(ExprKind::Path(path), blo);
-                    let r = self.ast.push_row(LetStmt { attrs: List::EMPTY, pat, ty: OptTyId::from(Some(t)), init: OptExprId::from(Some(body)), else_: OptBlockId::NONE });
+                    let r = self.ast.push_row(LetStmt { attrs: List::EMPTY, pat, ty: OptTyId::from(Some(t)), init: OptExprId::from(Some(body)), else_: OptBlockId::NONE, super_: false });
                     vec![Stmt::Let(r), Stmt::Expr(false, tail)]
                 }
                 None => vec![Stmt::Expr(false, body)],

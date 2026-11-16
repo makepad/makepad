@@ -100,8 +100,8 @@ impl<'a> Cx<'a> {
         Span { file: self.tb().file, lo, hi }
     }
     pub(super) fn espan(&self, e: ast::ExprId) -> Span {
-        let ex = self.ast().expr(e);
-        self.span(ex.lo, ex.hi)
+        let (lo, hi) = self.root.scope_tree.expr_span(self.ast(), e);
+        self.span(lo, hi)
     }
     pub(super) fn unit_ty(&self) -> TyId {
         self.tcx().tys.unit
@@ -136,6 +136,7 @@ impl<'a> Cx<'a> {
 
     // ---- scopes
     pub(super) fn scope_of(&self, node: Node, data: ScopeData) -> Option<ScopeId> {
+        let node = match node { Node::Expr(e) => Node::Expr(strip_paren(self.ast(), ast::ExprId(e)).0), _ => node };
         self.root.scope_tree.scope(node, data)
     }
     pub(super) fn node_scope(&self, node: Node, span: Span) -> BuildResult<ScopeId> {
@@ -147,6 +148,7 @@ impl<'a> Cx<'a> {
     /// rustc `temp_scope_id`, resolved through the scope tree: the scope the temporaries of `e` die in
     /// (None: static extension).
     pub(super) fn temp_scope(&self, e: ast::ExprId) -> Option<ScopeId> {
+        let e = strip_paren(self.ast(), e);
         self.scope_of(Node::Expr(e.0), ScopeData::Node)?;
         self.root.scope_tree.temporary_scope(e)
     }
@@ -154,6 +156,7 @@ impl<'a> Cx<'a> {
     /// The scope `e`'s temporaries die in from edition 2024, when that differs (the lint
     /// `tail_expr_drop_order`).
     pub(super) fn bid_scope(&self, e: ast::ExprId) -> Option<ScopeId> {
+        let e = strip_paren(self.ast(), e);
         self.scope_of(Node::Expr(e.0), ScopeData::Node)?;
         self.root.scope_tree.temp_lifetime(e).1
     }

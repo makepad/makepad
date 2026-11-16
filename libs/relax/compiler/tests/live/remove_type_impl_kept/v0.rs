@@ -1,4 +1,4 @@
-// A struct goes and its inherent impl stays: refused (E0412 at the impl's self type).
+// A struct goes and its inherent impl stays: refused (E0425 at the impl's self type).
 pub struct S(u32);
 impl S {
     pub fn get(&self) -> u32 {

@@ -11,6 +11,7 @@
 // performed directly in the caller's inference context under scrape_region_constraints.
 // Region assumptions (-Zhigher-ranked-assumptions) and error_info (diagnostics) are cut.
 use super::*;
+use super::eval_ctxt::fast_path::{sizedness_fast_path, trivially_wf};
 use super::fulfill::ObligationCtxt;
 use crate::types::TyKind;
 use crate::borrowck::constraints::ConstraintCategory;
@@ -44,6 +45,12 @@ pub struct TypeOpOutput<R> { pub output: R, pub constraints: Option<QueryRegionC
 
 pub trait TypeOp: Sized {
     type Output;
+    /// rustc `QueryTypeOp::try_fast_path` (type_op/mod.rs:70): the answer of an op that registers
+    /// nothing and constrains no region, known without running it. rustc asks it at the head of
+    /// `fully_perform_into`, inside the scrape; an answer here has no obligations and no region
+    /// constraints, so the scrape around it is empty and callers may ask before the scrape and their
+    /// own bookkeeping (the MIR type check's `fully_perform_op` does). Ops without one return None.
+    fn try_fast_path(&self, _infcx: &InferCtxt<'_>, _prog: &Program) -> Option<Self::Output> { None }
     fn fully_perform(self, infcx: &InferCtxt<'_>, prog: &Program) -> Result<TypeOpOutput<Self::Output>, NoSolution>;
     /// rustc `TypeOp::fully_perform` keeps the canonical query input for `error_info`
     /// (diagnostics rerun the query to blame a span for a higher-ranked failure). The input
@@ -78,9 +85,14 @@ pub struct ProvePredicate { pub predicate: Predicate }
 /// normalize.rs:14 try_fast_path; rustc_traits type_op.rs:41 type_op_normalize with the
 /// next solver's deep normalization (at.query_normalize).
 fn normalize_type_op(infcx: &InferCtxt<'_>, prog: &Program, param_env: ParamEnvId, ty: TyId) -> Result<TypeOpOutput<TyId>, NoSolution> {
-    let tys = &infcx.tcx.tys;
-    if !tys.may_project(ty) && !tys.has_opaque(ty) { return Ok(TypeOpOutput { output: ty, constraints: None }); }
+    if let Some(ty) = no_aliases(infcx, ty) { return Ok(TypeOpOutput { output: ty, constraints: None }); }
     scrape_region_constraints(infcx, prog, |ocx| ocx.deeply_normalize_ty(&param_env, ty))
+}
+/// normalize.rs:15 try_fast_path: a type with no alias to project and no opaque type is its own
+/// normalization.
+fn no_aliases(infcx: &InferCtxt<'_>, ty: TyId) -> Option<TyId> {
+    let tys = &infcx.tcx.tys;
+    (!tys.may_project(ty) && !tys.has_opaque(ty)).then_some(ty)
 }
 /// Normalization never defines an opaque type (the default solver does not touch opaques there; only relating
 /// one to its hidden type does): the opaques the body may define are not defining while it runs. Their
@@ -98,6 +110,8 @@ fn normalize_without_defining(infcx: &InferCtxt<'_>, prog: &Program, param_env: 
 }
 impl TypeOp for ParamEnvAnd<Normalize> {
     type Output = TyId;
+    /// normalize.rs:15: a value without aliases is its own normalization (`normalize_type_op`'s check).
+    fn try_fast_path(&self, infcx: &InferCtxt<'_>, _prog: &Program) -> Option<TyId> { no_aliases(infcx, self.value.value) }
     fn fully_perform(self, infcx: &InferCtxt<'_>, prog: &Program) -> Result<TypeOpOutput<TyId>, NoSolution> {
         normalize_without_defining(infcx, prog, self.param_env, self.value.value, false)
     }
@@ -105,16 +119,32 @@ impl TypeOp for ParamEnvAnd<Normalize> {
 }
 impl TypeOp for ParamEnvAnd<NormalizeSignature> {
     type Output = TyId;
+    /// normalize.rs:15, as for `Normalize`.
+    fn try_fast_path(&self, infcx: &InferCtxt<'_>, _prog: &Program) -> Option<TyId> { no_aliases(infcx, self.value.value) }
     fn fully_perform(self, infcx: &InferCtxt<'_>, prog: &Program) -> Result<TypeOpOutput<TyId>, NoSolution> {
         normalize_without_defining(infcx, prog, self.param_env, self.value.value, true)
     }
     fn input(&self) -> TypeOpInput { TypeOpInput::Normalize(self.param_env, self.value.value) }
 }
-/// prove_predicate.rs:10 (the WF fast path; sizedness has no Relax fast path here) and
-/// type_op_prove_predicate_with_cause.
+/// prove_predicate.rs:10: trivial sizedness and WF are answered by `try_fast_path`; otherwise the
+/// predicate is registered as in `type_op_prove_predicate_with_cause`.
 impl TypeOp for ParamEnvAnd<ProvePredicate> {
     type Output = ();
+    /// prove_predicate.rs:13 `QueryTypeOp::try_fast_path`: rustc's `sizedness_fast_path`, or a WF
+    /// type that is trivially well-formed, on the predicate as given (unresolved).
+    fn try_fast_path(&self, infcx: &InferCtxt<'_>, prog: &Program) -> Option<()> {
+        match &self.value.predicate.kind {
+            PredicateKind::Clause(ClauseKind::Trait(p)) => {
+                let GenericArg::Type(ty) = p.trait_ref.args[0] else { unreachable!() };
+                sizedness_fast_path(infcx, prog, self.param_env, p, ty).then_some(())
+            }
+            PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(t))) if trivially_wf(infcx, prog, *t) => Some(()),
+            _ => None,
+        }
+    }
     fn fully_perform(self, infcx: &InferCtxt<'_>, prog: &Program) -> Result<TypeOpOutput<()>, NoSolution> {
+        // (the fast path's answer registers nothing, so the empty scrape around it is skipped)
+        if let Some(()) = self.try_fast_path(infcx, prog) { return Ok(TypeOpOutput { output: (), constraints: None }); }
         // (proving a predicate never defines an opaque type either: see `NormalizeSignature`)
         let mode = infcx.typing_mode.get();
         if matches!(mode, crate::tcx::TypingMode::PostTypeckUntilBorrowck { .. }) {

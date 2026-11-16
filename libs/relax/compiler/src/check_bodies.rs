@@ -344,7 +344,7 @@ impl FactDecodec for FactResolver<'_> {
 }
 
 /// The blob format's version: a blob of another is no blob of this check's (it is in the key).
-pub(crate) const BLOB_VERSION: u32 = 1;
+pub(crate) const BLOB_VERSION: u32 = 2;
 
 /// One fresh crate's stored body verdicts as this check read them.
 struct Blob {
@@ -449,7 +449,9 @@ impl Bodies {
         for (blob, raw) in b.blobs.iter_mut().zip(reuse.body_blobs(&keys)) {
             let Some(raw) = raw else { continue };
             let Some(parsed) = parse_blob(&raw) else { continue };
-            let stands = parsed.late.iter().all(|(c, kind, name, hash)| {
+            // (a blob bound to another worktree: its crate's bodies are checked)
+            let Some(late) = reuse.unstow_late(parsed.tree, parsed.late) else { continue };
+            let stands = late.iter().all(|(c, kind, name, hash)| {
                 *late_memo.entry((c.clone(), *kind, name.clone())).or_insert_with(|| crate::check_reuse::late_now(c, *kind, name)) == *hash
             });
             if !stands { continue; }
@@ -597,7 +599,7 @@ impl Bodies {
             entries.extend(encoded.iter().map(|(k, v)| (*k, v.as_slice())));
             entries.sort_unstable_by_key(|e| e.0);
             entries.dedup_by_key(|e| e.0);
-            new.push((blob.key, write_blob(&reuse.late_inputs_of(prog, blob.krate), &table, &entries)));
+            new.push((blob.key, write_blob(reuse.stow_late(reuse.late_inputs_of(prog, blob.krate)), &table, &entries)));
         }
         reuse.put_bodies(new, keep);
         self.stats.store = t0.elapsed();
@@ -615,16 +617,18 @@ fn test_dropped_uses(prog: &Program, d: DefId, mut facts: BodyFacts) -> BodyFact
     facts
 }
 
-/// A blob: the version, the late inputs (crate, kind, name, value), the table (its length first),
-/// the bodies by key (key, length, facts).
-fn write_blob(late: &[(String, u8, String, u128)], table: &FactTable, entries: &[(u128, &[u8])]) -> Vec<u8> {
+/// A blob: the version, the worktree it is bound to and the late inputs (crate, kind, name, value)
+/// as check_reuse.rs stores them (`Reuse::stow_late`: tree 0, worktree-free), the table (its
+/// length first), the bodies by key (key, length, facts).
+fn write_blob((tree, late): (u128, Vec<(String, u8, String, u128)>), table: &FactTable, entries: &[(u128, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut tb = Vec::new();
     table.write(&mut tb);
     let mut w = W(&mut out);
     w.u32(BLOB_VERSION);
+    w.u128(tree);
     w.u32(late.len() as u32);
-    for (c, kind, name, hash) in late { w.str(c); w.u8(*kind); w.str(name); w.u128(*hash); }
+    for (c, kind, name, hash) in &late { w.str(c); w.u8(*kind); w.str(name); w.u128(*hash); }
     w.u32(tb.len() as u32);
     w.0.extend_from_slice(&tb);
     w.u32(entries.len() as u32);
@@ -632,8 +636,10 @@ fn write_blob(late: &[(String, u8, String, u128)], table: &FactTable, entries: &
     out
 }
 
-/// A blob read (`write_blob`): its late inputs, and the table's and each body's range.
+/// A blob read (`write_blob`): its worktree and late inputs as stored, and the table's and each
+/// body's range.
 struct Parsed {
+    tree: u128,
     late: Vec<(String, u8, String, u128)>,
     table: (usize, usize),
     entries: HashMap<u128, (usize, usize)>,
@@ -643,6 +649,7 @@ fn parse_blob(p: &[u8]) -> Option<Parsed> {
     let mut r = R(p);
     let at = |r: &R| p.len() - r.0.len();
     if r.u32()? != BLOB_VERSION { return None; }
+    let tree = r.u128()?;
     let mut late = Vec::new();
     for _ in 0..r.u32()? { late.push((r.str()?, r.u8()?, r.str()?, r.u128()?)); }
     let n = r.u32()? as usize;
@@ -657,7 +664,7 @@ fn parse_blob(p: &[u8]) -> Option<Parsed> {
         r.take(n)?;
         entries.insert(key, (lo, lo + n));
     }
-    r.0.is_empty().then_some(Parsed { late, table, entries })
+    r.0.is_empty().then_some(Parsed { tree, late, table, entries })
 }
 
 /// Little-endian table output, following check_reuse's length-prefixed encoding.

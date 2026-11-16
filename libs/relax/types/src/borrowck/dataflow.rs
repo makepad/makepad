@@ -168,7 +168,7 @@ impl BorrowckResults<'_> {
 }
 
 /// A borrowed view of the transient state; no extra bitset copies per point.
-/// uninits indexes MovePaths; ever_inits indexes Init records, not MovePaths.
+/// uninits indexes MovePaths; ever_inits indexes locals (nightly initialized.rs:686).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BorrowckDomain<'a> {
     pub borrows: &'a BitSet,

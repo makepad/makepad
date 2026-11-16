@@ -193,8 +193,17 @@ impl<T> BinaryHeap<T> {
     pub fn reserve_exact(&mut self, additional: usize) {
         self.data.reserve_exact(additional);
     }
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), super::TryReserveError> {
+        self.data.try_reserve(additional)
+    }
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), super::TryReserveError> {
+        self.data.try_reserve_exact(additional)
+    }
     pub fn shrink_to_fit(&mut self) {
         self.data.shrink_to_fit();
+    }
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        self.data.shrink_to(min_capacity);
     }
     pub fn into_vec(self) -> Vec<T> {
         self.data

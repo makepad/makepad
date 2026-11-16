@@ -304,13 +304,18 @@ impl Cx<'_> {
         let mut leaves = Vec::new();
         let pattern = self.assignee_pat(lhs, rhs_ty, remainder_scope, &mut leaves)?;
         let mut stmts = vec![self.thir.alloc_stmt(Stmt {
-            kind: StmtKind::Let { remainder_scope, init_scope, pattern: Box::new(pattern), initializer: Some(initializer), else_block: None, node: e.0, span },
+            kind: StmtKind::Let { remainder_scope, init_scope, pattern: Box::new(pattern), initializer: Some(initializer), else_block: None, node: e.0, span, super_: false },
         })];
         for (leaf, var, ty) in leaves {
             let leaf_span = self.espan(leaf);
             let scope = self.synthetic_scope(leaf, Synthetic::Assignment, ScopeData::Node, leaf_span)?;
             let target = self.mirror_expr(leaf)?;
-            let value = self.push(self.mk_at(leaf, leaf_span, ExprKind::VarRef { id: var }, ty));
+            // `a = lhs0` coerces `lhs0` to the assignee's type (typeck's ASSIGN_VALUE_KEY entry)
+            let mut value = self.mk_at(leaf, leaf_span, ExprKind::VarRef { id: var }, ty);
+            for adjustment in self.value_adjustments_at(leaf.0 | crate::typeck::ASSIGN_VALUE_KEY, ty) {
+                value = self.apply_adjustment(leaf, value, adjustment, false)?;
+            }
+            let value = self.push(value);
             let assign = self.push(self.mk_at(leaf, leaf_span, ExprKind::Assign { lhs: target, rhs: value }, unit));
             stmts.push(self.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope, expr: assign } }));
         }

@@ -1,7 +1,7 @@
 //! HashMap over the open-addressing RawTable. Same API and semantics as real std's, except
 //! iteration order (per process and map as in real std, but a different hash: see hash/fast.rs).
 
-use super::raw_table::{next_full, RawTable};
+use super::raw_table::{next_full, ExtractIf as RawExtractIf, RawTable};
 use crate::borrow::Borrow;
 use crate::fmt;
 use crate::hash::{BuildHasher, Hash};
@@ -72,6 +72,12 @@ impl<K, V, S> HashMap<K, V, S> {
         let mut f = f;
         self.table.retain(|kv: &mut (K, V)| f(&kv.0, &mut kv.1));
     }
+    pub fn extract_if<F: FnMut(&K, &mut V) -> bool>(&mut self, pred: F) -> ExtractIf<'_, K, V, F> {
+        ExtractIf { inner: self.extract_if_inner(), pred }
+    }
+    pub(super) fn extract_if_inner(&mut self) -> RawExtractIf<'_, (K, V)> {
+        self.table.extract_if()
+    }
     pub fn clear(&mut self) {
         self.table.clear();
     }
@@ -102,8 +108,8 @@ impl<K: Eq + Hash, V, S: BuildHasher> HashMap<K, V, S> {
     }
 
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), super::TryReserveError> {
-        self.reserve(additional);
-        Ok(())
+        let hb = &self.hash_builder;
+        self.table.try_reserve(additional, &|kv: &(K, V)| hb.hash_one(&kv.0))
     }
 
     pub fn shrink_to_fit(&mut self) {
@@ -167,6 +173,55 @@ impl<K: Eq + Hash, V, S: BuildHasher> HashMap<K, V, S> {
         }
     }
 
+    /// Looks up several values, panicking if two present keys refer to the same entry.
+    pub fn get_disjoint_mut<Q: ?Sized + Hash + Eq, const N: usize>(&mut self, ks: [&Q; N]) -> [Option<&mut V>; N]
+    where
+        K: Borrow<Q>,
+    {
+        // SAFETY: the helper checks all occupied bucket indices before making references.
+        unsafe { self.get_disjoint_mut_inner(ks, true) }
+    }
+
+    /// Looks up several values without checking for overlapping keys.
+    ///
+    /// # Safety
+    /// The keys must not overlap, even if the returned references are not used.
+    pub unsafe fn get_disjoint_unchecked_mut<Q: ?Sized + Hash + Eq, const N: usize>(&mut self, ks: [&Q; N]) -> [Option<&mut V>; N]
+    where
+        K: Borrow<Q>,
+    {
+        unsafe { self.get_disjoint_mut_inner(ks, false) }
+    }
+
+    // SAFETY: when check is false, the caller must ensure the occupied indices are distinct.
+    unsafe fn get_disjoint_mut_inner<Q: ?Sized + Hash + Eq, const N: usize>(&mut self, ks: [&Q; N], check: bool) -> [Option<&mut V>; N]
+    where
+        K: Borrow<Q>,
+    {
+        // Complete every lookup before creating any mutable references, including unchecked
+        // lookups: equality may inspect other entries in the same probe group.
+        let indices = ks.map(|k| self.find(k));
+        if check {
+            let mut i = 0;
+            while i < N {
+                if let Some(index) = indices[i] {
+                    let mut j = 0;
+                    while j < i {
+                        if indices[j] == Some(index) {
+                            crate::panicking::panic_str("duplicate keys found");
+                        }
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+        indices.map(|index| match index {
+            Some(i) => Some(unsafe { &mut (*self.table.slot_ptr(i)).1 }),
+            None => None,
+        })
+    }
+
     /// Inserts; on an existing key the value is replaced (the key is kept, as in real std).
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         let hash = self.hash_of(&k);
@@ -204,10 +259,6 @@ impl<K: Eq + Hash, V, S: BuildHasher> HashMap<K, V, S> {
             Some(i) => Some(self.table.remove(i)),
             None => None,
         }
-    }
-
-    pub fn extract_if<F: FnMut(&K, &mut V) -> bool>(&mut self, pred: F) -> ExtractIf<'_, K, V, F> {
-        ExtractIf { table: &mut self.table, pos: 0, pred }
     }
 }
 
@@ -598,27 +649,22 @@ impl<'a, K, V> Drop for Drain<'a, K, V> {
 }
 
 pub struct ExtractIf<'a, K, V, F> {
-    table: &'a mut RawTable<(K, V)>,
-    pos: usize,
+    inner: RawExtractIf<'a, (K, V)>,
     pred: F,
 }
 
 impl<'a, K, V, F: FnMut(&K, &mut V) -> bool> Iterator for ExtractIf<'a, K, V, F> {
     type Item = (K, V);
     fn next(&mut self) -> Option<(K, V)> {
-        while self.pos < self.table.buckets() {
-            let i = self.pos;
-            self.pos += 1;
-            if self.table.is_full_at(i) {
-                let kv = unsafe { self.table.get_mut(i) };
-                if (self.pred)(&kv.0, &mut kv.1) {
-                    return Some(self.table.remove(i));
-                }
-            }
-        }
-        None
+        let pred = &mut self.pred;
+        self.inner.next(|kv: &mut (K, V)| pred(&kv.0, &mut kv.1))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
+
+impl<'a, K, V, F: FnMut(&K, &mut V) -> bool> FusedIterator for ExtractIf<'a, K, V, F> {}
 
 pub struct Keys<'a, K: 'a, V: 'a> {
     inner: Iter<'a, K, V>,

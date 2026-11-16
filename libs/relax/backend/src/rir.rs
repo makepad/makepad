@@ -1039,6 +1039,11 @@ pub enum Inst {
     AtomicCas(Mem, AtomOrd, AtomOrd, VReg, VReg, VReg, VReg), // ok ord, fail ord, d, addr, expected, new
     /// memory fence; `true` = compiler-only (single-thread) fence
     Fence(AtomOrd, bool),
+    /// In a coroutine body before its transform only (lower.rs): every borrow of what lived in
+    /// this slot has ended (the end of its local's or its temporary's scope). It does not say the
+    /// slot's bytes are dead to lowering's own by-value uses. The coroutine transform reads and
+    /// removes every one, so no pass after it and no backend sees one.
+    StorageDead(u32),
     /// the thread's floating-point control register: `FpEnv(false, d)` reads it into d,
     /// `FpEnv(true, x)` writes x to it (x64: MXCSR, 32 bits; arm64: FPCR). Flush-to-zero,
     /// denormals-are-zero, rounding: an effect, ordered like a call
@@ -1189,7 +1194,7 @@ impl Inst {
             Inst::FpEnv(_, v) => f(*v),
             Inst::Cpuid(ds, a, b) => { ds.iter().for_each(|d| f(*d)); f(*a); f(*b); }
             Inst::Xgetbv(d, a) => { f(*d); f(*a); }
-            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) | Inst::Coverage { .. } => {}
+            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) | Inst::Coverage { .. } | Inst::StorageDead(..) => {}
         }
     }
 
@@ -1234,7 +1239,7 @@ impl Inst {
                 args.iter_mut().for_each(&mut f);
                 rets.iter_mut().for_each(&mut f);
             }
-            Inst::Fence(..) | Inst::Coverage { .. } => {}
+            Inst::Fence(..) | Inst::Coverage { .. } | Inst::StorageDead(..) => {}
             Inst::FpEnv(_, v) => f(v),
             Inst::Cpuid(ds, a, b) => {
                 ds.iter_mut().for_each(&mut f);
@@ -1413,6 +1418,10 @@ pub struct Func {
     /// a `#[unsafe(naked)]` fn: its one block is its `naked_asm!` (a noreturn Callee::Asm) and
     /// the backend emits no prologue, no epilogue, nothing but the block
     pub naked: bool,
+    /// Every call keeps its frame: no sibling calls (tail.rs). A constant-evaluation twin's body
+    /// (the JIT's ctfe_twin.rs): a constant's endless recursion ends in the stack overflow the
+    /// evaluation reports, as rustc's interpreter ends at its frame limit.
+    pub keep_frames: bool,
     /// The inline stack (`pos_ctx`): context k (1-based) is entry k-1, (the call's position -- its
     /// own context is the parent's --, a position inside the inlined fn naming it). Machine code
     /// carries it in its pc map (`inline_pc_entries`).
@@ -1553,7 +1562,7 @@ impl Func {
     /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
     /// injective maps: the bodies are equal up to a renaming of their slots.
     pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames } = self;
         let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
             (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
             (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
@@ -1612,12 +1621,13 @@ impl Func {
             && guard_calls.iter().zip(&o.guard_calls).all(|(x, y)| x.0 == y.0 && ma(x.1) == mb(y.1))
             && *guard_size == o.guard_size
             && *patched_path == o.patched_path
+            && *keep_frames == o.keep_frames
     }
 
     /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
     pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames } = self;
         fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
             match c {
                 Callee::Fn(x) => {
@@ -1704,6 +1714,9 @@ impl Func {
         }
         if *patched_path {
             patched_path.hash(h);
+        }
+        if *keep_frames {
+            keep_frames.hash(h);
         }
     }
 
@@ -1861,7 +1874,7 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false, keep_frames: false }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
@@ -2022,7 +2035,7 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
-                    Inst::Fence(..) | Inst::Coverage { .. } => {}
+                    Inst::Fence(..) | Inst::Coverage { .. } | Inst::StorageDead(..) => {}
                     Inst::FpEnv(_, v) => regs.push(*v),
                     Inst::Cpuid(ds, a, b) => { regs.extend_from_slice(ds); regs.push(*a); regs.push(*b); }
                     Inst::Xgetbv(d, a) => { regs.push(*d); regs.push(*a); }

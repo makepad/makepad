@@ -3,7 +3,8 @@
 # twice) under RELAX_WARM_STRICT, with O1 code from the first call (RELAX_O1=0: not the baseline tier; O1
 # folds an array's end address into a second relocation to the one block). Every run must exit 0 and print the cold result line (a
 # warm run once yielded a third element from `["l", "r"].iter()`). Prints "cache_warm_iter_end: ok"
-# or "cache_warm_iter_end: FAILED ...".
+# or "cache_warm_iter_end: FAILED ..."; exit 0 / 1. The fast bucket runs it for a JIT change
+# (land_gate.sh step_warm_strict).
 H=$(cd "$(dirname "$0")" && pwd)
 R=$1
 C=$(mktemp -d)
@@ -24,3 +25,4 @@ c = sys.argv[1]
 if os.path.dirname(c) and os.path.isdir(c) and not os.path.islink(c) and os.path.basename(c).startswith("tmp."):
     shutil.rmtree(c)
 PY
+[ -z "$bad" ] || exit 1

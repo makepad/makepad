@@ -642,3 +642,184 @@ fn body_unwind_actions_preserve_cleanup_policy() {
         }
     }
 }
+
+mod ctfe_shaping {
+    use crate::mir::*;
+    use crate::mir::transform::{self, fixtures::*};
+
+    fn go(target: u32) -> TerminatorKind { TerminatorKind::Goto { target: BasicBlock(target) } }
+    fn branch(discr: Operand, yes: u32, no: u32) -> TerminatorKind {
+        TerminatorKind::SwitchInt { discr, targets: SwitchTargets {
+            values: vec![1], targets: vec![BasicBlock(yes)], otherwise: BasicBlock(no),
+        } }
+    }
+    fn counters(block: &BasicBlockData) -> usize {
+        block.statements.iter().filter(|s| matches!(s.kind, StatementKind::ConstEvalCounter)).count()
+    }
+
+    #[test]
+    fn ctfe_limit_calls_back_edges_reachability_and_source_info() {
+        let fx = Fx::new("");
+        let f = zst(fx.fn_ty("cf"));
+        let mut unwind_call = call(f.clone(), vec![], local(2), 9);
+        if let TerminatorKind::Call { unwind, .. } = &mut unwind_call { *unwind = UnwindAction::Cleanup(BasicBlock(12)); }
+        let mut b = body(fx.def("cf"), BodyKind::Fn, fx.u8(), &[fx.u8()], &[fx.u8()], vec![
+            block(vec![], TerminatorKind::SwitchInt { discr: copy(1), targets: SwitchTargets {
+                values: vec![0, 1, 2], targets: vec![BasicBlock(1), BasicBlock(4), BasicBlock(6)], otherwise: BasicBlock(9),
+            } }),
+            block(vec![], branch(copy(1), 2, 3)),
+            block(vec![], go(1)),                         // loop latch
+            block(vec![], unwind_call),                  // call without back edge
+            block(vec![], branch(copy(1), 5, 9)),
+            block(vec![], call(f.clone(), vec![], local(2), 4)), // call AND back edge
+            block(vec![], go(7)),                        // do-while body
+            block(vec![], branch(copy(1), 6, 8)),         // do-while condition/latch
+            block(vec![], TerminatorKind::TailCall { func: f.clone(), args: vec![], fn_span: Span::default(), arg_spans: vec![] }),
+            block(vec![], TerminatorKind::Return),
+            block(vec![], go(10)),                       // unreachable loop
+            block(vec![], call(f, vec![], local(2), 9)),  // unreachable call
+            cleanup_block(vec![], go(13)),
+            cleanup_block(vec![], branch(copy(1), 12, 14)), // reachable only by unwind
+            cleanup_block(vec![], TerminatorKind::UnwindResume),
+        ]);
+        for (i, block) in b.basic_blocks.iter_mut().enumerate() {
+            block.terminator.as_mut().unwrap().source_info.span.lo = i as u32 + 10;
+        }
+        transform::ctfe_limit::ctfe_limit(&mut b);
+        for (i, expected, property) in [
+            (0, 0, "entry split"), (1, 0, "while header"), (2, 1, "loop latch"),
+            (3, 1, "call without back edge"), (4, 0, "call-loop header"),
+            (5, 1, "call and back edge must share one counter"), (6, 0, "do-while body"),
+            (7, 1, "do-while latch"), (8, 1, "tail call"), (9, 0, "return"),
+            (10, 0, "unreachable loop"), (11, 0, "unreachable call"),
+            (12, 0, "cleanup loop header"), (13, 1, "unwind successors must be reachable"),
+            (14, 0, "unwind resume"),
+        ] {
+            let block = &b.basic_blocks[i];
+            assert_eq!(counters(block), expected, "{property}: counter multiplicity");
+            if expected != 0 {
+                let last = block.statements.last().unwrap();
+                assert!(matches!(last.kind, StatementKind::ConstEvalCounter), "{property}: counter must be last");
+                assert_eq!(last.source_info, block.terminator.as_ref().unwrap().source_info,
+                    "{property}: counter must use terminator source_info");
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_removes_analysis_facts_and_keeps_real_edges() {
+        let fx = Fx::new("");
+        let ptr = fx.tcx.tys.intern(crate::types::TyKind::Ptr(false, fx.u8()));
+        let mut b = body(fx.def("cf"), BodyKind::Fn, fx.u8(), &[ptr], &[ptr], vec![
+            block(vec![
+                stmt(StatementKind::FakeRead(FakeReadCause::ForLet(None), local(1))),
+                assign(local(2), borrow(BorrowKind::Fake(FakeBorrowKind::Shallow), local(1))),
+                stmt(StatementKind::BackwardIncompatibleDropHint { place: local(1), reason: BackwardIncompatibleDropReason::Edition2024 }),
+                assign(local(2), Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::MutToConstPointer,
+                    CoercionSource::Implicit), copy(1), ptr)),
+                assign(local(2), Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::ArrayToPointer,
+                    CoercionSource::Implicit), copy(1), ptr)),
+                stmt(StatementKind::PlaceMention(local(1))),
+            ], TerminatorKind::FalseEdge { real_target: BasicBlock(1), imaginary_target: BasicBlock(2) }),
+            block(vec![], TerminatorKind::FalseUnwind { real_target: BasicBlock(2), unwind: UnwindAction::Cleanup(BasicBlock(3)) }),
+            block(vec![], TerminatorKind::Return),
+            cleanup_block(vec![], TerminatorKind::UnwindResume),
+        ]);
+        transform::cleanup_post_borrowck::cleanup_post_borrowck(&mut b);
+        assert!(matches!(b.basic_blocks[0].terminator.as_ref().unwrap().kind, TerminatorKind::Goto { target: BasicBlock(1) }),
+            "FalseEdge must retain only its real target");
+        assert!(matches!(b.basic_blocks[1].terminator.as_ref().unwrap().kind, TerminatorKind::Goto { target: BasicBlock(2) }),
+            "FalseUnwind must retain only its real target");
+        assert!(b.basic_blocks[0].statements[..3].iter().all(|s| matches!(s.kind, StatementKind::Nop)),
+            "fake read, fake borrow and incompatible-drop hint must become Nop");
+        for i in [3, 4] {
+            assert!(matches!(b.basic_blocks[0].statements[i].kind, StatementKind::Assign(_, Rvalue::Cast(CastKind::PtrToPtr, ..))),
+                "pointer coercion {i} must become an ordinary pointer cast");
+        }
+        assert!(matches!(b.basic_blocks[0].statements[5].kind, StatementKind::PlaceMention(_)),
+            "PlaceMention must survive until RemovePlaceMention");
+        transform::remove_place_mention::remove_place_mention(&mut b);
+        assert_eq!(b.basic_blocks[0].statements.len(), 2, "RemovePlaceMention must also remove Nops and retain casts");
+    }
+
+    #[test]
+    fn intrinsic_calls_lower_to_mir_and_diverging_casts_keep_their_statement() {
+        let fx = Fx::new(r#"
+            mod intrinsic_decls {
+                pub fn assume(x: bool) {}
+                pub fn wrapping_add(a: u8, b: u8) -> u8 { a }
+                pub fn transmute(x: u8) -> u8 { x }
+            }
+            pub fn ordinary(a: u8) -> u8 { a }
+        "#);
+        let mut b = body(fx.def("cf"), BodyKind::Fn, fx.u8(), &[], &[fx.tcx.tys.unit], vec![
+            block(vec![], call(zst(fx.fn_ty("assume")), vec![int(fx.tcx.tys.bool_, 1)], local(1), 1)),
+            block(vec![], call(zst(fx.fn_ty("wrapping_add")), vec![int(fx.u8(), 2), int(fx.u8(), 3)], local(0), 2)),
+            block(vec![], call(zst(fx.fn_ty("ordinary")), vec![copy(0)], local(0), 3)),
+            block(vec![], TerminatorKind::Return),
+        ]);
+        let source = SourceInfo { span: Span { lo: 8, hi: 13, ..Span::default() }, scope: SourceScope(0) };
+        b.basic_blocks[1].terminator.as_mut().unwrap().source_info = source;
+        transform::lower_intrinsics::lower_intrinsics(&fx.prog, &fx.tcx, &mut b);
+        assert!(matches!(b.basic_blocks[0].statements[0].kind,
+            StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(_))), "assume must lower to an intrinsic statement");
+        assert!(matches!(b.basic_blocks[1].statements[0].kind,
+            StatementKind::Assign(_, Rvalue::BinaryOp(BinOp::Add, _))), "wrapping_add must lower to BinaryOp::Add");
+        for (i, target) in [(0, BasicBlock(1)), (1, BasicBlock(2))] {
+            assert!(matches!(b.basic_blocks[i].terminator.as_ref().unwrap().kind, TerminatorKind::Goto { target: t } if t == target),
+                "intrinsic {i} must keep the normal target as Goto");
+        }
+        assert_eq!(b.basic_blocks[1].statements[0].source_info, source, "lowered assignment must preserve call source_info");
+        assert!(matches!(b.basic_blocks[2].terminator.as_ref().unwrap().kind, TerminatorKind::Call { .. }),
+            "ordinary function must remain a call");
+
+        let mut divergent = call(zst(fx.fn_ty("transmute")), vec![int(fx.u8(), 1)], local(0), 0);
+        if let TerminatorKind::Call { target, .. } = &mut divergent { *target = None; }
+        b.basic_blocks = vec![block(vec![], divergent)];
+        transform::lower_intrinsics::lower_intrinsics(&fx.prog, &fx.tcx, &mut b);
+        assert!(matches!(b.basic_blocks[0].terminator.as_ref().unwrap().kind, TerminatorKind::Unreachable),
+            "transmute without a return target must become Unreachable");
+        assert!(matches!(b.basic_blocks[0].statements[0].kind, StatementKind::Assign(_, Rvalue::Cast(CastKind::Transmute, ..))),
+            "diverging transmute must retain its cast for CTFE diagnostics");
+    }
+
+    #[test]
+    fn ctfe_shape_counts_call_loop_once_and_shapes_promoteds_without_counters() {
+        let fx = Fx::new("");
+        let mut b = body(fx.def("cf"), BodyKind::Fn, fx.u8(), &[fx.tcx.tys.bool_], &[], vec![
+            block(vec![], go(1)),
+            block(vec![], branch(copy(1), 2, 3)),
+            block(vec![stmt(StatementKind::PlaceMention(local(1)))], call(zst(fx.fn_ty("cf")), vec![], local(0), 4)),
+            block(vec![], TerminatorKind::Return),
+            block(vec![], drop_(local(0), 5)), // scalar drop must disappear before counting
+            block(vec![], go(1)),             // return guard must collapse into the back edge
+        ]);
+        b.phase = MirPhase::Analysis(AnalysisPhase::Initial);
+        let mut promoted = body(fx.def("cf"), BodyKind::Promoted(fx.def("cf"), PromotedId(0)),
+            fx.u8(), &[], &[], vec![
+                block(vec![stmt(StatementKind::PlaceMention(local(0)))], call(zst(fx.fn_ty("cf")), vec![], local(0), 1)),
+                block(vec![], TerminatorKind::Return),
+            ]);
+        promoted.phase = MirPhase::Analysis(AnalysisPhase::Initial);
+        b.promoted.push(promoted);
+        transform::ctfe_shape(&fx.prog, &fx.tcx, fx.env, &mut b).expect("call loop and promoted must shape successfully");
+        assert_eq!(b.phase, MirPhase::Runtime(RuntimePhase::PostCleanup), "outer body must finish runtime cleanup");
+        let calls: Vec<_> = b.basic_blocks.iter().filter(|bb| matches!(bb.terminator.as_ref().unwrap().kind, TerminatorKind::Call { .. })).collect();
+        assert_eq!(calls.len(), 1, "ordinary call must survive shaping");
+        assert_eq!(counters(calls[0]), 1, "call plus loop back edge must get one counter");
+        assert_eq!(b.basic_blocks.iter().map(counters).sum::<usize>(), 1, "call loop must have exactly one counter total");
+        assert!(b.basic_blocks.iter().all(|bb| !matches!(bb.terminator.as_ref().unwrap().kind, TerminatorKind::Drop { .. })),
+            "drop elaboration must remove the scalar drop before counter placement");
+        assert!(b.basic_blocks.iter().flat_map(|bb| &bb.statements).all(|s| !matches!(s.kind, StatementKind::PlaceMention(_))),
+            "outer PlaceMention must survive drop analysis then be removed");
+        let promoted = &b.promoted[0];
+        assert_eq!(promoted.phase, MirPhase::Runtime(RuntimePhase::PostCleanup), "promoted must also finish runtime cleanup");
+        assert_eq!(promoted.basic_blocks.iter().map(counters).sum::<usize>(), 0, "promoted calls must not receive CtfeLimit");
+        assert!(promoted.basic_blocks.iter().flat_map(|bb| &bb.statements).all(|s| !matches!(s.kind, StatementKind::PlaceMention(_))),
+            "promoted must run RemovePlaceMention");
+        let drops = transform::QueryDrops { prog: &fx.prog, tcx: &fx.tcx, env: fx.env };
+        use transform::DropProvider;
+        assert!(!drops.needs_drop(fx.u8()).expect("primitive drop query"), "production provider must recognize a no-drop scalar");
+        assert!(drops.needs_drop(fx.adt("D")).expect("ADT drop query"), "production provider must recognize an ADT destructor");
+    }
+}

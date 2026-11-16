@@ -22,7 +22,7 @@ pub fn thread_on(options: &relax_session::Options) -> bool {
 
 pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
     match x {
-        Inst::Coverage { .. } => x.clone(),
+        Inst::Coverage { .. } | Inst::StorageDead(..) => x.clone(),
         Inst::Iconst(d, v) => Inst::Iconst(m(*d), *v),
         Inst::Fconst(d, v, w) => Inst::Fconst(m(*d), *v, *w),
         Inst::Mov(d, a) => Inst::Mov(m(*d), m(*a)),

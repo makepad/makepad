@@ -89,6 +89,7 @@ fn instruction_reason(i: &Inst, stored: bool) -> &'static str {
             BitOp::Rev => "op-bitrev",
         },
         Inst::Coverage { .. } => "op-coverage",
+        Inst::StorageDead(..) => "op-storage-dead",
         Inst::Iconst(..) => "op-iconst",
         Inst::Fconst(..) => "op-fconst",
         Inst::Mov(..) => "op-mov",

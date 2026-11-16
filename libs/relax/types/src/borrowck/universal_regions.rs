@@ -101,7 +101,7 @@ impl UniversalRegionIndices {
         }
     }
 }
-struct UniversalRegionsBuilder<'a> { tcx: &'a Tcx, prog: &'a Program, defining_ty: DefiningTy, parent: Option<SignatureRegions>, contract: RegionContract }
+struct UniversalRegionsBuilder<'a> { tcx: &'a Tcx, prog: &'a Program, defining_ty: DefiningTy, parent: Option<&'a SignatureRegions>, contract: RegionContract }
 impl UniversalRegionsBuilder<'_> {
     fn build(mut self) -> SignatureRegions {
         let tcx = self.tcx;
@@ -115,7 +115,7 @@ impl UniversalRegionsBuilder<'_> {
             // bound by an enclosing callable. Instantiate that outer binder as
             // external query identities before the ordinary erased-region pass.
             let raw: Vec<_> = inputs.iter().copied().chain([output]).collect();
-            let base = self.parent.as_ref().map_or(0,|p| placeholder_base(tcx,p.regions.iter().filter_map(|u| match u.identity { Identity::Region(_,r) => Some(r), _ => None })));
+            let base = self.parent.map_or(0,|p| placeholder_base(tcx,p.regions.iter().filter_map(|u| match u.identity { Identity::Region(_,r) => Some(r), _ => None })));
             let mut replaced = crate::borrowck::implied_bounds::replace_erased_regions_with_placeholders(tcx,&raw,base);
             let next = std::cell::Cell::new(base + crate::borrowck::implied_bounds::implied_bounds_query_var_values(tcx,&replaced,
                 |r| matches!(tcx.tys.region_kind(r),RegionKind::RePlaceholder { .. })).len() as u32);
@@ -187,18 +187,18 @@ impl UniversalRegionsBuilder<'_> {
         indices.regions.push(UniversalRegion { identity:Identity::FnBody(scope),class:RegionClassification::Local,name:"'fn_body".into() });
         SignatureRegions { regions:indices.regions,inputs,output,implicit_input:None,contract:self.contract,fr_static:0,fr_fn_body,query_placeholders }
     }
-    fn compute_indices(&mut self) -> UniversalRegionIndices {
-        let mut regions = match self.parent.take() {
+    fn compute_indices(&self) -> UniversalRegionIndices {
+        let mut regions = match self.parent {
             // The parent's erased regions (its signature's placeholders, its environment's erased regions) are its own
             // external regions: the nested closure's types hold them erased, as regions of their own.
-            Some(parent) => parent.regions.into_iter().filter(|r| !matches!(r.identity,Identity::FnBody(_)) && !match r.identity {
+            Some(parent) => parent.regions.iter().filter(|r| !matches!(r.identity,Identity::FnBody(_)) && !match r.identity {
                 Identity::Region(_,x) => match self.tcx.tys.region_kind(x) {
                     RegionKind::RePlaceholder { .. } => true,
                     RegionKind::ReLateParam(_,LateParamKind::Anon(n)) => n >= ENV_ERASED_BASE,
                     _ => false,
                 },
                 _ => false,
-            }).map(|mut r| {
+            }).cloned().map(|mut r| {
                 if r.class != RegionClassification::Global { r.class = RegionClassification::External; } r
             }).collect(),
             None => vec![],
@@ -344,10 +344,11 @@ impl SignatureRegions {
     /// A closure's universal regions (universal_regions.rs `DefiningTy::Closure`): its parent's
     /// are external, its own signature's are local. The signature is the typeck result's, with
     /// the lifetime arguments of its types as written back.
+    /// Borrows the parent, cloning only its contract and the universal regions inherited by the closure.
     ///
     /// An async closure (`coroutine`: its upvar plan and its environment type, `&C`, `&mut C` or `C`) returns
     /// a coroutine whose upvars the signature fixes (`coroutine_closure_output`).
-    pub fn closure_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, sig: &crate::typeck::ClosureSignatures, coroutine: Option<(&CoroutineUpvars, TyId)>, parent: Self) -> Option<Self> {
+    pub fn closure_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, sig: &crate::typeck::ClosureSignatures, coroutine: Option<(&CoroutineUpvars, TyId)>, parent: &Self) -> Option<Self> {
         // compute_inputs_and_output: the closure's one (bound) signature, not
         // the body's supplied types; the annotation is ascribed onto it.
         let mut signature = sig.liberated_bound();
@@ -381,7 +382,8 @@ impl SignatureRegions {
     /// An inline constant's universal regions (`DefiningTy::InlineConst`): its creator's (the item or a
     /// closure) as external regions, and the regions of its type, external too. No inputs; the output
     /// is the constant's type.
-    pub fn inline_const_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, ty: TyId, parent: Self) -> Self {
+    /// Borrows the parent, cloning only its contract and the universal regions inherited by the constant.
+    pub fn inline_const_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, ty: TyId, parent: &Self) -> Self {
         UniversalRegionsBuilder { tcx,prog,defining_ty:DefiningTy::InlineConst { owner,expr,ty },contract:parent.contract.clone(),parent:Some(parent) }.build()
     }
     /// The closure body's implicit first argument (the environment, `&'env C`, `&'env mut C`

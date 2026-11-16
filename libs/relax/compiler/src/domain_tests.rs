@@ -226,11 +226,16 @@ fn teardown_fixture_cycles_and_retiring_thread() {
 }
 
 // The CPU budget's source and an app whose task pool lives in a static (tests/static_pool/pool.rs).
-// The budget's `#[relax_api]` marks name a crate a one-file program does not have.
+// The budget's `#[relax_api]` marks and its `relax_api::option_layouts!` entries name a crate a
+// one-file program does not have; the entries are for its provided build, the fixture runs it as JIT code.
 fn static_pool_fixture() -> String {
-    let budget = include_str!("../../../../libs/cpu_budget/src/lib.rs")
+    let mut budget = include_str!("../../../../libs/cpu_budget/src/lib.rs")
         .replace("use relax_api::relax_api;\n", "")
         .replace("#[relax_api]\n", "");
+    while let Some(at) = budget.find("relax_api::option_layouts! {") {
+        let end = at + budget[at..].find("\n}\n").expect("an option_layouts! block ends with a `}` line") + 3;
+        budget.replace_range(at..end, "");
+    }
     let app = include_str!("../tests/static_pool/pool.rs");
     format!("mod makepad_cpu_budget {{\n{budget}\n}}\n{app}")
 }
@@ -1328,12 +1333,39 @@ fn end_process(pid: u32) {
     }
 }
 
+/// The path the Unix socket `fd` is bound to, as `getsockname` gives it (a connection a listener
+/// accepted has the listener's). None for another descriptor or an unnamed socket.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn socket_path(fd: i32) -> Option<String> {
+    extern "C" {
+        fn getsockname(fd: i32, addr: *mut u8, len: *mut u32) -> i32;
+    }
+    const AF_UNIX: u16 = 1;
+    let mut addr = [0u8; 256];
+    let mut len = addr.len() as u32;
+    if unsafe { getsockname(fd, addr.as_mut_ptr(), &mut len) } != 0 {
+        return None;
+    }
+    // sockaddr_un: its family (a u16, or on Apple's systems a length byte and a u8), then the path
+    #[cfg(target_vendor = "apple")]
+    let family = addr[1] as u16;
+    #[cfg(not(target_vendor = "apple"))]
+    let family = u16::from_ne_bytes([addr[0], addr[1]]);
+    let path = addr.get(2..(len as usize).min(addr.len()))?;
+    let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    (family == AF_UNIX && end > 0).then(|| String::from_utf8_lossy(&path[..end]).into_owned())
+}
+
 /// What the process has open now: each descriptor and the file it names ("" for a pipe or a
-/// socket where the system names none), but the listing's own; on Windows, one row per handle.
+/// socket where the system names none; a Unix socket with the path it is bound to), but the
+/// listing's own; on Windows, one row per handle.
 fn open_now() -> Vec<(u64, String)> {
     #[cfg(target_os = "linux")]
     return std::fs::read_dir("/proc/self/fd").unwrap().filter_map(|e| e.ok()).map(|e| {
-        (e.file_name().to_string_lossy().parse().unwrap_or(u64::MAX), std::fs::read_link(e.path()).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default())
+        let fd = e.file_name().to_string_lossy().parse().unwrap_or(u64::MAX);
+        let file = std::fs::read_link(e.path()).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default();
+        let bound = file.starts_with("socket:").then(|| socket_path(fd as i32)).flatten();
+        (fd, bound.map_or(file.clone(), |path| format!("{file} {path}")))
     }).filter(|(_, file)| *file != format!("/proc/{}/fd", std::process::id())).collect();
     #[cfg(target_vendor = "apple")]
     {
@@ -1345,7 +1377,7 @@ fn open_now() -> Vec<(u64, String)> {
             let mut buf = [0u8; 1024];
             let named = unsafe { fcntl(fd, F_GETPATH, buf.as_mut_ptr()) } == 0;
             let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
-            (fd as u64, if named { String::from_utf8_lossy(&buf[..end]).into_owned() } else { String::new() })
+            (fd as u64, if named { String::from_utf8_lossy(&buf[..end]).into_owned() } else { socket_path(fd).unwrap_or_default() })
         }).filter(|(_, file)| file != "/dev/fd").collect();
     }
     #[cfg(windows)]
@@ -1363,6 +1395,15 @@ fn open_now() -> Vec<(u64, String)> {
 fn the_compilers(file: &str) -> bool {
     let name = file.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(file);
     name.ends_with(".rs") || name.contains(".rcs")
+}
+
+/// A connection to this process's own remote endpoint: a node's devhub follows each JIT it finds
+/// (its `observe` feed), dialing it at its next registry scan, and the endpoint keeps the accepted
+/// socket (three descriptors: the carrier's reader, writer and shutdown) while the follower stays.
+/// It is the process's, never the run's, and it comes in whichever round that scan does: in the
+/// second round of a loaded box (11-14). A run's own sockets are no Unix socket bound there.
+fn the_endpoints(file: &str) -> bool {
+    file.ends_with(&format!("/makepad-remote-{}.sock", std::process::id()))
 }
 
 /// The run's end gives back what the run held, though it never did: the next run binds the same
@@ -1416,7 +1457,7 @@ fn a_run_ends_with_what_it_held_given_back() {
             assert_eq!(unsafe { signal(SIGUSR2, 0) }, 0, "the run's handler stayed");
         }
         // what the round left open, by what it names: not a count of the whole process
-        let left: Vec<_> = open_now().into_iter().filter(|f| !open_before.contains(f) && !the_compilers(&f.1)).collect();
+        let left: Vec<_> = open_now().into_iter().filter(|f| !open_before.contains(f) && !the_compilers(&f.1) && !the_endpoints(&f.1)).collect();
         counts.push(left.len());
         lefts.push(left);
         domains().retain(|d| d.info.id != domain);

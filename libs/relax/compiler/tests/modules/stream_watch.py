@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix="module-stream-watch-") as tmp:
         capture_output=True, text=True,
     )
 lines = p.stderr.splitlines()
-quiet = next((i for i, s in enumerate(lines) if s == "stream-watch: quiet window ended"), None)
+quiet = next((i for i, s in enumerate(lines) if s == "stream-watch: fed, nothing reported"), None)
 errors = [i for i, s in enumerate(lines) if s.startswith("relax live:") and "memory/watch-stream.rs:" in s]
 ok = p.returncode == 0 and "out module stream watcher: true" in p.stdout and quiet is not None and errors and min(errors) > quiet
 if not ok:

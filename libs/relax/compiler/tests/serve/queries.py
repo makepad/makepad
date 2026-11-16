@@ -61,7 +61,7 @@ try:
     bad=source.read_text().replace('fn broken(_: i32)', 'fn broken(_: Missing)')
     watch.stdin.write(json.dumps(dict(method='didChange',path=str(source),text=bad))+'\n'); watch.stdin.flush()
     diagnostics,summary=batch('warm signature error')
-    assert any(d['code']=='E0412' for d in diagnostics),diagnostics
+    assert any(d['code']=='E0425' for d in diagnostics),diagnostics
     watch.stdin.write(json.dumps(dict(method='didChange',path=str(source),text=source.read_text()))+'\n'); watch.stdin.flush()
     diagnostics,summary=batch('warm fixed')
     assert not diagnostics,diagnostics

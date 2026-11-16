@@ -52,7 +52,42 @@ extern "C" {
     fn raise(sig: i32) -> i32;
     fn write(fd: i32, b: *const u8, n: usize) -> isize;
     pub fn setrlimit(r: i32, l: *const [u64; 2]) -> i32;
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+    fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
+    fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
+    fn memset(p: *mut u8, c: i32, n: usize) -> *mut u8;
 }
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct StackT {
+    sp: *mut u8,
+    flags: i32,
+    pad: i32,
+    size: usize,
+}
+#[cfg(target_vendor = "apple")]
+#[repr(C)]
+struct StackT {
+    sp: *mut u8,
+    size: usize,
+    flags: i32,
+}
+const SIGSEGV: i32 = 11;
+#[cfg(target_os = "linux")]
+const SA_ONSTACK: i32 = 0x0800_0000;
+#[cfg(target_vendor = "apple")]
+const SA_ONSTACK: i32 = 0x1;
+#[cfg(target_os = "linux")]
+const MAP_PRIVATE_ANON: i32 = 0x22;
+#[cfg(target_vendor = "apple")]
+const MAP_PRIVATE_ANON: i32 = 0x1002;
+/// a small stack's size and its guard's, and the protected page's (any page size)
+const SMALL: usize = 1 << 16;
+#[cfg(target_os = "linux")]
+const SIGUSR1: i32 = 10;
+#[cfg(target_vendor = "apple")]
+const SIGUSR1: i32 = 30;
 #[cfg(target_os = "linux")]
 const SIGUSR2: i32 = 12;
 #[cfg(target_vendor = "apple")]
@@ -200,6 +235,50 @@ pub fn install_abrt(_out: &mut [u64; 8]) {
         "SIGABRT installation must succeed");
 }
 
+static PROTECTED: AtomicU64 = AtomicU64::new(0);
+static SEGV_RUNS: AtomicU64 = AtomicU64::new(0);
+
+#[inline(never)]
+fn first_in_segv(x: u64) -> u64 { x.wrapping_mul(5).wrapping_add(1) }
+
+extern "C" fn on_segv(_sig: i32, _info: *mut u8, _uc: *mut u8) {
+    SEGV_RUNS.fetch_add(first_in_segv(0), SeqCst);
+    unsafe { mprotect(PROTECTED.load(SeqCst) as *mut u8, SMALL, 3); }
+}
+
+pub fn install_segv(_out: &mut [u64; 8]) {
+    let a = action(on_segv as *const () as usize, SA_SIGINFO | SA_ONSTACK);
+    assert_eq!(unsafe { sigaction(SIGSEGV, &a, null_mut()) }, 0, "SIGSEGV installation must succeed");
+}
+
+/// A 64 KB signal stack (above a guard) placed above the calling thread's stack, a page it
+/// protected, and a write into that page by the C library: the handler runs on the small stack.
+pub fn segv_on_small_stack(out: &mut [u64; 8]) {
+    let mark = 0u8;
+    let here = &mark as *const u8 as usize;
+    let mut base = null_mut();
+    for shift in 28..40 {
+        let hint = (here + (1usize << shift)) & !(SMALL - 1);
+        let p = unsafe { mmap(hint as *mut u8, 2 * SMALL, 3, MAP_PRIVATE_ANON, -1, 0) };
+        if p as isize == -1 { continue; }
+        if p as usize > here { base = p; break; }
+        unsafe { munmap(p, 2 * SMALL); }
+    }
+    assert!(!base.is_null(), "a small stack above the thread's");
+    assert_eq!(unsafe { mprotect(base, SMALL, 0) }, 0, "the small stack's guard");
+    let mut ss: StackT = unsafe { std::mem::zeroed() };
+    ss.sp = unsafe { base.add(SMALL) };
+    ss.size = SMALL;
+    let mut old: StackT = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { sigaltstack(&ss, &mut old) }, 0, "the small signal stack must be taken");
+    let page = unsafe { mmap(null_mut(), SMALL, 0, MAP_PRIVATE_ANON, -1, 0) };
+    PROTECTED.store(page as u64, SeqCst);
+    unsafe { memset(page, 7, std::hint::black_box(1)); }
+    assert_eq!(unsafe { sigaltstack(&old, null_mut()) }, 0, "the thread's signal stack must come back");
+    out[0] = SEGV_RUNS.load(SeqCst);
+    out[1] = unsafe { *page } as u64;
+}
+
 #[cfg(target_os = "linux")]
 extern "C" fn on_rt(_sig: i32, info: *mut u8, _uc: *mut u8) {
     let n = NVALUES.load(SeqCst) as usize;
@@ -219,26 +298,58 @@ pub fn values(out: &mut [u64; 8]) {
     for i in 0..3 { out[i] = VALUES[i].load(SeqCst); }
     out[3] = NVALUES.load(SeqCst);
 }
+
+static USR1_RUNS: AtomicU64 = AtomicU64::new(0);
+static WATCH_SIG_RUNS: AtomicU64 = AtomicU64::new(0);
+extern "C" fn on_usr1(_sig: i32, _info: *mut u8, _uc: *mut u8) { USR1_RUNS.fetch_add(1, SeqCst); }
+extern "C" fn on_watch_sig(_sig: i32, _info: *mut u8, _uc: *mut u8) { WATCH_SIG_RUNS.fetch_add(1, SeqCst); }
+
+/// Handlers on SIGUSR1 and on the host's watchdog signal (out[0]).
+pub fn install_usr1(out: &mut [u64; 8]) {
+    let a = action(on_usr1 as *const () as usize, SA_SIGINFO | SA_RESTART);
+    assert_eq!(unsafe { sigaction(SIGUSR1, &a, null_mut()) }, 0, "SIGUSR1 installation must succeed");
+    let a = action(on_watch_sig as *const () as usize, SA_SIGINFO | SA_RESTART);
+    assert_eq!(unsafe { sigaction(out[0] as i32, &a, null_mut()) }, 0, "the watchdog signal's installation must succeed");
+}
+
+/// Raises out[1] (0: none); out[2], out[3]: the SIGUSR1 and watchdog-signal handlers' runs.
+pub fn raise_and_count(out: &mut [u64; 8]) {
+    if out[1] != 0 {
+        assert_eq!(unsafe { raise(out[1] as i32) }, 0, "raise must succeed");
+    }
+    out[2] = USR1_RUNS.load(SeqCst);
+    out[3] = WATCH_SIG_RUNS.load(SeqCst);
+}
 "#;
 
 fn child(test: &str, hook: &str) -> std::process::Output {
+    child_with(test, hook, &[])
+}
+
+fn child_with(test: &str, hook: &str, env: &[(&str, &str)]) -> std::process::Output {
     let _slot = crate::test_child::slot();
     std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("progsig_tests::{test}"), "--nocapture", "--test-threads=1"])
         .env(CHILD, test)
         .env("RELAX_TEST_SIGNAL_IN_COMPILE", hook)
+        .envs(env.iter().copied())
         .output()
         .expect("the signal test child must run")
 }
 
 fn setup() -> (Box<Unit>, u32) {
+    setup_with(FIXTURE, "progsig_fixture")
+}
+
+/// A unit of fixture crate `name` (source `src`).
+fn setup_with(src: &str, name: &str) -> (Box<Unit>, u32) {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
     std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-progsig-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("lib.rs");
-    std::fs::write(&path, FIXTURE).unwrap();
-    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "progsig_fixture", false).unwrap();
+    std::fs::write(&path, src).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), name, false).unwrap();
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(dir).unwrap();
     let mut tcx = crate::tcx::Tcx::new();
@@ -384,7 +495,8 @@ fn an_outside_sigabrt_in_a_compile_reports_and_ends_the_process() {
         let output = child(TEST, "target_in_compile,6,process");
         let err = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.signal(), Some(6), "outside SIGABRT must end the compile: {:?}\n{err}", output.status);
-        assert!(err.contains("fixture: SIGABRT report") || (cfg!(relax) && err.contains("SIGABRT on thread")), "outside SIGABRT must report before exit:\n{err}");
+        assert!(err.contains("SIGABRT on thread"), "outside SIGABRT must have relax's report:\n{err}");
+        assert!(err.contains("fixture: SIGABRT report"), "outside SIGABRT must run the program's handler after the report:\n{err}");
         return;
     }
     assert_eq!(unsafe { setrlimit(4, &[0, 0]) }, 0, "the SIGABRT child must disable core dumps");
@@ -394,6 +506,119 @@ fn an_outside_sigabrt_in_a_compile_reports_and_ends_the_process() {
     let arg = out.as_mut_ptr() as u64;
     call(&mut u, krate, "install_abrt", arg);
     call(&mut u, krate, "target_in_compile", arg);
+    // A host thread that took the process-directed signal hands it back to the process, so it can
+    // still be on its way when the call returns: returning now would end the child with status 0.
+    // The minute only turns a lost signal into a failure instead of a hung parent.
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(60) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the outside SIGABRT must end the process once the compile is over");
+}
+
+/// One source for the SIGABRT fixture: run natively in this binary (`abrt_native`) and compiled by
+/// a unit (`ABRT_FIXTURE`), so both children run the same program.
+macro_rules! abrt_fixture {
+    ($($t:tt)*) => {
+        mod abrt_native { $($t)* }
+        const ABRT_FIXTURE: &str = stringify!($($t)*);
+    };
+}
+
+abrt_fixture! {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    extern "C" {
+        fn signal(sig: i32, h: usize) -> usize;
+        fn raise(sig: i32) -> i32;
+        fn abort() -> !;
+        fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+        fn _exit(code: i32) -> !;
+    }
+    static RUNS: AtomicU64 = AtomicU64::new(0);
+    // a fn of the test's that the ending handler calls first (out[2]; 0: none)
+    static HOOK: AtomicU64 = AtomicU64::new(0);
+    fn say(m: &[u8]) {
+        unsafe { write(2, m.as_ptr().cast(), m.len()) };
+    }
+    extern "C" fn on_abrt(_sig: i32) {
+        RUNS.fetch_add(1, SeqCst);
+        say(b"abrt fixture: the handler ran\n");
+    }
+    extern "C" fn on_abrt_exit(_sig: i32) {
+        let hook = HOOK.load(SeqCst);
+        if hook != 0 {
+            let f: extern "C" fn() = unsafe { core::mem::transmute(hook as usize) };
+            f();
+        }
+        say(b"abrt fixture: the handler ends the process\n");
+        unsafe { _exit(3) }
+    }
+    // out[0]: 1 raise(SIGABRT), 2 abort(), each with a handler that returns; 3 raise(SIGABRT)
+    // with one that ends the process; out[1]: the returning handler's runs
+    pub fn abrt_case(out: &mut [u64; 8]) {
+        HOOK.store(out[2], SeqCst);
+        let h = if out[0] == 3 { on_abrt_exit as *const () as usize } else { on_abrt as *const () as usize };
+        unsafe { signal(6, h) };
+        if out[0] == 2 {
+            unsafe { abort() }
+        }
+        unsafe { raise(6) };
+        say(b"abrt fixture: raise returned\n");
+        out[1] = RUNS.load(SeqCst);
+    }
+}
+
+/// A program's SIGABRT handler under the JIT does what it does natively: it runs, and when it
+/// returns raise(SIGABRT) goes on and abort() ends the process, relax's report after it; one that
+/// ends the process is the only one to speak, and finds the abort's site in the flight recorder.
+/// Each case runs natively and as a unit's program; their ends and the fixture's lines must be the
+/// same.
+#[test]
+fn a_program_sigabrt_handler_runs_and_returns_as_it_does_natively() {
+    const TEST: &str = "a_program_sigabrt_handler_runs_and_returns_as_it_does_natively";
+    const MODE: &str = "RELAX_PROGSIG_ABRT_MODE";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        let run = |mode: &str| {
+            let output = child_with(TEST, "", &[(MODE, mode)]);
+            let err = String::from_utf8_lossy(&output.stderr).into_owned();
+            let lines: Vec<String> = err.lines().filter(|l| l.starts_with("abrt fixture:")).map(str::to_string).collect();
+            (output.status.code(), output.status.signal(), lines, err)
+        };
+        for (case, reports) in [("raise", 1), ("abort", 1), ("exit", 0)] {
+            let (code, signal, lines, err) = run(&format!("native,{case}"));
+            // (the baseline ran the program's handler: else this binary's own run took the signal)
+            assert!(lines.iter().any(|l| l.starts_with("abrt fixture: the handler")), "{case}: natively the handler runs:\n{err}");
+            let (jit_code, jit_signal, jit_lines, jit_err) = run(&format!("jit,{case}"));
+            assert_eq!((jit_code, jit_signal), (code, signal), "{case}: under the JIT the process ends as natively:\n{jit_err}\nnatively:\n{err}");
+            assert_eq!(jit_lines, lines, "{case}: under the JIT the program says what it does natively:\n{jit_err}\nnatively:\n{err}");
+            let report = |e: &str| e.matches("relax: SIGABRT on thread").count();
+            assert_eq!(report(&jit_err), report(&err) + reports, "{case}: {reports} report(s) of the unit's:\n{jit_err}");
+            if case == "exit" {
+                assert!(jit_err.lines().any(|l| l == "abrt recorder: 1"), "{case}: the abort's site in the flight recorder before the handler:\n{jit_err}");
+            }
+        }
+        return;
+    }
+    assert_eq!(unsafe { setrlimit(4, &[0, 0]) }, 0, "the SIGABRT child must disable core dumps");
+    let mode = std::env::var(MODE).unwrap();
+    let (how, case) = mode.split_once(',').unwrap();
+    let mut out = [match case { "abort" => 2, "exit" => 3, _ => 1 }, 0, 0, 0, 0, 0, 0, 0];
+    if how == "native" {
+        abrt_native::abrt_case(&mut out);
+    } else {
+        // what the ending handler reads first: the unit's flight recorder
+        extern "C" fn recorder() {
+            eprintln!("abrt recorder: {}", crate::inspect::flightrec::count_events("signal.abort"));
+        }
+        crate::inspect::flightrec::init();
+        out[2] = recorder as *const () as usize as u64;
+        let (mut u, krate) = setup_with(ABRT_FIXTURE, "abrt_fixture");
+        let _program = crate::os::program_thread();
+        crate::os::fault::reassert();
+        call(&mut u, krate, "abrt_case", out.as_mut_ptr() as u64);
+    }
+    eprintln!("abrt fixture: runs {}", out[1]);
+    std::process::exit(0);
 }
 
 #[test]
@@ -435,3 +660,114 @@ fn queued_realtime_signals_in_a_compile_keep_their_count_and_values() {
     assert_eq!(&out[..3], &[1, 2, 3], "queued realtime signals must preserve their values and order");
     assert_eq!(crate::os::progsig::counts(50)[0], 3, "all three realtime handler runs must be counted");
 }
+
+/// A program's SIGSEGV handler runs on a 64 KB signal stack of the program's, and its first call
+/// compiles with 256 KB of stack (the compile hook): the compile moves to a stack segment and
+/// the handler fixes the page; the write lands. Before the stack check knew its stack, the
+/// compile ran on the signal stack and overflowed it with SIGSEGV blocked (the kernel's kill, no
+/// report). And right after the program's `sigaction`, the host's handler stays in the kernel
+/// with the program's behind it: the host's policy sees every fault without waiting for the run
+/// monitor to put it back.
+#[test]
+fn a_fault_handler_that_compiles_on_a_small_signal_stack_runs() {
+    const TEST: &str = "a_fault_handler_that_compiles_on_a_small_signal_stack_runs";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        let output = child_with(TEST, "", &[("RELAX_TEST_COMPILE_STACK", "first_in_segv,256")]);
+        assert!(output.status.success(), "the small-stack child must succeed: {:?}\n{}", output.status, String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let (mut u, krate) = setup();
+    let _program = crate::os::program_thread();
+    let mut out = [0u64; 8];
+    let arg = out.as_mut_ptr() as u64;
+    call(&mut u, krate, "install_segv", arg);
+    assert_eq!(crate::os::progsig::kernel_handler(SIGSEGV), crate::os::fault::host_handler(), "the host's handler stays in the kernel");
+    assert_eq!(crate::os::fault::chained_handler(SIGSEGV), crate::os::progsig::trampoline_addr(), "the program's handler is chained behind it");
+    call(&mut u, krate, "segv_on_small_stack", arg);
+    assert_eq!(out[0], 1, "the program's handler ran once");
+    assert_eq!(out[1], 7, "the write landed once the handler gave the page back");
+}
+
+/// A fault inside a compile is the compiler's: no program handler runs there, and the process
+/// ends by the signal with a report naming the signal, the address, the thread and the compile.
+/// Which fault runs the program's handler: on its thread outside a compile; on a thread with no
+/// program state, outside the host's own code.
+#[test]
+fn a_fault_inside_a_compile_ends_the_process_with_a_report() {
+    const TEST: &str = "a_fault_inside_a_compile_ends_the_process_with_a_report";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        use crate::os::progsig::runs_handler;
+        assert!(runs_handler(true, 0, || true), "a program thread outside a compile runs it");
+        assert!(!runs_handler(true, 1, || false) && !runs_handler(true, 2, || false), "inside a compile it never does");
+        assert!(runs_handler(false, 0, || false), "a thread with no state runs it for a fault outside the host's code");
+        assert!(!runs_handler(false, 0, || true), "a fault in the host's code with no state is the host's crash");
+        crate::os::fault::note_host_text();
+        let host = crate::os::fault::host_code as *const () as u64;
+        let libc = libc_write as *const () as u64;
+        assert!(crate::os::fault::host_code(host), "the host's code is its own");
+        // (under the JIT the host's code is JIT code in no image: every pc counts as the host's)
+        assert_eq!(crate::os::fault::host_code(libc), cfg!(relax), "the C library's code is not the host's");
+        let output = child(TEST, "target_in_compile,11,fault");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.signal(), Some(SIGSEGV), "the fault ends the process by its signal: {:?}\n{err}", output.status);
+        let line = err.lines().find(|l| l.starts_with("relax: fatal signal 11 on thread ")).unwrap_or_else(|| panic!("no fatal signal report:\n{err}"));
+        let at = err.lines().find_map(|l| l.strip_prefix("relax test: a fault at ")).and_then(|l| l.split(' ').next()).unwrap_or_else(|| panic!("no fault address from the hook:\n{err}"));
+        assert!(line.contains(&format!(" addr {at}")) && line.contains("inside a compile"), "the report names the address and why: {line}");
+        assert!(err.contains("in the compile of slot ") && err.contains("target_in_compile"), "the report names the compile:\n{err}");
+        return;
+    }
+    let (mut u, krate) = setup();
+    let _program = crate::os::program_thread();
+    let mut out = [0u64; 8];
+    let arg = out.as_mut_ptr() as u64;
+    call(&mut u, krate, "install_segv", arg);
+    call(&mut u, krate, "target_in_compile", arg);
+    panic!("the fault inside the compile must end the process");
+}
+
+const SIGSEGV: i32 = 11;
+
+extern "C" {
+    #[link_name = "write"]
+    fn libc_write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+}
+
+/// A program's SIGUSR1 is the program's: its handler runs, also after the run monitor put the
+/// host's handlers back on top. The host's watchdog has a signal of its own, and only its kicks
+/// are the host's: the program's own send of that signal runs the program's handler on it.
+#[test]
+fn a_program_sigusr1_and_its_send_of_the_watchdog_signal_run_its_handlers() {
+    const TEST: &str = "a_program_sigusr1_and_its_send_of_the_watchdog_signal_run_its_handlers";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        let output = child(TEST, "");
+        assert!(output.status.success(), "the SIGUSR1 child must succeed: {:?}\n{}", output.status, String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let (mut u, krate) = setup();
+    let _program = crate::os::program_thread();
+    let watch = crate::os::fault::watchdog_signal();
+    assert_ne!(watch, SIGUSR1, "the watchdog's signal is not SIGUSR1");
+    let mut out = [0u64; 8];
+    out[0] = watch as u64;
+    let arg = out.as_mut_ptr() as u64;
+    call(&mut u, krate, "install_usr1", arg);
+    assert_eq!(crate::os::progsig::kernel_handler(watch), crate::os::fault::host_handler(), "the host's handler stays on the watchdog's signal");
+    assert_eq!(crate::os::fault::chained_handler(watch), crate::os::progsig::trampoline_addr(), "the program's handler is chained behind it");
+    // the run monitor's tick
+    crate::os::fault::reassert();
+    out[1] = SIGUSR1 as u64;
+    call(&mut u, krate, "raise_and_count", arg);
+    assert_eq!((out[2], out[3]), (1, 0), "the program's SIGUSR1 runs its handler once");
+    crate::os::thread::kick(crate::os::thread::current());
+    out[1] = 0;
+    call(&mut u, krate, "raise_and_count", arg);
+    assert_eq!((out[2], out[3]), (1, 0), "a kick runs no program handler");
+    out[1] = watch as u64;
+    call(&mut u, krate, "raise_and_count", arg);
+    assert_eq!((out[2], out[3]), (1, 1), "the program's own send of the watchdog's signal runs its handler once");
+}
+
+#[cfg(target_os = "linux")]
+const SIGUSR1: i32 = 10;
+#[cfg(target_vendor = "apple")]
+const SIGUSR1: i32 = 30;

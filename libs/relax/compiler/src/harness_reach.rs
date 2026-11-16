@@ -221,7 +221,7 @@ fn definition(u: &Unit, mut id: u32) -> Option<DefId> {
         if id as usize >= u.fns.len() { return None; }
         let mut d = match &u.fns[id as usize].key {
             FnKey::Inst(d, _) => *d,
-            FnKey::Closure(_, _, parent) | FnKey::Sandbox(parent) | FnKey::Plain(parent) => { id = *parent; continue; }
+            FnKey::Closure(_, _, parent) | FnKey::Sandbox(parent) | FnKey::Plain(parent) | FnKey::Ctfe(parent) => { id = *parent; continue; }
             FnKey::Shim(s) => match s.kind {
                 relax_types::instance::ShimKind::ClosureOnce { closure, .. } => closure,
                 _ => s.kind.def_id(),

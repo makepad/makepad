@@ -230,7 +230,9 @@ fn rewrite_one(v: &FileView<'_>, r: &FvRecordRaw, n: usize) -> Result<(Vec<Edit>
     }
 
     // the field-level borrow `&P` / `&mut P`, or the place `P` itself
-    let (borrow_id, borrow) = v.expr_at(r.span).ok_or("the borrow is not an expression")?;
+    let (borrow_id, _) = v.expr_at(r.span).ok_or("the borrow is not an expression")?;
+    let borrow_id = v.unparen(borrow_id);
+    let borrow = *ast.expr(borrow_id);
     let (place_id, place) = match borrow.kind { ExprKind::AddrOf(false, _, x) => (x, *ast.expr(x)), _ => (borrow_id, borrow) };
     if !v.is_plain(place_id) { return Err("the place is not a plain place path"); }
     let place_text = v.text(place.lo, place.hi);
@@ -367,9 +369,10 @@ fn disjoint_rewrite(v: &FileView<'_>, d: &super::DisjointRecord) -> Result<(Vec<
 fn relookup(v: &FileView<'_>, lookup: super::Lookup) -> Result<(Vec<Edit>, String), &'static str> {
     let ast = v.ast();
     if lookup.call.hi > v.pf().src_len { return Err("inside a macro expansion"); }
-    let (call_id, call) = v.exprs().find(|(_, e)| e.lo == lookup.call.lo && e.hi == lookup.call.hi && matches!(e.kind, ExprKind::MethodCall(..)))
+    let (call_id, _) = v.expr_at(lookup.call)
         .ok_or("the lookup is not a method call expression")?;
-    let ExprKind::MethodCall(recv, row) = call.kind else { return Err("the lookup is not a method call") };
+    let call_id = v.unparen(call_id);
+    let ExprKind::MethodCall(recv, row) = ast.expr(call_id).kind else { return Err("the lookup is not a method call") };
     let row = ast.row(row);
     let args = ast.list(row.args);
     if args.len() != 1 || !v.simple_place(recv) || !v.simple_key(args[0]) { return Err("the map or the key is not a plain place"); }
@@ -511,7 +514,7 @@ impl FileView<'_> {
 mod tests {
     use super::*;
 
-    const SRC: &str = "struct V { a: Vec<u32>, b: Vec<u32> }\nfn add(v: &mut V, x: u32) {}\nfn count(v: &mut V) -> u32 { 0 }\nfn draw(v: &mut V, s: &Vec<u32>) {}\nfn clear(v: &mut V) {}\nfn f(vm: &mut V) {\n    add(vm, count(vm));\n}\nfn g(vm: &mut V) {\n    draw(vm, &vm.a);\n}\nfn h(vm: &mut V) -> u32 {\n    let first = &vm.a[0];\n    clear(vm);\n    *first\n}\nfn k(vm: &mut V) {\n    let c = || add(vm, count(vm));\n}\nfn pair(v: &mut V, s: &Vec<u32>, n: usize) {}\nfn p(vm: &mut V) {\n    pair(vm, &vm.a, (vm .a).len());\n}\nfn main() {}\n";
+    const SRC: &str = "struct V { a: Vec<u32>, b: Vec<u32> }\nfn add(v: &mut V, x: u32) {}\nfn count(v: &mut V) -> u32 { 0 }\nfn draw(v: &mut V, s: &Vec<u32>) {}\nfn clear(v: &mut V) {}\nfn f(vm: &mut V) {\n    add(vm, count(vm));\n}\nfn g(vm: &mut V) {\n    draw(vm, &vm.a);\n}\nfn g2(vm: &mut V) {\n    draw(vm, (&vm.a));\n}\nfn h(vm: &mut V) -> u32 {\n    let first = &vm.a[0];\n    clear(vm);\n    *first\n}\nfn k(vm: &mut V) {\n    let c = || add(vm, count(vm));\n}\nfn pair(v: &mut V, s: &Vec<u32>, n: usize) {}\nfn p(vm: &mut V) {\n    pair(vm, &vm.a, (vm .a).len());\n}\nfn main() {}\n";
 
     fn prog() -> Program {
         let session = std::sync::Arc::new(crate::Session::default());
@@ -568,6 +571,10 @@ mod tests {
         let (out, _, skipped) = run(&prog, rec(sp(&prog, "&vm.a", 0), within(&prog, "draw(vm, &vm.a)", 0, "vm", 0), true, None));
         assert!(skipped.is_empty(), "{skipped:?}");
         assert!(out.contains("    let mut __fv0 = std::mem::take(&mut vm.a);\n    draw(vm, &__fv0);\n    vm.a = __fv0;"), "{out}");
+        // a parenthesized borrow: the record has the parentheses' span (THIR's span of the borrow), the place is still `vm.a`
+        let (out, _, skipped) = run(&prog, rec(sp(&prog, "(&vm.a)", 0), within(&prog, "draw(vm, (&vm.a))", 0, "vm", 0), true, None));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(out.contains("    let mut __fv0 = std::mem::take(&mut vm.a);\n    draw(vm, (&__fv0));\n    vm.a = __fv0;"), "{out}");
         // without Default the rewrite is reported, not guessed
         let (_, applied, skipped) = run(&prog, rec(sp(&prog, "&vm.a", 0), within(&prog, "draw(vm, &vm.a)", 0, "vm", 0), false, None));
         assert!(applied.is_empty() && skipped[0].contains("no Default"), "{skipped:?}");
@@ -581,7 +588,7 @@ mod tests {
         assert!(out.contains("    clear(vm);\n    let first = &vm.a[0];\n    *first"), "{out}");
     }
 
-    const MAPS: &str = "use std::collections::HashMap;\nfn d<'a>(map: &'a mut HashMap<u32, u32>, key: u32) -> &'a mut u32 {\n    match map.get_mut(&key) {\n        Some(v) => v,\n        None => { map.insert(key, 0); map.get_mut(&key).unwrap() }\n    }\n}\nfn e<'a>(map: &'a mut HashMap<u32, u32>, key: u32) -> &'a mut u32 {\n    if let Some(v) = map.get_mut(&key) {\n        return v;\n    }\n    map.insert(key, 0);\n    map.get_mut(&key).unwrap()\n}\nfn k() -> u32 { 0 }\nfn f<'a>(map: &'a mut HashMap<u32, u32>) -> &'a mut u32 {\n    if let Some(v) = map.get_mut(&k()) {\n        return v;\n    }\n    map.get_mut(&1).unwrap()\n}\nfn main() {}\n";
+    const MAPS: &str = "use std::collections::HashMap;\nfn d<'a>(map: &'a mut HashMap<u32, u32>, key: u32) -> &'a mut u32 {\n    match map.get_mut(&key) {\n        Some(v) => v,\n        None => { map.insert(key, 0); map.get_mut(&key).unwrap() }\n    }\n}\nfn e<'a>(map: &'a mut HashMap<u32, u32>, key: u32) -> &'a mut u32 {\n    if let Some(v) = map.get_mut(&key) {\n        return v;\n    }\n    map.insert(key, 0);\n    map.get_mut(&key).unwrap()\n}\nfn k() -> u32 { 0 }\nfn f<'a>(map: &'a mut HashMap<u32, u32>) -> &'a mut u32 {\n    if let Some(v) = map.get_mut(&k()) {\n        return v;\n    }\n    map.get_mut(&1).unwrap()\n}\nfn e2<'a>(map: &'a mut HashMap<u32, u32>, key: u32) -> &'a mut u32 {\n    if let Some(v) = (map.get_mut(&key)) {\n        return v;\n    }\n    map.insert(key, 0);\n    map.get_mut(&key).unwrap()\n}\nfn main() {}\n";
 
     fn map_prog() -> Program {
         let session = std::sync::Arc::new(crate::Session::default());
@@ -614,6 +621,11 @@ mod tests {
         let out = String::from_utf8(crate::relaxed::apply(MAPS.as_bytes(), &edits).0).unwrap();
         assert!(out.contains("    if map.contains_key(&key) {\n        let v = map.get_mut(&key).unwrap();\n        return v;\n    }"), "{out}");
         assert!(n.msg.contains("accepted under Polonius"), "{}", n.msg);
+        // a parenthesized lookup: the loan has the parentheses' span (THIR's span of the call)
+        let n = polonius_note(&prog, "(map.get_mut(&key))", 0);
+        let (_, edits) = n.fix.expect("an if-let on a parenthesized lookup is rewritten");
+        let out = String::from_utf8(crate::relaxed::apply(MAPS.as_bytes(), &edits).0).unwrap();
+        assert!(out.contains("    if map.contains_key(&key) {\n        let v = map.get_mut(&key).unwrap();\n        return v;\n    }\n    map.insert(key, 0);\n    map.get_mut(&key).unwrap()\n}\nfn main"), "{out}");
     }
 
     #[test]

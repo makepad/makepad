@@ -159,6 +159,13 @@ const KIND_DEMAND_STORES: u32 = 16;
 /// the names a fn body's macro expansions produced (cache/deps.rs exp_names), keyed by the code
 /// key the fn has without them: a later run keys the fn's code without parsing its body
 const KIND_EXP_NAMES: u32 = 17;
+/// data_entry's refusal of a data object holding the checkout's folders as text in an entry made
+/// from sealed crates alone: its key names no checkout (code_key_bytes), so a moved checkout (its
+/// run dir with it) would link the old path -- never recorded (CacheStats::checkout_text)
+const WHY_CHECKOUT_TEXT: &str = "data object: the checkout's path";
+/// data_key's memo bit of an object encoded for an entry made from sealed crates alone (scanned
+/// for the checkout's path: data_entry)
+const MEMO_SCANNED: u32 = 1 << 31;
 /// the program's item graph (cache/deps.rs Deps::encode), one per program (its root crate's code
 /// store, under a key of the program's view: replaced when the program changes)
 const KIND_DEPS: u32 = 18;
@@ -178,6 +185,9 @@ const KIND_TIER: u32 = 20;
 /// check_test_subjects): the warnings it printed, under the key of their check keys together
 /// (test_warnings_key). The crates' clean verdicts are not stored then: a rerun prints these.
 const KIND_TEST_WARNINGS: u32 = 21;
+/// A program's real-time set (rt_set_load): one entry in its own store, under the key of the
+/// root crate and the cache configuration, which holds the codegen identity (compiler and std).
+const KIND_RT_SET: u32 = 22;
 const TIER_PARKED_SALT: u128 = 0x7469_6572_2d76_6572_6469_6374_2d70_6b64;
 const TIER_QUEUED_SALT: u128 = 0x7469_6572_2d71_7565_7565_642d_7261_7465;
 /// stores a front image was mapped from: kept for the rest of the process (the arrays point
@@ -239,7 +249,51 @@ const LEDGER_KEY: u128 = 0;
 // FnKey::Glue): one byte below 0xFF, else 0xFF and a u32; that byte used to be a constructor's
 // kind (GLUE_CTOR + variant 239), so an older entry is dropped rather than misread.
 // 36: a coroutine's closure type has tags of its own (enc_ty 29 for 17's form, 30 for 28's).
-const ENTRY_VERSION: u32 = 36;
+// 37: a type its tree has written before is a back-reference (TY_BACKREF) when that is shorter,
+// and a callee key the entry's relocation list has written before is one (RELOC_KEY_REF).
+const ENTRY_VERSION: u32 = 37;
+/// enc_ty's tag for "the n-th type this tree wrote in full" (a u32 n follows): written for a type
+/// whose first write was longer than this back-reference.
+const TY_BACKREF: u8 = 63;
+/// A back-reference's length (its tag and its u32).
+const TY_BACKREF_LEN: u32 = 5;
+/// A callee relocation's tag (20 slot, 21 thunk, 25 call) plus this: its key is the n-th one the
+/// entry's relocation list wrote (a u32 n follows instead of the key's bytes): 26, 27 and 31.
+const RELOC_KEY_REF: u8 = 6;
+
+/// The callee tag (20, 21, 25) of a callee relocation's tag, written in full or as a reference.
+fn callee_tag(tag: u8) -> u8 {
+    if tag >= 20 + RELOC_KEY_REF { tag - RELOC_KEY_REF } else { tag }
+}
+
+/// Writes a callee relocation (tag 20, 21 or 25) to slot `x`: the bytes of its key (`key`) the
+/// first time the list names `x`, after that the position of that key (RELOC_KEY_REF). False when
+/// the key cannot be encoded.
+fn write_callee(e: &mut E, tag: u8, x: u32, keyed: &mut HashMap<u32, u32>, key: impl FnOnce() -> Option<Vec<u8>>) -> bool {
+    if let Some(&n) = keyed.get(&x) {
+        e.u8(tag + RELOC_KEY_REF);
+        e.u32(n);
+        return true;
+    }
+    let Some(b) = key() else { return false };
+    e.u8(tag);
+    e.bytes(&b);
+    let n = keyed.len() as u32;
+    keyed.insert(x, n);
+    true
+}
+
+/// Reads a callee relocation's key after its tag byte `tag` and gives what `first` makes of it:
+/// `first` runs once per key, the first time the list writes it, and a later reference (a
+/// RELOC_KEY_REF tag) gives that result again from `seen`.
+fn read_callee<'a, T: Copy>(d: &mut D<'a>, tag: u8, seen: &mut Vec<T>, first: impl FnOnce(&'a [u8]) -> Option<T>) -> Option<T> {
+    if tag >= 20 + RELOC_KEY_REF {
+        return seen.get(d.u32()? as usize).copied();
+    }
+    let t = first(d.bytes()?)?;
+    seen.push(t);
+    Some(t)
+}
 /// the level of a code entry's code (its tier byte)
 const TIER_O1: u8 = 0;
 const TIER_O3: u8 = 1;
@@ -538,6 +592,20 @@ pub struct CacheStats {
     pub misses: u64,
     pub link_fail: u64,
     pub recorded: u64,
+    /// of those, kept in the store of a crate deeper than their deepest crate (store_crate)
+    pub wider_store: u64,
+    /// of those, made from sealed crates only (key and certificate: sealed_crates), and the
+    /// program's sealed crates: what a store no checkout owns could share (Target B)
+    pub sealed_records: u64,
+    pub sealed_crates: u64,
+    /// records written to the shared stores, lookups linked from them, and records a late input
+    /// in their scope kept in the checkout's store instead (a shared store's ledger stays empty)
+    pub shared_records: u64,
+    pub shared_hits: u64,
+    pub shared_kept_out: u64,
+    /// code made from sealed crates alone not recorded: a data object it names holds the
+    /// checkout's path (WHY_CHECKOUT_TEXT)
+    pub checkout_text: u64,
     pub unencodable: u64,
     /// entries rejected because a closure they name is another expression in this parse
     pub closure_mismatch: u64,
@@ -675,7 +743,7 @@ fn tls_shape(pl: &crate::jit::TlsPlace) -> u8 {
 fn record_deps(u: &Unit, id: u32, extra: &[u32]) -> Vec<u32> {
     // a sandboxed twin's code is its base's lowered body transformed: the base's inputs are its own
     let src = match u.fns[id as usize].key {
-        FnKey::Sandbox(b) if (b as usize) < u.fns.len() => b,
+        FnKey::Sandbox(b) | FnKey::Ctfe(b) if (b as usize) < u.fns.len() => b,
         _ => id,
     };
     let mut stack: Vec<u32> = extra.iter().copied().chain(u.body_deps.get(&src).into_iter().flatten().copied()).collect();
@@ -731,6 +799,35 @@ pub struct Cache {
     /// folded it (a const, an inlined body) stale with the crate that read it
     crate_names: Vec<String>,
     crate_closure: Vec<Vec<u64>>,
+    /// the key of the anchors this cache was opened against (OpenFrom::anchors): the checkout's
+    /// identity in the code, const and data keys and the code store names
+    anchors_key: u128,
+    /// per crate: whether no checkout owns its code (sealed_crates)
+    sealed: Vec<bool>,
+    /// what a sealed slot's code key takes in place of anchors_key: the places no checkout owns
+    /// (Anchors::machine_key) and the target, the same in every checkout over them
+    sealed_key: u128,
+    /// the code keys made with the sealed key, and the verdict keys over them: a borrowck or tier
+    /// verdict of such a key goes to the shared store of its store crate with the code
+    sealed_keys: HashSet<u128>,
+    /// the places no checkout owns (Anchors::machine_dirs): a shared store's ledger names files
+    /// under them only (SharedMerge)
+    machine_dirs: Vec<String>,
+    /// the shared code stores (OpenFrom::shared): per crate the path of its store there (sealed
+    /// crates only) and whether it is stale (a late input changed: never written by this run);
+    /// a pending entry for crate c's shared store is filed under c + the crate count
+    shared: Option<SharedCode>,
+    shared_path: Vec<Option<PathBuf>>,
+    shared_stale: Vec<bool>,
+    /// the code keys this run recorded to a shared store
+    shared_keys: HashSet<u128>,
+    /// the checkout's folders in every spelling a data object could hold them (CheckoutText): no
+    /// entry made from sealed crates alone holds one
+    checkout_text: CheckoutText,
+    /// the entry being encoded is made from sealed crates alone (its data objects are scanned for
+    /// the checkout's path), and goes to the shared store of cur_crate (its data objects too)
+    cur_sealed: bool,
+    cur_shared: bool,
     /// interface fingerprints (cache/items.rs), per crate index: what code keys name; the bound
     /// crates of this program folded in (items::apply_bound)
     iface: Vec<u128>,
@@ -789,6 +886,9 @@ pub struct Cache {
     front_stores_n: usize,
     /// while a key is encoded: the definitions it names (their local bodies join the key)
     enc_defs: Option<Vec<DefId>>,
+    /// while a code key is encoded: the items whose closures its types name (their bodies join
+    /// the key: enc_ty_tree's closure case)
+    enc_closure_items: Option<Vec<DefId>>,
     /// crate identity hash -> crate index
     crate_by_ident: HashMap<u128, u32>,
     crate_ident: Vec<u128>,
@@ -803,6 +903,9 @@ pub struct Cache {
     recording_pending: bool,
     /// front images (crate, key) reserved this run: an image is local to its crate's store
     front_reserved: HashSet<(u32, u128)>,
+    /// per program file: which of its images (1 the file's, 2 its part's) push_front_refs took
+    /// already, so a mid-run write passes over them without making their keys again
+    front_files: Vec<u8>,
     /// link name -> canonical foreign declaration (canon_foreign; built on first use)
     foreign_canon: Option<HashMap<String, DefId>>,
     /// per crate: definition key -> DefId (built on the first decode in that crate)
@@ -810,6 +913,8 @@ pub struct Cache {
     /// every definition by crate (built once, on the first decode)
     crate_defs: Vec<Vec<DefId>>,
     crate_defs_n: usize,
+    /// definitions from `crate_defs_n` to here are run-time modules' (`defs_mapped`); 0: none seen
+    module_defs_n: usize,
     /// per def: its key (memo, hierarchical)
     def_keys: HashMap<DefId, u128>,
     mapped_definitions: Option<collected::MappedDefinitions>,
@@ -898,6 +1003,29 @@ pub struct Cache {
     /// carries a fresh image
     image_slots: usize,
     image_stale: usize,
+    /// how many of `manifest`'s slots are the startup manifest's own: the rest are its session tail
+    /// (the slots the last quit's run installed past them, record_tail)
+    manifest_main: usize,
+    /// the identities (identity_hash) of the startup manifest this run wrote: the quit's session
+    /// tail is the install order past them
+    written_ids: Option<HashSet<u128>>,
+    /// this run's startup image: `replaced`'s length when it was built, its slots, and its slots
+    /// as a bit per slot id: an in-session rebuild is due once 5% of them were replaced since
+    /// (image_refresh_due)
+    image_built: Option<(usize, usize, Vec<u64>)>,
+    /// the slots whose code this run replaced (record: an entry without a recorded tier, and one
+    /// moved to a higher tier), in order: an image's stale slots are its own among them
+    /// (image_replaced; the replacements of every slot counted code that no image holds)
+    replaced: Vec<u32>,
+    /// the loaded image's slots, a bit per slot id (made at the first ask: image_ids)
+    loaded_bits: std::sync::OnceLock<Vec<u64>>,
+    /// the identities (identity_hash) of the loaded manifest's slots before its first present,
+    /// made at the first ask (cache/image.rs was_startup_slot)
+    startup_ids: std::sync::OnceLock<HashSet<u128>>,
+    /// a startup image built for a manifest whose later steps gave way (record_manifest): its
+    /// bytes and slots, `replaced`'s length when it was built, the crates edited live by then and
+    /// its slots' bits; the retry takes it while at most 1% of its slots were replaced since
+    image_kept: Option<(Vec<u8>, u32, usize, usize, Vec<u64>)>,
     /// the tier of each code entry this run recorded (by key), pending or written: a verified O1
     /// rebuild replaces only an entry below O1
     rec_tier: HashMap<u128, u8>,
@@ -919,6 +1047,14 @@ pub struct Cache {
     /// expression has, for expressions this run has not parsed yet: checked when one is
     /// decoded again and when the closure is built (jit: closure_identity_ok)
     closure_fps: HashMap<(u32, u32), u64>,
+    /// The type trees being encoded (enc_ty), innermost last (a tree in progress can start one in
+    /// another buffer, a callee's key), and spare tables for the next ones.
+    ty_written: Vec<TyTree>,
+    ty_written_spare: Vec<TyTree>,
+    /// The type trees being decoded (dec_ty): the input's address and the types read in full so
+    /// far, in order (TY_BACKREF names one); and spare lists.
+    ty_read: Vec<(usize, Vec<TyId>)>,
+    ty_read_spare: Vec<Vec<TyId>>,
     /// (item, its file) -> the item's closures in order (program::closure_exprs): what an
     /// owner-local closure identity's ordinal counts (closure_ordinal, closure_at)
     closure_ords: HashMap<(DefId, u32), std::sync::Arc<[u32]>>,
@@ -933,6 +1069,16 @@ type LinkedCode = (Vec<u8>, Vec<(u32, u64)>, Vec<RelocAt>);
 
 #[derive(Default)]
 struct E(Vec<u8>);
+
+/// One type tree being encoded (enc_ty): its output buffer's address, how many types it has
+/// written in full (what dec_ty counts), and each type's first write: its position in that count
+/// and its length.
+#[derive(Default)]
+struct TyTree {
+    buf: usize,
+    written: u32,
+    first: HashMap<TyId, (u32, u32)>,
+}
 
 impl E {
     fn u8(&mut self, x: u8) {
@@ -1006,7 +1152,57 @@ pub struct OpenFrom<'a> {
     pub tier1: bool,
     pub global_allocator: Option<DefId>,
     pub provided: Vec<(u32, u64)>,
+    /// the anchors the cache's keys and sealed crates are made against (None: this process's)
+    pub anchors: Option<crate::dirs::Anchors>,
+    /// the code store folder a user's checkouts share (Target B), None: none
+    pub shared: Option<SharedCode>,
 }
+
+/// The folder whose code stores a user's checkouts share: per sealed crate (sealed_crates) one
+/// store of the entries made from sealed crates alone, keyed the same in every checkout. A run that
+/// has it reads and writes it (shared_code says which runs have it). `stale`: stores this process
+/// found stale or that refused a batch, neither read nor written (a settle rebuild's new cache
+/// keeps its run's findings).
+#[derive(Clone, Debug)]
+pub struct SharedCode {
+    pub dir: PathBuf,
+    pub stale: Vec<PathBuf>,
+}
+
+/// The shared code stores of a run (None: it has none). Only a run whose third-party compile-time
+/// code is confined (Policy::Sandboxed, `makepad`) has them: a confined registry macro reaches
+/// nothing a key or a ledger does not hold (its tokens, the lexer, the invoking crate's cargo
+/// environment and `[env]`: LATE_CONFIG_ENV). Under Open (bare `relax`) such a macro runs as host
+/// code and may read the process environment or any file, so its code is not a function of its
+/// key, and code made confined is not what it would make: it neither writes nor reads them. None
+/// too under RELAX_CACHE_DIR (`own_cache_dir`: tests and measurement keep every store in their own
+/// folder), and when `home` (the folder, made private: shared_code_root) is refused.
+pub fn shared_code(policy: crate::sandbox::Policy, own_cache_dir: bool, home: impl FnOnce() -> Result<PathBuf, String>) -> Option<SharedCode> {
+    if policy != crate::sandbox::Policy::Sandboxed || own_cache_dir {
+        return None;
+    }
+    home().ok().map(|dir| SharedCode { dir, stale: Vec::new() })
+}
+
+/// The shared code folder this process's caches open (OpenFrom::with): set by the run's entry
+/// (run.rs cmd_run_inner), so a test or a tool that opens a cache shares nothing unless it says so.
+static SHARED_CODE: relax_session::sync::Mutex<Option<SharedCode>> = relax_session::sync::Mutex::new(None);
+
+/// Sets the shared code stores of this process's caches (shared_code; None: none).
+pub fn set_shared_code(s: Option<SharedCode>) {
+    *SHARED_CODE.lock().unwrap_or_else(|e| e.into_inner()) = crate::zone_alloc::kept_with(|| s.clone());
+}
+
+fn process_shared_code() -> Option<SharedCode> {
+    SHARED_CODE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The user's shared code folder: `<relax home>/code` (its stores in `cache/`, their builds' live
+/// locks in `cache/live/`).
+pub fn shared_code_root() -> PathBuf {
+    crate::gitstore::relax_home().join("code")
+}
+
 impl<'a> OpenFrom<'a> {
     pub fn of(u: &'a Unit) -> Self {
         Self::with(u, &u.prog, &u.tcx)
@@ -1015,7 +1211,7 @@ impl<'a> OpenFrom<'a> {
     /// new state)
     pub fn with(u: &Unit, prog: &'a crate::program::Program, tcx: &'a crate::tcx::Tcx) -> Self {
         OpenFrom { prog, tcx, opt: u.opt.clone(), tier1: u.tier1.is_some(), global_allocator: crate::jit::global_allocator_static_of(prog, u.aux),
-            provided: u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect() }
+            provided: u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect(), anchors: None, shared: process_shared_code() }
     }
 }
 
@@ -1092,6 +1288,10 @@ impl Cache {
         // which crates are bound to the loader's rustc build (provided.rs) is in the interface
         // fingerprints (items::apply_bound), so only the code that can reach a bound crate is keyed by it
         cfgh.u128(from.prog.session.options.fingerprint());
+        // the policy for third-party compile-time code (sandbox.rs Policy): `relax` and `makepad`
+        // of one tree share the codegen identity, and a registry proc macro expands from other
+        // inputs under each (crate_image::parse_options holds it for the front's stores)
+        cfgh.u8((crate::sandbox::policy() == crate::sandbox::Policy::Sandboxed) as u8);
         // the static a #[global_allocator] program's allocator shim calls: code inlining a shim
         // caller (core::heap::alloc & co) is certified by crate fingerprints, which do not show
         // whether or which allocator the program has (the static's type is in the shim callers'
@@ -1104,6 +1304,22 @@ impl Cache {
             }
             None => cfgh.u8(0),
         }
+        let crate_closure = dep_closures(prog, ncr);
+        // the checkout's anchors (a test's two checkouts in one process: two values), and which
+        // crates no checkout owns
+        let anchors = from.anchors.clone().unwrap_or_else(|| crate::dirs::Anchors::current(&crate::std_dir()));
+        // (a checkout whose folders have no reliable spelling list seals nothing: every key names it)
+        let checkout_text = CheckoutText::of(&anchors);
+        let sealed = if checkout_text.is_some() { sealed_crates(prog, ncr, &anchors, &crate_closure) } else { vec![false; ncr] };
+        let sealed_key = {
+            let mut h = Sip128::new();
+            h.str("relax-sealed-key");
+            h.u128(anchors.machine_key());
+            h.str(&crate::codegen_id::target_tag());
+            h.finish128()
+        };
+        let shared = from.shared.clone();
+        let shared_path: Vec<Option<PathBuf>> = (0..ncr).map(|_| None).collect();
         let mut c = Cache {
             verbose,
             mode,
@@ -1118,7 +1334,19 @@ impl Cache {
             mapped_index: None,
             fps,
             crate_names: (0..ncr).map(|ci| prog.syms.str(prog.crates[ci].name).to_string()).collect(),
-            crate_closure: dep_closures(prog, ncr),
+            crate_closure,
+            anchors_key: anchors.key(),
+            sealed,
+            sealed_key,
+            sealed_keys: HashSet::new(),
+            machine_dirs: anchors.machine_dirs().map(String::from).collect(),
+            shared,
+            shared_path,
+            shared_stale: vec![false; ncr],
+            shared_keys: HashSet::new(),
+            checkout_text: checkout_text.unwrap_or_default(),
+            cur_sealed: false,
+            cur_shared: false,
             iface: Vec::new(),
             iface_plain: Vec::new(),
             view: Vec::new(),
@@ -1145,6 +1373,7 @@ impl Cache {
             front_stores_of: Vec::new(),
             front_stores_n: 0,
             enc_defs: None,
+            enc_closure_items: None,
             crate_by_ident,
             crate_ident,
             cfg: cfgh.finish128(),
@@ -1153,10 +1382,12 @@ impl Cache {
             pending_keys: HashSet::new(),
             recording_pending: false,
             front_reserved: HashSet::new(),
+            front_files: Vec::new(),
             foreign_canon: None,
             def_maps: HashMap::new(),
             crate_defs: Vec::new(),
             crate_defs_n: 0,
+            module_defs_n: 0,
             def_keys: HashMap::new(),
             mapped_definitions: None,
             collected_boot: None,
@@ -1188,6 +1419,13 @@ impl Cache {
             manifest_len: 0,
             image_slots: 0,
             image_stale: 0,
+            manifest_main: 0,
+            written_ids: None,
+            image_built: None,
+            replaced: Vec::new(),
+            loaded_bits: std::sync::OnceLock::new(),
+            startup_ids: std::sync::OnceLock::new(),
+            image_kept: None,
             rec_tier: HashMap::new(),
             manifest_root: None,
             linked_key: HashMap::new(),
@@ -1204,6 +1442,10 @@ impl Cache {
             pending_verdicts: HashMap::new(),
             slot_by_bytes: Default::default(),
             closure_fps: HashMap::new(),
+            ty_written: Vec::new(),
+            ty_written_spare: Vec::new(),
+            ty_read: Vec::new(),
+            ty_read_spare: Vec::new(),
             closure_ords: HashMap::new(),
             stats: CacheStats::default(),
             why_unencodable: HashMap::new(),
@@ -1282,14 +1524,29 @@ impl Cache {
         // named by the view: an edit of the crate's items keeps its store (the entries' keys say
         // which code still holds)
         for ci in 0..ncr {
-            c.code_path.push(dir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.view[ci])));
+            c.code_path.push(dir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.view[ci], c.anchors_key)));
+        }
+        // a sealed crate's shared code store, named by the sealed key (the same in every checkout)
+        if let Some(sh) = c.shared.clone() {
+            let sdir = sh.dir.join("cache");
+            if pack::ensure_private_dir(&sh.dir).is_ok() && pack::ensure_private_dir(&sdir).is_ok() {
+                for ci in (0..ncr).filter(|&ci| c.sealed[ci]) {
+                    let p = sdir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.view[ci], c.sealed_key));
+                    // found stale, or refusing a batch, by this process before (a settle rebuild's cache)
+                    c.shared_stale[ci] = sh.stale.contains(&p);
+                    c.shared_path[ci] = Some(p);
+                }
+            } else {
+                c.shared = None;
+            }
         }
         c.depth = crate_depths(prog);
+        c.stats.sealed_crates = c.sealed.iter().filter(|s| **s).count() as u64;
         c.stale = vec![false; ncr];
         c.code_stale = vec![false; ncr];
         // open them (in parallel: ~80 files of each kind, each a header + an index copy)
         let opened: Vec<Option<std::sync::Arc<Store>>> = {
-            let all: Vec<PathBuf> = c.crate_path.iter().chain(c.code_path.iter()).cloned().collect();
+            let all: Vec<PathBuf> = c.crate_path.iter().chain(c.code_path.iter()).chain(c.shared_path.iter().flatten()).cloned().collect();
             let paths = &all;
             let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1323,7 +1580,8 @@ impl Cache {
         let mapped_index = collected.and_then(|g| g.indexes.as_ref());
         if mapped_index.is_none() { c.index.reserve(total); }
         let mut opened = opened;
-        let code_opened = opened.split_off(ncr);
+        let mut code_opened = opened.split_off(ncr);
+        let shared_opened = code_opened.split_off(ncr);
         for (ci, st) in opened.into_iter().enumerate() {
             let Some(st) = st else { continue };
             // A whole-crate image rejected on its own account (its dependencies were restored:
@@ -1377,12 +1635,20 @@ impl Cache {
         // this run's stores are open (so marked live: store::live)
         if mode != Mode::ReadOnly {
             let r = root.clone();
+            // the shared code folder too (by size alone: prune_shared)
+            let shared = c.shared.as_ref().map(|s| s.dir.clone());
             { let _k = crate::zone_alloc::kept();
             let _ = crate::run_threads::spawn("run-cache-prune", move || { let _z = crate::zone_alloc::compiler_thread();
                 makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
                 let (b, a) = prune_root(&r);
                 if verbose && std::env::var_os("RELAX_CACHE_TRACE").is_some() && b != a {
                     eprintln!("relax cache: pruned {} -> {} MB", b >> 20, a >> 20);
+                }
+                if let Some(d) = shared {
+                    let (b, a) = prune_shared(&d);
+                    if verbose && std::env::var_os("RELAX_CACHE_TRACE").is_some() && b != a {
+                        eprintln!("relax cache: pruned the shared code folder {} -> {} MB", b >> 20, a >> 20);
+                    }
                 }
             });
             }
@@ -1419,6 +1685,34 @@ impl Cache {
             c.stores.push(st);
             c.stats.code_stores += 1;
             warm_count::add(warm_count::STORES, 1);
+        }
+        // the shared code stores: a stale one (a late input of its scope changed) is neither read
+        // nor written; under a key a checkout store has too, the entry of the higher tier
+        let shared_crates: Vec<usize> = (0..ncr).filter(|&ci| c.shared_path[ci].is_some()).collect();
+        let ident_names: HashMap<String, String> = if shared_crates.is_empty() { HashMap::new() } else {
+            c.crate_ident.iter().zip(&c.crate_names).map(|(id, n)| (ident_hex(*id), n.clone())).collect()
+        };
+        let name_of = |id: &str| ident_names.get(id).cloned();
+        for (ci, st) in shared_crates.into_iter().zip(shared_opened) {
+            let Some(st) = st else { continue };
+            if c.shared_stale[ci] { continue; }
+            if !ledger_current_named(&st, &name_of, &mut late) {
+                c.shared_stale[ci] = true;
+                continue;
+            }
+            replay_store_ledger_named(&st, &name_of, &late);
+            let si = c.stores.len() as u32;
+            for (e, ix) in st.index.iter().enumerate() {
+                if matches!(ix.kind, KIND_LEDGER | KIND_MANIFEST | KIND_FRONT | KIND_FRONT_REF | KIND_FRONT_CRATE) { continue; }
+                let key = ix.key;
+                if c.index.contains_key(&key) {
+                    let shared_tier = st.get_at(e, key).filter(|(k, _)| *k == KIND_CODE).and_then(|(_, p)| payload_tier(p));
+                    if !shared_tier.zip(c.entry_tier(key)).is_some_and(|(n, o)| tier_rank(n) > tier_rank(o)) { continue; }
+                }
+                c.index.insert(key, (si, e as u32));
+            }
+            c.stores.push(st);
+            c.stats.code_stores += 1;
         }
         c.stats.index_entries = (c.index.len() + c.mapped_index.as_ref().map_or(0, |m| m.len())) as u64;
         let t_packs = t0.elapsed();
@@ -1517,6 +1811,18 @@ impl Cache {
         n
     }
 
+    /// Which images of program file `file` push_front_refs took (`front_files`).
+    pub fn front_file_taken(&self, file: usize) -> u8 {
+        self.front_files.get(file).copied().unwrap_or(0)
+    }
+
+    pub fn set_front_file_taken(&mut self, file: usize, images: u8) {
+        if self.front_files.len() <= file {
+            self.front_files.resize(file + 1, 0);
+        }
+        self.front_files[file] |= images;
+    }
+
     /// Warm-session diagnostics (`makepad inspect cache`): counts a fresh build of slot `id` (`base`: one of
     /// warm_count's RETIER_*_OVER) by the tier of its entry in the opened stores.
     pub(crate) fn note_retier_over(&mut self, u: &Unit, id: u32, base: usize) {
@@ -1570,6 +1876,68 @@ impl Cache {
         crates.iter().copied().max_by_key(|&c| (self.depth.get(c as usize).copied().unwrap_or(0), c)).unwrap_or(0)
     }
 
+    /// Whether crate `c`'s dependency closure holds every crate of `crates`.
+    fn sees_all(&self, c: u32, crates: &[u32]) -> bool {
+        let Some(set) = self.crate_closure.get(c as usize) else { return false };
+        crates.iter().all(|&x| set.get(x as usize / 64).is_some_and(|w| w >> (x % 64) & 1 == 1))
+    }
+
+    /// The crate whose code store holds an entry made from crates `crates` (its key's, its
+    /// certificate's): one whose dependency closure holds them all, as a code store's ledger
+    /// lists the late inputs (env!, include!) of its crate's closure alone. The deepest of them
+    /// when it sees the others (along a chain it does); else (`r::f::<s::T>`, r deeper than s
+    /// and not depending on it) the shallowest crate that sees them all, ties by crate index.
+    /// None: no crate the cache opened with does.
+    fn store_crate(&self, crates: &[u32]) -> Option<u32> {
+        let dom = self.dominant(crates);
+        if self.sees_all(dom, crates) {
+            return Some(dom);
+        }
+        (0..self.crate_closure.len() as u32).filter(|&c| self.sees_all(c, crates)).min_by_key(|&c| (self.depth.get(c as usize).copied().unwrap_or(u32::MAX), c))
+    }
+
+    /// The pending-store id of crate `c`'s shared code store (its crate index + the crate count).
+    fn shared_id(&self, c: u32) -> u32 {
+        c + self.code_path.len() as u32
+    }
+
+    /// The crate of pending-store id `s` (a shared store's or a code store's).
+    fn crate_of_store(&self, s: u32) -> u32 {
+        let n = self.code_path.len() as u32;
+        if s >= n { s - n } else { s }
+    }
+
+    /// Whether this run adds entries to crate `c`'s shared code store: one is open for it (a sealed
+    /// crate's), not stale, and the run writes its stores.
+    fn shared_writable(&self, c: u32) -> bool {
+        self.mode != Mode::ReadOnly && self.shared.is_some()
+            && self.shared_path.get(c as usize).is_some_and(|p| p.is_some()) && self.shared_stale.get(c as usize) == Some(&false)
+    }
+
+    /// The shared code stores as this cache uses them, for a settle rebuild's new cache: the ones it
+    /// found stale or that refused a batch stay so (SharedCode::stale). None: it has none.
+    pub fn shared_for_rebuild(&self) -> Option<SharedCode> {
+        let mut sh = self.shared.clone()?;
+        for (p, stale) in self.shared_path.iter().zip(&self.shared_stale) {
+            if let (Some(p), true) = (p, *stale) {
+                if !sh.stale.contains(p) { sh.stale.push(p.clone()); }
+            }
+        }
+        Some(sh)
+    }
+
+    /// The pending store of a verdict over code key `key` (a borrowck or tier verdict) whose store
+    /// crate is `kc`: the shared store of kc when the key is sealed and the run writes it there (the
+    /// verdict rests on sealed crates alone, as the code does), else kc's own.
+    fn verdict_store(&self, key: u128, kc: u32) -> u32 {
+        if self.sealed_keys.contains(&key) && self.shared_writable(kc) { self.shared_id(kc) } else { kc }
+    }
+
+    /// Whether store `p` (of `stores`) is a shared code store.
+    fn is_shared_store(&self, p: u32) -> bool {
+        self.shared.as_ref().is_some_and(|sh| self.stores.get(p as usize).is_some_and(|st| st.path.starts_with(&sh.dir)))
+    }
+
     /// SPEC-V: slot `id`'s body failed the borrow checker. Its code stays out of the cache: a record
     /// not yet written is dropped, later records of it are refused, and an entry that may be on disk
     /// already is replaced by an empty one (newest wins; an empty code payload is a miss), so a
@@ -1591,6 +1959,9 @@ impl Cache {
         });
         self.pending_bytes -= freed.min(self.pending_bytes);
         let krate = self.key_crate.get(&key).copied().unwrap_or(0);
+        // an entry in a shared store is replaced there (where the next open finds it)
+        let shared = self.shared_keys.contains(&key) || self.index_at(key).is_some_and(|(p, _)| self.is_shared_store(p));
+        let krate = if shared && self.shared_writable(krate) { self.shared_id(krate) } else { krate };
         if self.verbose {
             eprintln!("relax cache: slot {} {} failed the borrow checker: its code entry is dropped ({} pending)", id, u.fns[id as usize].name, before - self.pending.len());
         }
@@ -1623,8 +1994,28 @@ impl Cache {
         self.pending_bytes = 0;
         let marks = front_run::run_marks();
         let late = crate::sip::late_inputs();
+        let moved = crate::sip::late_moved();
         let mut files = Vec::new();
-        for ((c, front), mut entries) in by_store(pending) {
+        let mut shared = Vec::new();
+        let n = self.code_path.len() as u32;
+        for ((c, front), mut entries) in self.by_store_shared(pending) {
+            if self.reads_moved(self.crate_of_store(c), front, &moved) {
+                continue;
+            }
+            if !front && c >= n {
+                // written under the shared store's lock (Spill::write); refused, it goes to the
+                // crate's checkout store, emptied here first when that one was found stale
+                let ci = c - n;
+                let Some((path, _)) = self.store_of(c, false) else { continue };
+                let fallback_ledger = self.code_ledger(ci, &late);
+                let merge = self.shared_merge(ci, &late);
+                let Some((fallback, stale)) = self.store_of(ci, false) else { continue };
+                if std::mem::replace(stale, false) {
+                    files.push((fallback.clone(), true, vec![NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: fallback_ledger.clone() }]));
+                }
+                shared.push(SharedSpill { path, entries, merge, fallback, fallback_ledger });
+                continue;
+            }
             if !front {
                 entries.insert(0, NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: self.code_ledger(c, &late) }.into());
             }
@@ -1632,16 +2023,31 @@ impl Cache {
             let stale = std::mem::replace(stale, false);
             files.push((path, stale, entries));
         }
-        Some(Spill { dir: self.dir.clone(), files, marks })
+        Some(Spill { dir: self.dir.clone(), files, shared, marks })
     }
 
     // ------------------------------------------------------------ stable identities
+
+    /// The maps and restored tables still describe the program: nothing was added since, or
+    /// only definitions of crates loaded after the cache opened (a run-time module's), which
+    /// have no identity, so no key names them and none decodes to one. (Dropped at a module's
+    /// load, the first twin it linked from the cache built core's map again.)
+    fn defs_mapped(&mut self, u: &Unit) -> bool {
+        let n = u.prog.defs.len();
+        if self.crate_defs_n == n { return true; }
+        // (the run of modules' definitions is remembered, so a later program definition past
+        // them is found at once, not by walking them again on every key)
+        let mut i = self.crate_defs_n.max(self.module_defs_n);
+        while i < n && u.prog.def(DefId(i as u32)).krate as usize >= self.crate_ident.len() { i += 1; }
+        self.module_defs_n = i;
+        i == n
+    }
 
     /// A definition's key: its parent's key (the crate's identity at the root), name, kind,
     /// defining file (and, unless its path names it, its offset). Hierarchical, so a crate's
     /// whole map is cheap.
     fn def_key(&mut self, u: &Unit, d: DefId) -> u128 {
-        if self.crate_defs_n == u.prog.defs.len() {
+        if self.defs_mapped(u) {
             if let Some(k) = self.mapped_definitions.as_ref().and_then(|m| m.key(d)) { return k; }
         }
         if let Some(&k) = self.def_keys.get(&d) {
@@ -1674,6 +2080,7 @@ impl Cache {
             }
         }
         self.crate_defs_n = u.prog.defs.len();
+        self.module_defs_n = 0;
         let mut order: Vec<usize> = (first..by.len()).filter(|c| !by[*c].is_empty()).collect();
         order.sort_by_key(|c| std::cmp::Reverse(by[*c].len()));
         let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
@@ -1851,8 +2258,9 @@ impl Cache {
         let k = dd.u128()?;
         let c = *self.crate_by_ident.get(&ci)?;
         // definitions added since the maps were built (a live edit): build them again
-        if self.crate_defs_n != u.prog.defs.len() {
+        if !self.defs_mapped(u) {
             self.crate_defs_n = u.prog.defs.len();
+            self.module_defs_n = 0;
             self.crate_defs.clear();
             self.def_maps.clear();
             self.mapped_definitions = None;
@@ -1901,7 +2309,50 @@ impl Cache {
     }
 
     /// A monomorphic type by structure. Inference variables, params, etc. cannot be stored.
+    /// Written as a tree in which a type the same tree has written before, when that write was
+    /// longer than a back-reference, is its position (TY_BACKREF): a closure's type holds its
+    /// owner's arguments, which hold other closures of that owner, and a parser built of nested
+    /// closures spelled that out in full in keys of megabytes and code entries of gigabytes.
+    /// Each top-level type (a key's argument, a list's element) is a tree of its own, so its
+    /// bytes are the same wherever it is written.
     fn enc_ty(&mut self, u: &Unit, t: TyId, e: &mut E, crates: &mut Vec<u32>, depth: u32) -> Option<()> {
+        let buf = e as *const E as usize;
+        let top = self.ty_written.last().is_none_or(|w| w.buf != buf);
+        if top {
+            let mut w = self.ty_written_spare.pop().unwrap_or_default();
+            w.buf = buf;
+            self.ty_written.push(w);
+        }
+        let seen = self.ty_written.last().and_then(|w| w.first.get(&t).copied());
+        let written = match seen {
+            Some((n, len)) if len > TY_BACKREF_LEN => {
+                e.u8(TY_BACKREF);
+                e.u32(n);
+                Some(())
+            }
+            _ => {
+                let start = e.0.len();
+                let r = self.enc_ty_tree(u, t, e, crates, depth);
+                // (a tree in another buffer, started inside this one, has ended: this is the last)
+                if let (Some(()), Some(w)) = (r, self.ty_written.last_mut()) {
+                    let n = w.written;
+                    w.written += 1;
+                    w.first.entry(t).or_insert((n, (e.0.len() - start) as u32));
+                }
+                r
+            }
+        };
+        if top {
+            if let Some(mut w) = self.ty_written.pop() {
+                w.written = 0;
+                w.first.clear();
+                self.ty_written_spare.push(w);
+            }
+        }
+        written
+    }
+
+    fn enc_ty_tree(&mut self, u: &Unit, t: TyId, e: &mut E, crates: &mut Vec<u32>, depth: u32) -> Option<()> {
         if depth > 64 {
             return None;
         }
@@ -1977,6 +2428,15 @@ impl Cache {
                 // its owner's closure ordinal (closure_ordinal): the owner's type first, which
                 // names the item the ordinal counts in
                 let def = match u.tcx.tys.kind(owner) { TyKind::FnDef(d, ..) => Some(*d), _ => None };
+                // The type names the captured places (`s.a`, `s.b`), but the closure's environment
+                // is laid out from its owner's type check: whole captured locals (root-slot
+                // storage, layout::ClosureStorage), a struct the places are fields of. Code over
+                // the type (Box::new::<C>, C's drop glue and shims, a wrapper closure holding it)
+                // bakes that layout in: code_key_bytes hashes the owner's body for it.
+                if let (Some(d), Some(v)) = (def, self.enc_closure_items.as_mut()) {
+                    let item = closure_item(u, d);
+                    if !v.contains(&item) { v.push(item); }
+                }
                 if let Some((ord, fp)) = def.filter(|_| !u.prog.is_edit_version(file)).and_then(|d| self.closure_ordinal(u, d, file, expr)) {
                     e.u8(if coroutine { 30 } else { 28 });
                     crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
@@ -2157,7 +2617,34 @@ impl Cache {
         Some(u.tcx.tys.intern_region_args(&regions))
     }
 
+    /// enc_ty's tree: a TY_BACKREF is the type the same tree read in full at that position.
     fn dec_ty(&mut self, u: &Unit, d: &mut D, depth: u32) -> Option<TyId> {
+        let buf = d.b.as_ptr() as usize;
+        let top = self.ty_read.last().is_none_or(|r| r.0 != buf);
+        if top {
+            let v = self.ty_read_spare.pop().unwrap_or_default();
+            self.ty_read.push((buf, v));
+        }
+        let read = if d.b.get(d.p) == Some(&TY_BACKREF) {
+            d.p += 1;
+            d.u32().and_then(|n| self.ty_read.last()?.1.get(n as usize).copied())
+        } else {
+            let t = self.dec_ty_tree(u, d, depth);
+            if let (Some(t), Some(r)) = (t, self.ty_read.last_mut()) {
+                r.1.push(t);
+            }
+            t
+        };
+        if top {
+            if let Some((_, mut v)) = self.ty_read.pop() {
+                v.clear();
+                self.ty_read_spare.push(v);
+            }
+        }
+        read
+    }
+
+    fn dec_ty_tree(&mut self, u: &Unit, d: &mut D, depth: u32) -> Option<TyId> {
         if depth > 64 {
             return None;
         }
@@ -2188,7 +2675,13 @@ impl Cache {
             12 => {
                 let def = self.dec_def(u, d)?;
                 let regions = self.dec_regions(u, d)?;
-                TyKind::Adt(def, u.tcx.tys.mk_list(&self.dec_tys(u, d, depth)?), regions)
+                let args = self.dec_tys(u, d, depth)?;
+                // a key a program with other generics recorded (an edited type, or another std's
+                // `Box<T>` read where Box is `Box<T, A>`): no type of this program, so no key
+                if u.tcx.adts.get(&def).is_some_and(|adt| adt.n_generics as usize != args.len()) {
+                    return None;
+                }
+                TyKind::Adt(def, u.tcx.tys.mk_list(&args), regions)
             }
             13 => {
                 let ps = self.dec_tys(u, d, depth)?;
@@ -2313,6 +2806,16 @@ impl Cache {
                 }
                 self.enc_tys(u, &shim.args, e, crates, 0)
             }
+            // a constant-evaluation twin: its base's key (the twin's code is a function of the
+            // base's lowered body, ctfe_twin.rs steps; the kind keeps twin and base code apart)
+            FnKey::Ctfe(base) => {
+                if base as usize >= u.fns.len() {
+                    return None;
+                }
+                e.u8(KeyKind::Ctfe as u8);
+                let bk = u.fns[base as usize].key.clone();
+                self.enc_fnkey(u, &bk, e, crates, depth + 1)
+            }
             // a sandboxed twin: its domain and its base's key. Its code names what it holds of the
             // run's sandbox by symbols (sandbox.rs thunk_sym ..), linked again here; the domain
             // keeps code one policy made out of another domain's units, and the kind keeps
@@ -2385,14 +2888,16 @@ impl Cache {
     /// What real-time threads of the program rooted at crate `root` reached in earlier runs (jit.rs
     /// realtime), compiled ahead when the program marks its real-time code: the key encodings of
     /// the slots (resolve them with slot_for_bytes_unit) and the trait-object types whose vtables
-    /// it followed (a type that no longer decodes is left out).
+    /// it followed (a type that no longer decodes is left out). Only a set this configuration
+    /// recorded (rt_set_key): key bytes name definitions and types in the std and compiler that
+    /// wrote them, and decoded against another std they name other types (a `Box<T>` key of a
+    /// std before `Box<T, A>` decoded to a one-argument Box, which no impl matches).
     pub fn rt_set_load(&mut self, u: &Unit, root: u32) -> (Vec<Vec<u8>>, Vec<TyId>) {
-        let Ok(b) = std::fs::read(self.rt_set_path(u, root)) else { return Default::default() };
-        let mut d = D { b: &b, p: 0 };
+        let key = self.rt_set_key(u, root);
+        let Some(store) = Store::open(&self.rt_set_path(key)) else { return Default::default() };
+        let Some((KIND_RT_SET, b)) = store.get(key) else { return Default::default() };
+        let mut d = D { b, p: 0 };
         let (mut keys, mut dyns) = (Vec::new(), Vec::new());
-        if d.u32() != Some(ENTRY_VERSION) {
-            return (keys, dyns);
-        }
         for _ in 0..d.u32().unwrap_or(0) {
             let Some(k) = d.bytes() else { break };
             keys.push(k.to_vec());
@@ -2428,7 +2933,6 @@ impl Cache {
             }
         }
         let mut e = E::default();
-        e.u32(ENTRY_VERSION);
         e.u32(n);
         e.0.extend_from_slice(&keys.0);
         e.u32(nd);
@@ -2436,16 +2940,26 @@ impl Cache {
         if crate::jit::rt_trace() {
             eprintln!("relax rt: recorded {} of {} slots, {} of {} trait-object types", n, ids.len(), nd, dyns.len());
         }
-        let path = self.rt_set_path(u, root);
-        let tmp = path.with_extension("new");
-        if std::fs::write(&tmp, &e.0).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
+        let key = self.rt_set_key(u, root);
+        let _ = crate::store::append(&self.rt_set_path(key), vec![NewEntry { key, kind: KIND_RT_SET, payload: e.0 }], true);
     }
 
-    fn rt_set_path(&self, u: &Unit, root: u32) -> PathBuf {
-        let name = u.prog.crates.get(root as usize).map_or("program", |c| u.prog.syms.str(c.name));
-        self.dir.join(format!("rt-{}.set", name))
+    /// The real-time set's key: the root crate's name under this cache configuration (the codegen
+    /// identity: compiler stamps and std digest, the format and the code options) and worktree.
+    fn rt_set_key(&self, u: &Unit, root: u32) -> u128 {
+        let mut h = Sip128::new();
+        h.str("rt-set");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
+        h.u128(self.cfg);
+        h.str(&crate::codegen_id::target_tag());
+        h.str(u.prog.crates.get(root as usize).map_or("program", |c| u.prog.syms.str(c.name)));
+        h.finish128()
+    }
+
+    /// The real-time set's store: its own, pruned as every store is (one per key)
+    fn rt_set_path(&self, key: u128) -> PathBuf {
+        self.dir.join(format!("rt_set-{:016x}.rcs", key as u64))
     }
 
     /// memory report (RELAX_MEM_REPORT): the recorder's and linker's tables (capacity based)
@@ -2575,6 +3089,7 @@ impl Cache {
         let mut e = E::default();
         let mut crates = Vec::new();
         let outer = self.enc_defs.replace(Vec::new());
+        let outer_items = self.enc_closure_items.replace(Vec::new());
         let r = self.enc_fnkey(u, key, &mut e, &mut crates, 0);
         // the allocator shim's callers call the program's #[global_allocator] (or the default):
         // their code depends on it, which the fn's own identity does not show
@@ -2590,6 +3105,7 @@ impl Cache {
             }
         }
         let named = std::mem::replace(&mut self.enc_defs, outer).unwrap_or_default();
+        let closure_items = std::mem::replace(&mut self.enc_closure_items, outer_items).unwrap_or_default();
         r?;
         // code of (or instantiated with) a crate loaded after the cache opened: never cached
         if crates.iter().any(|&c| c as usize >= self.crate_ident.len()) {
@@ -2597,7 +3113,7 @@ impl Cache {
         }
         crates.sort_unstable();
         crates.dedup();
-        let dom = self.dominant(&crates);
+        let dom = self.store_crate(&crates)?;
         // a slot of the startup manifest whose crates are as it was recorded from and none
         // edited since: its key as recorded (the bodies below hash to what they hashed to then)
         let unchanged = |c: &u32| self.manifest_key_crates.as_ref().is_none_or(|ok| ok.get(*c as usize) == Some(&true));
@@ -2609,8 +3125,11 @@ impl Cache {
                 let g = self.deps_graph(u);
                 let mut h = Sip128::new();
                 h.str("code-deps");
-                // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-                h.u128(crate::dirs::anchors_key());
+                // the checkout (payloads can hold its absolute paths); code of sealed crates alone
+                // the places no checkout owns instead, so every checkout over them has its key: an
+                // entry made from it holds a checkout's paths only through a slot it took in (its
+                // certificate names it with its key) or a late input (its store's ledger)
+                h.u128(if crates.iter().all(|&c| self.sealed.get(c as usize) == Some(&true)) { self.sealed_key } else { self.anchors_key });
                 h.u128(self.cfg);
                 h.write(&e.0);
                 h.write(&shim.0);
@@ -2654,8 +3173,14 @@ impl Cache {
                     }
                 }
                 // the bodies the code is made from: the definition's, a closure's enclosing fns'
-                // -- their text and position, and what the names in them find
-                for &d in &kd {
+                // -- their text and position, and what the names in them find -- and the items
+                // whose closures its types name: their type check lays out those closures'
+                // environments (enc_ty_tree), which the code holds as they were
+                let mut bodies = kd.clone();
+                for d in closure_items {
+                    if !bodies.contains(&d) { bodies.push(d); }
+                }
+                for &d in &bodies {
                     h.u128(self.def_body(u, d));
                     h.u128(self.body_names_of(u, d, &g));
                 }
@@ -2667,7 +3192,7 @@ impl Cache {
                 let mut h = Sip128::new();
                 h.str("code-exp");
                 h.u128(k0);
-                for &d in &kd {
+                for &d in &bodies {
                     match self.exp_closure(u, d, k0, dom, &g) {
                         Some(x) => h.u128(x),
                         None => {
@@ -2680,6 +3205,10 @@ impl Cache {
             }
         };
         self.key_crate.insert(k, dom);
+        // (only with shared stores: a run without them writes every verdict to its checkout)
+        if self.shared.is_some() && crates.iter().all(|&c| self.sealed.get(c as usize) == Some(&true)) {
+            self.sealed_keys.insert(k);
+        }
         Some((k, crates, e.0))
     }
 
@@ -2858,7 +3387,10 @@ impl Cache {
                     p.extend_from_slice(&th.to_le_bytes());
                     p.extend_from_slice(&(n.len() as u32).to_le_bytes());
                     for x in &n { p.extend_from_slice(&x.to_le_bytes()); }
-                    self.push_pending(dom, NewEntry { key: ekey, kind: KIND_EXP_NAMES, payload: p });
+                    // a sealed store crate's: every crate the key names is sealed (its closure
+                    // is), and so is k0 -- the shared store, where the next checkout finds them
+                    let store = if self.sealed.get(dom as usize) == Some(&true) && self.shared_writable(dom) { self.shared_id(dom) } else { dom };
+                    self.push_pending(store, NewEntry { key: ekey, kind: KIND_EXP_NAMES, payload: p });
                 }
                 (th, n)
             }
@@ -2952,6 +3484,9 @@ impl Cache {
         let k = h.finish128();
         let dom = self.key_crate.get(&code).copied().unwrap_or(0);
         self.key_crate.insert(k, dom);
+        if self.sealed_keys.contains(&code) {
+            self.sealed_keys.insert(k);
+        }
         Some(k)
     }
 
@@ -3083,6 +3618,7 @@ impl Cache {
     pub fn record_borrowck(&mut self, key: u128, v: StoredVerdict) {
         if self.pending_keys.insert(key) {
             let kc = self.key_crate.get(&key).copied().unwrap_or(0);
+            let kc = self.verdict_store(key, kc);
             self.push_pending(kc, NewEntry { key, kind: KIND_BORROWCK, payload: enc_verdict(&v) });
             self.pending_verdicts.insert(key, v);
         }
@@ -3250,7 +3786,10 @@ impl Cache {
     /// The content key of data object `idx` (bytes, alignment, pointer words), recording its
     /// entry; None when it cannot be stored (mutable, opaque, unattributed pointers).
     fn data_entry(&mut self, u: &Unit, idx: u32) -> Option<u128> {
-        let memo = (idx, self.cur_crate);
+        // the store it goes to: the entry's (a shared one's own key and store); the memo tells a
+        // scanned object (a sealed entry's) from one encoded unscanned
+        let store = if self.cur_shared { self.shared_id(self.cur_crate) } else { self.cur_crate };
+        let memo = (idx, store | if self.cur_sealed { MEMO_SCANNED } else { 0 });
         if let Some(&k) = self.data_key.get(&memo) {
             if k.is_none() {
                 let w = self.data_why.get(&idx).copied().unwrap_or("data object: cycle");
@@ -3275,6 +3814,13 @@ impl Cache {
             };
             ptrs.sort_unstable_by_key(|(o, _)| *o);
             let bytes = unsafe { std::slice::from_raw_parts(start as *const u8, len as usize) }.to_vec();
+            // code keyed by no checkout links no path of the checkout that wrote it (a constant a
+            // macro made from the environment): the objects it points to are scanned the same way
+            // (enc_sym below encodes them through here)
+            if self.cur_sealed && self.checkout_text.found_in(&bytes) {
+                self.why(WHY_CHECKOUT_TEXT);
+                return None;
+            }
             let mut e = E::default();
             e.u32(ENTRY_VERSION);
             e.u64(align);
@@ -3304,8 +3850,8 @@ impl Cache {
             let key = {
                 let mut h = Sip128::new();
                 h.str("data");
-                // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-                h.u128(crate::dirs::anchors_key());
+                // the checkout, as the code's key; a shared entry's objects the sealed key
+                h.u128(if self.cur_shared { self.sealed_key } else { self.anchors_key });
                 h.u128(self.cfg);
                 h.write(&e.0);
                 // a named object (a constant, a vtable, a location) is its own entry: two
@@ -3324,7 +3870,7 @@ impl Cache {
                     eprintln!("relax cache: DATA {} key {:032x} ptrs {:?} enc {}", n, key, ws, hex);
                 }
             }
-            let kc = self.cur_crate;
+            let kc = store;
             if self.mode != Mode::ReadOnly && !self.data_reaches(key, kc) {
                 self.pending_keys.insert(key);
                 self.data_crates.entry(key).or_default().push(kc);
@@ -3345,17 +3891,25 @@ impl Cache {
     /// a build script's own code named first went to that script's store, and the std code naming
     /// it after failed to link in every other program
     fn data_reaches(&self, key: u128, kc: u32) -> bool {
-        let closure = self.crate_closure.get(kc as usize).map_or(&[][..], |set| &set[..]);
-        let reaches = |c: usize| closure.get(c / 64).is_some_and(|w| w >> (c % 64) & 1 == 1);
-        if self.data_crates.get(&key).is_some_and(|cs| cs.iter().any(|&c| reaches(c as usize))) {
+        // (pending-store ids: a shared store's entry finds its data in the shared stores, which
+        // every checkout opens; a code store's in the code stores)
+        let n = self.code_path.len() as u32;
+        let shared = kc >= n;
+        let closure = self.crate_closure.get(self.crate_of_store(kc) as usize).map_or(&[][..], |set| &set[..]);
+        let reaches = |s: u32| (s >= n) == shared && { let c = self.crate_of_store(s) as usize; closure.get(c / 64).is_some_and(|w| w >> (c % 64) & 1 == 1) };
+        if self.data_crates.get(&key).is_some_and(|cs| cs.iter().any(|&c| reaches(c))) {
             return true;
         }
         // where the index has it (one store of those holding it), or `kc`'s own store
-        let store_crate = |p: u32| self.code_path.iter().position(|cp| *cp == self.stores[p as usize].path);
-        if self.index_at(key).is_some_and(|(p, _)| store_crate(p).is_some_and(reaches)) {
+        let store_id = |p: u32| {
+            let path = &self.stores[p as usize].path;
+            self.code_path.iter().position(|cp| cp == path).map(|c| c as u32)
+                .or_else(|| self.shared_path.iter().position(|sp| sp.as_ref() == Some(path)).map(|c| c as u32 + n))
+        };
+        if self.index_at(key).is_some_and(|(p, _)| store_id(p).is_some_and(reaches)) {
             return true;
         }
-        let own = self.code_path.get(kc as usize);
+        let own = if shared { self.shared_path.get((kc - n) as usize).and_then(|p| p.as_ref()) } else { self.code_path.get(kc as usize) };
         self.stores.iter().any(|st| Some(&st.path) == own && st.index.binary_search_by(|e| { let k = e.key; k.cmp(&key) }).is_ok())
     }
 
@@ -3396,6 +3950,7 @@ impl Cache {
     /// `record_o3`'s inputs for an encoding later (the O3 install is a publish: the record's key and
     /// certificate encoding runs in the bounded record batches instead). None: it would store nothing.
     pub(crate) fn defer_record_o3(&self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], inlined: &[u32], nounwind: &[(u32, bool)]) -> Option<PendingRecord> {
+        if matches!(u.fns[id as usize].key, FnKey::Ctfe(_)) { return None; }
         if self.mode == Mode::ReadOnly || u.fns[id as usize].patch_gen != 0 {
             return None;
         }
@@ -3468,6 +4023,7 @@ impl Cache {
         let vk = key ^ salt;
         if self.has_index(&vk) || !self.pending_keys.insert(vk) { return; }
         let kc = self.key_crate.get(&key).copied().unwrap_or(0);
+        let kc = self.verdict_store(key, kc);
         self.push_pending(kc, NewEntry { key: vk, kind: KIND_TIER, payload });
     }
 
@@ -3554,9 +4110,15 @@ impl Cache {
             trace_lookup(u, id, "norecord:o1v-not-below");
             return;
         }
-        let Some(payload) = self.encode_entry(u, id, code, relocs, pc_map, o3, kind, pending) else {
+        self.cur_sealed = false;
+        self.cur_shared = false;
+        let enc = self.encode_entry(u, id, code, relocs, pc_map, o3, kind, pending);
+        self.cur_sealed = false;
+        let shared = std::mem::replace(&mut self.cur_shared, false);
+        let Some((payload, sealed)) = enc else {
             if o3.is_some() { warm_count::add(warm_count::O3_UNENCODABLE, 1); }
             let w = self.last_why;
+            if w == WHY_CHECKOUT_TEXT { self.stats.checkout_text += 1; }
             trace_lookup(u, id, &format!("norecord:encode:{}", w));
             if o3.is_none() {
                 relax_codegen::warm::reason(id, &format!("unstorable:{}", w));
@@ -3575,6 +4137,12 @@ impl Cache {
             trace_lookup(u, id, "norecord:provisional-below");
             return;
         }
+        // a shared entry is written once: replaced only by code of a higher tier (another
+        // checkout's O3 code of the same fn does not rewrite it, nor the startup images over it)
+        if shared && existing && !payload_tier(&payload).zip(self.rec_tier.get(&key).copied().or_else(|| self.entry_tier(key))).is_some_and(|(new, old)| tier_rank(new) > tier_rank(old)) {
+            trace_lookup(u, id, "norecord:shared-written");
+            return;
+        }
         self.pending_keys.insert(key);
         // a replacement of an entry with no recorded tier, and one that moves its slot's tier up
         // (O1 -> O2/O3), count like a stale image slot (record_manifest: rewritten past 2%; the
@@ -3584,8 +4152,8 @@ impl Cache {
         // warm run rewrote the whole image)
         if replace && (existing || self.linked.contains(&id)) {
             match self.entry_tier(key) {
-                None => self.stats.rewrite_why[0] += 1,
-                Some(old) if payload_tier(&payload).is_some_and(|new| tier_rank(new) > tier_rank(old)) => self.stats.rewrite_why[1] += 1,
+                None => { self.stats.rewrite_why[0] += 1; self.replaced.push(id); }
+                Some(old) if payload_tier(&payload).is_some_and(|new| tier_rank(new) > tier_rank(old)) => { self.stats.rewrite_why[1] += 1; self.replaced.push(id); }
                 Some(_) => {}
             }
         }
@@ -3599,8 +4167,19 @@ impl Cache {
                 trace_keyed(u, id, &format!("rec:{}{} {:?}{} rir {} deps {} code {}", ["base", "O1", "O2", "O3"][tier_level(t) as usize], if t & TIER_PROVISIONAL != 0 { "-provisional" } else { "" }, kind, if pending.is_some() { " deferred" } else { "" }, rir, u.body_deps.get(&id).map_or(0, |v| v.len()), code.len()), Some(key));
             }
         }
+        // (the store encode_entry chose: the slot's verdict and tier records follow its code)
         let kc = self.cur_crate;
-        self.push_pending(kc, NewEntry { key, kind: KIND_CODE, payload });
+        self.key_crate.insert(key, kc);
+        if self.slot_crates.get(&id).is_some_and(|c| self.dominant(c) != kc) { self.stats.wider_store += 1; }
+        if sealed { self.stats.sealed_records += 1; }
+        let store = if shared {
+            self.shared_keys.insert(key);
+            self.stats.shared_records += 1;
+            self.shared_id(kc)
+        } else {
+            kc
+        };
+        self.push_pending(store, NewEntry { key, kind: KIND_CODE, payload });
         self.stats.recorded += 1;
         warm_count::add(warm_count::RECORDED, 1);
         if o3.is_some() { warm_count::add(warm_count::O3_WRITTEN, 1); }
@@ -3629,15 +4208,16 @@ impl Cache {
     /// The dependency certificate of a code: every slot of `deps` (`record_deps`: the slots whose
     /// RIR it took in), by its key encoding with its key
     /// now. The entry links only while each still has that key (its body, position and
-    /// interface unchanged). None: one has no key (the entry cannot be stored).
-    fn cert_bytes(&mut self, u: &Unit, deps: &[u32]) -> Option<Vec<u8>> {
+    /// interface unchanged). With it, the crates those keys come from. None: one has no key (the
+    /// entry cannot be stored).
+    fn cert_bytes(&mut self, u: &Unit, deps: &[u32]) -> Option<(Vec<u8>, Vec<u32>)> {
         let t0 = relax_session::clock::cpu_ns();
         let r = self.cert_bytes_inner(u, deps);
         self.stats.cert_write_ns += relax_session::clock::cpu_ns() - t0;
         r
     }
 
-    fn cert_bytes_inner(&mut self, u: &Unit, deps: &[u32]) -> Option<Vec<u8>> {
+    fn cert_bytes_inner(&mut self, u: &Unit, deps: &[u32]) -> Option<(Vec<u8>, Vec<u32>)> {
         let mut items: Vec<(Vec<u8>, u128)> = Vec::new();
         let mut crates: Vec<u32> = Vec::new();
         for &c in deps {
@@ -3667,7 +4247,7 @@ impl Cache {
             e.bytes(&b);
             e.u128(k);
         }
-        Some(e.0)
+        Some((e.0, crates))
     }
 
     /// A hash of crates `idents`' whole fingerprints (certificate fast path). None: one is
@@ -3694,8 +4274,8 @@ impl Cache {
     /// ones -- O3 code: the callees it kept as calls for lack of a body (PendingRecord::with_kept),
     /// those without a key left out -- (each list by key, in key order: the same slots encode the
     /// same in every session), the nounwind answers and the dependency certificate. Verify compares
-    /// a cached entry's with the fresh build's.
-    fn encode_inputs(&mut self, u: &Unit, id: u32, o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>, breaches: bool, e: &mut E) -> Option<()> {
+    /// a cached entry's with the fresh build's. Returns the crates the certificate's keys come from.
+    fn encode_inputs(&mut self, u: &Unit, id: u32, o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>, breaches: bool, e: &mut E) -> Option<Vec<u32>> {
         let o2 = kind == RecKind::O2;
         let base = o3.is_none() && kind == RecKind::First && match pending {
             Some(p) => p.baseline,
@@ -3777,19 +4357,22 @@ impl Cache {
                 &deps
             }
         };
-        let Some(cert) = self.cert_bytes(u, deps) else {
+        let Some((cert, crates)) = self.cert_bytes(u, deps) else {
             self.stats.unencodable += 1;
             self.why("dependency key");
             return None;
         };
         e.0.extend_from_slice(&cert);
-        Some(())
+        Some(crates)
     }
 
     /// The payload of a code entry (O1, or O3 with its inlined slots);
     /// None: it cannot be stored (`last_why` says why).
     #[allow(clippy::too_many_arguments)]
-    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>) -> Option<Vec<u8>> {
+    /// Slot `id`'s code entry: its payload, and whether it is made from sealed crates only (its
+    /// key's and its certificate's: sealed_crates). It leaves cur_sealed and cur_shared set for
+    /// the caller (whether the entry goes to the shared store of its store crate).
+    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>) -> Option<(Vec<u8>, bool)> {
         // unlinked code only: a pool word must still be zero (linked code holds this run's values)
         for rl in relocs {
             let o = rl.at as usize;
@@ -3816,10 +4399,31 @@ impl Cache {
         let mut e = E::default();
         e.u32(ENTRY_VERSION);
         e.str(&u.fns[id as usize].name);
-        self.encode_inputs(u, id, o3, kind, pending, self.mode == Mode::Verify, &mut e)?;
+        let mut named = self.encode_inputs(u, id, o3, kind, pending, self.mode == Mode::Verify, &mut e)?;
+        let is_sealed = |c: &u32| self.sealed.get(*c as usize) == Some(&true);
+        let sealed = named.iter().all(is_sealed) && self.slot_crates.get(&id).is_some_and(|k| k.iter().all(is_sealed));
+        // code that took in slots of crates its store's crate does not see (a std fn that inlined
+        // a caller of the workspace allocator's shim): the store of one that sees those too, whose
+        // ledger lists their late inputs (store_crate); its data objects, encoded below, go along
+        if !self.sees_all(self.cur_crate, &named) {
+            named.push(self.cur_crate);
+            let Some(c) = self.store_crate(&named) else {
+                self.stats.unencodable += 1;
+                self.why("no crate sees the certificate's crates");
+                return None;
+            };
+            self.cur_crate = c;
+        }
+        // made from sealed crates alone: its data is scanned for the checkout's path, and it goes
+        // to the shared store of its (sealed) store crate when this run writes it
+        self.cur_sealed = sealed;
+        self.cur_shared = sealed && self.shared_writable(self.cur_crate);
         e.bytes(code);
         e.u32(relocs.len() as u32);
         let mut rw = Vec::new();
+        // each callee's key once: a later relocation to it names the key's position (RELOC_KEY_REF).
+        // A key is the callee's whole instance identity, and a fn calls the same callees many times.
+        let mut keyed = HashMap::new();
         for rl in relocs {
             e.u32(rl.at);
             e.u8(kind_code(rl.kind));
@@ -3827,17 +4431,12 @@ impl Cache {
             let ok = match r {
                 Reloc::Sym(s) => self.enc_sym(u, *s, &mut e, &mut rw).is_some(),
                 Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => {
-                    e.u8(match r { Reloc::Slot(_) => 20, Reloc::Call(_) => 25, _ => 21 });
-                    match self.slot_bytes(u, *x) {
-                        Some(b) => {
-                            e.bytes(&b);
-                            true
-                        }
-                        None => {
-                            self.why("callee key");
-                            false
-                        }
+                    let tag = match r { Reloc::Slot(_) => 20, Reloc::Call(_) => 25, _ => 21 };
+                    let ok = write_callee(&mut e, tag, *x, &mut keyed, || self.slot_bytes(u, *x));
+                    if !ok {
+                        self.why("callee key");
                     }
+                    ok
                 }
                 Reloc::TlsKey => {
                     e.u8(22);
@@ -3896,7 +4495,7 @@ impl Cache {
                 e.u128(0);
             }
         }
-        Some(e.0)
+        Some((e.0, sealed))
     }
 
     // ------------------------------------------------------------ linking
@@ -3953,6 +4552,14 @@ impl Cache {
         // whether its entry holds after an edit (load_manifest)
         h.u128(*self.view.get(root as usize)?);
         Some(h.finish128())
+    }
+
+    /// Key of a startup manifest's session tail (record_tail).
+    fn manifest_tail_key(&self, manifest: u128) -> u128 {
+        let mut h = Sip128::new();
+        h.str("startup slots tail");
+        h.u128(manifest);
+        h.finish128()
     }
 
     /// Key of the entry naming the sources a startup manifest's code keys were made from.
@@ -4014,6 +4621,9 @@ impl Cache {
         self.pending_verdicts = old.pending_verdicts.clone();
         self.manifest_done = old.manifest_done;
         self.manifest_len = old.manifest_len;
+        self.written_ids = old.written_ids.clone();
+        self.image_built = old.image_built.clone();
+        self.replaced = old.replaced.clone();
         self.collected_committed = true;
         self.stats = old.stats.clone();
         // the same program (settle_rebuild compares it): the same item graph and definitions
@@ -4068,12 +4678,39 @@ impl Cache {
                             Some(self.crate_ident.iter().enumerate().map(|(c, id)| recorded.get(id).is_some_and(|fp| self.fp_now(c) == Some(*fp))).collect())
                         })
                     };
+                    // the session tail the last quit wrote (record_tail): the slots its run installed
+                    // past this manifest's, seeded after them (jit::spec_seed_manifest); their keys
+                    // only when recorded from these very sources
+                    let main = out.len();
+                    if let Some((KIND_MANIFEST, t)) = pk.get_checked(self.manifest_tail_key(key)) {
+                        let fp = self.sources_fp();
+                        let seen: HashSet<u128> = out.iter().map(|b| identity_hash(b)).collect();
+                        let mut d = D { b: t, p: 0 };
+                        let _ = (|| {
+                            if d.u32()? != ENTRY_VERSION {
+                                return None;
+                            }
+                            let same = d.u128()? == fp;
+                            let n = d.u32()? as usize;
+                            for _ in 0..n {
+                                let b = d.bytes()?;
+                                let k = d.u128()?;
+                                if !seen.contains(&identity_hash(b)) {
+                                    out.push(b.to_vec());
+                                    keys.push(if same && k != 0 && self.has_index(&k) { k } else { 0 });
+                                }
+                            }
+                            Some(())
+                        })();
+                        if self.verbose { eprintln!("relax cache: the startup manifest's session tail: {} slots past its {}", out.len() - main, main); }
+                    }
                     if let Some(crates) = crates.filter(|_| missing == 0 && self.mode != Mode::Verify) {
                         self.manifest_keys = out.iter().zip(&keys).filter(|(_, k)| **k != 0).map(|(b, k)| (identity_hash(b), *k)).collect();
                         self.manifest_key_crates = crates;
                     }
                     self.manifest = out;
                     self.manifest_old_keys = keys;
+                    self.manifest_main = main;
                     self.manifest_present = present;
                     self.manifest_missing = missing;
                     self.manifest_uncached = uncached;
@@ -4102,14 +4739,19 @@ impl Cache {
         }
         let t0 = std::time::Instant::now();
         if !crate::preempt::is_stopped() && relax_codegen::warm::enabled() {
+            // (every slot of the unit: a waiting request goes first, as in the steps below)
+            crate::run::yield_section("manifest outcomes");
             for (id, f) in u.fns.iter().enumerate() {
+                if id % 4096 == 4095 && stop() {
+                    return false;
+                }
                 if !f.compiled && !f.history().inlined_into.is_empty() {
                     self.remember_outcome(u, id as u32, None, "cold inlined-only; no standalone code entry");
                 }
             }
         }
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
-        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && (self.stats.rewrite_why[0] + self.stats.rewrite_why[1]) as usize * 50 <= self.image_slots) {
+        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && { let (r, n) = self.image_replaced(); r * 50 <= n }) {
             return true;
         }
         // at exit the slots' keys can no longer be made: after the mid-run manifest the exit
@@ -4131,7 +4773,7 @@ impl Cache {
         let mut before_present = 0;
         let mut present_ids = Vec::new();
         for (n, &id) in order.iter().enumerate() {
-            if n % 64 == 63 && stop() { return false; }
+            if n % 16 == 15 && stop() { return false; }
             if let Some(b) = self.slot_bytes(u, id) {
                 let entry = match self.slot_key(u, id) {
                     Some(k) if self.has_index(&k) || self.pending_keys.contains(&k) => k,
@@ -4147,31 +4789,63 @@ impl Cache {
         if self.verbose { eprintln!("relax cache: manifest phases: {} slots keyed in {:.1} ms", order.len(), t0.elapsed().as_secs_f64() * 1e3); }
         if stop() { return false; }
         crate::run::yield_section("manifest compare");
-        let old: HashSet<&[u8]> = self.manifest.iter().map(|b| b.as_slice()).collect();
-        let new = list.iter().filter(|b| !old.contains(b.0.as_slice())).count();
+        let mut old: HashSet<&[u8]> = HashSet::with_capacity(self.manifest.len());
+        for (i, b) in self.manifest.iter().enumerate() {
+            if i % 1024 == 1023 && stop() { return false; }
+            old.insert(b.as_slice());
+        }
+        let mut new = 0;
+        for (i, b) in list.iter().enumerate() {
+            if i % 1024 == 1023 && stop() { return false; }
+            new += !old.contains(b.0.as_slice()) as usize;
+        }
         // the same start as before (within 2%), the loaded manifest still valid and its image
-        // current (within 2%, and covering all but 2% of its cached slots): no new one
-        let image_current = !self.image_rewrite
-            && (self.image_slots == 0 || ((self.image_stale + (self.stats.rewrite_why[0] + self.stats.rewrite_why[1]) as usize) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49));
+        // current (within 2%, covering all but 2% of its cached slots, and at most 2% of its slots
+        // ones no call reached while its window was open: jit::startup_set_called): no new one
+        let (replaced, _) = self.image_replaced();
+        let image_current = !self.image_rewrite && match &self.image_built {
+            // this run's image: its slots replaced since it was built
+            Some((_, n, _)) => replaced * 50 <= *n,
+            None => self.image_slots == 0 || ((self.image_stale + replaced) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49 && crate::jit::not_called_at_present() * 50 <= self.image_slots),
+        };
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
             self.manifest_done = true; self.manifest_len = order.len();
+            self.image_kept = None;
             return true;
         }
         if self.verbose {
-            eprintln!("relax cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}), image slots {} stale {} cached at present {}",
-                self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], self.image_slots, self.image_stale, self.manifest_present_cached);
+            eprintln!("relax cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}; of the image's own slots {}), image slots {} stale {} cached at present {}",
+                self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], replaced, self.image_slots, self.image_stale, self.manifest_present_cached);
         }
         crate::run::yield_section("manifest image");
-        let img = if self.mode != Mode::Verify {
-            match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
-        } else { None };
+        // the image an earlier try built and then gave way after (a busy session's tries each
+        // threw away 0.7-0.9 s of build, and some never finished before the quit)
+        let edited = crate::reload::edited_crates().len();
+        let kept = self.image_kept.take().filter(|(_, n, at, ed, bits)| *ed == edited && self.replaced_in(bits, *at) * 100 <= *n as usize);
+        let (img, built_at) = match kept {
+            Some((b, n, at, _, bits)) => {
+                if self.verbose { eprintln!("relax cache: startup image of {} slots kept from the try that gave way ({} of them replaced since)", n, self.replaced_in(&bits, at)); }
+                (Some((b, n, bits)), at)
+            }
+            None => {
+                let at = self.replaced.len();
+                let img = if self.mode != Mode::Verify {
+                    match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
+                } else { None };
+                (img, at)
+            }
+        };
         // at exit no key can be made any more (slot_key): slots no lookup or record keyed this
         // run fall out of the image. A rewrite then (O2/O3 code replaced startup code since the
         // mid-run write) must not replace the loaded image with one covering fewer slots: the
         // next start would prelink a fraction of it (Calculator: 16,000 -> 2 slots)
-        crate::run::yield_section("manifest tail");
-        if stop() { return false; }
         let n_img = img.as_ref().map_or(0, |i| i.1 as usize);
+        let mut e = E::default();
+        let mut written: HashSet<u128> = HashSet::with_capacity(list.len());
+        let mut gone: Vec<u128> = Vec::new();
+        let made = 'steps: {
+        crate::run::yield_section("manifest tail");
+        if stop() { break 'steps false; }
         if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 {
             if self.verbose {
                 eprintln!("relax cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
@@ -4181,20 +4855,22 @@ impl Cache {
         }
         // the entry first (the yield checks: nothing is queued before the last of them)
         crate::run::yield_section("manifest entry");
-        let mut e = E::default();
+        // (its whole size at once, as build_image's: the image copied below would grow it in steps
+        // that each move all of it between two yield checks)
+        e.0.reserve(img.as_ref().map_or(0, |i| i.0.len()) + list.iter().map(|(b, _)| b.len() + 20).sum::<usize>() + 16);
         e.u32(ENTRY_VERSION);
         e.u32(list.len() as u32);
         e.u32(before_present as u32);
         for (i, (b, entry)) in list.iter().enumerate() {
-            if i % 1024 == 1023 && stop() { return false; }
+            if i % 1024 == 1023 && stop() { break 'steps false; }
             e.bytes(b);
             e.u128(*entry);
         }
-        if let Some((img, _)) = img {
+        if let Some((img, _, _)) = &img {
             e.u32(IMAGE_MAGIC);
             for part in img.chunks(1 << 20) {
                 e.0.extend_from_slice(part);
-                if stop() { return false; }
+                if stop() { break 'steps false; }
             }
         }
         // the code entries this manifest supersedes: a slot of the loaded manifest whose key
@@ -4203,17 +4879,35 @@ impl Cache {
         // keeps). Removed with this manifest's write, its bytes are dead space: the store
         // rewrite drops them once they outgrow a quarter of the live ones (store.rs append).
         crate::run::yield_section("manifest superseded");
-        let mut gone: Vec<u128> = Vec::new();
+        for (i, (b, _)) in list.iter().enumerate() {
+            if i % 1024 == 1023 && stop() { break 'steps false; }
+            written.insert(identity_hash(b));
+        }
         if self.manifest.len() == self.manifest_old_keys.len() {
-            let old_keys: HashMap<&[u8], u128> = self.manifest.iter().zip(&self.manifest_old_keys)
-                .filter(|(_, k)| **k != 0).map(|(b, k)| (b.as_slice(), *k)).collect();
+            let mut old_keys: HashMap<&[u8], u128> = HashMap::with_capacity(self.manifest.len());
+            for (i, (b, k)) in self.manifest.iter().zip(&self.manifest_old_keys).enumerate() {
+                if i % 1024 == 1023 && stop() { break 'steps false; }
+                if *k != 0 { old_keys.insert(b.as_slice(), *k); }
+            }
             for (i, (b, k)) in list.iter().enumerate() {
-                if i % 1024 == 1023 && stop() { return false; }
+                if i % 1024 == 1023 && stop() { break 'steps false; }
                 if let Some(o) = old_keys.get(b.as_slice()).filter(|o| *k != 0 && **o != *k && !self.pending_keys.contains(o)) { gone.push(*o); }
             }
         }
+        true
+        };
+        if !made {
+            // the retry takes this image while at most 1% of its slots were replaced since
+            if let Some((b, n, bits)) = img { self.image_kept = Some((b, n, built_at, edited, bits)); }
+            return false;
+        }
         // (past the last yield check: this manifest is the run's)
         self.manifest_done = true; self.manifest_len = order.len();
+        self.written_ids = Some(written);
+        if let Some((_, _, bits)) = img.filter(|_| n_img > 0) {
+            // (as built: what was replaced since counts against it)
+            self.image_built = Some((built_at, n_img, bits));
+        }
         let mut removed = 0;
         for o in gone {
             let Some((p, _)) = self.index_at(o) else { continue };
@@ -4230,6 +4924,90 @@ impl Cache {
         self.push_pending(root, NewEntry { key: self.manifest_sources_key(key), kind: KIND_MANIFEST, payload: f.0 });
         self.image_rewrite = false;
         true
+    }
+
+    /// The quit's record of the session (on the owner thread): the slots of this run's install
+    /// order past the startup manifest the next start loads (the one this run wrote, else the
+    /// loaded one's own slots) become its session tail, which the next start's speculative workers
+    /// link ahead after its first present, after the manifest's later slots. The manifest and its
+    /// image stay as written: rebuilding the image at the quit held the exit for a second and more
+    /// (image_refresh_due rebuilds it in the session instead).
+    /// `stop` as for record_manifest: yes drops this record (false), a later pass makes it again.
+    pub fn record_tail(&mut self, u: &Unit, root: u32, order: &[u32], stop: &dyn Fn() -> bool) -> bool {
+        if self.mode == Mode::ReadOnly || self.keys_moved != 0 || !self.layout_edited.is_empty() {
+            return true;
+        }
+        let Some(key) = self.manifest_key(root) else { return true };
+        let t0 = std::time::Instant::now();
+        let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
+        let known = match self.written_ids.take() {
+            Some(w) => w,
+            None => self.manifest[..self.manifest_main.min(self.manifest.len())].iter().map(|b| identity_hash(b)).collect(),
+        };
+        crate::run::yield_section("manifest tail keys");
+        let mut list: Vec<(Vec<u8>, u128)> = Vec::new();
+        let mut gave_way = false;
+        for (n, &id) in order.iter().enumerate() {
+            if n % 64 == 63 && stop() { gave_way = true; break; }
+            let Some(b) = self.slot_bytes(u, id) else { continue };
+            if known.contains(&identity_hash(&b)) {
+                continue;
+            }
+            let entry = match self.slot_key(u, id) {
+                Some(k) if self.has_index(&k) || self.pending_keys.contains(&k) => k,
+                _ => 0,
+            };
+            list.push((b, entry));
+        }
+        self.written_ids = Some(known);
+        if gave_way || stop() {
+            return false;
+        }
+        let mut e = E::default();
+        e.u32(ENTRY_VERSION);
+        e.u128(if crate::reload::edited_crates().is_empty() { self.sources_fp() } else { 0 });
+        e.u32(list.len() as u32);
+        for (b, entry) in &list {
+            e.bytes(b);
+            e.u128(*entry);
+        }
+        self.push_pending(root, NewEntry { key: self.manifest_tail_key(key), kind: KIND_MANIFEST, payload: e.0 });
+        if self.verbose {
+            eprintln!("relax cache: the startup manifest's session tail: {} of the {} slots installed, in {:.1} ms", list.len(), order.len(), t0.elapsed().as_secs_f64() * 1e3);
+        }
+        true
+    }
+
+    /// An in-session rebuild of the startup image is due (the mid-run writes): more than 5% of its
+    /// slots had their code replaced since it was built or loaded (O2/O3 over the O1 code: the next
+    /// start leaves those lazy). A cold run tiers up for minutes after its first write.
+    pub fn image_refresh_due(&self) -> bool {
+        let (replaced, n) = self.image_replaced();
+        let since = if self.image_built.is_some() { replaced } else { self.image_stale + replaced };
+        self.manifest_done && self.mode == Mode::On && n > 0 && since * 20 > n
+    }
+
+    /// The startup image's slots replaced this run, and its slots: this run's image, those
+    /// replaced since it was built; else the loaded one, those replaced since its prelink.
+    fn image_replaced(&self) -> (usize, usize) {
+        match &self.image_built {
+            Some((at, n, bits)) => (self.replaced_in(bits, *at), *n),
+            None => (self.replaced_in(self.loaded_bits(), 0), self.image_slots),
+        }
+    }
+
+    /// How many of the slots in `bits` (a bit per slot id) `replaced[from..]` names, each once.
+    fn replaced_in(&self, bits: &[u64], from: usize) -> usize {
+        let mut seen = vec![0u64; bits.len()];
+        let mut n = 0;
+        for &id in &self.replaced[from.min(self.replaced.len())..] {
+            let (w, b) = ((id / 64) as usize, 1u64 << (id % 64));
+            if bits.get(w).is_some_and(|x| x & b != 0) && seen[w] & b == 0 {
+                seen[w] |= b;
+                n += 1;
+            }
+        }
+        n
     }
 
     pub fn flush_front_graphs() -> Result<(), String> {
@@ -4287,9 +5065,31 @@ impl Cache {
         // the images the references among `pending` name, written by now
         let marks = front_run::run_marks();
         let late = crate::sip::late_inputs();
+        let moved = crate::sip::late_moved();
         pack::ensure_private_dir(&self.dir)?;
         let _io = SPILL_IO.write().unwrap_or_else(|e| e.into_inner());
-        for ((c, front), mut entries) in by_store(pending) {
+        let ncode = self.code_path.len() as u32;
+        for ((c, front), entries) in self.by_store_shared(pending) {
+            if self.reads_moved(self.crate_of_store(c), front, &moved) {
+                continue;
+            }
+            // a shared store's batch: written with its ledger merged with the one on disk, under the
+            // store's lock (SharedMerge); refused, it goes to the crate's checkout store
+            let (c, mut entries) = if !front && c >= ncode {
+                let ci = c - ncode;
+                let Some((path, _)) = self.store_of(c, false) else { continue };
+                let merge = self.shared_merge(ci, &late);
+                match crate::store::append_ledgered(&path, entries, LEDGER_KEY, &mut |disk| merge.merge(disk).map(|payload| NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload })) {
+                    Ok(None) => continue,
+                    Ok(Some(back)) => {
+                        self.shared_refused(ci, &back);
+                        (ci, back)
+                    }
+                    Err(e) => return Err(format!("{}: {}", path.display(), e)),
+                }
+            } else {
+                (c, entries)
+            };
             // the ledger: the include!/env! inputs as this run saw them -- the crate's own for its
             // front store, its dependency closure's for its code store
             let ledger = if front { None } else { Some(self.code_ledger(c, &late)) };
@@ -4301,6 +5101,9 @@ impl Cache {
         }
         if let Some(root) = self.dir.parent() {
             prune_root(root);
+        }
+        if let Some(sh) = self.shared.as_ref() {
+            prune_shared(&sh.dir);
         }
         Ok(n)
     }
@@ -4341,6 +5144,8 @@ key_kinds! {
     Closure = 5,
     /// a sandboxed twin: its confinement domain's name and its base's key
     Sandbox = 6,
+    /// a constant-evaluation twin (ctfe_twin.rs): its base's key
+    Ctfe = 7,
 }
 
 impl KeyKind {
@@ -4349,7 +5154,7 @@ impl KeyKind {
     pub(crate) fn counted(self) -> bool {
         match self {
             KeyKind::Inst | KeyKind::ClosureInFile | KeyKind::Closure | KeyKind::Twin | KeyKind::Sandbox => true,
-            KeyKind::Glue | KeyKind::Shim => false,
+            KeyKind::Glue | KeyKind::Shim | KeyKind::Ctfe => false,
         }
     }
 }
@@ -4378,18 +5183,227 @@ fn by_store(pending: Vec<(u32, NewEntry)>) -> HashMap<(u32, bool), Vec<NewEntry>
 impl Cache {
     /// Crate `c`'s front or code store file and its stale flag.
     fn store_of(&mut self, c: u32, front: bool) -> Option<(PathBuf, &mut bool)> {
+        let n = self.code_path.len();
         if front {
             Some((self.crate_path.get(c as usize)?.clone(), self.stale.get_mut(c as usize)?))
-        } else {
+        } else if (c as usize) < n {
             Some((self.code_path.get(c as usize)?.clone(), self.code_stale.get_mut(c as usize)?))
+        } else {
+            let c = c as usize - n;
+            Some((self.shared_path.get(c)?.clone()?, self.shared_stale.get_mut(c)?))
         }
     }
+
+    /// by_store, the batch of a shared store this run no longer writes (its ledger refused an
+    /// earlier batch: shared_refused) in the checkout's code store of the crate (same keys).
+    fn by_store_shared(&mut self, pending: Vec<(u32, NewEntry)>) -> HashMap<(u32, bool), Vec<NewEntry>> {
+        let mut by = by_store(pending);
+        let n = self.code_path.len() as u32;
+        let shared: Vec<u32> = by.keys().filter(|(c, front)| !front && *c >= n).map(|(c, _)| *c).collect();
+        for s in shared {
+            let c = s - n;
+            if self.shared_stale.get(c as usize) != Some(&true) { continue; }
+            let entries = by.remove(&(s, false)).unwrap_or_default();
+            self.stats.shared_kept_out += entries.iter().filter(|e| e.kind == KIND_CODE).count() as u64;
+            by.entry((c, false)).or_default().extend(entries);
+        }
+        by
+    }
+
+    /// Crate `c`'s shared store refused a batch (`entries`, now the checkout store's): its ledger on
+    /// disk names a value this run does not have, or this run's names a file under the checkout.
+    /// The run writes no more to it.
+    fn shared_refused(&mut self, c: u32, entries: &[NewEntry]) {
+        if let Some(stale) = self.shared_stale.get_mut(c as usize) { *stale = true; }
+        self.stats.shared_kept_out += entries.iter().filter(|e| e.kind == KIND_CODE).count() as u64;
+        if self.verbose {
+            eprintln!("relax cache: the shared code store of crate {} refused {} entries: its ledger and this run's late inputs differ", self.crate_names.get(c as usize).map_or("?", |n| n.as_str()), entries.len());
+        }
+    }
+
+    /// The merge of crate `c`'s shared store ledger (SharedMerge) under this run's late inputs.
+    fn shared_merge(&self, c: u32, late: &[(String, u8, String, u128)]) -> SharedMerge {
+        let index: HashMap<&str, usize> = self.crate_names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+        let set = self.crate_closure.get(c as usize);
+        let in_scope = |i: usize| set.is_some_and(|set| set.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1));
+        let run = late.iter().filter_map(|(cn, k, name, h)| {
+            let i = *index.get(cn.as_str())?;
+            if !in_scope(i) { return None; }
+            Some((ident_hex(*self.crate_ident.get(i)?), *k, name.clone(), *h))
+        }).collect();
+        SharedMerge {
+            run,
+            names: self.crate_ident.iter().zip(&self.crate_names).map(|(id, n)| (ident_hex(*id), n.clone())).collect(),
+            late: late.iter().map(|(c, k, n, h)| ((c.clone(), *k, n.clone()), *h)).collect(),
+            machine: self.machine_dirs.clone(),
+            verbose: self.verbose,
+        }
+    }
+}
+
+/// A crate's identity (Cache::crate_ident) as a shared store's ledger names the crate: the same in
+/// every checkout over the crate's sources (a multi-version name can hold a unit index).
+fn ident_hex(id: u128) -> String {
+    format!("{id:032x}")
+}
+
+/// The merge of a shared code store's ledger with the one on disk, under the store's lock
+/// (store::append_ledgered). The batch is written when every input the disk ledger names for a crate
+/// of this program has this run's value, and none of this run's inputs is a file outside the places
+/// no checkout owns (another checkout would check it against its own tree). The ledger written is
+/// the disk's, verbatim (inputs of crates this program lacks included), plus this run's it lacks.
+/// Else nothing is written: the batch goes to the checkout's store (Fable's ledger rule, step 4).
+struct SharedMerge {
+    /// this run's late inputs of the crate's closure, crates by ident (ident_hex)
+    run: Vec<(String, u8, String, u128)>,
+    /// ident (ident_hex) -> this program's crate name, every crate of the program
+    names: HashMap<String, String>,
+    /// this run's late inputs, by (crate name, kind, name)
+    late: HashMap<(String, u8, String), u128>,
+    /// the places no checkout owns (Anchors::machine_dirs)
+    machine: Vec<String>,
+    verbose: bool,
+}
+
+impl SharedMerge {
+    fn merge(&self, disk: Option<&[u8]>) -> Option<Vec<u8>> {
+        let say = |why: String| if self.verbose { eprintln!("relax cache: shared store ledger: {why}"); };
+        if let Some((_, _, name, _)) = self.run.iter().find(|(_, k, name, _)| crate::sip::late_base(*k) == crate::sip::LATE_FILE
+            && !self.machine.iter().any(|m| std::path::Path::new(name).starts_with(m))) {
+            say(format!("the included file {name} lies in the checkout"));
+            return None;
+        }
+        let mut all = match disk {
+            Some(b) => decode_ledger(b)?,
+            None => Vec::new(),
+        };
+        for (c, k, name, h) in &all {
+            let Some(cname) = self.names.get(c) else { continue };
+            let now = self.late.get(&(cname.clone(), *k, name.clone())).copied().unwrap_or_else(|| late_now(cname, *k, name));
+            if now != *h {
+                say(format!("crate {cname}: `{name}` differs from the stored value"));
+                return None;
+            }
+        }
+        let have: HashSet<(String, u8, String)> = all.iter().map(|(c, k, n, _)| (c.clone(), *k, n.clone())).collect();
+        all.extend(self.run.iter().filter(|(c, k, n, _)| !have.contains(&(c.clone(), *k, n.clone()))).cloned());
+        all.sort();
+        let mut sites = match disk {
+            Some(b) => ledger_include_sites(b)?,
+            None => Vec::new(),
+        };
+        sites.extend(crate::builtins::recorded_include_sites());
+        Some(encode_ledger_sites(all.iter(), sites))
+    }
+}
+
+/// A spill's batch for a shared code store (Cache::spill_take): written under the store's lock with
+/// `merge`; refused, to `fallback` (the crate's checkout store) under `fallback_ledger`.
+struct SharedSpill {
+    path: PathBuf,
+    entries: Vec<NewEntry>,
+    merge: SharedMerge,
+    fallback: PathBuf,
+    fallback_ledger: Vec<u8>,
+}
+
+/// Every spelling of a checkout's folders (Anchors::checkout_dirs: the workspace, the run dir) a
+/// data object could hold: as given and symlink-resolved, with either separator and as a Windows
+/// extended path, in UTF-8 and UTF-16LE, matched without ASCII case (the file systems of macOS and
+/// Windows ignore it), and Relax's anchored form (`\0ws\0`, `\0run\0`). Code keyed by no checkout
+/// (code_key_bytes) holds none of them (data_entry).
+#[derive(Default)]
+pub(crate) struct CheckoutText {
+    /// the spellings, ASCII-lowercased, sorted (those of one first byte in a row)
+    forms: Vec<Vec<u8>>,
+    /// the first bytes of `forms`, a bit each
+    first: [u64; 4],
+    /// the spellings of the shared roots (Anchors::shared_roots, spelled as `forms`): a spelling
+    /// of the checkout found wholly inside one of them is part of that root's path, not the
+    /// checkout's (a non-ASCII root has none: what it holds counts)
+    roots: Vec<Vec<u8>>,
+}
+
+/// A folder's spellings as a data object could hold it: as written and with its links resolved,
+/// with either separator and in the `\\?\` form, ASCII-lowercased, in UTF-8 and UTF-16. None:
+/// a folder with non-ASCII characters (its NFC and NFD spellings differ byte by byte).
+fn dir_spellings(dir: &str) -> Option<Vec<Vec<u8>>> {
+    let canon = resolved_spelling(dir);
+    if !dir.is_ascii() || !canon.is_ascii() {
+        return None;
+    }
+    let mut texts = vec![dir.to_string(), canon];
+    for t in texts.clone() {
+        texts.push(t.replace('/', "\\"));
+        texts.push(t.replace('\\', "/"));
+        texts.push(format!("\\\\?\\{}", t.replace('/', "\\")));
+    }
+    let mut forms = Vec::new();
+    for t in texts {
+        let t = t.to_ascii_lowercase();
+        forms.push(t.encode_utf16().flat_map(u16::to_le_bytes).collect());
+        forms.push(t.into_bytes());
+    }
+    Some(forms)
+}
+
+impl CheckoutText {
+    /// None: a folder whose spellings cannot all be listed (non-ASCII: its NFC and NFD spellings
+    /// differ byte by byte), where no crate is sealed.
+    pub(crate) fn of(anchors: &crate::dirs::Anchors) -> Option<CheckoutText> {
+        let mut forms: Vec<Vec<u8>> = vec![b"\0ws\0".to_vec(), b"\0run\0".to_vec()];
+        for dir in anchors.checkout_dirs().filter(|d| !d.is_empty()) {
+            forms.extend(dir_spellings(dir)?);
+        }
+        forms.sort();
+        forms.dedup();
+        let mut first = [0u64; 4];
+        for f in &forms {
+            first[(f[0] >> 6) as usize] |= 1 << (f[0] & 63);
+        }
+        let mut roots: Vec<Vec<u8>> = anchors.shared_roots().iter().filter_map(|r| dir_spellings(r)).flatten().collect();
+        roots.sort();
+        roots.dedup();
+        Some(CheckoutText { forms, first, roots })
+    }
+
+    /// Whether `bytes` holds one of the spellings, other than wholly inside a shared root's: one
+    /// pass, a spelling compared only where a byte starts one (it runs over each data object
+    /// sealed code names, once a run). A spelling that continues past the root's (a value made
+    /// from the checkout's folder and more text) still counts.
+    pub(crate) fn found_in(&self, bytes: &[u8]) -> bool {
+        let at = |j: usize, f: &[u8]| bytes[j..].get(..f.len()).is_some_and(|w| w.eq_ignore_ascii_case(f));
+        (0..bytes.len()).any(|i| {
+            let b = bytes[i].to_ascii_lowercase();
+            self.first[(b >> 6) as usize] >> (b & 63) & 1 == 1
+                && self.forms[self.forms.partition_point(|f| f[0] < b)..].iter().take_while(|f| f[0] == b).any(|f| {
+                    let end = i + f.len();
+                    at(i, f) && !self.roots.iter().any(|r| r.len() >= f.len() && (end.saturating_sub(r.len())..=i).any(|j| at(j, r)))
+                })
+        })
+    }
+}
+
+/// `dir` with its symbolic links resolved: of its deepest existing folder (a run dir not made
+/// yet), the rest appended as written.
+fn resolved_spelling(dir: &str) -> String {
+    let path = std::path::Path::new(dir);
+    for base in path.ancestors() {
+        if let Ok(real) = std::fs::canonicalize(base) {
+            let rest = path.strip_prefix(base).unwrap_or(std::path::Path::new(""));
+            let full = if rest.as_os_str().is_empty() { real } else { real.join(rest) };
+            return full.to_string_lossy().into_owned();
+        }
+    }
+    dir.to_string()
 }
 
 /// Entries taken out of a running cache (Cache::spill_take), written off the unit.
 pub struct Spill {
     dir: PathBuf,
     files: Vec<(PathBuf, bool, Vec<NewEntry>)>,
+    /// batches of the shared code stores, written after `files`
+    shared: Vec<SharedSpill>,
     /// the images their references name, written by the time they were taken
     marks: front_run::RunMarks,
 }
@@ -4444,6 +5458,26 @@ impl Spill {
                 // process state: kept heap
                 let mut w = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
                 crate::zone_alloc::kept_with(|| w.push((self.dir.clone(), path.clone(), code.clone())));
+            }
+        }
+        // a shared store's batch with its ledger merged under the store's lock; refused, the
+        // checkout store's (the run's later batches try again: the spill does not stop them)
+        for SharedSpill { path, entries, merge, fallback, fallback_ledger } in self.shared {
+            n += entries.len();
+            let code: Vec<u128> = entries.iter().filter(|e| e.kind == KIND_CODE || e.kind == KIND_DATA).map(|e| e.key).collect();
+            let back = crate::store::append_ledgered(&path, entries, LEDGER_KEY, &mut |disk| merge.merge(disk).map(|payload| NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload }))
+                .map_err(|e| format!("{}: {}", path.display(), e))?;
+            let at = match back {
+                None => path,
+                Some(mut back) => {
+                    back.insert(0, NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: fallback_ledger });
+                    append_store(&fallback, back, false, &self.marks)?;
+                    fallback
+                }
+            };
+            if !code.is_empty() {
+                let mut w = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+                crate::zone_alloc::kept_with(|| w.push((self.dir.clone(), at.clone(), code.clone())));
             }
         }
         Ok(n)
@@ -4584,6 +5618,28 @@ fn payload_tier(p: &[u8]) -> Option<u8> {
 /// Whether a pack's recorded late macro inputs (include!/env! contents) still have the same
 /// content: a pack from a run that read different bytes is not used.
 fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, String, String), u128>) -> bool {
+    ledger_current_named(p, &|c| present.contains(c).then(|| c.to_string()), memo)
+}
+
+/// The content hash a late input has now (crates::late_value_now).
+fn late_now(c: &str, k: u8, name: &str) -> u128 {
+    crate::sip::late_hash(crate::crates::late_value_now(c, k, name).as_deref())
+}
+
+/// A ledger's entries: (crate, kind, name, content hash); None: it does not decode.
+fn decode_ledger(payload: &[u8]) -> Option<Vec<(String, u8, String, u128)>> {
+    let mut d = D { b: payload, p: 0 };
+    let n = d.u32()?;
+    let mut v = Vec::with_capacity(n.min(1 << 16) as usize);
+    for _ in 0..n {
+        v.push((d.str()?.to_string(), d.u8()?, d.str()?.to_string(), d.u128()?));
+    }
+    Some(v)
+}
+
+/// ledger_current, the crate a ledger entry names mapped to this program's crate name by `name_of`
+/// (None: not in this program; a shared store's ledger names crates by ident).
+fn ledger_current_named(p: &Store, name_of: &dyn Fn(&str) -> Option<String>, memo: &mut HashMap<(u8, String, String), u128>) -> bool {
     let payload = match p.get(LEDGER_KEY) {
         Some((KIND_LEDGER, b)) => b,
         _ => return false,
@@ -4598,20 +5654,13 @@ fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, 
             (Some(c), Some(k), Some(n), Some(h)) => (c, k, n, h),
             _ => return false,
         };
-        if !present.contains(c) {
-            continue;
-        }
+        let Some(c) = name_of(c) else { continue };
+        let c = c.as_str();
         // each input is read once per open, however many packs name it
-        let now = *memo.entry((k, c.to_string(), name.to_string())).or_insert_with(|| {
-            if crate::sip::late_base(k) == crate::sip::LATE_FILE {
-                crate::sip::late_hash(crate::vfs::read(name).ok().as_deref())
-            } else {
-                crate::sip::late_hash(crate::crates::crate_env_named(c, name).as_deref().map(|s| s.as_bytes()))
-            }
-        });
+        let now = *memo.entry((k, c.to_string(), name.to_string())).or_insert_with(|| late_now(c, k, name));
         if now != h {
             if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("relax cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", if crate::sip::late_base(k) == crate::sip::LATE_FILE { "file" } else { "env" });
+                eprintln!("relax cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", crate::sip::late_kind_name(k));
             }
             return false;
         }
@@ -4622,21 +5671,69 @@ fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, 
 /// Replays a validated pack's `KIND_LEDGER` into `sip` (with the hashes `ledger_current` just
 /// verified), so a later write's ledger still lists the inputs this run took from the cache.
 fn replay_store_ledger(p: &Store, present: &HashSet<String>, memo: &HashMap<(u8, String, String), u128>) {
+    replay_store_ledger_named(p, &|c| present.contains(c).then(|| c.to_string()), memo)
+}
+
+/// replay_store_ledger, crates mapped as ledger_current_named maps them. Its include sites
+/// restore include ownership when cached code did not expand the calls in this run.
+fn replay_store_ledger_named(p: &Store, name_of: &dyn Fn(&str) -> Option<String>, memo: &HashMap<(u8, String, String), u128>) {
     let Some((KIND_LEDGER, payload)) = p.get(LEDGER_KEY) else { return };
     let mut d = D { b: payload, p: 0 };
     let Some(n) = d.u32() else { return };
+    let mut files = HashSet::default();
     for _ in 0..n {
         let (Some(c), Some(k), Some(name), Some(h)) = (d.str(), d.u8(), d.str(), d.u128()) else { return };
-        if !present.contains(c) {
-            continue;
+        let Some(c) = name_of(c) else { continue };
+        let cur = memo.get(&(k, c.clone(), name.to_string())).copied().unwrap_or(h);
+        crate::sip::note_late_hash(&c, k, name, cur);
+        if crate::sip::late_base(k) == crate::sip::LATE_FILE { files.insert(name.to_string()); }
+    }
+    if let Some(sites) = ledger_include_sites(payload) { replay_include_sites(&sites, &files); }
+}
+
+/// The include sites after a ledger's late-input rows. Every ledger has them: each store's key
+/// names the build that wrote it (front_id, codegen_id::id), so no store of a build without
+/// them is read. They are in no key or validation hash.
+type IncludeSites = Vec<(String, Vec<(u32, String)>)>;
+const INCLUDE_SITES_TAG: &[u8] = b"include-sites\0";
+
+/// The include sites of a ledger (None: a malformed ledger).
+fn ledger_include_sites(payload: &[u8]) -> Option<IncludeSites> {
+    let mut d = D { b: payload, p: 0 };
+    for _ in 0..d.u32()? {
+        d.str()?; d.u8()?; d.str()?; d.u128()?;
+    }
+    crate::crate_image::decode(d.b.get(d.p..)?.strip_prefix(INCLUDE_SITES_TAG)?)
+}
+
+/// Replay only sites of validated late files, including when a demand part or a crate's image
+/// supplied the parsed items without running include_input. Never infer an includer from a crate.
+fn replay_include_sites(sites: &IncludeSites, files: &HashSet<String>) {
+    if files.is_empty() { return; }
+    for (includer, sites) in sites {
+        for (at, path) in sites {
+            if files.contains(path) { crate::builtins::note_include_site(includer, *at, path); }
         }
-        let cur = memo.get(&(k, c.to_string(), name.to_string())).copied().unwrap_or(h);
-        crate::sip::note_late_hash(c, k, name, cur);
     }
 }
 
+/// Store the usual late-input rows and their recorded include sites, outside cache identities.
 fn encode_ledger<'a>(inputs: impl Iterator<Item = &'a (String, u8, String, u128)>) -> Vec<u8> {
+    encode_ledger_sites(inputs, crate::builtins::recorded_include_sites())
+}
+
+/// Encode a late-input ledger with sites from this run and any retained ledger. Only paths in
+/// its late-file rows are kept; grouping and sorting make the optional tail deterministic.
+fn encode_ledger_sites<'a>(inputs: impl Iterator<Item = &'a (String, u8, String, u128)>, sites: IncludeSites) -> Vec<u8> {
     let inputs: Vec<_> = inputs.collect();
+    let files: HashSet<&str> = inputs.iter().filter(|(_, k, _, _)| crate::sip::late_base(*k) == crate::sip::LATE_FILE).map(|(_, _, p, _)| p.as_str()).collect();
+    let mut grouped = std::collections::BTreeMap::<String, Vec<(u32, String)>>::new();
+    for (includer, sites) in sites {
+        for site in sites {
+            if files.contains(site.1.as_str()) { grouped.entry(includer.clone()).or_default().push(site); }
+        }
+    }
+    let sites: IncludeSites = grouped.into_iter().map(|(p, mut sites)| { sites.sort(); sites.dedup(); (p, sites) }).collect();
     let mut e = E::default();
     e.u32(inputs.len() as u32);
     for (c, k, name, h) in inputs {
@@ -4645,6 +5742,8 @@ fn encode_ledger<'a>(inputs: impl Iterator<Item = &'a (String, u8, String, u128)
         e.str(name);
         e.u128(*h);
     }
+    e.0.extend_from_slice(INCLUDE_SITES_TAG);
+    e.0.extend_from_slice(&crate::crate_image::encode(&sites));
     e.0
 }
 
@@ -4677,7 +5776,51 @@ fn dep_closures(prog: &crate::program::Program, ncr: usize) -> Vec<Vec<u64>> {
     out.into_iter().map(Option::unwrap_or_default).collect()
 }
 
+/// Per crate: whether no checkout owns its code, so that two checkouts would build the same code
+/// from it. Its root and every file of it the program loaded are sources no checkout owns
+/// (Anchors::sealed_source: under the cargo home or std's folder, outside the workspace and the
+/// run dir), it has no build-script output (a registered OUT_DIR: the run dir's), and so is
+/// every crate of its dependency closure (`closure`, dep_closures): a code store's ledger checks
+/// the late inputs of the closure, and one of them may be a checkout's file.
+fn sealed_crates(prog: &crate::program::Program, ncr: usize, anchors: &crate::dirs::Anchors, closure: &[Vec<u64>]) -> Vec<bool> {
+    let mut own: Vec<bool> = (0..ncr).map(|c| {
+        let krate = &prog.crates[c];
+        let root = prog.mods.get(krate.root_mod as usize).and_then(|m| prog.file_paths.get(m.file as usize));
+        root.is_some_and(|p| anchors.sealed_source(p)) && crate::crates::crate_env_registered(prog.syms.str(krate.name), "OUT_DIR").is_none()
+    }).collect();
+    for (path, &c) in prog.file_paths.iter().zip(&prog.file_crate) {
+        if own.get(c as usize) == Some(&true) && !anchors.sealed_source(path) {
+            own[c as usize] = false;
+        }
+    }
+    (0..ncr).map(|c| closure.get(c).is_some_and(|set| (0..ncr).all(|d| set.get(d / 64).is_none_or(|w| w >> (d % 64) & 1 == 0) || own[d]))).collect()
+}
+
 impl Cache {
+    /// Whether crate `c`'s store (`front`: its front store, else its code store) has in its ledger
+    /// a late input whose hash moved in this run (`moved`: sip::late_moved, a live edit of an
+    /// included file). Its entries are not written: those built before the edit read the old
+    /// contents and the ledger would name the new, so a run of the restored file found the store
+    /// stale, the good entries an earlier run wrote with it, and started cold (cache_warm_const_edit's
+    /// include probes, now and then: when a session lived long enough to spill, 11-14).
+    fn reads_moved(&self, c: u32, front: bool, moved: &[(String, u8, String)]) -> bool {
+        if moved.is_empty() {
+            return false;
+        }
+        let at = |name: &str| self.crate_names.iter().position(|n| n == name);
+        let hit = match front {
+            true => moved.iter().any(|m| at(&m.0) == Some(c as usize)),
+            false => {
+                let Some(set) = self.crate_closure.get(c as usize) else { return false };
+                moved.iter().any(|m| at(&m.0).is_some_and(|i| set.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1)))
+            }
+        };
+        if hit && self.verbose {
+            eprintln!("relax cache: the {} store of crate {} is not written: an included file it reads changed in this run", if front { "front" } else { "code" }, self.crate_names.get(c as usize).map_or("?", |n| n.as_str()));
+        }
+        hit
+    }
+
     /// Crate `c`'s code store ledger: the late inputs of every crate in its dependency closure.
     fn code_ledger(&self, c: u32, late: &[(String, u8, String, u128)]) -> Vec<u8> {
         let Some(set) = self.crate_closure.get(c as usize) else { return encode_ledger(std::iter::empty()) };
@@ -4697,7 +5840,7 @@ fn key_defs(u: &Unit, key: &FnKey) -> Vec<DefId> {
     for _ in 0..32 {
         match k {
             FnKey::Inst(d, _) => { out.push(d); break; }
-            FnKey::Closure(_, _, parent) | FnKey::Plain(parent) | FnKey::Sandbox(parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
+            FnKey::Closure(_, _, parent) | FnKey::Plain(parent) | FnKey::Sandbox(parent) | FnKey::Ctfe(parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
             _ => break,
         }
     }
@@ -4805,8 +5948,7 @@ const IN_USE_BY_OTHERS: std::time::Duration = std::time::Duration::from_secs(10 
 /// slot's last build uses stays (native.rs prune). So are the outputs of the build scripts Relax
 /// runs (`<root>/build`): what a script pass's last run used stays (unitgraph.rs prune_build).
 pub fn prune_root(root: &std::path::Path) -> (u64, u64) {
-    let cap = std::env::var("RELAX_CACHE_MAX").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20);
-    let sizes = prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), cap);
+    let sizes = prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), cache_max());
     let since = std::time::SystemTime::now().checked_sub(IN_USE_BY_OTHERS).unwrap_or(std::time::UNIX_EPOCH);
     let native = crate::native::prune(&root.join("native"), since, false);
     if native > 0 && std::env::var_os("RELAX_CACHE_TRACE").is_some() {
@@ -4817,6 +5959,29 @@ pub fn prune_root(root: &std::path::Path) -> (u64, u64) {
         eprintln!("relax cache: pruned {build} build script director(ies) no root names");
     }
     sizes
+}
+
+/// RELAX_CACHE_MAX in bytes (None: unset, the default cap).
+fn cache_max() -> Option<u64> {
+    std::env::var("RELAX_CACHE_MAX").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20)
+}
+
+/// Keeps a shared code folder (SharedCode, Target B) by size alone: prune with no programs, so no
+/// store sets and no retiring list there (a program's set is named by the program's identity, the
+/// same in two checkouts of one app: one checkout's set would retire the stores of the other's
+/// views), and the cap on this folder alone (RELAX_CACHE_MAX, else twice this run's stores there,
+/// at least CAP_FLOOR_MB). Replaced generations go; then whole stores, least recently used first,
+/// never one this process uses, one another run stamped in the last IN_USE_BY_OTHERS or one of a
+/// running build (its live lock in the folder). An evicted entry is compiled again: a miss, never a
+/// failure. Returns (bytes before, after).
+pub fn prune_shared(root: &std::path::Path) -> (u64, u64) {
+    prune_shared_with(root, &crate::store::live(), &crate::store::open_files(), cache_max())
+}
+
+/// prune_shared with this run's stores `live`, the generation files it opened `open` and the cap
+/// in bytes (None: the default).
+fn prune_shared_with(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf>, cap: Option<u64>) -> (u64, u64) {
+    prune(root, live, open, &[], cap)
 }
 
 /// At exit: every store's replaced generations go, including the ones this process itself
@@ -5191,7 +6356,7 @@ pub(crate) fn trace_keyed(u: &Unit, id: u32, what: &str, code_key: Option<u128>)
     let krate = match &u.fns[id as usize].key {
         FnKey::Inst(d, _) => u.prog.syms.str(u.prog.crates[u.prog.def(*d).krate as usize].name).to_string(),
         FnKey::Closure(f, _, _) => u.prog.file_crate.get(*f as usize).map_or("-".to_string(), |c| u.prog.syms.str(u.prog.crates[*c as usize].name).to_string()),
-        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => "-".to_string(),
+        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) | FnKey::Ctfe(_) => "-".to_string(),
     };
     let on_main = crate::owner::for_main();
     // the code key and the identity of the fn (its key bytes without interfaces and bodies): the same
@@ -5216,6 +6381,9 @@ pub fn write_trace() {
 
 /// The address of a provided (host-built) crate's entry in this process (SymKind::Provided).
 fn provided_value(u: &Unit, name: &str) -> Option<u64> {
+    if let Some(key) = name.strip_prefix("static:") {
+        return u.provided.iter().find_map(|(_, pc)| pc.shared.get(key).map(|&(addr, _, _)| addr as u64));
+    }
     if let Some(key) = name.strip_prefix("shim:") {
         for (_, pc) in &u.provided {
             if let Some(sh) = pc.shims.get(key) {
@@ -5261,7 +6429,19 @@ impl Cache {
             }
             return None;
         }
-        self.verify_same_tier(u, id, &cached, fresh, relocs, provisional)
+        // an entry of a shared store was recorded in the sealed key's namespace (its data objects
+        // keyed by the sealed key: data_entry): the fresh encoding is made in the same one
+        let shared_crate = self.index_at(key).filter(|&(p, _)| self.is_shared_store(p)).and_then(|(p, _)| {
+            let path = &self.stores[p as usize].path;
+            self.shared_path.iter().position(|q| q.as_ref() == Some(path))
+        });
+        let outside = (self.cur_crate, self.cur_sealed, self.cur_shared);
+        if let Some(c) = shared_crate {
+            (self.cur_crate, self.cur_sealed, self.cur_shared) = (c as u32, true, true);
+        }
+        let same = self.verify_same_tier(u, id, &cached, fresh, relocs, provisional);
+        (self.cur_crate, self.cur_sealed, self.cur_shared) = outside;
+        same
     }
 
     /// Verify mode: where two encodings of a record's build inputs part (encode_inputs): the
@@ -5408,6 +6588,8 @@ impl Cache {
         let start = d.p;
         let _ = start;
         let mut rw = Vec::new();
+        // the callee keys written so far, as the entry's writer counts them (write_callee)
+        let mut keyed = HashMap::new();
         for rl in relocs.iter().take(n) {
             let (o, r) = (&rl.at, &rl.target);
             let co = d.u32().unwrap_or(u32::MAX);
@@ -5416,14 +6598,8 @@ impl Cache {
             let ok = match r {
                 Reloc::Sym(s) => self.enc_sym(u, *s, &mut e, &mut rw).is_some(),
                 Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => {
-                    e.u8(match r { Reloc::Slot(_) => 20, Reloc::Call(_) => 25, _ => 21 });
-                    match self.slot_bytes(u, *x) {
-                        Some(b) => {
-                            e.bytes(&b);
-                            true
-                        }
-                        None => false,
-                    }
+                    let tag = match r { Reloc::Slot(_) => 20, Reloc::Call(_) => 25, _ => 21 };
+                    write_callee(&mut e, tag, *x, &mut keyed, || self.slot_bytes(u, *x))
                 }
                 Reloc::TlsKey => { e.u8(22); true }
                 Reloc::TlsSlow => { e.u8(23); true }
@@ -5614,11 +6790,12 @@ fn front_store_name_with(parse_options: u128, name: &str, fp: u128) -> String {
 }
 /// A crate's code store: the front store's formula over its interface fingerprint (another
 /// hash domain, so never the front store's name).
-fn code_store_name(options: &crate::options::Options, name: &str, iface: u128) -> String {
+fn code_store_name(options: &crate::options::Options, name: &str, iface: u128, anchors_key: u128) -> String {
     let mut h = Sip128::new();
     h.str("code-store");
-    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-    h.u128(crate::dirs::anchors_key());
+    // the worktree (Cache::anchors_key): payloads still hold its absolute paths (Target B
+    // removes this per payload)
+    h.u128(anchors_key);
     h.u128(crate::codegen_id::id());
     h.str(&crate::codegen_id::target_tag());
     h.u128(iface);
@@ -5739,16 +6916,18 @@ struct DeferredFront {
 static DEFERRED_FRONT: relax_session::sync::Mutex<Vec<DeferredFront>> = relax_session::sync::Mutex::new(Vec::new());
 
 /// Starts the writer of the boot's deferred records and graph on its own thread (low priority). Called
-/// at the first present; anything not started by then is written by the mid-run writer or the exit.
-pub fn start_deferred_front() {
+/// at the point a present marks (`after`: an app's first present, a check's load, a live test
+/// session's first pass, the quiet start of a program that never presents); anything not started
+/// by then is written by the mid-run writer or the exit.
+pub fn start_deferred_front(after: &'static str) {
     if DEFERRED_FRONT.lock().unwrap().is_empty() { return; }
     let _k = crate::zone_alloc::kept();
-    let _ = crate::run_threads::spawn("run-front-graph", || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-front-graph", move || { let _z = crate::zone_alloc::compiler_thread();
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         let t = std::time::Instant::now();
         let r = flush_front_graphs();
         if crate::preload::trace() {
-            eprintln!("relax front: records and graph written after the first present: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
+            eprintln!("relax front: records and graph written after {after}: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
         }
     });
 }
@@ -5821,6 +7000,8 @@ fn record_now_ns() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
+/// Write the validated graph and demand parts, with a late-input ledger carrying their include
+/// sites. The ledger's include sites change no graph, part, front-image or code key.
 fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let _profile = crate::load_profile::span(job.profile, "front-graph-write", "graph writer");
     // RELAX_BOOT_TRACE: where a graph write's time goes (one line per recorded graph)
@@ -5884,6 +7065,14 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
         let recorded = { let _r = crate::load_profile::span(job.profile, "front-graph-demand-record", "graph writer"); demand.recorded_parts() };
         mark("demand-record");
         if recorded.len() != demand.parts.len() { return None; }
+        let mut sites = crate::builtins::recorded_include_sites();
+        for st in &previous {
+            if let Some((KIND_LEDGER, payload)) = st.get(LEDGER_KEY) { sites.extend(ledger_include_sites(payload)?); }
+        }
+        let mut late = demand.late_inputs.clone();
+        for part in &recorded { late.extend(part.late_inputs.iter().cloned()); }
+        late.sort(); late.dedup();
+        entries.push(NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: encode_ledger_sites(late.iter(), sites) });
         let _encode = crate::load_profile::span(job.profile, "rust-demand-encode", "graph writer");
         if job.profile { eprintln!("rust-demand-parts: encoded={} retained={} writer=post-load", recorded.iter().filter(|p| p.key == 0).count(), recorded.iter().filter(|p| p.key != 0).count()); }
         // the changed crates' parts are encoded in parallel, each opening its crate's front-image
@@ -5988,7 +7177,7 @@ pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::pat
         let lock = front_store_lock(&path);
         let _store = lock.lock().unwrap_or_else(|e| e.into_inner());
         let guard = SPILL_IO.read().unwrap_or_else(|e| e.into_inner());
-        Spill { dir: dir.to_owned(), files: vec![(path, false, entries)], marks: marks.clone() }.write_locked(&guard, &late)?;
+        Spill { dir: dir.to_owned(), files: vec![(path, false, entries)], shared: Vec::new(), marks: marks.clone() }.write_locked(&guard, &late)?;
     }
     let mut probes: std::collections::BTreeMap<String, bool> = base.probes.iter().cloned().collect();
     for (p, exists) in &prog.module_probes { probes.entry(p.clone()).or_insert(*exists); }
@@ -6536,9 +7725,7 @@ impl crate::crate_image::CrateImages for FrontImages {
             return None;
         }
         let late = image.late_inputs.iter().map(|(c, kind, name, hash)| {
-            let content = if crate::sip::late_base(*kind) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() }
-                else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
-            (c, *kind, name, *hash, content)
+            (c, *kind, name, *hash, crate::crates::late_value_now(c, *kind, name))
         }).collect::<Vec<_>>();
         if late.iter().any(|(_, _, _, hash, content)| crate::sip::late_hash(content.as_deref()) != *hash) {
             if crate::preload::trace() { eprintln!("boot-trace: context demand image: late input changed"); }
@@ -6553,6 +7740,11 @@ impl crate::crate_image::CrateImages for FrontImages {
             }
             return None;
         }
+        // the graph's ledger (write_front_graph writes one beside every demand image)
+        let st = Store::open(&front_graph_path(&self.dir, recipe.identity))?;
+        let Some((KIND_LEDGER, payload)) = st.get(LEDGER_KEY) else { return None };
+        let files = late.iter().filter(|(_, k, _, _, _)| crate::sip::late_base(*k) == crate::sip::LATE_FILE).map(|(_, _, p, _, _)| (*p).clone()).collect();
+        replay_include_sites(&ledger_include_sites(payload)?, &files);
         for (c, kind, name, _, content) in late { crate::sip::note_late_input(c, kind, name, content.as_deref()); }
         Some(image)
     }
@@ -6587,6 +7779,9 @@ impl crate::crate_image::CrateImages for FrontImages {
         let Some(image) = saved.demand_image.clone().filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
         let path = front_graph_path(&self.dir, identity);
         let store = Store::open(&path)?;
+        // the graph's ledger (write_front_graph writes one beside every demand image)
+        let Some((KIND_LEDGER, ledger)) = store.get(LEDGER_KEY) else { return None };
+        let sites = ledger_include_sites(ledger)?;
         let profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
         let keys = from.iter().zip(crates).map(|(&j, c)| {
             let part = &image.parts[j];
@@ -6603,14 +7798,14 @@ impl crate::crate_image::CrateImages for FrontImages {
                 return None;
             }
             let late = part.late_inputs.iter().map(|(c, kind, name, hash)| {
-                let content = if crate::sip::late_base(*kind) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() }
-                    else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
-                (c, *kind, name, *hash, content)
+                (c, *kind, name, *hash, crate::crates::late_value_now(c, *kind, name))
             }).collect::<Vec<_>>();
             if let Some((_, kind, name, _, _)) = late.iter().find(|(_, _, _, hash, content)| crate::sip::late_hash(content.as_deref()) != *hash) {
                 if profile { eprintln!("rust-demand-part-invalid: {} late {kind} {name}", c.name); }
                 return None;
             }
+            let files = late.iter().filter(|(_, k, _, _, _)| crate::sip::late_base(*k) == crate::sip::LATE_FILE).map(|(_, _, p, _, _)| (*p).clone()).collect();
+            replay_include_sites(&sites, &files);
             for (c, kind, name, _, content) in late { crate::sip::note_late_input(c, kind, name, content.as_deref()); }
             Some(part.key)
         }).collect::<Vec<_>>();
@@ -6667,6 +7862,8 @@ impl crate::crate_image::CrateImages for FrontImages {
         self.selected_image(c, deps, Some((plan, deferred)))
     }
 }
+/// Restore a front image's late inputs and include sites. Whole crate images and unchanged-file
+/// images both bypass expansion, so the ledger names each included file's includer.
 fn replay_front_ledger(st: &Store) -> Option<()> {
     let (kind, b) = st.get(LEDGER_KEY)?;
     if kind != KIND_LEDGER {
@@ -6674,14 +7871,16 @@ fn replay_front_ledger(st: &Store) -> Option<()> {
     }
     let mut d = D { b, p: 0 };
     let n = d.u32()?;
+    let mut files = HashSet::default();
     for _ in 0..n {
         let c = d.str()?;
         let k = d.u8()?;
         let name = d.str()?;
         let _hash = d.u128()?;
-        let content = if crate::sip::late_base(k) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() } else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
-        crate::sip::note_late_input(c, k, name, content.as_deref());
+        crate::sip::note_late_input(c, k, name, crate::crates::late_value_now(c, k, name).as_deref());
+        if crate::sip::late_base(k) == crate::sip::LATE_FILE { files.insert(name.to_string()); }
     }
+    replay_include_sites(&ledger_include_sites(b)?, &files);
     Some(())
 }
 impl Cache {
@@ -7214,7 +8413,7 @@ fn write_front_record(job: FrontWrite) -> Result<Option<usize>, String> {
     let _profile = crate::load_profile::span(profile, "front-record-write", name);
     // Keep code/old parts, even if the boot record was rejected. Cache::open decides
     // staleness after loading; an early write must not retire still-linkable code.
-    Spill { dir, files: vec![(path.clone(), false, entries)], marks }.write_locked(&guard, &late)?;
+    Spill { dir, files: vec![(path.clone(), false, entries)], shared: Vec::new(), marks }.write_locked(&guard, &late)?;
     Ok(recorded.then_some(ci))
 }
 
@@ -7320,6 +8519,9 @@ mod cold_tests {
         let pre = vec![crate::preload::PreCrate { name: "test_crate".into(), root, edition: 2021, cfg: cfg.clone(),
             deps: vec![],  proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let store = dir.join("cache");
+        // made as a run makes its cache folder, owner-only: a missing one comes from the first
+        // lookup's live lock with the umask's mode, and under umask 002 the store refuses it
+        pack::ensure_private_dir(&store).unwrap();
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
         prog.front_sink = Some(FrontSink::for_dir(&store));
@@ -7473,6 +8675,7 @@ mod cold_tests {
                 image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
         }
         let store = dir.join("cache");
+        pack::ensure_private_dir(&store).unwrap();
         let load = |images: Option<&dyn crate::crate_image::CrateImages>| {
             let mut prog = crate::program::Program::new(sess);
             prog.record_front = true;
@@ -7561,6 +8764,7 @@ mod cold_tests {
                 image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
         }
         let store = dir.join("cache");
+        pack::ensure_private_dir(&store).unwrap();
         let load = |pre: &[crate::preload::PreCrate], images: &FrontImages| {
             let mut prog = crate::program::Program::new(sess);
             prog.record_front = true;
@@ -7637,7 +8841,8 @@ mod cold_tests {
         isolated_test!(cold_self_dependency_finishes_without_blocking_later_crates);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-cycle-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // the sink's folder, owner-only as a run's cache folder (create_dir_all's is refused under umask 002)
+        pack::ensure_private_dir(&dir).unwrap();
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
         prog.front_sink = Some(FrontSink::for_dir(&dir));
@@ -7675,7 +8880,7 @@ mod cold_tests {
         isolated_test!(cold_self_alias_graph_matches_full_fingerprints_before_finish);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-self-alias-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
         prog.front_sink = Some(FrontSink::for_dir(&dir));
@@ -7741,7 +8946,7 @@ mod cold_tests {
 
     fn forward_dependencies(sess: &std::sync::Arc<crate::Session>, missing_callback: bool) {
         let dir = std::env::temp_dir().join(format!("relax-cold-forward-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
@@ -7805,7 +9010,7 @@ mod cold_tests {
         isolated_test!(cold_load_maps_at_publication_and_restores_warm);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-front-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let a = dir.join("a.rs").to_string_lossy().into_owned();
         let b = dir.join("b.rs").to_string_lossy().into_owned();
         std::fs::write(&a, "pub fn a() -> u32 { 7 }").unwrap();
@@ -7895,7 +9100,7 @@ mod cold_tests {
         isolated_test!(lazy_part_is_mapped_before_publication_and_restored_warm);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-part-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let path = dir.join("lib.rs").to_string_lossy().into_owned();
         let text = b"pub fn f(x: u32) -> u32 { let y = x + 3; y * 2 }".to_vec();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
@@ -8033,6 +9238,745 @@ mod data_tests {
         }
         drop(cache);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The real-time set crosses runs, so it is read only under the configuration that wrote it:
+    /// a set a std before `Box<T, A>` recorded decoded its `Box<T>` keys to a one-argument Box,
+    /// and the glue over it failed to compile (Sandbox's first frame, 11-14). A type key that a
+    /// program with other generics wrote (an edited type under one compiler) decodes to no type.
+    #[test]
+    fn rt_set_keyed_by_configuration_and_generic_counts() {
+        isolated_test!(rt_set_keyed_by_configuration_and_generic_counts);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let session = std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-rt-set-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("lib.rs");
+        let load = |text: &str| {
+            std::fs::write(&source, text).unwrap();
+            let mut prog = crate::program::Program::new(&session);
+            prog.load_crate("rt_set", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            Unit::new(prog, tcx, 0)
+        };
+        let held = |u: &Unit, name: &str| {
+            let def = (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap();
+            u.tcx.tys.intern(TyKind::Adt(def, u.tcx.tys.mk_list(&[u.tcx.tys.i32_]), crate::types::RegionArgsId::EMPTY))
+        };
+        let u = load("#![no_std] pub struct S<T>(T); pub struct R<T>(T);");
+        let mut cache = open_test_cache(&u, &root.join("cache"));
+        let types = [held(&u, "S"), held(&u, "R")];
+        cache.rt_set_store(&u, 0, &[], &types);
+        assert_eq!(cache.rt_set_load(&u, 0).1, types, "the configuration that wrote the set reads it");
+        let cfg = cache.cfg;
+        cache.cfg ^= 1;
+        assert!(cache.rt_set_load(&u, 0).1.is_empty(), "another configuration (another compiler or std) reads no set");
+        drop(cache);
+        // the program edited: S takes two arguments now, R is as it was
+        let v = load("#![no_std] pub struct S<T, U = u8>(T, U); pub struct R<T>(T);");
+        let mut cache = open_test_cache(&v, &root.join("cache"));
+        assert_eq!(cache.cfg, cfg, "an edit keeps the configuration");
+        assert_eq!(cache.rt_set_load(&v, 0).1, [held(&v, "R")], "S<i32> names no type of the edited program; R<i32> still does");
+        drop(cache);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An instance key is read only as the generics of the fn it names: one a program with other
+    /// generics recorded (a parameter added, an `impl Trait` parameter, one of its impl's) decodes
+    /// to no key, as a type key of an edited ADT does; a key of an unchanged fn still decodes. The
+    /// count the decoder checks (Tcx::fn_generic_count) is the signature's, for every shape here.
+    #[test]
+    fn an_instance_key_of_other_generics_decodes_to_no_key() {
+        isolated_test!(an_instance_key_of_other_generics_decodes_to_no_key);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let session = std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-inst-arity-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("lib.rs");
+        let load = |text: &str| {
+            std::fs::write(&source, text).unwrap();
+            let mut prog = crate::program::Program::new(&session);
+            prog.load_crate("inst_arity", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            Unit::new(prog, tcx, 0)
+        };
+        let named = |u: &Unit, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name && matches!(u.prog.def(d).kind, DefKind::Fn | DefKind::AssocFn)).unwrap();
+        let tail = "pub trait Tr<P> { fn t<C>(&self, _: C, _: P) {} } pub fn k<const N: usize>() {}";
+        let u = load(&format!("#![no_std] pub fn f<T>(_: T) {{}} pub fn g(_: u32) {{}} pub struct S<A>(A); impl<A> S<A> {{ pub fn m<'a, B>(&'a self, _: B) {{}} }} {tail}"));
+        let (i, n) = (u.tcx.tys.i32_, u.tcx.tys.intern(TyKind::Const(u.tcx.tys.const_usize(3))));
+        let keys = [("f", vec![i]), ("g", vec![]), ("m", vec![i, i]), ("t", vec![i, i, i]), ("k", vec![n])];
+        let mut cache = open_test_cache(&u, &root.join("cache"));
+        let mut encoded = Vec::new();
+        for (name, args) in &keys {
+            let def = named(&u, name);
+            assert_eq!(u.tcx.fn_generic_count(&u.prog, def), u.tcx.fn_sig(&u.prog, def).map(|s| s.n_generics), "`{name}`: the count is the signature's");
+            assert_eq!(u.tcx.fn_generic_count(&u.prog, def), Some(args.len() as u32), "`{name}`'s instance arguments");
+            let mut bytes = E::default();
+            assert!(cache.enc_fnkey(&u, &FnKey::Inst(def, args.clone()), &mut bytes, &mut vec![], 0).is_some(), "`{name}` encodes");
+            encoded.push(bytes.0);
+        }
+        drop(cache);
+        // f takes another parameter, g an `impl Trait` one, m's impl another; t and k are as they were
+        let mut v = load(&format!("#![no_std] pub fn f<T, U>(_: T, _: U) {{}} pub fn g(_: impl Copy) {{}} pub struct S<A, Z = u8>(A, Z); impl<A, Z> S<A, Z> {{ pub fn m<'a, B>(&'a self, _: B) {{}} }} {tail}"));
+        for (name, _) in &keys {
+            let def = named(&v, name);
+            assert_eq!(v.tcx.fn_generic_count(&v.prog, def), v.tcx.fn_sig(&v.prog, def).map(|s| s.n_generics), "edited `{name}`: the count is the signature's");
+        }
+        let mut cache = open_test_cache(&v, &root.join("cache"));
+        for ((name, args), bytes) in keys.iter().zip(&encoded) {
+            let key = unsafe { Linker::new(&mut cache).dec_fnkey(&mut v, &mut D { b: bytes, p: 0 }, 0) };
+            let kept = matches!(*name, "t" | "k");
+            match key {
+                Some(FnKey::Inst(def, a)) => assert!(kept && v.prog.name(def) == *name && a.len() == args.len(), "`{name}`'s key decoded to {:?} with {} arguments", v.prog.name(def), a.len()),
+                other => assert!(!kept && other.is_none(), "`{name}`'s key decoded to {other:?}"),
+            }
+        }
+        drop(cache);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A code store is checked by its ledger: the `env!`/`include!` inputs of its crate's
+    /// dependency closure. `r::name::<s::T>` folds `s`'s `env!` constant, and `r` is deeper than
+    /// `s` without depending on it: the entry went to `r`'s store, whose ledger does not list
+    /// GAP_X, and linked with the old value folded in after it changed. Each run here is one
+    /// program over the same cache, the value of GAP_X as `s` reads it noted as its expansion does.
+    #[test]
+    fn an_instance_over_an_unrelated_crate_misses_when_that_crates_late_input_changes() {
+        isolated_test!(an_instance_over_an_unrelated_crate_misses_when_that_crates_late_input_changes);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-ledger-gap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // (crate, source, dependencies): r reaches depth 2 through x, s has depth 1
+        let crates: [(&str, &str, &[&str]); 5] = [
+            ("base", "#![no_std] pub trait Tag { const NAME: &'static str; }", &[]),
+            ("s", "#![no_std] pub struct T; impl base::Tag for T { const NAME: &'static str = env!(\"GAP_X\"); } pub fn own() -> u32 { 1 }", &["base"]),
+            ("x", "#![no_std] pub fn deeper() {}", &["base"]),
+            ("r", "#![no_std] #[inline(never)] pub fn name<A: base::Tag>() -> &'static str { A::NAME } pub fn own() -> u32 { x::deeper(); 7 }", &["base", "x"]),
+            ("root", "#![no_std] pub fn main() -> &'static str { r::name::<s::T>() }", &["base", "s", "r"]),
+        ];
+        for (name, text, _) in crates { std::fs::write(dir.join(format!("{name}.rs")), text).unwrap(); }
+        let mut prog = crate::program::Program::new(&session);
+        let mut index: HashMap<&str, u32> = HashMap::new();
+        for (name, _, deps) in crates {
+            let deps = deps.iter().map(|d| (prog.syms.intern(d), index[d])).collect();
+            let path = dir.join(format!("{name}.rs"));
+            index.insert(name, prog.load_crate(name, path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), deps).unwrap());
+        }
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let def = |u: &Unit, krate: u32, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.def(d).krate == krate && u.prog.name(d) == name).unwrap();
+        let t = u.tcx.tys.intern(TyKind::Adt(def(&u, index["s"], "T"), u.tcx.tys.mk_list(&[]), crate::types::RegionArgsId::EMPTY));
+        let (name, r_own, s_own) = (def(&u, index["r"], "name"), def(&u, index["r"], "own"), def(&u, index["s"], "own"));
+        let ids = [u.fn_id(FnKey::Inst(name, vec![t])), u.fn_id(FnKey::Inst(r_own, vec![])), u.fn_id(FnKey::Inst(s_own, vec![]))];
+        // one run over the cache with GAP_X = `value`, as `s`'s expansion of env! notes it: whether
+        // each slot hit (a miss is recorded), and how many records went to a store wider than
+        // their deepest crate's. Each starts with sip's late inputs as a fresh process has them
+        // (run_end): one run's GAP_X is not a live edit of the run before's (sip::late_moved, whose
+        // stores are not written).
+        let mut run = |value: &str| -> ([bool; 3], u64) {
+            // Safety: no other thread of this test reads or notes late inputs
+            unsafe { relax_session::reset_statics() };
+            crate::crates::set_crate_env("s", vec![("GAP_X".to_string(), value.to_string())]);
+            crate::sip::note_late_input("s", crate::sip::LATE_ENV, "GAP_X", Some(value.as_bytes()));
+            let mut cache = open_test_cache(&u, &dir.join("cache"));
+            let hit = ids.map(|id| cache.lookup(&mut u, id).is_some());
+            for (&id, hit) in ids.iter().zip(hit) {
+                if !hit { cache.record(&u, id, &[0xc3], &[], &[]); }
+            }
+            cache.flush().unwrap();
+            (hit, cache.stats.wider_store)
+        };
+        assert_eq!(run("one"), ([false; 3], 1), "a cold cache: r::name::<s::T> is kept in the store of a crate that sees s (root's)");
+        assert_eq!(run("one").0, [true; 3], "GAP_X unchanged: every slot hits");
+        let ([name, r_own, s_own], _) = run("two");
+        assert!(!s_own, "s's own code misses: s's store's ledger lists GAP_X");
+        assert!(!name, "r::name::<s::T> folds GAP_X: it misses and is built again");
+        assert!(r_own, "r's own code hits: no late input of s reaches it");
+        assert_eq!(run("two").0, [true; 3], "the entries recorded under the new value hit");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The policy for third-party compile-time code (sandbox.rs Policy: bare `relax` Open,
+    /// `makepad` Sandboxed) is in the keys of what an expansion reaches: the two binaries of one tree
+    /// share the codegen identity, and a registry proc macro expands from other inputs under each.
+    /// Code recorded under one policy is not linked under the other; the front's identity (parser
+    /// options: its store names, graph and collected identities) and the check verdicts' keys
+    /// differ; each policy's own code hits.
+    #[test]
+    fn code_and_front_stores_of_one_compile_time_policy_are_not_the_others() {
+        isolated_test!(code_and_front_stores_of_one_compile_time_policy_are_not_the_others);
+        use crate::sandbox::Policy;
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-policy-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "#![no_std] pub fn one() -> u32 { 1 }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("a", dir.join("a.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let one = (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == "one").unwrap();
+        let id = u.fn_id(FnKey::Inst(one, vec![]));
+        // one run under `policy`: whether the slot hit (a miss is recorded), the parser options
+        // identity and crate a's front store name
+        let mut run = |policy: Policy| -> (bool, u128, String, u128) {
+            // (this test plays both entry points)
+            unsafe { relax_base::compile_time::replace_policy_in_test(policy) };
+            let mut cache = open_test_cache(&u, &dir.join("cache"));
+            let hit = cache.lookup(&mut u, id).is_some();
+            if !hit { cache.record(&u, id, &[0xc3], &[], &[]); }
+            cache.flush().unwrap();
+            (hit, crate::crate_image::parse_options(&session.options), front_store_name(&session.options, "a", cache.fps[0]), crate::check_reuse::env_key(&u.prog))
+        };
+        let open = run(Policy::Open);
+        assert!(!open.0, "a cold cache");
+        let sandboxed = run(Policy::Sandboxed);
+        assert!(!sandboxed.0, "code recorded under Open is not linked under Sandboxed");
+        assert_ne!(open.1, sandboxed.1, "the parser options identity (front graph and collected identities) holds the policy");
+        assert_ne!(open.2, sandboxed.2, "a crate's front store is each policy's own");
+        assert_ne!(open.3, sandboxed.3, "so are the check verdicts' keys");
+        assert!(run(Policy::Open).0, "Open's own code hits");
+        assert!(run(Policy::Sandboxed).0, "Sandboxed's own code hits");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// RELAX_WARM_STRICT fails a validated warm start that misses code a prior run of its cache
+    /// recorded (the cold run's ledger row says "recorded"), and names the slot with its key; a
+    /// slot no run recorded before (a path this start takes first) is accounting only.
+    #[test]
+    fn strict_fails_a_lost_recorded_entry_and_not_a_first_run_path() {
+        isolated_test!(strict_fails_a_lost_recorded_entry_and_not_a_first_run_path);
+        // (before anything reads it: warm::enabled is read once)
+        std::env::set_var("RELAX_WARM_STRICT", "1");
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-strict-lost-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "#![no_std] pub fn kept() -> u32 { 1 } pub fn fresh() -> u32 { 2 }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("a", dir.join("a.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let slot = |u: &mut Unit, name: &str| { let d = (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap(); u.fn_id(FnKey::Inst(d, vec![])) };
+        let (kept, fresh) = (slot(&mut u, "kept"), slot(&mut u, "fresh"));
+        let cache_dir = dir.join("cache");
+        // the cold run: kept runs, its code and its ledger row are recorded
+        let mut cache = open_test_cache(&u, &cache_dir);
+        assert!(cache.lookup(&mut u, kept).is_none(), "a cold cache");
+        cache.record(&u, kept, &[0xc3], &[], &[]);
+        cache.flush().unwrap();
+        let key = cache.slot_key(&u, kept).unwrap();
+        drop(cache);
+        // its entry lost on purpose: replaced by an empty one (newest wins; an empty code payload
+        // is a miss), its ledger row kept
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.reject_verdict(&u, kept);
+        cache.flush().unwrap();
+        drop(cache);
+        // the warm start, validated (run.rs classify)
+        relax_codegen::warm::classify(true);
+        let mut cache = open_test_cache(&u, &cache_dir);
+        assert!(cache.lookup(&mut u, fresh).is_none(), "fresh never ran: no code of it");
+        assert_eq!(relax_codegen::warm::strict_code(0), 0, "a path this start takes first failed the strict run");
+        assert!(cache.lookup(&mut u, kept).is_none(), "kept's entry is gone");
+        let name = |id| crate::syms::stable_fn_name(&u, id);
+        assert_eq!(relax_codegen::warm::lost_slot(&name(kept)), Some((key, key)), "kept is the miss of recorded code, under its key");
+        assert_eq!(relax_codegen::warm::lost_slot(&name(fresh)), None, "fresh is no miss of recorded code");
+        assert_eq!(relax_codegen::warm::strict_code(0), 1, "a validated warm start that missed recorded code passed the strict run");
+        assert_eq!(relax_codegen::warm::strict_code(3), 3, "a failing run keeps its code");
+        drop(cache);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A proc macro's read of cargo's `[env]` (macro_reg::call_krate_env past the crate's own
+    /// variables) is a late input of the invoking crate (sip LATE_CONFIG_ENV), present or absent:
+    /// the crate's code store is stale when that configuration's value changes, and not when only
+    /// the process environment has the variable (a confined macro never sees it). Each run is one
+    /// program over the same cache, its macro's read made as a confined expansion makes it.
+    #[test]
+    fn a_macros_read_of_cargos_env_config_checks_its_crates_store() {
+        isolated_test!(a_macros_read_of_cargos_env_config_checks_its_crates_store);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-config-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s.rs"), "#![no_std] pub fn own() -> u32 { 1 }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("s", dir.join("s.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let own = (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == "own").unwrap();
+        let id = u.fn_id(FnKey::Inst(own, vec![]));
+        const K: &str = "RELAX_CONFIG_ENV_TEST_K";
+        // one run with `[env]` K = `config`: whether s::own hit (a miss is recorded)
+        let mut run = |config: Option<&str>| -> bool {
+            // Safety: no other thread of this test reads or notes late inputs
+            unsafe { relax_session::reset_statics() };
+            crate::crates::set_config_env(config.map(|v| (K.to_string(), v.to_string())).into_iter().collect());
+            let call = crate::macro_reg::with_call_krate("s");
+            assert_eq!(crate::macro_reg::call_krate_env(K).as_deref(), config, "the macro reads [env]'s value");
+            drop(call);
+            let mut cache = open_test_cache(&u, &dir.join("cache"));
+            let hit = cache.lookup(&mut u, id).is_some();
+            if !hit { cache.record(&u, id, &[0xc3], &[], &[]); }
+            cache.flush().unwrap();
+            hit
+        };
+        assert!(!run(Some("one")), "a cold cache");
+        assert!(run(Some("one")), "the same [env] value: s's store holds");
+        assert!(!run(Some("two")), "another [env] value: s's store is stale");
+        assert!(!run(None), "K gone from [env]: stale again (an absent read is noted too)");
+        // (this test's process is this test alone: isolated_test)
+        std::env::set_var(K, "from the shell");
+        assert!(run(None), "the process environment is not an input of a confined macro");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Only a run whose third-party compile-time code is confined (Policy::Sandboxed) has the
+    /// shared code stores (shared_code), and it reads and writes them; an Open run, or one with its
+    /// own cache dir, has none. Checkouts a (Open), b and c (Sandboxed) of one program over one cargo
+    /// home, sealed registry crate dep, whose confined macro read `[env]` K (sip LATE_CONFIG_ENV):
+    /// an Open run neither writes nor links shared code, a Sandboxed run writes dep's entries and
+    /// another checkout links them (a verify finds them the same: the constant their code names is
+    /// keyed by the sealed key on both sides), K is checked by value (a mismatch or K absent neither
+    /// uses nor changes the shared store), and K in the process environment is not an input.
+    #[test]
+    fn only_runs_with_confined_compile_time_code_use_the_shared_stores() {
+        isolated_test!(only_runs_with_confined_compile_time_code_use_the_shared_stores);
+        use crate::sandbox::Policy;
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let top = std::env::temp_dir().join(format!("relax-confined-shared-{}", std::process::id()));
+        let (cargo, std_dir, home) = (top.join("cargo"), top.join("std"), top.join("home/code"));
+        let registry = cargo.join("registry/src/index");
+        let write = |path: &std::path::Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(&registry.join("dep-1.0.0/src/lib.rs"), "#![no_std] pub fn twice(x: u32) -> u32 { x * 2 } pub fn three() -> u32 { 3 }");
+        let (a, b, c) = (top.join("a"), top.join("b"), top.join("c"));
+        for ws in [&a, &b, &c] {
+            write(&ws.join("src/lib.rs"), "#![no_std] pub fn main() -> u32 { dep::twice(1) + dep::three() }");
+        }
+        let shared = |policy: Policy, own_dir: bool| shared_code(policy, own_dir, || Ok(home.clone()));
+        assert!(shared(Policy::Open, false).is_none() && shared(Policy::Sandboxed, false).map(|s| s.dir) == Some(home.clone()) && shared(Policy::Sandboxed, true).is_none(),
+            "an Open run and a run with its own cache dir have no shared store");
+        // slots dep::twice, dep::three, app::main
+        let load = |ws: &std::path::Path| {
+            let mut prog = crate::program::Program::new(&session);
+            let d = prog.load_crate("dep", registry.join("dep-1.0.0/src/lib.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+            let deps = vec![(prog.syms.intern("dep"), d)];
+            prog.load_crate("app", ws.join("src/lib.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), deps).unwrap();
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            let u = Unit::new(prog, tcx, 0);
+            let def = |krate: &str, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&x| u.prog.syms.str(u.prog.crates[u.prog.def(x).krate as usize].name) == krate && u.prog.name(x) == name).unwrap();
+            let ids = [("dep", "twice"), ("dep", "three"), ("app", "main")].map(|(k, n)| u.fn_id(FnKey::Inst(def(k, n), vec![])));
+            // a constant each slot's code names (a data object: keyed by the sealed key in a shared store)
+            let k = u.data(b"a constant", 1, DataKind::Bytes);
+            let k = u.data_sym(k);
+            (u, ids, k)
+        };
+        // every unit made before any runs (a unit's drop stops the key queries of later ones)
+        let (mut ua, a_ids, a_k) = load(&a);
+        let (mut ub, b_ids, b_k) = load(&b);
+        let (mut uc, c_ids, c_k) = load(&c);
+        const CODE: [u8; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 0xc3];
+        let named = |k: Sym| [RelocAt { at: 0, kind: RelocKind::Pool64, target: Reloc::Sym(k) }];
+        const K: &str = "RELAX_SHARED_CONFIG_ENV_TEST_K";
+        // checkout `ws`'s cache under `policy`, dep's macro having read `[env]` K = `config`
+        let open = |u: &Unit, ws: &std::path::Path, policy: Policy, config: Option<&str>| -> Cache {
+            // Safety: no other thread of this test reads or notes late inputs
+            unsafe { relax_session::reset_statics() };
+            // (this test plays both entry points)
+            unsafe { relax_base::compile_time::replace_policy_in_test(policy) };
+            crate::crates::set_config_env(config.map(|v| (K.to_string(), v.to_string())).into_iter().collect());
+            let call = crate::macro_reg::with_call_krate("dep");
+            assert_eq!(crate::macro_reg::call_krate_env(K).as_deref(), config, "dep's macro reads [env]'s value");
+            drop(call);
+            let mut from = OpenFrom::of(u);
+            from.anchors = Some(crate::dirs::Anchors::of(&[
+                ("run", ws.join("target/relax").to_str().unwrap()), ("cargo", cargo.to_str().unwrap()), ("ws", ws.to_str().unwrap()),
+            ], std_dir.to_str().unwrap()));
+            from.shared = shared(policy, false);
+            let mut cache = Cache::open_from(&from, Mode::ReadOnly, ws.join("target/relax"), None).unwrap();
+            cache.mode = Mode::On;
+            cache
+        };
+        // one run: which slots hit (a miss is recorded, its code naming constant `k`) and
+        // [recorded, sealed records, shared records, shared hits]
+        let run = |u: &mut Unit, ids: &[u32; 3], k: Sym, ws: &std::path::Path, policy: Policy, config: Option<&str>| -> ([bool; 3], [u64; 4]) {
+            let mut cache = open(u, ws, policy, config);
+            let hit = ids.map(|id| cache.lookup(u, id).is_some());
+            for (&id, hit) in ids.iter().zip(hit) {
+                if !hit { cache.record(u, id, &CODE, &named(k), &[]); }
+            }
+            cache.flush().unwrap();
+            let st = &cache.stats;
+            (hit, [st.recorded, st.sealed_records, st.shared_records, st.shared_hits])
+        };
+        // the shared stores and their bytes (their builds' live locks aside)
+        let stores = || -> Vec<(std::path::PathBuf, Vec<u8>)> {
+            let mut v: Vec<_> = std::fs::read_dir(home.join("cache")).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file())
+                .map(|p| { let bytes = std::fs::read(&p).unwrap(); (p, bytes) }).collect();
+            v.sort();
+            v
+        };
+        let one = Some("one");
+        let opened = run(&mut ua, &a_ids, a_k, &a, Policy::Open, one);
+        assert!(opened == ([false; 3], [3, 2, 0, 0]) && stores().is_empty(), "an Open run writes nothing shared: {opened:?}");
+        let wrote = run(&mut ub, &b_ids, b_k, &b, Policy::Sandboxed, one);
+        assert!(wrote == ([false; 3], [3, 2, 2, 0]) && !stores().is_empty(), "a Sandboxed run writes its sealed entries: {wrote:?}");
+        assert_eq!(run(&mut ua, &a_ids, a_k, &a, Policy::Open, one), ([true; 3], [0, 0, 0, 0]), "an Open run links nothing shared");
+        assert_eq!(run(&mut uc, &c_ids, c_k, &c, Policy::Sandboxed, one), ([true, true, false], [1, 0, 0, 2]), "a second Sandboxed checkout links them");
+        // (a verify of them compares in their store's namespace: their constant is keyed alike)
+        let mut cache = open(&uc, &c, Policy::Sandboxed, one);
+        let verified: Vec<_> = c_ids[..2].iter().map(|&id| (cache.lookup(&mut uc, id).is_some(), cache.verify_entry(&uc, id, &CODE, &named(c_k)))).collect();
+        assert_eq!(verified, [(true, Some(true)); 2], "a second Sandboxed checkout links them, and a verify finds them the same");
+        drop(cache);
+        let before = stores();
+        for other in [Some("two"), None] {
+            let (hit, st) = run(&mut uc, &c_ids, c_k, &c, Policy::Sandboxed, other);
+            assert!(hit[..2] == [false, false] && st[1..] == [2, 0, 0] && stores() == before,
+                "an `[env]` value a confined macro read is checked by value; a mismatch neither uses nor changes the shared store ({other:?}: {hit:?} {st:?})");
+        }
+        assert_eq!(run(&mut ub, &b_ids, b_k, &b, Policy::Sandboxed, one), ([true; 3], [0, 0, 0, 2]),
+            "an `[env]` value a confined macro read is checked by value; a mismatch neither uses nor changes the shared store (b with K=one still hits)");
+        // (this test's process is this test alone: isolated_test)
+        std::env::set_var(K, "from the shell");
+        assert_eq!(run(&mut ub, &b_ids, b_k, &b, Policy::Sandboxed, one), ([true; 3], [0, 0, 0, 2]), "the process environment is not an input of a confined macro");
+        drop((ua, ub, uc));
+        std::fs::remove_dir_all(top).unwrap();
+    }
+
+    /// Two checkouts `a` and `b` of one program over one cargo home, each with its own run dir,
+    /// opened with their own anchors (OpenFrom::anchors) in the order a, b, b edited, b, a. Which
+    /// crates are sealed (no checkout owns their code): a registry package; not one with a build
+    /// script's OUT_DIR, nor one depending on it, nor a path dependency, nor a registry package
+    /// when the cargo home lies in the checkout. With no shared store nothing is shared: b's first
+    /// run hits none of a's code, each sees its own edit, and a's reopen records nothing. Code made
+    /// from sealed crates alone whose constant holds the checkout's path (dep::twice here) is never
+    /// recorded: its key names no checkout, while a path in std's folder or the registry is the
+    /// root's even where the checkout's folder name begins it. Over a shared store (OpenFrom::shared, the same order
+    /// again on fresh run dirs) b's first run links the code a made from sealed crates alone and
+    /// records none of it; code naming a type of the checkout stays in the checkout's store; later
+    /// runs record nothing; a std elsewhere reads none of the shared code; and `a` moved (its run
+    /// dir with it) links only the shared code, nothing that holds a path.
+    #[test]
+    fn two_checkouts_share_only_the_code_of_their_sealed_crates() {
+        isolated_test!(two_checkouts_share_only_the_code_of_their_sealed_crates);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let top = std::env::temp_dir().join(format!("relax-two-checkouts-{}", std::process::id()));
+        let (cargo, std_dir) = (top.join("cargo"), top.join("std"));
+        let registry = cargo.join("registry/src/index");
+        let write = |path: &std::path::Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(&registry.join("dep-1.0.0/src/lib.rs"), "#![no_std] pub fn twice() -> u32 { 2 } pub fn same<T>(t: T) -> T { t }");
+        write(&registry.join("gen-1.0.0/src/lib.rs"), "#![no_std] pub fn made() -> u32 { 3 }");
+        write(&registry.join("above-1.0.0/src/lib.rs"), "#![no_std] pub fn more() -> u32 { gen::made() }");
+        crate::crates::set_crate_env("gen", vec![("OUT_DIR".to_string(), top.join("a/target/relax/build/gen-0/out").to_string_lossy().into_owned())]);
+        let app = |n: u32| format!("#![no_std] pub struct Local; pub fn main() -> u32 {{ dep::twice(); above::more(); util::local(); {n} }} pub fn keep() -> Local {{ dep::same(Local) }}");
+        // a2: where `a` is moved to at the end (the same sources, loaded before any runs)
+        let (a, b, a2) = (top.join("a"), top.join("b"), top.join("a2"));
+        for ws in [&a, &b, &a2] {
+            write(&ws.join("util/src/lib.rs"), "#![no_std] pub fn local() -> u32 { 4 }");
+            write(&ws.join("src/lib.rs"), &app(1));
+        }
+        // (crate, root, dependencies); the slots of each run, and a constant holding the
+        // checkout's path that dep::twice's code names (as a macro of the environment makes one)
+        let load = |ws: &std::path::Path| {
+            let crates: [(&str, std::path::PathBuf, &[&str]); 5] = [
+                ("dep", registry.join("dep-1.0.0/src/lib.rs"), &[]),
+                ("gen", registry.join("gen-1.0.0/src/lib.rs"), &[]),
+                ("above", registry.join("above-1.0.0/src/lib.rs"), &["gen"]),
+                ("util", ws.join("util/src/lib.rs"), &[]),
+                ("app", ws.join("src/lib.rs"), &["dep", "above", "util"]),
+            ];
+            let mut prog = crate::program::Program::new(&session);
+            let mut index: HashMap<&str, u32> = HashMap::new();
+            for (name, path, deps) in crates {
+                let deps = deps.iter().map(|d| (prog.syms.intern(d), index[d])).collect();
+                index.insert(name, prog.load_crate(name, path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), deps).unwrap());
+            }
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            let u = Unit::new(prog, tcx, 0);
+            let def = |u: &Unit, krate: &str, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.def(d).krate == index[krate] && u.prog.name(d) == name).unwrap();
+            let local = u.tcx.tys.intern(TyKind::Adt(def(&u, "app", "Local"), u.tcx.tys.mk_list(&[]), crate::types::RegionArgsId::EMPTY));
+            let u32_ = u.tcx.tys.u32_;
+            let keys = [("dep", "twice", None), ("dep", "same", Some(u32_)), ("dep", "same", Some(local)), ("gen", "made", None), ("above", "more", None), ("util", "local", None), ("app", "main", None), ("app", "keep", None)]
+                .map(|(krate, name, arg)| FnKey::Inst(def(&u, krate, name), arg.into_iter().collect()));
+            let ids = keys.map(|k| u.fn_id(k));
+            let path = u.data(ws.join("src/lib.rs").to_str().unwrap().as_bytes(), 1, DataKind::Bytes);
+            let path = u.data_sym(path);
+            (u, ids, path, index)
+        };
+        // every unit made before any runs (a unit's drop stops the key queries of later ones)
+        let (mut ua, a_ids, a_path, index) = load(&a);
+        let (mut ub, b_ids, b_path, _) = load(&b);
+        write(&b.join("src/lib.rs"), &app(2));
+        let (mut ub2, b2_ids, b2_path, _) = load(&b);
+        let (mut ua2, a2_ids, a2_path, _) = load(&a2);
+        let anchors = |ws: &std::path::Path, cargo: &std::path::Path, std_dir: &std::path::Path| crate::dirs::Anchors::of(&[
+            ("run", ws.join("target/relax").to_str().unwrap()), ("cargo", cargo.to_str().unwrap()), ("ws", ws.to_str().unwrap()),
+        ], std_dir.to_str().unwrap());
+        // checkout `ws`'s cache in run dir `dir` (relative to it) over shared store folder `shared`
+        let open = |u: &Unit, ws: &std::path::Path, dir: &str, shared: Option<&std::path::Path>, std_dir: &std::path::Path| {
+            let mut from = OpenFrom::of(u);
+            from.anchors = Some(anchors(ws, &cargo, std_dir));
+            from.shared = shared.map(|dir| SharedCode { dir: dir.to_path_buf(), stale: Vec::new() });
+            let mut cache = Cache::open_from(&from, Mode::ReadOnly, ws.join(dir), None).unwrap();
+            cache.mode = Mode::On;
+            cache
+        };
+        // one run of checkout `ws`: which slots hit (a miss is recorded: dep::twice's code names
+        // the constant `path`), what it recorded, how much of that was made from sealed crates
+        // alone and went to the shared store, what it linked from there, and how much sealed
+        // code was not recorded for the path in its data
+        let run = |u: &mut Unit, ids: &[u32; 8], path: Sym, ws: &std::path::Path, dir: &str, shared: Option<&std::path::Path>| -> ([bool; 8], [u64; 5]) {
+            let mut cache = open(u, ws, dir, shared, &std_dir);
+            let hit = ids.map(|id| cache.lookup(u, id).is_some());
+            for (i, (&id, hit)) in ids.iter().zip(hit).enumerate() {
+                let named = [RelocAt { at: 0, kind: RelocKind::Pool64, target: Reloc::Sym(path) }];
+                if !hit { cache.record(u, id, &[0, 0, 0, 0, 0, 0, 0, 0, 0xc3], if i == 0 { &named[..] } else { &[][..] }, &[]); }
+            }
+            cache.flush().unwrap();
+            let st = &cache.stats;
+            (hit, [st.recorded, st.sealed_records, st.shared_records, st.shared_hits, st.checkout_text])
+        };
+        let cold = open(&ua, &a, "target/relax", None, &std_dir);
+        let sealed: Vec<(&str, bool)> = ["dep", "gen", "above", "util", "app"].iter().map(|c| (*c, cold.sealed[index[c] as usize])).collect();
+        assert_eq!(sealed, [("dep", true), ("gen", false), ("above", false), ("util", false), ("app", false)],
+            "sealed: the registry package; not one with OUT_DIR, one depending on it, a path dependency or the workspace");
+        assert_eq!(cold.stats.sealed_crates, 1);
+        drop(cold);
+        let n = ua.prog.crates.len();
+        let inside = sealed_crates(&ua.prog, n, &anchors(&top, &cargo, &std_dir), &dep_closures(&ua.prog, n));
+        assert!(!inside[index["dep"] as usize], "a cargo home inside the checkout is the checkout's: its packages are not sealed");
+        // the spellings of a's folders a data object could hold: each is found, another folder is not;
+        // a folder with non-ASCII characters has no reliable list (it seals nothing)
+        let text = CheckoutText::of(&anchors(&a, &cargo, &std_dir)).unwrap();
+        let at = a.to_str().unwrap();
+        let wide = format!("{at}/src/lib.rs").encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        for spelling in [format!("x{at}/src"), at.to_uppercase(), at.replace('/', "\\"), format!("\\\\?\\{}", at.replace('/', "\\")), resolved_spelling(at), "\0ws\0src".into()] {
+            assert!(text.found_in(spelling.as_bytes()), "{spelling:?} is a spelling of a's folder");
+        }
+        assert!(text.found_in(&wide), "a's folder in UTF-16");
+        assert!(!text.found_in(b.to_str().unwrap().as_bytes()) && !text.found_in(cargo.to_str().unwrap().as_bytes()), "b's folder and the cargo home are not a's");
+        assert!(CheckoutText::of(&anchors(&top.join("caf\u{e9}"), &cargo, &std_dir)).is_none(), "a non-ASCII folder has no reliable spelling list");
+        // a checkout whose folder's name begins a shared root's (`s` beside std at `std`, `c` beside
+        // the cargo home `cargo`): a path in the root is the root's; text that continues the
+        // checkout's folder past the root, or a path in the checkout, is the checkout's; a std
+        // inside the checkout is the checkout's
+        let (s, c) = (top.join("s"), top.join("c"));
+        let in_std = format!("{}/core/src/lib.rs", std_dir.to_str().unwrap());
+        let in_registry = format!("{}/dep-1.0.0/src/lib.rs", registry.to_str().unwrap());
+        let s_text = CheckoutText::of(&anchors(&s, &cargo, &std_dir)).unwrap();
+        assert!(!s_text.found_in(in_std.as_bytes()) && !s_text.found_in(in_std.to_uppercase().as_bytes()), "a path in std is std's, not checkout s's");
+        assert!(s_text.found_in(format!("{}x", s.to_str().unwrap()).as_bytes()), "checkout s's folder with text after it (concat! without a separator) is s's");
+        assert!(s_text.found_in(format!("{}/src/lib.rs", s.to_str().unwrap()).as_bytes()), "a path in checkout s is s's");
+        let c_text = CheckoutText::of(&anchors(&c, &cargo, &std_dir)).unwrap();
+        assert!(!c_text.found_in(in_registry.as_bytes()), "a path in the cargo home's registry is the registry's, not checkout c's");
+        assert!(c_text.found_in(format!("{}/config.toml", cargo.to_str().unwrap()).as_bytes()), "the cargo home outside its registry and git folders is no shared root");
+        assert!(CheckoutText::of(&anchors(&top, &cargo, &std_dir)).unwrap().found_in(in_std.as_bytes()), "a std inside the checkout is the checkout's");
+        let own = "target/relax";
+        // (dep::twice holds the path: it misses in every run)
+        let rest = [false, true, true, true, true, true, true, true];
+        assert_eq!(run(&mut ua, &a_ids, a_path, &a, own, None), ([false; 8], [7, 1, 0, 0, 1]), "a's first run records every slot but dep::twice, dep::same::<u32> from sealed crates alone");
+        assert_eq!(run(&mut ub, &b_ids, b_path, &b, own, None), ([false; 8], [7, 1, 0, 0, 1]), "b's first run hits none of a's code (no shared store)");
+        let edited = run(&mut ub2, &b2_ids, b2_path, &b, own, None);
+        assert_eq!(edited, ([false, true, true, true, true, true, false, true], [1, 0, 0, 0, 1]), "b sees its own edit: main misses and is recorded, the rest hits");
+        assert_eq!(run(&mut ub2, &b2_ids, b2_path, &b, own, None), (rest, [0, 0, 0, 0, 1]), "b's edited code hits");
+        assert_eq!(run(&mut ua, &a_ids, a_path, &a, own, None), (rest, [0, 0, 0, 0, 1]), "a's reopen hits its own code, b's edit unseen, and records nothing");
+        // the same over a shared store, on fresh run dirs
+        let (home, fresh) = (top.join("home/code"), "target/relax-shared");
+        let home = Some(home.as_path());
+        assert_eq!(run(&mut ua, &a_ids, a_path, &a, fresh, home), ([false; 8], [7, 1, 1, 0, 1]), "a's first run shares dep::same::<u32>");
+        let first = [false, true, false, false, false, false, false, false];
+        assert_eq!(run(&mut ub, &b_ids, b_path, &b, fresh, home), (first, [6, 0, 0, 1, 1]),
+            "b's first run links dep::same::<u32> from the shared store and records the rest in its own (dep::same::<Local> names b's type)");
+        assert_eq!(run(&mut ub2, &b2_ids, b2_path, &b, fresh, home), ([false, true, true, true, true, true, false, true], [1, 0, 0, 1, 1]), "b sees its own edit over the shared store");
+        assert_eq!(run(&mut ub2, &b2_ids, b2_path, &b, fresh, home), (rest, [0, 0, 0, 1, 1]), "b's next run records nothing");
+        assert_eq!(run(&mut ua, &a_ids, a_path, &a, fresh, home), (rest, [0, 0, 0, 1, 1]), "a's reopen hits its own code and the shared code, and records nothing");
+        // another std's sealed key: its code of sealed crates is keyed anew, the shared store unread
+        let mut other = open(&ua, &a, fresh, home, &top.join("std2"));
+        let hit = a_ids.map(|id| other.lookup(&mut ua, id).is_some());
+        assert_eq!((hit, other.stats.shared_hits), ([false, false, true, true, true, true, true, true], 0), "under another std the sealed slots miss, a's own code hits");
+        drop(other);
+        // `a` moved to a2, its run dirs with it: the shared code hits; a's own code is keyed by
+        // the checkout and misses; nothing that holds a path was recorded to hit
+        std::fs::remove_dir_all(&a2).unwrap();
+        std::fs::rename(&a, &a2).unwrap();
+        assert_eq!(run(&mut ua2, &a2_ids, a2_path, &a2, fresh, home), (first, [6, 0, 0, 1, 1]), "the moved checkout links only the shared code");
+        // the shared folder's cap evicts the store (not stamped lately, used by no run of this
+        // process now): the next run compiles that code again and shares it, a miss and no failure
+        let shared_dir = top.join("home/code");
+        for e in std::fs::read_dir(shared_dir.join("cache")).unwrap().flatten().filter(|e| e.path().is_file()) {
+            std::fs::File::options().write(true).open(e.path()).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
+        }
+        let (before, after) = prune_shared_with(&shared_dir, &HashSet::new(), &HashSet::new(), Some(1));
+        assert!(before > 0 && after == 0, "the cap took the shared store ({before} -> {after} bytes)");
+        assert_eq!(run(&mut ua2, &a2_ids, a2_path, &a2, fresh, home), ([false, false, true, true, true, true, true, true], [1, 1, 1, 0, 1]),
+            "after the eviction dep::same::<u32> misses, is compiled again and shared again; a2's own code hits");
+        drop((ua, ub, ub2, ua2));
+        std::fs::remove_dir_all(top).unwrap();
+    }
+
+    /// A shared store's ledger is merged with the one on disk under the store's lock (SharedMerge,
+    /// store::append_ledgered). The merge alone: a disk entry of a crate this program lacks is kept,
+    /// one of a crate it has with another value refuses the batch, and so does an included file
+    /// under a checkout (a registry file does not). Then checkouts a and b (DEP_MODE=one) and c
+    /// (DEP_MODE=two) over one shared store, dep reading DEP_MODE and a file of its own: b links
+    /// a's dep code and dep's borrowck verdict and records none of it; c neither uses nor changes
+    /// the store (its dep code and verdict are its own) and a hits after it as before; and a and c
+    /// writing in turn after both validated an empty store: c's batch is refused and lands in c's
+    /// own store, where c's next run finds it, while a's next run links the shared code.
+    #[test]
+    fn shared_stores_share_code_whose_late_inputs_agree() {
+        isolated_test!(shared_stores_share_code_whose_late_inputs_agree);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let top = std::env::temp_dir().join(format!("relax-shared-ledger-{}", std::process::id()));
+        let (cargo, std_dir) = (top.join("cargo"), top.join("std"));
+        let registry = cargo.join("registry/src/index");
+        let write = |path: &std::path::Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let note = registry.join("dep-1.0.0/src/note.txt");
+        write(&registry.join("dep-1.0.0/src/lib.rs"), "#![no_std] pub fn mode() -> &'static str { env!(\"DEP_MODE\") } pub fn note() -> &'static str { include_str!(\"note.txt\") } pub fn twice(x: u32) -> u32 { x * 2 }");
+        write(&note, "a note");
+        let note = note.to_str().unwrap().to_string();
+        let (env, file) = (crate::sip::LATE_ENV, crate::sip::LATE_FILE);
+        let (one, two) = (crate::sip::late_hash(Some(b"one")), crate::sip::late_hash(Some(b"two")));
+
+        // the merge alone
+        let (dep_id, lacked) = (ident_hex(1), ident_hex(7));
+        let merge = |run: Vec<(String, u8, String, u128)>, value: u128| SharedMerge {
+            run,
+            names: [(dep_id.clone(), "dep".to_string())].into_iter().collect(),
+            late: [(("dep".to_string(), env, "DEP_MODE".to_string()), value)].into_iter().collect(),
+            machine: vec![cargo.to_str().unwrap().to_string(), std_dir.to_str().unwrap().to_string()],
+            verbose: false,
+        };
+        let disk = encode_ledger([(lacked.clone(), env, "S_MODE".to_string(), one), (dep_id.clone(), env, "DEP_MODE".to_string(), one)].iter());
+        let merged = merge(vec![(dep_id.clone(), env, "DEP_MODE".to_string(), one), (dep_id.clone(), file, note.clone(), crate::sip::late_hash(Some(b"a note")))], one).merge(Some(&disk));
+        let merged = decode_ledger(&merged.expect("equal values merge")).unwrap();
+        assert!(merged.iter().any(|e| e.0 == lacked), "a crate this program lacks keeps its ledger entries");
+        assert!(merged.iter().any(|e| e.2 == note), "this run's inputs the disk lacks are added (a file of the registry is a shared input)");
+        assert!(merge(vec![(dep_id.clone(), env, "DEP_MODE".to_string(), two)], two).merge(Some(&disk)).is_none(), "another value of an input on disk refuses the batch");
+        let inside = top.join("a/data.txt").to_str().unwrap().to_string();
+        assert!(merge(vec![(dep_id.clone(), file, inside, one)], one).merge(None).is_none(), "an included file under a checkout refuses the batch");
+
+        // three checkouts over one shared store
+        let app = "#![no_std] pub fn main() -> u32 { dep::mode(); dep::note(); dep::twice(1) }";
+        let (a, b, c) = (top.join("a"), top.join("b"), top.join("c"));
+        for ws in [&a, &b, &c] {
+            write(&ws.join("src/lib.rs"), app);
+        }
+        // a process's late inputs as dep's expansion notes them, DEP_MODE = `mode`
+        let inputs = |mode: &str| {
+            // Safety: no other thread of this test reads or notes late inputs
+            unsafe { relax_session::reset_statics() };
+            crate::crates::set_crate_env("dep", vec![("DEP_MODE".to_string(), mode.to_string())]);
+            crate::sip::note_late_input("dep", env, "DEP_MODE", Some(mode.as_bytes()));
+            crate::sip::note_late_input("dep", file, &note, Some(b"a note"));
+        };
+        let load = |ws: &std::path::Path, mode: &str| {
+            inputs(mode);
+            let mut prog = crate::program::Program::new(&session);
+            let d = prog.load_crate("dep", registry.join("dep-1.0.0/src/lib.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+            let deps = vec![(prog.syms.intern("dep"), d)];
+            prog.load_crate("app", ws.join("src/lib.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), deps).unwrap();
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            let u = Unit::new(prog, tcx, 0);
+            let def = |krate: &str, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&x| u.prog.syms.str(u.prog.crates[u.prog.def(x).krate as usize].name) == krate && u.prog.name(x) == name).unwrap();
+            let ids = [("dep", "mode"), ("dep", "note"), ("dep", "twice"), ("app", "main")].map(|(k, n)| u.fn_id(FnKey::Inst(def(k, n), vec![])));
+            (u, ids)
+        };
+        // every unit made before any runs (a unit's drop stops the key queries of later ones)
+        let (mut ua, a_ids) = load(&a, "one");
+        let (mut ub, b_ids) = load(&b, "one");
+        let (mut uc, c_ids) = load(&c, "two");
+        let open = |u: &Unit, ws: &std::path::Path, dir: &str, shared: &std::path::Path| {
+            let mut from = OpenFrom::of(u);
+            from.anchors = Some(crate::dirs::Anchors::of(&[
+                ("run", ws.join(dir).to_str().unwrap()), ("cargo", cargo.to_str().unwrap()), ("ws", ws.to_str().unwrap()),
+            ], std_dir.to_str().unwrap()));
+            from.shared = Some(SharedCode { dir: shared.to_path_buf(), stale: Vec::new() });
+            let mut cache = Cache::open_from(&from, Mode::ReadOnly, ws.join(dir), None).unwrap();
+            cache.mode = Mode::On;
+            cache
+        };
+        // the slots' lookups (a miss is recorded) and dep::twice's borrowck verdict (found, or recorded)
+        let fill = |cache: &mut Cache, u: &mut Unit, ids: &[u32; 4]| -> ([bool; 4], bool) {
+            let hit = ids.map(|id| cache.lookup(u, id).is_some());
+            for (&id, hit) in ids.iter().zip(hit) {
+                if !hit { cache.record(u, id, &[0xc3], &[], &[]); }
+            }
+            let vk = cache.borrowck_key(u, ids[2]).unwrap();
+            let verdict = cache.borrowck_stored(vk).is_some();
+            if !verdict { cache.record_borrowck(vk, StoredVerdict::Clean); }
+            (hit, verdict)
+        };
+        // one run: hits, verdict found, [shared records, shared hits, kept out]
+        let run = |u: &mut Unit, ids: &[u32; 4], ws: &std::path::Path, mode: &str, dir: &str, shared: &std::path::Path| {
+            inputs(mode);
+            let mut cache = open(u, ws, dir, shared);
+            let (hit, verdict) = fill(&mut cache, u, ids);
+            cache.flush().unwrap();
+            let st = &cache.stats;
+            (hit, verdict, [st.shared_records, st.shared_hits, st.shared_kept_out])
+        };
+        let home = top.join("home/code");
+        let own = "target/relax";
+        assert_eq!(run(&mut ua, &a_ids, &a, "one", own, &home), ([false; 4], false, [3, 0, 0]), "a's first run shares dep's three fns");
+        assert_eq!(run(&mut ub, &b_ids, &b, "one", own, &home), ([true, true, true, false], true, [0, 3, 0]), "b links dep's code and verdict from the shared store and records none of it");
+        assert_eq!(run(&mut uc, &c_ids, &c, "two", own, &home), ([false; 4], false, [0, 0, 0]), "c, with another DEP_MODE, neither reads the shared store nor writes it");
+        assert_eq!(run(&mut ua, &a_ids, &a, "one", own, &home), ([true; 4], true, [0, 3, 0]), "a hits the shared code after c as before");
+        // a and c both open an empty shared store, then write in turn
+        let (home2, fresh) = (top.join("home2/code"), "target/relax-turns");
+        inputs("one");
+        let mut ca = open(&ua, &a, fresh, &home2);
+        fill(&mut ca, &mut ua, &a_ids);
+        inputs("two");
+        let mut cc = open(&uc, &c, fresh, &home2);
+        fill(&mut cc, &mut uc, &c_ids);
+        inputs("one");
+        ca.flush().unwrap();
+        inputs("two");
+        cc.flush().unwrap();
+        assert_eq!((ca.stats.shared_records, ca.stats.shared_kept_out, cc.stats.shared_kept_out), (3, 0, 3), "the second writer, with another DEP_MODE, is refused: its dep code goes to its own store");
+        drop((ca, cc));
+        assert_eq!(run(&mut ua, &a_ids, &a, "one", fresh, &home2), ([true; 4], true, [0, 3, 0]), "a links the shared code the first writer left");
+        assert_eq!(run(&mut uc, &c_ids, &c, "two", fresh, &home2), ([true; 4], true, [0, 0, 0]), "c finds its refused batch in its own store");
+        drop((ua, ub, uc));
+        std::fs::remove_dir_all(top).unwrap();
     }
 
     /// A warm start: a key names a coroutine's type, and the body that defines the coroutine is
@@ -8322,6 +10266,52 @@ mod data_tests {
     }
 
     #[test]
+    fn a_run_time_crates_definitions_keep_the_definition_maps() {
+        isolated_test!(a_run_time_crates_definitions_keep_the_definition_maps);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false;
+        session.options.tyck_ahead = false;
+        let sess = &std::sync::Arc::new(session);
+        let root = std::env::temp_dir().join(format!("relax-defmaps-{}", std::process::id()));
+        pack::ensure_private_dir(&root).unwrap();
+        let source = root.join("fixture.rs");
+        let module_path = root.join("module.rs");
+        std::fs::write(&source, "pub fn f() {}\nfn main() {}\n").unwrap();
+        std::fs::write(&module_path, "pub fn g() {}\n").unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let f = DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "f").unwrap() as u32);
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let mut c = open_test_cache(&u, &root);
+        let mut e = E::default();
+        c.enc_def(&u, f, &mut e, &mut Vec::new());
+        assert_eq!(c.dec_def(&u, &mut D { b: &e.0, p: 0 }), Some(f), "the program definition must decode before a module loads");
+        let maps = (c.crate_defs_n, c.def_maps.len());
+        assert_eq!(maps, (u.prog.defs.len(), 1), "the first decode must build the program crate's definition map");
+
+        u.prog.load_crate("module", module_path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let g = DefId(u.prog.defs.iter().position(|d| u.prog.syms.str(d.name) == "g").unwrap() as u32);
+        assert!(u.prog.def(g).krate as usize >= c.crate_ident.len(), "the run-time module must have no cache identity");
+        assert_eq!(c.dec_def(&u, &mut D { b: &e.0, p: 0 }), Some(f), "the program definition must still decode after a module loads");
+        assert_eq!((c.crate_defs_n, c.def_maps.len()), maps, "loading a run-time module must keep the definition maps");
+        let mut module_e = E::default();
+        c.enc_def(&u, g, &mut module_e, &mut Vec::new());
+        assert_eq!(c.dec_def(&u, &mut D { b: &module_e.0, p: 0 }), None, "a run-time module's definition must not decode from a cache key");
+
+        // A live edit adds a definition to a crate the cache can name.
+        let added = *u.prog.def(f);
+        u.prog.defs.push(added);
+        let _ = c.dec_def(&u, &mut D { b: &e.0, p: 0 });
+        assert_eq!(c.crate_defs_n, u.prog.defs.len(), "adding a program definition must rebuild the definition maps");
+        assert_eq!(c.module_defs_n, 0, "rebuilding the definition maps must reset the module definition count");
+        drop(c);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn fnhdr_cache_roundtrip() {
         isolated_test!(fnhdr_cache_roundtrip);
         use crate::types::{Abi, FnHeader, Safety};
@@ -8347,6 +10337,74 @@ mod data_tests {
         }
         drop(cache);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A type tree writes a repeated subtree once (TY_BACKREF): a type 12 levels deep, each level
+    /// holding the one below three times, stays small instead of 3^12 copies and decodes to the
+    /// same type. A repeated type shorter than a back-reference is written again, so an encoding
+    /// never grows by one, and each element of a list is a tree of its own: its bytes are the same
+    /// wherever it is written.
+    #[test]
+    fn a_repeated_subtype_is_written_once_and_reads_back() {
+        isolated_test!(a_repeated_subtype_is_written_once_and_reads_back);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-ty-backref-{}", std::process::id()));
+        let u = Unit::new(crate::program::Program::new(sess), crate::tcx::Tcx::new(), 0);
+        let mut cache = open_test_cache(&u, &root);
+        let tys = &u.tcx.tys;
+        let tuple = |v: &[TyId]| tys.intern(TyKind::Tuple(tys.mk_list(v)));
+        let enc = |cache: &mut Cache, t: TyId| {
+            let mut e = E::default();
+            assert!(cache.enc_ty(&u, t, &mut e, &mut Vec::new(), 0).is_some());
+            e.0
+        };
+        let mut ty = tuple(&[tys.u8_, tys.i32_]);
+        for _ in 0..12 {
+            ty = tuple(&[ty, tys.intern(TyKind::Slice(ty)), ty]);
+        }
+        let b = enc(&mut cache, ty);
+        assert!(b.len() < 1024, "{} bytes for a 13-level tree", b.len());
+        let mut d = D { b: &b, p: 0 };
+        assert_eq!(cache.dec_ty(&u, &mut d, 0), Some(ty), "the tree reads back");
+        assert_eq!(d.p, b.len());
+        let (same, other) = (tuple(&[tys.u8_, tys.u8_]), tuple(&[tys.u8_, tys.u32_]));
+        assert_eq!(enc(&mut cache, same).len(), enc(&mut cache, other).len(), "a back-reference to a type shorter than it");
+        let pair = tuple(&[ty, ty]);
+        let mut e = E::default();
+        assert!(cache.enc_tys(&u, &[ty, pair, ty], &mut e, &mut Vec::new(), 0).is_some());
+        assert_eq!(cache.dec_tys(&u, &mut D { b: &e.0, p: 0 }, 0), Some(vec![ty, pair, ty]), "the list reads back");
+        assert_eq!(e.0.windows(b.len()).filter(|w| *w == &b[..]).count(), 3, "each element a tree of its own, its first type in full");
+        drop(cache);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A relocation list writes each callee key once and names it again by its position
+    /// (RELOC_KEY_REF); its reader makes what it needs of each key once, and a reference past the
+    /// keys written does not read.
+    #[test]
+    fn a_callee_key_is_written_once_per_relocation_list() {
+        let keys = [b"key-one".to_vec(), b"key-two".to_vec()];
+        let (mut e, mut keyed, mut encoded) = (E::default(), HashMap::new(), 0);
+        for (tag, x) in [(20, 0u32), (21, 1), (25, 0), (21, 1)] {
+            assert!(write_callee(&mut e, tag, x, &mut keyed, || {
+                encoded += 1;
+                Some(keys[x as usize].clone())
+            }));
+        }
+        let (mut d, mut seen, mut firsts, mut read) = (D { b: &e.0, p: 0 }, Vec::new(), 0, Vec::new());
+        for _ in 0..4 {
+            let tag = d.u8().unwrap();
+            let key = read_callee(&mut d, tag, &mut seen, |b| {
+                firsts += 1;
+                Some(b)
+            });
+            read.push((callee_tag(tag), key.unwrap()));
+        }
+        assert_eq!(read, [(20u8, &keys[0][..]), (21, &keys[1][..]), (25, &keys[0][..]), (21, &keys[1][..])]);
+        assert_eq!((encoded, firsts, d.p), (2, 2, e.0.len()), "each key encoded and read once");
+        let mut past = E::default();
+        past.u32(2);
+        assert!(read_callee(&mut D { b: &past.0, p: 0 }, 20 + RELOC_KEY_REF, &mut seen, Some).is_none(), "a reference past the keys written");
     }
 
     #[test]
@@ -8606,7 +10664,8 @@ mod data_tests {
 
     fn front_fixture(sess: &std::sync::Arc<crate::Session>, tag: &str) -> (PathBuf, crate::program::Program, Vec<crate::preload::PreCrate>) {
         let root = std::env::temp_dir().join(format!("relax-front-{tag}-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&root).unwrap();
+        // owner-only, as open_test_cache's root has to be (create_dir_all's is not under umask 002)
+        pack::ensure_private_dir(&root).unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
@@ -9157,7 +11216,13 @@ impl Linker {
         Some(match KeyKind::of(d.u8()?)? {
             KeyKind::Inst => {
                 let def = self.cache().dec_def(u, d)?;
-                FnKey::Inst(def, self.cache().dec_tys(u, d, 0)?)
+                let args = self.cache().dec_tys(u, d, 0)?;
+                // a key a program with other generics recorded (an edited fn, as dec_ty's ADTs): no
+                // instance of this program, so no key
+                if u.tcx.fn_generic_count(&u.prog, def).is_some_and(|n| n as usize != args.len()) {
+                    return None;
+                }
+                FnKey::Inst(def, args)
             }
             KeyKind::ClosureInFile => {
                 let file = self.cache().dec_file(u, d)?;
@@ -9236,6 +11301,17 @@ impl Linker {
                 };
                 unsafe { crate::sandbox::twin(u, base) };
                 FnKey::Sandbox(base)
+            }
+            // a constant-evaluation twin, keyed by its base (a base the startup image names: its slot)
+            KeyKind::Ctfe => {
+                let base = match self.image_slot_at(u, d) {
+                    Some(b) => b,
+                    None => {
+                        let bk = self.dec_fnkey(u, d, depth + 1)?;
+                        u.fn_id(bk)
+                    }
+                };
+                FnKey::Ctfe(base)
             }
         })
     }
@@ -9368,6 +11444,7 @@ impl Linker {
             14 => {
                 let FnKey::Sandbox(base) = self.dec_fnkey(u, d, 0)? else { return None };
                 let t = unsafe { crate::sandbox::twin(u, base) };
+                crate::sandbox::note_linked_ref(u, t);
                 unsafe { crate::sandbox::thunk_sym(u, t) }.ok()?
             }
             15 => {
@@ -9478,6 +11555,9 @@ impl Linker {
                 found = true;
                 trace_lookup(u, id, "hit");
                 r = self.link_entry(u, id, payload);
+                if r.is_some() && at.is_some_and(|(p, _)| self.cache().is_shared_store(p)) {
+                    self.cache().stats.shared_hits += 1;
+                }
             }
         }
         // SPEC-V: a body with no entry of its own whose unverified-mode twin has one (an earlier
@@ -9512,9 +11592,16 @@ impl Linker {
         }
         if !found {
             if relax_codegen::warm::enabled() {
-                let reason = self.cache().miss_reason(u, id, key0);
-                warm_count::add(if reason.starts_with("cold record exists; lookup key changed") { warm_count::KEY_CHANGED } else if reason.starts_with("cold record exists") { warm_count::ENTRY_GONE } else { warm_count::NOT_RECORDED }, 1);
+                let (reason, recorded) = self.cache().miss_reason(u, id, key0);
+                warm_count::add(match recorded { Some(old) if old != key0 => warm_count::KEY_CHANGED, Some(_) => warm_count::ENTRY_GONE, None => warm_count::NOT_RECORDED }, 1);
                 relax_codegen::warm::reason(id, &reason);
+                // code a prior run of this cache recorded, which this start did not find: the
+                // strict verdict (warm::strict_code). An entry its certificate refused was found
+                // (an input it took in changed), and a live edit gives what it reaches new keys.
+                let refused = self.cache().cert_rejected.contains(&key);
+                if let Some(old) = recorded.filter(|_| !refused && crate::reload::program_edits() == 0) {
+                    relax_codegen::warm::recorded_miss(id, &crate::syms::stable_fn_name(u, id), key0, old);
+                }
             }
             self.cache().missed.insert(id);
             self.cache().stats.misses += 1;
@@ -9638,6 +11725,8 @@ impl Linker {
         let n = d.u32()? as usize;
         let mut relocs = Vec::with_capacity(n);
         let mut rw = Vec::new();
+        // the slot of each callee key the list wrote, in order (a RELOC_KEY_REF names one)
+        let mut keyed = Vec::new();
         for _ in 0..n {
             let o = d.u32()? as usize;
             let kind = kind_of(d.u8()?)?;
@@ -9645,15 +11734,14 @@ impl Linker {
             // the relocation keeps what it names (a slot, a symbol): the install records the
             // code's references from these (jit CodeRefs), as it does for code built this run
             let target = match tag {
-                20 | 21 | 25 => {
+                20 | 21 | 25 | 26 | 27 | 31 => {
                     d.u8()?;
-                    let b = d.bytes()?;
-                    let sid = self.slot_of_bytes(u, b)?;
+                    let sid = read_callee(&mut d, tag, &mut keyed, |b| self.slot_of_bytes(u, b))?;
                     let sid = {
                         let c = self.cache();
                         u.twin_link_target(id, sid, |b| c.has_stored_entry(u, b))
                     };
-                    match tag {
+                    match callee_tag(tag) {
                         20 => {
                             callees.push(sid);
                             Reloc::Slot(sid)
@@ -10028,10 +12116,10 @@ impl Cache {
         let mut h = Sip128::new();
         h.str("const-value-v2");
         // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-        h.u128(crate::dirs::anchors_key());
+        h.u128(self.anchors_key);
         h.u128(self.cfg);
         h.write(&e.0);
-        let dom = self.dominant(&crates);
+        let dom = self.store_crate(&crates)?;
         Some((h.finish128(), dom, crates))
     }
 
@@ -10052,7 +12140,8 @@ impl Cache {
     /// of changed), and for a complete one each body by its identity with its code key. An
     /// incomplete certificate (the value ran code, or read one that did) holds only by the fast
     /// path over the crates its identity names (whose fingerprints cover their dependencies).
-    fn const_cert_bytes(&mut self, u: &Unit, own: &[u32], cert: &crate::jit::ConstCert) -> Option<Vec<u8>> {
+    /// With it, every crate it names.
+    fn const_cert_bytes(&mut self, u: &Unit, own: &[u32], cert: &crate::jit::ConstCert) -> Option<(Vec<u8>, Vec<u32>)> {
         let mut complete = cert.complete;
         let mut items: Vec<(Vec<u8>, u128)> = Vec::new();
         let mut crates: Vec<u32> = own.to_vec();
@@ -10089,7 +12178,8 @@ impl Cache {
             e.bytes(&b);
             e.u128(k);
         }
-        Some(e.0)
+        let named = idents.iter().map(|i| self.crate_by_ident.get(i).copied()).collect::<Option<Vec<u32>>>()?;
+        Some((e.0, named))
     }
 
     pub fn record_const(&mut self, u: &Unit, def: DefId, args: &[TyId], addr: u64, cert: &crate::jit::ConstCert) -> Option<()> {
@@ -10100,13 +12190,18 @@ impl Cache {
         // A recursive compile can inspect this object before its initializer finishes.
         self.data_key.retain(|&(i, _), _| i != idx);
         self.data_why.remove(&idx);
+        // the value was evaluated from bodies of crates the key's store crate may not see: the
+        // store of one that sees them all (store_crate); the value's data goes there too
+        let (mut payload, mut named) = self.const_cert_bytes(u, &own, cert)?;
+        let krate = if self.sees_all(krate, &named) { krate } else {
+            named.push(krate);
+            self.store_crate(&named)?
+        };
         let previous = self.cur_crate;
         self.cur_crate = krate;
         let data = self.data_entry(u, idx);
         self.cur_crate = previous;
-        let data = data?;
-        let mut payload = self.const_cert_bytes(u, &own, cert)?;
-        payload.extend_from_slice(&data.to_le_bytes());
+        payload.extend_from_slice(&data?.to_le_bytes());
         self.pending_keys.insert(key);
         self.const_live.insert(key);
         self.push_pending(krate, NewEntry { key, kind: KIND_CONST, payload });
@@ -10196,17 +12291,19 @@ impl Cache {
         self.push_pending(krate, NewEntry { key, kind: KIND_WARM_OUTCOME, payload: e.0 });
     }
 
-    fn miss_reason(&self, u: &Unit, id: u32, code_key: u128) -> String {
+    /// Why slot `id`'s lookup under `code_key` found no code, from the cold run's ledger, and the
+    /// key a prior run recorded its code under when one did.
+    fn miss_reason(&self, u: &Unit, id: u32, code_key: u128) -> (String, Option<u128>) {
         let outcome = self.get(self.outcome_key(u, id)).and_then(|(kind, bytes)| {
             if kind != KIND_WARM_OUTCOME { return None; }
             let mut d = D { b: bytes, p: 0 };
             Some((d.u128()?, d.str()?.to_owned()))
         });
         match outcome {
-            Some((old, reason)) if reason == "recorded" && old != code_key => "cold record exists; lookup key changed".to_owned(),
-            Some((_, reason)) if reason == "recorded" => "cold record exists; code entry unavailable".to_owned(),
-            Some((_, reason)) => reason,
-            None => "no standalone cold lookup/record observed; precise cause unresolved".to_owned(),
+            Some((old, reason)) if reason == "recorded" && old != code_key => ("cold record exists; lookup key changed".to_owned(), Some(old)),
+            Some((old, reason)) if reason == "recorded" => ("cold record exists; code entry unavailable".to_owned(), Some(old)),
+            Some((_, reason)) => (reason, None),
+            None => ("no standalone cold lookup/record observed; precise cause unresolved".to_owned(), None),
         }
     }
 }
@@ -10346,7 +12443,7 @@ mod prune_tests {
         let me = crate::store::this_build();
         let (prog, other) = (0x5eed_u64, 0x0ade_u64);
         let sets = dir.join("sets");
-        std::fs::create_dir_all(&sets).unwrap();
+        pack::ensure_private_dir(&sets).unwrap();
         std::fs::write(sets.join(format!("{me:016x}-{prog:016x}")), "code w widgets-0000000000000001.rcs\nfront w widgets-0000000000000021.rcs\ncode r removed-0000000000000004.rcs\ncode s shared-0000000000000005.rcs\nfront p parted-0000000000000007.rcs\ngraph front_graph-0000000000000008.rcs\n").unwrap();
         // another program of this build still uses the old `shared`
         std::fs::write(sets.join(format!("{me:016x}-{other:016x}")), "code s shared-0000000000000005.rcs\n").unwrap();
@@ -10379,6 +12476,58 @@ mod prune_tests {
         prune(&root, &live, &HashSet::new(), &[(prog, roles2)], Some(u64::MAX));
         assert!(!parted_v1.exists());
         assert_eq!(std::fs::read_to_string(sets.join(format!("{me:016x}.retiring"))).unwrap(), "");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A shared code folder is kept by size alone (prune_shared): two checkouts of one program that
+    /// name different views of a crate (their store sets would retire each other's store) keep both
+    /// stores, and no store set is written there; under the cap every build's stores stay; over it
+    /// the least recently used go first, never this run's or a running build's.
+    #[test]
+    fn a_shared_code_folder_is_pruned_by_size_alone() {
+        isolated_test!(a_shared_code_folder_is_pruned_by_size_alone);
+        let root = std::env::temp_dir().join(format!("relax-shared-prune-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        let dir = root.join("cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = |name: &str, age_s: u64, build: Option<u64>| -> PathBuf {
+            let p = dir.join(name);
+            crate::store::append(&p, vec![NewEntry { key: 1, kind: KIND_DATA, payload: vec![7; 4096] }], true).unwrap();
+            if let Some(b) = build {
+                crate::store::set_build_for_test(&p, b);
+            }
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age_s);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+            p
+        };
+        let me = crate::store::this_build();
+        let (idle, alive) = (me ^ 0x1111, me ^ 0x2222);
+        let view_a = store("dep-00000000000000a1.rcs", 3000, None);
+        let view_b = store("dep-00000000000000b1.rcs", 2000, None);
+        let other = store("core-00000000000000c1.rcs", 4000, Some(idle));
+        let running = store("core-00000000000000d1.rcs", 5000, Some(alive));
+        let used = store("std-00000000000000e1.rcs", 6000, None);
+        let lock = std::fs::File::create(dir.join("live").join(format!("{alive:016x}"))).unwrap();
+        lock.lock_shared().unwrap();
+        let live: HashSet<PathBuf> = [used.clone()].into_iter().collect();
+        let name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        // checkouts a, b, a of one program (one program identity), each naming its view of dep
+        for view in [&view_a, &view_b, &view_a] {
+            let roles: std::collections::BTreeMap<String, String> = [("code dep".to_string(), name(view))].into_iter().collect();
+            crate::store::note_program(0x5eed, &roles);
+            prune_shared_with(&root, &live, &HashSet::new(), Some(u64::MAX));
+        }
+        assert!(view_a.exists() && view_b.exists(), "neither checkout's view of dep retires the other's");
+        assert!(!dir.join("sets").exists(), "no store sets in a shared folder");
+        assert!(other.exists() && running.exists() && used.exists(), "under the cap every build's stores stay");
+        let size = |p: &PathBuf| std::fs::metadata(p).unwrap().len();
+        let all: u64 = [&view_a, &view_b, &other, &running, &used].iter().map(|p| size(p)).sum();
+        prune_shared_with(&root, &live, &HashSet::new(), Some(all - 1));
+        assert!(!other.exists(), "over the cap the least recently used store not in use goes first");
+        assert!(view_a.exists() && view_b.exists());
+        prune_shared_with(&root, &live, &HashSet::new(), Some(1));
+        assert!(!view_a.exists() && !view_b.exists(), "down to what is in use");
+        assert!(used.exists() && running.exists(), "this run's store and a running build's stay");
+        drop(lock);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -10421,7 +12570,7 @@ mod prune_tests {
         std::fs::File::create(&ended).unwrap();
         std::fs::File::create(dir.join("live").join(format!("{idle:016x}"))).unwrap();
         let sets = dir.join("sets");
-        std::fs::create_dir_all(&sets).unwrap();
+        pack::ensure_private_dir(&sets).unwrap();
         let (ended_set, idle_set) = (sets.join(format!("{:016x}-{:016x}", me ^ 0x3333, 1)), sets.join(format!("{idle:016x}-{:016x}", 1)));
         std::fs::write(&ended_set, "").unwrap();
         std::fs::write(&idle_set, "").unwrap();
@@ -10476,6 +12625,9 @@ pub(crate) unsafe fn reset_statics() {
     reset(&DEFERRED_FRONT, relax_session::sync::Mutex::new(Vec::new()));
     reset(&THUNK_DECODED, std::sync::atomic::AtomicU64::new(0));
     reset(&THUNK_DECODE_NS, std::sync::atomic::AtomicU64::new(0));
+    // the next run's entry sets it again (run.rs cmd_run_inner); the stores this one found stale
+    // go with it
+    reset(&SHARED_CODE, relax_session::sync::Mutex::new(None));
 }
 
 /// The mappings of the stores: last of what a run held, since what the run's tables are views of

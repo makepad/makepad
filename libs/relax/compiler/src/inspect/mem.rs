@@ -5,7 +5,8 @@
 //!   relax's named mappings, GPU driver mappings, the relax cache files, libraries, ...); these
 //!   add up to the RSS. `regions/...` (macOS): resident pages by VM tag, private vs shared --
 //!   shared file pages are counted whole, so they do not add up to the kernel's resident size.
-//! - `malloc/...`: the allocator's own view: in use, held free (the retention a trim returns).
+//! - `malloc/...`: the allocator's own view: in use, held free (the retention a trim returns; on
+//!   Linux what of it is resident at most), and glibc's free chunks, trimmed pages included.
 //! - `relax/...`: what Relax holds for the app: JIT code / data / statics, the burst arena, the
 //!   compiler's heap by subsystem when RELAX_MEM_REPORT counts it, structure sizes on request.
 //!
@@ -134,11 +135,14 @@ fn kb(v: &str) -> u64 {
     v.split_whitespace().next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0) * 1024
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const UNNAMED: &str = "unnamed (malloc arenas + large blocks, thread stacks, driver memory)";
+
 /// What a mapping is, from its smaps name.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn classify_path(path: &str, home: &str) -> String {
     match path {
-        "" => "unnamed (malloc arenas + large blocks, thread stacks, driver memory)".into(),
+        "" => UNNAMED.into(),
         "[heap]" => "malloc main heap".into(),
         "[stack]" => "main stack".into(),
         "[vdso]" | "[vvar]" | "[vsyscall]" | "[vvar_vclock]" => "kernel".into(),
@@ -427,9 +431,16 @@ fn malloc_stats(s: &mut Snap) {
         fn mallinfo2() -> Mallinfo2;
     }
     let m = unsafe { mallinfo2() };
-    s.add("malloc/in use", (m.uordblks + m.hblkhd) as u64);
+    let in_use = (m.uordblks + m.hblkhd) as u64;
+    s.add("malloc/in use", in_use);
     s.add("malloc/in use/large blocks (mmapped)", m.hblkhd as u64);
-    s.add("malloc/held free", m.fordblks as u64);
+    // fordblks counts free chunks whether or not a trim already gave their pages back, so it is
+    // no resident size. What they keep resident is at most the anonymous memory of malloc's
+    // mappings (the main heap, the unnamed mappings, which also hold thread stacks and driver
+    // memory) beyond what is in use: os_regions ran first.
+    let anon = s.get("rss/anon/malloc main heap") + s.get(&format!("rss/anon/{}", UNNAMED));
+    s.add("malloc/held free", (m.fordblks as u64).min(anon.saturating_sub(in_use)));
+    s.add("malloc/free chunks, trimmed included (not resident)", m.fordblks as u64);
 }
 
 #[cfg(target_vendor = "apple")]
@@ -719,6 +730,23 @@ pub fn cmd_mem(req: &Req, out: &mut Out) {
             let r1 = crate::memstat::resident();
             out.line(&format!("{{\"trim\":\"done\",\"rss_before_mb\":{},\"rss_after_mb\":{},\"ms\":{:.1},\"burst_small_chunks\":{},\"compiler_small_chunks\":{}}}",
                 mb(r0), mb(r1), ms, b0.1[0], b0.0[0]));
+        }
+        Some("census") => {
+            // every live block of the compiler arena's old chunks (the cold state's survivors after a
+            // settle rebuild), by the tag it was allocated under: exact, where `heap top` samples
+            let mut per = [[0usize; 3]; 64];
+            let t = crate::zone_alloc::compiler_old_census(&crate::memstat::block_tag, &mut per);
+            let g = crate::zone_alloc::GRANULE;
+            out.measured("compiler arena, old chunks: live blocks by tag", "arena.rs old_census: each detached old chunk walked under its lock, off the free list, resident granules", &[]);
+            out.line(&format!("{{\"old_chunks_walked\":{},\"attached_not_walked\":{},\"blocks\":{},\"granules_kept\":{},\"kept_mb\":{:.1},\"tags\":{}}}",
+                t[0], t[3], t[1], t[2], (t[2] * g) as f64 / 1048576.0, if !crate::memstat::enabled() { "\"off (RELAX_MEM_REPORT unset): one row\"" } else { "\"memstat\"" }));
+            let mut rows: Vec<(usize, [usize; 3])> = per.iter().copied().enumerate().filter(|r| r.1[0] > 0).collect();
+            rows.sort_by(|a, b| b.1[2].cmp(&a.1[2]).then(b.1[0].cmp(&a.1[0])));
+            for (tag, [blocks, bytes, granules]) in rows {
+                let name = crate::memstat::TAG_NAMES.get(tag).copied().unwrap_or("no tag");
+                out.line(&format!("{{\"tag\":{},\"blocks\":{},\"slot_mb\":{:.2},\"granules\":{},\"granule_mb\":{:.1}}}",
+                    json_str(name), blocks, bytes as f64 / 1048576.0, granules, (granules * g) as f64 / 1048576.0));
+            }
         }
         Some("snap") => {
             let name = req.pos.get(1).cloned().unwrap_or_else(|| format!("s{}", now_ms()));

@@ -6,14 +6,17 @@ usage: run.py --makepad <makepad binary>   (RELAX_STD in the environment)
 Copies pkg/ to a temporary dir, runs it (a working tree: live) and edits src/main.rs while it runs.
 ease.rs (never edited) has `match self { Self::Pow { begin, end } => .. }`; makepad's
 animator.rx Ease::map has the same shape, and a Calculator layout edit was refused with
-"E0412: cannot find type `Self::ExpDecay`" from it.
-  1. body edit of value()                               -> patched, new output (4)
-  2. a field added to Pad and a fn added (in place)     -> patched, output 4 (the running Pad's
-     new field reads its default)
-  3. the field and helper are removed                 -> patched, output 5
+"E0412: cannot find type `Self::ExpDecay`" from it (E0425 since rustc 1.100).
+  1. body edit of value()                              -> patched, output 4 becomes 5
+  2a. add extra() returning 0 and call it in value()    -> patched in place, output 5 + 0 = 5;
+      collecting the added item must resolve Self::Variant in the unchanged ease.rs
+  2b. add field b to Pad, its initializer and its use  -> restart offered, naming main's frame;
+      the previous code keeps printing 5, with no claim that Pad takes its new layout
+  3. discard the pending field edit and remove extra  -> patched in the same process, output 5
   4. an invalid body edit is refused, then reverted   -> patched notification, output 5
   5. value() returns 999                              -> the program sees it and exits
-No step may report E0412. Prints PASS/FAIL per step; exit 1 on any FAIL.
+No step may report an unresolved type (`cannot find type`, E0412/E0425).
+Prints PASS/FAIL per step; exit 1 on any FAIL.
 """
 import os, shutil, subprocess, sys, tempfile, threading, time
 
@@ -63,40 +66,56 @@ def step(name, ok):
     if not ok:
         fails += 1
 
-def no_e0412(since):
-    return not any("E0412" in l for l in err[since:])
+def no_unresolved_type(since):
+    """Reject unresolved types regardless of error code so the Self::Variant regression stays visible."""
+    return not any("cannot find type" in l for l in err[since:])
 
 try:
-    step("starts", wait(lambda: last_value() == 4 and os.path.exists(ready), 120))
+    step("starts", wait(lambda: last_value() == 4 and os.path.exists(ready), 120) and no_unresolved_type(0))
     n = len(err)
     body = base.replace("p.a + ease(", "p.a + 1 + ease(")
     save(body)
     ok = wait(lambda: last_value() == 5)
-    step("body edit applies", ok and no_e0412(n))
+    step("body edit applies", ok and no_unresolved_type(n))
     n = len(err)
-    # (an added item makes the reload collect it: the step that reported the earlier E0412s)
-    layout = body.replace("    pub a: u64,\n", "    pub a: u64,\n    pub b: u64,\n").replace("Pad { a: 1 }", "Pad { a: 1, b: 8 }").replace("p.a + 1 + ease(", "p.a + p.b + extra() + ease(") + "\nfn extra() -> u64 {\n    0\n}\n"
+    # (an added item makes the reload collect it: the step that reported the earlier unresolved types)
+    item = body.replace("p.a + 1 + ease(", "p.a + 1 + extra() + ease(") + "\n/// Returns zero so collecting an added item preserves value()'s output.\nfn extra() -> u64 {\n    0\n}\n"
+    m = len(out)
+    save(item)
+    ok = wait(lambda: len(out) > m and any("main.rs: patched" in l for l in err[n:]))
+    step("added item next to a Self::Variant match patches in place", ok and last_value() == 5 and p.poll() is None
+         and not any("a restart applies it; offered" in l for l in err[n:]) and no_unresolved_type(n))
+    n = len(err)
+    # main holds Pad for the whole run: a field added needs a restart, and none is requested here.
+    layout = item.replace("    pub a: u64,\n", "    pub a: u64,\n    pub b: u64,\n").replace("Pad { a: 1 }", "Pad { a: 1, b: 8 }").replace("p.a + 1 + extra() + ease(", "p.a + 1 + p.b + extra() + ease(")
     save(layout)
-    # (the running Pad's new field reads its default 0: 1 + 0 + 0 + 3)
-    ok = wait(lambda: any("relax live: main.rs" in l for l in err[n:]))
+    ok = wait(lambda: any("a restart applies it; offered" in l for l in err[n:]))
+    m = len(out)
     time.sleep(0.5)
-    step("layout edit next to a Self::Variant match: applied, no E0412 (%s)" % (last_value(),), ok and last_value() == 4 and no_e0412(n))
+    report = err[n:]
+    values = [int(l.split()[3]) for l in out[m:] if l.startswith("out tick ")]
+    step("layout edit offers a restart naming main's frame and keeps the previous code", ok and p.poll() is None
+         and bool(values) and all(v == 5 for v in values) and last_value() == 5 and no_unresolved_type(n)
+         and any(l.startswith("relax live: main.rs:") and "struct `Pad` changed its layout" in l
+                 and "::main` is running on thread" in l and "its frame may hold values of it in the old layout" in l
+                 and "a restart applies it; offered" in l for l in report)
+         and not any("takes its new layout" in l or "relax live: restarting" in l for l in report))
     n = len(err)
     save(body)
     ok = wait(lambda: last_value() == 5 and any("main.rs: patched" in l for l in err[n:]))
-    step("field and helper removal applies in the same process", ok and p.poll() is None and no_e0412(n))
+    step("discarding the pending field and removing the helper patches in the same process", ok and p.poll() is None and no_unresolved_type(n))
     n = len(err)
     save(body.replace("p.a + 1 + ease(", 'p.a + "invalid" + ease('))
     ok = wait(lambda: any("NOT applied" in l for l in err[n:]))
-    step("invalid body is refused", ok and last_value() == 5)
+    step("invalid body is refused", ok and last_value() == 5 and no_unresolved_type(n))
     n = len(err)
     save(body)
     ok = wait(lambda: any("main.rs: patched" in l for l in err[n:]))
-    step("restoring the running source reports a completed patch", ok and last_value() == 5)
+    step("restoring the running source reports a completed patch", ok and last_value() == 5 and no_unresolved_type(n))
     n = len(err)
     save(body.replace("    p.a + 1 + ease(&Ease::Pow { begin: 2, end: 1 }, 1u32) as u64\n", "    999\n"))
     ok = wait(lambda: p.poll() is not None)
-    step("final edit applies, program exits", ok and last_value() == 999 and no_e0412(n))
+    step("final edit applies, program exits", ok and last_value() == 999 and no_unresolved_type(n))
 finally:
     if p.poll() is None:
         os.killpg(p.pid, 15)

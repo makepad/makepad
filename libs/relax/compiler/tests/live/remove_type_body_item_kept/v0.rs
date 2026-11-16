@@ -1,5 +1,5 @@
 // A struct goes and a fn declared in another fn's body still names it in its signature: refused
-// (E0412).
+// (E0425).
 pub struct S(pub u32);
 
 fn outer() -> u32 {

@@ -410,23 +410,18 @@ impl Extend<TokenStream> for TokenStream {
     }
 }
 
-/// Lexer for `str::parse::<TokenStream>()`: the host compiler installs one (`set_lexer`).
-static LEXER: std::sync::OnceLock<fn(&str) -> Option<TokenStream>> = std::sync::OnceLock::new();
-
-/// Installs the lexer behind `"..".parse::<TokenStream>()` (once per process).
-#[doc(hidden)]
-pub fn set_lexer(f: fn(&str) -> Option<TokenStream>) {
-    let _ = LEXER.set(f);
-}
-
-/// Parses Rust source text into tokens (spans: call site).
+/// Parses Rust source text into tokens (spans: call site), as rustc's `str::parse` does: text
+/// that does not lex, or whose delimiters do not balance, is a `LexError`. It needs nothing of
+/// the host: a native macro may parse before anything in its process has read a source file
+/// (the lexer was installed as a side effect of that, and a cross-target check's relax_api
+/// expansions got a LexError for `f32 , f32`).
 impl std::str::FromStr for TokenStream {
     type Err = LexError;
     fn from_str(s: &str) -> Result<TokenStream, LexError> {
-        match LEXER.get() {
-            Some(f) => f(s).ok_or(LexError),
-            None => Err(LexError),
-        }
+        let mut toks = Vec::new();
+        crate::lexer::lex(s.as_bytes(), 2021, &mut toks).map_err(|_| LexError)?;
+        let call_site = Span::call_site();
+        from_toks(s.as_bytes(), &toks, &|_, _| call_site).map_err(|_| LexError)
     }
 }
 

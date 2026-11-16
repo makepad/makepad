@@ -7,7 +7,9 @@
 //! the thread's stack.
 //!
 //! - `ensure_sufficient_stack(f)`: runs `f` here, or on a fresh segment when less than the red
-//!   zone is left. Cheap enough for every recursion step (a thread-local read and a compare).
+//!   zone is left, or when it runs on a stack this module does not know (an alternate signal
+//!   stack: a lazy compile a signal handler's first call starts). Cheap enough for every
+//!   recursion step (a thread-local read and two compares).
 //! - `on_program_stack(f)`: a program thread's body on a large guarded reservation; finished
 //!   ones are kept for the next thread (`Spares`).
 
@@ -17,8 +19,11 @@ const STACK_RED_ZONE: usize = 1 << 20;
 const STACK_SEGMENT: usize = 64 << 20;
 
 thread_local! {
-    /// lowest usable address of the stack this thread runs on now (0: not known yet)
-    static STACK_LO: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// the stack this thread runs on now, usable [lo, hi): its own, a program stack or a segment
+    /// (0, 0: not known yet)
+    static STACK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    /// the OS thread's own stack, usable [lo, hi) (0, 0: not read yet, or unknown)
+    static THREAD_STACK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
     /// the program stack this thread runs on (`on_program_stack`): usable [lo, hi), or (0, 0)
     static PROGRAM_STACK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
@@ -99,11 +104,11 @@ fn on_program_stack_from<F: FnOnce()>(spares: &Spares<Segment>, bounds_changed: 
         job.r = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
     }
     let mut job: Job<F> = Job { f: Some(f), bounds_changed, r: None };
-    let (old_lo, old_ps) = (STACK_LO.with(|c| c.get()), PROGRAM_STACK.with(|c| c.get()));
-    STACK_LO.with(|c| c.set(seg.floor));
+    let (old, old_ps) = (STACK.with(|c| c.get()), PROGRAM_STACK.with(|c| c.get()));
+    STACK.with(|c| c.set((seg.floor, seg.top)));
     PROGRAM_STACK.with(|c| c.set((seg.floor, seg.top)));
     unsafe { imp::call_on_segment(&seg, run::<F>, &mut job as *mut Job<F> as *mut u8) };
-    STACK_LO.with(|c| c.set(old_lo));
+    STACK.with(|c| c.set(old));
     PROGRAM_STACK.with(|c| c.set(old_ps));
     bounds_changed();
     program_stack_done(spares, seg);
@@ -177,6 +182,30 @@ impl<T: Copy> Spares<T> {
         k.1[n].take()
     }
 
+    /// `take` where the lock is free, else None: a signal handler may have interrupted its own
+    /// thread inside `take` or `keep`.
+    pub fn try_take(&self) -> Option<T> {
+        let mut k = self.kept.try_lock().ok()?;
+        if k.0 == 0 {
+            return None;
+        }
+        k.0 -= 1;
+        let n = k.0;
+        k.1[n].take()
+    }
+
+    /// `keep` where the lock is free, else `x` back (as for full spares).
+    pub fn try_keep(&self, x: T) -> Option<T> {
+        let Ok(mut k) = self.kept.try_lock() else { return Some(x) };
+        if k.0 == SPARES {
+            return Some(x);
+        }
+        let n = k.0;
+        k.1[n] = Some(x);
+        k.0 += 1;
+        None
+    }
+
     /// Keeps `x` for a later `take`; gives it back when the spares are full (the caller frees it).
     pub fn keep(&self, x: T) -> Option<T> {
         let mut k = self.kept.lock().unwrap_or_else(|e| e.into_inner());
@@ -190,12 +219,14 @@ impl<T: Copy> Spares<T> {
     }
 }
 
-/// Runs `f` on a fresh stack segment when this thread's stack is nearly used up.
+/// Runs `f` on a fresh stack segment when this thread's stack is nearly used up, or when it runs on
+/// a stack this module did not make or read (an alternate signal stack, a library's fiber), whose
+/// room it cannot know.
 #[inline]
 pub fn ensure_sufficient_stack<R, F: FnOnce() -> R>(f: F) -> R {
     let here = &f as *const _ as usize;
-    let lo = STACK_LO.with(|c| c.get());
-    if lo != 0 && here.saturating_sub(lo) >= STACK_RED_ZONE {
+    let (lo, hi) = STACK.with(|c| c.get());
+    if lo <= here && here < hi && here - lo >= STACK_RED_ZONE {
         return f();
     }
     grow(f)
@@ -204,14 +235,18 @@ pub fn ensure_sufficient_stack<R, F: FnOnce() -> R>(f: F) -> R {
 #[inline(never)]
 fn grow<R, F: FnOnce() -> R>(f: F) -> R {
     let here = &f as *const _ as usize;
-    let mut lo = STACK_LO.with(|c| c.get());
-    if lo == 0 {
-        lo = program_stack_bounds().map_or_else(stack_lo, |b| b.0);
-        STACK_LO.with(|c| c.set(lo));
+    let (mut lo, mut hi) = STACK.with(|c| c.get());
+    if !(lo <= here && here < hi) {
+        // read again: the thread may have moved to or from a program stack
+        (lo, hi) = program_stack_bounds().unwrap_or_else(thread_stack);
+        STACK.with(|c| c.set((lo, hi)));
     }
-    if lo == 0 || here.saturating_sub(lo) >= STACK_RED_ZONE {
+    if lo <= here && here < hi && here - lo >= STACK_RED_ZONE {
         return f();
     }
+    // near the end of the stack, or on one outside it: a signal stack never has the red zone's
+    // room (64 KB), and a compile there overflowed it with the signal blocked (the kernel's kill,
+    // no report)
     struct Job<F, R> {
         f: Option<F>,
         r: Option<std::thread::Result<R>>,
@@ -222,18 +257,68 @@ fn grow<R, F: FnOnce() -> R>(f: F) -> R {
         // a Rust panic must not unwind through the stack switch (no unwind info for it)
         job.r = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
     }
-    let seg = match imp::stack_segment(STACK_SEGMENT) {
+    let seg = match SPARE_SEGMENTS.try_take().or_else(|| imp::stack_segment(STACK_SEGMENT)) {
         Some(seg) => seg,
         None => return f(),
     };
     let mut job: Job<F, R> = Job { f: Some(f), r: None };
-    STACK_LO.with(|c| c.set(seg.lo));
+    STACK.with(|c| c.set((seg.lo, seg.top)));
     unsafe { imp::call_on_segment(&seg, run::<F, R>, &mut job as *mut Job<F, R> as *mut u8) };
-    STACK_LO.with(|c| c.set(lo));
-    imp::free_segment(seg);
+    STACK.with(|c| c.set((lo, hi)));
+    segment_done(seg);
     match job.r.take().unwrap() {
         Ok(r) => r,
         Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
+/// Segments `grow` is done with, for the next one: a signal handler whose first calls compile
+/// maps one segment, not one per compile. (Taken and kept without waiting: `grow` may run in a
+/// handler that interrupted its thread inside either.)
+static SPARE_SEGMENTS: Spares<Segment> = Spares::new();
+
+/// `grow` is done with segment `s`: kept for the next unless it was used deep (its pages would
+/// stay committed) or enough are kept; else unmapped.
+fn segment_done(s: Segment) {
+    if imp::used_below(&s, s.top - PROGRAM_STACK_KEEP) {
+        imp::free_segment(s);
+    } else if let Some(s) = SPARE_SEGMENTS.try_keep(s) {
+        imp::free_segment(s);
+    }
+}
+
+/// The OS thread's own stack, usable [lo, hi), read once per thread ((0, 0): unknown).
+fn thread_stack() -> (usize, usize) {
+    let b = THREAD_STACK.with(|c| c.get());
+    if b.1 != 0 {
+        return b;
+    }
+    let b = stack_bounds();
+    THREAD_STACK.with(|c| c.set(b));
+    b
+}
+
+/// Reads the calling thread's own stack bounds now, in normal context (a thread's first lazy
+/// compile), so that a check made later in a signal handler does not ask the OS there (glibc reads
+/// /proc/self/maps for the main thread's, and allocates).
+pub fn note_thread_stack() {
+    let b = thread_stack();
+    let _ = STACK.try_with(|c| if c.get().1 == 0 { c.set(program_stack_bounds().unwrap_or(b)) });
+}
+
+/// Which stack address `sp` of the calling thread is on, as this module knows them, and the bytes
+/// below it there: a program stack, the thread's own, or the segment it runs on now; None for a
+/// stack this module did not make or read (an alternate signal stack). For fault reports:
+/// async-signal-safe (thread-locals without destructors).
+pub fn stack_of(sp: usize) -> Option<(&'static str, usize)> {
+    let inside = |b: (usize, usize)| b.1 != 0 && b.0 <= sp && sp < b.1;
+    let thread = THREAD_STACK.try_with(|c| c.get()).unwrap_or((0, 0));
+    let now = STACK.try_with(|c| c.get()).unwrap_or((0, 0));
+    match program_stack_bounds() {
+        Some(b) if inside(b) => Some(("a program stack", sp - b.0)),
+        _ if inside(thread) => Some(("the thread's stack", sp - thread.0)),
+        _ if inside(now) => Some(("a stack segment", sp - now.0)),
+        _ => None,
     }
 }
 
@@ -248,9 +333,9 @@ struct Segment {
     top: usize,
 }
 
-/// lowest usable address of the calling thread's stack (0: unknown)
+/// The calling thread's own stack, usable [lo, hi) ((0, 0): unknown)
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn stack_lo() -> usize {
+fn stack_bounds() -> (usize, usize) {
     extern "C" {
         fn pthread_self() -> usize;
         fn pthread_getattr_np(t: usize, attr: *mut u64) -> i32;
@@ -260,17 +345,17 @@ fn stack_lo() -> usize {
     unsafe {
         let mut attr = [0u64; 16];
         if pthread_getattr_np(pthread_self(), attr.as_mut_ptr()) != 0 {
-            return 0;
+            return (0, 0);
         }
         let (mut addr, mut size) = (0usize, 0usize);
-        pthread_attr_getstack(attr.as_ptr(), &mut addr, &mut size);
+        let ok = pthread_attr_getstack(attr.as_ptr(), &mut addr, &mut size) == 0;
         pthread_attr_destroy(attr.as_mut_ptr());
-        addr
+        if ok { (addr, addr + size) } else { (0, 0) }
     }
 }
 
 #[cfg(target_vendor = "apple")]
-fn stack_lo() -> usize {
+fn stack_bounds() -> (usize, usize) {
     extern "C" {
         fn pthread_self() -> usize;
         fn pthread_get_stackaddr_np(t: usize) -> *mut u8;
@@ -278,25 +363,26 @@ fn stack_lo() -> usize {
     }
     unsafe {
         let t = pthread_self();
-        pthread_get_stackaddr_np(t) as usize - pthread_get_stacksize_np(t)
+        let hi = pthread_get_stackaddr_np(t) as usize;
+        (hi - pthread_get_stacksize_np(t), hi)
     }
 }
 
 #[cfg(windows)]
-fn stack_lo() -> usize {
+fn stack_bounds() -> (usize, usize) {
     let (mut lo, mut hi) = (0usize, 0usize);
     unsafe { relax_session::win32::GetCurrentThreadStackLimits(&mut lo, &mut hi) };
     // the reservation's base; its lowest pages are the guard region
     if lo == 0 {
-        0
+        (0, 0)
     } else {
-        lo + 3 * 4096 + 65536
+        (lo + 3 * 4096 + 65536, hi)
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn stack_lo() -> usize {
-    0
+fn stack_bounds() -> (usize, usize) {
+    (0, 0)
 }
 
 #[cfg(unix)]
@@ -630,6 +716,78 @@ mod tests {
         // 4 KiB a level, 8192 levels: 32 MiB, beyond a 2 MiB test thread
         let h = std::thread::Builder::new().stack_size(2 << 20).spawn(|| down(8192)).unwrap();
         assert!(h.join().unwrap() <= 8192);
+    }
+
+    /// A deep call started on a small stack this module did not make (a 64 KB alternate signal
+    /// stack, mapped once above and once below the thread's own) runs on a segment. The check
+    /// knew the low bound alone: above the thread's stack every small stack passed its red zone,
+    /// and a lazy compile in a signal handler overflowed the alternate stack (the kernel's kill).
+    #[cfg(unix)]
+    #[test]
+    fn a_deep_call_from_a_foreign_small_stack_runs_on_a_segment() {
+        use std::ffi::c_void;
+        extern "C" {
+            fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
+            fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
+            fn munmap(addr: *mut c_void, len: usize) -> i32;
+        }
+        const SMALL: usize = 64 << 10;
+        const GUARD: usize = 16 << 10;
+        let anon = if cfg!(target_vendor = "apple") { 0x1002 } else { 0x22 };
+        /// Recurses through `n` frames of 4 KB; the lowest frame's address.
+        #[inline(never)]
+        fn down(n: u32) -> usize {
+            let pad = [n as u8; 4096];
+            let at = std::hint::black_box(&pad) as *const _ as usize;
+            if n == 0 { at } else { down(n - 1).min(at) }
+        }
+        /// On the small stack [small.0, small.1): where the closure ran and, run off it, the
+        /// lowest frame of 256 KB below it (0: it ran on the small stack, which has no such room).
+        struct Job {
+            small: (usize, usize),
+            ran: usize,
+            lowest: usize,
+        }
+        extern "C" fn on_small(p: *mut u8) {
+            let job = unsafe { &mut *(p as *mut Job) };
+            let small = job.small;
+            let r = super::ensure_sufficient_stack(|| {
+                let here = std::hint::black_box(0u8);
+                let here = &here as *const u8 as usize;
+                (here, if here >= small.0 && here < small.1 { 0 } else { down(64) })
+            });
+            (job.ran, job.lowest) = r;
+        }
+        let (lo, hi) = super::stack_bounds();
+        assert!(hi > lo, "the thread's stack is known");
+        // (a hint: the system maps there when it is free; further out until one lands on that side)
+        let map = |above: bool| -> usize {
+            for shift in 28..40 {
+                let hint = if above { hi.checked_add(1 << shift) } else { lo.checked_sub(1 << shift) };
+                let Some(hint) = hint.map(|h| h & !0xffff) else { continue };
+                let at = unsafe { mmap(hint as *mut c_void, SMALL + GUARD, 3, anon, -1, 0) } as usize;
+                if at as isize == -1 {
+                    continue;
+                }
+                if (above && at >= hi) || (!above && at + SMALL + GUARD <= lo) {
+                    return at;
+                }
+                unsafe { munmap(at as *mut c_void, SMALL + GUARD) };
+            }
+            panic!("no mapping {} the thread's stack", if above { "above" } else { "below" });
+        };
+        for above in [true, false] {
+            let base = map(above);
+            assert_eq!(unsafe { mprotect(base as *mut c_void, GUARD, 0) }, 0);
+            let small = super::Segment { base, len: SMALL + GUARD, lo: base + GUARD, floor: base + GUARD, top: (base + SMALL + GUARD) & !15 };
+            let mut job = Job { small: (small.base, small.base + small.len), ran: 0, lowest: 0 };
+            unsafe { super::imp::call_on_segment(&small, on_small, &mut job as *mut Job as *mut u8) };
+            let side = if above { "above" } else { "below" };
+            let on_small = |a: usize| a >= small.base && a < small.base + small.len;
+            assert!(!on_small(job.ran), "the call from the small stack {side} the thread's ran on it");
+            assert!(job.lowest != 0 && !on_small(job.lowest), "its 256 KB of frames {side} the thread's stack are off the small stack");
+            unsafe { munmap(base as *mut c_void, SMALL + GUARD) };
+        }
     }
 
     /// Leaves MAGIC at the low end of an N-word frame; returns its address.

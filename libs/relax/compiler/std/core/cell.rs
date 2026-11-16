@@ -6,6 +6,7 @@ use crate::ops::{Deref, DerefMut};
 
 /// The primitive for interior mutability (Relax knows it: no `noalias` on what it covers).
 #[repr(transparent)]
+#[rustc_pub_transparent]
 #[rustc_layout_no_niche]
 #[lang = "unsafe_cell"]
 pub struct UnsafeCell<T: ?Sized> {

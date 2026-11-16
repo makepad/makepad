@@ -85,9 +85,9 @@ same binary under two names measures the noise floor. `RW_MS` (4000) is the per-
 defaults to `../std`, `RUN_PREFIX` defaults to `nice -n 10` (`none` on Windows). Timing belongs on the quiet machines
 through the bench queue:
 
-* x64 (`win` box): `local/agent_state/fast-rust/codegen2/rwtime_submit.sh <tag> <name=fastrust-commercial>...`
+* x64 (a quiet x64 box): the queue's submit script takes `<tag> <name=fastrust-commercial>...`
   (names sharing a key share one Relax build; `BENCH_KEY=<key>` takes the rwbench tree from another commit)
-* arm64 (mini): `.../codegen2/rwtime_a64_submit.sh <name=fastrust-commercial>...`
+* arm64 (an arm64 Mac): its submit script takes `<name=fastrust-commercial>...`
 
 Both pack `src_tar.py` trees plus the commercial `engine/` and `stage/libs/` dirs, build Relax and rwbench on the box and
 print these tables. The crate resolves offline from `vendor/` (its own `[patch.crates-io]` mirrors the root manifest's).
@@ -106,4 +106,4 @@ A pool node (x86-64 Linux, shared, NOT a quiet machine; frozen `relax-t19`):
 | maps_tile_decode | 19.523 | 19.173 | 0.98 | 1650 | 1846 | 141.4 | O3: 301 hot, 302 installed | yes |
 | layout_widgets | 29.792 | 85.201 | 2.86 | 40 | 4303 | 868.3 | O3: 1104 hot, 116 installed | yes |
 
-Quiet-machine results (x64 win box, arm64 mini) are posted by the bench queue under local/agent_state/fast-rust/bench/results/.
+Quiet-machine results (the x64 box, the arm64 Mac) are posted by the bench queue.

@@ -139,16 +139,6 @@ fn lifetime_lints(prog: &Program, d: DefId) {
     }
 }
 
-/// The name an attribute sets: `no_mangle` of `#[no_mangle]` and of `#[unsafe(no_mangle)]`.
-fn attr_name(prog: &Program, file: u32, a: &Attr) -> Vec<u8> {
-    let p = prog.src(file);
-    let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
-    if hi > lo + 2 && crate::cfg::tok_str(p, lo) == b"unsafe" && crate::cfg::tok_str(p, lo + 1) == b"(" {
-        return crate::cfg::tok_str(p, lo + 2).to_vec();
-    }
-    lint::attr_path(prog, file, a)
-}
-
 /// rustc `InvalidNoMangleItems` (late) and the `const _` visibility check of ast_validation.
 fn item_lints(prog: &Program, d: DefId) {
     let def = prog.def(d);
@@ -161,7 +151,7 @@ fn item_lints(prog: &Program, d: DefId) {
             // `check_item` of fns and `check_impl_item`; trait methods are not checked
             let parent = prog.def(def.parent);
             if def.kind == DefKind::AssocFn && parent.kind != DefKind::Impl { return; }
-            if !attrs.iter().any(|a| matches!(&attr_name(prog, def.file, a)[..], b"no_mangle" | b"export_name")) { return; }
+            if !attrs.iter().any(|a| matches!(&lint::attr_path(prog, def.file, a)[..], b"no_mangle" | b"export_name")) { return; }
             let ItemKind::Fn(sig, _, _) = item.kind else { return };
             let sig = *ast.fn_sig(sig);
             let mono = |g: Generics| ast.list(g.params).iter().any(|p| !matches!(p.kind, GenericParamKind::Lifetime(_)));
@@ -176,7 +166,7 @@ fn item_lints(prog: &Program, d: DefId) {
             }
         }
         DefKind::Const => {
-            if attrs.iter().any(|a| attr_name(prog, def.file, a) == b"no_mangle") && !lint::external(prog, def.file, item.lo) {
+            if attrs.iter().any(|a| lint::attr_path(prog, def.file, a) == b"no_mangle") && !lint::external(prog, def.file, item.lo) {
                 emit(prog, d, &NO_MANGLE_CONST_ITEMS, def.file, item.lo, "const items should never be `#[no_mangle]`");
             }
             // `pub const _: () = ..;`: the visibility has no effect
@@ -1452,8 +1442,12 @@ impl<'a> W<'a> {
                         }
                     }
                     let dyn2015_exception = self.pf.edition == 2015 && is_dyn && i == 0 && path.global();
+                    // a bare trait object (2015/2018 `Send + Sync`) starts with its first bound's
+                    // written path, never a parenthesized bound: a `(` right before it opens the
+                    // type around the object (`&(Shape + Sync)`)
+                    let enclosing_paren = matches!(ty, Ty::DynTrait(_, false)) && i == 0;
                     if let Some(pos) = self.bound_parens(b) {
-                        if (is_last || !fn_with_explicit_ret_ty) && !dyn2015_exception {
+                        if (is_last || !fn_with_explicit_ret_ty) && !dyn2015_exception && !enclosing_paren {
                             self.emit_delims(&UNUSED_PARENS, pos, "parentheses", "type");
                         }
                     }

@@ -290,7 +290,7 @@ pub fn super_paths(prog: &Program, own: &[bool]) -> Vec<String> {
             _ => false,
         };
         if too_many {
-            errors.push(prog.record_error(def.file, item.lo, "resolve", "E0433: failed to resolve: too many leading `super` keywords".to_string()));
+            errors.push(prog.record_error(def.file, item.lo, "resolve", format!("E0433: {}", prog.too_many_super_message(scope))));
         } else if let Vis::In(p) = item.vis {
             vis_path_segments(prog, def.file, scope, p, &mut errors);
         }
@@ -308,7 +308,9 @@ pub fn super_paths(prog: &Program, own: &[bool]) -> Vec<String> {
         }
         if im.ext || !im.global || im.segs.first().map(|s| s.0) != Some(SegKind::Super) { continue; }
         if im.pos >= prog.files[im.file as usize].src_len { continue; }
-        errors.push(prog.record_error(im.file, im.pos, "resolve", "E0433: failed to resolve: global paths cannot start with `super`".to_string()));
+        // resolve_path_with_ribs, rustc_resolve/src/ident.rs:1990-2000: this is the message;
+        // the former "failed to resolve" prefix belongs to neither the message nor the label.
+        errors.push(prog.record_error(im.file, im.pos, "resolve", "E0433: global paths cannot start with `super`".to_string()));
     }
     errors
 }
@@ -1262,6 +1264,87 @@ pub fn union_fields(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
     Vec::new()
 }
 
+/// rustc_hir_analysis check/check.rs `check_transparent`, its field check (E0690, at the ADT's
+/// def span): a `repr(transparent)` ADT with one variant has at most one non-trivial field. A
+/// field is trivial when its layout is known, sized, of size 0 and alignment 1 (a 1-ZST), and
+/// `is_trivial` finds no reason inside it. Relax's diagnostics carry no labels, so rustc's
+/// per-field labels (which reason makes each field non-trivial) are not kept: the count is the
+/// message. The variant count (E0731) is repr_checks' own; a union's gate is feature_gate.rs's.
+fn transparent_fields(prog: &Program, tcx: &Tcx, d: DefId) -> Option<String> {
+    let adt = tcx.adts.get(&d)?;
+    // bad_variant_count: the fields are not checked
+    if adt.variants.len() != 1 { return None; }
+    let fields = &adt.variants[0].fields;
+    if fields.len() <= 1 { return None; }
+    let env = crate::tcx::TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, d), param_env: tcx.param_env_id(prog, d), mode: crate::tcx::TypingMode::non_body_analysis() };
+    let (lay, lcx) = (crate::layout::Layouts::new(), crate::layout::LayoutCx::new(prog));
+    let krate = prog.def(d).krate;
+    let count = fields.iter().filter(|f| {
+        // layout_of fails for a type that does not normalize, references an error or depends on
+        // a parameter (NormalizationFailure, ReferencesError, Unknown / TooGeneric)
+        let Ok(ty) = tcx.try_normalize_erasing_regions(prog, env, f.ty) else { return true };
+        if tcx.tys.has_error(ty) || crate::transmute::too_generic(prog, tcx, env, ty, 0) { return true; }
+        let l = lay.of(&lcx, tcx, ty);
+        if lay.is_unsized(&lcx, tcx, ty) || l.size != 0 || l.align != 1 { return true; }
+        !transparent_trivial(prog, tcx, env, krate, ty, &mut Vec::new())
+    }).count();
+    if count <= 1 { return None; }
+    let desc = if adt.is_enum() { "the variant of a transparent enum" } else if adt.is_union() { "transparent union" } else { "transparent struct" };
+    Some(format!("E0690: {desc} needs at most one non-trivial field, but has {count}"))
+}
+
+/// check_transparent's `is_trivial` on a 1-ZST field type of an ADT of crate `krate`: false at a
+/// `repr(C)` type inside it, or at a type of another crate (unless `#[rustc_pub_transparent]`)
+/// that is `#[non_exhaustive]` or has a field that is not `pub`, either of which could make it
+/// non-zero-sized later. `path`: the ADTs being walked. rustc meets no cycle here (a 1-ZST
+/// cannot contain itself); Relax's layout gives a cyclic type (E0072) a stand-in 1-ZST, which
+/// must not recurse forever.
+fn transparent_trivial(prog: &Program, tcx: &Tcx, env: crate::tcx::TypingEnv, krate: u32, ty: TyId, path: &mut Vec<TyId>) -> bool {
+    let ty = tcx.try_normalize_erasing_regions(prog, env, ty).unwrap_or(ty);
+    match *tcx.tys.kind(ty) {
+        TyKind::Tuple(l) => tcx.tys.list(l).to_vec().into_iter().all(|t| transparent_trivial(prog, tcx, env, krate, t, path)),
+        TyKind::Array(e, _) => transparent_trivial(prog, tcx, env, krate, e, path),
+        TyKind::Adt(a, args, _) => {
+            let Some(adt) = tcx.adts.get(&a) else { return true };
+            let def = prog.def(a);
+            let ast = &prog.files[def.file as usize].ast;
+            let item = ast.item(def.item);
+            if def.krate != krate && !crate::lang_items::has_attr(prog, def.file, ast.list(item.attrs), "rustc_pub_transparent") {
+                let non_exhaustive = |attrs: ast::List<ast::Attr>| crate::lang_items::has_attr(prog, def.file, ast.list(attrs), "non_exhaustive");
+                // is_variant_list_non_exhaustive, or a variant's is_field_list_non_exhaustive
+                let marked = match item.kind {
+                    ast::ItemKind::Enum(r) => adt.is_variant_list_non_exhaustive() || ast.list(ast.row(r).variants).iter().any(|v| non_exhaustive(v.attrs)),
+                    _ => non_exhaustive(item.attrs),
+                };
+                if marked { return false; }
+                // a field that is not `pub` (an enum's fields have the enum's visibility)
+                let private_in = |l: ast::List<ast::FieldDef>| ast.list(l).iter().any(|f| !matches!(f.vis, ast::Vis::Pub));
+                let private = match item.kind {
+                    ast::ItemKind::Enum(_) => !matches!(item.vis, ast::Vis::Pub) && adt.variants.iter().any(|v| !v.fields.is_empty()),
+                    ast::ItemKind::Union(r) => private_in(ast.row(r).fields),
+                    ast::ItemKind::Struct(r) => match ast.row(r).data {
+                        ast::VariantData::Tuple(l) | ast::VariantData::Struct(l) => private_in(l),
+                        ast::VariantData::Unit => false,
+                    },
+                    _ => false,
+                };
+                if private { return false; }
+            }
+            // `def.repr().c()`: `repr(C)` as written (AdtT::repr_c also holds for `repr(transparent)`)
+            let f = &prog.files[def.file as usize];
+            let repr_c = ast.list(item.attrs).iter().any(|at| at.toks.hi > at.toks.lo && f.tok_text(at.toks.lo) == "repr" && (at.toks.lo + 1..at.toks.hi).any(|i| f.tok_text(i) == "C"));
+            if repr_c { return false; }
+            if path.contains(&ty) { return true; }
+            path.push(ty);
+            let args = tcx.tys.list(args).to_vec();
+            let trivial = adt.variants.iter().all(|v| v.fields.iter().all(|f| transparent_trivial(prog, tcx, env, krate, tcx.tys.subst(f.ty, &args), path)));
+            path.pop();
+            trivial
+        }
+        _ => true,
+    }
+}
+
 /// rustc_passes check_attr.rs `check_repr` (and the packed/align checks of check/check.rs):
 /// the `#[repr(..)]` hints of an item against its kind and against each other.
 pub fn repr_checks(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
@@ -1377,8 +1460,12 @@ pub fn repr_checks(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
     if transparent && is_enum {
         if let ItemKind::Enum(r) = item.kind {
             let n = ast.list(ast.row(r).variants).len();
-            if n != 1 { err(item.name.lo, format!("E0731: transparent enum needs exactly one variant, but has {}", n)); }
+            // bad_variant_count, at the def span as check_transparent passes it
+            if n != 1 { err(item.lo, format!("E0731: transparent enum needs exactly one variant, but has {}", n)); }
         }
+    }
+    if transparent && (is_struct || is_enum || is_union) {
+        if let Some(msg) = transparent_fields(prog, tcx, d) { err(item.lo, msg); }
     }
     if ints.len() > 1 { err(first_pos, "E0566: conflicting representation hints".to_string()); }
     // `repr(C, u64)` on a fieldless enum

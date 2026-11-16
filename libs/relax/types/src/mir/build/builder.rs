@@ -89,6 +89,8 @@ pub struct Builder<'a> {
     pub upvars: Vec<CapturedPlace>,
     pub upvar_env: Option<UpvarEnv>,
     pub var_debug_info: Vec<VarDebugInfo>,
+    /// Declaring the bindings of a desugaring's `let` (StmtKind::Let::super_).
+    pub desugaring_let: bool,
     pub unit_temp: Option<Place>,
     pub allocs: AllocMap,
 }
@@ -145,6 +147,7 @@ impl<'a> Builder<'a> {
             upvars: Vec::new(),
             upvar_env: None,
             var_debug_info: Vec::new(),
+            desugaring_let: false,
             unit_temp: None,
             allocs: AllocMap::default(),
         };
@@ -254,6 +257,7 @@ impl<'a> Builder<'a> {
                             opt_match_place: Some((None, span)),
                             pat_span: span,
                             introductions: vec![VarBindingIntroduction { span, is_shorthand: false }],
+                            from_desugaring: false,
                         }))
                     };
                     self.var_indices.insert(*var, LocalsForNode::One(local));

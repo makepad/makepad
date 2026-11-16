@@ -231,8 +231,10 @@ def bad_lines(text, since=0):
 
 
 # a HAL line about drawing (the GPU backends, the frame path); the media, XR-stream, input and
-# window-manager services log their own news with the same prefix
-DRAW = re.compile(r"^\[hal-(?!video|media|camera|xr-remote|gamepad|dialog|wm\]|android-permission|android-dialog)")
+# window-manager services log their own news with the same prefix, and a backend's upload pool says
+# when a submit had to make an arena (a hiccup that degrades gracefully, logged as such: an app's
+# first frames make theirs, and every replay read that as a GPU error before its edits, 11-12)
+DRAW = re.compile(r"^\[hal-(?!video|media|camera|xr-remote|gamepad|dialog|wm\]|android-permission|android-dialog|vulkan\] upload arenas: )")
 
 
 def healthy(app, since):
@@ -680,6 +682,9 @@ def host_case(app, what, path, n, rec):
 
 def host(package, wm):
     os.makedirs(WORK, exist_ok=True)
+    # the edits go back once the run ends: left in the tree, they read as the tree's own changes
+    # (a lease's end saved them as unlanded work, 11-14)
+    kept = {path: open(os.path.join(ROOT, path)).read() for _, path in HOST_EDITS}
     env, session = {}, None
     if wm:
         session, socket = wm_session()
@@ -728,6 +733,9 @@ def host(package, wm):
         if session:
             print("the WM's log: " + " | ".join(session.text().splitlines()[-4:])[:500], flush=True)
             session.stop()
+        for path, text in kept.items():
+            with open(os.path.join(ROOT, path), "w") as f:
+                f.write(text)
     if tally.get("fail") or tally.get("silent"):
         print("\n".join(said[-30:]), flush=True)
     return rate(package + (" under the WM" if wm else "") + " rebuild", tally, {})

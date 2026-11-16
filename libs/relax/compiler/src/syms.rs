@@ -49,7 +49,7 @@ pub enum SymKind {
     /// index into `Syms::rw_blocks` (size, align)
     Rw(u32),
     /// an entry of a provided (host-built) crate: `shim:<key>`, `last_panic:<crate>`,
-    /// `drop:<type def path>`
+    /// `drop:<type def path>`, `static:<static def path>`
     Provided(String),
     /// a `#[thread_local]` static's offset (jit.rs Unit::thread_local_place): from the thread
     /// pointer, or in the thread-local block
@@ -709,6 +709,11 @@ fn provenance(u: &Unit, v: u64) -> Option<Sym> {
     if let Some(s) = u.static_sym_at(v) {
         return Some(s);
     }
+    if let Some((key, start)) = crate::provided::shared_at(u, v) {
+        let mut s = u.syms.intern(SymKind::Provided(format!("static:{key}")), start);
+        s.off = (v - start) as i64;
+        return Some(s);
+    }
     // an anonymous mutable block (a promoted temporary, a per-domain constant): per-domain storage
     // like a static, so a word pointing into it is rebased in every domain's copy (domain.rs)
     if let Some(s) = u.syms.rw_sym_at(v) {
@@ -1183,6 +1188,7 @@ fn stable_fn_name_d(u: &Unit, id: u32, depth: u32) -> String {
         }
         crate::jit::FnKey::Sandbox(b) => if b == u32::MAX { "sandbox:invalid".to_string() } else { format!("sandbox:{}", stable_fn_name_d(u, b, depth + 1)) },
         crate::jit::FnKey::Plain(b) => format!("plain:{}", stable_fn_name_d(u, b, depth + 1)),
+        crate::jit::FnKey::Ctfe(b) => format!("ctfe:{}", stable_fn_name_d(u, b, depth + 1)),
         crate::jit::FnKey::Closure(file, e, p) => {
             let parent = if depth < 16 { stable_fn_name_d(u, p, depth + 1) } else { String::new() };
             format!("closure:{}:{}@{}", u.prog.file_paths.get(file as usize).map_or("", |x| x.as_str()), e, parent)

@@ -64,17 +64,7 @@ pub fn compute_goal_fast_path(infcx: &InferCtxt<'_>, prog: &crate::program::Prog
                 let ty = infcx.deeply_resolve_ignoring_regions(ty);
                 match lang {
                     Some(LangItem::Sized | LangItem::MetaSized) => {
-                        let meta = lang == Some(LangItem::MetaSized);
-                        let mut holds = has_trivial_sizedness(infcx, prog, ty, meta);
-                        if !holds && matches!(tys.kind(ty), TyKind::Param(_) | TyKind::Placeholder(_)) {
-                            for clause in &*infcx.tcx.param_env_by_id(goal.param_env).clauses {
-                                if let PredicateKind::Clause(ClauseKind::Trait(c)) = &clause.kind {
-                                    holds |= c.polarity == ClausePolarity::Positive && c.trait_ref.args[0] == GenericArg::Type(ty) &&
-                                        (c.trait_ref.def_id == p.trait_ref.def_id || (meta && infcx.tcx.lang_items.get(LangItem::Sized) == Some(c.trait_ref.def_id)));
-                                }
-                            }
-                        }
-                        if !holds { return None; }
+                        if !sizedness_fast_path(infcx, prog, goal.param_env, p, ty) { return None; }
                     }
                     Some(LangItem::Copy | LangItem::Clone) if !tys.has_infer(ty) && !tys.flags(ty).intersects(crate::types::TypeFlags::HAS_FREE_REGIONS) && trivially_copy(tys, ty) => {},
                     _ => return None,
@@ -128,7 +118,38 @@ impl TypeFolder for CollectNonRegionInfer {
         else { super_fold_const(tys,c,self,d) }
     }
 }
-fn has_trivial_sizedness(infcx: &InferCtxt<'_>, prog: &crate::program::Program, ty: TyId, meta: bool) -> bool {
+/// rustc_trait_selection/src/traits/util.rs:220 `sizedness_fast_path`: prove positive
+/// Sized/MetaSized clauses from trivial types or caller bounds without solver work.
+/// The caller supplies the self type so fulfillment keeps its resolution while type ops
+/// inspect the predicate as given, without cloning its arguments to replace the self type.
+pub(crate) fn sizedness_fast_path(infcx: &InferCtxt<'_>, prog: &crate::program::Program, param_env: ParamEnvId, p: &TraitClause, ty: TyId) -> bool {
+    if p.polarity != ClausePolarity::Positive { return false; }
+    let meta = match infcx.tcx.lang_items.by_def.get(&p.trait_ref.def_id) {
+        Some(LangItem::Sized) => false,
+        Some(LangItem::MetaSized) => true,
+        _ => return false,
+    };
+    sizedness_holds(infcx, prog, param_env, p.trait_ref.def_id, meta, ty)
+}
+/// The rule of `sizedness_fast_path` for a positive clause of the Sized (`meta` false) or
+/// MetaSized (`meta` true) trait `trait_def` on `ty`: trivial sizedness, or a parameter or
+/// placeholder with a matching positive caller bound (MetaSized also takes a Sized bound).
+/// Callers that already know the trait (the MIR type check's `prove_trait_ref`) ask it directly.
+pub(crate) fn sizedness_holds(infcx: &InferCtxt<'_>, prog: &crate::program::Program, param_env: ParamEnvId, trait_def: crate::program::DefId, meta: bool, ty: TyId) -> bool {
+    let mut holds = has_trivial_sizedness(infcx, prog, ty, meta);
+    if !holds && matches!(infcx.tcx.tys.kind(ty), TyKind::Param(_) | TyKind::Placeholder(_)) {
+        for clause in &*infcx.tcx.param_env_by_id(param_env).clauses {
+            if let PredicateKind::Clause(ClauseKind::Trait(c)) = &clause.kind {
+                holds |= c.polarity == ClausePolarity::Positive && c.trait_ref.args[0] == GenericArg::Type(ty) &&
+                    (c.trait_ref.def_id == trait_def || (meta && infcx.tcx.lang_items.get(LangItem::Sized) == Some(c.trait_ref.def_id)));
+            }
+        }
+    }
+    holds
+}
+/// Structural sizedness shared by fulfillment and type ops to prove trivial types
+/// without registering obligations or resolving inference variables.
+pub(crate) fn has_trivial_sizedness(infcx: &InferCtxt<'_>, prog: &crate::program::Program, ty: TyId, meta: bool) -> bool {
     let tcx = infcx.tcx;
     match tcx.tys.kind(ty) {
         TyKind::Foreign(_) | TyKind::Alias(..) | TyKind::Param(_) | TyKind::Placeholder(_) | TyKind::Bound(..) | TyKind::Infer(_) => false,
@@ -158,7 +179,9 @@ fn trivially_copy(tys: &Types, t: TyId) -> bool {
         _ => false,
     }
 }
-fn trivially_wf(infcx: &InferCtxt<'_>, prog: &crate::program::Program, t: TyId) -> bool {
+/// Structural well-formedness shared by fulfillment and type ops to skip goals that
+/// need no obligations, using the supplied type without resolving inference variables.
+pub(crate) fn trivially_wf(infcx: &InferCtxt<'_>, prog: &crate::program::Program, t: TyId) -> bool {
     let tys = &infcx.tcx.tys;
     match tys.kind(t) {
         TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str | TyKind::Never | TyKind::Param(_) | TyKind::Placeholder(_) | TyKind::Bound(..) | TyKind::IntVar(_) | TyKind::FloatVar(_) => true,

@@ -3,9 +3,9 @@
 //! The flag is the person's opt-in to C tooling: without it no package's C is compiled or linked
 //! (neither cargo nor the system C compiler runs, and no native library is loaded). It is no
 //! sandbox: `relax run` runs the package's Rust, its build scripts and proc macros included, with
-//! or without it. A package cannot grant it to itself (its run-env may not set RELAX_ALLOW_C), and
-//! a relax its program starts does not inherit it (progenv ALLOW_C). With it, the packages whose build
-//! script compiles or links native code (`links =`, a build-dependency on cc / cmake / pkg-config /
+//! or without it. A package cannot grant it to itself (it is a word of the person's command line:
+//! options.rs GRANTS), and a relax its program starts does not inherit it. With it, the packages
+//! whose build script compiles or links native code (`links =`, a build-dependency on cc / cmake / pkg-config /
 //! bindgen / vcpkg, or a script that reads `DEP_*` metadata of those) are built by cargo itself, so
 //! their build scripts run verbatim: `cargo check --release -p <package> --message-format=json`
 //! in the run's workspace, same Cargo.lock, same cargo flags. Cargo's `RUSTC_WRAPPER` is this
@@ -379,9 +379,9 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     // ---- the key: what the native scripts' outputs depend on. Not the package the run is for,
     // and of the resolved graph only the native closure (the packages whose scripts or libs
     // cargo builds for real): two packages whose closure resolves alike share the build.
-    let selection = selection_key(&script_pkgs, &lib_pkgs);
-    // (v16: a receipt holds its scripts' declared variables, `cached`)
-    let mut h = fnv(b"native-link-v16", 0xcbf29ce484222325);
+    let selection = selection_key(&script_pkgs, &lib_pkgs, c_toolchain());
+    // (v17: the program's C compiler linker and its file)
+    let mut h = fnv(b"native-link-v17", 0xcbf29ce484222325);
     // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
     h = fnv(&crate::dirs::anchors_key().to_le_bytes(), h);
     h = fnv(req.triple.as_bytes(), h);
@@ -412,6 +412,13 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     }
     let cc_version = Command::new(cc()).arg("--version").output().map(|o| o.stdout).unwrap_or_default();
     h = fnv(cc_version.split(|&b| b == b'\n').next().unwrap_or(&[]), h);
+    // the program's linker (the native library links with it): its file as it is now, so an
+    // update of the toolchain under the same name is another build. Its stamp, not its
+    // `--version`: a check without --allow-c reads this key too (Mode::Cached), and must not run
+    // a program the workspace's cargo config names
+    if let Some(linker) = configured_linker(req.workspace, req.triple) {
+        h = fnv(&linker_stamp(&linker), h);
+    }
     let mut native_packages: Vec<_> = seeds.iter().map(|&s| {
         let bs = &g.build_scripts[s];
         let mut features = bs.features.clone();
@@ -441,7 +448,7 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     names.dedup();
     let dir = format!("{}/native/{:016x}", req.relax_dir, h);
     let messages_path = format!("{}/messages.jsonl", dir);
-    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let ext = if cfg!(target_os = "macos") { "dylib" } else if cfg!(windows) { "dll" } else { "so" };
     let lib_path = format!("{}/libnative.{}", dir, ext);
     let fast_mark = format!("{}/fast", dir);
     Plan { script_pkgs, lib_pkgs, flags, names, key: h, selection, dir, messages_path, lib_path, fast_mark }
@@ -666,6 +673,9 @@ struct Outputs {
     /// the program's link arguments (`-C link-arg`s of its binary's rustc command: RUSTFLAGS, the
     /// cargo config's rustflags, its build scripts' `rustc-link-arg`s), as cargo gave them
     link_args: Vec<String>,
+    /// the linker of that same rustc command when it is a C compiler driver; `link_args` are
+    /// written for it
+    linker: Option<String>,
 }
 
 /// (crate, features) of each build script of the graph: what the native steps read of it
@@ -695,11 +705,22 @@ fn cached(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)],
     (there && same_runs && same_env).then_some(out)
 }
 
-/// The variables the script run that left `out_dir` declared with `rerun-if-env-changed` (cargo's
-/// `output` file beside it), each once, with this process's value (None: unset): cargo gives the
+/// cargo's record of the script run that left `out_dir`: the script's stdout, which cargo writes
+/// after every run, beside OUT_DIR (`build/<pkg>-<hash>/output`) or, in cargo's newer build-dir
+/// layout, in the run folder beside it (`build/<pkg>/<hash>/run/stdout`). Read only beside
+/// OUT_DIR, no run matched its receipt under the newer layout, and every warm `--allow-c` run
+/// built its native code again (11-14).
+fn script_stdout(out_dir: &str) -> std::path::PathBuf {
+    let out = std::path::Path::new(out_dir);
+    let output = out.with_file_name("output");
+    if output.is_file() { output } else { out.with_file_name("run").join("stdout") }
+}
+
+/// The variables the script run that left `out_dir` declared with `rerun-if-env-changed` (its
+/// stdout, [`script_stdout`]), each once, with this process's value (None: unset): cargo gives the
 /// script this environment.
 fn declared_env(out_dir: &str) -> Vec<(String, Option<String>)> {
-    let output = std::fs::read_to_string(std::path::Path::new(out_dir).with_file_name("output")).unwrap_or_default();
+    let output = std::fs::read_to_string(script_stdout(out_dir)).unwrap_or_default();
     let mut names: Vec<&str> = output.lines().filter_map(|l| {
         l.strip_prefix("cargo::").or_else(|| l.strip_prefix("cargo:"))?.strip_prefix("rerun-if-env-changed=")
     }).map(str::trim_end).collect();
@@ -708,12 +729,10 @@ fn declared_env(out_dir: &str) -> Vec<(String, Option<String>)> {
     names.into_iter().map(|k| (k.to_string(), std::env::var(k).ok())).collect()
 }
 
-/// The script run that left `out_dir` as it is: cargo's `output` file beside it (the script's
-/// stdout, which cargo writes after every run), by length and modification time. Empty when
-/// there is none.
+/// The script run that left `out_dir` as it is: its stdout ([`script_stdout`]), by length and
+/// modification time. Empty when there is none.
 fn run_stamp(out_dir: &str) -> String {
-    let output = std::path::Path::new(out_dir).with_file_name("output");
-    std::fs::metadata(output).ok().and_then(|m| {
+    std::fs::metadata(script_stdout(out_dir)).ok().and_then(|m| {
         let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
         Some(format!("{}.{}", m.len(), t.as_nanos()))
     }).unwrap_or_default()
@@ -726,8 +745,9 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
     let mut statics: Vec<String> = Vec::new();
     // each static library with the search paths of the script that named it: the copy that script
     // built (a bundled sqlite in its OUT_DIR) wins over one of the same name in a path another
-    // script added (on Linux, the system's non-PIC libsqlite3.a in the path fontconfig's script adds)
-    let mut static_homes: Vec<(String, Vec<String>)> = Vec::new();
+    // script added (on Linux, the system's non-PIC libsqlite3.a in the path fontconfig's script
+    // adds); and the script's package (its `pkg` index: the archives' order)
+    let mut static_homes: Vec<(String, Vec<String>, usize)> = Vec::new();
     let mut archives: Vec<String> = Vec::new();
     let mut search: Vec<String> = Vec::new();
     let mut fw_search: Vec<String> = Vec::new();
@@ -736,10 +756,12 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
     let mut runs: Vec<(String, String)> = Vec::new();
     let mut env_seen: Vec<(String, Option<String>)> = Vec::new();
     let mut link_args: Vec<String> = Vec::new();
+    let mut linker: Option<String> = None;
     for line in messages.lines() {
         let j = crate::json::parse(line.as_bytes()).map_err(|e| format!("cargo message: {e}"))?;
         if let Some(a) = j.get("relax_link_args") {
             link_args = a.arr().iter().map(|x| x.str().to_string()).collect();
+            linker = j.get("relax_linker").map(|l| l.str()).filter(|l| !l.is_empty()).map(str::to_string);
             continue;
         }
         let (n, v) = id_name_version(j.get("package_id").map(|p| p.str()).unwrap_or(""));
@@ -787,7 +809,7 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
             };
             match kind.as_str() {
                 "static" => {
-                    static_homes.push((name.clone(), own_search.clone()));
+                    static_homes.push((name.clone(), own_search.clone(), scripts_of[s].0));
                     statics.push(name);
                 }
                 "framework" => {
@@ -802,8 +824,17 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
         }
         scripts.push(ScriptOut { ..out });
     }
+    // The messages come in the order cargo's scripts finished, which changes from build to build.
+    // The link takes a symbol two archives define from the first of them (link: every defined
+    // global is a root, and ld64 and GNU ld alike take it from the first archive that has it), so
+    // the archives go in the packages' order (name, version, folder), each script's own libraries
+    // in the order it named them: the same for every build.
+    static_homes.sort_by(|a, b| {
+        let (p, q) = (&pkg[a.2], &pkg[b.2]);
+        (&p.1, &p.2, &p.0).cmp(&(&q.1, &q.2, &q.0))
+    });
     // the out dirs of the scripts hold archives too (cc's output is `native=<out_dir>`)
-    for (name, own_search) in &static_homes {
+    for (name, own_search, _) in &static_homes {
         let file = format!("lib{}.a", name);
         match own_search.iter().chain(search.iter()).map(|d| format!("{}/{}", d, file)).find(|p| std::path::Path::new(p).is_file()) {
             Some(p) => {
@@ -814,7 +845,7 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
             None => return Err(format!("--allow-c: a native build script links static library `{}`, but {} is in none of its search paths ({})", name, file, search.join(", "))),
         }
     }
-    Ok(Outputs { scripts, runs, env: env_seen, statics, archives, search, fw_search, dylibs, frameworks, link_args })
+    Ok(Outputs { scripts, runs, env: env_seen, statics, archives, search, fw_search, dylibs, frameworks, link_args, linker })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -889,7 +920,7 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
     flags: &[&String], script_pkgs: &[String], lib_pkgs: &[String], seeds: &[usize], tier: Tier) -> Result<String, String> {
     // Cargo does not track the wrapper's selection environment. An empty stub
     // from another selection must never count as a fresh real library.
-    let selection = selection_key(script_pkgs, lib_pkgs);
+    let selection = selection_key(script_pkgs, lib_pkgs, c_toolchain());
     let target = match tier { Tier::Fast => format!("{}/native/cargo-target/{selection:016x}", relax_dir), Tier::Optimized => format!("{}/native/cargo-target-opt/{selection:016x}", relax_dir) };
     let target = std::path::absolute(&target).map_err(|e| format!("native target directory: {e}"))?;
     // Cargo can put intermediate files outside target_directory. Resolve its
@@ -907,7 +938,7 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
     let metadata = crate::json::parse(&metadata.stdout)?;
     let build = metadata.get("build_directory").map(|v| std::path::PathBuf::from(v.str()))
         .filter(|p| p != &target)
-        .map(|p| p.join("makepad-native").join(match tier { Tier::Fast => "fast", Tier::Optimized => "optimized" }).join(format!("{selection:016x}")))
+        .map(|p| p.join("relax-native").join(match tier { Tier::Fast => "fast", Tier::Optimized => "optimized" }).join(format!("{selection:016x}")))
         .unwrap_or_else(|| target.clone());
     // the program's link arguments: the wrapper writes them here, a file per binary or test
     // harness. A folder of its own per cargo run: the program's stubs depend on its name
@@ -951,7 +982,7 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let out = cmd.output();
-    let link_args = program_link_args(&link_dir, package, flags);
+    let (link_args, linker) = program_link(&link_dir, package, flags);
     let _ = std::fs::remove_dir_all(&link_dir);
     let out = out.map_err(|e| format!("--allow-c needs cargo on PATH to build the native dependencies ({}): {e}", package))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -1037,14 +1068,15 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
             return Err(format!("--allow-c: cargo and Relax resolve `{} {}` with different features (cargo {:?}, relax {:?})", p.1, p.2, built, ours));
         }
     }
-    keep.push_str(&format!("{{\"relax_link_args\":[{}]}}\n", link_args.iter().map(|a| json_string(a)).collect::<Vec<_>>().join(",")));
+    keep.push_str(&format!("{{\"relax_link_args\":[{}],\"relax_linker\":{}}}\n", link_args.iter().map(|a| json_string(a)).collect::<Vec<_>>().join(","), json_string(linker.as_deref().unwrap_or(""))));
     Ok(keep)
 }
 
-/// The link arguments the wrapper saw on the rustc command of the program (`wrapper`, a file per
-/// crate of the package's binaries and test harnesses): the binary `--bin` names, else the crate
-/// named after the package, else what they all say alike.
-fn program_link_args(dir: &std::path::Path, package: &str, flags: &[&String]) -> Vec<String> {
+/// The link arguments and C compiler linker the wrapper saw on the rustc command of the program
+/// (`wrapper`, a file per crate of the package's binaries and test harnesses): the binary `--bin`
+/// names, else the crate named after the package, else what they all say alike. The first line is
+/// the linker (empty for none), and the remaining non-empty lines are its arguments.
+fn program_link(dir: &std::path::Path, package: &str, flags: &[&String]) -> (Vec<String>, Option<String>) {
     let units: Vec<(String, String)> = std::fs::read_dir(dir).into_iter().flatten().flatten()
         .filter_map(|e| Some((e.file_name().to_str()?.to_string(), std::fs::read_to_string(e.path()).ok()?))).collect();
     let named = flags.iter().position(|f| f.as_str() == "--bin").and_then(|i| flags.get(i + 1)).map(|b| b.as_str())
@@ -1052,7 +1084,60 @@ fn program_link_args(dir: &std::path::Path, package: &str, flags: &[&String]) ->
         .unwrap_or(package).replace('-', "_");
     let alike = units.first().filter(|(_, t)| units.iter().all(|(_, u)| u == t));
     let text = units.iter().find(|(n, _)| *n == named).or(alike).map_or("", |(_, t)| t.as_str());
-    text.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
+    let mut lines = text.lines();
+    let linker = lines.next().filter(|l| !l.is_empty()).map(str::to_string);
+    (lines.filter(|l| !l.is_empty()).map(str::to_string).collect(), linker)
+}
+
+/// The program's linker when rustc drives it as a C compiler. The last linker and linker flavour
+/// options win; an explicit flavour decides, otherwise its file stem and the target's default
+/// do, as in rustc. An absent or empty linker, or a flavour without a C compiler driver, gives
+/// none, so the native library keeps cc.
+fn linker_of(args: &[String]) -> Option<String> {
+    let mut linker = None;
+    let mut flavor = None;
+    let mut target = "";
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let value = if a == "--target" {
+            i += 1;
+            target = args.get(i).map(String::as_str).unwrap_or("");
+            None
+        } else if let Some(t) = a.strip_prefix("--target=") {
+            target = t;
+            None
+        } else if a == "-C" || a == "--codegen" {
+            i += 1;
+            args.get(i).map(String::as_str)
+        } else {
+            a.strip_prefix("-C").or_else(|| a.strip_prefix("--codegen="))
+        };
+        if let Some(v) = value.map(str::trim_start) {
+            if let Some(l) = v.strip_prefix("linker=") {
+                linker = Some(l);
+            } else if let Some(f) = v.strip_prefix("linker-flavor=") {
+                flavor = Some(f);
+            }
+        }
+        i += 1;
+    }
+    let linker = linker.filter(|l| !l.is_empty())?;
+    let driver = if let Some(flavor) = flavor {
+        matches!(flavor, "gcc" | "gnu-cc" | "gnu-lld-cc" | "darwin-cc" | "darwin-lld-cc" | "unix-cc")
+    } else {
+        let stem = std::path::Path::new(linker).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(stem, "cc" | "c++" | "gcc" | "g++" | "clang" | "clang++")
+            || ["-cc", "-gcc", "-g++", "-clang", "-clang++"].iter().any(|&s| stem.ends_with(s)) {
+            true
+        } else if matches!(stem, "ld" | "lld" | "rust-lld" | "wasm-ld" | "link" | "lld-link" | "emcc")
+            || stem.starts_with("ld.") || stem.starts_with("ld64") || stem.ends_with("-ld") || stem.ends_with("-wasm-ld") {
+            false
+        } else {
+            !target.ends_with("-msvc") && !target.contains("-uefi") && !target.starts_with("wasm")
+        }
+    };
+    driver.then(|| linker.to_string())
 }
 
 /// The `-C link-arg=` / `-C link-args=` values of a rustc command line, in order.
@@ -1094,13 +1179,72 @@ fn json_string(s: &str) -> String {
     o
 }
 
-fn selection_key(scripts: &[String], libs: &[String]) -> u64 {
-    let mut h = fnv(b"target-compiler-probes-v5-link-args", 0xcbf29ce484222325);
+/// The cargo selection of a native build (its own cargo target): the packages whose scripts and
+/// libraries cargo builds for real, and the C toolchain they are built with (`c_toolchain`).
+fn selection_key(scripts: &[String], libs: &[String], toolchain: &[u8]) -> u64 {
+    let mut h = fnv(b"target-compiler-probes-v6-toolchain", 0xcbf29ce484222325);
     for list in [scripts, libs] {
         h = fnv(b"\xff", h);
         for name in list { h = fnv(name.as_bytes(), h); h = fnv(b"\0", h); }
     }
-    h
+    h = fnv(b"\xff", h);
+    fnv(toolchain, h)
+}
+
+/// The C toolchain a native build runs, as `cc --version` names it (the compiler's version and,
+/// for clang, the folder it is installed in); empty without a C compiler. Read once per run.
+/// Build scripts write the toolchain's paths into what they print and leave (a link search path
+/// into the compiler's runtime folder, a CMake cache naming the compiler), and cargo does not run a
+/// script again when the toolchain changes: after a toolchain update those outputs named folders
+/// the update had removed. Another toolchain is another selection, whose scripts run.
+static C_TOOLCHAIN: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+fn c_toolchain() -> &'static [u8] {
+    C_TOOLCHAIN.get_or_init(|| {
+        let out = Command::new(cc()).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output();
+        crate::zone_alloc::kept_with(|| out.map(|o| o.stdout).unwrap_or_default())
+    })
+}
+
+/// The configured target linker, from the environment before cargo config files. Relative paths
+/// with a slash resolve against the config file's base folder; bare names stay on PATH.
+fn configured_linker(workspace: &str, triple: &str) -> Option<String> {
+    let key = format!("CARGO_TARGET_{}_LINKER", triple.to_uppercase().replace(['-', '.'], "_"));
+    if let Some(linker) = std::env::var(key).ok().filter(|l| !l.is_empty()) {
+        return Some(linker);
+    }
+    for (base, path) in crate::resolve::cargo_config_files(workspace) {
+        let Ok(text) = crate::vfs::read_to_string(&path) else { continue };
+        let Ok(config) = crate::toml::parse_toml(&text) else { continue };
+        let Some(linker) = config.get_path(&["target", triple, "linker"]).and_then(|l| l.as_str()) else { continue };
+        let path = std::path::Path::new(linker);
+        return Some(if linker.contains('/') && path.is_relative() {
+            std::path::Path::new(&base).join(path).to_string_lossy().into_owned()
+        } else {
+            linker.to_string()
+        });
+    }
+    None
+}
+
+/// The file a linker name runs (a path, or the first match on PATH) as the key reads it: its
+/// path, size and modification time, read without running it. Empty when no file is found.
+fn linker_stamp(linker: &str) -> Vec<u8> {
+    let named = std::path::Path::new(linker);
+    let file = if named.components().count() > 1 {
+        Some(named.to_path_buf())
+    } else {
+        let exe = if cfg!(windows) && named.extension().is_none() { format!("{linker}.exe") } else { linker.to_string() };
+        std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(&exe)).find(|f| f.is_file()))
+    };
+    let Some(file) = file else { return Vec::new() };
+    let Ok(meta) = std::fs::metadata(&file) else { return Vec::new() };
+    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    let mut out = std::fs::canonicalize(&file).unwrap_or(file).to_string_lossy().into_owned().into_bytes();
+    out.push(0);
+    out.extend_from_slice(&meta.len().to_le_bytes());
+    out.extend_from_slice(&mtime.to_le_bytes());
+    out
 }
 
 /// `native/lock`, held exclusively: a root is written, or a prune decides what goes. None when
@@ -1236,6 +1380,10 @@ fn cargo_selection(flags: &[&String]) -> Vec<String> {
 /// is its own), on ELF every undefined one (`nm -D`; ELF records no providing library), the
 /// symbol version off.
 fn library_imports(lib: &str) -> Result<Vec<String>, String> {
+    // a DLL leaves no import open: its link bound each to a library or failed
+    if cfg!(windows) {
+        return Ok(Vec::new());
+    }
     let apple = cfg!(target_vendor = "apple");
     let mut nm = Command::new("nm");
     nm.args(if apple { ["-m", "-u"] } else { ["-D", "-u"] }).arg(lib);
@@ -1283,18 +1431,44 @@ fn link(lib_path: &str, out: &Outputs, triple: &str, resolvable: Resolvable) -> 
     let symbols_path = format!("{}.symbols", tmp);
     // the accessors' object: the callback relink below reuses the link's arguments
     let addresses_path = format!("{}.addresses.o", tmp);
-    let mut cmd = Command::new(cc());
+    let linker = out.linker.clone().unwrap_or_else(cc);
+    let mut cmd = Command::new(&linker);
+    // every member of the archives, for the loader's check of which callbacks the program needs
+    // (native_stub member_table): each global symbol they define is a root, so the link takes every
+    // member that defines one; the program's imports are known when it loads
+    let members;
     if cfg!(target_os = "macos") {
         cmd.args(["-dynamiclib", "-o", &tmp, "-Wl,-undefined,dynamic_lookup"]);
-        for a in archives {
-            cmd.arg(format!("-Wl,-force_load,{}", a));
-        }
+        let symbols;
+        (symbols, members) = macho_archive_symbols(archives)?;
+        // Each member is taken by normal archive extraction, as on Linux: every defined global
+        // symbol is a root (`-u`), and the first member in the archives' order that defines it
+        // provides it. -force_load took every member, so an archive holding an object twice (a
+        // merged archive) failed on duplicate definitions. The roots go to the C driver in a
+        // response file (a large library defines tens of thousands); `-Xlinker` keeps a name
+        // whole whatever it holds.
+        let roots = symbols.keys().map(|name| {
+            format!("-Xlinker -u -Xlinker \"{}\"\n", name.replace('\\', "\\\\").replace('"', "\\\""))
+        }).collect::<String>();
+        std::fs::write(&symbols_path, roots).map_err(|e| format!("{symbols_path}: {e}"))?;
+        cmd.arg(format!("@{symbols_path}"));
         // C built with -fvisibility=hidden and assembly's `.private_extern` (ring's core) stay
         // local to the library, where dlsym cannot see them: the same address accessors as Linux
-        compile_accessors(&macho_archive_symbols(archives)?, &tmp, &addresses_path)?;
+        if let Err(e) = compile_accessors(&symbols, &tmp, &addresses_path) {
+            let _ = std::fs::remove_file(&symbols_path);
+            return Err(e);
+        }
         cmd.arg(&addresses_path);
+        cmd.args(archives);
     } else {
-        cmd.args(["-shared", "-fPIC", "-o", &tmp]);
+        if cfg!(windows) {
+            // a DLL (mingw-w64's gcc and ld) that exports every global symbol of what it links,
+            // as an ELF library's dynamic table has them: the loader looks them up by name
+            // (GetProcAddress, os::proc symbol_in)
+            cmd.args(["-shared", "-o", &tmp, "-Wl,--export-all-symbols"]);
+        } else {
+            cmd.args(["-shared", "-fPIC", "-o", &tmp]);
+        }
         if cfg!(target_os = "linux") {
             // Prebuilt assembly archives may omit .note.GNU-stack. Like rustc's
             // ELF links, keep the stack non-executable instead of inheriting an
@@ -1308,20 +1482,37 @@ fn link(lib_path: &str, out: &Outputs, triple: &str, resolvable: Resolvable) -> 
         // both copies and fail with duplicate definitions. Each symbol notes whether
         // it is thread-local (the address accessors below leave those out).
         let mut symbols = std::collections::BTreeMap::new();
+        let mut each = Vec::new();
         for archive in archives {
-            let out = Command::new("nm").args(["-g", "--defined-only", "--format=sysv", archive])
+            let out = Command::new("nm").args(["-g", "--format=sysv", archive])
                 .output().map_err(|e| format!("--allow-c: cannot read archive symbols: {e}"))?;
             if !out.status.success() {
                 return Err(format!("--allow-c: nm failed for {archive}: {}", String::from_utf8_lossy(&out.stderr)));
             }
-            // name | value | class | type | size | line | section; the member and column headers have no `|`
+            // per member "Symbols from <archive>[<member>]:", then rows name | value | class |
+            // type | size | line | section (the column header has no `|`); class U, w and v are
+            // references (weak ones included: a member that is taken binds them if it can)
             for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if line.starts_with("Symbols from ") {
+                    each.push(crate::native_stub::ArchiveMember::default());
+                    continue;
+                }
                 let columns: Vec<&str> = line.split('|').map(str::trim).collect();
                 if columns.len() >= 4 && columns[2].len() == 1 && !columns[0].is_empty() {
-                    symbols.insert(columns[0].to_string(), columns[3] == "TLS");
+                    let member = match each.last_mut() {
+                        Some(m) => m,
+                        None => { each.push(Default::default()); each.last_mut().unwrap() }
+                    };
+                    if matches!(columns[2], "U" | "w" | "v") {
+                        member.refs.push(columns[0].to_string());
+                    } else {
+                        symbols.insert(columns[0].to_string(), columns[3] == "TLS");
+                        member.defs.push(columns[0].to_string());
+                    }
                 }
             }
         }
+        members = each;
         let args = symbols.keys().map(|name| {
             format!("--undefined=\"{}\"\n", name.replace('\\', "\\\\").replace('"', "\\\""))
         }).collect::<String>();
@@ -1364,11 +1555,15 @@ fn link(lib_path: &str, out: &Outputs, triple: &str, resolvable: Resolvable) -> 
     // that finds a library of the scripts' search folders at load time)
     cmd.args(&out.link_args);
     let run = |cmd: &mut Command| -> Result<(), String> {
-        let out = cmd.output().map_err(|e| format!("--allow-c: cannot run the C compiler to link the native library: {e}"))?;
+        let out = cmd.output().map_err(|e| format!("--allow-c: cannot run the linker to link the native library: {e}"))?;
         if out.status.success() {
             return Ok(());
         }
-        Err(format!("--allow-c: linking the native library failed ({} archive(s): {}):\n{}", archives.len(), archives.join(" "), String::from_utf8_lossy(&out.stderr)))
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // a DLL's link resolves every import: C calling a fn of the program has no stub to bind
+        // through here (library_imports)
+        let callbacks = if cfg!(windows) && stderr.contains("undefined reference") { "\n(on Windows, C code that calls back into the program's Rust is not supported yet)" } else { "" };
+        Err(format!("--allow-c: linking the native library failed ({} archive(s): {}):\n{stderr}{callbacks}", archives.len(), archives.join(" ")))
     };
     let mut linked = run(&mut cmd);
     // C code calling back into Rust (crate::native_stub): an import the link left that no library
@@ -1382,8 +1577,9 @@ fn link(lib_path: &str, out: &Outputs, triple: &str, resolvable: Resolvable) -> 
             if callbacks.is_empty() {
                 return Ok(());
             }
-            std::fs::write(&stubs_path, crate::native_stub::object(triple, &callbacks)?).map_err(|e| format!("{stubs_path}: {e}"))?;
-            let mut with_stubs = Command::new(cc());
+            let table = crate::native_stub::member_table(&members, &callbacks);
+            std::fs::write(&stubs_path, crate::native_stub::object(triple, &callbacks, &table)?).map_err(|e| format!("{stubs_path}: {e}"))?;
+            let mut with_stubs = Command::new(&linker);
             with_stubs.arg(&stubs_path).args(cmd.get_args());
             run(&mut with_stubs)
         });
@@ -1446,26 +1642,43 @@ fn compile_accessors(symbols: &std::collections::BTreeMap<String, bool>, tmp: &s
 /// The defined global symbols of Mach-O archives (`nm -g --defined-only -m`: one
 /// `<value> (<segment>,<section>) [private ]external <name>` line each; the member headers have no
 /// section), thread-local when its section is one of `__thread_vars` / `_data` / `_bss`.
-fn macho_archive_symbols(archives: &[String]) -> Result<std::collections::BTreeMap<String, bool>, String> {
+fn macho_archive_symbols(archives: &[String]) -> Result<(std::collections::BTreeMap<String, bool>, Vec<crate::native_stub::ArchiveMember>), String> {
     let mut symbols = std::collections::BTreeMap::new();
+    let mut members: Vec<crate::native_stub::ArchiveMember> = Vec::new();
+    // the members' table spells C names: Mach-O's leading `_` off
+    let c = |name: &str| name.strip_prefix('_').unwrap_or(name).to_string();
     for archive in archives {
-        let out = Command::new("nm").args(["-g", "--defined-only", "-m", archive])
+        let out = Command::new("nm").args(["-g", "-m", archive])
             .output().map_err(|e| format!("--allow-c: cannot read archive symbols: {e}"))?;
         if !out.status.success() {
             return Err(format!("--allow-c: nm failed for {archive}: {}", String::from_utf8_lossy(&out.stderr)));
         }
+        // per member a line "<member>:" (older nm: "<archive>(<member>):"), then "<address>
+        // (<segment>,<section>) .. external <name>" for a definition and "(undefined) .. external
+        // <name>" for a reference: a symbol's line has a ") ", a member's does not
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Some(open) = line.find(" (") else { continue };
-            let Some(close) = line[open..].find(") ").map(|k| open + k) else { continue };
-            if !line[..open].bytes().all(|b| b.is_ascii_hexdigit()) {
+            if line.ends_with(':') && !line.contains(") ") {
+                members.push(Default::default());
                 continue;
             }
-            let section = &line[open + 2..close];
+            let Some(open) = line.find('(') else { continue };
+            let Some(close) = line[open..].find(") ").map(|k| open + k) else { continue };
             let Some(name) = line[close + 2..].split_whitespace().last() else { continue };
-            symbols.insert(name.to_string(), section.contains(",__thread_"));
+            if members.is_empty() {
+                members.push(Default::default());
+            }
+            let member = members.last_mut().unwrap();
+            let section = &line[open + 1..close];
+            let address = line[..open].trim();
+            if section == "undefined" && address.is_empty() {
+                member.refs.push(c(name));
+            } else if !address.is_empty() && address.bytes().all(|b| b.is_ascii_hexdigit()) {
+                symbols.insert(name.to_string(), section.contains(",__thread_"));
+                member.defs.push(c(name));
+            }
         }
     }
-    Ok(symbols)
+    Ok((symbols, members))
 }
 
 // ---- cargo's RUSTC_WRAPPER
@@ -1573,14 +1786,15 @@ pub fn wrapper() -> Option<i32> {
         i += 1;
     }
     let types: Vec<String> = rest.iter().enumerate().filter_map(|(i, a)| if a == "--crate-type" { rest.get(i + 1).cloned() } else { a.strip_prefix("--crate-type=").map(str::to_string) }).collect();
-    // the program's binaries and test harnesses: their link arguments, which the native library is
-    // linked with (program_link_args). The stub's dep-info names the run's folder, so the next
-    // cargo run, with a folder of its own, does not take this one as fresh.
+    // the program's binaries and test harnesses: their C compiler linker on the first line (empty
+    // for none), then their link arguments, which the native library is linked with (program_link).
+    // The stub's dep-info names the run's folder, so the next cargo run, with a folder of its own,
+    // does not take this one as fresh.
     let capture = std::env::var("RELAX_NATIVE_LINK_ARGS").ok().filter(|_| {
         std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some() && (types.iter().any(|t| t == "bin") || rest.iter().any(|a| a == "--test"))
     });
     if let Some(dir) = &capture {
-        let _ = std::fs::write(std::path::Path::new(dir).join(&name), link_args_of(rest).join("\n"));
+        let _ = std::fs::write(std::path::Path::new(dir).join(&name), format!("{}\n{}", linker_of(rest).unwrap_or_default(), link_args_of(rest).join("\n")));
     }
     let emit = value("--emit").unwrap_or_default();
     let json = value("--json").unwrap_or_default().contains("artifacts");
@@ -1670,6 +1884,37 @@ fn a_static_library_comes_from_the_script_that_built_it() {
 
 #[cfg(test)]
 #[test]
+fn same_named_archives_stay_their_scripts_own_and_keep_one_order() {
+    // two grammar packages whose scripts each build a `parser` into their own OUT_DIR (the first a
+    // `scanner` too), their messages in either order: cargo prints them as the scripts finish
+    let root = std::env::temp_dir().join(format!("relax-native-archive-order-{}", std::process::id()));
+    let (a, b) = (root.join("a-out"), root.join("b-out"));
+    for (d, libs) in [(&a, &["parser", "scanner"][..]), (&b, &["parser"][..])] {
+        std::fs::create_dir_all(d).unwrap();
+        for l in libs {
+            std::fs::write(d.join(format!("lib{l}.a")), b"!<arch>\n").unwrap();
+        }
+    }
+    let pkg = vec![
+        (String::new(), "grammar-b-sys".to_string(), "1.0.0".to_string()),
+        (String::new(), "grammar-a-sys".to_string(), "1.0.0".to_string()),
+    ];
+    let scripts = vec![(0usize, Vec::new()), (1usize, Vec::new())];
+    let line = |name: &str, dir: &std::path::Path, libs: &str| format!(
+        r#"{{"reason":"build-script-executed","package_id":"registry+https://github.com/rust-lang/crates.io-index#{name}@1.0.0","linked_libs":[{libs}],"linked_paths":["native={}"],"cfgs":[],"env":[],"out_dir":""}}"#, dir.display());
+    let (la, lb) = (line("grammar-a-sys", &a, r#""static=parser","static=scanner""#), line("grammar-b-sys", &b, r#""static=parser""#));
+    let a_first = outputs_with(&pkg, &scripts, &[0, 1], &format!("{la}\n{lb}\n")).unwrap_or_else(|e| panic!("{e}"));
+    let b_first = outputs_with(&pkg, &scripts, &[0, 1], &format!("{lb}\n{la}\n")).unwrap_or_else(|e| panic!("{e}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let want = vec![format!("{}/libparser.a", a.display()), format!("{}/libscanner.a", a.display()), format!("{}/libparser.a", b.display())];
+    let sorted = |v: &[String]| { let mut v = v.to_vec(); v.sort(); v };
+    assert_eq!(sorted(&a_first.archives), sorted(&want), "each script's `parser` is the one in its own folder, both linked");
+    assert_eq!(sorted(&b_first.archives), sorted(&want), "each script's `parser` is the one in its own folder, both linked");
+    assert_eq!((a_first.archives, b_first.archives), (want.clone(), want), "the packages' order, whichever script finished first");
+}
+
+#[cfg(test)]
+#[test]
 fn the_c_runtime_libraries_are_the_targets_own() {
     for triple in ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc", "aarch64-pc-windows-gnullvm"] {
         assert!(c_runtime_libs(triple).is_empty(), "{triple}: Windows' C runtime has no libdl, and links its math and threads by default");
@@ -1701,7 +1946,7 @@ fn script_selection_follows_every_unit_of_a_package() {
     let unit = |name: &str, deps: &[usize]| crate::unitgraph::RawUnit {
         name: name.to_string(), src_path: String::new(), edition: 2021, features: Vec::new(), proc_macro: false,
         deps: deps.iter().map(|&d| (d, String::new())).collect(), run_script: false,
-        pkg: (String::new(), name.to_string(), "1.0.0".to_string()), path_source: false, host_checks: None,
+        pkg: (String::new(), name.to_string(), "1.0.0".to_string()), path_source: false, registry: true, git: false, host_checks: None,
     };
     let raw = [unit("a", &[1]), unit("b", &[]), unit("a", &[3]), unit("c", &[]), unit("d", &[])];
     assert_eq!(dependency_packages(&raw, vec![0]), ["a", "b", "c"]);
@@ -1709,7 +1954,13 @@ fn script_selection_follows_every_unit_of_a_package() {
     assert!(is_target_out_dir("/w/build/x86_64-unknown-linux-gnu/release/build/a-1/out", build, "x86_64-unknown-linux-gnu"));
     assert!(!is_target_out_dir("/w/build/release/build/a-1/out", build, "x86_64-unknown-linux-gnu"));
     assert!(!is_target_out_dir("/elsewhere/x86_64-unknown-linux-gnu/out", build, "x86_64-unknown-linux-gnu"));
-    assert_ne!(selection_key(&["a".into()], &["b".into()]), selection_key(&["a".into(), "b".into()], &[]));
+    let (scripts, libs): (Vec<String>, Vec<String>) = (vec!["a".into()], vec!["b".into()]);
+    assert_ne!(selection_key(&scripts, &libs, b""), selection_key(&["a".into(), "b".into()], &[], b""), "a script package is not a library package");
+    // a toolchain update: the scripts' outputs name the old toolchain's folders, and cargo would not
+    // run them again in the same selection
+    let clang = |v: &str| format!("Apple clang version {v}\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n");
+    assert_ne!(selection_key(&scripts, &libs, clang("17.0.0").as_bytes()), selection_key(&scripts, &libs, clang("17.0.1").as_bytes()), "another C toolchain is another cargo selection");
+    assert_eq!(selection_key(&scripts, &libs, clang("17.0.0").as_bytes()), selection_key(&scripts, &libs, clang("17.0.0").as_bytes()));
 }
 
 #[cfg(test)]
@@ -1719,7 +1970,7 @@ fn native_key_uses_sorted_resolved_packages() {
         name: name.into(), src_path: String::new(), edition: 2021,
         features: features.iter().map(|f| f.to_string()).collect(), proc_macro: false,
         deps: Vec::new(), run_script: false,
-        pkg: (format!("packages/{name}"), name.into(), version.into()), path_source: false, host_checks: None,
+        pkg: (format!("packages/{name}"), name.into(), version.into()), path_source: false, registry: true, git: false, host_checks: None,
     };
     let a = unit("a", "1.0.0", &["fast", "std"]);
     let b = unit("b", "2.0.0", &[]);
@@ -1753,7 +2004,7 @@ fn native_key_follows_the_resolved_closure_and_its_path_sources() {
     let unit = |name: &str, dir: String, features: &[&str], deps: &[usize], path_source: bool| crate::unitgraph::RawUnit {
         name: name.into(), src_path: String::new(), edition: 2021, features: features.iter().map(|f| f.to_string()).collect(),
         proc_macro: false, deps: deps.iter().map(|&d| (d, String::new())).collect(), run_script: false,
-        pkg: (dir, name.into(), "1.0.0".into()), path_source, host_checks: None,
+        pkg: (dir, name.into(), "1.0.0".into()), path_source, registry: !path_source, git: false, host_checks: None,
     };
     // the package a run is for (`root`), the native package n (its lib, and its script, which
     // build-depends on the workspace crate h and the registry crate cc), and x outside the closure
@@ -1762,7 +2013,7 @@ fn native_key_follows_the_resolved_closure_and_its_path_sources() {
             host: None, proc_macro: false, bin: false, harness: false, build_script: false, version: "1.0.0".into(), registry: false, host_only: false }],
         root: 0,
         build_scripts: vec![BuildScript { krate: 0, also: Vec::new(), src_path: at("n/build.rs"), edition: 2021,
-            features: n_features.iter().map(|f| f.to_string()).collect(), build_deps: vec![(3, "h".into()), (4, "cc".into())], links_deps: Vec::new(), kept: false, profile: crate::resolve::ScriptProfile::RUN }],
+            features: n_features.iter().map(|f| f.to_string()).collect(), build_deps: vec![(3, "h".into()), (4, "cc".into())], links_deps: Vec::new(), kept: false, profile: crate::resolve::ScriptProfile::RUN, host: false }],
         pkg: vec![(at("n"), "n".into(), "1.0.0".into())],
         cfgs: vec![Vec::new()],
         env: vec![Vec::new()],
@@ -1795,40 +2046,47 @@ fn native_key_follows_the_resolved_closure_and_its_path_sources() {
 #[test]
 fn a_cached_cargo_run_stands_while_what_it_names_is_there() {
     let dir = std::env::temp_dir().join(format!("relax-native-cached-{}", std::process::id()));
-    let out_dir = dir.join("out");
-    std::fs::create_dir_all(&out_dir).unwrap();
-    let lib = dir.join("libnative.so");
-    let lib = lib.to_str().unwrap();
     let pkg = [(String::new(), "cfg_only".to_string(), "1.0.0".to_string())];
     let scripts = [(0, Vec::new())];
-    let quoted = out_dir.to_str().unwrap().replace('\\', "\\\\").replace('"', "\\\"");
-    // cargo's record of the script's run, beside its OUT_DIR
-    std::fs::write(dir.join("output"), b"cargo:rustc-cfg=has_feature\n").unwrap();
-    let run = run_stamp(out_dir.to_str().unwrap());
-    assert!(!run.is_empty());
-    let msg_run = |libs: &str, run: &str| format!(r#"{{"relax_host":false,"relax_run":"{run}","reason":"build-script-executed","package_id":"registry+https://example.test/index#cfg_only@1.0.0","linked_libs":{libs},"linked_paths":["native={quoted}"],"cfgs":["has_feature"],"env":[["GENERATED","yes"]],"out_dir":"{quoted}"}}"#);
-    let msg = |libs: &str| msg_run(libs, &run);
-    let hit = |m: &str| cached(&pkg, &scripts, &[0], m, lib).is_some();
-    // a script that links nothing leaves no library to find: cargo is not run again
-    assert!(hit(&msg("[]")), "a cfg/env-only script's run is reused without a library");
-    // one that links something needs the linked library
-    assert!(!hit(&msg(r#"["dylib=m"]"#)), "a system library to link, no library yet");
-    assert!(!hit(&msg(r#"["static=gen"]"#)), "an archive missing from its search path");
-    std::fs::write(out_dir.join("libgen.a"), b"!<arch>\n").unwrap();
-    assert!(!hit(&msg(r#"["static=gen"]"#)), "an archive to link, no library yet");
-    std::fs::write(lib, b"").unwrap();
-    assert!(hit(&msg(r#"["static=gen"]"#)) && hit(&msg(r#"["dylib=m"]"#)), "the linked library is there");
-    let m = msg("[]");
-    assert!(!hit(&m[..m.len() - 1]), "a cut-off message file is no hit");
-    // the OUT_DIR is shared with other keys' builds of the selection: a later run of the script
-    // (under another key) left it as that run wrote it, so the receipt is no hit
-    assert!(!hit(&msg_run("[]", "")), "a receipt that saw no run of the script");
-    std::fs::write(dir.join("output"), b"cargo:rustc-cfg=other_feature\n").unwrap();
-    assert!(!hit(&msg("[]")), "the script ran again since the receipt");
-    assert!(hit(&msg_run("[]", &run_stamp(out_dir.to_str().unwrap()))), "the receipt of that later run");
-    // generated sources live in OUT_DIR: a run whose OUT_DIR is gone is no hit, library or not
-    std::fs::remove_dir_all(&out_dir).unwrap();
-    assert!(!hit(&msg("[]")) && !hit(&msg(r#"["dylib=m"]"#)), "a removed OUT_DIR");
+    // cargo's record of the script's run (its stdout) beside its OUT_DIR, and in the run folder of
+    // cargo's newer build-dir layout: read only beside it, no warm run matched (11-14)
+    for (layout, home, stdout) in [("beside", "cfg_only-0123", "output"), ("run folder", "cfg_only/0123", "run/stdout")] {
+        let home = dir.join(home);
+        let out_dir = home.join("out");
+        let stdout = home.join(stdout);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(stdout.parent().unwrap()).unwrap();
+        let lib = home.join("libnative.so");
+        let lib = lib.to_str().unwrap();
+        let quoted = out_dir.to_str().unwrap().replace('\\', "\\\\").replace('"', "\\\"");
+        std::fs::write(&stdout, b"cargo:rustc-cfg=has_feature\ncargo:rerun-if-env-changed=RELAX_CACHED_RUN_UNSET\n").unwrap();
+        let run = run_stamp(out_dir.to_str().unwrap());
+        assert!(!run.is_empty(), "{layout}: the script's run is found");
+        assert_eq!(declared_env(out_dir.to_str().unwrap()), vec![("RELAX_CACHED_RUN_UNSET".to_string(), None)], "{layout}: the variables it declared");
+        let msg_run = |libs: &str, run: &str| format!(r#"{{"relax_host":false,"relax_run":"{run}","reason":"build-script-executed","package_id":"registry+https://example.test/index#cfg_only@1.0.0","linked_libs":{libs},"linked_paths":["native={quoted}"],"cfgs":["has_feature"],"env":[["GENERATED","yes"]],"out_dir":"{quoted}"}}"#);
+        let msg = |libs: &str| msg_run(libs, &run);
+        let hit = |m: &str| cached(&pkg, &scripts, &[0], m, lib).is_some();
+        // a script that links nothing leaves no library to find: cargo is not run again
+        assert!(hit(&msg("[]")), "{layout}: a cfg/env-only script's run is reused without a library");
+        // one that links something needs the linked library
+        assert!(!hit(&msg(r#"["dylib=m"]"#)), "{layout}: a system library to link, no library yet");
+        assert!(!hit(&msg(r#"["static=gen"]"#)), "{layout}: an archive missing from its search path");
+        std::fs::write(out_dir.join("libgen.a"), b"!<arch>\n").unwrap();
+        assert!(!hit(&msg(r#"["static=gen"]"#)), "{layout}: an archive to link, no library yet");
+        std::fs::write(lib, b"").unwrap();
+        assert!(hit(&msg(r#"["static=gen"]"#)) && hit(&msg(r#"["dylib=m"]"#)), "{layout}: the linked library is there");
+        let m = msg("[]");
+        assert!(!hit(&m[..m.len() - 1]), "{layout}: a cut-off message file is no hit");
+        // the OUT_DIR is shared with other keys' builds of the selection: a later run of the
+        // script (under another key) left it as that run wrote it, so the receipt is no hit
+        assert!(!hit(&msg_run("[]", "")), "{layout}: a receipt that saw no run of the script");
+        std::fs::write(&stdout, b"cargo:rustc-cfg=other_feature\n").unwrap();
+        assert!(!hit(&msg("[]")), "{layout}: the script ran again since the receipt");
+        assert!(hit(&msg_run("[]", &run_stamp(out_dir.to_str().unwrap()))), "{layout}: the receipt of that later run");
+        // generated sources live in OUT_DIR: a run whose OUT_DIR is gone is no hit, library or not
+        std::fs::remove_dir_all(&out_dir).unwrap();
+        assert!(!hit(&msg("[]")) && !hit(&msg(r#"["dylib=m"]"#)), "{layout}: a removed OUT_DIR");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1932,8 +2190,77 @@ fn a_shared_path_packages_files_are_hashed_in_its_checkout() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(test)]
+#[test]
+fn the_native_library_links_with_the_programs_c_compiler_linker() {
+    let linker = |args: &[&str]| linker_of(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    assert_eq!(linker(&["--target", "x86_64-unknown-linux-gnu", "--crate-type", "bin", "-C", "linker=/opt/x/bin/clang", "-C", "link-arg=-fuse-ld=/opt/m/bin/mold"]).as_deref(),
+        Some("/opt/x/bin/clang"), "clang is the driver for the program's mold argument");
+    assert_eq!(linker(&["-Clinker=gcc", "-C", "linker=clang"]).as_deref(), Some("clang"), "the last linker wins");
+    assert_eq!(linker(&["--codegen=linker=x86_64-linux-gnu-gcc"]).as_deref(), Some("x86_64-linux-gnu-gcc"), "the long codegen option keeps the target's gcc driver");
+    assert_eq!(linker(&["--codegen", "linker=clang"]).as_deref(), Some("clang"), "the separate long codegen option keeps the driver");
+    assert_eq!(linker(&["-C linker=clang"]).as_deref(), Some("clang"), "the spaced codegen option keeps the driver");
+    assert_eq!(linker(&["--target", "x86_64-unknown-linux-gnu"]), None, "no linker keeps the native library's cc");
+    assert_eq!(linker(&["-Clinker=clang", "-C", "linker="]), None, "an empty last linker keeps the native library's cc");
+    for name in ["ld", "ld.lld", "/usr/bin/ld.gold", "x86_64-linux-gnu-ld", "ld64", "ld64.lld", "lld", "rust-lld", "wasm-ld", "wasm32-wasm-ld", "link", "lld-link", "emcc"] {
+        assert_eq!(linker(&["--target", "x86_64-unknown-linux-gnu", "-C", &format!("linker={name}")]), None, "{name} is not a C compiler driver");
+    }
+    for name in ["cc", "c++", "gcc", "g++", "clang", "clang++", "target-cc", "target-gcc", "target-g++", "target-clang", "target-clang++", "/bin/clang.exe"] {
+        assert_eq!(linker(&["--target=x86_64-pc-windows-msvc", "-C", &format!("linker={name}")]).as_deref(), Some(name), "{name} is a C compiler driver even for an msvc target");
+    }
+    assert_eq!(linker(&["-C", "linker=clang", "-C", "linker-flavor=ld.lld"]), None, "an explicit bare linker flavour overrides the clang name");
+    for flavor in ["gcc", "gnu-cc", "gnu-lld-cc", "darwin-cc", "darwin-lld-cc", "unix-cc"] {
+        assert_eq!(linker(&["-C", "linker=clang", "-C", &format!("linker-flavor={flavor}")]).as_deref(), Some("clang"), "{flavor} drives the linker as a C compiler");
+    }
+    assert_eq!(linker(&["-Clinker=clang", "-Clinker-flavor=gcc", "--codegen=linker-flavor=ld.lld"]), None, "the last long linker flavour overrides the attached flavour");
+    assert_eq!(linker(&["-Clinker=clang", "-C linker-flavor=ld.lld", "--codegen", "linker-flavor=gcc"]).as_deref(), Some("clang"), "the last separate flavour overrides the spaced flavour");
+    assert_eq!(linker(&["-Clinker=mylinker"]).as_deref(), Some("mylinker"), "an unknown linker and unknown target default to a C compiler driver");
+    for (target, want) in [("x86_64-unknown-linux-gnu", Some("mylinker")), ("x86_64-pc-windows-msvc", None), ("x86_64-unknown-uefi", None), ("wasm32-unknown-unknown", None)] {
+        assert_eq!(linker(&["--target", target, "-C", "linker=mylinker"]).as_deref(), want, "an unknown linker follows the default flavour of {target}");
+    }
+
+    let dir = std::env::temp_dir().join(format!("relax-native-linker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app"), "/bin/clang\n-fuse-ld=/m/bin/mold\n-Wl,-rpath,/x").unwrap();
+    std::fs::write(dir.join("other"), "\n-Wl,-rpath,/y").unwrap();
+    assert_eq!(program_link(&dir, "app", &[]), (vec!["-fuse-ld=/m/bin/mold".to_string(), "-Wl,-rpath,/x".to_string()], Some("/bin/clang".to_string())),
+        "the selected program keeps its linker and both arguments");
+    assert_eq!(program_link(&dir, "other", &[]), (vec!["-Wl,-rpath,/y".to_string()], None),
+        "an empty first line keeps cc and the following argument");
+
+    let out = outputs_with(&[], &[], &[], "{\"relax_link_args\":[\"-fuse-ld=/m/bin/mold\"],\"relax_linker\":\"/bin/clang\"}\n").expect("the kept linker and its arguments must parse");
+    assert_eq!(out.link_args, ["-fuse-ld=/m/bin/mold"], "the kept run keeps the program's link argument");
+    assert_eq!(out.linker.as_deref(), Some("/bin/clang"), "the kept run keeps the program's linker");
+    let old = outputs_with(&[], &[], &[], "{\"relax_link_args\":[\"-Wl,-rpath,/x\"]}\n").expect("an older kept run must parse");
+    assert_eq!(old.link_args, ["-Wl,-rpath,/x"], "an older kept run keeps its link arguments");
+    assert_eq!(old.linker, None, "an older kept run keeps cc when no linker was recorded");
+    let empty = outputs_with(&[], &[], &[], "{\"relax_link_args\":[],\"relax_linker\":\"\"}\n").expect("an empty kept linker must parse");
+    assert_eq!(empty.linker, None, "an empty kept linker keeps cc");
+
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(workspace.join(".cargo")).unwrap();
+    let config = workspace.join(".cargo/config.toml");
+    std::fs::write(&config, "[target.x86_64-unknown-linux-gnu]\nlinker = \"tools/cc-wrap\"\n").unwrap();
+    assert_eq!(configured_linker(workspace.to_str().unwrap(), "x86_64-unknown-linux-gnu"), Some(workspace.join("tools/cc-wrap").to_string_lossy().into_owned()),
+        "a relative linker path resolves against the folder holding the cargo config folder");
+    std::fs::write(&config, "[target.x86_64-unknown-linux-gnu]\nlinker = \"clang\"\n").unwrap();
+    assert_eq!(configured_linker(workspace.to_str().unwrap(), "x86_64-unknown-linux-gnu").as_deref(), Some("clang"),
+        "a bare configured linker stays a PATH lookup");
+    // the key reads the linker's file without running it: another file under the name is another key
+    let tool = dir.join("tool");
+    std::fs::write(&tool, "a").unwrap();
+    let before = linker_stamp(tool.to_str().unwrap());
+    std::fs::write(&tool, "abc").unwrap();
+    assert!(!before.is_empty() && linker_stamp(tool.to_str().unwrap()) != before, "a changed linker file changes its stamp");
+    assert!(linker_stamp(dir.join("missing").to_str().unwrap()).is_empty(), "a linker with no file has an empty stamp");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&STARTED, std::sync::atomic::AtomicBool::new(false));
+    // read again by the next run: the toolchain may have been updated in between
+    reset(&C_TOOLCHAIN, std::sync::OnceLock::new());
 }

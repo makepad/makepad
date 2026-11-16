@@ -343,6 +343,10 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
     let _ = INSTRUMENTING.try_with(|c| c.set(true));
     let _flag = Flag;
     let u = &mut *up;
+    // (a lean code window keeps every slot's code: Unit::code_lean)
+    if u.code_lean() {
+        return Err("the JIT code window is lean: it takes code only for slots that have none, so no instrumented build installs (a process restart starts a new window)".to_string());
+    }
     let gen = u.begin_patch();
     let mut hits = vec![false; edits.len()];
     let mut order: Vec<usize> = (0..edits.len()).filter(|&k| !matches!(edits[k].1, Edit::Restart { .. })).collect();

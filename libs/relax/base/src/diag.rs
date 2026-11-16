@@ -177,8 +177,8 @@ mod tests {
     use super::*;
     #[test] fn encoding() {
         assert_eq!(quote("a\"\\\n\t\r\0é"), "\"a\\\"\\\\\\n\\t\\r\\u0000é\"");
-        let d = Diagnostic::new("typeck", "a.rs", 2, 3, "E0412: unknown");
-        assert_eq!(d.to_json(), "{\"severity\":\"error\",\"code\":\"E0412\",\"message\":\"unknown\",\"file\":\"a.rs\",\"line\":2,\"col\":3,\"end_line\":2,\"end_col\":3,\"phase\":\"typeck\",\"notes\":[],\"suggestion\":null}");
+        let d = Diagnostic::new("typeck", "a.rs", 2, 3, "E0425: unknown");
+        assert_eq!(d.to_json(), "{\"severity\":\"error\",\"code\":\"E0425\",\"message\":\"unknown\",\"file\":\"a.rs\",\"line\":2,\"col\":3,\"end_line\":2,\"end_col\":3,\"phase\":\"typeck\",\"notes\":[],\"suggestion\":null}");
     }
     #[test] fn code_table() {
         for pair in CODES.windows(2) { assert!(pair[0].0 < pair[1].0); }

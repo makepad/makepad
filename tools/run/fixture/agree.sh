@@ -90,7 +90,7 @@ named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_pt
   $T/arch_legacy_const_generics.rs $T/cow_slice_eq.rs $T/macro_tail_cfg.rs $T/macro_matcher_positions.rs $T/macro_forwarded_empty_vis.rs $T/derive_eq_nested_qself.rs $T/core_net_paths.rs $T/path_from_str.rs $T/macro_doc_after_empty_vis.rs $T/std_unchecked_split_collect.rs
   $T/std/core_dep_gaps_batch2.rs $T/std/core_dep_gaps_async_crypto.rs $T/std/box_dyn_read.rs $T/std/core_arch_neon_zmij.rs $T/std/core_arch_neon_recpe.rs $T/std/core_arch_sha3.rs $T/std/derive_split_tokens.rs
   $T/path_hash_matches_rustc.rs $T/cow_from_cstr.rs $T/avx_shuffle_and_mask_types.rs $T/avx_zext_si128.rs
-  $T/vec_cfg_elements.rs $T/promoted_closure_fields.rs $T/self_path_param_impl.rs $T/gat_value_path_elided_lifetime.rs $T/const_owned_async_block.rs $T/int_bit_ones.rs $T/os_str_join.rs $T/op_assign_ref_rhs.rs $T/op_overload_wide_operand.rs $T/closure_index_ref_capture.rs $T/slice_element_offset.rs $T/float_consts_golden_euler.rs $T/os_str_path_cow_cmp.rs $T/hint_cold_path.rs
+  $T/vec_cfg_elements.rs $T/promoted_closure_fields.rs $T/self_path_param_impl.rs $T/gat_value_path_elided_lifetime.rs $T/const_owned_async_block.rs $T/int_bit_ones.rs $T/int_signed_isqrt.rs $T/should_panic_file_form.rs $T/os_str_join.rs $T/op_assign_ref_rhs.rs $T/op_overload_wide_operand.rs $T/closure_index_ref_capture.rs $T/slice_element_offset.rs $T/float_consts_golden_euler.rs $T/os_str_path_cow_cmp.rs $T/hint_cold_path.rs
   $T/async_option_closure_future.rs $T/impl_trait_in_param_bounds.rs
   $T/async_borrow_across_pending.rs $T/std/core_ptr_unchecked_needs_drop.rs $T/std/os_ext_impls.rs
   $T/macro_pin_projection_shapes.rs
@@ -115,6 +115,7 @@ named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_pt
   $T/tuple_index_on_named_struct.rs
   $T/range_bounds_coerce.rs
   $T/match_arm_nested_match_lub.rs
+  $T/never_arm_fallback.rs
   $T/cfg_on_expr_fragment.rs
   $T/gat_expr_path_args.rs
   $T/op_with_128_bit_operand.rs
@@ -130,7 +131,19 @@ named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_pt
   $T/macro_stmt_opaque.rs
   $T/iter_nth_overrides.rs
   $T/vec_into_iter_drop_unwind.rs
-  $T/typeid_sibling_impls.rs"
+  $T/typeid_sibling_impls.rs
+  $T/inherent_const_impl_lifetime.rs
+  $T/char_module_path_fallback.rs
+  $T/std_items_refcmp_split_off_net_path.rs
+  $T/std_child_stdin_by_ref.rs
+  $T/std_unix_chown.rs
+  $T/fnmut_call_mutable_place_ops.rs
+  $T/closure_return_unsize_late_param.rs
+  $T/promoted_const_field.rs
+  $T/macro_ty_bare_trait_object_bounds.rs
+  $T/closure_param_index_from_call.rs
+  $T/rc_arc_block_layout.rs
+  $T/cast_open_target.rs $T/paren_closure_arg_last.rs $T/unary_block_tail_infer.rs $T/unstable_inherent_yields_to_stable_trait.rs $T/infer_scope_gaps.rs"
 [ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs $T/x86_carry_intrinsics.rs $T/x86_avx512_detect_runs_asm.rs"
 for f in "$fx"/accept/*.rs $named "$@"; do case_of "$f" 0; done
 # the differential files: real std and Relax's print the same `| ` lines
@@ -158,8 +171,10 @@ diffed="$T/std/core_int_methods.rs $T/std/core_char_props.rs $T/std/core_str_ops
   $T/std/os_exec.rs $T/std/os_fork_busy.rs $T/std/os_hr_probe.rs
   $T/std/os_io.rs $T/std/os_min_stack.rs $T/std/os_net.rs $T/std/os_path.rs $T/std/os_pipe.rs $T/std/os_pre_exec.rs
   $T/std/os_process_group.rs $T/std/os_sync.rs $T/std/os_thread.rs $T/std/os_time.rs $T/std/os_udp.rs
-  $T/std/core_panic_payload.rs $T/std/core_thread_panic.rs $T/std/core_rust_1100.rs
-  $T/destructuring_assign_moves.rs $T/std/core_constructor_temp_lifetime.rs $T/std/core_partial_eq_indirect.rs $T/promoted_temporary_reference_lifetime.rs"
+  $T/std/core_panic_payload.rs $T/std/core_thread_panic.rs $T/std/core_rust_1100.rs $T/std/core_allocator_heap.rs $T/std/core_allocator_box.rs
+  $T/std/core_allocator_vec.rs $T/std/core_fmt_num_buffer.rs
+  $T/destructuring_assign_moves.rs $T/destructuring_assign_coerce.rs $T/try_reserve_errors.rs $T/thread_spawn_refused.rs $T/slice_join_capacity.rs $T/alloc_error_aborts.rs $T/std/core_constructor_temp_lifetime.rs $T/std/core_partial_eq_indirect.rs $T/promoted_temporary_reference_lifetime.rs
+  $T/async_box_cycle_order.rs"
 [ "$(uname -m)" = x86_64 ] && diffed="$diffed $T/std/core_arch_sse42_cmpestr.rs"
 # core::arch: real std's on the host's own architecture; os_sys_raw's raw calls are macOS arm64's
 case "$(uname -m)" in
@@ -169,6 +184,8 @@ esac
 [ "$(uname -sm)" = "Darwin arm64" ] && diffed="$diffed $T/std/os_sys_raw.rs"
 for f in $diffed; do diff_of "$f"; done
 diff_env_of $T/std/os_min_stack.rs RUST_MIN_STACK=8388608
+# an async cycle first used from its other end, from the code the run above cached
+diff_env_of $T/async_box_cycle_order.rs CYCLE_ORDER=inner
 # macOS: std's sync and threads on the futex fallback (__ulock) too, not only os_sync_wait_on_address
 if [ "$(uname)" = Darwin ]; then
   for f in $T/std/os_sync.rs $T/std/os_thread.rs; do diff_env_of "$f" RELAX_FORCE_ULOCK=1; done
@@ -199,7 +216,7 @@ for f in "$fx"/reject/*.rs $T/supertrait_assoc_bound_unmet_reject.rs $T/macro_in
   $T/macro_stmt_fragment_semi_reject.rs $T/macro_stmt_fragment_one_token_reject.rs $T/macro_stmt_opaque_item_reject.rs \
   $T/method_projection_bound_not_in_scope_reject.rs $T/const_moved_after_borrow_reject.rs \
   $T/method_opaque_bound_not_in_scope_reject.rs \
-  $T/cmp_ref_eq_ref_ref_reject.rs $T/coherence_overflow_plain_limit_reject.rs $T/solver_overflow_beyond_twice_the_limit_reject.rs; do case_of "$f" 1; done
+  $T/cmp_ref_eq_ref_ref_reject.rs $T/fnmut_call_through_shared_guard_reject.rs $T/coherence_overflow_plain_limit_reject.rs $T/solver_overflow_beyond_twice_the_limit_reject.rs; do case_of "$f" 1; done
 # an x86_64-only reject (the file is empty elsewhere): a load stays unsafe beside the safe SSE2 intrinsics
 [ "$(uname -m)" = x86_64 ] && case_of "$T/sse2_load_requires_unsafe_reject.rs" 1
 for f in "$fx"/reject_bin/*.rs; do

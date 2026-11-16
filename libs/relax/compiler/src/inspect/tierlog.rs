@@ -21,8 +21,9 @@ pub mod ev {
     pub const CHECK: u8 = 2;
     /// queued for O3: `why` = the queue reason (Q_*), `a` = rate (calls/s), `b` = the code
     pub const QUEUE: u8 = 3;
-    /// an O3 queue entry that waited past REVALIDATE_NS went back to counting: `a` = its age
-    pub const REVALIDATE: u8 = 4;
+    /// an O3 queue entry left at its pick, its code under the threshold's rate (o3_pick_cold): `why` =
+    /// the queue reason, `a` = ns it waited, `b` = its cost then
+    pub const LEFT: u8 = 4;
     /// ... but other code was installed meanwhile: it stays queued (built)
     pub const KEPT: u8 = 5;
     /// a worker took it from the queue: `why` = queue reason, `a` = ns it waited
@@ -56,10 +57,10 @@ pub mod ev {
 
 pub const ARM_NEW: u8 = 0;
 pub const ARM_REARM: u8 = 1;
-pub const ARM_REVALIDATE: u8 = 2;
+pub const ARM_LEFT: u8 = 2;
 pub const ARM_SANDBOX: u8 = 3;
 pub const ARM_IMAGE: u8 = 4;
-pub const ARM_WHY: [&str; 5] = ["new code", "new code under the open window", "counted again (queued too long)", "sandbox twin", "startup image"];
+pub const ARM_WHY: [&str; 5] = ["new code", "new code under the open window", "counted again (cold at its O3 pick)", "sandbox twin", "startup image"];
 
 pub const WIN_DONE: u8 = 0;
 pub const WIN_IDLE: u8 = 1;
@@ -71,7 +72,8 @@ pub const DROP_CODEGEN: u8 = 1;
 pub const DROP_PATCH: u8 = 2;
 pub const DROP_SLOT_CHANGED: u8 = 3;
 pub const DROP_LINK: u8 = 4;
-pub const DROP_WHY: [&str; 5] = ["build panicked", "codegen error", "a patch changed meanwhile", "the slot changed meanwhile (other code installed, e.g. its O2 build)", "link check failed"];
+pub const DROP_LEAN: u8 = 5;
+pub const DROP_WHY: [&str; 6] = ["build panicked", "codegen error", "a patch changed meanwhile", "the slot changed meanwhile (other code installed, e.g. its O2 build)", "link check failed", "the code window is lean (only slots without code get code)"];
 
 pub const REFUSE_VERDICT: u8 = 0;
 pub const REFUSE_TAKE: u8 = 1;
@@ -281,14 +283,18 @@ pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
         ev::ARM => format!("count stub armed on {} ({})", code(e.b), ARM_WHY.get(e.why as usize).unwrap_or(&"?")),
         ev::CHECK => format!("cost check on {}: decayed cost {} under the threshold", code(e.b), e.a),
         ev::QUEUE => format!("queued for O3 by {}{}{}", Q_WHY.get(e.why as usize).unwrap_or(&"?"), if e.a > 0 { format!(" at {} cost/s", e.a) } else { String::new() }, if e.b != 0 { format!(" on {}", code(e.b)) } else { String::new() }),
-        ev::REVALIDATE => format!("O3 queue entry {} old: counted again", ms(e.a)),
+        ev::LEFT => format!("left the O3 queue at its pick ({}) after {}: cost {} under the threshold", Q_WHY.get(e.why as usize).unwrap_or(&"?"), ms(e.a), e.b),
         ev::KEPT => "O3 queue entry stays queued (other code was installed meanwhile)".into(),
         ev::POP => format!("taken by an O3 worker ({}) after {} in the queue", Q_WHY.get(e.why as usize).unwrap_or(&"?"), ms(e.a)),
         ev::COUNTED => format!("counted (PGO) build installed{}", if e.why == 1 { " (lukewarm: O3 once its counts show work)" } else { "" }),
         ev::WINDOW_END => format!("counted window ended: {} ({} entries/s)", WIN_WHY.get(e.why as usize).unwrap_or(&"?"), e.a),
         ev::PARKED => "parked in counted code: too little work for O3".into(),
         ev::O3_INSTALLED => format!("O3 code installed ({} build)", ms(e.a)),
-        ev::O3_DROPPED => format!("O3 build dropped: {}", DROP_WHY.get(e.why as usize).unwrap_or(&"?")),
+        ev::O3_DROPPED => {
+            // (the slot changed: the kind of the code that went in, + 1)
+            let now = (e.why == DROP_SLOT_CHANGED && e.a != 0).then(|| crate::jit::CodeKind::new(((e.a - 1) & 0xff) as u8, ((e.a - 1) >> 8) as u8));
+            format!("O3 build dropped: {}{}", DROP_WHY.get(e.why as usize).unwrap_or(&"?"), now.map_or(String::new(), |k| format!(": now {} code ({})", k.tier_name(), k.origin_name())))
+        }
         ev::O3_REFUSED if e.why == REFUSE_TAKE => format!("O3 build not started: {}", describe_take_bail(e)),
         ev::O3_REFUSED => format!("O3 build not started: {}", REFUSE_WHY.get(e.why as usize).unwrap_or(&"?")),
         ev::RETIER => format!("queued to be built again (retier {} of 4)", e.a),
@@ -458,7 +464,10 @@ mod tests {
     #[test]
     fn histories_start_at_a_decision() {
         init();
-        let slot = 0x7fff_fff0;
+        // a slot of its own each time it runs: a warm rerun in this process finds the histories
+        // of the runs before
+        static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let slot = 0x7fff_fff0 - RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         note_arm(slot, ARM_NEW, 0x1000);
         drain();
         assert!(history(slot).0.is_none());

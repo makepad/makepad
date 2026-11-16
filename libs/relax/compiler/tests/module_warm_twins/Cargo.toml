@@ -1,0 +1,10 @@
+[package]
+name = "module-warm-twins"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(relax)'] }

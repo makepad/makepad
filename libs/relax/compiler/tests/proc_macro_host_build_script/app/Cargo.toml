@@ -1,0 +1,8 @@
+[package]
+name = "hb-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hb-gen = { path = "../gen", features = ["wide"] }
+hb-macro = { path = "../macro" }

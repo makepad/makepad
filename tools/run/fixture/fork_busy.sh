@@ -23,14 +23,14 @@ while [ $i -lt "$ROUNDS" ]; do
     i=$((i + 1))
     $J run relax-provided-fixture --bin relax-fork-busy > "$dir/round$i.log" 2>&1
     st=$?
-    # macOS has no pipe2: there a spawn can read another spawn's child's copy of its error pipe under real
-    # std too, so os_fork_busy.rs prints that count to stderr and only the other systems check it
+    # a child's descriptors are read from /proc, so os_fork_busy.rs counts the children holding another
+    # spawn's descriptor off macOS only (which has no pipe2 either: there that is a race in real std too)
     waits=0
-    [ "$(uname -s)" = Darwin ] || grep -q "^| spawns that waited for another spawn's child: 0" "$dir/round$i.log" || waits=1
+    [ "$(uname -s)" = Darwin ] || grep -q "^| children holding another spawn's descriptor: 0" "$dir/round$i.log" || waits=1
     if [ $st -ne 0 ] || ! grep -q "^| forks that reached exec: 200 of 200" "$dir/round$i.log" || ! grep -q "^| concurrent spawns that reached exec: 48 of 48" "$dir/round$i.log" || [ $waits -ne 0 ]; then
         fails=$((fails + 1))
         echo "fork_busy: round $i FAILED (exit $st):"
-        grep -E "never reached exec|forks that reached|spawns that reached|spawns that waited|panicked|fault|forked child|waits for compile jobs" "$dir/round$i.log" | head -10
+        grep -E "never reached exec|forks that reached|spawns that reached|children holding|panicked|fault|forked child|waits for compile jobs" "$dir/round$i.log" | head -10
     fi
 done
 if [ $fails -eq 0 ]; then

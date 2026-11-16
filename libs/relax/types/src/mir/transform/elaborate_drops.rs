@@ -64,7 +64,7 @@ pub fn elaborate_drops(body: &mut Body, provider: &dyn DropProvider) -> Result<(
     if !validate::validate(body, provider.tcx()).is_empty() { return Err(DropError::InvalidMir("invalid input body")); }
     for block in &body.basic_blocks {
         for stmt in &block.statements {
-            if matches!(stmt.kind, StatementKind::FakeRead(..) | StatementKind::AscribeUserType(..) | StatementKind::PlaceMention(_)
+            if matches!(stmt.kind, StatementKind::FakeRead(..) | StatementKind::AscribeUserType(..)
                 | StatementKind::Assign(_, Rvalue::Ref(_, BorrowKind::Fake(_), _))) {
                 return Err(DropError::InvalidMir("analysis cleanup required before drop elaboration"));
             }

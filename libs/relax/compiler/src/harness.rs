@@ -73,16 +73,7 @@ fn collect(prog: &crate::program::Program, krates: &[u32]) -> Vec<Found> {
             match toks[0] {
                 "test" if toks.len() == 1 => test = true,
                 "ignore" => ignore = true,
-                "should_panic" => {
-                    should_panic = 1;
-                    // `should_panic = ".."` or `should_panic(expected = "..")`
-                    if let Some(k) = toks.iter().position(|t| *t == "=") {
-                        if let Some(lit) = toks.get(k + 1) {
-                            expected = relax_front::lit::unescape_str(lit);
-                            should_panic = 2;
-                        }
-                    }
-                }
+                "should_panic" => (should_panic, expected) = should_panic_attr(&toks),
                 _ => {}
             }
         }
@@ -94,6 +85,28 @@ fn collect(prog: &crate::program::Program, krates: &[u32]) -> Vec<Found> {
         out.push(Found { def: DefId(i as u32), name, ignore, should_panic, expected });
     }
     out
+}
+
+/// `#[should_panic]`'s tokens: 1, or 2 with the `expected` text.
+fn should_panic_attr(toks: &[&str]) -> (u32, String) {
+    // `should_panic = ".."` or `should_panic(expected = "..")`
+    match toks.iter().position(|t| *t == "=").and_then(|k| toks.get(k + 1)) {
+        Some(lit) => (2, relax_front::lit::unescape_str(lit)),
+        None => (1, String::new()),
+    }
+}
+
+/// Test fn `d`'s `#[should_panic]`: 0 without one, 1, or 2 with the `expected` text.
+pub(crate) fn should_panic_of(prog: &crate::program::Program, d: DefId) -> (u32, String) {
+    let def = prog.def(d);
+    let f = &prog.files[def.file as usize];
+    for a in f.ast.list(f.ast.item(def.item).attrs) {
+        if a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "should_panic" {
+            let toks: Vec<&str> = (a.toks.lo..a.toks.hi).map(|t| f.tok_text(t)).collect();
+            return should_panic_attr(&toks);
+        }
+    }
+    (0, String::new())
 }
 
 fn find_fn(u: &Unit, path: &str) -> Option<DefId> {

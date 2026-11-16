@@ -60,6 +60,14 @@
 //! before the load: the command line, the unit graph and the load's graph certificate (the inputs
 //! and module probes the front's images rest on). The next check of that command line whose
 //! certificate is current prints it right after the build scripts, with no load at all.
+//!
+//! No key names where the checkout lies: a path is in a key in its anchored spelling (dirs.rs:
+//! `\0ws\0src/lib.rs`), and so the payloads store the places their diagnostics name (`Stow`). A copy
+//! of the tree elsewhere (another worktree, the land gate's tree) over the same store finds every
+//! verdict of the same text and prints it with its own folders. A path that reaches the output
+//! otherwise stays in it: a late input's value (`env!("CARGO_MANIFEST_DIR")`) is in its verdict's
+//! key, and a payload that names the checkout in any other way is stored as it is, bound to its
+//! worktree.
 use crate::cache::CheckNode;
 use crate::check_order::{Entry, GroupAt, Out, Phase, Stage};
 use crate::program::{Program, NO_DEF};
@@ -67,7 +75,7 @@ use crate::sip::Sip128;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 const KIND_CRATE: u32 = 1;
 const KIND_RUN: u32 = 2;
 /// a checked crate's interface by node (`Table`), under its identity and interface hash
@@ -151,8 +159,6 @@ pub(crate) struct Reuse {
     checked: Vec<u32>,
     /// parallel to `checked`
     keys: Vec<u128>,
-    /// parallel to `checked`: the worktree-free verdict key has been traced
-    traced: Vec<bool>,
     /// parallel to `checked`: a stored verdict's key, 0 when none
     vkeys: Vec<u128>,
     hit: Vec<bool>,
@@ -209,30 +215,52 @@ pub(crate) struct Reuse {
     /// read and still current (kept when the store starts again from this check's)
     bodies_new: Vec<(u128, Vec<u8>)>,
     bodies_keep: Vec<(u128, Vec<u8>)>,
+    /// this checkout's anchors (the stored payloads' places are read under them), and its
+    /// spellings when the check stores (`Stow`)
+    anchors: crate::dirs::Anchors,
+    checkout: Option<crate::cache::CheckoutText>,
 }
 
-/// What a check's crates' keys rest on beyond the crates: the Relax build and options, the
+/// What a check's crates' keys rest on beyond the crates: the Relax build and options, the policy
+/// for third-party compile-time code, the
 /// variables that steer the check (every `RELAX_*` one but run.rs RUN_STATE_VARS and
-/// RUN_LOCATING_VARS, the store's mode RELAX_CACHE: how the verdicts are used, not what they rest
-/// on, so a Verify or read-only check finds what an ordinary one stored, and the store's own
+/// RUN_LOCATING_VARS, `RUN_RESOURCE_VARS`, the store's mode RELAX_CACHE: how the verdicts are used,
+/// not what they rest on, so a Verify or read-only check finds what an ordinary one stored, and the
+/// store's own
 /// `RELAX_CHECK_REUSE_*` ones: its traces and its tests' store, child and hooks, which must find
-/// what a check without them stored). Payload keys add the anchor locations separately.
-fn env_key(prog: &Program) -> u128 {
+/// what a check without them stored).
+/// How a check runs, not what it rests on: the threads it checks on (`RELAX_JOBS`: the check and
+/// the boot hand every pass's results back in item order) and whom the run works for
+/// (`RELAX_RUN_OWNER`: a build farm's job or lease, which names it in the build-script claims it
+/// holds). So a store one lease filled, on any number of cores, serves the next. Only the variables
+/// named here leave the keys: any other `RELAX_*` one, one the keys do not know among them, checks
+/// again (a cold check is safe, a stale verdict is not).
+pub(crate) const RUN_RESOURCE_VARS: [&str; 2] = ["RELAX_JOBS", "RELAX_RUN_OWNER"];
+
+pub(crate) fn env_key(prog: &Program) -> u128 {
     let mut h = Sip128::new();
     h.str("relax-check-env");
     h.u32(VERSION);
     h.u128(crate::codegen_id::id());
     h.u128(prog.session.options.fingerprint());
+    // the policy for third-party compile-time code: what a check of expanded code rests on
+    // (crate_image::parse_options)
+    h.u8((crate::sandbox::policy() == crate::sandbox::Policy::Sandboxed) as u8);
     let mut vars: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
-        .filter(|(k, _)| k.starts_with("RELAX_") && k != "RELAX_CACHE" && !k.starts_with("RELAX_CHECK_REUSE_") && !crate::run::RUN_STATE_VARS.contains(&k.as_str()) && !crate::run::RUN_LOCATING_VARS.contains(&k.as_str()))
+        .filter(|(k, _)| k.starts_with("RELAX_") && k != "RELAX_CACHE" && !k.starts_with("RELAX_CHECK_REUSE_") && !crate::run::RUN_STATE_VARS.contains(&k.as_str()) && !crate::run::RUN_LOCATING_VARS.contains(&k.as_str()) && !RUN_RESOURCE_VARS.contains(&k.as_str()))
         // the mount table as vfs describes it for keys: a folder mount's root, not the checkout it
         // reads (vfs.rs SHARE: a second checkout of the same text checks nothing again)
         .map(|(k, v)| if k == "RELAX_VFS" { (k, crate::vfs::mounts_key_text()) } else { (k, v) })
         .collect();
     vars.sort();
     h.u32(vars.len() as u32);
-    for (k, v) in vars { h.str(&k); h.str(&v); }
+    let trace = std::env::var_os("RELAX_CHECK_REUSE_TRACE").is_some();
+    for (k, v) in vars {
+        if trace { eprintln!("check-reuse-trace: env {k}={v}"); }
+        h.str(&k);
+        h.str(&v);
+    }
     h.finish128()
 }
 
@@ -323,25 +351,21 @@ fn crate_hash<'a>(what: &str, head: u128, files: impl ExactSizeIterator<Item = (
 fn table_key(ident: u128, iface: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("relax-check-table");
-    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-    h.u128(crate::dirs::anchors_key());
     h.u128(ident);
     h.u128(iface);
     h.finish128()
 }
 
-/// The stored late-input names' key, separate from the worktree-free crate key.
+/// The key of the stored late-input names of the verdicts under crate key `key`.
 fn late_key(key: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("relax-check-late");
     h.u128(key);
-    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-    h.u128(crate::dirs::anchors_key());
     h.finish128()
 }
 
-/// A verdict's stored and worktree-free keys, from one stream of crate and late-input hashes.
-fn verdict_keys(key: u128, late: &[(String, u8, String, u128)]) -> (u128, u128) {
+/// A verdict's key: its crate key and the late inputs' values.
+fn verdict_key(key: u128, late: &[(String, u8, String, u128)]) -> u128 {
     let mut h = Sip128::new();
     h.str("relax-check-verdict");
     h.u128(key);
@@ -351,10 +375,7 @@ fn verdict_keys(key: u128, late: &[(String, u8, String, u128)]) -> (u128, u128) 
         if crate::sip::late_base(*kind) == crate::sip::LATE_FILE { h.str(&crate::dirs::anchored(name)); } else { h.str(name); }
         h.u128(*hash);
     }
-    let anchored = h.finish128();
-    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-    h.u128(crate::dirs::anchors_key());
-    (h.finish128(), anchored)
+    h.finish128()
 }
 
 /// The text of crate `c` and of every crate of its closure (a proc-macro crate's code).
@@ -371,23 +392,126 @@ fn deep_text(prog: &Program, c: u32, texts: &[u128]) -> u128 {
 
 /// The current value of a late input (as the front validates its images: cache.rs).
 pub(crate) fn late_now(c: &str, kind: u8, name: &str) -> u128 {
-    let content = if crate::sip::late_base(kind) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() } else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
+    let content = crate::crates::late_value_now(c, kind, name);
     crate::sip::late_hash(content.as_deref())
 }
 
 fn late_current(c: &str, kind: u8, name: &str, hash: u128) -> bool { late_now(c, kind, name) == hash }
 
-impl Reuse {
-    /// Computes a persisted verdict key and traces its worktree-free counterpart once per crate.
-    fn verdict_key(&mut self, prog: &Program, j: usize, late: &[(String, u8, String, u128)]) -> u128 {
-        let (key, anchored) = verdict_keys(self.keys[j], late);
-        if !self.traced[j] && std::env::var_os("RELAX_CHECK_REUSE_TRACE").is_some() {
-            eprintln!("check-reuse-trace: {}: anchored key {:032x}", prog.syms.str(prog.crates[self.checked[j] as usize].name), anchored);
-            self.traced[j] = true;
-        }
-        key
+/// How a check's payloads name places apart from where its checkout lies (module doc): a path
+/// under an anchor in its anchored spelling, and so each place a diagnostic names (an anchor's
+/// folder where a path starts, then a file of the check up to `:<line>`). A payload that names
+/// the checkout otherwise -- a value made of its folder, a spelling of it no place uses, a marker
+/// -- is stored as it is, bound to its worktree (the anchors' key): a check elsewhere finds it
+/// under the same key and checks its crate again.
+struct Stow<'a> {
+    anchors: &'a crate::dirs::Anchors,
+    /// the checkout's spellings (cache.rs); None: no reliable list, every payload is bound
+    checkout: Option<&'a crate::cache::CheckoutText>,
+    /// the check's files: the places a diagnostic names
+    places: HashSet<&'a str>,
+}
+
+impl<'a> Stow<'a> {
+    fn new(anchors: &'a crate::dirs::Anchors, checkout: Option<&'a crate::cache::CheckoutText>, places: impl IntoIterator<Item = &'a str>) -> Stow<'a> {
+        Stow { anchors, checkout, places: places.into_iter().collect() }
     }
 
+    /// Whether `s` names the checkout (any spelling of its folders), an anchor's folder or a marker.
+    fn names_checkout(&self, s: &str) -> bool {
+        s.contains('\0') || self.checkout.is_none_or(|c| c.found_in(s.as_bytes())) || self.anchors.dirs().any(|(_, dir)| s.contains(dir))
+    }
+
+    /// A path as stored: anchored, else as it is when it names no checkout. None: bound.
+    fn path(&self, p: &str) -> Option<String> {
+        match self.anchors.anchored(p) {
+            Some(a) => (self.anchors.unanchored(&a).as_deref() == Some(p)).then_some(a),
+            None => (!self.names_checkout(p)).then(|| p.to_string()),
+        }
+    }
+
+    /// A late input's name as stored: a file's as a path, a variable's as it is.
+    fn late_name(&self, kind: u8, name: &str) -> Option<String> {
+        if crate::sip::late_base(kind) == crate::sip::LATE_FILE { self.path(name) } else { (!name.contains('\0')).then(|| name.to_string()) }
+    }
+
+    /// Late inputs as stored. None: bound.
+    fn late(&self, late: &[(String, u8, String, u128)]) -> Option<Vec<(String, u8, String, u128)>> {
+        late.iter().map(|(c, kind, name, h)| Some((c.clone(), *kind, self.late_name(*kind, name)?, *h))).collect()
+    }
+
+    /// A diagnostic as stored: the places it names anchored. None: it names the checkout otherwise.
+    fn text(&self, t: &str) -> Option<String> {
+        let b = t.as_bytes();
+        let path_byte = |c: u8| c.is_ascii_alphanumeric() || c >= 0x80 || b"/\\._-~+@%".contains(&c);
+        let mut at: Vec<(usize, usize)> = Vec::new();
+        for (_, dir) in self.anchors.dirs().filter(|(_, dir)| !dir.is_empty()) {
+            for (i, _) in t.match_indices(dir) {
+                if b.get(i + dir.len()) != Some(&b'/') || (i > 0 && path_byte(b[i - 1])) { continue; }
+                let line = t[i..].find('\n').map_or(t.len(), |n| i + n);
+                let end = t[i..line].match_indices(':').map(|(j, _)| i + j)
+                    .find(|&j| b.get(j + 1).is_some_and(u8::is_ascii_digit) && self.places.contains(&t[i..j]));
+                if let Some(end) = end { at.push((i, end)); }
+            }
+        }
+        at.sort_unstable();
+        let (mut out, mut residue, mut last) = (String::with_capacity(t.len()), String::new(), 0);
+        for (i, end) in at {
+            if i < last { continue; }
+            out.push_str(&t[last..i]);
+            out.push_str(&self.anchors.anchored(&t[i..end])?);
+            residue.push_str(&t[last..i]);
+            residue.push('\n');
+            last = end;
+        }
+        out.push_str(&t[last..]);
+        residue.push_str(&t[last..]);
+        if self.names_checkout(&residue) { return None; }
+        (self.anchors.unanchored_text(&out).as_deref() == Some(t)).then_some(out)
+    }
+
+    /// A verdict as stored. None: bound.
+    fn verdict(&self, v: &Verdict) -> Option<Verdict> {
+        let entries = v.entries.iter().map(|e| Some(Stored {
+            phase: e.phase, step: e.step, flags: e.flags, seq: e.seq, text: self.text(&e.text)?,
+            group: match &e.group { GroupAt::Path(p, l, c) => GroupAt::Path(self.path(p)?, *l, *c), g => g.clone() },
+        })).collect::<Option<_>>()?;
+        Some(Verdict { late: self.late(&v.late)?, refs: v.refs.clone(), deps: v.deps.clone(), names: v.names.clone(), entries })
+    }
+}
+
+/// A stored payload's names as this checkout reads them (`Stow`): a worktree-free payload's
+/// (bound to tree 0) under this checkout's anchors, a bound one's as they are.
+struct Unstow<'a> {
+    anchors: &'a crate::dirs::Anchors,
+    free: bool,
+}
+
+impl<'a> Unstow<'a> {
+    /// None: a payload bound to another worktree.
+    fn of(anchors: &'a crate::dirs::Anchors, tree: u128) -> Option<Unstow<'a>> {
+        (tree == 0 || tree == anchors.key()).then_some(Unstow { anchors, free: tree == 0 })
+    }
+
+    /// None (here and below): a marker of an anchor this checkout does not have.
+    fn text(&self, s: String) -> Option<String> {
+        if !self.free { return Some(s); }
+        let read = match self.anchors.unanchored_text(&s)? { std::borrow::Cow::Owned(o) => Some(o), std::borrow::Cow::Borrowed(_) => None };
+        Some(read.unwrap_or(s))
+    }
+
+    fn path(&self, s: String) -> Option<String> {
+        if !self.free { return Some(s); }
+        let read = match self.anchors.unanchored(&s)? { std::borrow::Cow::Owned(o) => Some(o), std::borrow::Cow::Borrowed(_) => None };
+        Some(read.unwrap_or(s))
+    }
+
+    fn late_name(&self, kind: u8, name: String) -> Option<String> {
+        if crate::sip::late_base(kind) == crate::sip::LATE_FILE { self.path(name) } else { Some(name) }
+    }
+}
+
+impl Reuse {
     /// The reuse of a one-shot check of `checked` rooted at `root`, in the cache's folder, in the
     /// store's mode (RELAX_CACHE). None: the cache is off.
     pub(crate) fn open(prog: &Program, root: u32, checked: &[u32]) -> Option<Reuse> {
@@ -459,8 +583,6 @@ impl Reuse {
         let run_key = {
             let mut h = Sip128::new();
             h.str("relax-check-run");
-            // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-            h.u128(crate::dirs::anchors_key());
             h.u128(set);
             let mut v = keys.clone();
             v.sort_unstable();
@@ -469,14 +591,16 @@ impl Reuse {
         };
         let path = dir.join(format!("check-{:016x}.rcs", set as u64));
         let trace = std::env::var_os("RELAX_CHECK_REUSE_TRACE").is_some();
+        let anchors = crate::dirs::Anchors::current(&crate::std_dir());
+        let checkout = if write { crate::cache::CheckoutText::of(&anchors) } else { None };
         let mut r = Reuse {
-            path, write, hit: vec![false; checked.len()], raw: vec![None; checked.len()], traced: vec![false; checked.len()],
+            path, write, hit: vec![false; checked.len()], raw: vec![None; checked.len()],
             vkeys: vec![0; checked.len()], late_names: vec![None; checked.len()], keys, checked, closures, iface_of,
             stored: Vec::new(), run_key, run_hit: false, idents, texts, heads, ifaces, cur, table_stored: vec![false; n],
             digests, tables: (0..n).map(|_| None).collect(), deps, restore: Vec::new(), store_entries: 0, sig_clean: false, t_keys: Default::default(),
             skipped: (skipped.iter().filter(|s| is_checked[s.0 as usize]).count(), skipped.iter().filter(|s| !is_checked[s.0 as usize]).count()),
             files: Vec::new(), late: Vec::new(), complete: false, recorded: Vec::new(),
-            verify, env, set, bodies_new: Vec::new(), bodies_keep: Vec::new(),
+            verify, env, set, bodies_new: Vec::new(), bodies_keep: Vec::new(), anchors, checkout,
         };
         r.restore = vec![false; r.checked.len()];
         // RELAX_CHECK_REUSE_TRACE: each crate's key parts (two checks' traces diff to what changed)
@@ -513,17 +637,24 @@ impl Reuse {
                     if trace { eprintln!("check-reuse-trace: {}: no verdict under its key", crate_name); }
                     continue;
                 };
-                let Some(late) = decode_late(names) else { continue };
+                let Some(late) = decode_late(names, &r.anchors) else {
+                    if trace { eprintln!("check-reuse-trace: {}: its verdict is another worktree's", crate_name); }
+                    continue;
+                };
                 let late: Vec<_> = late.into_iter().map(|(c, k, name)| {
                     let h = *late_memo.entry((c.clone(), k, name.clone())).or_insert_with(|| late_now(&c, k, &name));
                     (c, k, name, h)
                 }).collect();
-                let vkey = r.verdict_key(prog, j, &late);
+                if trace { for (c, k, name, h) in &late { eprintln!("check-reuse-trace: {crate_name}: late {c} {k} {name} {h:032x}"); } }
+                let vkey = verdict_key(r.keys[j], &late);
                 let Some((KIND_CRATE, p)) = store.get_checked(vkey) else {
                     if trace { eprintln!("check-reuse-trace: {}: no verdict for its late inputs' values", crate_name); }
                     continue;
                 };
-                let Some(v) = decode(p) else { continue };
+                let Some(v) = decode(p, &r.anchors) else {
+                    if trace { eprintln!("check-reuse-trace: {}: its verdict is another worktree's", crate_name); }
+                    continue;
+                };
                 let late_ok = v.late.iter().all(|(c, k, name, h)| *late_memo.entry((c.clone(), *k, name.clone())).or_insert_with(|| late_now(c, *k, name)) == *h);
                 let refs_ok = v.refs.iter().all(|(i, t)| by_ident.get(i).is_some_and(|&c| r.texts[c as usize] == *t));
                 // (the key holds the checked crates of the closure by identity: these are they)
@@ -553,6 +684,7 @@ impl Reuse {
             }
             if !changed.is_empty() {
                 let dirty = Dirty::of(prog, &mut r, &store, &changed, trace);
+                let stow = Stow::new(&r.anchors, r.checkout.as_ref(), prog.file_paths.iter().map(String::as_str));
                 for (j, v, since) in changed {
                     let c = r.checked[j];
                     let ok = since.iter().all(|&(d, was)| d != u32::MAX && !dirty.unknown.contains(&(d, was)))
@@ -560,7 +692,7 @@ impl Reuse {
                     if trace { eprintln!("check-reuse-trace: {} checked against changed interfaces: {}", prog.syms.str(prog.crates[c as usize].name), if ok { "stands" } else { "checked again" }); }
                     if ok {
                         let v = Verdict { deps: r.deps[j].clone(), ..v };
-                        r.raw[j] = Some(encode(&v));
+                        r.raw[j] = Some(encode(&v, &stow));
                         r.hit[j] = true;
                         r.restore[j] = true;
                         r.late.extend(v.late);
@@ -681,6 +813,7 @@ impl Reuse {
             if let Some(k) = slot.get(c as usize).copied().flatten() { files[k].push(f); }
         }
         let mut text_names = crate::cache::text_names(prog, &files).into_iter();
+        let stow = Stow::new(&self.anchors, self.checkout.as_ref(), prog.file_paths.iter().map(String::as_str));
         let mut new: Vec<crate::pack::NewEntry> = Vec::new();
         for j in 0..self.checked.len() {
             if self.hit[j] { continue; }
@@ -708,8 +841,8 @@ impl Reuse {
             let late = mine.into_iter().cloned().collect();
             let mut v = Verdict { late, refs, deps: self.deps[j].clone(), names: written, entries };
             v.late.sort_unstable();
-            new.push(crate::pack::NewEntry { key: late_key(self.keys[j]), kind: KIND_LATE, payload: encode_late(&v.late) });
-            new.push(crate::pack::NewEntry { key: self.verdict_key(prog, j, &v.late), kind: KIND_CRATE, payload: encode(&v) });
+            new.push(crate::pack::NewEntry { key: late_key(self.keys[j]), kind: KIND_LATE, payload: encode_late(&v.late, &stow) });
+            new.push(crate::pack::NewEntry { key: verdict_key(self.keys[j], &v.late), kind: KIND_CRATE, payload: encode(&v, &stow) });
             self.recorded.extend(v.entries);
         }
         // a hit checked against interfaces that changed since: stored with today's
@@ -754,22 +887,30 @@ impl Reuse {
     pub(crate) fn complete(&self) -> bool { self.complete }
 
     /// The late inputs (as `late` holds them) checked crate `j`'s check rests on: its own, its
-    /// unchecked and proc-macro dependencies', and a checked, non-proc-macro dependency's only
-    /// where that one's interface reads them by value (a hole body is no caller's, an item
-    /// expansion is interface text already).
+    /// proc-macro dependencies' and theirs (their code runs in the expansions), an unchecked
+    /// dependency's but those read in a hole body (sip.rs LATE_HOLE: no other crate's check sees
+    /// one; the crate's text is in the key), and a checked, non-proc-macro dependency's only where
+    /// that one's interface reads them by value (a hole body is no caller's, an item expansion is
+    /// interface text already). So a value read only in a dependency's fn bodies (the
+    /// `env!("CARGO_MANIFEST_DIR")` of a resource path) checks no crate above it again.
     fn late_of<'a>(&self, prog: &Program, j: usize, late: &'a [(String, u8, String, u128)]) -> Vec<&'a (String, u8, String, u128)> {
-        let c = self.checked[j];
-        let mut full: std::collections::HashSet<&str> = std::iter::once(prog.syms.str(prog.crates[c as usize].name)).collect();
-        let mut other = std::collections::HashSet::new();
+        let name_of = |d: u32| prog.syms.str(prog.crates[d as usize].name);
+        let mut full: HashSet<&str> = std::iter::once(name_of(self.checked[j])).collect();
+        let (mut unchecked, mut other) = (HashSet::new(), HashSet::new());
         for &d in &self.closures[j] {
-            let ci = &prog.crates[d as usize];
-            let name = prog.syms.str(ci.name);
-            if self.iface_of[d as usize] { other.insert(name); } else { full.insert(name); }
-            if ci.proc_macro {
-                full.extend(crate::check::dependency_closure(prog, d).into_iter().map(|p| prog.syms.str(prog.crates[p as usize].name)));
+            if prog.crates[d as usize].proc_macro {
+                full.insert(name_of(d));
+                full.extend(crate::check::dependency_closure(prog, d).into_iter().map(name_of));
+            } else if self.iface_of[d as usize] {
+                other.insert(name_of(d));
+            } else {
+                unchecked.insert(name_of(d));
             }
         }
-        late.iter().filter(|(k, kind, ..)| full.contains(k.as_str()) || (other.contains(k.as_str()) && crate::sip::late_reaches_callers(*kind))).collect()
+        late.iter().filter(|(k, kind, ..)| {
+            let k = k.as_str();
+            full.contains(k) || (unchecked.contains(k) && kind & crate::sip::LATE_HOLE == 0) || (other.contains(k) && crate::sip::late_reaches_callers(*kind))
+        }).collect()
     }
 
     /// Verify mode: the stored body verdicts are compared with the bodies' checks, none is used.
@@ -791,11 +932,26 @@ impl Reuse {
         v
     }
 
+    /// Late inputs as a body verdict blob stores them (`Stow`): (0, worktree-free), else (this
+    /// worktree's key, as they are).
+    pub(crate) fn stow_late(&self, late: Vec<(String, u8, String, u128)>) -> (u128, Vec<(String, u8, String, u128)>) {
+        match Stow::new(&self.anchors, self.checkout.as_ref(), []).late(&late) {
+            Some(free) => (0, free),
+            None => (self.anchors.key(), late),
+        }
+    }
+
+    /// A blob's late inputs (`stow_late`) as this checkout reads them. None: another worktree's.
+    pub(crate) fn unstow_late(&self, tree: u128, late: Vec<(String, u8, String, u128)>) -> Option<Vec<(String, u8, String, u128)>> {
+        let u = Unstow::of(&self.anchors, tree)?;
+        late.into_iter().map(|(c, kind, name, h)| Some((c, kind, u.late_name(kind, name)?, h))).collect()
+    }
+
     /// The key of checked crate `c`'s body verdicts (check_bodies.rs): what each of its bodies'
     /// checks rests on besides the body's own text -- the crate key's parts without the crate's
     /// text (the environment, the checked set, the crate's head, binary or not, test harness, its
     /// closure), the crate's own interface and its checked dependencies' interfaces (an interface
-    /// change is a new key), the worktree. The crate's file digests are kept (`digest`).
+    /// change is a new key). The crate's file digests are kept (`digest`).
     pub(crate) fn body_base(&mut self, prog: &Program, c: u32) -> Option<u128> {
         let j = self.checked.binary_search(&c).ok()?;
         let iface = if self.iface_of[c as usize] { self.ifaces[c as usize] } else {
@@ -819,8 +975,6 @@ impl Reuse {
         h.str("relax-check-bodies");
         h.u32(VERSION);
         h.u32(crate::check_bodies::BLOB_VERSION);
-        // the worktree: the crate identities hold its absolute paths
-        h.u128(crate::dirs::anchors_key());
         h.u128(self.env);
         h.u128(self.set);
         h.u128(self.heads[c as usize]);
@@ -1036,7 +1190,7 @@ pub(crate) fn graph_key(g: &crate::unitgraph::Graph) -> u128 {
     h.u32(g.bins.len() as u32);
     for b in &g.bins { h.u32(*b as u32); }
     h.u32(g.link_libs.len() as u32);
-    for (l, framework) in &g.link_libs { h.str(l); h.u8(*framework as u8); }
+    for (l, framework, outside_cwd) in &g.link_libs { h.str(l); h.u8(*framework as u8); h.u8(*outside_cwd as u8); }
     h.u8(g.native.is_some() as u8);
     h.finish128()
 }
@@ -1056,6 +1210,8 @@ pub(crate) struct Early {
     /// the certificate's inputs: a record is stored only when the check's files are these
     inputs: HashMap<String, u128>,
     n_probes: usize,
+    /// this checkout's anchors (a record's places are read under them)
+    anchors: crate::dirs::Anchors,
 }
 
 /// A decoded early record.
@@ -1077,8 +1233,6 @@ impl Early {
         let cert = images.certificate(pre)?;
         let mut h = Sip128::new();
         h.str("relax-check-early");
-        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
-        h.u128(crate::dirs::anchors_key());
         h.u32(VERSION);
         h.u128(env_key(prog));
         h.u32(args.len() as u32);
@@ -1090,7 +1244,10 @@ impl Early {
         h.u32(cert.probes.len() as u32);
         for (p, e) in &cert.probes { h.str(&crate::dirs::anchored(p)); h.u8(*e as u8); }
         let path = crate::dirs::relax_dir().join("cache").join(format!("check-early-{:016x}.rcs", cert.identity as u64));
-        Some(Early { path, key: h.finish128(), write: mode == crate::cache::Mode::On, inputs: cert.inputs.iter().cloned().collect(), n_probes: cert.probes.len() })
+        Some(Early {
+            path, key: h.finish128(), write: mode == crate::cache::Mode::On, inputs: cert.inputs.iter().cloned().collect(), n_probes: cert.probes.len(),
+            anchors: crate::dirs::Anchors::current(&crate::std_dir()),
+        })
     }
 
     /// The stored output printed when the record is current (its late inputs unchanged): the
@@ -1098,7 +1255,7 @@ impl Early {
     pub(crate) fn replay(&self) -> Option<i32> {
         let times = std::env::var_os("RELAX_CHECK_TIMES").is_some();
         let found = crate::store::Store::open(&self.path).and_then(|store| match store.get_checked(self.key) {
-            Some((KIND_EARLY, p)) => decode_early(p),
+            Some((KIND_EARLY, p)) => decode_early(p, &self.anchors),
             _ => None,
         });
         let current = found.filter(|r| r.late.iter().all(|(c, k, name, h)| late_current(c, *k, name, *h)));
@@ -1125,13 +1282,24 @@ impl Early {
         late.dedup();
         let mut stores: Vec<String> = crate::store::live().into_iter().map(|p| p.display().to_string()).collect();
         stores.sort();
+        let stow = Stow::new(&reuse.anchors, reuse.checkout.as_ref(), reuse.files.iter().map(|(p, _)| p.as_str()));
+        let free: Option<(Vec<_>, Vec<String>, Vec<String>)> = (|| Some((
+            stow.late(&late)?,
+            stores.iter().map(|s| stow.path(s)).collect::<Option<_>>()?,
+            texts.iter().map(|t| stow.text(t)).collect::<Option<_>>()?,
+        )))();
+        let (tree, late, stores, texts) = match &free {
+            Some((l, s, t)) => (0, l, s, &t[..]),
+            None => (reuse.anchors.key(), &late, &stores, texts),
+        };
         let mut w = W(Vec::new());
         w.u32(VERSION);
+        w.u128(tree);
         w.u32(reuse.crates() as u32);
         w.u32(late.len() as u32);
-        for (k, kind, name, h) in &late { w.str(k); w.0.push(*kind); w.str(name); w.u128(*h); }
+        for (k, kind, name, h) in late { w.str(k); w.0.push(*kind); w.str(name); w.u128(*h); }
         w.u32(stores.len() as u32);
-        for s in &stores { w.str(s); }
+        for s in stores { w.str(s); }
         w.u32(texts.len() as u32);
         for t in texts { w.str(t); }
         let entry = crate::pack::NewEntry { key: self.key, kind: KIND_EARLY, payload: w.0 };
@@ -1142,16 +1310,21 @@ impl Early {
     }
 }
 
-fn decode_early(p: &[u8]) -> Option<EarlyRecord> {
+/// An early record as this checkout reads it (`Unstow`). None: unreadable, or another worktree's.
+fn decode_early(p: &[u8], anchors: &crate::dirs::Anchors) -> Option<EarlyRecord> {
     let mut r = R(p);
     if r.u32()? != VERSION { return None; }
+    let u = Unstow::of(anchors, r.u128()?)?;
     let crates = r.u32()?;
     let mut late = Vec::new();
-    for _ in 0..r.u32()? { late.push((r.str()?, r.u8()?, r.str()?, r.u128()?)); }
+    for _ in 0..r.u32()? {
+        let (c, kind) = (r.str()?, r.u8()?);
+        late.push((c, kind, u.late_name(kind, r.str()?)?, r.u128()?));
+    }
     let mut stores = Vec::new();
-    for _ in 0..r.u32()? { stores.push(r.str()?); }
+    for _ in 0..r.u32()? { stores.push(u.path(r.str()?)?); }
     let mut texts = Vec::new();
-    for _ in 0..r.u32()? { texts.push(r.str()?); }
+    for _ in 0..r.u32()? { texts.push(u.text(r.str()?)?); }
     r.0.is_empty().then_some(EarlyRecord { crates, late, stores, texts })
 }
 
@@ -1184,24 +1357,41 @@ impl<'a> R<'a> {
     fn str(&mut self) -> Option<String> { let n = self.u32()? as usize; String::from_utf8(self.take(n)?.to_vec()).ok() }
 }
 
-/// The sorted names of a verdict's late inputs, without their values.
-fn encode_late(late: &[(String, u8, String, u128)]) -> Vec<u8> {
+/// The sorted names of a verdict's late inputs, without their values, as stored (`Stow`).
+fn encode_late(late: &[(String, u8, String, u128)], stow: &Stow) -> Vec<u8> {
+    let free = stow.late(late);
+    let (tree, late) = match &free { Some(l) => (0, l.as_slice()), None => (stow.anchors.key(), late) };
     let mut w = W(Vec::new());
+    w.u128(tree);
     w.u32(late.len() as u32);
     for (c, kind, name, _) in late { w.str(c); w.0.push(*kind); w.str(name); }
     w.0
 }
 
-fn decode_late(p: &[u8]) -> Option<Vec<(String, u8, String)>> {
+/// Stored late input names as this checkout reads them. None: unreadable, or another worktree's.
+fn decode_late(p: &[u8], anchors: &crate::dirs::Anchors) -> Option<Vec<(String, u8, String)>> {
     let mut r = R(p);
+    let u = Unstow::of(anchors, r.u128()?)?;
     let mut late = Vec::new();
-    for _ in 0..r.u32()? { late.push((r.str()?, r.u8()?, r.str()?)); }
+    for _ in 0..r.u32()? {
+        let (c, kind) = (r.str()?, r.u8()?);
+        late.push((c, kind, u.late_name(kind, r.str()?)?));
+    }
     r.0.is_empty().then_some(late)
 }
 
-fn encode(v: &Verdict) -> Vec<u8> {
+/// `v` as stored (`Stow`): worktree-free, else as it is, bound to this worktree.
+fn encode(v: &Verdict, stow: &Stow) -> Vec<u8> {
+    match stow.verdict(v) {
+        Some(free) => encode_as(&free, 0),
+        None => encode_as(v, stow.anchors.key()),
+    }
+}
+
+fn encode_as(v: &Verdict, tree: u128) -> Vec<u8> {
     let mut w = W(Vec::new());
     w.u32(VERSION);
+    w.u128(tree);
     w.u32(v.late.len() as u32);
     for (k, kind, name, h) in &v.late { w.str(k); w.0.push(*kind); w.str(name); w.u128(*h); }
     w.u32(v.refs.len() as u32);
@@ -1250,11 +1440,16 @@ fn decode_table(p: &[u8]) -> Option<Table> {
     r.0.is_empty().then_some(Table { head, nodes })
 }
 
-fn decode(p: &[u8]) -> Option<Verdict> {
+/// A stored verdict as this checkout reads it (`Unstow`). None: unreadable, or another worktree's.
+fn decode(p: &[u8], anchors: &crate::dirs::Anchors) -> Option<Verdict> {
     let mut r = R(p);
     if r.u32()? != VERSION { return None; }
+    let u = Unstow::of(anchors, r.u128()?)?;
     let mut late = Vec::new();
-    for _ in 0..r.u32()? { late.push((r.str()?, r.u8()?, r.str()?, r.u128()?)); }
+    for _ in 0..r.u32()? {
+        let (c, kind) = (r.str()?, r.u8()?);
+        late.push((c, kind, u.late_name(kind, r.str()?)?, r.u128()?));
+    }
     let mut refs = Vec::new();
     for _ in 0..r.u32()? { refs.push((r.u128()?, r.u128()?)); }
     let mut deps = Vec::new();
@@ -1267,10 +1462,10 @@ fn decode(p: &[u8]) -> Option<Verdict> {
         let group = match r.u8()? {
             0 => GroupAt::Zero,
             1 => GroupAt::At,
-            2 => GroupAt::Path(r.str()?, r.u32()?, r.u32()?),
+            2 => GroupAt::Path(u.path(r.str()?)?, r.u32()?, r.u32()?),
             _ => return None,
         };
-        entries.push(Stored { phase, step, flags, seq, group, text: r.str()? });
+        entries.push(Stored { phase, step, flags, seq, group, text: u.text(r.str()?)? });
     }
     r.0.is_empty().then_some(Verdict { late, refs, deps, names, entries })
 }

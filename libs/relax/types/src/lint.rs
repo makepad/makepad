@@ -470,6 +470,33 @@ pub fn level_at(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u
 pub fn emit_in(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u32, pos: u32, msg: &str) {
     if !enabled() { return; }
     let spec = level_at(prog, def, inner, lint, file, pos);
+    report(prog, def, lint, spec, file, pos, msg)
+}
+
+/// `emit` of a lint whose level is the one at `scope` (a definition, and a file and position in
+/// it) while its line is at `pos` of `file`: a constant evaluation's lint (rustc const_eval
+/// machine.rs: the level at the outermost frame's lint root, the span of what the evaluator is
+/// interpreting, which can be in a function the constant calls).
+pub fn emit_scoped(prog: &Program, scope: (DefId, u32, u32), lint: &Lint, file: u32, pos: u32, msg: &str) {
+    if !enabled() { return; }
+    let spec = level_at(prog, scope.0, &[], lint, scope.1, scope.2);
+    report(prog, scope.0, lint, spec, file, pos, msg)
+}
+
+/// A warning no lint level reaches, at `pos` of `file` in `def`'s scope: rustc's const-eval
+/// progress warning (const_eval machine.rs LongRunningWarn, shown even under `--cap-lints`),
+/// ordered as `lint`'s reports are. The check prints identical lines once (rustc prints each).
+pub fn progress_warning(prog: &Program, def: DefId, lint: &Lint, file: u32, pos: u32, msg: &str) {
+    if !enabled() { return; }
+    let (l, c) = prog.files[file as usize].line_col(pos);
+    let line = format!("{}:{}:{}: warning: {}", prog.file_paths[file as usize], l, c, msg);
+    let _k = crate::zone_alloc::kept();
+    let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    sink(Reported { level: Level::Warn, lint: lint.name, def, seq, line });
+}
+
+/// `emit_in`'s report at the level `spec` resolved.
+fn report(prog: &Program, def: DefId, lint: &Lint, spec: Resolved, file: u32, pos: u32, msg: &str) {
     let level = spec.level;
     if level == Level::Allow {
         if let Some(k) = spec.expect {
@@ -616,13 +643,19 @@ pub fn external(prog: &Program, file: u32, pos: u32) -> bool {
     matches!(prog.files[file as usize].expansion_kind(pos), crate::parser::ExpnKind::ExternalRules | crate::parser::ExpnKind::Builtin)
 }
 
-/// The attribute list's leading path (`allow`, `repr`, `doc`, `rustfmt::skip`) as bytes.
+/// The attribute list's leading path (`allow`, `repr`, `doc`, `rustfmt::skip`) as bytes. An unsafe
+/// attribute's path is inside its `unsafe(..)`: `no_mangle` of `#[unsafe(no_mangle)]` as of
+/// `#[no_mangle]` (rustc_ast `AttrItem::unsafety` wraps the path, it is not one).
 pub fn attr_path(prog: &Program, file: u32, a: &Attr) -> Vec<u8> {
     let p = prog.src(file);
-    let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+    let (mut lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+    if hi > lo + 2 && crate::cfg::tok_str(p, lo) == b"unsafe" && crate::cfg::tok_str(p, lo + 1) == b"(" {
+        lo += 2;
+    }
     let mut name: Vec<u8> = Vec::new();
     let mut i = lo;
-    while i < hi && !matches!(crate::cfg::tok_str(p, i), b"(" | b"=" | b"[" | b"{") {
+    // (`)` closes `unsafe(..)`: `#[unsafe(no_mangle)]`'s path ends there)
+    while i < hi && !matches!(crate::cfg::tok_str(p, i), b"(" | b")" | b"=" | b"[" | b"{") {
         name.extend_from_slice(crate::cfg::tok_str(p, i));
         i += 1;
     }

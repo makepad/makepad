@@ -51,6 +51,9 @@ fn check_in_child_store(dir: &std::path::Path, reuse: bool, store: &std::path::P
         }
         if let Some(c) = l.strip_prefix("reuse child exit ") { run.code = c.parse().unwrap(); }
     }
+    // the owners phase computes every item cell of a fresh crate (body_facts.rs item_text): no
+    // body is the first to read interface text, so no check's import uses depend on which bodies ran
+    assert_eq!(run.in_body, 0, "interface text first read in a body: {}", stderr.lines().find(|l| l.contains("items resolved in a body")).unwrap_or(""));
     run
 }
 
@@ -106,11 +109,12 @@ fn reuse_child() {
     std::mem::forget(u);
 }
 
-/// A package folder with `files` (lib.rs, bin.rs, ..), empty store.
+/// A package folder with `files` (lib.rs, bin.rs, ..), empty store. The store's folder is made as
+/// a run makes its cache folder, owner-only: under umask 002 the store refuses a group-writable one.
 fn package(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("relax-check-reuse-{}-{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    crate::pack::ensure_private_dir(&dir.join("store")).unwrap();
     for (f, src) in files { std::fs::write(dir.join(f), src).unwrap(); }
     dir
 }
@@ -143,26 +147,44 @@ fn changed(name: &str, files: &[(&str, &str)], before: &[(&str, &str)], change: 
 const LIB: &str = "pub fn f() -> u32 { 1 }\nfn unused_in_lib() {}\n";
 const BIN: &str = "fn main() { let x = pkg::f(); }\nfn unused_in_bin() {}\n";
 
-/// A verdict stored in one worktree never prints another worktree's paths; when Target B
-/// anchors the stored texts this test's hits become 2 with the same diagnostics.
+/// A copy of the package in another worktree, over the same store, reuses every verdict and prints
+/// its own paths (check_reuse.rs Stow), and the file it includes is its own: an edit of the copy's
+/// checks the crate that reads it again. A diagnostic that names the first worktree's folder
+/// outside a place (a value written in the source) binds its verdict to that worktree: the copy
+/// checks that crate again and prints what a check of every crate prints there.
 #[test]
-fn a_copy_in_another_worktree_prints_its_own_paths() {
+fn a_copy_in_another_worktree_reuses_its_verdicts_with_its_own_paths() {
     if std::env::var_os(CHILD).is_some() { return; }
-    let lib = format!("{LIB}fn another_unused() {{}}\n");
-    let files = [("lib.rs", lib.as_str()), ("bin.rs", BIN), ("Cargo.toml", "[workspace]\n")];
+    let lib = format!("{LIB}fn another_unused() {{}}\npub fn data() -> usize {{ include_str!(\"data.txt\").len() }}\n");
+    let files = [("lib.rs", lib.as_str()), ("bin.rs", BIN), ("data.txt", "one"), ("Cargo.toml", "[workspace]\n")];
     let a = package("wt-a", &files);
     let b = package("wt-b", &files);
     let store = a.join("store");
     let (a_path, b_path) = (a.to_str().unwrap(), b.to_str().unwrap());
-    let first = check_in_child_store(&a, true, &store, &[("RELAX_WORKSPACE", a_path)]);
+    let (in_a, in_b) = ([("RELAX_WORKSPACE", a_path)], [("RELAX_WORKSPACE", b_path)]);
+    let verify = [("RELAX_WORKSPACE", b_path), ("RELAX_CACHE", "verify")];
+    let first = check_in_child_store(&a, true, &store, &in_a);
     assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
-    let env = [("RELAX_WORKSPACE", b_path)];
-    let reused = check_in_child_store(&b, true, &store, &env);
-    let cold = check_in_child_store(&b, false, &store, &env);
-    assert_eq!((reused.hits, reused.code, cold.code), (0, 0, 0), "{reused:?}, {cold:?}");
-    assert_eq!(reused.diags, cold.diags, "{reused:?}, {cold:?}");
-    assert!(reused.diags.iter().any(|d| d.contains(b_path)), "{reused:?}");
-    assert!(reused.diags.iter().all(|d| !d.contains(a_path)), "{reused:?}");
+    let reused = check_in_child_store(&b, true, &store, &in_b);
+    let cold = check_in_child_store(&b, false, &store, &in_b);
+    assert!(reused.full && reused.hits == 2 && (reused.code, cold.code) == (0, 0), "the copy reuses every verdict: {reused:?}, {cold:?}");
+    assert_eq!(reused.diags, cold.diags, "the copy prints what its check of every crate prints: {reused:?}, {cold:?}");
+    assert!(reused.diags.iter().any(|d| d.contains(b_path)) && reused.diags.iter().all(|d| !d.contains(a_path)), "its own paths: {reused:?}");
+    std::fs::write(b.join("data.txt"), "two!").unwrap();
+    let reused = check_in_child_store(&b, true, &store, &in_b);
+    assert_eq!((reused.hits, &reused.diags), (1, &cold.diags), "the copy's included file edited: the library checked again: {reused:?}");
+    let note = format!("#[deprecated(note = \"see {a_path}/notes\")]\npub fn old() {{}}\n");
+    let bin = BIN.replace("let x = pkg::f();", "let x = pkg::f(); pkg::old();");
+    for d in [&a, &b] {
+        std::fs::write(d.join("data.txt"), "two!").unwrap();
+        std::fs::write(d.join("lib.rs"), format!("{lib}{note}")).unwrap();
+        std::fs::write(d.join("bin.rs"), &bin).unwrap();
+    }
+    let first = check_in_child_store(&a, true, &store, &in_a);
+    let reused = check_in_child_store(&b, true, &store, &in_b);
+    let cold = check_in_child_store(&b, true, &store, &verify);
+    assert!(first.code == 0 && cold.diags.iter().any(|d| d.contains(&format!("see {a_path}/notes"))), "the note as written: {first:?}, {cold:?}");
+    assert_eq!((reused.hits, &reused.diags), (1, &cold.diags), "a diagnostic naming the first worktree's folder: the binary checked again in the copy: {reused:?}, {cold:?}");
     std::fs::remove_dir_all(&a).unwrap();
     std::fs::remove_dir_all(&b).unwrap();
 }
@@ -237,6 +259,28 @@ fn a_dependency_body_edit_checks_only_that_dependency() {
     std::fs::write(dir.join("bin.rs"), bin.replace("pkg::show(1u8).position()", "0")).unwrap();
     let (reused, cold) = reused_and_verified(&dir, &one, "the body that computed the library's item text first edited");
     assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 4, 6), "the body that computed the library's item text first edited: {reused:?}, {cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The import replay covers the crates checked again; a crate whose verdict is reused is read as a
+/// finished one, as rustc reads a dependency's names from its metadata (run.rs). The binary's
+/// imports through the library, a single import and a glob of a module whose two globs bring
+/// different `Dup`s, resolve as a replay of every crate resolves them when only the binary is
+/// checked again, and its uses of `Dup` stay ambiguous.
+#[test]
+fn a_reused_crate_is_read_as_a_finished_one_by_the_import_replay() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let lib = "pub mod inner { mod a { pub struct Dup; } mod b { pub struct Dup; } pub use a::*; pub use b::*; }\n\
+        pub use inner::*;\npub fn f() -> u32 { 1 }\n";
+    let bin = "#![warn(ambiguous_glob_imports)]\nuse pkg::inner::Dup as Single;\nuse pkg::inner::*;\n\
+        fn main() { let _ = pkg::Dup; let _ = Single; let _ = Dup; let _ = pkg::f(); }\n";
+    let dir = package("finished", &[("lib.rs", lib), ("bin.rs", bin)]);
+    let first = check_in_child(&dir, true, &[]);
+    let ambiguous = |r: &Run| r.diags.iter().filter(|d| d.contains("`Dup` is ambiguous")).count();
+    assert!(first.code == 0 && ambiguous(&first) >= 2, "the imports and the uses are the lint: {first:?}");
+    std::fs::write(dir.join("bin.rs"), bin.replace("let _ = pkg::f();", "let _ = pkg::f() + 1;")).unwrap();
+    let (reused, _) = reused_and_verified(&dir, &[], "the binary edited");
+    assert_eq!((reused.hits, ambiguous(&reused)), (1, ambiguous(&first)), "only the binary checked again, its reports as before: {reused:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -443,14 +487,16 @@ fn an_included_file_edit_checks_again() {
 /// A late input only a hole body reads (a fn body no caller's check sees: not const, not async, no
 /// `impl Trait` return) is the library's own: changed, the library is checked again, not the
 /// binary above it, and the body that read it is checked again too (its stored verdict rests on
-/// the value: here an array length's). Read in a const fn's body, or by an item as well (the hole's
-/// read of the same file does not hide it), it reaches the binary, whose array length rests on it.
+/// the value: here the length in an `include_bytes!` literal's type). Read in a const fn's body, or
+/// by an item as well (the hole's read of the same file does not hide it), it reaches the binary,
+/// whose array length rests on it (the other bodies other crates' checks see:
+/// a_late_input_a_body_other_checks_see_checks_them_again).
 /// A body that includes a file (`include!`) has no stored verdict: an edit of another body of its
 /// crate replays the others, and checks it again. The package's variable is an ordinary one: every
 /// `RELAX_*` variable steers the whole check (env_key).
 #[test]
 fn a_late_input_only_a_body_reads_checks_only_its_crate() {
-    let hole = format!("{LIB}pub fn g() -> usize {{\n    let a: [u8; include_str!(\"data.txt\").len()] = [0; 3];\n    a.len() + env!(\"CHECK_REUSE_V\").len()\n}}\n");
+    let hole = format!("{LIB}pub fn g() -> usize {{\n    let a: &[u8; 3] = include_bytes!(\"data.txt\");\n    a.len() + env!(\"CHECK_REUSE_V\").len()\n}}\n");
     changed("late-hole", &[("lib.rs", &hole), ("bin.rs", BIN), ("data.txt", "one")], &[("CHECK_REUSE_V", "a")],
         |d| std::fs::write(d.join("data.txt"), "four").unwrap(), &[("CHECK_REUSE_V", "b")], 1);
     let konst = format!("{LIB}pub const fn g() -> usize {{ env!(\"CHECK_REUSE_V\").len() }}\n");
@@ -470,6 +516,36 @@ fn a_late_input_only_a_body_reads_checks_only_its_crate() {
     // replayed (k was edited, h includes a file); verified: those two, k's verdict the reused
     // check stored, and the binary's unused_in_bin (main's facts have a position)
     assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 2, 4), "a body edit beside an include!: {reused:?}, {cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A late input read in a body another crate's check can see stays in the keys of the crates above
+/// (sip.rs LATE_HOLE, parser.rs anon_const): edited, the binary is checked again too, for an opaque
+/// return type's body (its hidden type holds the array's length), an async fn's, and a constant in
+/// a fn body (an array length, an inline const). A const fn's body:
+/// a_late_input_only_a_body_reads_checks_only_its_crate.
+#[test]
+fn a_late_input_a_body_other_checks_see_checks_them_again() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let lib = format!("{LIB}pub fn bytes() -> impl Sized {{ *include_bytes!(\"data.txt\") }}\n\
+        pub async fn later() -> usize {{ env!(\"CHECK_REUSE_V\").len() }}\n\
+        pub fn sized() -> usize {{\n    let a: [u8; include_str!(\"n.txt\").len()] = [0; 3];\n    a.len() + const {{ env!(\"CHECK_REUSE_W\").len() }}\n}}\n");
+    let dir = package("late-seen", &[("lib.rs", &lib), ("bin.rs", BIN), ("data.txt", "one"), ("n.txt", "abc")]);
+    let mut env = [("CHECK_REUSE_V", "a"), ("CHECK_REUSE_W", "a")];
+    let first = check_in_child(&dir, true, &env);
+    assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
+    std::fs::write(dir.join("data.txt"), "four").unwrap();
+    let (reused, _) = reused_and_verified(&dir, &env, "an opaque return type's body");
+    assert_eq!(reused.hits, 0, "an opaque return type's body: {reused:?}");
+    env[0].1 = "bb";
+    let (reused, _) = reused_and_verified(&dir, &env, "an async fn's body");
+    assert_eq!(reused.hits, 0, "an async fn's body: {reused:?}");
+    std::fs::write(dir.join("n.txt"), "xyz").unwrap();
+    let (reused, _) = reused_and_verified(&dir, &env, "an array length in a fn body");
+    assert_eq!(reused.hits, 0, "an array length in a fn body: {reused:?}");
+    env[1].1 = "bb";
+    let (reused, _) = reused_and_verified(&dir, &env, "an inline const in a fn body");
+    assert_eq!(reused.hits, 0, "an inline const in a fn body: {reused:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -493,6 +569,23 @@ fn a_build_output_edit_checks_again() {
 #[test]
 fn a_lint_flag_checks_again() {
     changed("lintflag", &[("lib.rs", LIB), ("bin.rs", BIN)], &[], |_| {}, &[("RELAX_LINT_FLAGS", "-A dead_code")], 0);
+}
+
+/// How a check runs is no part of its keys (check_reuse.rs RUN_RESOURCE_VARS): a store filled under
+/// one owner and job count serves a check under another, every verdict reused. A `RELAX_*` variable
+/// the keys do not know still checks again.
+#[test]
+fn a_store_serves_another_owner_and_job_count() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let dir = package("runner", &[("lib.rs", LIB), ("bin.rs", BIN)]);
+    let first = check_in_child(&dir, true, &[("RELAX_JOBS", "1"), ("RELAX_RUN_OWNER", "L1")]);
+    assert_eq!(first.hits, 0, "{first:?}");
+    let other = [("RELAX_JOBS", "3"), ("RELAX_RUN_OWNER", "L2")];
+    let (reused, _) = reused_and_verified(&dir, &other, "another owner and job count");
+    assert!(reused.full && reused.hits == 2, "a store one owner and job count filled serves another: {reused:?}");
+    let unknown = check_in_child(&dir, true, &[other[0], other[1], ("RELAX_CHECK_KEY_PROBE", "1")]);
+    assert_eq!(unknown.hits, 0, "a RELAX_* variable the keys do not know checks again: {unknown:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Under `-D warnings` a warning fails the check: nothing is stored, the next check checks all.
@@ -703,9 +796,9 @@ fn a_dependency_error_fails_the_check() {
     write("ws/app/lib.rs", &app(1));
     for (what, dep, code, named) in [
         ("an unresolved import", "use std::collections::NoSuchMap;\npub fn value() -> u32 { 7 }\n", "E0432", true),
-        ("a field type", "pub struct S { pub f: NoSuchType }\npub fn value() -> u32 { 7 }\n", "E0412", true),
+        ("a field type", "pub struct S { pub f: NoSuchType }\npub fn value() -> u32 { 7 }\n", "E0425", true),
         // (a fn signature is collected when a body reaches it)
-        ("a signature the app reaches", "pub fn value() -> NoSuchType { loop {} }\n", "E0412", true),
+        ("a signature the app reaches", "pub fn value() -> NoSuchType { loop {} }\n", "E0425", true),
     ] {
         write("dep/lib.rs", dep);
         fails(&format!("{what}, cold"), code, named, false);
@@ -719,7 +812,7 @@ fn a_dependency_error_fails_the_check() {
     write(&format!("{registry_dep}/Cargo.toml"), "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
     write(&format!("{registry_dep}/lib.rs"), "pub fn value() -> NoSuchType { loop {} }\n");
     write("ws/app/Cargo.toml", &app_toml(registry_dep));
-    fails("a published crate's signature the app reaches", "E0412", true, true);
+    fails("a published crate's signature the app reaches", "E0425", true, true);
     write("ws/app/Cargo.toml", &app_toml("dep"));
     write("dep/lib.rs", "pub fn value() -> u32 { 7 }\n");
     for what in ["fixed", "fixed, again"] {
@@ -737,7 +830,11 @@ fn a_dependency_error_fails_the_check() {
 /// the names resolve, and a name the app's own two globs both provide is ambiguous where it is
 /// used (E0659). A `pub(crate)` glob of the dependency's module brings the app nothing (relax
 /// issue 186: its `Scalar` met the app's own through the app's two globs, E0659, and in a type
-/// it named the dependency's `f32`, E0308).
+/// it named the dependency's `f32`, E0308). Nor does a private module's ambiguous name the
+/// dependency's root globs beside a visible binding of it: the root's `Gear` is `tool`'s, and the
+/// app's uses of it are clean, as rustc has them (a private module's two globs of `shader`
+/// reached a framework crate's root through its `pub use vm::*`, and an app's single import of
+/// a path through `shader` got the lint, which rustc does not report).
 #[test]
 fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
@@ -750,10 +847,10 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     };
     write("ws/Cargo.toml", "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n");
     write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
-    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\nmod units { pub type Scalar = f32; }\npub mod prelude { pub struct Body; #[allow(unused_imports)] pub(crate) use crate::units::*; }\n");
+    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\nmod units { pub type Scalar = f32; }\npub mod prelude { pub struct Body; #[allow(unused_imports)] pub(crate) use crate::units::*; }\npub mod tool { pub struct Gear; }\nmod other { pub struct Gear; }\nmod mix { #[allow(unused_imports)] use super::tool::*; #[allow(unused_imports)] use super::other::*; pub fn mixed() -> u32 { 2 } }\npub use mix::*;\npub use tool::*;\n");
     write("dep/inner.rs", "use super::*;\nmod b { pub struct Dup; }\npub use b::*;\npub struct Inner;\npub fn inner_fn() -> u32 { root_fn() + 1 }\n");
     write("ws/app/Cargo.toml", "[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = { path = \"../../dep\" }\n");
-    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\nuse dep::prelude::*;\nmod clock {{ pub struct Scalar; }}\nuse clock::*;\npub fn body() -> Body {{ let _s: Scalar = Scalar; Body }}\n{clash}");
+    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\nuse dep::prelude::*;\nmod clock {{ pub struct Scalar; }}\nuse clock::*;\npub fn body() -> Body {{ let _s: Scalar = Scalar; Body }}\npub fn gear() -> u32 {{ let _ = Gear; let _ = dep::Gear; mixed() }}\npub mod two {{ use dep::Gear; pub fn h() {{ let _ = Gear; }} }}\n{clash}");
     let check = || {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
@@ -764,8 +861,8 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
         let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
         (code, stderr.into_owned())
     };
-    // the dep's names through the cycle and the enum glob, and the app's `Scalar` beside the dep's
-    // `pub(crate)` glob: no diagnostic
+    // the dep's names through the cycle and the enum glob, the app's `Scalar` beside the dep's
+    // `pub(crate)` glob, and `Gear` past the private module's ambiguous one: no diagnostic
     write("ws/app/lib.rs", &app(""));
     let clean = check();
     assert!(clean.0 == Some(0) && !clean.1.contains(": error") && !clean.1.contains(": warning:"), "{}", clean.1);
@@ -773,5 +870,12 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     write("ws/app/lib.rs", &app("mod own { pub struct Thing; }\nuse own::*;\npub fn clash() -> u32 { let _ = Thing; 0 }\n"));
     let clash = check();
     assert!(clash.0.is_some_and(|c| c != 0) && clash.1.contains("E0659") && clash.1.contains("`Thing` is ambiguous"), "{}", clash.1);
+    // the dep's own ambiguous `Dup` (its two globs): rustc reads it from metadata as an ambiguous
+    // child, and each use -- through the glob, as a type, by path, by a single import and through
+    // that import -- is the deny-by-default lint `ambiguous_glob_imports`, not E0659
+    write("ws/app/lib.rs", &app("pub fn dup(_d: Dup) { let _ = Dup; let _ = dep::Dup; }\nmod one { use dep::Dup; pub fn g() { let _ = Dup; } }\n"));
+    let dup = check();
+    let lines: Vec<&str> = dup.1.lines().filter(|l| l.contains("`Dup` is ambiguous")).collect();
+    assert!(dup.0.is_some_and(|c| c != 0) && lines.len() == 5 && lines.iter().all(|l| l.contains("ambiguous_glob_imports") && !l.contains("E0659")), "{}", dup.1);
     std::fs::remove_dir_all(&dir).unwrap();
 }

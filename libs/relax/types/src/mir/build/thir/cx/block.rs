@@ -52,7 +52,7 @@ impl Cx<'_> {
                 Ok(Some(self.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope, expr } })))
             }
             ast::Stmt::Let(row) => {
-                let ast::LetStmt { pat, ty, init, else_, .. } = *ast.row(row);
+                let ast::LetStmt { pat, ty, init, else_, super_, .. } = *ast.row(row);
                 let pat_span = self.pat_span(pat);
                 let span = match init.get() {
                     Some(init) => self.span(pat_span.lo, self.ast().expr(init).hi.max(pat_span.hi)),
@@ -70,7 +70,7 @@ impl Cx<'_> {
                     Some(init) => Some(self.mirror_expr(init)?),
                     None => None,
                 };
-                let kind = StmtKind::Let { remainder_scope, init_scope, pattern: Box::new(pattern), initializer, else_block, node, span };
+                let kind = StmtKind::Let { remainder_scope, init_scope, pattern: Box::new(pattern), initializer, else_block, node, span, super_ };
                 Ok(Some(self.thir.alloc_stmt(Stmt { kind })))
             }
         }

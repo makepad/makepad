@@ -12,6 +12,9 @@
 #   every makepad-script call it makes from JIT code;
 # - vm_call: a panic in a with_vm closure (makepad-script-std bound): the trampoline boxes it on
 #   the caller's side, ScriptVmCall::resume_if_panicked frees the box there and resumes it;
+# - relax-provided-enum: primitive-repr enums built, matched and dropped on both sides,
+#   Option/Vec/handle fields, mutable bindings, guards and partial moves agree on every line;
+#   a repr(Rust) data enum still refuses construction and names #[repr(u8)] as the remedy;
 # and a field whose bytes are rustc's alone stays refused, naming the field
 # (relax-provided-fixture-guard: `Registry.by_name`, rustc's HashMap), as does an unmarked fn
 # counting rustc's Arc of a type that crosses the boundary (relax-provided-fixture-arc-guard).
@@ -42,6 +45,22 @@ guard=$(jit relax-provided-fixture --bin relax-provided-fixture-guard)
 echo "$guard" | grep -q 'a field of `relax_provided_fixture::Registry` (`by_name: ' || echo "$guard" | grep -q 'a field of `Registry` (`by_name: ' || { fail="$fail guard"; echo "--- guard:"; echo "$guard" | tail -6 | cut -c1-600; }
 arc=$(jit relax-provided-fixture --bin relax-provided-fixture-arc-guard)
 echo "$arc" | grep -q 'shared_registry_retain` calls `[a-z:]*increment_strong_count` in JIT-compiled code' || { fail="$fail arc-guard"; echo "--- arc-guard:"; echo "$arc" | tail -6 | cut -c1-600; }
+native=$(cargo run --release -q -p relax-provided-fixture --bin relax-provided-enum 2>&1); native_rc=$?
+# (the JIT run's own diagnostics on stderr are not the program's lines)
+out=$(jit relax-provided-fixture --bin relax-provided-enum); rc=$?
+out=$(printf '%s\n' "$out" | grep -v -e '^relax: ' -e '^makepad-remote: ')
+if [ $native_rc != 0 ] || [ $rc != 0 ] || [ -z "$native" ] || [ "$native" != "$out" ]; then
+    fail="$fail provided-enum"
+    echo "--- provided-enum native (rc $native_rc):"; echo "$native"
+    echo "--- provided-enum jit (rc $rc):"; echo "$out"
+else
+    echo "provided-enum: all lines agree"
+fi
+refused=$(jit relax-provided-fixture --bin relax-provided-enum -- refused); rc=$?
+if [ $rc = 0 ] || ! echo "$refused" | grep -F -q 'RefusedPodTy' || ! echo "$refused" | grep -F -q 'Mark it #[repr(u8)] so both compilers lay it out alike'; then
+    fail="$fail enum-refused"
+    echo "--- enum-refused (rc $rc):"; echo "$refused" | tail -6 | cut -c1-600
+fi
 rm -rf "$dir"
 if [ -z "$fail" ]; then
     echo "provided_script: ok"

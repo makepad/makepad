@@ -42,7 +42,7 @@ for app in $APPS; do
     if cat "$out/$app".* 2>/dev/null | grep -q "lives in a provided crate"; then failed="$failed $app"; fi
 done
 echo "--- distinct refusals:"
-cat "$out"/*.audit "$out"/*.run 2>/dev/null | grep -o "static \`[^\`]*\` is read from JIT-compiled code\|\`[^\`]*\` calls \`[^\`]*\` in JIT-compiled code\|a field of \`[^\`]*\` is [a-z]*\|\`[^\`]*\` is built in JIT-compiled code\|\`[^\`]*\` is [a-z]* by variant" | sort | uniq -c | sort -rn
+cat "$out"/*.audit "$out"/*.run 2>/dev/null | grep -o "static \`[^\`]*\` is read from JIT-compiled code\|static \`[^\`]*\` (\`[^\`]*\`) is laid out and run by rustc's std\|static \`[^\`]*\` of provided crate \`[^\`]*\`[:a-z ]*\|\`[^\`]*\` calls \`[^\`]*\` in JIT-compiled code\|a field of \`[^\`]*\` is [a-z]*\|\`[^\`]*\` is built in JIT-compiled code\|\`[^\`]*\` is [a-z]* by variant" | sort | uniq -c | sort -rn
 echo "--- violation rows (audit) with the way in:"
 grep -h -A1 "^violation" "$out"/*.audit 2>/dev/null | cut -c1-400 | head -80
 echo "--- panics:"

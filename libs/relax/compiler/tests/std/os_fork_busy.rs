@@ -190,48 +190,66 @@ pub fn concurrent_spawns_while_tiers_build() {
     eprintln!("os_fork_busy: longest spawn {:.1} ms", SPAWN_MAX_US.load(Ordering::Relaxed) as f64 / 1e3);
 }
 
-/// Spawns from four threads whose children outlive them: no spawn waits for another spawn's child.
-/// Between `pipe` and `fcntl(FD_CLOEXEC)` another thread's fork left this spawn's error pipe open in
-/// its child, and the spawn read that pipe until that child ended (a devhub test's hub held its
-/// lease table through it, and its tools waited for the run that never started, 2026-11-04). Real
-/// std's `pipe2` has no such moment on Linux; macOS has no pipe2, in real std either, so there the count
-/// is a race in both std's and goes to stderr, not into the compared lines.
+/// Spawns from four threads at once: no child holds another spawn's descriptor. Between `pipe` and
+/// `fcntl(FD_CLOEXEC)` another thread's fork left a spawn's error pipe open in its child, and the
+/// spawn read that pipe until that child ended (a devhub test's hub held its lease table through
+/// it, and its tools waited for the run that never started, 2026-11-04). What is counted is that
+/// cause: the descriptors each child holds once it echoed a byte, beyond those a child spawned
+/// alone first holds there (what every child inherits). A spawn's duration counted a slow first
+/// build of its closure under the JIT on a loaded box as such a wait (agree, 2026-11-14). Real
+/// std's `pipe2` has no such moment on Linux; macOS has no pipe2 (in real std either) and no /proc,
+/// so nothing is counted there.
 #[test]
 fn a04_spawns_never_wait_for_each_others_children() {
     spawns_never_wait_for_each_others_children();
 }
 
+/// `cat` through std's fork path (a pre_exec closure), with its stdin and stdout piped.
+fn echo_child() -> std::process::Child {
+    let mut c = Command::new("cat");
+    c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    unsafe {
+        c.pre_exec(|| Ok(()));
+    }
+    c.spawn().unwrap()
+}
+
+/// The descriptors `c` holds once it echoed a byte (Linux: /proc/<pid>/fd), or None where they
+/// cannot be read; then `c` is ended. The echo comes after its exec closed what the fork copied
+/// with close-on-exec and after its own start (the dynamic loader opens its libraries as fd 3).
+fn held_fds(mut c: std::process::Child) -> Option<std::collections::BTreeSet<u32>> {
+    use std::io::{Read, Write};
+    let mut byte = [0u8; 1];
+    let echoed = c.stdin.as_mut().is_some_and(|i| i.write_all(b"x").is_ok()) && c.stdout.as_mut().is_some_and(|o| o.read_exact(&mut byte).is_ok());
+    let fds = if echoed { std::fs::read_dir(format!("/proc/{}/fd", c.id())).ok() } else { None };
+    let fds = fds.map(|d| d.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect());
+    let _ = c.kill();
+    let _ = c.wait();
+    fds
+}
+
 /// The test's body (also run by `relax-fork-busy`).
 pub fn spawns_never_wait_for_each_others_children() {
-    const LIFE: Duration = Duration::from_secs(1);
-    let waited = AtomicUsize::new(0);
+    let inherited = held_fds(echo_child());
+    let holding = AtomicUsize::new(0);
     std::thread::scope(|s| {
         for _ in 0..4 {
             s.spawn(|| {
-                let mut children = Vec::new();
                 for _ in 0..SIBLING_SPAWNS {
-                    let mut c = Command::new("sleep");
-                    c.arg("1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-                    unsafe {
-                        c.pre_exec(|| Ok(()));
+                    if let (Some(base), Some(fds)) = (&inherited, held_fds(echo_child())) {
+                        if !fds.is_subset(base) {
+                            holding.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
-                    let t = Instant::now();
-                    children.push(c.spawn().unwrap());
-                    if t.elapsed() >= LIFE {
-                        waited.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                for mut c in children {
-                    let _ = c.wait();
                 }
             });
         }
     });
-    let waited = waited.load(Ordering::Relaxed);
-    if cfg!(target_vendor = "apple") {
-        eprintln!("os_fork_busy: spawns that waited for another spawn's child: {waited}");
+    let holding = holding.load(Ordering::Relaxed);
+    if cfg!(target_os = "linux") {
+        println!("| children holding another spawn's descriptor: {holding}");
     } else {
-        println!("| spawns that waited for another spawn's child: {waited}");
+        eprintln!("os_fork_busy: a child's descriptors are read from /proc, which only Linux has");
     }
 }
 

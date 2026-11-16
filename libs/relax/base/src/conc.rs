@@ -127,6 +127,10 @@ pub struct MemoMap<K, V> {
 
 struct MemoTable<K, V> {
     buckets: Box<[std::sync::atomic::AtomicPtr<MemoNode<K, V>>]>,
+    /// bit r: a bucket of run r (2^MEMO_RUN buckets) was used. The walks of the table read those
+    /// runs alone (`used`), so a large table's untouched pages stay untouched when it is freed
+    /// too: freeing a cleared 2^20-bucket table read all 8 MB of it for the two entries it held.
+    runs: Box<[std::sync::atomic::AtomicU64]>,
 }
 
 struct MemoNode<K, V> {
@@ -140,18 +144,53 @@ unsafe impl<K: Send + Sync, V: Send + Sync> Send for MemoMap<K, V> {}
 unsafe impl<K: Send + Sync, V: Send + Sync> Sync for MemoMap<K, V> {}
 
 const MEMO_LOCKS: usize = 64;
+/// Log2 of the buckets one bit of `runs` stands for: 16 KB of buckets, a page.
+const MEMO_RUN: u32 = 11;
 
 impl<K, V> MemoTable<K, V> {
     fn new(bits: u32) -> *mut MemoTable<K, V> {
         // All-zero bytes are null pointers: a large fresh zeroed allocation's pages stay
         // untouched until a bucket is used (a Program/Tcx holds dozens of 2^16-bucket tables).
         let buckets = unsafe { Box::<[std::sync::atomic::AtomicPtr<MemoNode<K, V>>]>::new_zeroed_slice(1usize << bits).assume_init() };
-        Box::into_raw(Box::new(MemoTable { buckets }))
+        let runs = unsafe { Box::<[std::sync::atomic::AtomicU64]>::new_zeroed_slice(((1usize << bits) >> MEMO_RUN).max(1).div_ceil(64)).assume_init() };
+        Box::into_raw(Box::new(MemoTable { buckets, runs }))
+    }
+
+    /// Bucket b gets node n as its head; the run is marked before the bucket points at it.
+    #[inline]
+    fn publish(&self, b: usize, n: *mut MemoNode<K, V>) {
+        use std::sync::atomic::Ordering;
+        let r = b >> MEMO_RUN;
+        let bit = 1u64 << (r % 64);
+        let word = &self.runs[r / 64];
+        if word.load(Ordering::Acquire) & bit == 0 {
+            word.fetch_or(bit, Ordering::AcqRel);
+        }
+        self.buckets[b].store(n, Ordering::Release);
+    }
+
+    /// Buckets in runs that have been used, leaving untouched runs unread.
+    fn used(&self) -> impl Iterator<Item = &std::sync::atomic::AtomicPtr<MemoNode<K, V>>> {
+        self.runs.iter().enumerate().flat_map(move |(i, word)| {
+            let mut bits = word.load(std::sync::atomic::Ordering::Acquire);
+            std::iter::from_fn(move || {
+                if bits == 0 { return None; }
+                let r = i * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let start = r << MEMO_RUN;
+                Some(&self.buckets[start..(start + (1usize << MEMO_RUN)).min(self.buckets.len())])
+            })
+        }).flatten()
+    }
+
+    /// No bucket run has been marked as used.
+    fn unused(&self) -> bool {
+        self.runs.iter().all(|word| word.load(std::sync::atomic::Ordering::Acquire) == 0)
     }
 
     unsafe fn free(t: *mut MemoTable<K, V>) {
         let t = Box::from_raw(t);
-        for b in t.buckets.iter() {
+        for b in t.used() {
             let mut p = b.load(std::sync::atomic::Ordering::Relaxed);
             while !p.is_null() {
                 let n = Box::from_raw(p);
@@ -265,7 +304,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     pub fn snapshot(&self) -> HashMap<K, V> where K: Clone {
         let mut out = HashMap::default();
         let table = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
-        for bucket in &table.buckets {
+        for bucket in table.used() {
             let mut ptr = bucket.load(std::sync::atomic::Ordering::Acquire);
             while !ptr.is_null() {
                 let node = unsafe { &*ptr };
@@ -284,7 +323,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
         let _k = self.phase();
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v, next: head }));
-        t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
+        t.publish(b, n);
     }
 
     /// Inserts `v` unless the key is already there; returns the value the map holds for it (the
@@ -300,7 +339,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
         let _k = self.phase();
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v.clone(), next: head }));
-        t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
+        t.publish(b, n);
         v
     }
 
@@ -318,7 +357,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
         let _k = self.phase();
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v, next: head }));
-        t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
+        t.publish(b, n);
     }
 
     /// Memory report: (entries, bytes) of the current table, `deep` adding each entry's own heap
@@ -326,7 +365,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     pub fn mem_stats(&self, deep: impl Fn(&K, &V) -> usize) -> (usize, usize) {
         let t = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
         let (mut n, mut b) = (0usize, t.buckets.len() * 8);
-        for bucket in t.buckets.iter() {
+        for bucket in t.used() {
             let mut p = bucket.load(std::sync::atomic::Ordering::Acquire);
             while !p.is_null() {
                 let node = unsafe { &*p };
@@ -339,6 +378,11 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     }
 
     pub fn clear(&self) {
+        let table = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
+        if table.unused() {
+            // Keep an unused table instead of allocating and retiring one.
+            return;
+        }
         let _k = self.phase();
         let fresh = MemoTable::new(self.bits);
         let old = self.table.swap(fresh, std::sync::atomic::Ordering::AcqRel);
@@ -349,7 +393,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     /// Safety: exclude ALL readers and writers (including suspended queries holding references).
     pub unsafe fn retain_exclusive(&self, mut keep: impl FnMut(&K, &V) -> bool) {
         let table = &*self.table.load(std::sync::atomic::Ordering::Relaxed);
-        for bucket in table.buckets.iter() {
+        for bucket in table.used() {
             let mut prev: *mut MemoNode<K, V> = std::ptr::null_mut();
             let mut node = bucket.load(std::sync::atomic::Ordering::Relaxed);
             while !node.is_null() {
@@ -505,7 +549,8 @@ impl<T> AppendVec<T> {
 
     #[inline]
     fn ptr(&self, i: usize) -> *mut T {
-        assert!(i < self.len(), "AppendVec index {} out of bounds", i);
+        let len = self.len();
+        assert!(i < len, "AppendVec index {} out of bounds (len {})", i, len);
         let c = self.chunks[i >> AV_BITS].load(std::sync::atomic::Ordering::Acquire);
         unsafe { c.add(i & (AV_CHUNK - 1)) }
     }
@@ -559,8 +604,58 @@ impl<T> Drop for AppendVec<T> {
 
 #[cfg(test)]
 mod settle_tests {
-    use super::MemoMap;
+    use super::{MemoMap, MemoTable, MEMO_RUN};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn walks_read_the_bucket_runs_in_use() {
+        fn used_runs<K, V>(table: &MemoTable<K, V>) -> u32 {
+            table.runs.iter().map(|word| word.load(Ordering::Acquire).count_ones()).sum()
+        }
+
+        let map = MemoMap::with_bits(14);
+        let table = map.table.load(Ordering::Acquire);
+        map.clear();
+        assert_eq!(map.table.load(Ordering::Acquire), table, "clearing an unused table replaced it");
+        assert!(map.graveyard.lock().unwrap_or_else(|e| e.into_inner()).is_empty(), "clearing an unused table retired it");
+        assert_eq!(used_runs(unsafe { &*table }), 0, "an unused table has marked runs");
+
+        let values: Vec<_> = (0..600).map(|_| Arc::new(vec![0u8; 16])).collect();
+        map.insert(1, values[0].clone());
+        assert!(Arc::ptr_eq(&map.insert_first(2, values[1].clone()), &values[1]), "insert first returned a different value");
+        map.put_unless(3, values[2].clone(), |_| false);
+        assert!((1..=3).contains(&used_runs(unsafe { &*table })), "three entries should mark one to three runs");
+        assert_eq!(map.snapshot().len(), 3, "snapshot missed the first three entries");
+        assert_eq!(map.mem_stats(|_, _| 0).0, 3, "memory stats missed the first three entries");
+
+        for k in 4..=600 { map.insert(k, values[k - 1].clone()); }
+        for (b, bucket) in unsafe { &*table }.buckets.iter().enumerate() {
+            if !bucket.load(Ordering::Acquire).is_null() {
+                let r = b >> MEMO_RUN;
+                assert_ne!(unsafe { &*table }.runs[r / 64].load(Ordering::Acquire) & (1u64 << (r % 64)), 0, "a bucket with entries is in an unmarked run");
+            }
+        }
+        assert_eq!(map.snapshot().len(), 600, "snapshot missed entries in used runs");
+        assert_eq!(map.mem_stats(|_, _| 0).0, 600, "memory stats missed entries in used runs");
+
+        unsafe { map.retain_exclusive(|k, _| k % 3 == 0); }
+        assert_eq!(map.snapshot().len(), 200, "retain kept the wrong number of entries");
+        for (i, v) in values.iter().enumerate() {
+            assert_eq!(Arc::strong_count(v), if (i + 1) % 3 == 0 { 2 } else { 1 }, "retain did not keep or free the value for key {}", i + 1);
+        }
+
+        map.clear();
+        let fresh = map.table.load(Ordering::Acquire);
+        assert_ne!(fresh, table, "clearing a used table did not replace it");
+        assert_eq!(map.graveyard.lock().unwrap_or_else(|e| e.into_inner()).as_slice(), &[table], "clearing a used table did not retire it");
+        assert!(!map.contains(&3), "clear left a retained key in the map");
+        assert_eq!(used_runs(unsafe { &*fresh }), 0, "the fresh table has marked runs");
+        unsafe { map.reclaim(); }
+        for (i, v) in values.iter().enumerate() {
+            assert_eq!(Arc::strong_count(v), 1, "reclaim did not free the value for key {}", i + 1);
+        }
+    }
 
     #[test]
     fn exclusive_retain_frees_removed_and_retired_values() {

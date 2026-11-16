@@ -22,6 +22,10 @@ test-tree = "its build script runs cargo metadata on the checkout"
 name = "relax_compiler"
 path = "src/lib.rs"
 
+[[test]]
+name = "enum_tag16"
+path = "tests/enum_tag16.rs"
+
 [dependencies]
 makepad-cpu-budget = { workspace = true }
 makepad-core-util = { path = "../../core_util", version = "0.1.0" }

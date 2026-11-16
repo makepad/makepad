@@ -60,7 +60,7 @@ pub(crate) fn note_samples(u: &Unit, it: impl Iterator<Item = (u32, u64)>) {
     let m = g.get_or_insert_with(HashMap::new);
     for (mut id, w) in it {
         // a twin's time is its slot's (the export ships the slot)
-        while let crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p) = u.fns[id as usize].key {
+        while let crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p) | crate::jit::FnKey::Ctfe(p) = u.fns[id as usize].key {
             if p == id || p as usize >= u.fns.len() { break; }
             id = p;
         }
@@ -568,8 +568,8 @@ fn read_union() -> Result<HashMap<String, std::collections::HashSet<(usize, usiz
     for path in file.split(',').filter(|p| !p.is_empty()) {
         let bytes = std::fs::read(path).map_err(|e| format!("union {path}: {e}"))?;
         let j = crate::json::parse(&bytes).map_err(|e| format!("union {path}: {e}"))?;
-        if j.get("format").map(|v| v.str()) != Some("makepad-web-trace/1") {
-            return Err(format!("union {path}: expected makepad-web-trace/1"));
+        if j.get("format").map(|v| v.str()) != Some("relax-web-trace/1") {
+            return Err(format!("union {path}: expected relax-web-trace/1"));
         }
         let functions = j.get("functions").ok_or_else(|| format!("union {path}: no functions"))?;
         for f in functions.arr() {
@@ -684,7 +684,8 @@ pub fn finish(u: &Unit) {
     // Const/static initializer slots run only in the compiler. Their declared
     // images are linked as data; their evaluator bodies are not runtime roots.
     // Use the coverage collector's same distinction, keeping every union root.
-    funcs.retain(|id, _| (*id as usize) < u.fns.len() && (forced.contains(id)
+    funcs.retain(|id, _| (*id as usize) < u.fns.len()
+        && !matches!(u.fns[*id as usize].key, crate::jit::FnKey::Ctfe(_)) && (forced.contains(id)
         || u.fns[*id as usize].compiled && crate::coverage::runtime_function(u, *id)));
     if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: {} slots captured, {} installed runtime/union roots (of {} slots in the unit); {} compiler initializer roots excluded", n_cap, funcs.len(), u.fns.len(), n_initializers);
@@ -1118,7 +1119,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             for id in &reached { included.extend(funcs[id].inl_slots.iter().copied()); }
         }
         let keys = included.iter().map(|id| crate::jit::slot_key(u, *id)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-        if let Err(error) = std::fs::write(&manifest, format!("makepad-shipped-functions/1\n{}\n", keys.join("\n"))) {
+        if let Err(error) = std::fs::write(&manifest, format!("relax-shipped-functions/1\n{}\n", keys.join("\n"))) {
             eprintln!("wasm export: function manifest {manifest}: {error}");
             FAILED.store(true, std::sync::atomic::Ordering::Release);
             let _ = std::fs::remove_file(path);
@@ -1208,7 +1209,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             let krate = loop {
                 match &u.fns[owner as usize].key {
                     crate::jit::FnKey::Inst(d, _) => break u.prog.syms.str(u.prog.crates[u.prog.def(*d).krate as usize].name),
-                    crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p)
+                    crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p) | crate::jit::FnKey::Ctfe(p)
                         if *p != owner && (*p as usize) < u.fns.len() => owner = *p,
                     _ => break "<generated>",
                 }
@@ -1418,7 +1419,7 @@ fn single_thread(name: &str) -> Option<HostBind> {
         n if n.starts_with("__relax_domain_") || n == "__relax_thread_spawn" => HostBind::Trap,
         // Linux std's only syscall is futex wait/wake (std sys/linux.rs): a no-op returning 0, as
         // macOS's __ulock_*
-        "syscall" | "__relax_wait_enter" | "__relax_wait_leave" | "__relax_wake" | "__ulock_wake" | "__ulock_wait" | "pthread_threadid_np" | "sched_yield" | "__relax_key_delete" | "__relax_catch_caught" => HostBind::Builtin(Builtin::Nop),
+        "syscall" | "__relax_wait_enter" | "__relax_wait_leave" | "__relax_wait_interrupted" | "__relax_wake" | "__ulock_wake" | "__ulock_wait" | "pthread_threadid_np" | "sched_yield" | "__relax_key_delete" | "__relax_catch_caught" => HostBind::Builtin(Builtin::Nop),
         // the one thread: id 1 (0 is a lock's "no owner": a reentrant lock would think it holds
         // itself), the main thread (gettid == getpid)
         "pthread_self" | "pthread_main_np" | "gettid" | "getpid" => HostBind::Builtin(Builtin::One),
@@ -1637,7 +1638,7 @@ fn slot_crate(u: &Unit, id: u32) -> Option<&crate::program::CrateInfo> {
     loop {
         match &u.fns[owner as usize].key {
             crate::jit::FnKey::Inst(d, _) => return u.prog.crates.get(u.prog.def(*d).krate as usize),
-            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p)
+            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p) | crate::jit::FnKey::Ctfe(p)
                 if *p != owner && (*p as usize) < u.fns.len() => owner = *p,
             _ => return None,
         }
@@ -1671,7 +1672,7 @@ fn generic_instance(u: &Unit, id: u32) -> bool {
     loop {
         match &u.fns[owner as usize].key {
             crate::jit::FnKey::Inst(_, args) => return !args.is_empty(),
-            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p)
+            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p) | crate::jit::FnKey::Ctfe(p)
                 if *p != owner && (*p as usize) < u.fns.len() => owner = *p,
             _ => return true,
         }

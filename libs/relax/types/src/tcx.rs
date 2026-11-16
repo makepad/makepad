@@ -225,6 +225,9 @@ pub struct Tcx {
     /// ADTs that each hold the previous one several times is exponential
     pub(crate) dtorck_constraints: std::sync::Mutex<crate::fxhash::HashMap<(DefId, usize), std::sync::Arc<crate::next_solver::dropck_outlives::DropckConstraint>>>,
     pub tys: Types,
+    /// Provided Option layout verdicts belong to this type context, never to a process-wide
+    /// TyId or name. OnceLock computes each verdict once even during parallel binding.
+    pub provided_option_layouts: crate::conc::MemoMap<TyId, std::sync::Arc<std::sync::OnceLock<Result<(), String>>>>,
     envs: env::Envs,
     /// Immutable entries; each declaration is lowered once by its first reader.
     sigs: ImageMap<DefId, std::sync::OnceLock<Box<SigParts>>>,
@@ -297,7 +300,7 @@ pub struct Tcx {
     future_defs: std::sync::OnceLock<Option<(DefId, DefId)>>,
     /// Return-position `impl Trait` declarations keyed by their opaque DefId.
     pub opaques: crate::conc::ShardMap<DefId, OpaqueDecl>,
-    /// The errors of lowering an opaque's bounds where it is written (E0412 ..), reported again by
+    /// The errors of lowering an opaque's bounds where it is written (E0425 ..), reported again by
     /// every later lowering of it (`lower_opaque`).
     opaque_lowering_errors: crate::conc::ShardMap<DefId, Vec<String>>,
     /// rustc `inferred_outlives_of` (a query there): the outlives requirements an ADT's fields put on its own
@@ -431,6 +434,7 @@ impl Tcx {
     fn with_types(tys: Types) -> Tcx {
         Tcx {
             tys,
+            provided_option_layouts: crate::conc::MemoMap::new_kept(8),
             dcx: Default::default(),
             dtorck_constraints: Default::default(),
             envs: env::Envs::new(),
@@ -535,6 +539,9 @@ impl Tcx {
                 // a trait impl whose trait did not resolve: reported there
                 None if is_trait_impl => {}
                 None => {
+                    // InherentCollect::check_item, rustc_hir_analysis/src/coherence/inherent_impls.rs:227:
+                    // an unresolved self type was diagnosed while lowering it, not an impl on a primitive.
+                    if matches!(self.tys.kind(st), TyKind::Error) { continue; }
                     if self.orphan_local(prog, st, krate) {
                         continue;
                     }
@@ -799,6 +806,7 @@ impl Tcx {
     }
 
     fn publish_declaration_inputs_with_solver(&mut self, visible: Option<&[bool]>, keep_solver: bool) {
+        self.provided_option_layouts.clear();
         self.variances.take();
         for cell in self.sigs.decoded_values_mut() {
             if let Some(p) = cell.get_mut() {
@@ -813,6 +821,8 @@ impl Tcx {
     /// Round-47 file input publication. Both version ids are invalidated so old
     /// dependencies cannot retain file-relative coordinates across edit/revert.
     pub fn publish_file_bodies(&mut self, files: &[u32]) {
+        // Const bodies can affect array lengths and hence Option layouts too.
+        self.provided_option_layouts.clear();
         let epoch = self.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         self.queries.file_bodies_changed(files, epoch);
     }
@@ -1406,6 +1416,33 @@ impl Tcx {
         ast.list(generics.params).iter().filter(|g| !matches!(g.kind, GenericParamKind::Lifetime(_))).count() as u32
     }
 
+    /// The type and const parameters of fn item `d`, the generic arguments of its instances: its
+    /// impl's, or its trait's with `Self` first, then its own and one per `impl Trait` parameter,
+    /// as [`Tcx::item_env`] names them and `fn_sig(d).n_generics` counts them, without lowering
+    /// the signature (a warm start's key decode asks it of every instance key it reads). None for
+    /// what is no fn item.
+    pub fn fn_generic_count(&self, prog: &Program, d: DefId) -> Option<u32> {
+        let def = prog.def(d);
+        if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) {
+            return None;
+        }
+        let ast = &prog.files[def.file as usize].ast;
+        let ItemKind::Fn(sig, _, _) = &ast.item(def.item).kind else { return None };
+        let sig = ast.fn_sig(*sig);
+        let parent = match (def.parent != NO_DEF).then(|| prog.def(def.parent).kind) {
+            Some(DefKind::Impl) => self.impl_generic_count(prog, def.parent),
+            Some(DefKind::Trait) => {
+                let pd = prog.def(def.parent);
+                let past = &prog.files[pd.file as usize].ast;
+                if past.as_trait(&past.item(pd.item).kind).is_some() { 1 + self.trait_generic_count(prog, def.parent) as u32 } else { 0 }
+            }
+            _ => 0,
+        };
+        let own = ast.list(sig.generics.params).iter().filter(|g| !matches!(g.kind, GenericParamKind::Lifetime(_))).count() as u32;
+        let synthetic = fn_impl_trait_params(ast, sig).into_iter().filter(|t| matches!(ast.ty(*t), ast::Ty::ImplTrait(_))).count() as u32;
+        Some(parent + own + synthetic)
+    }
+
     /// The impl's parameters and lifetime resolution, before its self type is lowered.
     fn impl_header_env(&self, prog: &Program, d: DefId, file: u32, generics: &ast::Generics) -> GenEnv {
         let mut env = GenEnv::default();
@@ -1756,6 +1793,9 @@ impl Tcx {
                 }
             }
         }
+        // a variant's clauses (its enum's, lowered for the variant) are computed here too, not first
+        // by a body that names the variant (body_facts.rs item_text: their errors are the enum's)
+        if def.kind == DefKind::Variant { let _ = self.own_clauses_of(prog, did); }
         if def.kind == DefKind::AssocFn && prog.item_defs.get(&(def.file, def.item.0)) == Some(&did) {
             // rustc_ast_passes ast_validation check_trait_fn_not_const (E0379)
             let ast = &prog.files[def.file as usize].ast;
@@ -2173,7 +2213,7 @@ impl Tcx {
         let (features, attr_pos) = tf::parse_target_feature_attrs(prog, file, attrs, &mut errors);
         let mut out = tf::TargetFeatureAttrs { attr_pos, ..Default::default() };
         if let Some(attr_pos) = attr_pos {
-            let arch = tf::target_arch(prog);
+            let arch = tf::target_arch(prog, file);
             // ast_lowering: a safe fn with the attribute is unsafe in the type system
             out.safe_target_features = header.safety == Safety::Safe;
             if out.safe_target_features && matches!(def.kind, DefKind::AssocFn) {
@@ -2477,7 +2517,22 @@ impl Tcx {
                 }
             },
             ast::Ty::Path(p) => self.lower_path_ty(cx, prog, file, module, env, p, Some(t)),
-            ast::Ty::DynTrait(bounds, _) => self.lower_dyn(cx, prog, file, module, env, ast.list(*bounds), 0, Some(t)),
+            ast::Ty::DynTrait(bounds, dyn_) => {
+                let bounds = ast.list(*bounds);
+                // Parsing accepts bare syntax in every edition: a macro's `$t:ty` may only
+                // stringify it. Reject it when used as a type, using the written token's edition.
+                if !dyn_ {
+                    let pos = bounds.iter().find_map(|b| match b {
+                        ast::Bound::Trait { path, .. } => Some(path.lo),
+                        _ => None,
+                    }).unwrap_or(0);
+                    if prog.files[file as usize].edition_at(pos) >= 2021 {
+                        self.err(cx, prog, file, pos, "E0782: trait objects must include the `dyn` keyword".to_string());
+                        return self.tys.error;
+                    }
+                }
+                self.lower_dyn(cx, prog, file, module, env, bounds, 0, Some(t))
+            }
             ast::Ty::ImplTrait(_) if env.impl_params.iter().any(|x| x.0 == t.0) => {
                 let i = env.impl_params.iter().find(|x| x.0 == t.0).unwrap().1;
                 self.tys.intern(TyKind::Param(i))
@@ -3076,7 +3131,8 @@ impl Tcx {
                 } else {
                     String::new()
                 };
-                self.err(cx, prog, file, p.lo, format!("E0412: cannot find type `{}` in this scope{}", path_str(prog, file, p), help));
+                let (at, message) = prog.unresolved_name_message(file, module, p, "type");
+                self.err(cx, prog, file, at, format!("E0425: {message}{help}"));
                 return self.tys.error;
             }
         };
@@ -3122,6 +3178,21 @@ impl Tcx {
                     return self.tys.error;
                 }
                 if self.prohibit_constraints(cx, prog, file, seg.args()) { return self.tys.error; }
+                // lower_generic_args: an argument given to another crate's `#[unstable]` parameter
+                // needs its feature (rustc 1.100's `vec::IntoIter<T, A>`: E0658 for allocator_ext)
+                let krate = prog.mods[module as usize].krate;
+                if def.krate != krate && self.validates(prog, file) {
+                    let given = match ast.gargs(seg.args()) {
+                        Some(ast::GenericArgs::Angle(v)) => ast.list(*v).iter().filter(|a| matches!(a, ast::GenericArg::Type(_) | ast::GenericArg::Const(_))).count(),
+                        _ => 0,
+                    };
+                    if given > 0 {
+                        let feats = prog.crates[krate as usize].features(prog);
+                        for (i, u) in crate::feature_gate::unstable_generic_params(prog, d) {
+                            if i < given && !u.enabled(feats) { self.err(cx, prog, file, seg.name.lo, u.message()); }
+                        }
+                    }
+                }
             }
         }
         match def.kind {
@@ -3166,6 +3237,31 @@ impl Tcx {
                 self.tys.error
             }
         }
+    }
+
+    /// How many of `args` (an ADT's or alias's, lifetimes apart) rustc's printer shows: the
+    /// trailing ones that equal their parameter's default, given the arguments before them, are
+    /// left out (rustc_middle ty/print/pretty.rs `generic_args_to_print`). So `type_name` of
+    /// `Vec<u8, Global>` is `Vec<u8>` and of `HashMap<K, V, RandomState>` is `HashMap<K, V>`, as
+    /// rustc's `type_name::<..>()` and the keys `#[relax_api]` records with it have them.
+    pub fn shown_args(&self, prog: &Program, d: DefId, args: &[TyId]) -> usize {
+        let mut n = args.len();
+        if n == 0 || !matches!(prog.def(d).kind, DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::TypeAlias) {
+            return n;
+        }
+        let state = EvalState::new();
+        // (a default that does not lower is no default here: nothing is reported)
+        state.errors.replace(Some(Vec::new()));
+        let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
+        while n > 0 {
+            let mut filled = args[..n - 1].to_vec();
+            self.fill_type_defaults(&cx, prog, d, &mut filled, None);
+            if filled.get(n - 1) != Some(&args[n - 1]) {
+                break;
+            }
+            n -= 1;
+        }
+        n
     }
 
     /// Appends the defaults of type params left out of `args` (`struct HashMap<K, V, S =
@@ -3637,7 +3733,9 @@ impl Tcx {
                     let first = prog.files[file as usize].text(ast.segs(p.segs)[0].name);
                     let known = prog.syms.get(first).is_some_and(|s| env.names.contains(&s) || prog.lookup_in_scope(module, s, true).is_some() || prog.lookup_in_scope(module, s, false).is_some() || prog.crates[prog.mods[module as usize].krate as usize].deps.iter().any(|d| d.0 == s));
                     if !known {
-                        self.err(cx, prog, file, p.lo, format!("E0433: failed to resolve: use of unresolved module or unlinked crate `{}`", first));
+                        let names: Vec<_> = ast.segs(p.segs).iter().map(|s| prog.files[file as usize].text(s.name)).collect();
+                        let message = prog.path_resolution_message(module, false, &names, 0, None);
+                        self.err(cx, prog, file, ast.segs(p.segs)[0].name.lo, format!("E0433: {message}"));
                     }
                 }
             }

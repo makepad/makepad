@@ -106,7 +106,7 @@ pub fn sets() -> &'static [&'static Set] {
 
 #[cfg(test)]
 mod tests {
-    use makepad_micro_proc_macro::{proc_macro::{Span, TokenStream}, TokenParser};
+    use makepad_micro_proc_macro::{proc_macro::TokenStream, TokenParser};
     use std::str::FromStr;
 
     /// The linked copy's token model takes the field types rustc's does (platform/script/tests/
@@ -116,13 +116,6 @@ mod tests {
     fn struct_fields_take_path_types() {
         let src = "{ #[rust] a: crate::pad_routing::TickHold, #[rust] b: ::std::collections::BTreeMap<u32, self::x::Y>, \
                    #[live] c: Vec<crate::x::Y>, #[rust] d: Option<(String, String)>, #[rust] e: m::Wrap<T>::Inner }";
-        // the host compiler installs the lexer behind `str::parse` (relax-front's builtins)
-        fn lex(s: &str) -> Option<TokenStream> {
-            let mut toks = Vec::new();
-            relax_lex::lexer::lex(s.as_bytes(), 2021, &mut toks).ok()?;
-            relax_lex::tokens::from_toks(s.as_bytes(), &toks, &|_, _| Span::call_site()).ok()
-        }
-        relax_lex::tokens::set_lexer(lex);
         let mut p = TokenParser::new(TokenStream::from_str(src).unwrap());
         let fields = p.eat_all_struct_fields().expect("fields parse");
         let got: Vec<(String, String)> = fields.iter().map(|f| (f.name.clone(), f.ty.to_string().replace(' ', ""))).collect();

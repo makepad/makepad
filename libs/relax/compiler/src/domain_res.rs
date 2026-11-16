@@ -114,6 +114,18 @@ type ForkFn = Option<unsafe extern "C" fn()>;
 #[cfg(unix)]
 static ATFORK: Mutex<Vec<(u64, ForkFn, ForkFn, ForkFn)>> = Mutex::new(Vec::new());
 
+/// `ATFORK` was used once: an exec child must not lock the registry it may have inherited locked.
+/// Conservative, never cleared while the run lives, even when a domain's handlers go; a run started
+/// again in place clears it with the registry (reset_statics).
+#[cfg(unix)]
+static ATFORK_USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The run may have registered fork handlers (an exec child's fork then takes the full path).
+#[cfg(unix)]
+pub(crate) fn atfork_may_have_handlers() -> bool {
+    ATFORK_USED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[cfg(unix)]
 use unix::Res;
 #[cfg(unix)]
@@ -382,6 +394,7 @@ mod unix {
     }
     pub(crate) fn note_child(pid: i32) {
         if pid > 0 {
+            crate::jit::note_progress(crate::jit::PROGRESS_PROC);
             note(Res::Child { pid, told: false, detached: false });
         }
     }
@@ -530,6 +543,8 @@ mod unix {
     /// The program's `pthread_atfork`, kept here (`ATFORK`): libc would call the handlers after the
     /// run's end, and on threads not in its domain.
     pub extern "C" fn pthread_atfork(prepare: ForkFn, parent: ForkFn, child: ForkFn) -> c_int {
+        // A fork racing this registration must not take the registry as unused.
+        ATFORK_USED.store(true, std::sync::atomic::Ordering::SeqCst);
         let domain = crate::domain::current();
         let _kept = crate::zone_alloc::kept();
         ATFORK.lock().unwrap_or_else(|e| e.into_inner()).push((domain, prepare, parent, child));
@@ -1045,4 +1060,6 @@ pub(crate) unsafe fn reset_statics() {
     reset(&OWNED, Mutex::new(Vec::new()));
     #[cfg(unix)]
     reset(&ATFORK, Mutex::new(Vec::new()));
+    #[cfg(unix)]
+    reset(&ATFORK_USED, std::sync::atomic::AtomicBool::new(false));
 }

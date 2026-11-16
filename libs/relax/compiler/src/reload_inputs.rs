@@ -23,6 +23,8 @@ struct ResolvedGraph {
     workspace: String,
     package: String,
     flags: Vec<String>,
+    /// the loader's features its provided closures were resolved with (run.rs unify_for)
+    unify: Vec<crate::unitgraph::Unify>,
     shape: u64,
 }
 
@@ -176,8 +178,8 @@ impl Inputs {
     }
 
     /// The graph `units` the app was resolved to (`graph_moved` resolves it again).
-    pub fn set_graph(&mut self, workspace: &str, package: &str, flags: &[String], units: &crate::unitgraph::Units) {
-        self.graph = Some(ResolvedGraph { workspace: workspace.into(), package: package.into(), flags: flags.to_vec(), shape: graph_shape(units) });
+    pub fn set_graph(&mut self, workspace: &str, package: &str, flags: &[String], units: &crate::unitgraph::Units, unify: Vec<crate::unitgraph::Unify>) {
+        self.graph = Some(ResolvedGraph { workspace: workspace.into(), package: package.into(), flags: flags.to_vec(), unify, shape: graph_shape(units) });
     }
 
     /// Whether `path` is a manifest or lockfile of the app's graph.
@@ -189,7 +191,7 @@ impl Inputs {
     /// manifests and the lockfile as they are now; one that does not resolve differs).
     pub(super) fn graph_moved(&self, sess: &std::sync::Arc<crate::Session>) -> bool {
         let Some(g) = &self.graph else { return true };
-        crate::unitgraph::unit_graph(sess, &g.workspace, &g.package, &g.flags).map_or(true, |units| graph_shape(&units) != g.shape)
+        crate::unitgraph::unit_graph(sess, &g.workspace, &g.package, &g.flags, false, &g.unify).map_or(true, |units| graph_shape(&units) != g.shape)
     }
 
     /// The loader binary's own sources ([`runner_paths`]). Outside the target directory only. A

@@ -3403,6 +3403,8 @@ impl<'a> Gen<'a> {
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::FMulAdd(np, na, w, d, a, b, c) => self.fma(options, *np, *na, *w, *d, *a, *b, *c),
             Inst::Coverage { .. } => unreachable!("coverage lowered before native emission"),
+            // (removed by the coroutine transform before any pass)
+            Inst::StorageDead(..) => {}
             Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(options, i),
             Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
             Inst::TlsStatic(d, off) => self.tls_static(*d, *off),
@@ -3900,7 +3902,13 @@ impl<'a> Gen<'a> {
                 let rd = self.use_i(options, *dst, R10);
                 let rs = self.use_i(options, *src, R11);
                 // overlapping bytes of the frame (frame::copy_overlap; a verify build fails on it,
-                // compile_freq): memmove order, each piece loaded whole before it is stored
+                // compile_freq): memmove order, each piece loaded whole before it is stored.
+                // Valid RIR never gets here (a Copy is a memcpy): coalesce_slot_copies joins slots in
+                // the RIR and keeps two apart where a copy between them would meet bytes of the
+                // joined slot (codegen tests/slot_coalesce.rs
+                // a_second_copy_at_another_offset_keeps_joined_slots_apart), and ptr::copy is a
+                // memmove call, never a Copy. Kept as the release build's guard against a pass or
+                // frame layout fault.
                 let delta = crate::frame::copy_overlap(&self.slot_pos, *dst, *src, *size);
                 if delta != 0 {
                     for (o, w) in crate::frame::copy_pieces(*size, 16, delta > 0) {

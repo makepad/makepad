@@ -1684,7 +1684,7 @@ fn sink_trees(f: &Func, direct: &dyn Fn(&Callee) -> bool) -> Option<Func> {
     let movable = |i: &Inst| -> Option<bool> {
         // Some(barrier-sensitive): may move; true: not past a memory effect
         match i {
-            Inst::Call(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) | Inst::AtomicLoad(..) | Inst::Coverage { .. } => None,
+            Inst::Call(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) | Inst::AtomicLoad(..) | Inst::Coverage { .. } | Inst::StorageDead(..) => None,
             _ if crate::passes::is_mem_effect(i) => None,
             Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) => Some(true),
             Inst::IBin(IOp::Div | IOp::Rem, ..) | Inst::IBinI(IOp::Div | IOp::Rem, ..) => Some(true),
@@ -4099,6 +4099,8 @@ impl<'a> Fx<'a> {
                 self.set(*d);
             }
             Inst::Coverage { .. } => return Err("native coverage probe in wasm output".into()),
+            // (removed by the coroutine transform before any pass)
+            Inst::StorageDead(..) => {}
             Inst::Fence(..) => {}
             Inst::FpEnv(false, d) => {
                 self.i64c(0);

@@ -1,7 +1,7 @@
-//! makepad inspect: a running program answers questions about itself (local/agent_state/fast-rust/
-//! inspect/DESIGN.md). One thread per `makepad run` listens on a Unix socket next to a discovery file
-//! in the temp dir; a client (`makepad inspect <pid|app|all> <command>`, or any agent speaking the
-//! line protocol) sends one request per line and reads JSON lines back, ending with an `end` line.
+//! makepad inspect: a running program answers questions about itself. One thread per `makepad run`
+//! listens on a Unix socket next to a discovery file in the temp dir; a client (`makepad inspect
+//! <pid|app|all> <command>`, or any agent speaking the line protocol) sends one request per line
+//! and reads JSON lines back, ending with an `end` line.
 //!
 //! The basics never need the owner thread: thread lists and stacks come from the OS and the code
 //! tables, waits from the lock-free wait registry, events from this module's own queue. Only names
@@ -251,7 +251,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("pause", "", "stops the program's threads (Relax's and inspect's keep running); stacks work while paused"),
     ("resume", "", "after pause: the program runs again (`resume P<n> panic` releases a parked panic)"),
     ("gpu", "[top [by=bytes|owner|site|churn] [n=15]|idle [frames=1800] [n=15]|snap <name>|diff <a> <b|now>|path <session>:<kind>:<index>:<generation>]", "HAL GPU memory: totals per session, kind and owner against the device (native apps: MAKEPAD_INSPECT=1 or MAKEPAD_REMOTE=1)"),
-    ("hal", "pump|pace", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none); pace: the WM-hosted shell's frame pacing"),
+    ("hal", "pump|pace|lose", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none); pace: the WM-hosted shell's frame pacing; lose: the GPU device is taken for lost, as a driver reset would (the run and the app recover on a new one)"),
     ("writes", "<Type::field> | (none: the watches) | W<n> [n=20] | rm <W<n>|all>", "who writes a struct field: the compiled fns that assign `x.field` (`=`, `op=`) are rebuilt to record every write: its site (fn, file:line), the value written and the field's address; `writes W<n>` reads the sites and the latest writes"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
     ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, live patches installed and the ones the newest presented window frame was built with (frame_patch), finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
@@ -1050,6 +1050,7 @@ fn display_name(u: &crate::jit::Unit, id: u32, depth: u32) -> String {
         // a SPEC-V twin: its base slot's name now (the twin's own copy was taken when it was made, before
         // the base had one: `[unverified]` alone)
         crate::jit::FnKey::Plain(b) if depth < 8 && (*b as usize) < u.fns.len() => format!("{} [unverified]", display_name(u, *b, depth + 1)),
+        crate::jit::FnKey::Ctfe(b) if depth < 8 && (*b as usize) < u.fns.len() => format!("ctfe:{}", display_name(u, *b, depth + 1)),
         _ => f.name.to_string(),
     }
 }
@@ -1403,6 +1404,7 @@ fn cmd_jit(req: &Req, out: &mut Out) {
         all / 1_000_000,
         blocks
     ));
+    out.line(&crate::jit::queue_held_line());
     // a program that presents frames: its rate in the same window (0 = it draws nothing now)
     if f1 > 0 {
         out.line(&format!("frames: {:.0} fps in the window ({} presented in all)", (f1 - f0) as f64 * 1000.0 / ms as f64, f1));
@@ -1946,7 +1948,7 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
             let ch = opened.channel;
             let service = active.clone();
             { let _k = crate::zone_alloc::kept();
-            if let Err(e) = std::thread::Builder::new().name("makepad-remote-service".into()).spawn(move || {
+            if let Err(e) = std::thread::Builder::new().name("run-inspect-service".into()).spawn(move || {
                 while let Some(ev) = ch.recv() {
                     if matches!(ev, makepad_remote::Event::Closed(..)) {
                         break;
@@ -2030,6 +2032,20 @@ pub extern "C" fn relax_wait_enter(kind: u32, addr: usize, holder: usize) {
 }
 
 pub extern "C" fn relax_wait_leave() {
+    wait_left();
+    // a test's watch that expired while it waited: it unwinds from here as a hang
+    crate::jit::watchdog_at_wait(|| {});
+}
+
+/// Relax std's sys futex_wait: a signal ended the wait's system call (EINTR) and the wait goes
+/// on. A test's watch that expired meanwhile (its kick is that signal) leaves the wait here and
+/// unwinds it as a hang: a lock no one releases never brings the thread to relax_wait_leave.
+pub extern "C" fn relax_wait_interrupted() {
+    crate::jit::watchdog_at_wait(wait_left);
+}
+
+/// A wait's end in the registry, the CPU budget and the program heap.
+fn wait_left() {
     if !crate::owner::in_fork_child() {
         makepad_cpu_budget::take_back();
     }

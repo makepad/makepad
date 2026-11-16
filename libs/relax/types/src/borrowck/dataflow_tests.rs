@@ -276,33 +276,26 @@ fn combined_results_keep_init_history_moves_and_call_edges_separate() {
     b.basic_blocks[2].is_cleanup = true;
     let (moves, set) = gather(&tcx, &b, true);
     let path = moves.rev_lookup.find_local(Local(1)).unwrap();
-    let arg_init = moves.init_path_map[path][0];
-    let call_init = moves.init_loc_map[at(0, 1)][0];
-    let borrow_init = moves.init_loc_map[at(0, 0)][0];
     let prog = crate::program::Program::new(&std::sync::Arc::new(crate::Session::default()));
     let analysis = Borrowck::new(&prog, &tcx, &b, &RegionValues::all(&b, 1), &set, &moves);
     let results = analysis.iterate_to_fixpoint();
     let mut cursor = results.cursor();
     cursor.seek_before_primary_effect(at(0, 0));
     assert!(!cursor.get().uninits.contains(path));
-    bits(cursor.get().ever_inits, &[arg_init]);
+    bits(cursor.get().ever_inits, &[1]); // the argument
     cursor.seek_after_primary_effect(at(0, 1));
     assert!(cursor.get().uninits.contains(path));
-    assert!(cursor.get().ever_inits.contains(arg_init));
-    assert!(cursor.get().ever_inits.contains(borrow_init));
-    assert!(!cursor.get().ever_inits.contains(call_init));
+    bits(cursor.get().ever_inits, &[1, 2]); // and the borrow; the call's return init is not yet
     for (block, uninit) in [(1, false), (2, true)] {
         cursor.seek_before_primary_effect(at(block, 0));
         assert_eq!(cursor.get().uninits.contains(path), uninit);
-        assert_eq!(cursor.get().ever_inits.contains(call_init), !uninit);
+        bits(cursor.get().ever_inits, &[1, 2]); // a move out does not end `_1`'s init history
         bits(cursor.get().borrows, &[0]); // Call destinations do not kill loans.
     }
     cursor.seek_after_primary_effect(at(1, 0));
     bits(cursor.get().borrows, &[]);
     assert!(cursor.get().uninits.contains(path));
-    assert!(!cursor.get().ever_inits.contains(arg_init));
-    assert!(!cursor.get().ever_inits.contains(call_init));
-    assert!(cursor.get().ever_inits.contains(borrow_init));
+    bits(cursor.get().ever_inits, &[2]); // StorageDead(_1) ends it
     assert_eq!(cursor.get().uninits.domain_size(), moves.move_paths.len());
-    assert_eq!(cursor.get().ever_inits.domain_size(), moves.inits.len());
+    assert_eq!(cursor.get().ever_inits.domain_size(), b.local_decls.len());
 }

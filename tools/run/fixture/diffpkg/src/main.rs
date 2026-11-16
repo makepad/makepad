@@ -7,7 +7,7 @@ macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 #[path = "../../../../../libs/relax/compiler/rwbench/src/box3d_scene.rs"]
 mod box3d_scene;
 
-const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files), ("smallvec_macro", smallvec_macro), ("substitutes", substitutes)];
+const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files), ("smallvec_macro", smallvec_macro), ("substitutes", substitutes), ("relax_api_table", relax_api_table), ("bare_trait_objects", bare_trait_objects)];
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -27,6 +27,13 @@ fn main() {
         if r < 3 && ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
+    }
+}
+
+/// Bare trait objects with `+` bounds in a dependency crate that uses edition 2015.
+fn bare_trait_objects() {
+    for line in relax_diffpkg_ed2015::lines() {
+        d!("{}", line);
     }
 }
 
@@ -276,4 +283,28 @@ fn substitutes() {
         panics(|| ArrayString::<2>::from("é").unwrap().truncate(1)),
         panics(|| { ArrayString::<2>::from("é").unwrap().remove(1); }),
         panics(|| ArrayString::<0>::new().push('x')));
+}
+
+/// The `#[relax_api]` table a Relax host reads to bind the crates the loader provides
+/// (relax_api::entries: here the CPU budget's entries and relax_api's anchor): its length, and per
+/// entry its kind, module, key and signature (their fns called) and its data. Under Relax the CPU
+/// budget is a provided crate: its entries are the loader's, where rustc's link puts the crate's own
+/// (sections.rs lay_out; 11-14 the table listed relax_api's anchor alone, a host under the JIT then
+/// compiled the provided crates again from source). The program uses the budget, as a host uses the
+/// crates it binds: rustc links no crate the program never names.
+fn relax_api_table() {
+    let w = makepad_cpu_budget::Wake::current();
+    w.unpark();
+    makepad_cpu_budget::park_for(1_000);
+    d!("relax_api budget cores>0 {}", makepad_cpu_budget::cores() > 0);
+    let e = relax_api::entries();
+    let mut lines: Vec<String> = e
+        .iter()
+        .map(|x| format!("{} {} {} | {} | slots {:?} size {} align {} offsets {:?} shim {} drop {}", x.kind, x.module, (x.key)(), (x.sig)(), x.slots, x.size, x.align, x.offsets, x.shim.is_some(), x.drop.is_some()))
+        .collect();
+    lines.sort();
+    d!("relax_api entries {} budget {}", e.len(), e.iter().filter(|x| x.module.starts_with("makepad_cpu_budget")).count());
+    for l in &lines {
+        d!("relax_api {}", l);
+    }
 }

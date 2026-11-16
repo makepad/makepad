@@ -176,7 +176,6 @@ fn is_workspace_manifest(toml: &str) -> bool {
 
 impl FileCtx {
     pub fn new(krate: &str, path: &str, module_path: &str, cfg: &CfgSet) -> FileCtx {
-        crate::pm::set_lexer(lex_stream);
         let (manifest_dir, pkg_name, pkg_version, _ws) = crate_meta(path);
         let file_macro = file_macro_path(path);
         FileCtx {
@@ -870,6 +869,28 @@ pub fn include_path(current: Option<&str>, rel: &str) -> String {
     crate::vfs::normalize_path(&path)
 }
 
+static INCLUDE_SITES: relax_session::sync::Mutex<Option<crate::fxhash::HashMap<String, Vec<(u32, String)>>>> = relax_session::sync::Mutex::new(None);
+
+/// Record an expanded include's authored file, byte offset and resolved path. An offset of
+/// u32::MAX means the expansion has no call position in that file's own text.
+/// Warm stores replay the same records when they take an image without expanding its calls.
+pub fn note_include_site(includer: &str, at: u32, path: &str) {
+    let mut sites = INCLUDE_SITES.lock().unwrap();
+    let sites = sites.get_or_insert_with(Default::default).entry(includer.to_string()).or_default();
+    let site = (at, path.to_string());
+    if let Err(i) = sites.binary_search(&site) { sites.insert(i, site); }
+}
+
+/// The resolved include paths recorded for one authored file, sorted by byte offset and path.
+pub fn include_sites(includer: &str) -> Vec<(u32, String)> {
+    INCLUDE_SITES.lock().unwrap().as_ref().and_then(|m| m.get(includer).cloned()).unwrap_or_default()
+}
+
+/// A snapshot for the late-input ledger: only expansion records, never inferred includers.
+pub fn recorded_include_sites() -> Vec<(String, Vec<(u32, String)>)> {
+    INCLUDE_SITES.lock().unwrap().as_ref().map(|m| m.iter().map(|(p, s)| (p.clone(), s.clone())).collect()).unwrap_or_default()
+}
+
 /// The paths (as written) of the `include!("..")` / `include_str!("..")` / `include_bytes!("..")`
 /// calls among token texts: a plain or raw string literal argument, or `concat!` of such literals
 /// (another computed one, `env!(..)`, is not seen).
@@ -905,7 +926,8 @@ pub fn include_literals<'a>(texts: &[&'a [u8]]) -> Vec<String> {
     out
 }
 
-/// Resolve nested includes relative to the file that authored the invocation.
+/// Resolve nested includes relative to the file that authored the invocation, recording the
+/// resolved path and its authored position for reloads (source_span follows token origins).
 /// `literal`: include_str! / include_bytes! (Parser::late_flags).
 fn include_input(p: &crate::parser::Parser, lo: usize, hi: usize, call_lo: u32, literal: bool) -> Result<(String, Vec<u8>), String> {
     let args = lit_args(p, lo, hi)?;
@@ -916,6 +938,15 @@ fn include_input(p: &crate::parser::Parser, lo: usize, hi: usize, call_lo: u32, 
     } else { None };
     let current = authored.as_ref().map(|s| s.path.as_str()).or_else(|| p.bctx.as_ref().map(|c| c.path.as_str()));
     let path = include_path(current, rel);
+    if let Some(current) = current {
+        let text = authored.as_ref().map_or(p.src, |s| &s.src);
+        // source_span follows token origins and expansion calls into authored text. An
+        // empty or out-of-source span has no authored position: keep only the file then.
+        let at = if source.lo < source.hi && source.hi as usize <= text.len() {
+            source.lo
+        } else { u32::MAX };
+        note_include_site(current, at, &path);
+    }
     let data = crate::vfs::read(&path).map_err(|e| format!("couldn't read `{}`: {}", path, e))?;
     crate::sip::note_late_input(p.bctx.as_ref().map_or("", |c| c.krate.as_str()), crate::sip::LATE_FILE | p.late_flags(literal), &path, Some(&data));
     Ok((path, data))
@@ -1332,6 +1363,9 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
     // A group the macro hands back as it came (its span) stays one group, as under rustc, where it
     // keeps its macro_rules origin: `same!($e * 2)` of `1 + 1` is 4. A macro's own invisible group
     // reads as its tokens (rustc_ast token.rs InvisibleOrigin::ProcMacro; emit_tokens).
+    if !p.frag_groups.is_empty() || !p.meta_frags.is_empty() {
+        group_fragments(&mut input.trees, &p.frag_groups, &p.meta_frags, None);
+    }
     if p.synth_parens.is_empty() {
         return run(input, call);
     }
@@ -1339,6 +1373,44 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
     let mut output = run(input, call)?;
     regroup(&mut output.trees, &p.synth_parens, Delimiter::None, Delimiter::Parenthesis);
     Ok(output)
+}
+
+/// rustc hands a proc macro every fragment a macro_rules arm forwards in an invisible group,
+/// whatever its length, but an `ident`, a `lifetime` and a `tt` (rustc_expand mbe/transcribe.rs
+/// transcribe_pnr: `MetaVarKind`'s invisible delimiters): `$e:expr` of `"b"` is
+/// `Group(None, "b")`. const_format's `formatcp!` reads each argument as one
+/// (`parse_unwrap_group` takes the next tree as the group; a bare `"b"` was taken and the `,`
+/// after it became the argument). The fragments of `trees` with a token range (`frag_groups`: a
+/// type, a path, a block, ...) and the one-token expressions and literals (`meta_frags`) become
+/// invisible groups; an expression of several tokens is one already (`regroup`). `inside`: the
+/// fragment whose group `trees` is, which it starts.
+fn group_fragments(trees: &mut Vec<TokenTree>, ranges: &crate::fxhash::HashMap<u32, u32>, one_token: &crate::fxhash::HashMap<u32, &'static str>, inside: Option<u32>) {
+    let mut i = 0;
+    while i < trees.len() {
+        let first = trees[i].span();
+        let end = if i == 0 && inside == Some(first.lo) {
+            None
+        } else {
+            ranges.get(&first.lo).copied().or_else(|| one_token.contains_key(&first.lo).then_some(first.hi))
+        };
+        // the trees from this one to the one the fragment ends with
+        match end.and_then(|end| (i..trees.len()).find(|&j| trees[j].span().hi == end)) {
+            Some(last) => {
+                let inner: Vec<TokenTree> = trees.drain(i..=last).collect();
+                let stop = inner.last().map_or(first, TokenTree::span);
+                let span = Span { hi: stop.hi, end: stop.end, ..first };
+                let mut group = Group { delim: Delimiter::None, stream: TokenStream { trees: inner }, span };
+                group_fragments(&mut group.stream.trees, ranges, one_token, Some(first.lo));
+                trees.insert(i, TokenTree::Group(group));
+            }
+            None => {
+                if let TokenTree::Group(g) = &mut trees[i] {
+                    group_fragments(&mut g.stream.trees, ranges, one_token, None);
+                }
+            }
+        }
+        i += 1;
+    }
 }
 
 /// The groups of `trees` whose opening parenthesis is one the transcriber wrote around a
@@ -1612,6 +1684,40 @@ fn leading_docs(gap: &[u8], gap_lo: u32, span_of: &dyn Fn(u32, u32) -> Span) -> 
         }
     });
     (first, docs)
+}
+
+/// Where an item's outer doc comments begin: rustc hands an attribute macro each of them as a
+/// `#[doc = ".."]` attribute (derives take them through `leading_docs`). The lexer keeps no
+/// comments as tokens, and expand_attr_macro reads docs from its item's text, so those before its
+/// first token (`///` lines above its first attribute) are taken in here: the first outer `///` /
+/// `/** */` between the token before the item (`gap_lo`: its end) and the item (`item_lo`), else
+/// `item_lo`.
+fn outer_docs_lo(text: &[u8], gap_lo: u32, item_lo: u32) -> u32 {
+    if gap_lo >= item_lo || item_lo as usize > text.len() {
+        return item_lo;
+    }
+    let gap = &text[gap_lo as usize..item_lo as usize];
+    if !gap.windows(2).any(|w| w == b"//" || w == b"/*") {
+        return item_lo;
+    }
+    let mut first = None;
+    crate::pm_tokens::for_each_gap_doc(gap, |d| {
+        if !d.inner && first.is_none() {
+            first = Some(gap_lo + d.lo as u32);
+        }
+    });
+    first.unwrap_or(item_lo)
+}
+
+/// `outer_docs_lo` for the parser's item starting at its token `lo` (authored source only:
+/// expansion text keeps its doc attributes as tokens).
+fn item_lo_with_docs(p: &crate::parser::Parser, lo: usize) -> u32 {
+    let item_lo = p.toks.at(lo).lo;
+    if item_lo as usize >= p.src.len() {
+        return item_lo;
+    }
+    let gap_lo = if lo > 0 { p.toks.at(lo - 1).hi } else { 0 };
+    outer_docs_lo(p.src, gap_lo, item_lo)
 }
 
 /// Derives of one item, from its source bytes (`item_lo`: its position, for diagnostics).
@@ -2166,7 +2272,7 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
     let buf = Buf { src: p.src, ext: p.ext.view() };
     let toks = &p.toks;
     let (alo, ahi) = (attrs[k].toks.lo as usize, attrs[k].toks.hi as usize);
-    let item_lo = toks.at(lo).lo;
+    let item_lo = item_lo_with_docs(p, lo);
     let item_hi = toks.at(hi.saturating_sub(1)).hi;
     let path = p.bctx.as_ref().map_or("", |c| c.path.as_str());
     // the attribute's name and arguments
@@ -2304,35 +2410,44 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
     let t_wall = std::time::Instant::now();
     let jobs = crate::preload::jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<Vec<(usize, Result<ItemOut, (u32, String)>)>> = crate::pool::scope(|sc| {
-        let mut hs = Vec::new();
-        for _ in 0..jobs.min(sites.len()) {
-            hs.push(sc.spawn(|| {
-                let mut out = Vec::new();
-                loop {
-                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if k >= sites.len() {
-                        break;
-                    }
-                    let (fi, lo, hi) = sites[k];
-                    let src = files[fi].1;
-                    let before = files[fi].2.partition_point(|t| t.lo < lo);
-                    let gap_lo = if before == 0 { 0 } else { files[fi].2[before - 1].hi.min(lo) };
-                    let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
-                    let (_, docs) = leading_docs(&src[gap_lo as usize..lo as usize], gap_lo, &span_of);
-                    out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), docs, lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None, None)));
-                }
-                out
-            }));
-        }
-        let mut all = Vec::new();
-        for h in hs {
-            if let Ok(v) = h.join() {
-                all.push(v);
+    let expand_sites = || {
+        let mut out = Vec::new();
+        loop {
+            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if k >= sites.len() {
+                break;
             }
+            let (fi, lo, hi) = sites[k];
+            let src = files[fi].1;
+            let before = files[fi].2.partition_point(|t| t.lo < lo);
+            let gap_lo = if before == 0 { 0 } else { files[fi].2[before - 1].hi.min(lo) };
+            let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
+            let (_, docs) = leading_docs(&src[gap_lo as usize..lo as usize], gap_lo, &span_of);
+            out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), docs, lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None, None)));
         }
-        all
-    });
+        out
+    };
+    // One job runs on this thread: a single-thread load (`preload::SINGLE`) is the owner's while
+    // the program runs, where an expansion's host request runs in place; on a pool thread that
+    // request would wait for the owner, which waits here for that thread (a live edit's macro
+    // world build hung in this join).
+    let results: Vec<Vec<(usize, Result<ItemOut, (u32, String)>)>> = if jobs <= 1 {
+        vec![expand_sites()]
+    } else {
+        crate::pool::scope(|sc| {
+            let mut hs = Vec::new();
+            for _ in 0..jobs.min(sites.len()) {
+                hs.push(sc.spawn(&expand_sites));
+            }
+            let mut all = Vec::new();
+            for h in hs {
+                if let Ok(v) = h.join() {
+                    all.push(v);
+                }
+            }
+            all
+        })
+    };
     PRE.with(|m| {
         let mut m = m.borrow_mut();
         for v in results {
@@ -2499,7 +2614,7 @@ fn item_cfg_on(trees: &[TokenTree], cfg: Option<&CfgSet>) -> bool {
     true
 }
 
-/// rustc's derive input: `cfg_attr` expanded, `#[cfg]`-false fields/variants removed (cfg_eval),
+/// rustc's derive input: `cfg_attr` expanded, `#[cfg]`-false generics/fields/variants removed (cfg_eval),
 /// the `#[derive]` attributes taken off. Returns all derive paths in order and the item.
 fn prepare_derive_input(input: TokenStream, cfg: Option<&CfgSet>) -> (Vec<String>, TokenStream) {
     let mut names = Vec::new();
@@ -2538,8 +2653,8 @@ fn prepare_derive_input(input: TokenStream, cfg: Option<&CfgSet>) -> (Vec<String
         out.push(trees[i].clone());
         i += 1;
     }
-    // cfg-strip fields / variants: the item's body groups
-    let out = strip_body(out, cfg);
+    // cfg-strip generic parameters, then fields / variants in the item's body groups
+    let out = strip_body(strip_generics(out, cfg), cfg);
     (names, TokenStream { trees: out })
 }
 
@@ -2627,6 +2742,38 @@ pub fn cfg_holds(pred: &[TokenTree], cfg: Option<&CfgSet>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Generic parameters use the same cfg filtering and comma splitting as fields.
+fn strip_generics(mut trees: Vec<TokenTree>, cfg: Option<&CfgSet>) -> Vec<TokenTree> {
+    let Some(kw) = trees.iter().position(|t| matches!(t, TokenTree::Ident(i) if matches!(i.to_string().as_str(), "struct" | "enum" | "union"))) else {
+        return trees;
+    };
+    // The item name is followed immediately by its optional `<..>` list.
+    let start = kw + 2;
+    if !matches!(trees.get(start), Some(TokenTree::Punct(p)) if p.as_char() == '<') {
+        return trees;
+    }
+    let mut angle = 1i32;
+    for i in start + 1..trees.len() {
+        if let TokenTree::Punct(p) = &trees[i] {
+            match p.as_char() {
+                '<' => angle += 1,
+                '>' => {
+                    // `->` in a bound or default type is not a closing angle.
+                    let arrow = matches!(&trees[i - 1], TokenTree::Punct(q) if q.as_char() == '-' && q.spacing() == Spacing::Joint);
+                    if !arrow { angle -= 1; }
+                }
+                _ => {}
+            }
+        }
+        if angle == 0 {
+            let params = strip_elems(trees[start + 1..i].to_vec(), cfg, false);
+            trees.splice(start + 1..i, params);
+            break;
+        }
+    }
+    trees
 }
 
 /// Removes `#[cfg(false)]` elements from the item's body: struct fields, tuple fields, enum
@@ -3068,4 +3215,5 @@ pub(crate) unsafe fn reset_statics() {
     reset(&BY_DIR, relax_session::sync::Mutex::new(None));
     reset(&ROOT, std::sync::OnceLock::new());
     reset(&PAYLOADS, relax_session::sync::Mutex::new(None));
+    reset(&INCLUDE_SITES, relax_session::sync::Mutex::new(None));
 }

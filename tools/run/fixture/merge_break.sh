@@ -2,8 +2,8 @@
 # Regression test: two branches that merge cleanly, each one checking clean alone, whose merge breaks a caller's
 # test fail the fast bucket's test-target check (land_gate.sh tests) on the merge, naming the caller's tests; each
 # branch alone passes it. One landing changed a fn's arguments, another added a #[cfg(test)] caller of the old
-# ones, and makepad-fab's tests broke while every bucket said ok (11-05). A test's own warning is a warn line, the
-# gate passing (a WARN to who brought it, the bucket green: zero warnings is the rule). A user with no test target
+# ones, and makepad-fab's tests broke while every bucket said ok (11-05). A test's own warning fails its target too
+# (zero warnings: a WARN line, green, was fixed by no one, 11-16), the warning said. A user with no test target
 # (no gate package, not changed) that the signature breaks fails the fast bucket's depcheck (land_gate.sh deps) on
 # the landing that broke it, naming it; a user with tests is left to the test-target check: no test target, no
 # check of it at all, until a later diff happened to reach it (11-08). A workspace of the crates, and stubs under the
@@ -95,8 +95,8 @@ gate() { # gate <label> <expect ok|fail> <rev>: land_gate.sh tests from the base
   out=$(cd "$dir/repo" && bash "$here/land_gate.sh" tests "$base" - 2>&1); code=$?
   case "$2" in
     ok) [ "$code" = 0 ] && echo "$out" | grep -q '^NODEGATE-OK' && ! echo "$out" | grep -q '^GATEUNIT warn' || { echo "$out" | tail -20; fail="$fail $1"; };;
-    warn) [ "$code" = 0 ] && echo "$out" | grep -q '^NODEGATE-OK' && echo "$out" | grep -qx 'GATEUNIT warn tests merge-break-plan' \
-        && echo "$out" | grep -qx 'GATEUNIT ok tests merge-break-plan' && echo "$out" | grep -q '^plan/src/tests.rs:[0-9]*:[0-9]*: warning: constant `SIDE` is never used' \
+    warned) [ "$code" = 1 ] && echo "$out" | grep -qx 'GATEUNIT fail tests merge-break-plan' && ! echo "$out" | grep -q '^GATEUNIT warn' \
+        && echo "$out" | grep -q '^plan/src/tests.rs:[0-9]*:[0-9]*: warning: constant `SIDE` is never used' \
         || { echo "$out" | tail -20; fail="$fail $1"; };;
     fail) [ "$code" = 1 ] && echo "$out" | grep -qx 'GATEUNIT fail tests merge-break-plan' && ! echo "$out" | grep -q 'GATEUNIT fail tests merge-break-shape' \
         && echo "$out" | grep -q '^plan/src/tests.rs:[0-9]*:[0-9]*: error\[E0061\]' || { echo "$out" | tail -20; fail="$fail $1"; };;
@@ -116,7 +116,7 @@ gate sig-alone ok sig
 deps sig-leaves-a-user fail sig
 deps test-alone ok test
 gate test-alone ok test
-gate unused-helper warn unused
+gate unused-helper warned unused
 g checkout -q -b merged sig
 g merge -q --no-edit test || fail="$fail merge-conflict"
 gate merged fail merged

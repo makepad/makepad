@@ -212,7 +212,7 @@ mod tests {
                 "[package]\nname = \"renamed-helper\"\n[package.metadata.relax]\nbuild-script-noop = [\"build\", \"empty\"]\n").unwrap();
             let mut f = Self {
                 script: BuildScript { krate: 0, also: Vec::new(), src_path: dir.join("build.rs").display().to_string(), edition: 2021,
-                    features: Vec::new(), build_deps: vec![(0, "helper".into())], links_deps: Vec::new(), kept: false, profile: crate::resolve::ScriptProfile::RUN },
+                    features: Vec::new(), build_deps: vec![(0, "helper".into())], links_deps: Vec::new(), kept: false, profile: crate::resolve::ScriptProfile::RUN, host: false },
                 dir, units: Vec::new(),
             };
             f.units.push(f.unit("helper", Vec::new()));
@@ -228,7 +228,7 @@ mod tests {
             let src_path = self.dir.join(format!("{name}.rs")).display().to_string();
             std::fs::write(&src_path, "// fixture\n").unwrap();
             RawUnit { name: name.into(), src_path, edition: 2021, features: Vec::new(), proc_macro: false, deps,
-                run_script: false, pkg: (self.dir.join(name).display().to_string(), name.into(), "0.0.0".into()), path_source: true, host_checks: None }
+                run_script: false, pkg: (self.dir.join(name).display().to_string(), name.into(), "0.0.0".into()), path_source: true, registry: false, git: false, host_checks: None }
         }
     }
 
@@ -357,7 +357,7 @@ fn main() {
         f.script.build_deps.push((3, "retained".into()));
         let target = f.dir.join("target").display().to_string();
         let r = rewrite(&f.script, &f.units).unwrap();
-        let (json, hash) = super::super::script_units(&f.script, &f.units, Some(&r), &target);
+        let (json, hash, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target);
         let g = super::super::Units::from_json(json.as_bytes()).unwrap();
         assert_eq!(g.units.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), ["shared", "retained", "build-script-build"]);
         let root = &g.units[g.roots[0]];
@@ -365,7 +365,7 @@ fn main() {
         assert_eq!(g.units[1].deps, vec![(0, "shared".into())]);
         assert_eq!(root.src_path, format!("{target}/build-scripts/{hash:016x}/build.rs"));
         assert_eq!(root.pkg_id, format!("path+file://{}#build-script-build@0.0.0", f.dir.display()));
-        let (original, original_hash) = super::super::script_units(&f.script, &f.units, None, &target);
+        let (original, original_hash, _) = super::super::script_units(&f.script, &f.units, None, &target);
         assert_ne!(hash, original_hash);
         let original = super::super::Units::from_json(original.as_bytes()).unwrap();
         assert_eq!(original.units[original.roots[0]].src_path, f.script.src_path);
@@ -383,7 +383,7 @@ fn main() {
 
         // If another root reaches the helper, only its direct edge is removed.
         f.units[3].deps.push((0, "helper".into()));
-        let (json, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target);
+        let (json, _, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target);
         let g = super::super::Units::from_json(json.as_bytes()).unwrap();
         assert_eq!(g.units.len(), 5);
         assert_eq!(g.units[g.roots[0]].deps, vec![(3, "retained".into())]);

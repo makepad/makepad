@@ -6,7 +6,8 @@ usage: run.py --makepad <makepad binary>   (RELAX_STD in the environment)
 
 Copies pkg/ to a temporary dir, runs it live with RELAX_STALE_PARK=1 and edits src/work.rs:
   1. an edit the borrow checker rejects after it ran (SPEC-V runs it before its verdict), the worker
-     blocked inside it                -> REVERTED: its code is invalidated (PROT_NONE, never reused),
+     blocked inside it                -> REVERTED: its code is invalidated (inaccessible or
+                                         trap-filled, never reused),
                                          `stale` and `inspect code` say so
   2. free the worker                  -> it returns into the invalidated code: parked, the app pauses;
                                          `stale` says RETURNED, the reason and every stack (the
@@ -97,7 +98,7 @@ try:
     told = inspect("stale")
     step("stale: its code is invalidated (the borrow checker)", "rolled back: the borrow checker rejected it" in told and "work::step" in told, told)
     code = inspect("code")
-    step("inspect code counts the invalidated group", re.search(r"invalidated \(PROT_NONE, never reused\): [1-9]\d* groups", code) is not None, code)
+    step("inspect code counts the invalidated group", re.search(r"invalidated \(never reused\): [1-9]\d* groups", code) is not None, code)
     # 2. the worker returns into it
     n_err = len(err)
     send("free")

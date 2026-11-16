@@ -574,6 +574,31 @@ pub static FRAMES: AtomicU64 = AtomicU64::new(0);
 static FRAMES_AFTER_PRESENT: AtomicU64 = AtomicU64::new(0);
 /// How long after the first present the startup image's window stays open at most
 const IMAGE_WINDOW_NS: u64 = 1_000_000_000;
+/// Only the manifest seed thread waits here. An unpark's permit covers a close racing its park;
+/// the frame/present hooks take no lock and never wait for the installer.
+static IMAGE_WINDOW_WAITER: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+pub(crate) fn wake_image_window() {
+    if let Some(t) = IMAGE_WINDOW_WAITER.get() { t.unpark(); }
+}
+
+/// Wait off the owner until the image window closes, or background work stops. The only timed
+/// wait is to the window's actual deadline, not a polling interval (a quiet app may draw no more).
+pub(crate) fn wait_image_window_closed(stop: &dyn Fn() -> bool) -> bool {
+    let _ = IMAGE_WINDOW_WAITER.set(std::thread::current());
+    crate::run_threads::on_end(wake_image_window);
+    loop {
+        if stop() || crate::run_threads::ending() { return false; }
+        if !image_window_open() { return true; }
+        let fp = present_ns();
+        if fp == 0 {
+            std::thread::park();
+        } else {
+            let left = (fp + IMAGE_WINDOW_NS).saturating_sub(wall_ns());
+            if left != 0 { std::thread::park_timeout(std::time::Duration::from_nanos(left)); }
+        }
+    }
+}
 
 /// The UI thread's first frames after the first present are on: the present is less than a second
 /// old, or the UI thread is still in the burst of JIT waits that began with them (jit::ui_burst).
@@ -619,8 +644,11 @@ pub(crate) extern "C" fn relax_frame_done() {
         episode_at(EP_SUM.load(Relaxed) + dt, now);
     }
     let last = LAST_FRAME.swap(now, Relaxed);
-    if fp != 0 && last >= fp && FRAMES_AFTER_PRESENT.fetch_add(1, Relaxed) == 0 && crate::run::VERBOSE.load(Relaxed) {
-        eprintln!("relax startup image window closed at +{:.0} ms after the first present ({} startup slots)", ms(now - fp), crate::jit::ORDER_PRESENT_LEN.load(Relaxed));
+    if fp != 0 && last >= fp && FRAMES_AFTER_PRESENT.fetch_add(1, Relaxed) == 0 {
+        wake_image_window();
+        if crate::run::VERBOSE.load(Relaxed) {
+            eprintln!("relax startup image window closed at +{:.0} ms after the first present ({} startup slots)", ms(now - fp), crate::jit::ORDER_PRESENT_LEN.load(Relaxed));
+        }
     }
     episode_end();
     let compiled = MAIN_COMPILE_NS.load(Relaxed);
@@ -750,6 +778,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&LOG_KEY, std::sync::Mutex::new(String::new()));
     reset(&FRAMES, AtomicU64::new(0));
     reset(&FRAMES_AFTER_PRESENT, AtomicU64::new(0));
+    reset(&IMAGE_WINDOW_WAITER, std::sync::OnceLock::new());
     reset(&FRAME_PATCH, AtomicU64::new(0));
     reset(&COMPILED_AT_LAST, AtomicU64::new(0));
     reset(&LAST, AtomicU64::new(u64::MAX));

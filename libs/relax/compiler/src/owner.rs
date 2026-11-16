@@ -1,4 +1,4 @@
-//! The owner thread (local/agent_state/fast-rust/JIT_THREADS.md): the one thread that runs every
+//! The owner thread: the one thread that runs every
 //! step reading or changing a unit's mutable state -- lazy compiles' fronts and installs, constant
 //! and static evaluation (and the JIT code they run), the disk cache, patches, tier installs, the
 //! exit summary. There is no unit lock. Other threads hand it closures and wait for them
@@ -886,6 +886,11 @@ pub fn program_waiting() -> bool {
     FOREGROUND.load(Ordering::Relaxed) + MAIN_PUBLISH.load(Ordering::Relaxed) > 0
 }
 
+/// A main-thread request is queued: an install-ahead batch gives the owner back between links.
+pub(crate) fn main_waiting() -> bool {
+    MAIN_QUEUED.load(Ordering::Relaxed) + MAIN_PUBLISH.load(Ordering::Relaxed) > 0
+}
+
 /// A request waits now that long work on the owner (the cache's mid-run writes, the settle
 /// rebuild) gives the owner back for, at its next check: what `program_waiting` counts, or a Job
 /// a thread waits for (a back end's constant or static, a report, inspect). Background publishes,
@@ -971,6 +976,7 @@ pub fn start() {
         let _k = crate::zone_alloc::kept();
         crate::query::set_wait_hook(crate::query::WaitHook { on_owner: is_owner, pump: pump_latch, wake, me });
         makepad_cpu_budget::set_wait_hook(crate::waits::token_wait);
+        crate::pool::set_job_lift(crate::jit::job_lift, crate::jit::job_back);
         let (tx, rx) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("run-owner".into())

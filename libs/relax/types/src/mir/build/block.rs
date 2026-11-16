@@ -112,7 +112,7 @@ impl Builder<'_> {
                 StmtKind::Let { init_scope, initializer: None, else_block: Some(_), .. } => {
                     return Err(self.error(self.region_scope_span(*init_scope), UnsupportedReason::Internal("initializer is missing, but else block is present in this let binding")));
                 }
-                StmtKind::Let { remainder_scope, init_scope, pattern, initializer, else_block: None, .. } => {
+                StmtKind::Let { remainder_scope, init_scope, pattern, initializer, else_block: None, super_, .. } => {
                     // Enter the remainder scope, i.e., the bindings' destruction scope.
                     let ignores_expr_result = matches!(pattern.kind, PatKind::Wild);
                     self.block_context.push(BlockFrame::Statement { ignores_expr_result });
@@ -134,7 +134,10 @@ impl Builder<'_> {
 
                         block = self
                             .in_scope(scope, |this| {
-                                this.declare_bindings(visibility_scope, remainder_span, pattern, None, Some((None, initializer_span)))?;
+                                this.desugaring_let = *super_;
+                                let declared = this.declare_bindings(visibility_scope, remainder_span, pattern, None, Some((None, initializer_span)));
+                                this.desugaring_let = false;
+                                declared?;
                                 this.expr_into_pattern(block, pattern, init) // irrefutable pattern
                             })?
                             .into_block();

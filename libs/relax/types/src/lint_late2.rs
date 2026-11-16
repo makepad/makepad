@@ -1405,18 +1405,23 @@ impl<'a> L2<'a> {
 
 // ---------------------------------------------------------------- unsafe_code (rustc_lint builtin.rs UnsafeCode)
 
-/// The first attribute named `name` of an item: the position of its `#`.
-fn attr_pos(prog: &Program, file: u32, attrs: &[Attr], name: &str) -> Option<u32> {
-    let a = attrs.iter().find(|a| lint::attr_path(prog, file, a) == name.as_bytes())?;
-    let p = prog.src(file);
-    let at = a.toks.lo as usize;
-    Some(p.tok(at.saturating_sub(if a.inner { 3 } else { 2 })).lo)
+/// The builtin attributes rustc parses as unsafe ones (rustc_attr_parsing: each parser whose
+/// `SAFETY` is `AttributeSafety::Unsafe`).
+const UNSAFE_ATTRS: [&str; 7] = ["no_mangle", "export_name", "link_section", "naked", "ffi_const", "ffi_pure", "force_target_feature"];
+
+/// rustc_attr_parsing safety.rs check_attribute_safety: every use of an unsafe builtin attribute is
+/// `unsafe_code`, written `#[unsafe(..)]` or not, at the attribute (inside its `#[`).
+fn unsafe_attrs(prog: &Program, file: u32, attrs: &[Attr], emit: &dyn Fn(u32, &str)) {
+    for a in attrs {
+        let name = lint::attr_path(prog, file, a);
+        if let Some(n) = UNSAFE_ATTRS.iter().find(|n| n.as_bytes() == &name[..]) {
+            emit(prog.src(file).tok(a.toks.lo as usize).lo, &format!("usage of the unsafe `{n}` attribute"));
+        }
+    }
 }
 
 /// The item-level `unsafe_code` checks over the definitions of the checked crates marked in `own`.
 pub fn check_items(prog: &Program, own: &[bool]) {
-    const NOTE_MANGLE: &str = "";
-    let _ = NOTE_MANGLE;
     for i in 0..prog.defs.len() {
         let d = prog.defs[i];
         if !own.get(d.krate as usize).copied().unwrap_or(false) { continue; }
@@ -1429,7 +1434,6 @@ pub fn check_items(prog: &Program, own: &[bool]) {
             if lint::external(prog, d.file, pos) { return; }
             lint::emit(prog, id, &lint::UNSAFE_CODE, d.file, pos, msg);
         };
-        let in_impl = d.parent != crate::program::NO_DEF && prog.def(d.parent).kind == DefKind::Impl;
         match item.kind {
             ItemKind::Trait(r) => if ast.row(r).unsafe_ { emit(item.lo, "declaration of an `unsafe` trait"); },
             ItemKind::Impl(r) => {
@@ -1438,14 +1442,7 @@ pub fn check_items(prog: &Program, own: &[bool]) {
             }
             ItemKind::Fn(sig, body, _) => {
                 let sig = *ast.fn_sig(sig);
-                if d.kind == DefKind::AssocFn && in_impl {
-                    if let Some(p) = attr_pos(prog, d.file, attrs, "no_mangle") { emit(p, "declaration of a `no_mangle` method"); }
-                    if let Some(p) = attr_pos(prog, d.file, attrs, "export_name") { emit(p, "declaration of a method with `export_name`"); }
-                } else if d.kind == DefKind::Fn {
-                    if let Some(p) = attr_pos(prog, d.file, attrs, "no_mangle") { emit(p, "declaration of a `no_mangle` function"); }
-                    if let Some(p) = attr_pos(prog, d.file, attrs, "export_name") { emit(p, "declaration of a function with `export_name`"); }
-                    if let Some(p) = attr_pos(prog, d.file, attrs, "link_section") { emit(p, "declaration of a function with `link_section`"); }
-                }
+                unsafe_attrs(prog, d.file, attrs, &emit);
                 if sig.unsafe_ {
                     let has_body = body.is_some() || sig.lazy_body.is_some();
                     match d.kind {
@@ -1456,11 +1453,7 @@ pub fn check_items(prog: &Program, own: &[bool]) {
                     }
                 }
             }
-            ItemKind::Static(..) => {
-                if let Some(p) = attr_pos(prog, d.file, attrs, "no_mangle") { emit(p, "declaration of a `no_mangle` static"); }
-                if let Some(p) = attr_pos(prog, d.file, attrs, "export_name") { emit(p, "declaration of a static with `export_name`"); }
-                if let Some(p) = attr_pos(prog, d.file, attrs, "link_section") { emit(p, "declaration of a static with `link_section`"); }
-            }
+            ItemKind::Static(..) => unsafe_attrs(prog, d.file, attrs, &emit),
             _ => {}
         }
     }

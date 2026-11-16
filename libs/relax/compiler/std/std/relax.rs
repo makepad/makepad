@@ -1,4 +1,4 @@
-//! Relax-only: run-time modules (local/plans/hotreload.md §11). A program running under Relax
+//! Relax-only: run-time modules. A program running under Relax
 //! (`cfg(relax)`) loads a Rust source file as a module, takes typed fn pointers to its
 //! exports, edits it live and unloads it. A failed load or edit changes nothing and returns
 //! the compiler's one-line errors.
@@ -150,6 +150,8 @@ extern "C" {
     fn __relax_module_load_src(name: *const u8, nlen: usize, path: *const u8, plen: usize, src: *const u8, slen: usize, deps: *const u8, dlen: usize) -> u64;
     fn __relax_module_load_stream(name: *const u8, nlen: usize, path: *const u8, plen: usize, src: *const u8, slen: usize, deps: *const u8, dlen: usize) -> u64;
     fn __relax_module_stream(h: u64, src: *const u8, slen: usize, kept: *mut usize) -> u32;
+    fn __relax_module_stream_settled(h: u64) -> u32;
+    fn __relax_module_stream_hold(h: u64, on: u32) -> u32;
     fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *const u8, tlen: usize) -> u64;
     fn __relax_module_replace(h: u64, src: *const u8, slen: usize) -> u32;
     fn __relax_module_unload(h: u64);
@@ -187,55 +189,6 @@ pub fn store_file(url: &str, commit: &str, path: &str) -> Option<crate::vec::Vec
     let v = unsafe { core::slice::from_raw_parts(p, n) }.to_vec();
     unsafe { relax_vfs_release(id) };
     Some(v)
-}
-
-/// One file of a git repository in Relax's stores (`url` as a run spec names it, the 40-hex
-/// `commit`, `path` inside the repository): None when the store does not keep that commit
-/// (e.g. a release downloaded but not run yet) or has no such file.
-pub fn store_file(url: &str, commit: &str, path: &str) -> Option<crate::vec::Vec<u8>> {
-    let (mut p, mut n) = (core::ptr::null(), 0usize);
-    let id = unsafe { relax_store_file(url.as_ptr(), url.len(), commit.as_ptr(), commit.len(), path.as_ptr(), path.len(), &mut p, &mut n) };
-    if id == 0 {
-        return None;
-    }
-    let v = unsafe { core::slice::from_raw_parts(p, n) }.to_vec();
-    unsafe { relax_vfs_release(id) };
-    Some(v)
-}
-
-/// Reports progress of a long wait (a download): `done` of `total` (None: unknown) for `label`,
-/// e.g. "CEF 132 MB". The launcher (the runner) shows it as its progress bar; in a terminal it
-/// is a short line. A build script's reports reach the launcher through the Relax running it.
-/// Throttled inside: call it as often as convenient.
-pub fn progress(label: &str, done: u64, total: Option<u64>) {
-    unsafe { __relax_progress(label.as_ptr(), label.len(), done, total.unwrap_or(u64::MAX)) }
-}
-
-/// HTTPS GET of `url` into the file `to` through Relax's own HTTP client (the system's TLS
-/// stack; no process is started): written to `<to>.part` and renamed when complete, redirects
-/// followed, progress reported as `label`. Returns the byte count.
-pub fn download(url: &str, to: &crate::path::Path, label: &str) -> Result<u64, String> {
-    let to = to.to_string_lossy();
-    let mut err = crate::vec::Vec::with_capacity(1024);
-    let mut n = 0usize;
-    let r = unsafe { __relax_download(url.as_ptr(), url.len(), to.as_ptr(), to.len(), label.as_ptr(), label.len(), err.as_mut_ptr(), err.capacity(), &mut n) };
-    if r >= 0 {
-        return Ok(r as u64);
-    }
-    unsafe { err.set_len(n) };
-    Err(String::from_utf8_lossy(&err).into_owned())
-}
-
-/// The folder for downloads any later run may reuse (a CEF distribution): `downloads/` in
-/// Relax's cache folder. None without a home folder.
-pub fn download_dir() -> Option<crate::path::PathBuf> {
-    let mut buf = crate::vec::Vec::with_capacity(4096);
-    let n = unsafe { __relax_download_dir(buf.as_mut_ptr(), buf.capacity()) };
-    if n == 0 || n > buf.capacity() {
-        return None;
-    }
-    unsafe { buf.set_len(n) };
-    Some(crate::path::PathBuf::from(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 /// Streams source into a loaded file. Returns 0 for applied/partial, 1 for incomplete
@@ -680,6 +633,16 @@ pub enum Edit {
     NeedsReload,
 }
 
+/// A module stream's hold ([`Module::hold_stream`]); dropping it releases the stream.
+pub struct StreamHold(u64);
+
+impl Drop for StreamHold {
+    fn drop(&mut self) {
+        // (a module unloaded meanwhile has no stream left to release)
+        unsafe { __relax_module_stream_hold(self.0, 0) };
+    }
+}
+
 /// The result of feeding a module's whole source so far.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
@@ -803,7 +766,8 @@ impl Module {
     /// applies independently; cut tokens, incomplete bodies and invalid items keep their
     /// last applied version. Missing items in a prefix are never deleted.
     /// Calls within 16 ms coalesce; feed again or run with the live watcher to drain them.
-    /// Source errors are quiet until a roughly one-second stall (reported by the watcher)
+    /// Source errors are quiet until a roughly one-second stall (no new text and no feed for a
+    /// second; reported by the watcher)
     /// or `finish_stream`; `Err` here indicates an invalid handle, not unfinished source.
     /// `&str` cannot split a UTF-8 character: buffer incomplete bytes before calling.
     pub fn stream(&self, text: &str) -> Result<Stream, String> {
@@ -813,6 +777,31 @@ impl Module {
             1 => Ok(Stream::Incomplete),
             2 => Ok(Stream::NeedsReload),
             3 => Ok(Stream::Pending),
+            _ => Err(last_error()),
+        }
+    }
+
+    /// Blocks until the live watcher has nothing left of this module's stream: the newest
+    /// coalesced prefix (a `Stream::Pending` feed) applied and, once the text stopped changing,
+    /// its stall reported (about a second after the last change and feed). Returns at once when no
+    /// stream is open (none fed, or `finish_stream` ended it). `Err` when nothing would settle
+    /// it: the run has no live watcher (feed the text again instead), or the module was unloaded.
+    pub fn stream_settled(&self) -> Result<(), String> {
+        match unsafe { __relax_module_stream_settled(self.0) } {
+            0 => Ok(()),
+            _ => Err(last_error()),
+        }
+    }
+
+    /// Holds this module's stream until the returned guard drops: each `stream` call only keeps
+    /// its text as the newest pending one and returns `Stream::Pending`, and the live watcher
+    /// neither feeds nor reports it (a burst of text that should land as one edit, or not while
+    /// the app is in the middle of something). On release the watcher, or the next feed, applies
+    /// the newest text. `finish_stream` and `unload` end the stream and its hold;
+    /// `stream_settled` on a held stream with a pending text is `Err`.
+    pub fn hold_stream(&self) -> Result<StreamHold, String> {
+        match unsafe { __relax_module_stream_hold(self.0, 1) } {
+            0 => Ok(StreamHold(self.0)),
             _ => Err(last_error()),
         }
     }

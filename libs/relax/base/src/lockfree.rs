@@ -1,6 +1,5 @@
-//! Lock-free building blocks of the JIT's tier and owner queues (local/agent_state/relax-campaign/
-//! OWNERARCH.DESIGN.md §5): well-known patterns only, the memory ordering of every step named where
-//! it happens, each tested under contention below.
+//! Lock-free building blocks of the JIT's tier and owner queues: well-known patterns only, the
+//! memory ordering of every step named where it happens, each tested under contention below.
 //!
 //! - `IdStack`: a Treiber stack of u32 ids, intrusive (each id's link word lives with the id, e.g. in
 //!   its tier record), popped only as a whole (`take_all`), so there is no single-node pop and no ABA.

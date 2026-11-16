@@ -331,9 +331,11 @@ fn gen_int(o: &mut String, t: &Int) {
     let _ = writeln!(o, "        let r = acc.overflowing_mul(base); (r.0, over | r.1)\n    }}");
     // wrapping family
     for op in ["add", "sub", "mul", "neg", "div", "rem", "pow"] {
-        if op == "mul" {
-            // Relax integer operators wrap; do not compute an unused overflow flag.
-            let _ = writeln!(o, "    pub const fn wrapping_mul(self, rhs: {n}) -> {n} {{ self * rhs }}");
+        if let Some(sym) = match op { "add" => Some('+'), "sub" => Some('-'), "mul" => Some('*'), _ => None } {
+            // Relax integer operators wrap; do not compute an unused overflow flag. No call, as
+            // rustc's bodies call intrinsics::wrapping_{add,sub,mul}, which its MIR lowers to the
+            // operator: a constant's long_running_const_eval steps are rustc's.
+            let _ = writeln!(o, "    pub const fn wrapping_{op}(self, rhs: {n}) -> {n} {{ self {sym} rhs }}");
             continue;
         }
         let (args, call) = match op {
@@ -423,6 +425,9 @@ fn gen_int(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    pub const fn rem_euclid(self, rhs: {n}) -> {n} {{ let r = self % rhs; if r < 0 {{ r.wrapping_add(rhs.wrapping_abs()) }} else {{ r }} }}");
         let _ = writeln!(o, "    pub const fn div_euclid(self, rhs: {n}) -> {n} {{ let q = self / rhs; if self % rhs < 0 {{ if rhs > 0 {{ q - 1 }} else {{ q + 1 }} }} else {{ q }} }}");
         let _ = writeln!(o, "    pub const fn cast_unsigned(self) -> {u} {{ self as {u} }}");
+        // int_macros.rs checked_isqrt / isqrt: the unsigned root of a value that is not negative
+        let _ = writeln!(o, "    pub const fn checked_isqrt(self) -> Option<{n}> {{ if self < 0 {{ None }} else {{ Some((self as {u}).isqrt() as {n}) }} }}");
+        let _ = writeln!(o, "    #[track_caller]\n    pub const fn isqrt(self) -> {n} {{ match self.checked_isqrt() {{ Some(sqrt) => sqrt, None => crate::panicking::panic_str(\"argument of integer square root cannot be negative\") }} }}");
         let _ = writeln!(o, "    pub const fn overflowing_add_unsigned(self, rhs: {u}) -> ({n}, bool) {{ let rhs = rhs as {n}; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }}");
         let _ = writeln!(o, "    pub const fn checked_add_unsigned(self, rhs: {u}) -> Option<{n}> {{ let (a, b) = self.overflowing_add_unsigned(rhs); if b {{ None }} else {{ Some(a) }} }}");
         let _ = writeln!(o, "    pub const fn saturating_add_unsigned(self, rhs: {u}) -> {n} {{ match self.checked_add_unsigned(rhs) {{ Some(v) => v, None => {n}::MAX }} }}");

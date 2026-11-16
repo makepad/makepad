@@ -75,6 +75,8 @@ fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono:
     // `makepad check`'s session (run.rs): constants go through the check-mode interpreter first
     let mut sess = crate::Session::default();
     sess.options.const_fuel = true;
+    sess.options.tiny_const_eval_limit = std::env::var_os("RELAX_TINY_CONST_EVAL_LIMIT").is_some_and(|v| v == "1");
+    if std::env::var_os("RELAX_CTFE").is_some_and(|v| v == "0") { sess.options.ctfe = crate::options::Ctfe::Off; }
     sess.options.post_mono = post_mono;
     let sess = std::sync::Arc::new(sess);
     // as run.rs sets up a check: import and macro uses are recorded, every crate keeps the
@@ -577,6 +579,116 @@ fn a_tuple_field_read_through_pin_or_arc_is_read() {
     assert_eq!(warnings, ["field `0` is never read [dead_code]", "unused variable: `unused` [unused_variables]"]);
 }
 
+/// Relax issue 231: the unsafe builtin attributes are `unsafe_code` in either form, `#[no_mangle]`
+/// or `#[unsafe(no_mangle)]` (rustc_attr_parsing safety.rs: every use), at the attribute, so an
+/// `#[expect(unsafe_code)]` on one is fulfilled; and an exported fn is a dead-code root whatever
+/// its visibility, so what only it calls is used. Relax read `unsafe` as the attribute's path:
+/// each expectation went unfulfilled and the exported fns' callees were never used.
+#[test]
+fn unsafe_attributes_are_unsafe_code_in_either_form() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::unsafe_attributes_are_unsafe_code_in_either_form") else {
+        check_package(r#"
+            #![warn(unsafe_code)]
+            #[expect(unsafe_code)]
+            #[unsafe(no_mangle)]
+            extern "C" fn exported() -> u32 { only_from_export() }
+            fn only_from_export() -> u32 { 7 }
+            #[expect(unsafe_code)]
+            #[unsafe(export_name = "rx231_named")]
+            extern "C" fn named() -> u32 { also_from_export() }
+            fn also_from_export() -> u32 { 8 }
+            #[expect(unsafe_code)]
+            #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__rx231"))]
+            #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".data.rx231"))]
+            #[unsafe(no_mangle)]
+            static SECTION: u32 = 1;
+            #[no_mangle]
+            extern "C" fn plain() -> u32 { from_plain() }
+            fn from_plain() -> u32 { 9 }
+            #[unsafe(no_mangle)]
+            static STATIC: u32 = 2;
+            fn never_called() {}
+        "#, &[]);
+        return;
+    };
+    // rustc 1.100's, for the same library
+    assert_eq!(warnings, [
+        "function `never_called` is never used [dead_code]",
+        "usage of the unsafe `no_mangle` attribute [unsafe_code]",
+        "usage of the unsafe `no_mangle` attribute [unsafe_code]",
+    ]);
+}
+
+/// Relax issue 231 (its destructuring-coercion case showed it): a destructuring assignment is
+/// rustc's `let` pattern and assignments (`Two(x, _, ..) = v` is `let Two(lhs0, _, ..) = v; x =
+/// lhs0;`), so a tuple-struct, struct or variant assignee reads the fields it names, nested ones
+/// too; `_` and `..` read none. Relax counted the assignee as a construction only and said all
+/// its fields were never read.
+#[test]
+fn a_destructuring_assignment_reads_the_fields_it_takes() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_destructuring_assignment_reads_the_fields_it_takes") else {
+        check_package(r#"
+            struct Two(u8, u16, u32);
+            struct Named { a: u8, b: u16, c: u32 }
+            enum E { V(u8, u16) }
+            struct Inner(u8, u8);
+            pub fn run() -> u32 {
+                let (x, z): (u8, u32);
+                Two(x, _, ..) = Two(1, 2, 3);
+                let p: u8;
+                Named { a: p, b: _, .. } = Named { a: 4, b: 5, c: 6 };
+                let r: u8;
+                (E::V(r, _),) = (E::V(7, 8),);
+                let s: u8;
+                [Inner(_, s)] = [Inner(9, 10)];
+                z = 1;
+                x as u32 + p as u32 + r as u32 + s as u32 + z
+            }
+        "#, &[]);
+        return;
+    };
+    // rustc 1.100's, for the same library
+    assert_eq!(warnings, [
+        "field `0` is never read [dead_code]",
+        "field `1` is never read [dead_code]",
+        "fields `1` and `2` are never read [dead_code]",
+        "fields `b` and `c` are never read [dead_code]",
+    ]);
+}
+
+/// A field only a derived Debug or Clone reads is never read (rustc ignores those impls), also
+/// when the same body reads a tuple's field of that index: `format!`'s expansion reads `args.0`,
+/// which Relax counted as a read of field 0 of every struct the body names (check_rustc's
+/// gh1328_live_lib.rs:108 too).
+#[test]
+fn a_tuple_field_is_no_struct_field_of_the_same_index() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_tuple_field_is_no_struct_field_of_the_same_index") else {
+        check_package(r#"
+            #[derive(Debug)]
+            pub struct DebugOnly { read_by_debug_only: u32 }
+            pub fn debug_only() -> String { format!("{:?}", DebugOnly { read_by_debug_only: 1 }) }
+            #[derive(Debug, Clone)]
+            pub struct Two { a: u32, b: u8 }
+            pub fn two() -> (String, u32) {
+                let pair = (Two { a: 1, b: 2 }, 3u32);
+                (format!("{:?}", pair.0.clone()), pair.1)
+            }
+            pub struct Read { c: u32, d: u8 }
+            pub fn read() -> u32 {
+                let t = (Read { c: 4, d: 5 }, 6u32);
+                t.0.c + t.1
+            }
+        "#, &[]);
+        return;
+    };
+    // rustc 1.100's, for the same library
+    assert_eq!(warnings, [
+        "field `d` is never read [dead_code]",
+        "field `read_by_debug_only` is never read [dead_code]",
+        "fields `a` and `b` are never read [dead_code]",
+    ]);
+}
+
 /// WARNZERO class 8 (hal linux_ipc.rs:69 and :74): `IoSlice` and `IoSliceMut` are FFI-safe, as
 /// real std's are (repr(transparent) over an `iovec` / `WSABUF`; Relax std had plain slices),
 /// so a `msghdr` of them in an `extern` block is no `improper_ctypes`; a slice still is.
@@ -749,4 +861,91 @@ fn a_lock_dropped_by_a_wildcard_fails_the_check() {
         "#, &[]), 1);
     };
     assert_eq!(warnings, ["error: non-binding let on a synchronization lock [let_underscore_lock]"; 4]);
+}
+
+/// The cases of `a_constants_steps_reach_long_running_const_eval_where_rustcs_do`, one per line
+/// (each its own functions, so each line's diagnostics are its own): a shape at N - 1 steps short
+/// of the tiny limit and at N, then an allowed constant, an endless one and a warn-level one.
+const STEP_TABLE: &str = r#"const fn while_18(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const WHILE_18: u32 = while_18(18);
+const fn while_19(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const WHILE_19: u32 = while_19(19);
+const fn do_while_19(n: u32) -> u32 { let mut i = 0; loop { i += 1; if i >= n { break; } } i } pub const DO_WHILE_19: u32 = do_while_19(19);
+const fn do_while_20(n: u32) -> u32 { let mut i = 0; loop { i += 1; if i >= n { break; } } i } pub const DO_WHILE_20: u32 = do_while_20(20);
+const fn call_to_head_9_step(x: u32) -> u32 { x + 1 } const fn call_to_head_9(n: u32) -> u32 { let mut i = 0; while i < n { i = call_to_head_9_step(i); } i } pub const CALL_TO_HEAD_9: u32 = call_to_head_9(9);
+const fn call_to_head_10_step(x: u32) -> u32 { x + 1 } const fn call_to_head_10(n: u32) -> u32 { let mut i = 0; while i < n { i = call_to_head_10_step(i); } i } pub const CALL_TO_HEAD_10: u32 = call_to_head_10(10);
+const fn labelled_9(n: u32) -> u32 { let mut i = 0; let mut c = 0; 'o: while i < n { i += 1; let mut j = 0; while j < 3 { j += 1; c += 1; if j == 2 { continue 'o; } } } c } pub const LABELLED_9: u32 = labelled_9(9);
+const fn labelled_10(n: u32) -> u32 { let mut i = 0; let mut c = 0; 'o: while i < n { i += 1; let mut j = 0; while j < 3 { j += 1; c += 1; if j == 2 { continue 'o; } } } c } pub const LABELLED_10: u32 = labelled_10(10);
+const fn recursion_18(n: u32) -> u32 { if n == 0 { 0 } else { recursion_18(n - 1) + 1 } } pub const RECURSION_18: u32 = recursion_18(18);
+const fn recursion_19(n: u32) -> u32 { if n == 0 { 0 } else { recursion_19(n - 1) + 1 } } pub const RECURSION_19: u32 = recursion_19(19);
+const fn intrinsic_9(n: u32) -> u32 { let mut i = 0u32; while i < n { i = i.wrapping_add(1); } i } pub const INTRINSIC_9: u32 = intrinsic_9(9);
+const fn intrinsic_10(n: u32) -> u32 { let mut i = 0u32; while i < n { i = i.wrapping_add(1); } i } pub const INTRINSIC_10: u32 = intrinsic_10(10);
+const fn promoted_19(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const PROMOTED_19: u32 = { let r: &'static u32 = &promoted_19(19); *r };
+const fn promoted_20(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const PROMOTED_20: u32 = { let r: &'static u32 = &promoted_20(20); *r };
+const fn nested_18_in(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } const NESTED_18_INNER: u32 = nested_18_in(15); const fn nested_18(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const NESTED_18: u32 = NESTED_18_INNER + nested_18(18);
+const fn nested_19_in(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } const NESTED_19_INNER: u32 = nested_19_in(15); const fn nested_19(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const NESTED_19: u32 = NESTED_19_INNER + nested_19(19);
+#[allow(long_running_const_eval)] const fn allow_on_fn_18(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const ALLOW_ON_FN_18: u32 = allow_on_fn_18(18);
+#[allow(long_running_const_eval)] const fn allow_on_fn_19(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } pub const ALLOW_ON_FN_19: u32 = allow_on_fn_19(19);
+const fn allowed(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } #[allow(long_running_const_eval)] pub const ALLOWED: u32 = allowed(70);
+pub const ENDLESS: () = loop {};
+const fn warned(n: u32) -> u32 { let mut i = 0; while i < n { i += 1; } i } #[warn(long_running_const_eval)] pub const WARNED: u32 = warned(40);
+"#;
+
+/// rustc's const-eval step count (const_eval machine.rs: CtfeLimit's counters on the mir_for_ctfe
+/// shape), at its boundary. Under the tiny limit (20 steps; RELAX_TINY_CONST_EVAL_LIMIT, rustc's
+/// `-Z tiny-const-eval-limit`) each shape passes at N - 1 and is `long_running_const_eval` at N,
+/// at rustc's span: a while loop, a do-while (its exit pass takes no back edge), a call that
+/// returns to the loop head, labelled nested loops with `continue`, recursion, a lowered
+/// intrinsic (`wrapping_add`'s call counts, the intrinsic's does not), a promoted and a nested
+/// constant (each counts its own steps), and an `#[allow]` on the called fn (the level is the
+/// constant's). An allowed constant warns at each power of two past the limit (32 and 64: the
+/// same line, which the check prints once where rustc prints it twice), an endless loop is denied,
+/// and a warn-level constant warns at the limit and again past 32. The expected lines are rustc
+/// 1.100's for the same text with `-Z tiny-const-eval-limit`.
+#[test]
+fn a_constants_steps_reach_long_running_const_eval_where_rustcs_do() {
+    const TINY: &str = "RELAX_TINY_CONST_EVAL_LIMIT";
+    if std::env::var_os(CHILD).is_some() {
+        let _ = check_code(STEP_TABLE, &[], false);
+        return;
+    }
+    let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "check_lint_tests::a_constants_steps_reach_long_running_const_eval_where_rustcs_do", "--nocapture", "--test-threads=1", "--format=terse"])
+        .env(CHILD, "1")
+        .env(TINY, "1")
+        .env_remove("RELAX_LINT_FLAGS"));
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+    let got: Vec<&str> = stderr.lines().chain(stdout.lines()).filter_map(|l| l.split_once("lib.rs:").map(|(_, at)| at)).collect();
+    let lint = "constant evaluation is taking a long time [long_running_const_eval]";
+    let progress = "constant evaluation is taking a long time";
+    let expected = [
+        format!("2:51: error: {lint}"), format!("4:54: error: {lint}"), format!("6:131: error: {lint}"), format!("8:110: error: {lint}"),
+        format!("10:63: error: {lint}"), format!("12:76: error: {lint}"), format!("14:54: error: {lint}"), format!("16:181: error: {lint}"),
+        format!("18:91: error: {lint}"), format!("19:50: warning: {progress}"), format!("20:25: error: {lint}"),
+        format!("21:49: warning: {lint}"), format!("21:49: warning: {progress}"),
+    ];
+    assert_eq!(got, expected, "the check's long_running_const_eval reports are not rustc's\n{stderr}");
+}
+
+/// The native count of a constant's code (ctfe_twin.rs) against the interpreter's, rustc's: for
+/// every constant of STEP_TABLE that both evaluate (each initializer runs as code: RELAX_CTFE=0),
+/// native <= interpreter (more would make a run reject what rustc accepts) and native >=
+/// interpreter / 8 (a run's consult of the interpreter at 2M / 8 native steps relies on it).
+#[test]
+fn a_constants_native_steps_follow_the_interpreters() {
+    if std::env::var_os(CHILD).is_some() {
+        let _ = check_code(STEP_TABLE, &[], false);
+        let steps = std::mem::take(&mut *crate::jit::CONST_STEPS.lock().unwrap_or_else(|e| e.into_inner()));
+        assert!(steps.len() >= 12, "too few constants ran both ways: {steps:?}");
+        let off: Vec<_> = steps.iter().filter(|(_, interp, native)| native > interp || native * 8 < *interp).collect();
+        assert!(off.is_empty(), "(constant, interpreter steps, native steps) outside [interpreter / 8, interpreter]: {off:?}");
+        return;
+    }
+    let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "check_lint_tests::a_constants_native_steps_follow_the_interpreters", "--nocapture", "--test-threads=1", "--format=terse"])
+        .env(CHILD, "1")
+        .env("RELAX_TINY_CONST_EVAL_LIMIT", "1")
+        .env("RELAX_CTFE", "0")
+        .env_remove("RELAX_LINT_FLAGS"));
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
 }

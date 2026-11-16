@@ -1261,6 +1261,10 @@ pub struct LetStmt {
     pub ty: OptTyId,
     pub init: OptExprId,
     pub else_: OptBlockId,
+    /// `super let` (rustc `LetStmt::super_`): its bindings and the temporaries its initializer
+    /// extends live as long as the value of the block it is in. Only the built-in formatting macros
+    /// write one (rustc_ast_lowering format.rs: `super let args = (&arg0, ..);`).
+    pub super_: bool,
 }
 
 /// An expression statement with outer attributes (`Stmt::Attrs`).

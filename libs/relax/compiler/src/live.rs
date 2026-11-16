@@ -229,7 +229,14 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
                     let t = Instant::now();
                     let back: Vec<(u32, u32)> = undo.versions.clone();
                     let up: *mut Unit = &mut *u;
-                    let ns = unsafe { crate::reload::rollback(up, undo, "a panic or fault in its code (M7)") };
+                    let ns = match unsafe { crate::reload::rollback(up, undo, "a panic or fault in its code (M7)") } {
+                        Ok(ns) => ns,
+                        Err(r) => {
+                            println!("  patch {} not rolled back: {}", best_gen, r.why);
+                            undos.insert(i, r.undo);
+                            continue;
+                        }
+                    };
                     for (o, n) in back {
                         for r in running.iter_mut() {
                             if r.1 == n {

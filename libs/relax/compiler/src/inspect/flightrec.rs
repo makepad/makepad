@@ -44,7 +44,7 @@ const HITCH_LAST_NS: u64 = 60_000_000_000;
 const AUTO_KEEP: usize = 12;
 
 static DUMP_MS: AtomicU64 = AtomicU64::new(1000);
-/// how the run was started (a replay starts the same): (args, cwd, MAKEPAD_* environment)
+/// how the run was started (a replay starts the same): (args, cwd, the variables HostEnv.recorded names)
 static RUN: Mutex<Option<(String, String, String)>> = Mutex::new(None);
 static THREAD: Mutex<Option<std::thread::Thread>> = Mutex::new(None);
 
@@ -66,7 +66,7 @@ pub fn init() {
     let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
     let env: Vec<String> = std::env::vars_os()
         .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
-        .filter(|(k, _)| k.starts_with("MAKEPAD") || k.starts_with("SANDBOX_"))
+        .filter(|(k, _)| crate::progenv::host_env().recorded.iter().any(|p| k.starts_with(p)))
         .map(|(k, v)| format!("{k}={}", v.to_string_lossy()))
         .collect();
     *RUN.lock().unwrap_or_else(|e| e.into_inner()) = Some((args.join("\u{1f}"), cwd, env.join("\u{1f}")));
@@ -303,6 +303,14 @@ fn push_ev(ring: &Slots<Ev>, cat: &str, text: &str, a: u64, b: u64) {
     ring.push(Ev { t: crate::clock::wall_ns(), os_id: super::threads::self_os_id(), a, b, cat_len, len, cat: cat_b, text: text_b });
 }
 
+/// The recorded events of category `cat` (a test's check of what a path recorded).
+#[cfg(test)]
+pub(crate) fn count_events(cat: &str) -> usize {
+    let mut n = 0;
+    events().read(0, &mut |_, e: Ev| n += (&e.cat[..e.cat_len as usize] == cat.as_bytes()) as usize);
+    n
+}
+
 /// An input event of the program as the remote command that injects it again
 /// (`mouse k=down x=.. y=..`, `key k=down c=..`, `text t=..`), at its UI frame.
 pub fn input(frame: u64, injected: bool, command: &str) {
@@ -471,6 +479,9 @@ pub enum Why {
     Asked,
     /// a run painted no window (makepad-platform's first-draw watch: `NODRAW_CAT`)
     NoDraw,
+    /// the JIT code window went lean (`Unit::code_lean`): the recent compiles and installs say
+    /// which loop filled it
+    Lean,
 }
 
 /// The category of makepad-platform's first-draw event (`first_draw::CAT`): a run that started
@@ -486,6 +497,7 @@ impl Why {
             Why::Fault => "fault",
             Why::Asked => "asked",
             Why::NoDraw => "nodraw",
+            Why::Lean => "lean",
         }
     }
 }
@@ -538,13 +550,14 @@ fn watch() {
                 2 => Why::Panic,
                 3 => Why::Fault,
                 5 => Why::NoDraw,
+                6 => Why::Lean,
                 _ => Why::Asked,
             };
             let now = crate::clock::wall_ns();
             let last = LAST_AUTO.load(Relaxed);
             // (a run's one no-draw event is never left out for an earlier recording: a restart's
             // hitch just before it would have been)
-            let gap = match why { Why::Panic => DUMP_GAP_NS / 3, Why::NoDraw => 0, _ => DUMP_GAP_NS };
+            let gap = match why { Why::Panic => DUMP_GAP_NS / 3, Why::NoDraw | Why::Lean => 0, _ => DUMP_GAP_NS };
             if last == 0 || now.saturating_sub(last) >= gap {
                 LAST_AUTO.store(now, Relaxed);
                 match save(if why == Why::Hitch { HITCH_LAST_NS } else { DUMP_LAST_NS }, why, None, true) {
@@ -593,6 +606,11 @@ pub(super) struct Cursors {
     app_ev: u64,
     input: u64,
     jit: u64,
+    /// the JIT installs ring's head at the attach: only those before it are sent (a backfill's
+    /// history). From the attach on each install reaches the stream once, as the viewer's own
+    /// record (pstream::jit_install, with its source line): sent from the ring too, every
+    /// install of a live recording counted twice, half of them as replacing the other half.
+    jit_end: u64,
     frames: u64,
     samples: u64,
     counters: u64,
@@ -606,13 +624,14 @@ impl Cursors {
     /// From the rings' start (`backfill`), else from now on.
     pub fn new(backfill: bool) -> Cursors {
         if backfill {
-            return Cursors { ev: 0, app_ev: 0, input: 0, jit: 0, frames: 0, samples: 0, counters: 0, prev_frame: None, run_sent: false };
+            return Cursors { ev: 0, app_ev: 0, input: 0, jit: 0, jit_end: jits().fill().0, frames: 0, samples: 0, counters: 0, prev_frame: None, run_sent: false };
         }
         Cursors {
             ev: events().fill().0,
             app_ev: app_events().fill().0,
             input: inputs().fill().0,
             jit: jits().fill().0,
+            jit_end: jits().fill().0,
             frames: frames().fill().0,
             samples: u64::MAX,
             counters: u64::MAX,
@@ -651,13 +670,16 @@ pub(super) fn encode(cur: &mut Cursors, enc: &mut super::pstream::StreamEnc, min
     }
     // JIT installs (names from the code tables, read now)
     let mut jit = Vec::new();
-    let (c, lost) = jits().read(cur.jit, &mut |_, j| {
-        if j.t >= min_t {
-            jit.push(j);
-        }
-    });
-    cur.jit = c;
-    lost_total += lost;
+    let end = cur.jit_end;
+    if cur.jit < end {
+        let (c, lost) = jits().read(cur.jit, &mut |n, j| {
+            if n < end && j.t >= min_t {
+                jit.push(j);
+            }
+        });
+        cur.jit = c;
+        lost_total += lost;
+    }
     let mut jrecs = Vec::with_capacity(jit.len());
     for j in jit {
         let tid = enc.known_tid(j.os_id).unwrap_or(0);
@@ -888,6 +910,16 @@ fn stamp(secs: u64) -> String {
 }
 
 static ONCE: AtomicBool = AtomicBool::new(false);
+
+/// The JIT code window went lean (`Unit::code_lean`, once a run): the recorder's thread writes
+/// the recording, as for a panic.
+pub fn code_lean(what: &str) {
+    if !on() {
+        return;
+    }
+    event("code", what, 0, 0);
+    request_dump(Why::Lean);
+}
 
 /// A fatal fault is ending the process: the recording is written now, on the faulting thread
 /// (no stall-sample names: they would ask the owner).

@@ -595,19 +595,23 @@ impl<'a> BodyRefs<'a> {
         self.prog.lookup_in_container(t, def.name, matches!(def.kind, DefKind::AssocTy)).or_else(|| self.prog.lookup_in_container(t, def.name, false))
     }
 
-    fn adt_of_ty(&self, t: crate::types::TyId, derefs: u32) -> Option<DefId> {
+    /// The struct whose field a field expression reads, from its base's type and the builtin
+    /// dereferences before it: Ok(None) when the base is a tuple (its field is no definition's),
+    /// Err when an overloaded dereference stands between or the type is not known.
+    fn adt_of_ty(&self, t: crate::types::TyId, derefs: u32) -> Result<Option<DefId>, ()> {
         let mut t = t;
         for _ in 0..derefs {
             match *self.tcx.tys.kind(t) {
                 TyKind::Ref(_, x, _) => t = x,
-                TyKind::Adt(d, args, _) if lint::is_diagnostic_item(self.prog, d, "Box") => t = *self.tcx.tys.list(args).first()?,
-                _ => return None,
+                TyKind::Adt(d, args, _) if lint::is_diagnostic_item(self.prog, d, "Box") => t = *self.tcx.tys.list(args).first().ok_or(())?,
+                _ => return Err(()),
             }
         }
         while let TyKind::Ref(_, x, _) = *self.tcx.tys.kind(t) { t = x; }
         match *self.tcx.tys.kind(t) {
-            TyKind::Adt(d, ..) => Some(d),
-            _ => None,
+            TyKind::Adt(d, ..) => Ok(Some(d)),
+            TyKind::Tuple(..) => Ok(None),
+            _ => Err(()),
         }
     }
 
@@ -615,9 +619,15 @@ impl<'a> BodyRefs<'a> {
         let Some(&(derefs, idx)) = self.body.field_idx.get(&e.0) else { return };
         let bi = self.body.expr_ix(base);
         if bi < self.body.expr_ty.len() {
-            if let Some(adt) = self.adt_of_ty(self.body.expr_ty[bi], derefs) {
-                self.out.push(Ref::Field((adt, 0, idx)));
-                return;
+            match self.adt_of_ty(self.body.expr_ty[bi], derefs) {
+                Ok(Some(adt)) => {
+                    self.out.push(Ref::Field((adt, 0, idx)));
+                    return;
+                }
+                // a tuple's field (`format_args!`'s `args.0`): not a field of the structs this
+                // body names that has the same index
+                Ok(None) => return,
+                Err(()) => {}
             }
         }
         // through an overloaded dereference (`Pin<&mut S>`, a guard): the struct the body names
@@ -667,6 +677,47 @@ impl<'a> BodyRefs<'a> {
                     if matches!(ast.pat(*x), Pat::Rest | Pat::Wild) { continue; }
                     let idx = if k < dotdot { k } else { k - 1 + missing };
                     self.out.push(Ref::Field((adt, vi, idx as u32)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The fields a destructuring assignee's tuple-struct and struct parts take (pat_fields for
+    /// the pattern rustc lowers the assignee to): the ones it names, not `_` or `..`.
+    fn assignee_fields(&mut self, a: ExprId) {
+        let ast = self.ast;
+        let skip = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Underscore | ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false));
+        match ast.expr(a).kind {
+            ExprKind::Paren(x) => self.assignee_fields(x),
+            ExprKind::Tuple(xs) | ExprKind::Array(xs) => {
+                for &x in ast.list(xs) { self.assignee_fields(x); }
+            }
+            ExprKind::Call(_, args) => {
+                let Some(Res::Def(d)) = self.body.res.get(&a.0).copied() else { return };
+                let (adt, vi) = self.variant_of(d);
+                let Some(nf) = self.tcx.adts.get(&adt).and_then(|ad| ad.variants.get(vi as usize)).map(|v| v.fields.len()) else { return };
+                let list = ast.list(args);
+                let rest = list.iter().position(|x| matches!(ast.expr(*x).kind, ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false)));
+                for (k, &x) in list.iter().enumerate() {
+                    if skip(x) { continue; }
+                    let idx = match rest { Some(r) if k > r => nf.wrapping_sub(list.len() - k), _ => k };
+                    self.out.push(Ref::Field((adt, vi, idx as u32)));
+                    self.assignee_fields(x);
+                }
+            }
+            ExprKind::Struct(row) => {
+                let st = *ast.row(row);
+                let Some(Res::Def(d)) = self.body.res.get(&a.0).copied() else { return };
+                let (adt, vi) = self.variant_of(d);
+                for f in ast.list(st.fields) {
+                    if skip(f.expr) { continue; }
+                    let name = self.prog.files[self.body.file as usize].text(f.name);
+                    let fields = self.tcx.adts.get(&adt).and_then(|ad| ad.variants.get(vi as usize)).map(|v| &v.fields);
+                    let i = fields.and_then(|fs| fs.iter().position(|ft| self.prog.syms.str(ft.name) == name))
+                        .or_else(|| crate::ast::tuple_index(name).map(|n| n as usize));
+                    if let Some(i) = i { self.out.push(Ref::Field((adt, vi, i as u32))); }
+                    self.assignee_fields(f.expr);
                 }
             }
             _ => {}
@@ -844,6 +895,9 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
                 // with its field accesses: a field written to is live
                 self.expr(l);
                 self.expr(r);
+                // `S(a, b) = v` / `S { x, .. } = v` is rustc's `let S(lhs0, lhs1) = v; a = lhs0; ..`:
+                // the pattern reads the fields it takes
+                if crate::lit::is_assignee_pattern(ast, l) { self.assignee_fields(l); }
                 return;
             }
             _ => {}
@@ -1348,6 +1402,8 @@ pub struct CrateItems<'p> {
 /// reported an error of that never bind in rustc, besides the ones still open. `replayed`: the
 /// crates with bodies replayed from stored verdicts, whose import reports wait while one is a
 /// candidate (lint_imports::Judge): those crates come back, for `finish_imports`.
+/// The ADT late lints reuse this call's layout and Copy memos across crates, matching rustc's
+/// `layout_of` and `is_copy_raw` queries instead of rebuilding their answers per item.
 pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, erroneous: &[usize], replayed: &[bool]) -> Vec<Deferred> {
     if !lint::enabled() { return Vec::new(); }
     let mut pt = PartTimes::new("lint_dead::finish");
@@ -1360,11 +1416,15 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, er
     let traits: Vec<HashSet<DefId>> = crates.iter().map(|c| traits.remove(&c.krate).unwrap_or_default()).collect();
     let mut order: Vec<usize> = (0..crates.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(crates[i].defs.len()), i));
+    // Like rustc's layout_of, cached cycle stand-ins suppress repeat E0391 reports from
+    // later items/lints; fresh per-item tables could report the same cycle again.
+    let lay = crate::layout::Layouts::new();
+    let copy_memo = crate::conc::MemoMap::default();
     let parts = crate::lint::par_each(&order, |&i| {
         let mut pt = PartTimes::new("lint_dead::finish");
         let c = &crates[i];
         let judge = if replayed.get(c.krate as usize).copied().unwrap_or(false) { Judge::Defer } else { Judge::Report };
-        let candidates = finish_crate(&CrateCx { prog, tcx, c, root, refs: &refs, children: &children }, &traits[i], late, judge, &mut pt);
+        let candidates = finish_crate(&CrateCx { prog, tcx, c, root, refs: &refs, children: &children, lay: &lay, copy_memo: &copy_memo }, &traits[i], late, judge, &mut pt);
         (pt, (judge == Judge::Defer && !candidates.is_empty()).then_some((i, candidates)))
     });
     let mut deferred = Vec::new();
@@ -1440,7 +1500,8 @@ fn crate_items<'p>(prog: &'p Program, own: &[bool], erroneous: &[usize], mut chi
     crates
 }
 
-/// The shared read-only context for one checked crate's lints.
+/// One checked crate's lint context; `finish` owns its layout and Copy memos so crate workers
+/// reuse answers as rustc's `layout_of` and `is_copy_raw` queries do.
 struct CrateCx<'a> {
     prog: &'a Program,
     tcx: &'a Tcx,
@@ -1448,6 +1509,10 @@ struct CrateCx<'a> {
     root: u32,
     refs: &'a HashMap<DefId, BodyInfo>,
     children: &'a HashMap<DefId, Vec<DefId>>,
+    /// `finish`'s `layout_of` memo, shared by the three ADT layout lints to reuse layouts.
+    lay: &'a crate::layout::Layouts,
+    /// `is_copy_raw` answers by crate, param env and erased type; non-body analysis mode is fixed.
+    copy_memo: &'a crate::conc::MemoMap<(u32, crate::tcx::ParamEnvId, crate::types::TyId), bool>,
 }
 
 /// One checked crate's dead code and reachability lints (`late`), and its unused imports as
@@ -1463,8 +1528,9 @@ fn finish_crate(cx: &CrateCx<'_>, traits: &HashSet<DefId>, late: bool, judge: Ju
 }
 
 /// misc_checking_3 of one checked crate: dead code, then the late lints of its items.
+/// The ADT lints share `finish`'s memos through `cx`, reusing rustc's `layout_of`/`is_copy_raw` answers.
 fn late_lints(cx: &CrateCx<'_>, reach: &Reach, pt: &mut PartTimes) {
-    let CrateCx { prog, tcx, c, root, refs, children } = *cx;
+    let CrateCx { prog, tcx, c, root, refs, children, lay, copy_memo } = *cx;
     let own = &c.own[..];
     let mut s = Dead { prog, tcx, own, refs, live: HashSet::new(), live_log: Vec::new(), live_fields: HashSet::new(), worklist: Vec::new(), scanned: HashSet::new(), propagated: false, ignored_derived: HashMap::new(), children };
     // seeds
@@ -1567,14 +1633,12 @@ fn late_lints(cx: &CrateCx<'_>, reach: &Reach, pt: &mut PartTimes) {
     if executable { rep.run(&DEAD_CODE_PUB_IN_BINARY, &pre_live, true, &all); }
     rep.run(&DEAD_CODE, &s.live, false, &all);
     pt.mark("report");
-    crate::lint_late::missing_copy_implementations(prog, tcx, &c.defs, reach);
+    crate::lint_late::missing_copy_implementations(prog, tcx, &c.defs, reach, lay, copy_memo);
     pt.mark("missing_copy_implementations");
-    crate::lint_late::variant_size_differences(prog, tcx, &c.defs);
+    crate::lint_late::variant_size_differences(prog, tcx, &c.defs, lay);
     pt.mark("variant_size_differences");
     crate::lint_late::async_fn_in_trait(prog, &c.defs, reach);
     pt.mark("async_fn_in_trait");
-    crate::lint_late::repr_transparent_fields(prog, tcx, &c.defs);
-    pt.mark("repr_transparent_fields");
     unnameable_types(prog, own, reach);
     pt.mark("unnameable_types");
 }

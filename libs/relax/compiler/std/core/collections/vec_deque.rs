@@ -75,7 +75,16 @@ impl<T> VecDeque<T> {
 
     /// Moves the contents into a buffer of `new_cap` (>= len), head becomes 0.
     fn realloc(&mut self, new_cap: usize) {
-        let mut v: Vec<T> = Vec::with_capacity(new_cap);
+        if let Err(e) = self.try_realloc(new_cap) {
+            crate::vec::handle_error(e);
+        }
+    }
+
+    /// The buffer moved to a new one of `new_cap` (>= len) slots, its parts made contiguous; Err
+    /// (and the deque unchanged) when the allocator cannot give it.
+    fn try_realloc(&mut self, new_cap: usize) -> Result<(), super::TryReserveError> {
+        let mut v: Vec<T> = Vec::new();
+        v.try_reserve_exact(new_cap)?;
         let dst = v.as_mut_ptr();
         let new_cap = v.capacity();
         crate::mem::forget(v);
@@ -90,6 +99,7 @@ impl<T> VecDeque<T> {
         self.buf = unsafe { ptr::NonNull::new_unchecked(dst) };
         self.cap = unsafe { Cap::new::<T>(new_cap) };
         self.head = 0;
+        Ok(())
     }
 
     fn free_buf(&mut self) {
@@ -152,8 +162,17 @@ impl<T> VecDeque<T> {
         if crate::heap::Layout::array::<T>(new_cap).is_err() {
             return Err(super::TryReserveError::capacity_overflow());
         }
-        self.realloc(new_cap);
-        Ok(())
+        self.try_realloc(new_cap)
+    }
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), super::TryReserveError> {
+        let required = match self.len.checked_add(additional) {
+            Some(r) => r,
+            None => return Err(super::TryReserveError::capacity_overflow()),
+        };
+        if required <= self.capacity() {
+            return Ok(());
+        }
+        self.try_realloc(required)
     }
     pub fn shrink_to_fit(&mut self) {
         self.shrink_to(0);
@@ -995,6 +1014,18 @@ unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for IterMut<'a, T> {
 
 pub struct IntoIter<T> {
     inner: VecDeque<T>,
+}
+
+// alloc/src/collections/vec_deque/into_iter.rs (`cycle()` clones the IntoIter)
+impl<T: Clone> Clone for IntoIter<T> {
+    fn clone(&self) -> Self {
+        IntoIter { inner: self.inner.clone() }
+    }
+}
+impl<T: fmt::Debug> fmt::Debug for IntoIter<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("IntoIter").field(&self.inner).finish()
+    }
 }
 
 impl<T> Iterator for IntoIter<T> {

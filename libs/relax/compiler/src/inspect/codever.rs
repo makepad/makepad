@@ -25,7 +25,7 @@ fn fn_lines_depth(u: &Unit, id: u32, depth: u32) -> Option<(u32, u32, u32)> {
     }
     match &u.fns[id as usize].key {
         FnKey::Inst(d, _) => def_lines(u, *d),
-        FnKey::Plain(b) | FnKey::Sandbox(b) => fn_lines_depth(u, *b, depth + 1),
+        FnKey::Plain(b) | FnKey::Sandbox(b) | FnKey::Ctfe(b) => fn_lines_depth(u, *b, depth + 1),
         FnKey::Closure(_, _, p) => fn_lines_depth(u, *p, depth + 1),
         _ => None,
     }
@@ -477,7 +477,7 @@ impl Resolver {
             if same_file(u, f, pf) && pl >= lo && pl <= hi {
                 return None;
             }
-        } else if !matches!(u.fns[id as usize].key, FnKey::Inst(..) | FnKey::Closure(..) | FnKey::Plain(..)) {
+        } else if !matches!(u.fns[id as usize].key, FnKey::Inst(..) | FnKey::Closure(..) | FnKey::Plain(..) | FnKey::Ctfe(..)) {
             // glue and shims: generated code, positions of what they forward to
             return None;
         }
@@ -699,7 +699,7 @@ pub(crate) fn own_slot(u: &Unit, id: u32, targets: &[u32]) -> bool {
             return true;
         }
         s = match u.fns[s as usize].key {
-            FnKey::Plain(b) | FnKey::Sandbox(b) => b,
+            FnKey::Plain(b) | FnKey::Sandbox(b) | FnKey::Ctfe(b) => b,
             FnKey::Closure(_, _, p) => p,
             _ => return false,
         };
@@ -723,23 +723,35 @@ pub fn cmd_code(req: &Req, out: &mut Out) {
         by.push(format!("{} {:.2} MB / {} installs", crate::jit::GROW_NAMES[k], crate::jit::CODE_GROWTH[k].load(Ordering::Relaxed) as f64 / 1048576.0, crate::jit::CODE_INSTALLS[k].load(Ordering::Relaxed)));
     }
     out.line(&format!("code installed {:.2} MB (append-only, never freed): {}", total as f64 / 1048576.0, by.join(", ")));
-    out.line(&crate::invalid::stats_line());
     let up = crate::jit::current_unit();
+    if !up.is_null() {
+        out.line(&unsafe { &*up }.window_line());
+        // what the lean point said: the window then, and the slots with the most versions
+        if let Some(report) = unsafe { &*up }.lean_report() {
+            for line in report.lines() {
+                out.line(&format!("  lean point: {}", line));
+            }
+        }
+    }
+    out.line(&crate::invalid::stats_line());
     if up.is_null() {
         return;
     }
     let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || {
         let u = unsafe { &*up };
-        let mut v: Vec<(u32, u32, &str)> = u.fns.iter().filter(|f| f.version > 1).map(|f| (f.version, f.code_len, &*f.name)).collect();
-        v.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        v.iter().take(n).map(|(ver, len, name)| format!("  {} versions  {} B now  {}", ver, len, name)).collect::<Vec<_>>()
+        let (installs, top) = u.version_stats(n);
+        (u.fns.len(), installs, top.iter().map(|(ver, len, name)| format!("  {} versions  {} B now  {}", ver, len, name)).collect::<Vec<_>>())
     });
     match r {
-        Some(lines) if lines.is_empty() => out.line("no fn has more than one version"),
-        Some(lines) => {
-            out.line(&format!("top fns by versions:"));
-            for l in lines {
-                out.line(&l);
+        Some((slots, installs, lines)) => {
+            out.line(&format!("{} slots, {} versions in all (every install and rollback counts one)", slots, installs));
+            if lines.is_empty() {
+                out.line("no fn has more than one version");
+            } else {
+                out.line("top fns by versions:");
+                for l in lines {
+                    out.line(&l);
+                }
             }
         }
         None => out.line("(top fns: the owner is busy; counts above are current)"),
@@ -791,6 +803,7 @@ pub fn cmd_versions(req: &Req, out: &mut Out) {
                 FnKey::Closure(..) => "closure".to_string(),
                 FnKey::Plain(b) => format!("SPEC-V unverified twin of slot {}", b),
                 FnKey::Sandbox(b) => format!("sandboxed twin of slot {}", b),
+                FnKey::Ctfe(b) => format!("ctfe twin of slot {}", b),
                 FnKey::Glue(..) => "glue".to_string(),
                 FnKey::Shim(..) => "shim".to_string(),
             };

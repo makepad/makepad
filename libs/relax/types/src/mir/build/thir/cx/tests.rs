@@ -2,7 +2,7 @@
 //! the kinds of expressions the arenas hold.
 use super::Cx;
 use crate::borrowck::body::{BodyKind, CheckedBody};
-use crate::mir::build::pattern::tests::{named, program};
+use crate::mir::build::pattern::tests::{named, program, HEADER};
 use crate::mir::build::thir::{ExprKind, ThirBody};
 use crate::mir::build::{BuildCx, BuildResult, BuildRoot};
 use crate::tcx::{EvalCx, EvalState, TypingEnv};
@@ -78,6 +78,26 @@ fn closures_capture() {
 fn borrows_and_casts() {
     let k = kinds("pub fn f(x: u8) -> u64 { let r = &x; let m = &mut 3u8; *m += *r; (x as u64) + 1 }", "f");
     has(&k, &["Borrow", "Cast", "Deref"]);
+    let source = "pub fn g(x: u8) -> u8 { x } pub fn f(x: u8) -> u64 { let p: fn(u8) -> u8 = ((g)); ((p(x) as u64)) + 1 }";
+    let file = format!("{HEADER}{source}");
+    // (a span of another file, as core's, can lie past this file's end)
+    let text_of = |span: crate::mir::Span| file.get(span.lo as usize..span.hi as usize);
+    build(source, "f", |r| {
+        let t = r.unwrap_or_else(|e| panic!("{e:?}"));
+        for text in ["((g))", "((p(x) as u64))"] {
+            let at = |e: &&crate::mir::build::thir::Expr| text_of(e.span) == Some(text);
+            let scopes: Vec<_> = t.thir.exprs.iter().filter(at).filter(|e| matches!(e.kind, ExprKind::Scope { .. })).collect();
+            assert_eq!(scopes.len(), 1, "one inner scope for {text}");
+            let ExprKind::Scope { value, .. } = scopes[0].kind else { panic!() };
+            let value = &t.thir.exprs[value.0 as usize];
+            assert_eq!(text_of(value.span), Some(text), "the adjusted value keeps the parenthesized span");
+            if text == "((g))" {
+                assert!(matches!(value.kind, ExprKind::PointerCoercion { .. }), "parenthesis coercion retained");
+            } else {
+                assert!(matches!(value.kind, ExprKind::Cast { .. }), "inner cast retained");
+            }
+        }
+    });
 }
 
 #[test]
@@ -92,11 +112,13 @@ fn fn_body_fields_are_filled() {
 
 #[test]
 fn const_body_has_no_fn_scopes() {
-    build("pub const K: u8 = 1 + 2; pub fn f() {}", "K", |r| {
-        let t = r.unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(t.params.is_empty());
-        assert!(t.fn_scopes.is_none());
-    });
+    for init in ["1 + 2", "((1 + 2))"] {
+        build(&format!("pub const K: u8 = {init}; pub fn f() {{}}"), "K", |r| {
+            let t = r.unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(t.params.is_empty());
+            assert!(t.fn_scopes.is_none());
+        });
+    }
 }
 
 #[test]
@@ -110,10 +132,12 @@ fn destructuring_assignment() {
 
 #[test]
 fn destructuring_assignment_binds_in_a_remainder_scope() {
-    build("pub fn f(mut a: u8, mut b: u8) { (a, b) = (b, a); }", "f", |r| {
-        let t = r.unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(t.thir.var_scopes.len(), 2);
-    });
+    for assignee in ["(a, b)", "(((a), (b)))"] {
+        build(&format!("pub fn f(mut a: u8, mut b: u8) {{ {assignee} = (b, a); }}"), "f", |r| {
+            let t = r.unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(t.thir.var_scopes.len(), 2);
+        });
+    }
 }
 
 #[test]

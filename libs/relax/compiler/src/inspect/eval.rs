@@ -69,7 +69,7 @@ fn program_frame(u: &Unit, frames: &[u64]) -> Option<(usize, u32, DefId)> {
         // a closure is in its parent's scope
         for _ in 0..8 {
             match key {
-                FnKey::Closure(_, _, p) | FnKey::Plain(p) | FnKey::Sandbox(p) if (*p as usize) < u.fns.len() => key = &u.fns[*p as usize].key,
+                FnKey::Closure(_, _, p) | FnKey::Plain(p) | FnKey::Sandbox(p) | FnKey::Ctfe(p) if (*p as usize) < u.fns.len() => key = &u.fns[*p as usize].key,
                 _ => break,
             }
         }

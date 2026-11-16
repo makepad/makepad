@@ -98,10 +98,19 @@ fn created_closures(mir: &Body, out: &mut Vec<u32>) {
     for p in &mir.promoted { created_closures(p, out); }
 }
 
+/// The root's path for the `unchecked` messages, made the first time one is written (most roots
+/// write none).
+struct RootName<'a> { prog: &'a Program, def: crate::program::DefId, text: std::cell::OnceCell<String> }
+impl std::fmt::Display for RootName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text.get_or_init(|| self.prog.def_path(self.def)))
+    }
+}
+
 /// Check one typeck root. See the module doc.
 pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::Body, fv_cache: Option<&Rc<SummaryCx>>) -> Verdict {
     let mut v = Verdict { errors: Vec::new(), unchecked: Vec::new(), fv_only: Vec::new(), fv_records: Vec::new(), relaxed_records: Vec::new(), bodies: 0 };
-    let name = prog.def_path(typeck.def);
+    let name = RootName { prog, def: typeck.def, text: Default::default() };
     let env = TypingEnv {
         limit: crate::tcx::RecursionLimit::for_item(prog, typeck.def),
         param_env: typeck.param_env.unwrap_or_default(),
@@ -219,7 +228,7 @@ fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::In
         if crate::wfcheck::obligations::predicate_mentions_error(infcx, &o.goal.predicate) { continue; }
         let mut message = match &o.goal.predicate.kind {
             crate::next_solver::PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) => {
-                let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_string(false, prog, tcx, t));
+                let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_diag_string(prog, tcx, t));
                 // rustc_on_unimplemented on `Send`/`Sync` for a future: "future cannot be sent between threads safely"
                 if message.ends_with("cannot be sent between threads safely") && matches!(p.trait_ref.args.first(), Some(crate::consts::GenericArg::Type(t)) if tcx.is_coroutine(*t)) {
                     "future cannot be sent between threads safely".to_string()
@@ -334,7 +343,7 @@ struct Group<'a, 'b> {
     typeck: &'a typeck::Body,
     env: TypingEnv,
     root: &'b BuildRoot<'b>,
-    name: &'a str,
+    name: &'b RootName<'b>,
     fv_cache: Option<&'a Rc<SummaryCx>>,
 }
 
@@ -383,7 +392,9 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     // Nesting from the MIR itself (which body aggregates which closure), not from source extents: macro
     // expansions give nested closures equal spans. Inner bodies come first, as do_mir_borrowck requires.
     let mut creator: crate::fxhash::HashMap<u32, Option<u32>> = Default::default();
-    for (owner, mir) in &built {
+    // (a single built body is the group's only one: it creates no closure or inline constant to order)
+    let walked: &[(CheckedBody, Box<Body>)] = if built.len() > 1 { &built } else { &[] };
+    for (owner, mir) in walked {
         let by = match owner.kind { OwnerKind::Closure(e) | OwnerKind::InlineConst(e) => Some(e.0), _ => None };
         let mut created = vec![];
         created_closures(mir, &mut created);
@@ -413,8 +424,8 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     let mut closure_sigs: crate::fxhash::HashMap<u32, SignatureRegions> = Default::default();
     for &c in closure_order.iter().rev() {
         let parent = match creator.get(&c).copied().flatten().and_then(|p| closure_sigs.get(&p)) {
-            Some(p) => p.clone(),
-            None => item_sig.clone(),
+            Some(p) => p,
+            None => &item_sig,
         };
         if let Some(&ty) = typeck.inline_const_types.get(&c).filter(|_| built.iter().any(|(o, _)| matches!(o.kind, OwnerKind::InlineConst(e) if e.0 == c))) {
             closure_sigs.insert(c, SignatureRegions::inline_const_in(tcx, prog, typeck.def, c, ty, parent));
@@ -441,20 +452,21 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         };
         closure_sigs.insert(c, sig.with_closure_env(tcx, typeck.def, c, env_ty));
     }
+    let mut item_sig = Some(item_sig);
     for (owner, mut mir) in built {
         let (sig, key, nested) = match owner.kind {
             OwnerKind::Closure(e) => {
-                let Some(sig) = closure_sigs.get(&e.0).cloned() else { v.unchecked.push(format!("{name}: closure without a signature")); return; };
+                let Some(sig) = closure_sigs.remove(&e.0) else { v.unchecked.push(format!("{name}: closure without a signature")); return; };
                 let id = ClosureId { file: typeck.file, expr: e.0 };
                 let key = if mir.coroutine.is_some() { ClauseOwner::Coroutine(id) } else { ClauseOwner::Closure(id) };
                 (sig, key, true)
             }
             OwnerKind::InlineConst(e) => {
-                let Some(sig) = closure_sigs.get(&e.0).cloned() else { v.unchecked.push(format!("{name}: inline const without universal regions")); return; };
+                let Some(sig) = closure_sigs.remove(&e.0) else { v.unchecked.push(format!("{name}: inline const without universal regions")); return; };
                 let Some(&def) = prog.node_id_to_def_id.get(&(typeck.file, relax_front::def_collector::NodeId::InlineConst(e))) else { v.unchecked.push(format!("{name}: inline const definition")); return; };
                 (sig, ClauseOwner::Def(def), true)
             }
-            _ => (item_sig.clone(), ClauseOwner::Def(typeck.def), false),
+            _ => (item_sig.take().unwrap(), ClauseOwner::Def(typeck.def), false),
         };
         let moves = MoveData::gather_moves(&mir, prog, tcx, env, &|_| true);
         let mut infcx = BorrowckInferCtxt::new(tcx, prog, typeck.def, typeck.def, &typeck.args);
@@ -483,13 +495,9 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         for bug in std::mem::take(&mut tc.summary.mir_bugs) {
             v.unchecked.push(format!("{name}: MIR bug: {}", render_ids(prog, tcx, &bug.message)));
         }
-        let borrows = BorrowSet::build(tcx, &p.mir, false, &p.moves);
-        let regions_stub = None::<()>;
-        let _ = regions_stub;
         for e in errors {
             let d = diagnostics::Diag::new(e.code(), e.span, e.kind.note());
             v.errors.push(diagnostics::capture(prog, typeck.def, &d));
-            let _ = &borrows;
         }
         // E0320: the drop-check rules of a local's type overflowed the recursion limit
         // (DropckOutlivesResult::report_overflows)
@@ -537,19 +545,25 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
             v.unchecked.push(format!("{name}: {why}"));
             continue;
         }
-        let borrows = BorrowSet::build(tcx, &p.mir, matches!(p.mir.source.kind, BodyKind::Fn | BodyKind::Closure(_)), &p.moves);
-        let names = universal_names(tcx, prog, p);
-        let mut dcx = DiagCx::new(tcx, prog, p.owner.owner, &p.mir, &p.moves, &checked.regions, &borrows, &names);
-        dcx.coroutine_kinds = checked.coroutine_kinds.clone();
         if crate::lint::enabled() && checked.result.accepted() && matches!(p.owner.kind, OwnerKind::Function | OwnerKind::Closure(_)) {
             lint_unused_mut(prog, typeck.def, &p.mir, &checked.result.used_mut);
         }
-        v.errors.extend(diagnostics::render_errors(&dcx, &checked.result));
         // `report_opaque_type_errors`: only when the region inference found no error (those would explain them).
-        if checked.regions.regioncx.errors.is_empty() {
-            v.errors.extend(diagnostics::opaque_types::report_opaque_type_errors(&dcx, &checked.deferred_opaque_type_errors).iter().map(|d| diagnostics::capture(prog, p.owner.owner, d)));
+        let opaque_errors = checked.regions.regioncx.errors.is_empty() && !checked.deferred_opaque_type_errors.is_empty();
+        // The borrow set, region names and diagnostics context exist to render errors; rustc makes the
+        // names only when it reports one. A body with nothing to render builds none of them.
+        let r = &checked.result;
+        if !r.errors.is_empty() || !r.region_errors.is_empty() || !r.fv_only.is_empty() || opaque_errors {
+            let borrows = BorrowSet::build(tcx, &p.mir, matches!(p.mir.source.kind, BodyKind::Fn | BodyKind::Closure(_)), &p.moves);
+            let names = universal_names(tcx, prog, p);
+            let mut dcx = DiagCx::new(tcx, prog, p.owner.owner, &p.mir, &p.moves, &checked.regions, &borrows, &names);
+            dcx.coroutine_kinds = checked.coroutine_kinds.clone();
+            v.errors.extend(diagnostics::render_errors(&dcx, r));
+            if opaque_errors {
+                v.errors.extend(diagnostics::opaque_types::report_opaque_type_errors(&dcx, &checked.deferred_opaque_type_errors).iter().map(|d| diagnostics::capture(prog, p.owner.owner, d)));
+            }
+            v.fv_only.extend(diagnostics::render_fv_only(&dcx, r));
         }
-        v.fv_only.extend(diagnostics::render_fv_only(&dcx, &checked.result));
         v.fv_records.extend(checked.result.fv_records.iter().cloned());
         v.relaxed_records.extend(checked.result.relaxed_records.iter().cloned());
     }
@@ -710,7 +724,8 @@ pub fn check_anon_const(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, body: &typec
 }
 
 /// rustc_borrowck lib.rs lint_unused_mut: a user binding or argument declared `mut` that no write or
-/// mutable borrow needed -- `unused_mut`. The pattern span of the binding says where the `mut` is.
+/// mutable borrow needed -- `unused_mut`. The lint points at the binding's own span (`local_decl.source_info.span`,
+/// lib.rs:2752): `mut v` in `Some(mut v)`, not the whole pattern; the whole pattern's span finds the attributes.
 fn lint_unused_mut(prog: &Program, owner: DefId, mir: &Body, used: &crate::mir::dataflow::BitSet) {
     use crate::mir::{BindingForm, ByRef, LocalInfo, LocalKind, Mutability, VarBindingForm};
     if crate::lint::generated(prog, owner) { return; }
@@ -720,10 +735,11 @@ fn lint_unused_mut(prog: &Program, owner: DefId, mir: &Body, used: &crate::mir::
         if decl.mutability != Mutability::Mut || used.contains(i) || !matches!(decl.kind, LocalKind::UserVar | LocalKind::Arg) { continue; }
         let LocalInfo::User(BindingForm::Var(VarBindingForm { binding_mode: crate::mir::BindingMode(ByRef::No, Mutability::Mut), pat_span, .. })) = &decl.local_info else { continue };
         let Some(name) = mir.var_debug_info.iter().find(|v| v.place.local.0 as usize == i && v.place.projection.is_empty()).map(|v| v.name.as_str()) else { continue };
-        if name.starts_with('_') || crate::lint::external(prog, pat_span.file, pat_span.lo) { continue; }
+        let span = decl.source_info.span;
+        if name.starts_with('_') || crate::lint::external(prog, span.file, span.lo) { continue; }
         // (under the attributes of the binding's statement, arm or parameter: its name is in the span)
         let around = crate::lint::attrs_at(prog, owner, pat_span.file, pat_span.lo, pat_span.hi);
-        crate::lint::emit_in(prog, owner, &around, &crate::lint::UNUSED_MUT, pat_span.file, pat_span.lo,
+        crate::lint::emit_in(prog, owner, &around, &crate::lint::UNUSED_MUT, span.file, span.lo,
             &format!("variable does not need to be mutable -- help: remove this `mut` (`{}`)", name));
     }
 }

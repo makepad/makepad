@@ -12,7 +12,9 @@ fn deadlines() {
     std::thread::sleep(Duration::from_millis(800));
     let start = Instant::now();
     let outer = guard(30, || guard(1000, || spin(u64::MAX)));
-    assert!(outer.is_err() || outer.unwrap().is_err());
+    let message = outer.and_then(|inner| inner).expect_err("an expired deadline must return an error");
+    assert!(message.contains("watchdog"), "the deadline error must name the watchdog");
+    assert!(message.contains("30 ms"), "the deadline error must name the expired outer deadline");
     assert!(start.elapsed() < Duration::from_millis(800));
     // Returning an inner guard must restore the still-active outer deadline.
     let start = Instant::now();

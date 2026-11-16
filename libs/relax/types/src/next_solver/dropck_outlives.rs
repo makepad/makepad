@@ -183,11 +183,14 @@ pub fn compute_dropck_outlives_inner(ocx: &mut ObligationCtxt<'_, '_>, env: &Par
 
 impl TypeOp for ParamEnvAnd<DropckOutlives> {
     type Output = DropckOutlivesResult;
+    /// type_op/outlives.rs:11 `QueryTypeOp::try_fast_path`: a type whose drop is trivial has no
+    /// drop data to walk, so its result is the empty one.
+    fn try_fast_path(&self, infcx: &InferCtxt<'_>, _prog: &Program) -> Option<DropckOutlivesResult> {
+        trivial_dropck_outlives(infcx.tcx, self.value.dropped_ty).then(DropckOutlivesResult::default)
+    }
     fn fully_perform(self, infcx: &InferCtxt<'_>, prog: &Program) -> Result<TypeOpOutput<DropckOutlivesResult>, NoSolution> {
-        // the trivial fast path (query.rs: DropckOutlives::try_fast_path)
-        if trivial_dropck_outlives(infcx.tcx, self.value.dropped_ty) {
-            return Ok(TypeOpOutput { output: DropckOutlivesResult::default(), constraints: None });
-        }
+        // (the fast path's answer registers nothing, so the empty scrape around it is skipped)
+        if let Some(output) = self.try_fast_path(infcx, prog) { return Ok(TypeOpOutput { output, constraints: None }); }
         let limit = infcx.recursion_limit(prog);
         scrape_region_constraints(infcx, prog, |ocx| compute_dropck_outlives_inner(ocx, &self.param_env, self.value.dropped_ty, limit))
     }

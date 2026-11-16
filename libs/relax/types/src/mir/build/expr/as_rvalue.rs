@@ -609,7 +609,7 @@ pub(super) mod tests {
             root, thir, owner, source: MirSource { owner: owner.owner, kind: BodyKind::Fn }, body_span: Span::default(), arg_count: 0, coroutine: None,
             cfg: Default::default(), scopes, source_scopes: vec![crate::mir::SourceScopeData { span: Span::default(), parent_scope: None }],
             source_scope: SourceScope(0), guard_context: Vec::new(), fixed_temps: Default::default(), fixed_temps_scope: None, var_indices: Default::default(),
-            local_decls: Vec::new(), canonical_user_type_annotations: Vec::new(), upvars: Vec::new(), upvar_env: None, var_debug_info: Vec::new(),
+            local_decls: Vec::new(), canonical_user_type_annotations: Vec::new(), upvars: Vec::new(), upvar_env: None, var_debug_info: Vec::new(), desugaring_let: false,
             unit_temp: None, allocs: Default::default(), block_context: Vec::new(),
         };
         (b, tcx)

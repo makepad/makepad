@@ -27,7 +27,8 @@ mod unix {
         unsafe { pthread_self() as u64 }
     }
 
-    fn own_name(b: &mut [u8; 64]) -> usize {
+    /// The calling thread's name into `b`: its length (no allocation; a fault report's).
+    pub fn own_name(b: &mut [u8; 64]) -> usize {
         unsafe { pthread_getname_np(pthread_self(), b.as_mut_ptr(), b.len()) };
         b.iter().position(|&c| c == 0).unwrap_or(0)
     }
@@ -107,9 +108,96 @@ mod unix {
         }
     }
 
+    /// The kicks on their way to each thread. A delivery of the watchdog's signal is a kick
+    /// only when its thread has one pending here (`take_kick`); any other is the program's own and
+    /// goes to its handler (`os::fault::not_a_kick`). Real-time signals queue (Linux, Android):
+    /// each kick is one delivery and the count is exact. macOS's SIGEMT does not: two kicks
+    /// pending at once are one delivery and leave one counted, so a later SIGEMT of the program's
+    /// on that thread is taken as a kick (only a program that handles SIGEMT can see that).
+    /// The kicker claims a thread's entry (a full chunk links another: nothing allocates in a
+    /// handler); the handler only reads and counts down; the thread gives its entries back at its
+    /// end with the signal blocked first (`kicks_done`), so no kick counted there arrives after.
+    mod kicks {
+        use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering::SeqCst};
+        const N: usize = 64;
+        pub struct Entry {
+            pub thread: AtomicU64,
+            pub pending: AtomicU64,
+        }
+        struct Chunk {
+            entries: [Entry; N],
+            next: AtomicPtr<Chunk>,
+        }
+        #[allow(clippy::declare_interior_mutable_const)]
+        const FREE: Entry = Entry { thread: AtomicU64::new(0), pending: AtomicU64::new(0) };
+        static FIRST: Chunk = Chunk { entries: [FREE; N], next: AtomicPtr::new(std::ptr::null_mut()) };
+
+        pub fn entries() -> impl Iterator<Item = &'static Entry> {
+            let mut c: Option<&'static Chunk> = Some(&FIRST);
+            std::iter::from_fn(move || {
+                let this = c?;
+                c = unsafe { this.next.load(SeqCst).as_ref() };
+                Some(this)
+            })
+            .flat_map(|c| c.entries.iter())
+        }
+
+        /// `t`'s entry, claimed when it has none: a free one, else one of a new chunk.
+        pub fn claim(t: u64) -> &'static Entry {
+            loop {
+                if let Some(e) = entries().find(|e| e.thread.load(SeqCst) == t) {
+                    return e;
+                }
+                if let Some(e) = entries().find(|e| e.thread.compare_exchange(0, t, SeqCst, SeqCst).is_ok()) {
+                    return e;
+                }
+                let mut last = &FIRST;
+                while let Some(next) = unsafe { last.next.load(SeqCst).as_ref() } {
+                    last = next;
+                }
+                let new = Box::into_raw(Box::new(Chunk { entries: [FREE; N], next: AtomicPtr::new(std::ptr::null_mut()) }));
+                if last.next.compare_exchange(std::ptr::null_mut(), new, SeqCst, SeqCst).is_err() {
+                    drop(unsafe { Box::from_raw(new) });
+                }
+            }
+        }
+    }
+
+    /// Interrupts thread `t` for the hang watchdog / RELAX_COMPILE_WATCH / a run's end: the
+    /// watchdog's signal, counted as a kick on its way (`kicks`).
     pub fn kick(t: u64) {
-        unsafe {
-            pthread_kill(t as usize, crate::os::fault::watchdog_signal());
+        use std::sync::atomic::Ordering::SeqCst;
+        let e = loop {
+            let e = kicks::claim(t);
+            e.pending.fetch_add(1, SeqCst);
+            // (the thread gave the entry back at its end meanwhile: the count goes with it)
+            if e.thread.load(SeqCst) == t {
+                break e;
+            }
+            e.pending.fetch_sub(1, SeqCst);
+        };
+        if unsafe { pthread_kill(t as usize, crate::os::fault::watchdog_signal()) } != 0 {
+            e.pending.fetch_sub(1, SeqCst);
+        }
+    }
+
+    /// In the watchdog signal's handler: is this delivery a kick? (One is counted off.)
+    /// Async-signal-safe.
+    pub fn take_kick() -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let me = current();
+        kicks::entries().any(|e| e.thread.load(SeqCst) == me && e.pending.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok())
+    }
+
+    /// The calling thread ends: the watchdog's signal is blocked on it from here (a kick sent now
+    /// is never delivered) and its kick entries go back.
+    pub fn kicks_done() {
+        use std::sync::atomic::Ordering::SeqCst;
+        crate::os::progsig::block_here(crate::os::fault::watchdog_signal());
+        let me = current();
+        for e in kicks::entries().filter(|e| e.thread.load(SeqCst) == me) {
+            e.pending.store(0, SeqCst);
+            e.thread.store(0, SeqCst);
         }
     }
 
@@ -135,7 +223,7 @@ mod unix {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
-    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, name, note_current};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, take_kick};
 
     pub fn realtime() -> bool {
         extern "C" {
@@ -148,7 +236,7 @@ mod imp {
 
 #[cfg(target_vendor = "apple")]
 mod imp {
-    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, name, note_current};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, take_kick};
     use super::unix::pthread_self;
 
     /// A thread with a time-constraint policy (CoreAudio's IO threads, audio workgroups).

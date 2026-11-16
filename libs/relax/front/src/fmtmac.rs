@@ -174,7 +174,10 @@ impl<'a> Parser<'a> {
         self.pos = save;
         let g = r?;
         let start = self.splice_buf(&name, &g, lo)?;
-        Ok(Some(self.in_expansion(start, |p| p.expr())?))
+        self.builtin_exp += 1;
+        let e = self.in_expansion(start, |p| p.expr());
+        self.builtin_exp -= 1;
+        Ok(Some(e?))
     }
 
     fn builtin_gen(&mut self, name: &str, hi: usize, lo: u32) -> PResult<Gen> {
@@ -716,49 +719,6 @@ impl<'a> Parser<'a> {
         self.gen_pieces(g, out, srcs, flo)
     }
 
-    /// Whether evaluation suspends in this body. Expanded/interpolated expressions may
-    /// have spans outside this parser's token buffer, so inspect syntax rather than tokens.
-    fn expr_may_yield(&self, e: ExprId) -> bool {
-        match self.ast.expr(e).kind {
-            ExprKind::Await(_) | ExprKind::Yield(_) => true,
-            ExprKind::Unary(_, x) | ExprKind::Cast(x, _) | ExprKind::Paren(x) | ExprKind::Box(x)
-            | ExprKind::Try(x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _)
-            | ExprKind::AddrOf(_, _, x) => self.expr_may_yield(x),
-            ExprKind::Binary(_, a, b) | ExprKind::Assign(a, b) | ExprKind::AssignOp(_, a, b)
-            | ExprKind::Index(a, b) | ExprKind::Repeat(a, b) => self.expr_may_yield(a) || self.expr_may_yield(b),
-            ExprKind::Call(f, args) => self.expr_may_yield(f) || self.ast.list(args).iter().any(|&x| self.expr_may_yield(x)),
-            ExprKind::MethodCall(recv, row) => self.expr_may_yield(recv) || self.ast.list(self.ast.row(row).args).iter().any(|&x| self.expr_may_yield(x)),
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Loop(b, _) => self.block_may_yield(b),
-            ExprKind::If(c, b, other) => self.expr_may_yield(c) || self.block_may_yield(b) || other.get().is_some_and(|x| self.expr_may_yield(x)),
-            ExprKind::Let(_, x) => self.expr_may_yield(x),
-            ExprKind::Match(x, arms) => self.expr_may_yield(x) || self.ast.list(arms).iter().any(|a| a.guard.get().is_some_and(|g| self.expr_may_yield(g)) || self.expr_may_yield(a.body)),
-            ExprKind::While(row) => { let w = self.ast.row(row); self.expr_may_yield(w.cond) || self.block_may_yield(w.body) }
-            ExprKind::For(row) => { let f = self.ast.row(row); self.expr_may_yield(f.iter) || self.block_may_yield(f.body) }
-            ExprKind::Break(_, x) | ExprKind::Return(x) => x.get().is_some_and(|x| self.expr_may_yield(x)),
-            ExprKind::Tuple(xs) | ExprKind::Array(xs) => self.ast.list(xs).iter().any(|&x| self.expr_may_yield(x)),
-            ExprKind::Struct(row) => { let s = self.ast.row(row); self.ast.list(s.fields).iter().any(|f| self.expr_may_yield(f.expr)) || s.base.get().is_some_and(|x| self.expr_may_yield(x)) }
-            ExprKind::Range(a, b, _) => a.get().is_some_and(|x| self.expr_may_yield(x)) || b.get().is_some_and(|x| self.expr_may_yield(x)),
-            ExprKind::Mac(row) => {
-                let m = self.ast.row(row);
-                if m.args == NO_MAC_ARGS { return true; }
-                let args = self.ast.mac_arg(m.args);
-                self.ast.list(args.exprs).iter().any(|&x| self.expr_may_yield(x)) || args.guard.get().is_some_and(|x| self.expr_may_yield(x))
-            }
-            // Nested async, closure and const bodies do not execute while evaluating this slot.
-            ExprKind::Async(..) | ExprKind::Closure(_) | ExprKind::ConstBlock(_)
-            | ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Continue(_) | ExprKind::Underscore => false,
-        }
-    }
-
-    fn block_may_yield(&self, b: BlockId) -> bool {
-        self.ast.stmts(b).iter().any(|s| match *s {
-            Stmt::Let(row) => { let l = self.ast.row(row); l.init.get().is_some_and(|x| self.expr_may_yield(x)) || l.else_.get().is_some_and(|b| self.block_may_yield(b)) }
-            Stmt::Expr(_, e) => self.expr_may_yield(e),
-            Stmt::Attrs(row) => self.expr_may_yield(self.ast.row(row).expr),
-            Stmt::Item(_) | Stmt::Empty => false,
-        })
-    }
-
     /// Emits `Arguments::new_const / new_v1 / new_v1_formatted` for resolved pieces
     /// (`Ph` indices are slots into `srcs`).
     fn gen_pieces(&mut self, g: &mut Gen, pieces: Vec<Piece>, srcs: Vec<Src>, _lo: u32) -> PResult<()> {
@@ -798,21 +758,6 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         let formatted = phs.iter().any(|(_, s)| !is_default(s));
-        // each slot evaluated once, in slot order: inline when the placeholders use every slot
-        // exactly once in order and nothing else refers to them; otherwise bind them first
-        let mut inline = !formatted && phs.len() == srcs.len();
-        // rustc ast_lowering format.rs: the arguments of the later slots are evaluated before any `Argument` is
-        // made (`super let args = (&arg0, &arg1)`), so none of them is held across a suspension point in them
-        if inline && srcs.iter().skip(1).any(|s| matches!(s, Src::Expr(e) if self.expr_may_yield(*e))) {
-            inline = false;
-        }
-        if inline {
-            for (k, (i, _)) in phs.iter().enumerate() {
-                if *i != k {
-                    inline = false;
-                }
-            }
-        }
         // args array: one entry per placeholder, then width/precision params
         let mut args: Vec<(usize, &'static str)> = Vec::new();
         for (i, s) in &phs {
@@ -844,49 +789,30 @@ impl<'a> Parser<'a> {
                 specs.push((k, s, prec, width));
             }
         }
-        if formatted {
-            tg!(g; #core() :: fmt :: Arguments :: new_v1_formatted #open());
-        } else {
-            tg!(g; #core() :: fmt :: Arguments :: new_v1 #open());
+        // rustc ast_lowering format.rs (a format_args! with arguments):
+        //     { super let args = (&arg0, &arg1, ..); super let args = [Argument::new_display(args.0), ..];
+        //       Arguments::new(template, &args) }
+        // Every argument is evaluated and borrowed, in slot order, before any `Argument` is made, and the
+        // `super let`s give the borrowed temporaries the lifetime of the block's value: as long as the
+        // variable in `let a = format_args!(..);`, to the end of the enclosing statement otherwise.
+        // rustc's template is static data; Relax's pieces are a promoted literal array and its
+        // placeholders a third `super let`, so a stored `Arguments` keeps them as long as its arguments.
+        g.open_brace();
+        tg!(g; super let __relax_args = #open());
+        for s in srcs.iter() {
+            borrow(g, s);
+            g.punct(T::Comma);
         }
-        emit_lits(g);
-        g.punct(T::Comma);
-        // rustc (pre-`super let`) lowering: the arguments array is `&[..]` when the placeholders use
-        // every slot once in order, else `&match (&a0, &a1) { (a0, a1) => [..] }`; either way the
-        // array temporary belongs to the enclosing expression, not to a match arm.
-        if inline {
-            tg!(g; & #open_bracket());
-        } else {
-            tg!(g; & match #open());
-            for s in srcs.iter() {
-                borrow(g, s);
-                g.punct(T::Comma);
-            }
-            tg!(g; #close() #open_brace() #open());
-            for i in 0..srcs.len() {
-                g.word(&format!("__relax_a{}", i));
-                g.punct(T::Comma);
-            }
-            tg!(g; #close() => #open_bracket());
-        }
+        tg!(g; #close() ; super let __relax_args = #open_bracket());
         for (k, (i, ctor)) in args.iter().enumerate() {
             if k > 0 {
                 g.punct(T::Comma);
             }
-            tg!(g; #core() :: fmt :: rt :: Argument :: #word(ctor) #open());
-            if inline {
-                borrow(g, &srcs[*i]);
-            } else {
-                g.word(&format!("__relax_a{}", i));
-            }
-            g.close();
+            tg!(g; #core() :: fmt :: rt :: Argument :: #word(ctor) #open() __relax_args . #int(*i) #close());
         }
-        g.punct(T::CloseBracket);
-        if !inline {
-            g.punct(T::CloseBrace);
-        }
+        tg!(g; #close_bracket() ;);
         if formatted {
-            tg!(g; , & #open_bracket());
+            tg!(g; super let __relax_specs = #open_bracket());
             for (n, (k, s, prec, width)) in specs.iter().enumerate() {
                 if n > 0 {
                     g.punct(T::Comma);
@@ -897,9 +823,18 @@ impl<'a> Parser<'a> {
                 width.emit(g);
                 g.close();
             }
-            g.punct(T::CloseBracket);
+            tg!(g; #close_bracket() ;);
+            tg!(g; #core() :: fmt :: Arguments :: new_v1_formatted #open());
+        } else {
+            tg!(g; #core() :: fmt :: Arguments :: new_v1 #open());
+        }
+        emit_lits(g);
+        tg!(g; , & __relax_args);
+        if formatted {
+            tg!(g; , & __relax_specs);
         }
         g.close();
+        g.close_brace();
         Ok(())
     }
 

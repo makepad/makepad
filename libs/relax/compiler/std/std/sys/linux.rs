@@ -39,7 +39,6 @@ pub const O_DIRECTORY: c_int = 0x4000;
 #[cfg(target_arch = "aarch64")]
 pub const O_NOFOLLOW: c_int = 0x8000;
 pub const O_CLOEXEC: c_int = 0x80000;
-pub const MFD_CLOEXEC: core::ffi::c_uint = 0x1;
 
 pub const LOCK_SH: c_int = 1;
 pub const LOCK_EX: c_int = 2;
@@ -212,11 +211,12 @@ extern "C" {
     pub fn stat(path: *const c_char, buf: *mut stat_t) -> c_int;
     pub fn lstat(path: *const c_char, buf: *mut stat_t) -> c_int;
     pub fn fstat(fd: c_int, buf: *mut stat_t) -> c_int;
-    pub fn memfd_create(name: *const c_char, flags: core::ffi::c_uint) -> c_int;
     pub fn readdir(dir: *mut c_void) -> *mut dirent_t;
     fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
     fn pthread_self() -> usize;
     fn syscall(num: c_long, ...) -> c_long;
+    // the loader's: a signal ended a futex wait's system call (a test's watch may end the wait)
+    fn __relax_wait_interrupted();
     fn gettid() -> i32;
     fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
     fn readlink(path: *const c_char, buf: *mut c_char, size: usize) -> isize;
@@ -457,6 +457,7 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>) -
                 return false;
             }
             if e == EINTR {
+                unsafe { __relax_wait_interrupted() };
                 continue;
             }
         }

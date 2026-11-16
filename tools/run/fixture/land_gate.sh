@@ -13,7 +13,9 @@
 #   fast  : the JIT binary of the landed tree (kept or built here, 0 warnings), devhub's binary when changed,
 #           checks and warm presents of the affected set across the bucket's landings, plus affected JIT suites,
 #           one cargo check of the test targets the landings reach (both repos; step_testcheck), and the wasm32
-#           check of makepad-platform and makepad-widgets (step_wasmcheck).
+#           check of makepad-platform and makepad-widgets (step_wasmcheck); beside them, the restart statics check
+#           (restart_statics.py: start_statics, join_statics); for a JIT change, the warm start under
+#           RELAX_WARM_STRICT (cache_warm_iter_end: step_warm_strict).
 #           GATE_PROVEN skips units whose inputs already passed. GATE_RETRY (fast and hot; units joined by ;) names
 #           what failed earlier and has not passed since: gated whatever the diff reaches, until it passes.
 #   hot   : boot the directly touched apps and always Calculator (one small drawing app: a broken draw path
@@ -22,7 +24,7 @@
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
 #   testrun: the tests bucket: the tests of the changed packages and the gate packages the landings reach, the
 #           smoke set and JIT checks too when they reach the JIT (affected.py --runs: the fast bucket's selection,
-#           both repos) run under the tree's JIT (`makepad test <pkg> --release`), one unit `test <pkg>` each, slowest first
+#           both repos) run under the tree's JIT (`makepad test <pkg> --profile release-checks`), one unit `test <pkg>` each, slowest first
 #           (GATE_TIMES); with GATE_QUEUE=1 a shard of the
 #           run (one lease and box each) takes them a unit at a time from the queue its shards share (next_told).
 #           GATE_PROVEN skips a package whose inputs passed; GATE_RETRY runs what failed until it passes;
@@ -48,6 +50,9 @@ T=${CARGO_TARGET_DIR:-$PWD/target}
 here=$(cd "$(dirname "$0")" && pwd)
 # the node's one JIT through cargo (rebuilt when its sources changed, a ~0.2 s no-op otherwise)
 B="cargo run --profile host -q --manifest-path $PWD/Cargo.toml -p makepad-run --bin makepad --"
+# the profile of every JIT test run here, as `devhub test` runs it (lease/mod.rs JIT_TEST_PROFILE): release
+# with cargo test's checks, debug assertions and overflow checks on. Cargo-routed tests stay --release.
+TP="--profile release-checks"
 log=$(mktemp -d "${TMPDIR:-/tmp}/landgate.XXXXXX") || exit 2
 # tmpfs /tmp on the nodes: orphaned gate dirs filled it and crashed a hosted app. A failed gate's step logs
 # (proofs, presents, depcheck) go to the lease's keep dir first, which its holder copies to the master
@@ -74,6 +79,22 @@ step_build() {
 # a tracked file naming a private address, path or host: except hot, it costs a small build
 step_private() {
   cargo run -q --profile host -p makepad-private-check > "$log/private" 2>&1 || { head -20 "$log/private"; fail="$fail private"; }
+}
+# every static of the JIT's crates is reset at a run's end or stays with a reason (restart_statics.py): one a
+# landing adds unlisted fails the fast bucket of that landing. Sources only, one core for 10-25 s: it runs beside
+# the bucket's other steps (start_statics) and joins before the verdict (join_statics).
+start_statics() {
+  statics=""
+  [ -f tools/run/fixture/restart_statics.py ] || return 0
+  ( python3 tools/run/fixture/restart_statics.py > "$log/statics" 2>&1; echo $? > "$log/statics.code" ) & statics=$!
+}
+join_statics() {
+  [ -n "$statics" ] || return 0
+  wait "$statics"
+  tail -1 "$log/statics"
+  if [ "$(cat "$log/statics.code" 2>/dev/null)" != 0 ]; then
+    grep -v '^restart_statics: ' "$log/statics" | head -20; fail="$fail statics"
+  fi
 }
 step_rustc_check() {
   CARGO_INCREMENTAL=0 cargo check --release -p makepad-widgets -j8 > "$log/rustc" 2>&1 || { grep -E "^error" -A6 "$log/rustc" | head -20; fail="$fail rustc-check"; }
@@ -116,10 +137,18 @@ step_checks() {
   se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) fail="$fail strict-errors";; esac
   # `makepad check --json`'s rows: codes, phases and suggestions as the producers recorded them
   cj=$(bash libs/relax/compiler/tests/check_json/run.sh "$jit" 2>&1); echo "$cj" | grep -E '^[-+]\{|^unexpected|^check_json' | cut -c1-230; case "$cj" in *"check_json: ok"*) ;; *) fail="$fail check-json";; esac
+  # a program three times on one fresh disk cache: the third run compiles nothing and runs no initializer
+  # (std's code is recorded and linked like the program's, its statics' values come from the cache)
+  cw=$(bash libs/relax/compiler/tests/cache_warm_statics/run.sh "$jit" 2>&1); echo "$cw" | grep -E '^cache_warm_statics' | cut -c1-230; case "$cw" in *"cache_warm_statics: ok"*) ;; *) fail="$fail cache-warm-statics";; esac
+  # a build script of a workspace mounted from a git store, as a devhub overlay's is: its child run inherits
+  # the mount's std, a path on no disk, with the mount table
+  mm=$(bash libs/relax/compiler/tests/mounted_build_script/run.sh "$jit" 2>&1); case "$mm" in *"mounted_build_script: ok"*) echo "$mm" | grep -E '^mounted_build_script';; *) echo "$mm" | tail -9 | cut -c1-230; fail="$fail mounted-build-script";; esac
   lc=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" 2>&1) || fail="$fail live-cases"; echo "$lc" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]' | cut -c1-230
   # code a rejected edit left invalidated while a thread was inside it: the return into it parks, with its report
   # (its whole output kept in the run's logs; a failure shows its steps' detail and names the file)
   python3 libs/relax/compiler/tests/live_invalid/run.py --makepad "$jit" > "$log/live-invalid" 2>&1 || { fail="$fail live-invalid"; grep -aE '^(FAIL|  )' "$log/live-invalid" | head -40 | cut -c1-230; echo "GATEOUT live-invalid :: live-invalid"; }; grep -aE '^live invalid' "$log/live-invalid" | cut -c1-230
+  # an added item beside Self::Variant patches; a layout edit names the frame that needs a restart
+  python3 libs/relax/compiler/tests/live_selfvariant/run.py --makepad "$jit" > "$log/live-selfvariant" 2>&1 || { fail="$fail live-selfvariant"; grep -aE '^FAIL' "$log/live-selfvariant"; echo "GATEOUT live-selfvariant :: live-selfvariant"; }; grep -aE '^live selfvariant' "$log/live-selfvariant"
   # the real-time case beside two more copies of itself: their compiles stay off its thread's cores
   # (its failure names the copies that failed and each one's longest call: `rt-lock-copies[1:5289us,3:5056us]`)
   rl=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 2>&1) || fail="$fail rt-lock-copies[$(echo "$rl" | sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' | paste -sd, -)]"; echo "$rl" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]|copy [0-9]' | cut -c1-230
@@ -198,7 +227,7 @@ step_jit_suites() { # library test suites under the JIT, which pass under rustc:
     if [ "$mode" = fast ] && proven "suite $p"; then
       echo "jit suite $p: proven"; unit_line proven "suite $p"; continue
     fi
-    $B test "$p" --release > "$log/suite-$p" 2>&1
+    $B test "$p" $TP > "$log/suite-$p" 2>&1
     suite_status=$?
     r=$(grep -E '^test result:' "$log/suite-$p" | tail -1)
     echo "jit suite $p: ${r:-no result}"
@@ -314,16 +343,28 @@ step_jit() { # the JIT binary of this tree: the one this box built before from e
   out=$(bash tools/run/fixture/loader_build.sh 2>&1) || { fail="$fail build"; echo "$out"; return 1; }
   echo "$out" | grep -v '^LOADER-OK'
 }
+# RELAX_WARM_STRICT's gate (a JIT change): one program run cold, then warm twice, on one fresh disk cache under
+# RELAX_WARM_STRICT=1; every run exits 0 with its result line (cache_warm_iter_end). A validated warm start that
+# misses code a prior run of its cache recorded fails its run (relax_codegen::warm::strict_code). A few seconds.
+WARM_STRICT_UNIT="warm cache_warm_iter_end"
+step_warm_strict() {
+  if proven "$WARM_STRICT_UNIT"; then echo "warm strict: proven"; unit_line proven "$WARM_STRICT_UNIT"; return 0; fi
+  local bin=${MAKEPAD_LOADER:-$T/host/makepad}
+  [ -x "$bin" ] || { echo "warm strict: no JIT binary at $bin"; fail="$fail warm-strict"; unit_line fail "$WARM_STRICT_UNIT"; return 1; }
+  out=$(bash libs/relax/compiler/tests/cache_warm_iter_end/run.sh "$bin" 2>&1); code=$?
+  echo "$out" | tail -3 | cut -c1-400
+  if [ "$code" = 0 ]; then unit_line ok "$WARM_STRICT_UNIT"; else fail="$fail warm-strict"; unit_line fail "$WARM_STRICT_UNIT"; return 1; fi
+}
 step_devhub() { # devhub's own binary when the bucket diff touches it (0 warnings)
   grep -qx 'devhub yes' "$log/affected" || return 0
   if proven "devhub makepad-devhub"; then echo "devhub: proven"; unit_line proven "devhub makepad-devhub"; return 0; fi
   CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-devhub --bin makepad-devhub -j8 > "$log/devhub" 2>&1 || { fail="$fail devhub-build"; tail -20 "$log/devhub"; unit_line fail "devhub makepad-devhub"; return 1; }
   if grep -E "^(warning|error)" "$log/devhub" | grep -qv sandbox; then grep -E "^(warning|error)" "$log/devhub" | grep -v sandbox | head -20; fail="$fail devhub-warnings"; unit_line fail "devhub makepad-devhub"; return 1; fi
   # and its tests: the master restarts into this code, a break there stops the orchestration
-  $B test makepad-devhub --release --lib > "$log/devhub-test" 2>&1 || { fail="$fail devhub-tests"; test_failures "$log/devhub-test"; echo "GATEOUT devhub makepad-devhub :: devhub-test"; unit_line fail "devhub makepad-devhub"; return 1; }
+  $B test makepad-devhub $TP --lib > "$log/devhub-test" 2>&1 || { fail="$fail devhub-tests"; test_failures "$log/devhub-test"; echo "GATEOUT devhub makepad-devhub :: devhub-test"; unit_line fail "devhub makepad-devhub"; return 1; }
   grep -E "^test result" "$log/devhub-test" | head -2
   # the build a phone's JIT host embeds (no checkout: tools/run/android_host)
-  $B test makepad-devhub --release --lib --no-default-features > "$log/devhub-test-bare" 2>&1 || { fail="$fail devhub-tests-no-checkout"; test_failures "$log/devhub-test-bare"; echo "GATEOUT devhub makepad-devhub :: devhub-test-bare"; unit_line fail "devhub makepad-devhub"; return 1; }
+  $B test makepad-devhub $TP --lib --no-default-features > "$log/devhub-test-bare" 2>&1 || { fail="$fail devhub-tests-no-checkout"; test_failures "$log/devhub-test-bare"; echo "GATEOUT devhub makepad-devhub :: devhub-test-bare"; unit_line fail "devhub makepad-devhub"; return 1; }
   grep -E "^test result" "$log/devhub-test-bare" | head -1
   unit_line ok "devhub makepad-devhub"
 }
@@ -425,16 +466,15 @@ step_qcheck() {
 }
 # one cargo check of a lines file's packages (affected.py's `<word> <pkg> <dir>`), beside the JIT steps on half the
 # lease's cores, niced. Its release profile has its own build directory in the node's one target: no wait on the JIT
-# steps' cargo (host). A package fails when cargo could not compile it, or at `warnings` on a warning of its own
-# (short-format lines under its directory); one it never reached (one it uses failed first) has no verdict. At
-# `errors` a warning of its own is a `GATEUNIT warn` line, no failure.
+# steps' cargo (host). A package fails when cargo could not compile it, or on a warning of its own (short-format
+# lines under its directory: zero warnings); one it never reached (one it uses failed first) has no verdict.
 # Each error or warning line is the package's whose directory holds its file most closely: the members package at
 # apps/commercial took every Fab test's warning under its own name, and the command its name says (`cargo check
 # --tests -p makepad-commercial-members`) compiles none of them (11-06). A unit that warns or fails says the command
 # that shows it alone (GATEREPRO, or UNITS_REPRO and the package), for the lane to run.
-# cargo_units <lines file> <LABEL> <failing step word> <errors|warnings> [cargo check args]
+# cargo_units <lines file> <LABEL> <failing step word> [cargo check args]
 cargo_units() {
-  local list=$1 label=$2 word=$3 level=$4 f out code unit own owned repro named=0 pkgs=(); shift 4
+  local list=$1 label=$2 word=$3 f out code unit own owned repro named=0 pkgs=(); shift 3
   # a line's words after its directory go to cargo (a `tests` line's `--features=`: what its users turn on)
   while read -r -a f; do pkgs+=(-p "${f[1]}" "${f[@]:3}"); done < "$list"
   out=$(CARGO_TARGET_DIR=$T nice -n 10 cargo check --release --message-format short -j $(( (${RELAX_JOBS:-8} + 1) / 2 )) "$@" "${pkgs[@]}" 2>&1); code=$?
@@ -443,13 +483,11 @@ cargo_units() {
     unit=$(unit_of "${f[@]}")
     own=$(echo "$owned" | awk -F '\t' -v p="${f[1]}" '$1 == p { sub(/^[^\t]*\t/, ""); print }')
     repro="GATEREPRO $unit :: ${UNITS_REPRO:-cargo check --release${*:+ $*} -p} ${f[1]}${f[3]:+ ${f[*]:3}}"
-    if echo "$out" | grep -qF "could not compile \`${f[1]}\`" || { [ "$level" = warnings ] && [ -n "$own" ]; }; then
-      echo "$own" | head -40; echo "${f[1]}: cargo check failed"; echo "$repro"; unit_line fail "$unit"; fail="$fail ${f[1]}"; named=$((named + 1))
-    else
-      # at `errors`, its own warnings (each once: its lib and its test build both say it) before a warn line:
-      # the bucket names who brought a new one, and the unit stays green
-      if [ -n "$own" ]; then echo "$own" | awk '!seen[$0]++' | head -40; echo "$repro"; unit_line warn "$unit"; fi
-      if [ "$code" = 0 ]; then unit_line ok "$unit"; fi
+    if echo "$out" | grep -qF "could not compile \`${f[1]}\`" || [ -n "$own" ]; then
+      # its own lines, each once (a lib's warning is said by its lib build and its test build both)
+      echo "$own" | awk '!seen[$0]++' | head -40; echo "${f[1]}: cargo check failed"; echo "$repro"; unit_line fail "$unit"; fail="$fail ${f[1]}"; named=$((named + 1))
+    elif [ "$code" = 0 ]; then
+      unit_line ok "$unit"
     fi
   done < "$list"
   if [ "$code" != 0 ] && [ "$named" = 0 ]; then
@@ -474,13 +512,14 @@ owner_of() {
 # this repo's with no test target that are no gate package and unchanged), their libs and bins (0 warnings)
 step_depcheck() {
   [ -s "$log/cargo" ] || return 0
-  cargo_units "$log/cargo" DEPCHECK cargo-check warnings
+  cargo_units "$log/cargo" DEPCHECK cargo-check
 }
 # the test targets the landings reach (affected.py `tests` lines: the changed packages and their users, both repos),
 # after the depcheck in its slot, on what it checked: no other step compiles a #[cfg(test)] body, and two landings
 # that merged cleanly broke makepad-fab's tests unseen, a new test calling build_preview with an argument the other
-# landing took away (11-05). Errors fail it; a warning is a WARN to the landings that brought it (zero warnings is
-# the rule, but a test target's unused helper is no break of the branch).
+# landing took away (11-05). Errors fail it, and so does a warning (zero warnings): a test target's warning was a
+# WARN line, green, that no lane fixed, its origin unknown at the unit's first look (11-16); red, the bucket names
+# the landing that touched its file.
 # The proc-macro packages get a check of their own. A proc-macro's test build links its expansion crates for the
 # target, so one check of every package unifies its users' features onto them: makepad-micro-proc-macro's
 # relax-tokens (Relax's crates turn it on) swaps the token types under the rustc entry points, a build no
@@ -499,8 +538,8 @@ step_testcheck() {
       echo "$line" >> "$log/tests-lib"
     fi
   done < "$log/tests"
-  if [ -s "$log/tests-lib" ]; then cargo_units "$log/tests-lib" TESTCHECK tests-check errors --tests; fi
-  if [ -s "$log/tests-pm" ]; then cargo_units "$log/tests-pm" TESTCHECK tests-check errors --tests; fi
+  if [ -s "$log/tests-lib" ]; then cargo_units "$log/tests-lib" TESTCHECK tests-check --tests; fi
+  if [ -s "$log/tests-pm" ]; then cargo_units "$log/tests-pm" TESTCHECK tests-check --tests; fi
 }
 # the browser build of the two crates every app stands on (`cargo check --lib --target wasm32-unknown-unknown`, no
 # link) after every landing: the JIT builds the host alone, and only CI's cross shards, hours on, saw a web-only
@@ -519,7 +558,7 @@ step_wasmcheck() {
   for line in "${todo[@]}"; do
     echo "$line" > "$log/wasm"
     RUSTUP_HOME=$x/rustup CARGO_HOME=$x/cargo PATH=$x/cargo/bin:$PATH MAKEPAD_BUILD=" " RUSTFLAGS="-Z allow-features=" RUSTC_BOOTSTRAP=1 \
-      UNITS_REPRO="bash tools/run/fixture/ci_xcheck.sh wasm32-unknown-unknown lib" cargo_units "$log/wasm" WASMCHECK wasm32-check warnings --lib --target wasm32-unknown-unknown
+      UNITS_REPRO="bash tools/run/fixture/ci_xcheck.sh wasm32-unknown-unknown lib" cargo_units "$log/wasm" WASMCHECK wasm32-check --lib --target wasm32-unknown-unknown
   done
 }
 # the GPU guards (affected.py `guard` lines: package, dir, target `lib` or `test:<name>`, filter): render tests of
@@ -542,7 +581,7 @@ step_guards() {
     if [ -z "$target_args" ]; then
       echo "$unit: no target $target"; r=""; status=1
     else
-      (cd "$dir" && exec env ${RELAX_JOBS:+MAKEPAD_CPU_CORES=$RELAX_JOBS} $B test "$pkg" --release $target_args -- "$filter") > "$log/$out" 2>&1
+      (cd "$dir" && exec env ${RELAX_JOBS:+MAKEPAD_CPU_CORES=$RELAX_JOBS} $B test "$pkg" $TP $target_args -- "$filter") > "$log/$out" 2>&1
       status=$?
       r=$(grep -E '^test result:' "$log/$out" | tail -1)
     fi
@@ -554,7 +593,7 @@ step_guards() {
       *) [ ! -f "$log/$out" ] || test_failures "$log/$out";;
     esac
     if [ "$bad" = 0 ]; then unit_line ok "$unit"
-    else fail="$fail $out"; echo "GATEREPRO $unit :: makepad test $pkg --release $target_args -- $filter"; unit_line fail "$unit"; fi
+    else fail="$fail $out"; echo "GATEREPRO $unit :: makepad test $pkg $TP $target_args -- $filter"; unit_line fail "$unit"; fi
   done < "$log/guards"
 }
 # a cold present takes about PRESENT_CORES cores (its JIT compiling, its first pipelines): five side by side on
@@ -683,23 +722,46 @@ test_failures() {
     if (nr > 12) print "(and " nr - 12 " more such lines in the log)"
   }' "$1"
 }
+# keep_artifacts <pkg> <name>: a failed unit's test artifacts (its package's part of $MAKEPAD_TEST_ARTIFACTS, the
+# captures and logs makepad_test writes per test) into the lease's keep dir as artifacts-<name>/, which its holder
+# copies back with the failed steps' logs: a red is inspected after the gate's lease and its scratch are gone. Its
+# app homes stay behind (keep_logs.sh: never an app home's data). A passing unit's are not kept.
+keep_artifacts() {
+  local from=${MAKEPAD_TEST_ARTIFACTS:-}/$1 to n
+  [ -n "${DEVHUB_KEEP:-}" ] && [ -n "${MAKEPAD_TEST_ARTIFACTS:-}" ] && [ -d "$from" ] || return 0
+  to=$DEVHUB_KEEP/artifacts-$2
+  n=$(cd "$from" && find . -type f ! -path '*/home/*' | while IFS= read -r f; do mkdir -p "$to/$(dirname "$f")" && cp -p "$f" "$to/$f" && echo "$f"; done | grep -c .)
+  [ "$n" -gt 0 ] && echo "$3: its test artifacts kept as artifacts-$2 ($n files) in the lease's keep"
+  return 0
+}
 # one package's test targets under the JIT, as `cargo test -p <pkg>` runs them (doc tests aside): its failing
 # tests and panics, or HUNG and the tests it still ran, and the command that runs it alone (GATEREPRO)
 testrun_one() {
   # (a split package's target: `test <pkg> <dir> --lib`, its unit `test <pkg> --lib`, its log its own)
-  local unit code r hung run name=$2${4:+-${*:4}} busy_unit busy_s measure_s m pk was
+  local unit code r hung run repro name=$2${4:+-${*:4}} busy_unit busy_s measure_s m pk was ran=
   unit=$(unit_of "$@"); name=${name// /-}
   # a stall said once its tests give no new result far past its last measure (watched)
   m=${TIME_S[$unit]:-0}; busy_unit=$unit busy_s=$(( m * BUSY_TIMES > BUSY_FLOOR_S ? m * BUSY_TIMES : BUSY_FLOOR_S )) measure_s=$m
-  run=(env ${TEST_JOBS:+RELAX_JOBS=$TEST_JOBS MAKEPAD_CPU_CORES=$TEST_JOBS RUST_TEST_THREADS=$TEST_JOBS} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 $B test "$2" --release "${@:4}")
+  if [ -n "${NATIVE[$unit]+set}" ]; then
+    # a target its Cargo.toml runs under cargo (shard_units), as `devhub test` runs it
+    echo "$unit: under cargo, as its Cargo.toml's native-tests says: ${NATIVE[$unit]}"
+    run=(env ${TEST_JOBS:+CARGO_BUILD_JOBS=$TEST_JOBS MAKEPAD_CPU_CORES=$TEST_JOBS RUST_TEST_THREADS=$TEST_JOBS} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 cargo test --release -p "$2" "${@:4}")
+    repro="cargo test --release -p $2${4:+ ${*:4}}"
+  else
+    run=(env ${TEST_JOBS:+RELAX_JOBS=$TEST_JOBS MAKEPAD_CPU_CORES=$TEST_JOBS RUST_TEST_THREADS=$TEST_JOBS} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 $B test "$2" $TP "${@:4}")
+    repro="makepad test $2 $TP${4:+ ${*:4}}"
+  fi
   local t0=$SECONDS
   watched "$log/testrun-$name" "${run[@]}"; code=$?
   # its seconds, which the next run deals the slowest units out by (GATE_TIMES); a hung unit's are no measure:
   # one stopped after 78 min took a shard of its own in the next run's deal, and every unit not measured yet with
-  # it (as the slowest measured), 11-07
-  [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ] || echo "GATETIME $unit $((SECONDS - t0))"
+  # it (as the slowest measured), 11-07. Nor are those of a run that ended before its tests started (its build
+  # failed), nor its peak: a failed build's time stood for a 20-38 min unit's, and the next run's watch read it
+  # against that, 11-16
+  grep -qE '^running [0-9]+ tests?$' "$log/testrun-$name" && ran=1
+  [ -z "$ran" ] || { [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ]; } || echo "GATETIME $unit $((SECONDS - t0))"
   # its peak RSS, which the next run's shards start it by (GATE_PEAKS)
-  if [ -s "$log/testrun-$name.peak" ]; then
+  if [ -n "$ran" ] && [ -s "$log/testrun-$name.peak" ]; then
     pk=$(< "$log/testrun-$name.peak"); was=${PEAK_MB[$unit]:-0}
     echo "GATEPEAK $unit $pk"
     # what held it then, largest first: a build the unit set off shows by name
@@ -722,15 +784,17 @@ testrun_one() {
     echo "$unit: HUNG ($(head -1 "$log/testrun-$name.hung" | sed 's/^== //; s/; their state$//'): stopped; $r before it)"
     echo "HUNG: ${hung:-no test of a target: between its targets or before them}; its stacks: testrun-$name.hung in the run's kept logs"
     grep -E '"verdict"' "$log/testrun-$name.hung" | head -4 | cut -c1-400
-    echo "GATEREPRO $unit :: makepad test $2 --release${4:+ ${*:4}}${hung:+ -- $hung --exact}"
+    echo "GATEREPRO $unit :: $repro${hung:+ -- $hung --exact}"
     echo "GATEOUT $unit :: testrun-$name testrun-$name.hung"
+    keep_artifacts "$2" "$name" "$unit"
     unit_line fail "$unit"; fail="$fail test:$name"; return
   fi
   if [ "$code" = 0 ]; then echo "$unit: ok ($r, $(grep -c '^test result:' "$log/testrun-$name") targets)"; unit_line ok "$unit"; return; fi
   echo "$unit: FAILED (exit $code; $r)"
   test_failures "$log/testrun-$name"
-  echo "GATEREPRO $unit :: makepad test $2 --release${4:+ ${*:4}}"
+  echo "GATEREPRO $unit :: $repro"
   echo "GATEOUT $unit :: testrun-$name"
+  keep_artifacts "$2" "$name" "$unit"
   unit_line fail "$unit"; fail="$fail test:$name"
 }
 # shard_units <runs file>: the run's units, slowest first (GATE_TIMES: `<unit>=<s>` by `;`, each one's last
@@ -739,6 +803,10 @@ testrun_one() {
 # GATE_PROVEN, GATE_RETRY and GATE_TIMES): the queue they share (next_told). A package measured over GATE_SPLIT_S
 # (its targets' sum once split) runs as one unit per test target (`test <pkg> --lib`, `--bin <name>`,
 # `--test <name>`): makepad-fab's 25 targets in series took 1650 s, one unit longer than a shard's share (11-07).
+# So does a package whose Cargo.toml runs a target under cargo (`[package.metadata.makepad.native-tests]`, target =
+# why): that target's unit runs `cargo test`, as `devhub test` routes it, and is said in <runs file>.native (unit,
+# a tab, why); makepad-run's confined_macros re-runs its own binary as each case's runner, and under `makepad test`
+# each runner was a JIT of its own: six at once took 41 GB, red in every tests bucket from the day it came (11-13).
 shard_units() {
   python3 -I - "$1" "${GATE_TIMES:-}" "${GATE_PROVEN:-}" "${GATE_SPLIT_S:-600}" "${GATE_ONLY:-}" <<'PY'
 import json, statistics, subprocess, sys
@@ -780,15 +848,22 @@ def default_features(p):
         elif r in implicit:
             on.add(r)
     return on
-def targets(pkg, d):
-    """The package's test targets as `makepad test <pkg>` runs them (cargo test's: its lib, bins and tests, less
-    those whose required features its default ones lack: named alone, such a target is an error)."""
+def package(pkg, d):
     found = [p for m in metas.values() for p in m if p["name"] == pkg]
     if not found:
         meta = json.loads(subprocess.run(["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1", "--manifest-path", f"{d}/Cargo.toml"], check=True, capture_output=True, text=True).stdout)
         metas[meta["workspace_root"]] = meta["packages"]
         found = [p for p in meta["packages"] if p["name"] == pkg]
-    p = found[0]
+    return found[0]
+def native_tests(pkg, d):
+    """The targets its Cargo.toml runs under cargo, never the JIT (`lib`, `bin:<name>`, `test:<name>`), each with why."""
+    return ((package(pkg, d).get("metadata") or {}).get("makepad") or {}).get("native-tests") or {}
+def key(sel):
+    return "lib" if sel == ["--lib"] else f"{sel[0][2:]}:{sel[1]}"
+def targets(pkg, d):
+    """The package's test targets as `makepad test <pkg>` runs them (cargo test's: its lib, bins and tests, less
+    those whose required features its default ones lack: named alone, such a target is an error)."""
+    p = package(pkg, d)
     on = default_features(p)
     out = []
     for t in p["targets"]:
@@ -802,21 +877,28 @@ def targets(pkg, d):
         elif "test" in kinds:
             out.append(["--test", t["name"]])
     return sorted(out)
-lines = []
+lines, native = [], []
 for l in open(path).read().splitlines():
     w = l.split()
     if not w:
         continue
-    if len(w) == 3 and measure(w[1]) > float(split):
-        for sel in targets(w[1], w[2]):
+    declared = native_tests(w[1], w[2])
+    if (len(w) == 3 and measure(w[1]) > float(split)) or declared:
+        sels = targets(w[1], w[2])
+        for t in sorted(set(declared) - {key(sel) for sel in sels}):
+            print(f"testrun: {w[1]}'s native-tests names {t}, which is none of its test targets")
+        for sel in sels:
             u = unit(w + sel)
             if u in proven:
                 print(f"{u}: proven")
                 print(f"GATEUNIT proven {u}")
             else:
                 lines.append(" ".join(w + sel))
+                if key(sel) in declared:
+                    native.append(f"{u}\t{declared[key(sel)]}")
     else:
         lines.append(l)
+open(f"{path}.native", "w").write("".join(n + "\n" for n in native))
 if only:
     lines = [l for l in lines if unit(l.split()) in only]
 def took(line):
@@ -892,7 +974,8 @@ if [ "$mode" = testrun ]; then
     else echo "test ${f[*]:1}" >> "$log/runs"; fi
   done < <(grep '^tests ' "$log/affected")
   shard_units "$log/runs" || { echo "NODEGATE-FAIL: shard"; exit 1; }
-  declare -A PEAK_MB=() TIME_S=()
+  declare -A PEAK_MB=() TIME_S=() NATIVE=()
+  while IFS=$'\t' read -r nu why; do [ -z "$nu" ] || NATIVE[$nu]=$why; done < "$log/runs.native"
   IFS=';' read -r -a peaks <<< "${GATE_PEAKS:-}"
   for pk in "${peaks[@]}"; do [ -z "$pk" ] || PEAK_MB[${pk%=*}]=${pk##*=}; done
   IFS=';' read -r -a times <<< "${GATE_TIMES:-}"
@@ -957,6 +1040,7 @@ if [ "$mode" = fast ]; then
   # on a pool box): a hang still fails, later
   export PRESENT_WARM=1 PRESENT_WAIT=${PRESENT_WAIT:-240}
   timed step_private
+  start_statics
   if timed step_affected; then
     filter_units check "$log/checks"
     filter_units present "$log/presents"
@@ -970,12 +1054,16 @@ if [ "$mode" = fast ]; then
     # a JIT or kernel change runs the library suites under the JIT too (the full gate always does)
     suites=0; git diff --quiet "$QBASE" HEAD -- libs/relax libs/csg 2>/dev/null || suites=1
     ! grep -q '^suite ' "$log/affected" || suites=1
+    # the warm-strict gate: a JIT change, or a failure of it not passed since
+    warm_strict=0; git diff --quiet "$QBASE" HEAD -- libs/relax 2>/dev/null || warm_strict=1
+    case ";${GATE_RETRY:-};" in *";$WARM_STRICT_UNIT;"*) warm_strict=1;; esac
     need_jit=0
     [ ! -s "$log/checks" ] && [ ! -s "$log/presents" ] && [ -z "${GATE_RETRY:-}" ] || need_jit=1
     if grep -qx 'devhub yes' "$log/affected" && ! proven "devhub makepad-devhub"; then need_jit=1; fi
     if [ "$suites" = 1 ]; then
       for p in ${JIT_SUITES:-makepad-csg-brep}; do proven "suite $p" || need_jit=1; done
     fi
+    [ "$warm_strict" = 0 ] || proven "$WARM_STRICT_UNIT" || need_jit=1
     if [ "$need_jit" = 0 ]; then echo "jit: skipped (every unit proven)"; fi
     if [ "$need_jit" = 0 ] || timed step_jit; then
       timed step_devhub
@@ -984,6 +1072,7 @@ if [ "$mode" = fast ]; then
       [ -n "$depcheck" ] || start_depcheck
       timed step_qpresent
       [ "$suites" = 0 ] || timed step_jit_suites
+      [ "$warm_strict" = 0 ] || timed step_warm_strict
     fi
     # (a JIT that did not build: alone, its verdict all the same)
     [ -n "$depcheck" ] || start_depcheck
@@ -993,6 +1082,7 @@ if [ "$mode" = fast ]; then
     if [ "$code" = 0 ] && [ -f "$log/depcheck.fail" ]; then fail="$fail$(cat "$log/depcheck.fail")"
     else echo "depcheck: ended without a verdict (exit $code)"; fail="$fail depcheck"; fi
   fi
+  join_statics
   who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown) in $PWD]"
   if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail $who"; exit 1; fi
   echo "NODEGATE-OK fast$sum $who"; exit 0

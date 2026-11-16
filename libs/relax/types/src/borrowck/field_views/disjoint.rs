@@ -144,14 +144,14 @@ impl<'a> MirBorrowckCtxt<'a> {
         let mut cur = b.block.0 as usize;
         // back from b to a: every block entered only from the previous one
         while cur != a.block.0 as usize {
-            let [p] = self.cfg.predecessors[cur][..] else { return None };
+            let [p] = self.cfg.dominators.predecessors[cur][..] else { return None };
             cur = p.0 as usize;
             if blocks.contains(&cur) { return None; }
             blocks.push(cur);
         }
         // and further back while the run has no side entry
         for _ in 0..64 {
-            let [p] = self.cfg.predecessors[cur][..] else { break };
+            let [p] = self.cfg.dominators.predecessors[cur][..] else { break };
             if blocks.contains(&(p.0 as usize)) { break; }
             cur = p.0 as usize;
             blocks.push(cur);

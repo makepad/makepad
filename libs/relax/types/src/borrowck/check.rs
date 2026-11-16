@@ -7,7 +7,7 @@ use super::mir_nll::MirRegionResult;
 use super::path_utils::{each_borrow_involving_path, is_active};
 use super::places_conflict::{borrow_conflicts_with_place, AccessDepth, ArtificialField, PlaceConflictBias};
 use super::prefixes::{prefixes, PrefixSet};
-use crate::mir::dataflow::BitSet;
+use crate::mir::dataflow::{BitSet, EverInitializedPlaces};
 use crate::mir::move_paths::{InitKind, LookupResult, MoveData};
 use crate::mir::visit::Visitor;
 use crate::mir::*;
@@ -212,7 +212,7 @@ fn check_with_scopes_fv(prog: &Program, tcx: &Tcx, body: &Body, regions: &MirReg
         move_errors: vec![], buffered_move_errors: vec![], buffered_mut_errors: vec![],
         fv: fv.map(|v| fv_hook::FvRun::new(v, body, &borrows)), fv_own: None,
         d3: relaxed_feature(prog, body, "disjoint-index"), d3_feeds: None, d3_taken: None, nested };
-    for b in cx.cfg.reverse_postorder.clone() {
+    for b in cx.cfg.dominators.reverse_postorder.clone() {
         let block = &body.basic_blocks[b];
         let block_id = BasicBlock(b as u32);
         if !results.borrows.is_reachable(block_id) { continue; }
@@ -633,15 +633,17 @@ impl MirBorrowckCtxt<'_> {
         if borrow_conflicts_with_place(self.tcx, self.body, &borrow.borrowed_place, borrow.kind, &root,
             if thread_local { Deep } else { Shallow(None) }, PlaceConflictBias::Overlap) { self.lifetime_error(borrow, &root, at, span); }
     }
-    fn first_reaching_init(&self, local: Local, state: BorrowckDomain<'_>) -> Option<usize> {
+    /// rustc lib.rs:2528: the first init of `local` (in gather order) that may have executed on some
+    /// path reaching `at` without an intervening `StorageDead(local)`.
+    fn first_reaching_init(&self, local: Local, at: Location) -> Option<usize> {
         let path = self.moves.rev_lookup.find_local(local)?;
-        self.moves.init_path_map[path].iter().copied().find(|&i| state.ever_inits.contains(i))
+        self.moves.init_path_map[path].iter().copied().find(|&i| EverInitializedPlaces::init_reaches_location(self.body, local, &self.moves.inits[i], at))
     }
     fn add_used_mut(&mut self, root: &Place, allow: bool, state: BorrowckDomain<'_>) {
         if root.projection.is_empty() {
             // If the local may have been initialized and is now being mutated, the mutation may be a
             // reassignment, which justifies the `mut`.
-            if !allow && self.first_reaching_init(root.local, state).is_some() { self.result.used_mut.insert(root.local.0 as usize); }
+            if !allow && state.ever_inits.contains(root.local.0 as usize) { self.result.used_mut.insert(root.local.0 as usize); }
         } else if !allow {
             if let Some(field) = self.upvar_field(root) { self.note_used_mut_upvar(field); }
         }
@@ -699,7 +701,9 @@ impl MirBorrowckCtxt<'_> {
             Ok((root, allow)) => { self.add_used_mut(&root, allow, state); return false; }
             Err(the_place_err) => the_place_err,
         };
-        let Some(init) = self.first_reaching_init(place.local, state) else { return false; };
+        // rustc lib.rs:2506: only a local that may have been initialized reports an error.
+        if !state.ever_inits.contains(place.local.0 as usize) { return false; }
+        let init = self.first_reaching_init(place.local, at).expect("an ever-initialized local has a reaching init");
         let detail = Detail::Mutability { place: place.clone(), the_place_err: the_place_err.clone(), access: access.access_kind(), location: at, init: Some(init) };
         let code = if borrow { "E0596" } else if place.projection.is_empty() { "E0384" } else { "E0594" };
         if self.relaxed_mut(&the_place_err, span, code) { return false; }
@@ -1032,65 +1036,20 @@ fn last_projection(place: &Place) -> Option<(PlaceElem, Place)> {
     Some((elem.clone(), Place { local: place.local, projection: projection.to_vec() }))
 }
 
-/// Rebase Relax nll.rs::compute_dominators onto MIR; reuse its RPO/intersect
-/// algorithm and MIR's Visitor for edges. No second dataflow engine is introduced.
-struct CheckCfg { predecessors: Vec<Vec<BasicBlock>>, idom: Vec<usize>, reverse_postorder: Vec<usize> }
+struct CheckCfg { dominators: crate::mir::dominators::Dominators }
 impl CheckCfg {
     fn new(body: &Body) -> Self {
-        struct Edges(Vec<BasicBlock>);
-        impl Visitor for Edges { fn visit_target(&mut self, b: &BasicBlock, _: bool, _: Location) { self.0.push(*b); } }
-        let n = body.basic_blocks.len();
-        let mut successors = vec![vec![]; n];
-        let mut predecessors = vec![vec![]; n];
-        for (b, block) in body.basic_blocks.iter().enumerate() {
-            let mut edges = Edges(vec![]);
-            edges.visit_terminator(block.terminator.as_ref().unwrap(), Location { block: BasicBlock(b as u32), statement_index: block.statements.len() });
-            for &s in &edges.0 { predecessors[s.0 as usize].push(BasicBlock(b as u32)); }
-            successors[b] = edges.0;
-        }
-        let mut seen = BitSet::new_empty(n);
-        let mut stack = vec![(0, false)];
-        let mut order = vec![];
-        while let Some((b, finish)) = stack.pop() {
-            if finish { order.push(b); continue; }
-            if !seen.insert(b) { continue; }
-            stack.push((b, true));
-            // nightly Postorder consumes successors with next_back().
-            for s in &successors[b] { stack.push((s.0 as usize, false)); }
-        }
-        order.reverse();
-        let mut rank = vec![usize::MAX; n];
-        for (i, &b) in order.iter().enumerate() { rank[b] = i; }
-        let mut idom = vec![usize::MAX; n]; idom[0] = 0;
-        loop {
-            let mut changed = false;
-            for &b in order.iter().skip(1) {
-                let mut new = usize::MAX;
-                for p in predecessors[b].iter().map(|p| p.0 as usize).filter(|&p| idom[p] != usize::MAX) {
-                    if new == usize::MAX { new = p; continue; }
-                    let mut p = p;
-                    while p != new { if rank[p] > rank[new] { p = idom[p]; } else { new = idom[new]; } }
-                }
-                if new != usize::MAX && new != idom[b] { idom[b] = new; changed = true; }
-            }
-            if !changed { break; }
-        }
-        Self { predecessors, idom, reverse_postorder: order }
+        Self { dominators: crate::mir::dominators::Dominators::new(body) }
     }
     fn dominates(&self, a: BasicBlock, b: BasicBlock) -> bool {
-        let mut b = b.0 as usize;
-        loop {
-            if b == a.0 as usize { return true; }
-            let parent = self.idom[b];
-            if parent == usize::MAX || parent == b { return false; } b = parent;
-        }
+        self.dominators.dominates(a, b)
     }
     fn location_dominates(&self, a: Location, b: Location) -> bool {
         if a.block == b.block { a.statement_index <= b.statement_index } else { self.dominates(a.block, b.block) }
     }
     fn predecessor_locations(&self, body: &Body, at: Location) -> Vec<Location> {
         if at.statement_index > 0 { return vec![Location { statement_index: at.statement_index - 1, ..at }]; }
-        self.predecessors[at.block.0 as usize].iter().map(|&block| Location {
+        self.dominators.predecessors[at.block.0 as usize].iter().map(|&block| Location {
             block, statement_index: body.basic_blocks[block.0 as usize].statements.len(),
         }).collect()
     }

@@ -97,6 +97,55 @@ pub unsafe fn patch_code_u32(addr: u64, w: u32) {
     fill_code(addr, 4, |b| (*(b.as_mut_ptr() as *const std::sync::atomic::AtomicU32)).store(w, std::sync::atomic::Ordering::Release));
 }
 
+/// The steps of a trap fill (invalid.rs) for the code pages it overwrites dead code in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Transit {
+    /// out of every thread's reach while the fill is written: inaccessible where code is written
+    /// through a read-write alias; read-write without execute where code has one view (the fill
+    /// writes the pages themselves). A fetch or a read faults and waits (jit.rs `transit_retry`).
+    Out,
+    /// readable, not executable: the instruction cache is told of the fill (arm64's cache
+    /// maintenance by address needs the address readable)
+    Read,
+    /// executable again, as the reservation made them
+    Back,
+}
+
+/// Sets code pages [addr, addr + len) (whole pages) to a step of a trap fill (`Transit`). A
+/// failure is fatal: the dead code would stay runnable, or live code out of reach.
+pub fn code_transit(addr: u64, len: usize, step: Transit) {
+    if no_codegen() {
+        return;
+    }
+    let single = single_code_view(addr);
+    #[cfg(unix)]
+    let ok = {
+        const PROT_READ: i32 = 1;
+        match step {
+            Transit::Out => unsafe { unix::mprotect(addr as *mut u8, len, if single { unix::PROT_RW } else { 0 }) == 0 },
+            Transit::Read => unsafe { unix::mprotect(addr as *mut u8, len, if single { unix::PROT_RW } else { PROT_READ }) == 0 },
+            Transit::Back => code_held(addr, len, false),
+        }
+    };
+    #[cfg(windows)]
+    let ok = {
+        use crate::os::win32::*;
+        let prot = match (step, single) {
+            (Transit::Out, false) => PAGE_NOACCESS,
+            (Transit::Read, false) => PAGE_READONLY,
+            (Transit::Out | Transit::Read, true) => PAGE_READWRITE,
+            (Transit::Back, false) => PAGE_EXECUTE_READ,
+            (Transit::Back, true) => PAGE_EXECUTE_READWRITE,
+        };
+        let mut old = 0u32;
+        unsafe { VirtualProtect(addr as *mut u8, len, prot, &mut old) != 0 }
+    };
+    if !ok {
+        eprintln!("relax run: code pages at {:#x} ({} bytes) could not be set to {:?} for a trap fill", addr, len, step);
+        std::process::abort();
+    }
+}
+
 /// The code [addr, addr + len) of a run that ended: nothing can execute it any more, while whatever
 /// still reads it (a thunk's word, a disassembly) can, and a compile still in flight can finish
 /// writing (through the RW alias, which stays). The whole range goes at once, also what no code was
@@ -324,6 +373,7 @@ mod imp {
     const PROT_RWX: i32 = 7;
     const MAP_SHARED: i32 = 0x01;
     const MAP_FIXED: i32 = 0x10;
+    const MAP_NORESERVE: i32 = 0x4000;
     const SEEK_DATA: i32 = 3;
     const SEEK_HOLE: i32 = 4;
 
@@ -453,7 +503,7 @@ mod imp {
                 // MAP_FIXED failing may have unmapped the range: take it back as before
                 munmap(rw, size);
                 close(fd);
-                if mmap(base as *mut u8, size, PROT_RWX, super::unix::MAP_PRIVATE_ANON | MAP_FIXED, -1, 0) as u64 != base {
+                if mmap(base as *mut u8, size, PROT_RWX, super::unix::MAP_PRIVATE_ANON | MAP_FIXED | MAP_NORESERVE, -1, 0) as u64 != base {
                     panic!("reservation: code memory lost while mapping its views");
                 }
                 return false;
@@ -495,7 +545,9 @@ mod imp {
         None
     }
 
-    /// The code part of a fresh reservation: W^X views, or (W^X off or unavailable) one RWX view.
+    /// The code part of a fresh reservation: W^X views, or (W^X off or unavailable) one RWX view,
+    /// uncharged as the views are (MAP_NORESERVE: overcommit accounting charges it page by page as
+    /// code lands, never the whole window at once).
     fn make_code(base: u64, code: usize) {
         if code == 0 {
             return;
@@ -507,13 +559,42 @@ mod imp {
             WX_FAILED.store(true, Ordering::Relaxed);
             eprintln!("relax run: no memfd for W^X code memory here: code pages are read-write-execute");
         }
-        if unsafe { mprotect(base as *mut u8, code, PROT_RWX) } != 0 {
-            panic!("reservation: mprotect RWX failed");
+        if unsafe { mmap(base as *mut u8, code, PROT_RWX, super::unix::MAP_PRIVATE_ANON | MAP_FIXED | MAP_NORESERVE, -1, 0) } as u64 != base {
+            panic!("reservation: the RWX code view failed");
         }
     }
 
+    /// A reservation's addresses, at `at` (MAP_FIXED_NOREPLACE) or anywhere: PROT_NONE, which the
+    /// overcommit accounting does not charge, then its data part read-write, the one part it
+    /// charges. (One writable mapping of the whole of it was charged at once: arm64's 3-GB code
+    /// window and its data, 4 GB, can be refused at start where RAM and swap are less than that,
+    /// a phone or a headset.) 0: `at` is taken.
+    fn reserve_parts(at: Option<u64>, code: usize, rest: usize) -> u64 {
+        const MAP_FIXED_NOREPLACE: i32 = 0x100000;
+        let (hint, flags) = match at {
+            Some(a) => (a as *mut u8, super::unix::MAP_PRIVATE_ANON | MAP_FIXED_NOREPLACE),
+            None => (std::ptr::null_mut(), super::unix::MAP_PRIVATE_ANON),
+        };
+        let p = unsafe { mmap(hint, code + rest, 0, flags, -1, 0) };
+        if p as isize == -1 || p.is_null() || at.is_some_and(|a| p as u64 != a) {
+            if at.is_some() {
+                // (a kernel without MAP_FIXED_NOREPLACE takes `at` as a hint: elsewhere is no use)
+                if p as isize != -1 && !p.is_null() {
+                    unsafe { munmap(p, code + rest) };
+                }
+                return 0;
+            }
+            panic!("reservation: no {} MB of address space", (code + rest) >> 20);
+        }
+        let base = p as u64;
+        if rest != 0 && unsafe { mprotect((base + code as u64) as *mut u8, rest, PROT_RW) } != 0 {
+            panic!("reservation: its {} MB of data cannot be made read-write", rest >> 20);
+        }
+        base
+    }
+
     pub fn reserve(code: usize, rest: usize) -> u64 {
-        let base = alloc_rw(code + rest);
+        let base = reserve_parts(None, code, rest);
         crate::memstat::name_mapping(base as usize + code, rest, c"relax-jit-data");
         make_code(base, code);
         // perf names samples in anonymous memory from /tmp/perf-<pid>.map, but only for mappings
@@ -544,10 +625,57 @@ mod imp {
 
     /// `reserve` at exactly `at` (the wasm32 web target's window, web32.rs); 0 when the range is
     /// taken.
+    #[cfg(test)]
+    mod tests {
+        /// The bytes of [lo, hi) the overcommit accounting charged (/proc/self/smaps: the
+        /// mappings flagged `ac`) and the bytes mapped there at all.
+        fn charged(lo: u64, hi: u64) -> (u64, u64) {
+            let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+            let (mut charged, mut mapped, mut cur) = (0, 0, None);
+            for line in smaps.lines() {
+                let range = line.split(' ').next().and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((u64::from_str_radix(a, 16).ok()?, u64::from_str_radix(b, 16).ok()?)));
+                if let Some((a, b)) = range.filter(|_| !line.starts_with("VmFlags")) {
+                    // (its part in [lo, hi): a neighbour of the same kind may be merged with it)
+                    cur = (a < hi && b > lo).then(|| b.min(hi) - a.max(lo));
+                    mapped += cur.unwrap_or(0);
+                } else if let (Some(len), Some(flags)) = (cur, line.strip_prefix("VmFlags:")) {
+                    if flags.split_whitespace().any(|f| f == "ac") {
+                        charged += len;
+                    }
+                }
+            }
+            (charged, mapped)
+        }
+
+        /// A unit's reservation is charged only for its data part, with W^X views and with the
+        /// one RWX view alike, so one larger than the machine's RAM and swap together is taken:
+        /// charged whole at its mmap (arm64's code window and data, 4 GB), the overcommit
+        /// heuristic refuses it where RAM and swap are less (a phone, a headset).
+        #[test]
+        fn a_reservation_charges_only_its_data_part() {
+            isolated_test!(a_reservation_charges_only_its_data_part);
+            let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap();
+            let kb = |key: &str| meminfo.lines().find_map(|l| l.strip_prefix(key)?.trim().strip_suffix(" kB")?.trim().parse::<u64>().ok()).unwrap_or(0) << 10;
+            let huge = 2u64 << 20;
+            let code = ((kb("MemTotal:") + kb("SwapTotal:") + (1 << 30) + huge - 1) & !(huge - 1)) as usize;
+            let rest = 64usize << 20;
+            // the addresses as they are taken, before the code part has a view
+            let base = super::reserve_parts(None, code, rest);
+            assert_eq!(charged(base, base + (code + rest) as u64), (rest as u64, (code + rest) as u64), "taken whole, charged for its data part");
+            unsafe { super::munmap(base as *mut u8, code + rest) };
+            for single_view in [false, true] {
+                super::WX_FAILED.store(single_view, std::sync::atomic::Ordering::Relaxed);
+                let base = super::reserve(code, rest);
+                let (charged, mapped) = charged(base, base + (code + rest) as u64);
+                assert_eq!(mapped, (code + rest) as u64, "all of it is taken (single view: {single_view})");
+                assert_eq!(charged, rest as u64, "only the data part is charged (single view: {single_view})");
+                super::release(base, code, rest);
+            }
+        }
+    }
+
     pub fn reserve_at(at: u64, code: usize, rest: usize) -> u64 {
-        const MAP_FIXED_NOREPLACE: i32 = 0x100000;
-        let p = unsafe { super::unix::mmap(at as *mut u8, code + rest, super::unix::PROT_RW, super::unix::MAP_PRIVATE_ANON | MAP_FIXED_NOREPLACE, -1, 0) };
-        if p as isize == -1 || p as u64 != at {
+        if reserve_parts(Some(at), code, rest) == 0 {
             return 0;
         }
         crate::memstat::name_mapping(at as usize + code, rest, c"relax-jit-data");
@@ -655,6 +783,19 @@ mod imp {
             a += iline;
         }
         std::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+    }
+
+    /// `write_code` in two halves, for a write while the code's pages are out of reach (a trap
+    /// fill, invalid.rs): where bytes [addr, addr + len) are written (the RW alias; with one view,
+    /// the address) ...
+    #[track_caller]
+    pub fn code_alias(addr: u64, len: usize) -> u64 {
+        writable(addr, len)
+    }
+
+    /// ... and the instruction cache told of what was written there (`addr` readable).
+    pub unsafe fn flush_code(addr: u64, len: usize) {
+        flush_icache(addr, len);
     }
 
     /// aarch64 does not keep the instruction cache coherent with data writes (x86-64 does).
@@ -877,6 +1018,21 @@ mod imp {
         fill(std::slice::from_raw_parts_mut(w as *mut u8, len));
         sys_icache_invalidate(addr as *mut u8, len);
     }
+
+    /// `write_code` in two halves, for a write while the code's pages are out of reach (a trap
+    /// fill, invalid.rs): where bytes [addr, addr + len) are written (the RW view) ...
+    #[track_caller]
+    pub fn code_alias(addr: u64, _len: usize) -> u64 {
+        match code_rw_of(addr) {
+            Some(w) => w,
+            None => panic!("code_alias: {:#x} is not code memory", addr),
+        }
+    }
+
+    /// ... and the instruction cache told of what was written there (`addr` readable).
+    pub unsafe fn flush_code(addr: u64, len: usize) {
+        sys_icache_invalidate(addr as *mut u8, len);
+    }
 }
 
 /// Windows: one reservation (MEM_RESERVE) whose pages are committed on demand in 1 MB granules
@@ -976,6 +1132,24 @@ mod imp {
             }
         }
         None
+    }
+
+    /// Whether code at `addr` has one read-write-execute view (written where it runs).
+    pub(super) fn single_code_view(addr: u64) -> bool {
+        code_rw_of(addr).is_none()
+    }
+
+    /// `write_code` in two halves, for a write while the code's pages are out of reach (a trap
+    /// fill, invalid.rs): where bytes [addr, addr + len) are written (the RW alias; with one view,
+    /// the address) ...
+    #[track_caller]
+    pub fn code_alias(addr: u64, _len: usize) -> u64 {
+        writable(addr)
+    }
+
+    /// ... and the instruction cache told of what was written there.
+    pub unsafe fn flush_code(addr: u64, len: usize) {
+        FlushInstructionCache(GetCurrentProcess(), addr as *const u8, len);
     }
 
     /// Where code bytes at `addr` are written: the RW alias, or (single RWX view) the address.

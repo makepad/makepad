@@ -189,16 +189,17 @@ fn check_root(prog: &Program, tcx: &Tcx, owner: CheckedBody, tb: &crate::typeck:
                 let (lo, hi) = span_of(&b);
                 let parent = nested.iter().filter(|p| **p != b).filter(|p| { let (plo, phi) = span_of(p); plo <= lo && hi <= phi && (plo, phi) != (lo, hi) })
                     .min_by_key(|p| { let (plo, phi) = span_of(p); phi - plo });
+                let parent_closure_sig;
                 let parent_sig = match parent {
-                    None => owner_sig.clone(),
+                    None => &owner_sig,
                     Some(p) => {
                         let BodyKind::Closure(pe) = p.kind else { unreachable!() };
                         let Some(psigs) = tb.closure_sigs.get(&pe.0) else {
                             out.unchecked.push(("enclosing closure without a recorded signature".into(), at));
                             return out;
                         };
-                        match SignatureRegions::closure_in(tcx, prog, tb.def, pe.0, psigs, None, owner_sig.clone()) {
-                            Some(s) => s,
+                        match SignatureRegions::closure_in(tcx, prog, tb.def, pe.0, psigs, None, &owner_sig) {
+                            Some(s) => { parent_closure_sig = s; &parent_closure_sig }
                             None => {
                                 out.unchecked.push(("enclosing closure has no signature regions".into(), at));
                                 return out;

@@ -57,8 +57,19 @@ pub fn concat_vec<T: Clone, V: Borrow<[T]>>(slice: &[V]) -> Vec<T> {
     out
 }
 
+/// alloc slice.rs `Join<&T>` / `Join<&[T]> for [V]`: one allocation of the joined length.
 pub fn join_vec<T: Clone, V: Borrow<[T]>>(slice: &[V], sep: &[T]) -> Vec<T> {
-    let mut out = Vec::new();
+    let n = slice.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut total = sep.len() * (n - 1);
+    let mut i = 0;
+    while i < n {
+        total += slice[i].borrow().len();
+        i += 1;
+    }
+    let mut out = Vec::with_capacity(total);
     let mut i = 0;
     while i < slice.len() {
         if i > 0 {

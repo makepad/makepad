@@ -164,7 +164,6 @@ pub const LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[
     ("refining_impl_trait_reachable", Warn, None, &["refining_impl_trait"], false),
     ("renamed_and_removed_lints", Warn, None, &[], false),
     ("repr_c_enums_larger_than_int", Warn, None, &["future_incompatible"], false),
-    ("repr_transparent_non_zst_fields", Deny, None, &["future_incompatible"], false),
     ("resolving_to_items_shadowing_supertrait_items", Allow, None, &[], true),
     ("rtsan_nonblocking_async", Warn, None, &[], false),
     ("rust_2021_incompatible_closure_captures", Allow, None, &["rust_2021_compatibility"], false),
@@ -298,6 +297,8 @@ pub static REMOVED: &[(&str, &str)] = &[
     ("wasm_c_abi", "the wasm C ABI has been fixed"),
     ("soft_unstable", "the general soft-unstable mechanism has been removed"),
     ("inline_always_mismatching_target_features", "replaced by a hard error for `#[inline(always)]` with `#[target_feature]`"),
+    ("repr_transparent_external_private_fields", "converted into hard error, see <https://github.com/rust-lang/rust/issues/78586> for more information"),
+    ("repr_transparent_non_zst_fields", "converted into hard error, see <https://github.com/rust-lang/rust/issues/78586> for more information"),
 ];
 
 /// rustc's late lints, sorted: its late lint pass's and misc_checking_3's (rustc_interface passes.rs

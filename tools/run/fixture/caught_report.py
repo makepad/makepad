@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""A panic the program catches has its report line tagged: `  report (caught): {..}`. One that
-ends a thread or a test keeps `  report: {..}`, and a failed unit's summary (land_gate.sh's
-test_failures, which reads `  report: ` lines) and jit_misses take only those.
+"""A panic the program catches is the program's to handle: std's hook prints its message, as
+rustc's does, and the JIT adds no report. One that ends a thread or a test keeps its
+`  report: {..}` line, which a failed unit's summary (land_gate.sh's test_failures) and jit_misses
+read.
 
 usage: caught_report.py [--makepad <makepad binary>]
   (run from the workspace root; the JIT runs through `cargo run --profile host` unless a binary is
   given; RELAX_STD defaults to libs/relax/compiler/std)
 
 A package is written to a fresh dir (its own RELAX_HOME):
-  1. `makepad run`: main catches a panic with catch_unwind ("caught on purpose": tagged), and a
-     thread it joins panics ("a thread ends": not tagged);
-  2. `makepad test`: one test catches a panic ("caught in a test": tagged), a #[should_panic] test
-     panics as it expects ("expected by the test": tagged), and one test fails ("fails the
-     test": not tagged).
-Red without the tag (jit.rs relax_catch_caught): every report says `report:`, so a summary takes
-the deliberate panics for failures (a bucket's relax-compiler summary led with three, 11-07).
+  1. `makepad run`: main catches a panic with catch_unwind ("caught on purpose": its message, no
+     report), and a thread it joins panics ("a thread ends": reported);
+  2. `makepad test`: one test catches a panic ("caught in a test": no report), a #[should_panic]
+     test panics as it expects ("expected by the test": no report), and one test fails ("fails the
+     test": reported).
+Red when a caught panic is reported: a suite whose tests catch panics on purpose filled its log
+with reports rustc never prints (relax issue 231); before that, untagged, a summary took them for
+failures (11-07).
 Prints `caught_report: ok` or `caught_report: FAIL <why>`; exit 1 on failure.
 """
 import os, re, shutil, subprocess, sys, tempfile
@@ -58,14 +60,29 @@ publish = false
 
 
 def reports(text):
-    """(tagged, message) of each report line."""
+    """The message of each report line (any `  report...: {..}` form)."""
     out = []
     for line in text.splitlines():
-        m = re.match(r"^  report( \(caught\))?: (\{.*)$", line)
+        m = re.match(r"^  report[^:]*: (\{.*)$", line)
         if m:
-            msg = re.search(r'"message":"([^"]*)"', m.group(2))
-            out.append((m.group(1) is not None, msg.group(1) if msg else ""))
+            msg = re.search(r'"message":"([^"]*)"', m.group(1))
+            out.append(msg.group(1) if msg else "")
     return out
+
+
+def compare(what, text, reported, quiet):
+    """None when exactly the `reported` panics have a report and each `quiet` one printed std's
+    message (`panicked at`) without one."""
+    got = reports(text)
+    for want in reported:
+        if want not in got:
+            return "%s: no report of %r (reports: %s)" % (what, want, got)
+    for q in quiet:
+        if q in got:
+            return "%s: %r was caught, yet reported (reports: %s)" % (what, q, got)
+        if not re.search(r"panicked at .*\n%s|panicked at .*%s" % (re.escape(q), re.escape(q)), text):
+            return "%s: std's message of %r is missing" % (what, q)
+    return None
 
 
 def check(jit, work):
@@ -76,14 +93,14 @@ def check(jit, work):
     env = dict(os.environ, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
                RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1")
     env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
-    # 1. a run
-    p = subprocess.run(jit + ["run", "--quiet", "relax-caught-report"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
+    # 1. a run, unattended: its panics unwind at once (attended, as under devhub's observer, the first
+    # parked for a decision nobody here makes, and the job paused, 11-14)
+    p = subprocess.run(jit + ["run", "--quiet", "--unattended", "relax-caught-report"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
     if "main done" not in p.stdout:
         return "the run did not finish (exit %s): %s" % (p.returncode, p.stderr.strip()[-400:])
-    got = reports(p.stderr)
-    for want in [(True, "caught on purpose"), (False, "a thread ends")]:
-        if want not in got:
-            return "the run's reports %s lack %s" % (got, want)
+    why = compare("the run", p.stderr, ["a thread ends"], ["caught on purpose"])
+    if why:
+        return why
     # 2. a test run
     log = os.path.join(work, "test.log")
     with open(log, "w") as f:
@@ -91,11 +108,7 @@ def check(jit, work):
     text = open(log, errors="replace").read()
     if p.returncode == 0 or "test tests::fails ... FAILED" not in text or "2 passed; 1 failed" not in text:
         return "the test run is not 2 passed, 1 failed (exit %s): %s" % (p.returncode, text.strip()[-400:])
-    got = reports(text)
-    for want in [(True, "caught in a test"), (True, "expected by the test"), (False, "fails the test")]:
-        if want not in got:
-            return "the test run's reports %s lack %s" % (got, want)
-    return None
+    return compare("the test run", text, ["fails the test"], ["caught in a test", "expected by the test"])
 
 
 args = sys.argv[1:]
