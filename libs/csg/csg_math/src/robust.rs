@@ -318,8 +318,7 @@ pub fn in_circle(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64, dx: f64, 
 
     let det = alift * bcdet + blift * cadet + clift * abdet;
 
-    let permanent = (bdx * cdy).abs()
-        + (cdx * bdy).abs() * alift
+    let permanent = ((bdx * cdy).abs() + (cdx * bdy).abs()) * alift
         + ((cdx * ady).abs() + (adx * cdy).abs()) * blift
         + ((adx * bdy).abs() + (bdx * ady).abs()) * clift;
     // Error bound from Shewchuk's incircle

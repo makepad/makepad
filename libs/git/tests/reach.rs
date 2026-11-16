@@ -86,6 +86,51 @@ fn is_ancestor_is_exact_for_every_pair() {
     }
 }
 
+/// `merge_bases` gives every pair of a history with a criss-cross merge, side chains and a clock
+/// that runs backwards what the full histories say: the common commits no other common commit
+/// descends from.
+#[test]
+fn merge_bases_are_exact_for_every_pair() {
+    let dir = tempdir().unwrap();
+    let mut repo = init_repo(dir.path());
+    let a = commit(&repo, &[], "a", 10);
+    let b = commit(&repo, &[a], "b", 20);
+    let c = commit(&repo, &[b], "c", 30);
+    let x = commit(&repo, &[b], "x", 5);
+    let y = commit(&repo, &[x], "y", 6);
+    // criss-cross: each side merges the other's older commit
+    let m1 = commit(&repo, &[c, y], "m1", 40);
+    let m2 = commit(&repo, &[y, c], "m2", 41);
+    let c2 = commit(&repo, &[m1], "c2", 42);
+    let y2 = commit(&repo, &[m2], "y2", 3);
+    let z = commit(&repo, &[a], "z", 50);
+    let n = commit(&repo, &[z, x], "n", 60);
+    let root2 = commit(&repo, &[], "other root", 70);
+    let all = [a, b, c, x, y, m1, m2, c2, y2, z, n, root2];
+    let reach_of = |repo: &mut Repository, tip: ObjectId| {
+        let mut r = Reach::new();
+        r.advance(repo, tip).unwrap();
+        all.iter().copied().filter(|o| r.contains(o)).collect::<Vec<_>>()
+    };
+    let reaches: Vec<Vec<ObjectId>> = all.iter().map(|&t| reach_of(&mut repo, t)).collect();
+    let of = |o: ObjectId| &reaches[all.iter().position(|&t| t == o).unwrap()];
+    for &p in &all {
+        for &q in &all {
+            let common: Vec<ObjectId> = of(p).iter().copied().filter(|o| of(q).contains(o)).collect();
+            let mut best: Vec<ObjectId> = common.iter().copied().filter(|&o| !common.iter().any(|&d| d != o && of(d).contains(&o))).collect();
+            let mut got = merge_bases(&mut repo, p, q).unwrap();
+            best.sort();
+            got.sort();
+            assert_eq!(got, best, "merge bases of {p} and {q}");
+        }
+    }
+    let mut cross = merge_bases(&mut repo, c2, y2).unwrap();
+    cross.sort();
+    let mut both = vec![c, y];
+    both.sort();
+    assert_eq!(cross, both, "a criss-cross merge has two bases");
+}
+
 #[test]
 fn entries_at_paths() {
     let dir = tempdir().unwrap();

@@ -53,6 +53,9 @@ fn widget_node_impl(
         let mut uid_field = None;
         let mut cast_fields = Vec::new();
         let mut find_fields = Vec::new();
+        // The `#[find]` fields that hold a widget of their own (a `WidgetRef`), not a widget
+        // struct drawn as part of this one.
+        let mut find_refs = Vec::new();
         let mut redraw_fields = Vec::new();
         // Every `#[live]` field whose type is a draw shader (`Draw…`): the
         // widget's material layers, exposed as (name, area) so a design
@@ -84,6 +87,9 @@ fn widget_node_impl(
             }
             if field.attrs.iter().any(|v| v.name == "find") {
                 find_fields.push(field.name.clone());
+                if field.ty.to_string().replace(' ', "").ends_with("WidgetRef") {
+                    find_refs.push(field.name.clone());
+                }
             }
             if field.attrs.iter().any(|v| v.name == "wrap") {
                 wrap_field = Some(field.name.clone());
@@ -299,11 +305,21 @@ fn widget_node_impl(
                     .add(".set_scroll_pos(cx, v)}");
             }
             if !find_fields.is_empty() {
+                // A field's own widget (a `WidgetRef`) is a child, unnamed (a path skips it): it
+                // draws as a widget of its own, so it is a node of the semantic tree, and the widget
+                // graph has to hold every drawn widget for that node's path to be named. A widget
+                // struct drawn as part of this one gives its children.
                 tb.add("    fn children(&self, visit:&mut dyn FnMut(LiveId, WidgetRef)){");
                 for find_field in &find_fields {
-                    tb.add("    self.")
-                        .ident(find_field)
-                        .add(".children(visit);");
+                    if find_refs.contains(find_field) {
+                        tb.add("    visit(LiveId(0), self.")
+                            .ident(find_field)
+                            .add(".clone());");
+                    } else {
+                        tb.add("    self.")
+                            .ident(find_field)
+                            .add(".children(visit);");
+                    }
                 }
                 tb.add("    }");
                 tb.add("    fn cancel_children_impl(&self, visit:&mut dyn FnMut(LiveId, WidgetRef))->bool{");

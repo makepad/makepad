@@ -17,6 +17,8 @@ pub struct Tree {
     parents: HashMap<NodeId, NodeId>,
     /// Updates applied so far.
     pub updates: u64,
+    /// The latest lookup answered by a frame; ordinary updates keep this acknowledgement.
+    pub lookup_seq: u32,
     /// Sequence number of the next notification.
     pub notify_seq: u64,
     /// (seq, notification), oldest first.
@@ -26,6 +28,11 @@ pub struct Tree {
 impl Tree {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records a completed in-process lookup after its frame's updates have been applied.
+    pub fn acknowledge_lookup(&mut self, seq: u32) {
+        self.lookup_seq = self.lookup_seq.max(seq);
     }
 
     /// Applies one update; returns the notifications it carried (the adapter raises them).

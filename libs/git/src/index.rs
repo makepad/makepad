@@ -87,12 +87,51 @@ impl<'a> BufReader<'a> {
 /// Read and parse the .git/index file.
 pub fn read_index(git_dir: &Path) -> Result<Index, GitError> {
     let index_path = git_dir.join("index");
-    let data = fs::read(&index_path)?;
+    let data = fs::read(&index_path).map_err(|e| GitError::io_at("read", &index_path, e))?;
     parse_index(&data)
 }
 
 /// Parse a git index from raw bytes.
 pub fn parse_index(data: &[u8]) -> Result<Index, GitError> {
+    parse_index_entries(data).map(|(index, _)| index)
+}
+
+/// Read an index that can be rewritten from its entries without losing split
+/// or sparse state. Those extensions require information beyond this model.
+pub fn read_index_for_update(git_dir: &Path) -> Result<Index, GitError> {
+    let index_path = git_dir.join("index");
+    let data = fs::read(&index_path).map_err(|e| GitError::io_at("read", &index_path, e))?;
+    let (index, end) = parse_index_entries(&data)?;
+    if special_index_extensions(&data, end)? {
+        return Err(GitError::InvalidIndex("cannot rewrite a split or sparse index".into()));
+    }
+    if index.entries.iter().any(|e| e.flags & 0x4000 != 0) {
+        return Err(GitError::InvalidIndex("cannot rewrite extended index flags".into()));
+    }
+    Ok(index)
+}
+
+/// Whether the index carries split-index or sparse-index state.
+pub fn is_split_or_sparse(data: &[u8]) -> Result<bool, GitError> {
+    let (_, end) = parse_index_entries(data)?;
+    special_index_extensions(data, end)
+}
+
+fn special_index_extensions(data: &[u8], end: usize) -> Result<bool, GitError> {
+    let payload_end = data.len().checked_sub(20).filter(|n| *n >= end)
+        .ok_or_else(|| GitError::InvalidIndex("missing index checksum".into()))?;
+    let mut r = BufReader::new(&data[end..payload_end]);
+    let mut special = false;
+    while r.remaining() != 0 {
+        let name = r.read_bytes(4)?;
+        special |= name == b"link" || name == b"sdir";
+        let len = r.read_u32()? as usize;
+        r.read_bytes(len)?;
+    }
+    Ok(special)
+}
+
+fn parse_index_entries(data: &[u8]) -> Result<(Index, usize), GitError> {
     let mut r = BufReader::new(data);
 
     // Header: "DIRC" + version + entry count
@@ -109,7 +148,7 @@ pub fn parse_index(data: &[u8]) -> Result<Index, GitError> {
     }
     let num_entries = r.read_u32()? as usize;
 
-    let mut entries = Vec::with_capacity(num_entries);
+    let mut entries: Vec<IndexEntry> = Vec::new();
     for _ in 0..num_entries {
         let entry_start = r.pos;
 
@@ -136,6 +175,10 @@ pub fn parse_index(data: &[u8]) -> Result<Index, GitError> {
         let name_len = (flags & 0xFFF) as usize;
         let path = if version < 4 {
             // v2/v3: NUL-terminated, padded to 8-byte boundary
+            let name_len = if name_len == 0xfff {
+                r.data[r.pos..].iter().position(|b| *b == 0)
+                    .ok_or_else(|| GitError::InvalidIndex("unterminated index path".into()))?
+            } else { name_len };
             let name_bytes = r.read_bytes(name_len)?;
             let path = std::str::from_utf8(name_bytes)
                 .map_err(|_| GitError::InvalidIndex("invalid UTF-8 path".into()))?
@@ -149,17 +192,24 @@ pub fn parse_index(data: &[u8]) -> Result<Index, GitError> {
 
             path
         } else {
-            // v4: prefix-compressed — read varint strip count, then NUL-terminated suffix
-            // We don't implement v4 prefix compression yet — just read until NUL
-            let start = r.pos;
-            while r.pos < r.data.len() && r.data[r.pos] != 0 {
-                r.pos += 1;
+            // v4 removes a suffix of the previous path before appending this one.
+            let mut b = r.read_bytes(1)?[0];
+            let mut strip = (b & 0x7f) as usize;
+            while b & 0x80 != 0 {
+                b = r.read_bytes(1)?[0];
+                strip = strip.checked_add(1).and_then(|n| n.checked_mul(128))
+                    .and_then(|n| n.checked_add((b & 0x7f) as usize))
+                    .ok_or_else(|| GitError::InvalidIndex("index path prefix overflow".into()))?;
             }
-            let path = std::str::from_utf8(&r.data[start..r.pos])
-                .map_err(|_| GitError::InvalidIndex("invalid UTF-8 path".into()))?
-                .to_string();
-            r.pos += 1; // skip NUL
-            path
+            let previous = entries.last().map_or("", |e| e.path.as_str());
+            let keep = previous.len().checked_sub(strip)
+                .ok_or_else(|| GitError::InvalidIndex("invalid index path prefix".into()))?;
+            let len = r.data[r.pos..].iter().position(|b| *b == 0)
+                .ok_or_else(|| GitError::InvalidIndex("unterminated index path".into()))?;
+            let mut bytes = previous.as_bytes()[..keep].to_vec();
+            bytes.extend_from_slice(r.read_bytes(len)?);
+            r.read_bytes(1)?;
+            String::from_utf8(bytes).map_err(|_| GitError::InvalidIndex("invalid UTF-8 path".into()))?
         };
 
         entries.push(IndexEntry {
@@ -179,14 +229,21 @@ pub fn parse_index(data: &[u8]) -> Result<Index, GitError> {
         });
     }
 
-    // We skip extensions and the trailing checksum — not needed for reading
-
-    Ok(Index { version, entries })
+    Ok((Index { version, entries }, r.pos))
 }
 
 /// Write the index in v2 format.
 /// The lock is taken exclusively; a held lock is refused, never written through.
 pub fn write_index(git_dir: &Path, index: &Index) -> Result<(), GitError> {
+    write_index_inner(git_dir, index, false)
+}
+
+/// Publish a complete index only after its bytes and directory entry are durable.
+pub fn write_index_durable(git_dir: &Path, index: &Index) -> Result<(), GitError> {
+    write_index_inner(git_dir, index, true)
+}
+
+fn write_index_inner(git_dir: &Path, index: &Index, durable: bool) -> Result<(), GitError> {
     let data = serialize_index(index)?;
     let index_path = git_dir.join("index");
     let lock_path = git_dir.join("index.lock");
@@ -205,7 +262,7 @@ pub fn write_index(git_dir: &Path, index: &Index) -> Result<(), GitError> {
                 GitError::io_at("create", &lock_path, e)
             }
         })?;
-    let written = file.write_all(&data);
+    let written = file.write_all(&data).and_then(|_| if durable { file.sync_all() } else { Ok(()) });
     drop(file);
     if let Err(e) = written {
         let _ = fs::remove_file(&lock_path);
@@ -215,6 +272,8 @@ pub fn write_index(git_dir: &Path, index: &Index) -> Result<(), GitError> {
         let _ = fs::remove_file(&lock_path);
         return Err(GitError::io_at("rename", &lock_path, e));
     }
+    #[cfg(unix)]
+    if durable { fs::File::open(git_dir).and_then(|d| d.sync_all()).map_err(|e| GitError::io_at("sync", git_dir, e))?; }
     Ok(())
 }
 
@@ -288,9 +347,53 @@ mod tests {
             gid: 0,
             file_size: content.len() as u32,
             oid: hash_object("blob", content),
-            flags: path.len() as u16,
+            flags: path.len().min(0xfff) as u16,
             path: path.to_string(),
         }
+    }
+
+    #[test]
+    fn durable_index_and_extension_detection() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let index = Index { version: 2, entries: vec![entry("a", b"contents")] };
+        write_index_durable(dir.path(), &index).unwrap();
+        let read = read_index_for_update(dir.path()).unwrap();
+        assert_eq!(serialize_index(&read).unwrap(), serialize_index(&index).unwrap(), "durable index round-trip");
+        assert!(!dir.path().join("index.lock").exists(), "the lock was renamed");
+        for name in [b"link", b"sdir"] {
+            let mut data = serialize_index(&index).unwrap();
+            data.truncate(data.len() - 20);
+            data.extend_from_slice(name);
+            data.extend_from_slice(&0u32.to_be_bytes());
+            let mut hash = crate::Sha1::new();
+            hash.update(&data);
+            data.extend_from_slice(&hash.finalize());
+            assert!(is_split_or_sparse(&data).unwrap(), "special extension is detected");
+            fs::write(dir.path().join("index"), data).unwrap();
+            assert!(read_index_for_update(dir.path()).is_err(), "special index is not rewritten from entries");
+        }
+    }
+
+    #[test]
+    fn compressed_and_long_index_paths_remain_complete() {
+        let entries = vec![entry("dir/a", b"a"), entry("dir/b", b"b")];
+        let mut data = b"DIRC".to_vec();
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend_from_slice(&2u32.to_be_bytes());
+        for (e, suffix) in entries.iter().zip([&b"\0dir/a\0"[..], &b"\x01b\0"[..]]) {
+            let one = serialize_index(&Index { version: 2, entries: vec![e.clone()] }).unwrap();
+            data.extend_from_slice(&one[12..74]);
+            data.extend_from_slice(suffix);
+        }
+        let mut hash = crate::Sha1::new();
+        hash.update(&data);
+        data.extend_from_slice(&hash.finalize());
+        let read = parse_index(&data).unwrap();
+        assert_eq!(read.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["dir/a", "dir/b"], "v4 paths expand before rewriting");
+        assert!(!is_split_or_sparse(&data).unwrap(), "v4 entries end at the extensions");
+        let path = format!("{}a", "d/".repeat(2048));
+        let data = serialize_index(&Index { version: 2, entries: vec![entry(&path, b"a")] }).unwrap();
+        assert_eq!(parse_index(&data).unwrap().entries[0].path, path, "saturated name length still reads the full path");
     }
 
     #[test]

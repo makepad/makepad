@@ -141,7 +141,8 @@ mod inner {
                     .name(format!("makepad-csg-{index}"))
                     .spawn(move || {
                         while let Some(job) = queue.pop() {
-                            job();
+                            // A job's panic ends the job, never the worker: the pool keeps its size.
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
                         }
                     })
                     .expect("spawn CSG worker");
@@ -226,12 +227,15 @@ mod inner {
         let (tx_a, rx_a) = mpsc::channel();
         let (tx_b, rx_b) = mpsc::channel();
         get_pool().submit(move || {
-            let _ = tx_a.send(fa());
+            let _ = tx_a.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(fa)));
         });
         get_pool().submit(move || {
-            let _ = tx_b.send(fb());
+            let _ = tx_b.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(fb)));
         });
-        (receive_helping(rx_a), receive_helping(rx_b))
+        (
+            receive_helping(rx_a).unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            receive_helping(rx_b).unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        )
     }
 
     pub fn parallel_do8<R, F>(tasks: [F; 8]) -> [R; 8]
@@ -256,10 +260,12 @@ mod inner {
             let (tx, rx) = mpsc::channel();
             receivers.push(rx);
             get_pool().submit(move || {
-                let _ = tx.send(task());
+                let _ = tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)));
             });
         }
-        receivers.into_iter().map(receive_helping).collect()
+        receivers.into_iter().map(|rx| {
+            receive_helping(rx).unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }).collect()
     }
 
     pub fn parallel_map<T, R, F>(data: &[T], f: F) -> Vec<R>
@@ -315,6 +321,55 @@ pub use inner::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicking_task_leaves_the_pool_at_full_size() {
+        if thread_count() < 2 {
+            return;
+        }
+        std::panic::set_hook(Box::new(|_| {}));
+        let failed_for = std::panic::catch_unwind(|| parallel_for(
+            (0..2 * thread_count())
+                .map(|i| move || if i % 2 == 0 { panic!("pool task {i}") } else { i })
+                .collect::<Vec<_>>(),
+        ));
+        let failed_do2 = std::panic::catch_unwind(|| parallel_do2(|| panic!("pool task a"), || 1));
+
+        let task_count = thread_count() + 1;
+        let arrived = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let results = parallel_for((0..task_count).map(|i| {
+            let arrived = Arc::clone(&arrived);
+            move || {
+                arrived.fetch_add(1, Ordering::SeqCst);
+                while arrived.load(Ordering::SeqCst) != task_count {
+                    for _ in 0..16 {
+                        std::hint::spin_loop();
+                    }
+                    std::thread::yield_now();
+                }
+                i
+            }
+        }).collect());
+        // All queued panicking tasks have finished once the rendezvous completes.
+        let _ = std::panic::take_hook();
+
+        assert!(
+            failed_for.err().is_some_and(|panic| {
+                panic.downcast_ref::<String>().is_some_and(|message| message.starts_with("pool task"))
+            }),
+            "a task's own panic reaches the caller",
+        );
+        assert!(
+            failed_do2.err().is_some_and(|panic| {
+                panic.downcast_ref::<&str>().is_some_and(|message| *message == "pool task a")
+            }),
+            "a task's own panic reaches the caller",
+        );
+        assert_eq!(
+            results, (0..task_count).collect::<Vec<_>>(),
+            "after panics every worker is still there",
+        );
+    }
 
     #[test]
     fn serial_scope_keeps_nested_helpers_on_the_calling_worker() {

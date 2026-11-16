@@ -46,7 +46,7 @@ pub use object::{Object, ObjectKind};
 pub use oid::ObjectId;
 /// Incremental SHA-1 for streaming canonical object content.
 pub use sha1::Sha1;
-pub use reach::{is_ancestor, Range, Reach};
+pub use reach::{is_ancestor, merge_bases, Range, Reach};
 pub use refs::{Ref, RefTarget};
 pub use repo::{repository_paths, resolve_commondir, resolve_gitfile, FirstParents, Repository, RepositoryPaths};
 pub use tree::{Tree, TreeEntry};

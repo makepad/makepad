@@ -296,12 +296,12 @@ pub fn write_ref(git_dir: &Path, name: &str, oid: &ObjectId) -> Result<(), GitEr
 
     // Ensure parent directory exists
     if let Some(parent) = ref_path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|e| GitError::io_at("create", parent, e))?;
     }
 
     let content = format!("{}\n", oid.to_hex());
-    fs::write(&lock_path, content.as_bytes())?;
-    fs::rename(&lock_path, &ref_path)?;
+    fs::write(&lock_path, content.as_bytes()).map_err(|e| GitError::io_at("write", &lock_path, e))?;
+    fs::rename(&lock_path, &ref_path).map_err(|e| GitError::io_at("rename", &lock_path, e))?;
     Ok(())
 }
 
@@ -317,6 +317,46 @@ pub fn update_head(git_dir: &Path, target: &RefTarget) -> Result<(), GitError> {
 
     fs::write(&lock_path, content.as_bytes())?;
     fs::rename(&lock_path, &head_path)?;
+    Ok(())
+}
+
+/// Write a shared ref durably. Pass its common dir, not a worktree admin dir.
+pub fn write_ref_durable(common_dir: &Path, name: &str, oid: &ObjectId) -> Result<(), GitError> {
+    let path = crate::worktree::checked_worktree_path(common_dir, name)?;
+    durable_ref(common_dir, &path, format!("{oid}\n").as_bytes())
+}
+
+/// Publish a worktree HEAD after syncing its bytes, then sync the admin dir.
+pub fn update_head_durable(git_dir: &Path, target: &RefTarget) -> Result<(), GitError> {
+    let content = match target {
+        RefTarget::Symbolic(name) => format!("ref: {name}\n"),
+        RefTarget::Direct(oid) => format!("{oid}\n"),
+    };
+    durable_ref(git_dir, &git_dir.join("HEAD"), content.as_bytes())
+}
+
+fn durable_ref(root: &Path, path: &Path, content: &[u8]) -> Result<(), GitError> {
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| GitError::InvalidRef("ref has no parent".into()))?;
+    fs::create_dir_all(parent).map_err(|e| GitError::io_at("create", parent, e))?;
+    let mut lock = path.as_os_str().to_os_string();
+    lock.push(".lock");
+    let lock = PathBuf::from(lock);
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&lock).map_err(|e| GitError::io_at("create", &lock, e))?;
+    let result = file.write_all(content).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(e) = result.and_then(|_| fs::rename(&lock, path)) {
+        let _ = fs::remove_file(&lock);
+        return Err(GitError::io_at("write ref", path, e));
+    }
+    // Parents may have just been created; persist their entries as well.
+    #[cfg(unix)]
+    for dir in parent.ancestors() {
+        fs::File::open(dir)?.sync_all()?;
+        if dir == root { break; }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
     Ok(())
 }
 
@@ -388,6 +428,24 @@ pub fn delete_ref(git_dir: &Path, name: &str) -> Result<(), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_refs_roundtrip_and_keep_held_locks() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let common = dir.path();
+        let admin = common.join("worktrees/tree");
+        fs::create_dir_all(&admin).unwrap();
+        let oid = crate::oid::hash_object("blob", b"ref target");
+        write_ref_durable(common, "refs/devhub/checkout", &oid).unwrap();
+        update_head_durable(&admin, &RefTarget::Direct(oid)).unwrap();
+        assert_eq!(resolve_head_in(&admin, common).unwrap(), oid, "durable detached HEAD round-trip");
+        assert_eq!(resolve_ref(common, "refs/devhub/checkout").unwrap(), oid, "durable shared ref round-trip");
+        update_head_durable(&admin, &RefTarget::Symbolic("refs/devhub/checkout".into())).unwrap();
+        assert_eq!(resolve_head_in(&admin, common).unwrap(), oid, "durable symbolic HEAD round-trip");
+        fs::write(admin.join("HEAD.lock"), b"held").unwrap();
+        assert!(update_head_durable(&admin, &RefTarget::Direct(oid)).is_err(), "held HEAD lock is refused");
+        assert_eq!(fs::read(admin.join("HEAD.lock")).unwrap(), b"held", "held lock stays untouched");
+    }
 
     /// A ref update in flight (git's `<ref>.lock`, empty while it is created, then holding the
     /// new id until its rename) is no ref: the listing neither fails on it nor names it.

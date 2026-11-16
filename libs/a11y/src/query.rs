@@ -157,6 +157,35 @@ impl Query {
         self.terms.is_empty() && self.nth.is_none()
     }
 
+    /// Whether this query names items to materialise on request. Role, state and other
+    /// structural filters alone do not ask widgets for additional content.
+    pub fn is_lookup(&self) -> bool {
+        self.terms.iter().any(|t| matches!(t, Term::Name(..) | Term::Value(..) | Term::Text(..) | Term::Id(..)))
+    }
+
+    /// The first name term (text, exact). Contains terms are already lowercase; use this
+    /// to narrow candidates, then [`Query::matches`] to check every term.
+    pub fn name_term(&self) -> Option<(&str, bool)> {
+        self.terms.iter().find_map(|t| match t { Term::Name(s, contains) => Some((s.as_str(), !*contains)), _ => None })
+    }
+
+    /// The first value term (text, exact). Contains terms are already lowercase; the final
+    /// candidate check is [`Query::matches`].
+    pub fn value_term(&self) -> Option<(&str, bool)> {
+        self.terms.iter().find_map(|t| match t { Term::Value(s, contains) => Some((s.as_str(), !*contains)), _ => None })
+    }
+
+    /// The first text term, including a bare word, already lowercase. Check candidates
+    /// with [`Query::matches`] after narrowing them through an index.
+    pub fn text_term(&self) -> Option<&str> {
+        self.terms.iter().find_map(|t| match t { Term::Text(s) => Some(s.as_str()), _ => None })
+    }
+
+    /// The first node-id term, whether written as `id=...` or `#...`.
+    pub fn id_term(&self) -> Option<NodeId> {
+        self.terms.iter().find_map(|t| match t { Term::Id(id) => Some(*id), _ => None })
+    }
+
     pub fn matches(&self, n: &Node) -> bool {
         terms_match(&self.terms, n)
     }

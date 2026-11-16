@@ -416,6 +416,8 @@ impl ActionResult {
 }
 
 /// Which consumers want the tree (the builder runs while any bit is set).
+/// OS and HOST are continuous; REMOTE, TEST and AUTOMATION are snapshot consumers,
+/// held by a request while it runs.
 pub mod consumer {
     pub const OS: u32 = 1;
     pub const REMOTE: u32 = 2;
