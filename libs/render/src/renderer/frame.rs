@@ -223,6 +223,7 @@ impl Renderer {
         // bound, the scene's. First, after a live edit, what the renderer
         // derived from the shaders' defaults is derived again (variants.rs).
         self.follow_reload(cx.cx);
+        self.restore_textures(cx.cx);
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
         self.prepare_stock_ibl(cx.cx);
         self.push_item_instances(cx.cx, world);
@@ -231,7 +232,14 @@ impl Renderer {
         if matches!(scope, EnvScope::Scene) {
             self.record_trample(cx);
         }
+        // An aux draw (a contact or id map) takes no screen AO: the AO is made from the scene's
+        // depth after these maps draw, so a map that bound it would read a texture written after
+        // it, and be owed a paint in every repaint after a recording.
+        let ssao = if matches!(scope, EnvScope::Aux) { self.ssao.take() } else { None };
         let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
+        if let Some(ssao) = ssao {
+            self.ssao = Some(ssao);
+        }
         self.pop_item_instances();
         stats
     }
@@ -393,6 +401,7 @@ impl Renderer {
         self.prepare_volume_fog_lighting(cx.current_pass_id(), sun, camera_pos);
         self.prepare_ssr_camera(cx.current_pass_id(), camera_pos);
         self.clustered.lin_ctl = self.lin_ctl();
+        self.clustered.key_spec = self.key_spec(world, sun.dir);
         let local_shadows = self.clustered_enabled && self.frame_lights.iter().any(|l| l.shadows);
         // Character palettes pack BEFORE the cascades encode: the skinned
         // depth passes bind the same texture the visible draw does.
@@ -752,6 +761,29 @@ impl Renderer {
             if let Some(id) = self.level_shader(cx.cx, lane, dv.draw_shader_id) {
                 dv.draw_shader_id = Some(id);
             }
+        }
+        // The screen AO on the level's opaque boxes and its terrain, as on the model lanes
+        // (draw_models.rs), bound by name into the variant each lane draws with. The blended
+        // lane takes none: the AO saw only opaque depth.
+        for (dv, opaque) in [
+            (draws.cube.as_deref_mut().map(|d| &mut d.cube.draw_vars), true),
+            (draws.alpha.as_deref_mut().map(|d| &mut d.cube.cube.draw_vars), false),
+            (draws.terrain.as_deref_mut().map(|d| &mut d.draw_vars), true),
+        ] {
+            let Some(dv) = dv else { continue };
+            let strength = match (&self.ssao, opaque) {
+                (Some((tex, strength)), true) => {
+                    bind_texture_named(cx.cx, dv, live_id!(ssao_map), tex);
+                    *strength
+                }
+                // Not sampled at strength 0, and not bound either: a draw keeps no AO texture
+                // from an earlier frame (or the scene's draw, for an aux one) as an input.
+                _ => {
+                    unbind_texture_named(cx.cx, dv, live_id!(ssao_map));
+                    0.0
+                }
+            };
+            dv.set_uniform(cx.cx, live_id!(ssao_ctl), &[strength, 0.0, 0.0, 0.0]);
         }
 
         // 1. Sky dome around the camera (depth-tested at radius, drawn
@@ -1627,6 +1659,7 @@ impl Renderer {
                 * (scene_state.viewport_rect.size.y * cx.current_dpi_factor()).max(1.0) as f32;
             self.prepare_foliage_lane(cx.cx);
             self.prepare_splat_lane(cx.cx);
+            self.prepare_impostor_lane(cx.cx);
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
@@ -1970,5 +2003,23 @@ impl Renderer {
         cx.end_scene_3d();
         draw_list.end(cx);
         stats
+    }
+}
+
+/// Binds `texture` to the texture input `name` of the shader `vars` draws with (no slot number:
+/// a lane's inherited textures fix the others).
+fn bind_texture_named(cx: &Cx, vars: &mut DrawVars, name: LiveId, texture: &Texture) {
+    if let Some(id) = vars.draw_shader_id {
+        if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name) {
+            vars.set_texture(slot, texture);
+        }
+    }
+}
+
+pub(super) fn unbind_texture_named(cx: &Cx, vars: &mut DrawVars, name: LiveId) {
+    if let Some(id) = vars.draw_shader_id {
+        if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name) {
+            vars.empty_texture(slot);
+        }
     }
 }

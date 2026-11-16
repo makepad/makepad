@@ -31,19 +31,21 @@ pub fn content_id(bytes: &[u8]) -> Option<u64> {
 }
 
 /// A load-ready BC5 normal map: its blocks as they are where BC is sampled,
-/// else RGBA mips decoded from them. `None` when `bytes` is not BC5.
-fn texture_from_bc5(bytes: &[u8]) -> Option<Result<PreparedTexture, String>> {
-    let view = makepad_texcomp::rgtc::Bc5View::parse(bytes).ok()?;
-    let hash = view.content_id.unwrap_or(bytes.len() as u64 ^ 0x4b54_5832_4243_3500);
+/// else RGBA mips decoded from them, keeping levels `k..` only. `None` when `bytes` is not BC5.
+fn texture_from_bc5(bytes: &[u8], k: usize, hash: Option<u64>) -> Option<Result<PreparedTexture, String>> {
+    let mut view = makepad_texcomp::rgtc::Bc5View::parse(bytes).ok()?;
+    if k >= view.levels.len() { return Some(Err(format!("KTX2 image has no level {k}"))); }
+    view.levels.drain(..k);
+    let hash = hash.or(view.content_id).unwrap_or(bytes.len() as u64 ^ 0x4b54_5832_4243_3500);
     let (width, height, _) = view.levels[0];
     let max_level = view.levels.len() - 1;
     if crate::material_surface::bc5_normal_maps() {
-        let blocks = view.levels.iter().flat_map(|l| l.2.iter().copied()).collect();
-        return Some(Ok(PreparedTexture { width: width as usize, height: height as usize, data: Vec::new(), max_level, hash,
-            compressed: Some((crate::material_surface::GpuCompressedFormat::Bc5, blocks)) }));
+        let blocks: Vec<u8> = view.levels.iter().flat_map(|l| l.2.iter().copied()).collect();
+        return Some(Ok(PreparedTexture { width: width as usize, height: height as usize, data: Vec::new().into(), max_level, hash, stored: None,
+            compressed: Some((crate::material_surface::GpuCompressedFormat::Bc5, blocks.into())) }));
     }
-    let data = view.levels.iter().flat_map(|&(w, h, blocks)| xy_bgra(makepad_texcomp::rgtc::decode_image(blocks, w, h, 2))).collect();
-    Some(Ok(PreparedTexture { width: width as usize, height: height as usize, data, max_level, hash, compressed: None }))
+    let data: Vec<u32> = view.levels.iter().flat_map(|&(w, h, blocks)| xy_bgra(makepad_texcomp::rgtc::decode_image(blocks, w, h, 2))).collect();
+    Some(Ok(PreparedTexture { width: width as usize, height: height as usize, data: data.into(), max_level, hash, stored: None, compressed: None }))
 }
 
 /// Decoded BC5 (X, Y bytes) as BGRA words: X in red, Y in green, blue 0.
@@ -55,12 +57,21 @@ fn xy_bgra(xy: Vec<u8>) -> impl Iterator<Item = u32> {
 /// the UASTC mips remapped to the host's compression target, else RGBA mips
 /// decoded from UASTC. `None` when `bytes` is not KTX2.
 pub fn texture_from_ktx2(bytes: &[u8]) -> Option<Result<PreparedTexture, String>> {
+    texture_from_ktx2_from(bytes, 0, None)
+}
+
+/// [`texture_from_ktx2`] holding levels `k..` only (level `k` becomes level 0), named `hash`
+/// when given (else its content id, as `texture_from_ktx2`). `Some(Err)` when the file has no
+/// level `k`. Only the kept levels are transcoded or decoded.
+pub fn texture_from_ktx2_from(bytes: &[u8], k: usize, hash: Option<u64>) -> Option<Result<PreparedTexture, String>> {
     if !is_ktx2(bytes) { return None; }
-    if let Some(texture) = texture_from_bc5(bytes) { return Some(texture); }
+    if let Some(texture) = texture_from_bc5(bytes, k, hash) { return Some(texture); }
     Some((|| {
-        let view = makepad_texcomp::basis::UastcView::parse(bytes)?;
+        let mut view = makepad_texcomp::basis::UastcView::parse(bytes)?;
+        if k >= view.levels.len() { return Err(format!("KTX2 image has no level {k}")); }
+        view.levels.drain(..k);
         // An image built without an id still dedupes within its own load.
-        let hash = view.content_id.unwrap_or(bytes.len() as u64 ^ 0x4b54_5832_0000_0000);
+        let hash = hash.or(view.content_id).unwrap_or(bytes.len() as u64 ^ 0x4b54_5832_0000_0000);
         if let Some(target) = crate::material_surface::compressed_texture_target() {
             return PreparedTexture::from_uastc_view(&view, target, hash).ok_or_else(|| "KTX2 image has no levels".to_string());
         }
@@ -69,7 +80,7 @@ pub fn texture_from_ktx2(bytes: &[u8]) -> Option<Result<PreparedTexture, String>
         for &(w, h, blocks) in &view.levels {
             data.extend(bgra(&makepad_texcomp::uastc::decode_image(blocks, w, h)?));
         }
-        Ok(PreparedTexture { width: width as usize, height: height as usize, data, max_level: view.levels.len() - 1, hash, compressed: None })
+        Ok(PreparedTexture { width: width as usize, height: height as usize, data: data.into(), max_level: view.levels.len() - 1, hash, stored: None, compressed: None })
     })())
 }
 
@@ -128,19 +139,23 @@ fn image_semantics(doc: &makepad_gltf::GltfDocument) -> HashMap<usize, PixelSema
     out
 }
 
-/// The base-colour images of impostor materials (`makepadShading.impostor`,
-/// impostor.rs): an atlas of many small views, magnified about three times
-/// where the stand-in takes over, where 4x4 compression blocks of its noisy
-/// leaf texels showed as squares. They stay PNG (RGBA8 on the GPU, a few MB
-/// per species), which also spares their encode on a model's first load.
-/// Their normal atlases are smooth and compress well (two channels).
-fn impostor_color_images(doc: &makepad_gltf::GltfDocument) -> std::collections::HashSet<usize> {
+/// The base-colour and depth images of impostor materials
+/// (`makepadShading.impostor`, impostor.rs). The colour atlas holds many
+/// small views, magnified about three times where the stand-in takes over,
+/// where 4x4 compression blocks of its noisy leaf texels showed as squares.
+/// The depth atlas (the occlusion slot, `ImpostorBake::depth`) splits 16
+/// bits over two bytes, which block compression would not keep. Both stay
+/// PNG (RGBA8 on the GPU, a few MB per species), which also spares their
+/// encode on a model's first load. Their normal atlases are smooth and
+/// compress well (two channels).
+fn impostor_images(doc: &makepad_gltf::GltfDocument) -> std::collections::HashSet<usize> {
     let textures = doc.textures.as_deref().unwrap_or(&[]);
     doc.materials.as_deref().unwrap_or(&[]).iter()
         .filter(|m| m.extras.as_ref().and_then(|e| e.key("makepadShading")).and_then(|s| s.key("impostor"))
             .is_some_and(|d| match d { makepad_gltf::JsonValue::F64(x) => *x > 0.0, makepad_gltf::JsonValue::U64(x) => *x > 0, makepad_gltf::JsonValue::I64(x) => *x > 0, _ => false }))
-        .filter_map(|m| m.pbr_metallic_roughness.as_ref()?.base_color_texture.as_ref())
-        .filter_map(|t| textures.get(t.index)?.source).collect()
+        .flat_map(|m| [m.pbr_metallic_roughness.as_ref().and_then(|p| p.base_color_texture.as_ref()).map(|t| t.index), m.occlusion_texture.as_ref().map(|t| t.index)])
+        .flatten()
+        .filter_map(|t| textures.get(t)?.source).collect()
 }
 
 /// Splat arrays consume RGBA PNGs: height and roughness live in alpha.
@@ -289,7 +304,7 @@ pub fn embed_load_ready_images_with_timings(glb: &[u8], quality: makepad_texcomp
     let parsed = makepad_gltf::parse_glb_bytes(glb).map_err(|e| format!("GLB: {e:?}"))?;
     let semantics = image_semantics(&parsed.document);
     let mut keep_png = nearest_images(&parsed.document);
-    keep_png.extend(impostor_color_images(&parsed.document));
+    keep_png.extend(impostor_images(&parsed.document));
     keep_png.extend(splat_images(&parsed.document));
     let authored_mips = authored_mip_images(glb, &parsed.document)?;
     let has_authored_mips = !authored_mips.is_empty();
@@ -480,7 +495,7 @@ mod tests {
         let reference = PreparedTexture::prepare(crate::renderer::decode_generated_png(&Cx::encode_rgba_as_png(64, 64,
             &(0..64 * 64).flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 4) as u8, 128, 255]).collect::<Vec<u8>>()).unwrap(), 64, 1 << 20).unwrap(), PixelSemantic::Color);
         assert_eq!(texture.data.len(), reference.data.len());
-        let worst = texture.data.iter().zip(&reference.data)
+        let worst = texture.data.iter().zip(reference.data.iter())
             .flat_map(|(a, b)| (0..4).map(move |s| ((a >> (s * 8)) as u8).abs_diff((b >> (s * 8)) as u8)))
             .max().unwrap();
         assert!(worst <= 12, "UASTC round trip within 12 levels, got {worst}");
@@ -498,6 +513,7 @@ mod tests {
     /// (X, Y, 0) elsewhere, the same texels either way.
     #[test]
     fn normal_maps_are_stored_as_bc5() {
+        let _bc5 = crate::material_surface::BC5_NORMAL_MAPS_TEST_LOCK.lock().unwrap();
         let n = 64usize;
         let mut image = ImageBuffer::default();
         image.width = n; image.height = n;
@@ -516,7 +532,7 @@ mod tests {
         let decoded = texture_from_ktx2(&ktx).unwrap().unwrap();
         assert_eq!((decoded.width, decoded.height, decoded.max_level, decoded.hash), (64, 64, 6, 0xabc));
         assert_eq!(decoded.data.len(), prepared.data.len());
-        let worst = decoded.data.iter().zip(&prepared.data).flat_map(|(a, b)| [((a >> 16) as u8).abs_diff((b >> 16) as u8), ((a >> 8) as u8).abs_diff((b >> 8) as u8)]).max().unwrap();
+        let worst = decoded.data.iter().zip(prepared.data.iter()).flat_map(|(a, b)| [((a >> 16) as u8).abs_diff((b >> 16) as u8), ((a >> 8) as u8).abs_diff((b >> 8) as u8)]).max().unwrap();
         assert!(worst <= 8, "BC5 X/Y within 8 levels of the mipped normals, got {worst}");
         assert!(decoded.data.iter().all(|t| t & 0xff == 0 && t >> 24 == 255), "blue 0, opaque: Z is rebuilt in the shader");
         crate::material_surface::set_bc5_normal_maps(true);

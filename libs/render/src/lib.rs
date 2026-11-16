@@ -41,6 +41,7 @@ pub mod model;
 pub mod material_surface;
 pub mod texture_compression;
 pub mod texture_pack;
+pub mod texture_restore;
 pub use makepad_texcomp;
 pub mod renderer;
 pub mod scene;
@@ -61,6 +62,7 @@ pub mod sky;
 pub mod smoke;
 pub mod vfx;
 pub mod ssao;
+pub mod cortao;
 pub mod volume_fog;
 pub mod ssr;
 pub mod trample;
@@ -109,22 +111,43 @@ use makepad_draw::*;
 /// `makepad_widgets::script_mod` (the shader block uses the widgets prelude)
 /// and before any widget that declares these draw types.
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    // The shared Splash stdlib (`mod.shared`: sRGB, hashes) the shaders use.
-    makepad_render_graph::pass_stdlib(vm);
-    local_shadows::sampling::script_mod(vm);
-    if local_shadows::hardware_shadow_maps() {
-        local_shadows::hardware_sampling::script_mod(vm);
+    for (_, step) in script_mod_steps() {
+        step(vm);
     }
-    clustered::script_mod(vm);
-    fast_gi::script_mod(vm);
-    ssao::script_mod(vm);
-    still_aa::script_mod(vm);
-    makepad_render_graph::script_mod(vm);
-    smoke::script_mod(vm);
-    vfx::shader::script_mod(vm);
-    shaders::script_mod(vm);
-    volume_fog::script_mod(vm);
-    ssr::script_mod(vm);
-    trample::script_mod(vm);
-    local_shadows::script_mod(vm)
+    NIL
+}
+
+/// One module of the scene layer's registration: its name and what registers it.
+pub type ScriptModStep = (&'static str, fn(&mut ScriptVm) -> ScriptValue);
+
+/// The modules `script_mod` registers, one at a time in its order, for a host
+/// that spreads the registration over frames (`custom_material::Registration`).
+pub fn script_mod_steps() -> impl Iterator<Item = ScriptModStep> {
+    const BEFORE_SHADERS: &[ScriptModStep] = &[
+        // The shared Splash stdlib (`mod.shared`: sRGB, hashes) the shaders use.
+        ("pass_stdlib", makepad_render_graph::pass_stdlib),
+        ("shadow sampling", local_shadows::sampling::script_mod),
+        ("hardware shadow sampling", hardware_sampling),
+        ("clustered", clustered::script_mod),
+        ("fast_gi", fast_gi::script_mod),
+        ("ssao", ssao::script_mod),
+        ("cortao", cortao::script_mod),
+        ("still_aa", still_aa::script_mod),
+        ("render_graph", makepad_render_graph::script_mod),
+        ("smoke", smoke::script_mod),
+        ("vfx", vfx::shader::script_mod),
+    ];
+    const AFTER_SHADERS: &[ScriptModStep] = &[
+        ("volume_fog", volume_fog::script_mod),
+        ("ssr", ssr::script_mod),
+        ("trample", trample::script_mod),
+        ("local_shadows", local_shadows::script_mod),
+    ];
+    fn hardware_sampling(vm: &mut ScriptVm) -> ScriptValue {
+        if local_shadows::hardware_shadow_maps() {
+            local_shadows::hardware_sampling::script_mod(vm);
+        }
+        NIL
+    }
+    BEFORE_SHADERS.iter().chain(shaders::SCRIPT_MOD_STEPS).chain(AFTER_SHADERS).copied()
 }

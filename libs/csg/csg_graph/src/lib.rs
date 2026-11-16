@@ -66,6 +66,18 @@ pub struct LoftSection {
     pub at: f64,
 }
 
+/// A planar ring with points in its (u, v) frame about `origin`, star-shaped about it
+/// and counter-clockwise seen along u x v.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ring {
+    pub origin: P3,
+    pub u: P3,
+    pub v: P3,
+    pub points: Vec<[f64; 2]>,
+    /// A sharp side edge at this ring: exact back ends split there; the mesh is unchanged.
+    pub crease: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Font {
     Sans,
@@ -213,6 +225,11 @@ pub trait BrepEngine: Send + Sync {
 pub enum Op {
     /// A box centred on the origin; `radius` rounds every edge (0: sharp).
     Box { size: P3, radius: f64 },
+    /// The convex hull of points, with exact facets and outward winding.
+    Hull { points: Vec<P3> },
+    /// Skin planar rings of equal point count, with flat caps fanned from the end origins.
+    /// `prism` marks a two-ring straight extrusion with sharp outline corners for exact back ends.
+    RingLoft { rings: Vec<Ring>, prism: bool },
     Sphere { radius: f64, segments: u32, rings: u32 },
     /// Along Y, centred; `top_radius` differs from `radius` for a cone.
     Cylinder { radius: f64, top_radius: f64, height: f64, segments: u32 },
@@ -243,6 +260,8 @@ pub enum Op {
     Boolean { mode: BoolMode, a: NodeId, b: Vec<NodeId> },
     /// Scale, then rotate X, Y, Z (degrees), then move by `at`.
     Transform { source: NodeId, at: P3, rotate: P3, scale: P3 },
+    /// Give every source triangle `tag`; 0 clears the tag channel.
+    Tag { source: NodeId, tag: u32 },
     /// A distance field meshed inside its box at `cell` (none: 80 cells over the box).
     Field { shape: SdfShape, cell: Option<f64> },
     /// A mesh given as data (an import).
@@ -262,7 +281,7 @@ impl Op {
     /// The nodes it reads.
     pub fn inputs(&self) -> Vec<NodeId> {
         match self {
-            Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Shell { source, .. } | Op::Offset { source, .. } | Op::Transform { source, .. } => vec![*source],
+            Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Shell { source, .. } | Op::Offset { source, .. } | Op::Transform { source, .. } | Op::Tag { source, .. } => vec![*source],
             Op::Boolean { a, b, .. } => std::iter::once(*a).chain(b.iter().copied()).collect(),
             Op::Gear { mesh_with: Some((g, _)), .. } => vec![*g],
             Op::Brep { inputs, .. } => inputs.clone(),
@@ -273,6 +292,8 @@ impl Op {
     pub fn name(&self) -> &'static str {
         match self {
             Op::Box { .. } => "box",
+            Op::Hull { .. } => "hull",
+            Op::RingLoft { .. } => "ring_loft",
             Op::Sphere { .. } => "sphere",
             Op::Cylinder { .. } => "cylinder",
             Op::Torus { .. } => "torus",
@@ -293,6 +314,7 @@ impl Op {
             Op::Boolean { mode: BoolMode::Difference, .. } => "difference",
             Op::Boolean { mode: BoolMode::Intersection, .. } => "intersection",
             Op::Transform { .. } => "transform",
+            Op::Tag { .. } => "tag",
             Op::Field { .. } => "sdf",
             Op::Mesh { .. } => "mesh",
             Op::Links { .. } => "links",
@@ -353,6 +375,25 @@ impl Graph {
             Op::Box { size, radius } => {
                 h.p3(*size);
                 h.f(*radius);
+            }
+            Op::Hull { points } => {
+                h.u(points.len() as u64);
+                points.iter().for_each(|p| h.p3(*p));
+            }
+            Op::RingLoft { rings, prism } => {
+                h.u(rings.len() as u64);
+                for ring in rings {
+                    h.p3(ring.origin);
+                    h.p3(ring.u);
+                    h.p3(ring.v);
+                    h.u(ring.points.len() as u64);
+                    for p in &ring.points {
+                        h.f(p[0]);
+                        h.f(p[1]);
+                    }
+                    h.u(ring.crease as u64);
+                }
+                h.u(*prism as u64);
             }
             Op::Sphere { radius, segments, rings } => {
                 h.f(*radius);
@@ -510,6 +551,10 @@ impl Graph {
                 h.p3(*rotate);
                 h.p3(*scale);
             }
+            Op::Tag { source, tag } => {
+                child(&mut h, *source);
+                h.u(*tag as u64);
+            }
             Op::Field { shape, cell } => {
                 h.bytes(&shape.key());
                 h.opt(*cell);
@@ -547,6 +592,12 @@ impl Graph {
                     h.u(t[0] as u64);
                     h.u(t[1] as u64);
                     h.u(t[2] as u64);
+                }
+                if mesh.is_tagged() {
+                    h.str("tags");
+                    for tag in &mesh.tags {
+                        h.u(*tag as u64);
+                    }
                 }
             }
         }

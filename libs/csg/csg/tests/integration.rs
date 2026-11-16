@@ -218,6 +218,11 @@ fn test_showcase_rook_is_manifold() {
         "rook should be valid, report={:?}",
         report
     );
+    assert!(
+        report.near_duplicate_pairs == 0 && report.coincident_pairs == 0,
+        "rook has no near-duplicate or coincident vertex pairs, report={:?}",
+        report
+    );
 }
 
 #[test]
@@ -557,6 +562,10 @@ fn test_union_rounded_coincident_faces_is_closed() {
     let u = shelf.union(&wall);
     let report = u.validate();
     assert!(report.is_closed && report.is_manifold, "rounded shelf + wall: {report:?}");
+    assert!(
+        report.near_duplicate_pairs == 0 && report.coincident_pairs == 0,
+        "rounded shelf + wall: no near-duplicate or coincident vertex pairs: {report:?}"
+    );
     let expected = shelf.volume() + wall.volume() - Solid::extrude(&rounded_rect(64.0, 6.0, 1.2, 3), 6.0).volume();
     assert!((u.volume() - expected).abs() < 1e-6 * expected, "volume {} vs {expected}", u.volume());
 }
@@ -571,6 +580,10 @@ fn test_union_rotated_boxes_sharing_faces_is_closed() {
     let u = shelf.union(&wall);
     let report = u.validate();
     assert!(report.is_closed && report.is_manifold, "rotated shelf + wall: {report:?}");
+    assert!(
+        report.near_duplicate_pairs == 0 && report.coincident_pairs == 0,
+        "rotated shelf + wall: no near-duplicate or coincident vertex pairs: {report:?}"
+    );
     let expected = 64.0 * 6.0 * 46.0 + 64.0 * 52.0 * 6.0 - 64.0 * 6.0 * 6.0;
     assert!((u.volume() - expected).abs() < 1e-6 * expected, "volume {} vs {expected}", u.volume());
 }
@@ -587,6 +600,7 @@ fn test_touching_solids_union_difference_intersection() {
     let check = |name: &str, s: &Solid, expected: f64| {
         let r = s.validate();
         assert!(r.is_closed && r.is_manifold, "{name}: {r:?}");
+        assert!(r.near_duplicate_pairs == 0 && r.coincident_pairs == 0, "{name}: no near-duplicate or coincident vertex pairs: {r:?}");
         assert!((s.volume() - expected).abs() < 1e-6 * expected.max(1.0), "{name}: volume {} vs {expected}", s.volume());
     };
     // On top: the box's bottom touches the plate's top.

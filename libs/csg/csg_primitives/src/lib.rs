@@ -5,6 +5,11 @@ use makepad_csg_math::{dvec3, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use std::f64::consts::PI;
 
+pub mod hull;
+pub use hull::hull;
+pub mod ring_loft;
+pub use ring_loft::{ring_loft, LoftRing};
+
 /// Create a box/cube mesh.
 /// `size`: dimensions in x, y, z.
 /// `center`: if true, centered at origin; otherwise, corner at origin.
@@ -653,6 +658,11 @@ mod tests {
             report.degenerate_triangles, 0,
             "{} has degenerate triangles",
             name
+        );
+        assert!(
+            report.near_duplicate_pairs == 0 && report.coincident_pairs == 0,
+            "{} has near-duplicate or coincident vertex pairs: {:?}",
+            name, report
         );
     }
 

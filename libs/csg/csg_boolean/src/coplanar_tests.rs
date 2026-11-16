@@ -13,6 +13,7 @@ fn dome_columns(columns: usize, top_flush: bool) {
     let dome_report = validate_mesh(&dome);
     assert_eq!(dome_report.boundary_edges, 0, "dome: {dome_report:?}");
     assert_eq!(dome_report.non_manifold_edges, 0, "dome: {dome_report:?}");
+    assert!(dome_report.near_duplicate_pairs == 0 && dome_report.coincident_pairs == 0, "dome: no near-duplicate or coincident vertex pairs: {dome_report:?}");
     let reflect = |mesh: &mut TriMesh| {
         if top_flush {
             for p in &mut mesh.vertices {
@@ -42,6 +43,7 @@ fn dome_columns(columns: usize, top_flush: bool) {
     assert_eq!(report.non_manifold_edges, 0, "{report:?}");
     assert_eq!(report.degenerate_triangles, 0, "{report:?}");
     assert!(report.is_consistently_oriented, "{report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "no near-duplicate or coincident vertex pairs: {report:?}");
     // The reference is smooth; the operands use inscribed polygonal surfaces.
     assert!((volume - expected).abs() < expected * 0.02, "volume={volume}, analytic={expected}");
 }
@@ -89,6 +91,7 @@ fn flush_ellipsoid(columns: usize, top_flush: bool) {
     assert_eq!(report.boundary_edges, 0, "{report:?}");
     assert_eq!(report.non_manifold_edges, 0, "{report:?}");
     assert_eq!(report.degenerate_triangles, 0, "{report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "no near-duplicate or coincident vertex pairs: {report:?}");
 }
 
 #[test]
@@ -115,22 +118,29 @@ fn coplanar_boolean_orientation() {
                 let report = validate_mesh(&mesh);
                 assert_eq!((report.boundary_edges,report.non_manifold_edges,report.degenerate_triangles), (0,0,0), "{label}: {report:?}");
                 assert!(report.is_consistently_oriented, "{label}: {report:?}");
+                assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "{label}: no near-duplicate or coincident vertex pairs: {report:?}");
                 assert!((mesh_volume(&mesh) - expected).abs() < 1e-9, "{label}: volume={} expected={expected}", mesh_volume(&mesh));
             }
         }
     }
 }
 
-fn face_touching_boxes(op: BoolOp) {
+pub(crate) fn face_touching_box_meshes() -> (TriMesh, TriMesh) {
     let a = cube(dvec3(4.0, 4.0, 4.0), true);
     let mut b = cube(dvec3(2.0, 2.0, 2.0), true);
     b.transform(Mat4d::translation(dvec3(0.0, -3.0, 0.0)));
+    (a, b)
+}
+
+fn face_touching_boxes(op: BoolOp) {
+    let (a, b) = face_touching_box_meshes();
     for (left, right, volume) in [(&a, &b, 64.0), (&b, &a, 8.0)] {
         let mesh = crate::mesh_boolean(left, right, op);
         let report = validate_mesh(&mesh);
         eprintln!("{op:?}: {report:?} volume={}", mesh_volume(&mesh));
         assert_eq!((report.boundary_edges, report.non_manifold_edges, report.degenerate_triangles), (0, 0, 0), "{op:?}: {report:?}");
         assert!(report.is_consistently_oriented, "{op:?}: {report:?}");
+        assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "{op:?}: no near-duplicate or coincident vertex pairs: {report:?}");
         let expected = match op {
             BoolOp::Union => 72.0,
             BoolOp::Difference => volume,

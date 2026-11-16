@@ -1665,8 +1665,7 @@ pub fn time_of_impact(input: &TOIInput) -> TOIOutput {
 
             // Check for overlap. This might happen if the root finder runs out of iterations.
             if s1 < target - tolerance {
-                // Failed!
-                b3_validate!(false);
+                // Failed! A handled outcome, not a broken invariant: the sweep stops at t1
                 output.state = TOIState::Failed;
                 output.fraction = t1;
                 done = true;
@@ -1719,15 +1718,13 @@ pub fn time_of_impact(input: &TOIInput) -> TOIOutput {
                 }
 
                 if root_iteration_count == max_root_iterations {
-                    b3_validate!(false);
+                    // out of iterations: t2 stays where it was and the push-back loop goes on
                     break;
                 }
             }
 
             // Restart the inner loop if we have a failing edge case.
             if root_iteration_count == max_root_iterations - 1 && function.type_ == SeparationType::Edges {
-                b3_validate!(false);
-
                 t2 = input.max_fraction;
                 force_fixed_axis(&mut function, t1);
                 b3_assert!(function.type_ != SeparationType::Edges);

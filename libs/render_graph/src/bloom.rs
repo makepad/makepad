@@ -253,6 +253,13 @@ impl BloomPass {
                 *t = Some(Self::rgba16f(cx));
             }
         }
+        self.prepare_draws(cx)
+    }
+
+    /// Make the chain's draw structs (their shaders) before its first run, which made them
+    /// otherwise; its passes and targets wait for that run. False while the script VM is held
+    /// elsewhere.
+    pub fn prepare_draws(&mut self, cx: &mut Cx) -> bool {
         if self.draw_down.is_none() {
             self.draw_down = cx.try_with_vm(|vm| Box::new(DrawBloomDown::script_new_with_default(vm)));
         }
@@ -262,6 +269,10 @@ impl BloomPass {
         if self.draw_adapt.is_none() {
             self.draw_adapt = cx.try_with_vm(|vm| Box::new(DrawExposureAdapt::script_new_with_default(vm)));
         }
+        self.draws_ready()
+    }
+
+    pub fn draws_ready(&self) -> bool {
         self.draw_down.is_some() && self.draw_up.is_some() && self.draw_adapt.is_some()
     }
 

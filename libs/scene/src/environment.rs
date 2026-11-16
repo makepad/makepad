@@ -418,6 +418,35 @@ pub struct Ibl {
     pub intensity: f32,
     /// Rotation about +Y, degrees.
     pub rotation_deg: f32,
+    /// Who draws the declared key's highlight: [`KeyReflection::Light`] (the
+    /// default) keeps the directional lobe; [`KeyReflection::Map`] keeps
+    /// `Environment::sun` in the sharp specular atlas levels and fades each
+    /// directional lobe in as its lookup crosses the cut, while this
+    /// preparation is bound and the light aims at the key. Diffuse and
+    /// shadows are unchanged. Map suits keys wider than about two atlas
+    /// texels (3 degrees at width 256), such as a studio softbox. A sun disc
+    /// should stay Light: at 256 it aliases and loses energy. No size limit
+    /// is enforced.
+    pub key_reflection: KeyReflection,
+}
+
+/// Where the declared key (`Environment::sun`) draws its highlight.
+/// Map suits a key wider than about two atlas texels (3 degrees at width
+/// 256), such as a studio softbox. A sun disc should stay Light: prefiltered
+/// at 256 it aliases and loses energy. No size limit is enforced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum KeyReflection {
+    /// The directional light draws the key's highlight, as before.
+    #[default]
+    Light,
+    /// The key stays in atlas levels below a cut derived from its angular
+    /// radius. Lobes wider than the key keep the directional light; each
+    /// lobe fades in across the atlas lookup's transition at the cut while
+    /// this preparation is bound and the light aims at the key.
+    /// Diffuse and shadows are unchanged. `Background::Environment { blur }`
+    /// reads this atlas too: a backdrop blurred past the cut has no key
+    /// (as under Light), while one below it shows the key.
+    Map,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

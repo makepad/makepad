@@ -62,6 +62,12 @@ fn v3(a: [f32; 3]) -> Vec3f {
     vec3f(a[0], a[1], a[2])
 }
 
+/// The GPU's precise `normalize`: each component divided by the correctly rounded length.
+fn unit(v: Vec3f) -> Vec3f {
+    let l = v.length();
+    if l > 0.0 { vec3f(v.x / l, v.y / l, v.z / l) } else { v }
+}
+
 fn to_world(n: Vec3f, l: Vec3f) -> Vec3f {
     let sgn = if n.z >= 0.0 { 1.0 } else { -1.0 };
     let a = -1.0 / (sgn + n.z);
@@ -77,7 +83,7 @@ fn ggx_d(nh: f32, a2: f32) -> f32 {
 }
 
 fn bsdf_eval(n: Vec3f, v: Vec3f, l: Vec3f, kd: Vec3f, f0: Vec3f, alpha: f32) -> Vec3f {
-    let h = (v + l).normalize();
+    let h = unit(v + l);
     let nl = n.dot(l).max(0.0001);
     let nv = n.dot(v).max(0.0001);
     let nh = n.dot(h).max(0.0);
@@ -92,7 +98,7 @@ fn bsdf_eval(n: Vec3f, v: Vec3f, l: Vec3f, kd: Vec3f, f0: Vec3f, alpha: f32) -> 
 }
 
 fn bsdf_pdf(n: Vec3f, v: Vec3f, l: Vec3f, alpha: f32, ps: f32) -> f32 {
-    let h = (v + l).normalize();
+    let h = unit(v + l);
     let nh = n.dot(h).max(0.0);
     let vh = v.dot(h).max(0.0001);
     let nl = n.dot(l).max(0.0);
@@ -120,19 +126,63 @@ fn fresnel_dielectric(cosi: f32, ior: f32) -> f32 {
     0.5 * (rs * rs + rp * rp)
 }
 
+/// Exact unpolarised Fresnel, eta = incident IOR / transmitted IOR.
+/// Keep the legacy thin-sheet arithmetic above unchanged.
+fn solid_fresnel(cosi: f32, eta: f32) -> f32 {
+    if eta == 1.0 {
+        return 0.0;
+    }
+    let cosi = cosi.clamp(0.0, 1.0);
+    let sint2 = eta * eta * (1.0 - cosi * cosi);
+    if sint2 >= 1.0 {
+        return 1.0;
+    }
+    let cost = (1.0 - sint2).sqrt();
+    let rs = (eta * cosi - cost) / (eta * cosi + cost);
+    let rp = (cosi - eta * cost) / (cosi + eta * cost);
+    0.5 * (rs * rs + rp * rp)
+}
+
+/// Smooth solid boundary; `ng` is outward, including for an inside camera.
+/// The caller supplies the existing lobe sample; TIR consumes no extra RNG.
+fn solid_interface(rd: Vec3f, ng: Vec3f, ior: f32, sample: f32) -> (Vec3f, bool) {
+    let front = ng.dot(rd) < 0.0;
+    let eta = if front { 1.0 / ior } else { ior };
+    let n = if front { ng } else { -ng };
+    let cosi = (-rd.dot(n)).clamp(0.0, 1.0);
+    let fr = solid_fresnel(cosi, eta);
+    if fr >= 1.0 || sample < fr {
+        return (rd - n * (2.0 * rd.dot(n)), true);
+    }
+    let cost = (1.0 - eta * eta * (1.0 - cosi * cosi)).max(0.0).sqrt();
+    (unit(rd * eta + n * (eta * cosi - cost)), false)
+}
+
+fn medium_transmittance(absorption: [f32; 3], distance: f32) -> Vec3f {
+    // Define zero distance explicitly, including fully absorbing channels.
+    if distance <= 0.0 {
+        return vec3f(1.0, 1.0, 1.0);
+    }
+    vec3f(
+        absorption[0].clamp(0.0, 1.0).powf(distance),
+        absorption[1].clamp(0.0, 1.0).powf(distance),
+        absorption[2].clamp(0.0, 1.0).powf(distance),
+    )
+}
+
 fn mix3(a: Vec3f, b: Vec3f, t: f32) -> Vec3f {
     a + (b - a) * t
 }
 
-fn ray_error(p: Vec3f) -> f32 {
+fn ray_error(p: Vec3f, scene_scale: f32) -> f32 {
     // Relative reconstruction bound (16 f32 ulps at the largest component)
-    // plus an absolute floor for geometry near the rebased origin.
-    1.0e-6 + p.x.abs().max(p.y.abs()).max(p.z.abs()) * 1.907_348_6e-6
+    // plus a scene-relative floor for geometry near the rebased origin.
+    scene_scale * 5.0e-9 + p.x.abs().max(p.y.abs()).max(p.z.abs()) * 1.907_348_6e-6
 }
 
-fn offset_ray(p: Vec3f, ng: Vec3f, dir: Vec3f) -> Vec3f {
+fn offset_ray(p: Vec3f, ng: Vec3f, dir: Vec3f, scene_scale: f32) -> Vec3f {
     let n = if ng.dot(dir) >= 0.0 { ng } else { -ng };
-    let eps = ray_error(p);
+    let eps = ray_error(p, scene_scale);
     // Geometric-normal offset leaves the source plane; the along-ray nudge
     // leaves a concave neighbour that is perpendicular to ng (a single-axis
     // offset stays on that neighbour's plane at a shared edge).
@@ -140,12 +190,12 @@ fn offset_ray(p: Vec3f, ng: Vec3f, dir: Vec3f) -> Vec3f {
 }
 
 fn geom_ng(tri: &crate::bvh::Tri) -> Vec3f {
-    Vec3f::cross(tri.v1 - tri.v0, tri.v2 - tri.v0).normalize()
+    unit(Vec3f::cross(tri.v1 - tri.v0, tri.v2 - tri.v0))
 }
 
-/// Offset origin sits behind an adjacent face: a back-facing hit at t < 1 cm.
-fn spurious_neighbour(hit: &Hit, rd: Vec3f, tris: &[crate::bvh::Tri]) -> bool {
-    if !hit.is_hit() || hit.t >= 0.01 {
+/// Offset origin sits behind an adjacent face within the scene-relative band.
+fn spurious_neighbour(hit: &Hit, rd: Vec3f, tris: &[crate::bvh::Tri], scene_scale: f32) -> bool {
+    if !hit.is_hit() || hit.t >= scene_scale * 5.0e-5 {
         return false;
     }
     geom_ng(&tris[hit.tri as usize]).dot(rd) > 0.0
@@ -193,9 +243,9 @@ impl<'a> CpuTracer<'a> {
     /// Secondary/shadow spawn: offset along ng and the ray, skip the source
     /// triangle, and if the offset origin is inside a concave neighbour
     /// (possibly several overlapping BIM faces) raise tmin past each
-    /// back-facing t<1 cm hit.
+    /// back-facing hit within 5e-5 of the scene diagonal.
     fn secondary_trace(&self, p: Vec3f, ng: Vec3f, rd: Vec3f, tmax: f32, skip: i32) -> Hit {
-        let ro = offset_ray(p, ng, rd);
+        let ro = offset_ray(p, ng, rd, self.packed.scene_scale);
         let mut tmin = 0.0;
         let mut hit = Hit::miss(tmax);
         for _ in 0..4 {
@@ -206,23 +256,29 @@ impl<'a> CpuTracer<'a> {
                 // retry it into a fake clean result.
                 return hit;
             }
-            if !spurious_neighbour(&hit, rd, &self.packed.accel.tris) {
+            if !spurious_neighbour(&hit, rd, &self.packed.accel.tris, self.packed.scene_scale) {
+                return hit;
+            }
+            // A nearby solid exit is a real medium boundary, not a BIM
+            // reconstruction artefact. Never skip it, however thin the wall.
+            let m = &self.materials[self.packed.tri_material[hit.tri as usize] as usize];
+            if m.solid && m.transmission > 0.0 {
                 return hit;
             }
             let tri = &self.packed.accel.tris[hit.tri as usize];
             let n = geom_ng(tri);
             let plane = n.dot(p - tri.v0).abs() / n.dot(rd).abs().max(1.0e-6);
-            tmin = plane.max(hit.t) + ray_error(p);
+            tmin = plane.max(hit.t) + ray_error(p, self.packed.scene_scale);
         }
         hit
     }
 
-    /// BIM panes are often exported as a 10–15 mm closed box although their
+    /// BIM panes are often exported as a thin closed box although their
     /// material semantics are thin. Cross the paired back face without a
     /// second Fresnel/transmittance event or an extra path bounce.
     fn thin_transmission_trace(&self, p: Vec3f, ng: Vec3f, rd: Vec3f, tri: usize) -> Hit {
-        let mut hit = self.secondary_trace(p, ng, rd, 1.0e9, tri as i32);
-        if !hit.is_hit() || hit.t >= 0.02 {
+        let mut hit = self.secondary_trace(p, ng, rd, self.packed.ray_tmax(), tri as i32);
+        if !hit.is_hit() || hit.t >= self.packed.scene_scale * 1.0e-4 {
             return hit;
         }
         let back_tri = hit.tri as usize;
@@ -233,8 +289,68 @@ impl<'a> CpuTracer<'a> {
         }
         let back = &self.packed.accel.tris[back_tri];
         let back_p = back.v0 * (1.0 - hit.u - hit.v) + back.v1 * hit.u + back.v2 * hit.v;
-        hit = self.secondary_trace(back_p, geom_ng(back), rd, 1.0e9, back_tri as i32);
+        hit = self.secondary_trace(back_p, geom_ng(back), rd, self.packed.ray_tmax(), back_tri as i32);
         hit
+    }
+
+    /// Deterministic straight-through guide, with eight continuation steps.
+    /// Legacy thin panes may pair their back face in one step; solids never do.
+    /// Select transmission whenever it exists (no RNG or Fresnel reflection);
+    /// TIR, exhausted traversal/budget, and escape have no surface guide.
+    fn guide_hit(&self, mut hit: Hit, rd: Vec3f) -> Hit {
+        for layer in 0..=MAX_SHADOW_GLASS_HITS {
+            if !hit.is_hit() || hit.truncated {
+                return hit;
+            }
+            let ti = hit.tri as usize;
+            let m = &self.materials[self.packed.tri_material[ti] as usize];
+            if m.transmission <= 0.0 {
+                return hit;
+            }
+            if layer == MAX_SHADOW_GLASS_HITS {
+                break;
+            }
+            let tri = &self.packed.accel.tris[ti];
+            let ng = geom_ng(tri);
+            let pt = tri.v0 * (1.0 - hit.u - hit.v) + tri.v1 * hit.u + tri.v2 * hit.v;
+            if m.solid {
+                let ior = m.ior.max(1.0);
+                let eta = if ng.dot(rd) < 0.0 { 1.0 / ior } else { ior };
+                if solid_fresnel(ng.dot(-rd).abs(), eta) >= 1.0 {
+                    break;
+                }
+                hit = self.secondary_trace(pt, ng, rd, self.packed.ray_tmax(), ti as i32);
+            } else {
+                hit = self.thin_transmission_trace(pt, ng, rd, ti);
+            }
+        }
+        Hit::miss(self.packed.ray_tmax())
+    }
+
+    /// CPU mirror of PtGuide: world-space pinhole/orthographic ray with a unit
+    /// direction. Returns interpolated normal and camera-forward depth, or -1 without a
+    /// guide. Existing first opaque hits retain the raster's ortho depth 1.
+    pub fn denoise_guide(&self, origin: Vec3f, direction: Vec3f) -> Vec4f {
+        let ro = origin - self.packed.origin;
+        let first = self.trace(ro, direction, self.packed.ray_tmax(), false, 0.0, -1);
+        let hit = self.guide_hit(first, direction);
+        if !hit.is_hit() || hit.truncated {
+            return vec4f(0.0, 0.0, 0.0, -1.0);
+        }
+        let ti = hit.tri as usize;
+        let w0 = 1.0 - hit.u - hit.v;
+        let a = &self.packed.attr.data[ti * 16..ti * 16 + 16];
+        let n = unit(vec3f(a[0], a[1], a[2]) * w0
+            + vec3f(a[4], a[5], a[6]) * hit.u
+            + vec3f(a[8], a[9], a[10]) * hit.v);
+        let tri = &self.packed.accel.tris[ti];
+        let pt = tri.v0 * w0 + tri.v1 * hit.u + tri.v2 * hit.v;
+        let depth = if hit.tri == first.tri && self.camera.ortho_height.is_some() {
+            1.0
+        } else {
+            (pt - (self.camera.pos - self.packed.origin)).dot(self.camera.basis().2)
+        };
+        vec4f(n.x, n.y, n.z, depth)
     }
 
     fn sample2(&self, pseed: u32, index: u32, pair: u32) -> (f32, f32) {
@@ -253,7 +369,7 @@ impl<'a> CpuTracer<'a> {
     /// blend in `PtTrace`'s albedo fetch.
     fn atlas_albedo(&self, ti: usize, w0: f32, u: f32, v: f32, base: Vec3f, footprint_m: f32) -> Vec3f {
         let mi = self.packed.tri_material[ti] as usize;
-        let m2 = &self.packed.mat.data[mi * 16 + 8..mi * 16 + 12];
+        let m2 = &self.packed.mat.data[mi * 20 + 8..mi * 20 + 12];
         if m2[2] <= 0.0 {
             return base;
         }
@@ -263,7 +379,7 @@ impl<'a> CpuTracer<'a> {
             a[3] * w0 + a[11] * u + a[13] * v,
             a[7] * w0 + a[12] * u + a[14] * v,
         );
-        let r = &self.packed.mat.data[mi * 16 + 12..mi * 16 + 16];
+        let r = &self.packed.mat.data[mi * 20 + 12..mi * 20 + 16];
         let fu = uv.x - uv.x.floor();
         let fv = uv.y - uv.y.floor();
         let x = ((r[0] + fu * r[2]) * atlas.width as f32).floor() as usize;
@@ -282,9 +398,9 @@ impl<'a> CpuTracer<'a> {
             let duv2 = vec2f(a[13] - a[3], a[14] - a[7]);
             let uv_area = (duv1.x * duv2.y - duv1.y * duv2.x).abs();
             // Worst-axis density plus grazing stretch (GPU twin comments).
-            let d_area = (uv_area / gn.length().max(1.0e-12)).sqrt();
-            let d1 = duv1.length() / e1.length().max(1.0e-6);
-            let d2 = duv2.length() / e2.length().max(1.0e-6);
+            let d_area = (uv_area / gn.length().max(self.packed.scene_area * 2.5e-17)).sqrt();
+            let d1 = duv1.length() / e1.length().max(self.packed.scene_scale * 5.0e-9);
+            let d2 = duv2.length() / e2.length().max(self.packed.scene_scale * 5.0e-9);
             let density = d_area.max(d1).max(d2);
             let texels = density * footprint_m * (r[2] * atlas.width as f32);
             let blend = ((texels - 2.0) * 0.071428575).clamp(0.0, 1.0);
@@ -323,7 +439,6 @@ impl<'a> CpuTracer<'a> {
                 cos_theta,
             ),
         )
-        .normalize()
     }
 
     /// Disc solid angle × disc radiance = unoccluded irradiance.
@@ -452,15 +567,16 @@ impl<'a> CpuTracer<'a> {
         l * w
     }
 
-    /// Visibility with expected thin-glass transmittance. Exceeding the fixed
-    /// hit budget is conservatively opaque.
+    /// Straight NEE through thin/solid glass: ignore bending, multiply each
+    /// interface's (1-F) and transmission, and attenuate back-side solid
+    /// arrivals by their segment length. Exceeding the budget is opaque.
     fn shadow(&self, mut p: Vec3f, mut ng: Vec3f, rd: Vec3f, mut tmax: f32, mut skip: i32) -> Option<ShadowVisibility> {
         self.bump_stats(|stats| stats.shadow_rays += 1);
         let mut tr = vec3f(1.0, 1.0, 1.0);
         let mut travelled = 0.0f32;
         let mut previous_glass: Option<(u32, Vec3f)> = None;
         // The extra trace proves that the ray escaped after the last allowed hit.
-        for _ in 0..=MAX_SHADOW_GLASS_HITS {
+        for layer in 0..=MAX_SHADOW_GLASS_HITS {
             let h = self.secondary_trace(p, ng, rd, tmax, skip);
             if h.truncated {
                 return None;
@@ -468,28 +584,32 @@ impl<'a> CpuTracer<'a> {
             if !h.is_hit() {
                 return Some(ShadowVisibility { transmittance: tr });
             }
+            if layer == MAX_SHADOW_GLASS_HITS {
+                return Some(ShadowVisibility::default());
+            }
             let ti = h.tri as usize;
+            let material_id = self.packed.tri_material[ti];
+            let m = &self.materials[material_id as usize];
+            let solid = m.solid && m.transmission > 0.0;
             // Self-occlusion skin (GPU twin): a blocker within `shadow_skin`
             // of the ORIGINAL surface is a stacked coplanar layer of the
             // same construction assembly, not a shadow caster — step past
             // it. `travelled` bounds the total skip to one skin depth.
-            if travelled + h.t < self.shadow_skin {
+            if !solid && travelled + h.t < self.shadow_skin {
                 travelled += h.t;
                 let tri = &self.packed.accel.tris[ti];
                 ng = geom_ng(tri);
                 let w0 = 1.0 - h.u - h.v;
                 p = tri.v0 * w0 + tri.v1 * h.u + tri.v2 * h.v;
                 skip = h.tri;
-                if tmax < 5.0e8 {
-                    tmax -= h.t + ray_error(p);
+                if tmax < self.packed.scene_scale * 2.5e6 {
+                    tmax -= h.t + ray_error(p, self.packed.scene_scale);
                     if tmax <= 0.0 {
                         return Some(ShadowVisibility { transmittance: tr });
                     }
                 }
                 continue;
             }
-            let material_id = self.packed.tri_material[ti];
-            let m = &self.materials[material_id as usize];
             let trans = m.transmission.clamp(0.0, 1.0);
             if trans <= 0.0 {
                 return Some(ShadowVisibility::default());
@@ -497,30 +617,43 @@ impl<'a> CpuTracer<'a> {
             self.bump_stats(|stats| stats.glass_shadow_hits += 1);
             let tri = &self.packed.accel.tris[ti];
             let w0 = 1.0 - h.u - h.v;
+            let segment_start = p;
             p = tri.v0 * w0 + tri.v1 * h.u + tri.v2 * h.v;
             ng = geom_ng(tri);
             let paired_back_face = previous_glass
                 .is_some_and(|(previous_material, previous_normal)| {
-                    previous_material == material_id && h.t < 0.02 && previous_normal.dot(ng) < -0.9
+                    previous_material == material_id && h.t < self.packed.scene_scale * 1.0e-4 && previous_normal.dot(ng) < -0.9
                 });
             if paired_back_face {
                 previous_glass = None;
                 skip = h.tri;
-                if tmax < 5.0e8 {
-                    tmax -= h.t + ray_error(p);
+                if tmax < self.packed.scene_scale * 2.5e6 {
+                    tmax -= h.t + ray_error(p, self.packed.scene_scale);
                     if tmax <= 0.0 {
                         return Some(ShadowVisibility { transmittance: tr });
                     }
                 }
                 continue;
             }
-            let tint = self.atlas_albedo(ti, w0, h.u, h.v, v3(m.albedo), 0.0);
-            let fr = fresnel_dielectric(ng.dot(-rd).abs(), m.ior.max(1.0));
-            tr = tr * tint * (trans * (1.0 - fr));
-            previous_glass = Some((material_id, ng));
+            if solid {
+                let front = ng.dot(rd) < 0.0;
+                let ior = m.ior.max(1.0);
+                let eta = if front { 1.0 / ior } else { ior };
+                if !front {
+                    tr = tr * medium_transmittance(m.absorption, (p - segment_start).length());
+                }
+                tr = tr * (trans * (1.0 - solid_fresnel(ng.dot(-rd).abs(), eta)));
+                // Solids never use the thin exported-pane pairing shortcut.
+                previous_glass = None;
+            } else {
+                let tint = self.atlas_albedo(ti, w0, h.u, h.v, v3(m.albedo), 0.0);
+                let fr = fresnel_dielectric(ng.dot(-rd).abs(), m.ior.max(1.0));
+                tr = tr * tint * (trans * (1.0 - fr));
+                previous_glass = Some((material_id, ng));
+            }
             skip = h.tri;
-            if tmax < 5.0e8 {
-                tmax -= h.t + ray_error(p);
+            if tmax < self.packed.scene_scale * 2.5e6 {
+                tmax -= h.t + ray_error(p, self.packed.scene_scale);
                 if tmax <= 0.0 {
                     return Some(ShadowVisibility { transmittance: tr });
                 }
@@ -541,9 +674,9 @@ impl<'a> CpuTracer<'a> {
         let (jx, jy) = self.sample2(pseed, sidx, 0);
         let mut ro = self.camera.pos - p.origin;
         let ndc = vec2f((px as f32 + jx) * inv.x * 2.0 - 1.0, 1.0 - (py as f32 + jy) * inv.y * 2.0);
-        let mut rd = (fwd + right * (ndc.x * tan_y * aspect) + up * (ndc.y * tan_y)).normalize();
+        let mut rd = unit(fwd + right * (ndc.x * (tan_y * aspect)) + up * (ndc.y * tan_y));
         if let Some(hh) = self.camera.ortho_height {
-            ro = ro + right * (ndc.x * hh * 0.5 * aspect) + up * (ndc.y * hh * 0.5);
+            ro = ro + right * (ndc.x * (hh * 0.5 * aspect)) + up * (ndc.y * (hh * 0.5));
             rd = fwd;
         }
         let lens_r = self.camera.lens_radius();
@@ -554,9 +687,9 @@ impl<'a> CpuTracer<'a> {
             let ap = vec2f(rr * phi.cos(), rr * phi.sin()) * lens_r;
             let fp = ro + rd * (self.camera.focus_dist / rd.dot(fwd).max(0.001));
             ro = ro + right * ap.x + up * ap.y;
-            rd = (fp - ro).normalize();
+            rd = unit(fp - ro);
         }
-        let mut hit = self.trace(ro, rd, 1.0e9, false, 0.0, -1);
+        let mut hit = self.trace(ro, rd, p.ray_tmax(), false, 0.0, -1);
         self.bump_stats(|stats| {
             stats.paths += 1;
             if hit.is_hit() {
@@ -564,7 +697,7 @@ impl<'a> CpuTracer<'a> {
             }
         });
         // One pixel's world footprint (the GPU's `pixel_world` uniform):
-        // metres per metre of ray length, or absolute metres for ortho.
+        // scene units per unit ray length, or scene units for ortho.
         let pixel_world = match self.camera.ortho_height {
             Some(hh) => hh / h as f32,
             None => 2.0 * tan_y / h as f32,
@@ -592,13 +725,14 @@ impl<'a> CpuTracer<'a> {
             if png.dot(rd) < 0.0 {
                 break;
             }
-            if self.materials[p.tri_material[ti] as usize].two_sided {
+            let material = &self.materials[p.tri_material[ti] as usize];
+            if material.two_sided || (material.solid && material.transmission > 0.0) {
                 break;
             }
             self.bump_stats(|stats| stats.primary_backface_skips += 1);
             let w0 = 1.0 - hit.u - hit.v;
             let pt = tri.v0 * w0 + tri.v1 * hit.u + tri.v2 * hit.v;
-            hit = self.trace(offset_ray(pt, png, rd), rd, 1.0e9, false, 0.0, ti as i32);
+            hit = self.trace(offset_ray(pt, png, rd, p.scene_scale), rd, p.ray_tmax(), false, 0.0, ti as i32);
         }
         let mut tp = vec3f(1.0, 1.0, 1.0);
         let mut lsum = vec3f(0.0, 0.0, 0.0);
@@ -625,14 +759,18 @@ impl<'a> CpuTracer<'a> {
             let e1 = tri.v1 - tri.v0;
             let e2 = tri.v2 - tri.v0;
             let gn = Vec3f::cross(e1, e2);
-            let mut ng = gn.normalize();
+            let mut ng = unit(gn);
             let a = &p.attr.data[ti * 16..ti * 16 + 16];
             let n0 = vec3f(a[0], a[1], a[2]);
             let n1 = vec3f(a[4], a[5], a[6]);
             let n2 = vec3f(a[8], a[9], a[10]);
-            let mut ns = (n0 * w0 + n1 * hit.u + n2 * hit.v).normalize();
+            let mut ns = unit(n0 * w0 + n1 * hit.u + n2 * hit.v);
             let m = &self.materials[p.tri_material[ti] as usize];
             let front = ng.dot(rd) < 0.0;
+            if m.solid && m.transmission > 0.0 && !front {
+                // ro is the physical previous vertex/camera, not its offset.
+                tp = tp * medium_transmittance(m.absorption, (pt - ro).length());
+            }
             if !front {
                 // A one-sided face seen from behind shades with the flipped
                 // normal instead of terminating the path black. The realtime
@@ -641,7 +779,7 @@ impl<'a> CpuTracer<'a> {
                 // wrong-wound roof plane) a hard black stripe the raster pane
                 // never shows. Emission stays front-gated below, so the
                 // sidedness test for lights is unchanged.
-                if !m.two_sided {
+                if !m.two_sided && !(m.solid && m.transmission > 0.0) {
                     self.bump_stats(|stats| stats.opaque_backface_flips += 1);
                 }
                 ng = -ng;
@@ -667,10 +805,10 @@ impl<'a> CpuTracer<'a> {
                 let mut wgt = 1.0;
                 if !delta && !self.brute {
                     let area = gn.length() * 0.5;
-                    let raw_n = gn / gn.length().max(1.0e-20);
+                    let raw_n = gn / gn.length().max(p.scene_area * 2.5e-25);
                     let cosl = if m.two_sided { raw_n.dot(-rd).abs() } else { raw_n.dot(-rd).max(0.0) };
                     let select_pdf = p.tri.data[ti * 12 + 11];
-                    let pl = hit.t * hit.t * select_pdf / (cosl * area).max(1.0e-6);
+                    let pl = hit.t * hit.t * select_pdf / (cosl * area).max(p.scene_area * 2.5e-11);
                     wgt = prev_pdf * prev_pdf / (prev_pdf * prev_pdf + pl * pl);
                 }
                 lsum = lsum + tp * emission * wgt;
@@ -682,15 +820,30 @@ impl<'a> CpuTracer<'a> {
             let r_light = self.sample2(pseed, sidx, dims[3]);
             let r_misc = self.sample2(pseed, sidx, dims[4]);
             let v = -rd;
+            if m.solid && trans > 0.0 {
+                let (direction, reflected) = solid_interface(rd, unit(gn), ior, r_lobe.0);
+                rd = direction;
+                if reflected {
+                    delta = true;
+                } else {
+                    tp = tp * trans;
+                    // As for thin sheets, preserve diffuse NEE ownership
+                    // under the straight-shadow approximation.
+                }
+                ro = pt;
+                hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
+                continue;
+            }
             // Classified glazing is a thin dielectric, not an alpha blend
             // between glass and an opaque diffuse sheet. Alpha supplies
             // absorption on transmission; Fresnel is the only lobe choice.
             if trans > 0.0 {
+                ro = pt;
                 let fr = fresnel_dielectric(ng.dot(v).abs(), ior);
                 if r_lobe.0 < fr {
                     rd = rd - ng * (2.0 * rd.dot(ng));
                     delta = true;
-                    hit = self.secondary_trace(pt, ng, rd, 1.0e9, ti as i32);
+                    hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
                 } else {
                     tp = tp * albedo * trans;
                     // Keep the previous event's delta state: after a diffuse
@@ -713,7 +866,7 @@ impl<'a> CpuTracer<'a> {
                     let n_nee = if ng.dot(ld) > 0.0 && ns.dot(ld) <= 0.0 { ng } else { ns };
                     let nl = n_nee.dot(ld);
                     if nl > 0.0 && ng.dot(ld) > 0.0 {
-                        let Some(vis) = self.shadow(pt, ng, ld, 1.0e9, ti as i32) else { return None };
+                        let Some(vis) = self.shadow(pt, ng, ld, p.ray_tmax(), ti as i32) else { return None };
                         let vis = vis.transmittance;
                         if vis.x + vis.y + vis.z > 0.0 {
                             self.bump_stats(|stats| stats.sun_nee_successes += 1);
@@ -729,7 +882,7 @@ impl<'a> CpuTracer<'a> {
                 let n_nee = if ng.dot(ld) > 0.0 && ns.dot(ld) <= 0.0 { ng } else { ns };
                 let nl = n_nee.dot(ld);
                 if nl > 0.0 && ng.dot(ld) > 0.0 {
-                    let Some(vis) = self.shadow(pt, ng, ld, 1.0e9, ti as i32) else { return None };
+                    let Some(vis) = self.shadow(pt, ng, ld, p.ray_tmax(), ti as i32) else { return None };
                     let vis = vis.transmittance;
                     if env.pdf > 0.0 && vis.x + vis.y + vis.z > 0.0 {
                         self.bump_stats(|stats| stats.sky_nee_successes += 1);
@@ -767,9 +920,9 @@ impl<'a> CpuTracer<'a> {
                 let bw1 = su * (1.0 - r_light.1);
                 let bw2 = su * r_light.1;
                 let lp = lt.v0 * (1.0 - su) + lt.v1 * bw1 + lt.v2 * bw2;
-                let lnrm = Vec3f::cross(lt.v1 - lt.v0, lt.v2 - lt.v0).normalize();
-                let nominal = (lp - pt).normalize();
-                let origin = offset_ray(pt, ng, nominal);
+                let lnrm = unit(Vec3f::cross(lt.v1 - lt.v0, lt.v2 - lt.v0));
+                let nominal = unit(lp - pt);
+                let origin = offset_ray(pt, ng, nominal, p.scene_scale);
                 let mut ld = lp - origin;
                 let dist = ld.length();
                 ld = ld / dist;
@@ -777,13 +930,13 @@ impl<'a> CpuTracer<'a> {
                 let nl = n_nee.dot(ld);
                 let lm_ref = &self.materials[p.tri_material[lrec[0] as usize] as usize];
                 let cosl = if lm_ref.two_sided { lnrm.dot(-ld).abs() } else { lnrm.dot(-ld).max(0.0) };
-                if nl > 0.0 && ng.dot(ld) > 0.0 && cosl > 0.0001 && dist > ray_error(pt) + ray_error(lp) {
-                    let Some(vis) = self.shadow(pt, ng, ld, dist - ray_error(lp), ti as i32) else { return None };
+                if nl > 0.0 && ng.dot(ld) > 0.0 && cosl > 0.0001 && dist > ray_error(pt, p.scene_scale) + ray_error(lp, p.scene_scale) {
+                    let Some(vis) = self.shadow(pt, ng, ld, dist - ray_error(lp, p.scene_scale), ti as i32) else { return None };
                     let vis = vis.transmittance;
                     if vis.x + vis.y + vis.z > 0.0 {
                         self.bump_stats(|stats| stats.emissive_nee_successes += 1);
                         let lm = v3(lm_ref.emission);
-                        let pl = dist * dist * lrec[2] / (cosl * lrec[1]).max(1.0e-8);
+                        let pl = dist * dist * lrec[2] / (cosl * lrec[1]).max(p.scene_area * 2.5e-13);
                         let ps_nee = spec_prob(f0, kd, n_nee.dot(v).max(0.0001));
                         let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha);
                         let pb = bsdf_pdf(n_nee, v, ld, alpha, ps_nee);
@@ -853,7 +1006,8 @@ impl<'a> CpuTracer<'a> {
                 tp = tp / q;
             }
             rd = ld;
-            hit = self.secondary_trace(pt, ng, rd, 1.0e9, ti as i32);
+            ro = pt;
+            hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
         }
         if let Some(limit) = self.preview_clamp {
             let peak = lsum.x.max(lsum.y).max(lsum.z);
@@ -890,12 +1044,12 @@ impl<'a> CpuTracer<'a> {
         let inv = vec2f(1.0 / w as f32, 1.0 / h as f32);
         let ndc = vec2f((px as f32 + 0.5 + jitter.0) * inv.x * 2.0 - 1.0, 1.0 - (py as f32 + 0.5 + jitter.1) * inv.y * 2.0);
         let mut ro = self.camera.pos - self.packed.origin;
-        let mut rd = (fwd + right * (ndc.x * tan_y * aspect) + up * (ndc.y * tan_y)).normalize();
+        let mut rd = unit(fwd + right * (ndc.x * (tan_y * aspect)) + up * (ndc.y * tan_y));
         if let Some(hh) = self.camera.ortho_height {
-            ro = ro + right * (ndc.x * hh * 0.5 * aspect) + up * (ndc.y * hh * 0.5);
+            ro = ro + right * (ndc.x * (hh * 0.5 * aspect)) + up * (ndc.y * (hh * 0.5));
             rd = fwd;
         }
-        let hit = self.packed.accel.trace(ro, rd, 1.0e9, false);
+        let hit = self.packed.accel.trace(ro, rd, self.packed.ray_tmax(), false);
         vec3f(if hit.truncated { -2.0 } else { hit.tri as f32 }, hit.u, hit.v)
     }
 
@@ -923,12 +1077,12 @@ impl<'a> CpuTracer<'a> {
         let (jx, jy) = self.sample2(pseed, sidx, 0);
         let mut ro = self.camera.pos - self.packed.origin;
         let ndc = vec2f((px as f32 + jx) * inv.x * 2.0 - 1.0, 1.0 - (py as f32 + jy) * inv.y * 2.0);
-        let mut rd = (fwd + right * (ndc.x * tan_y * aspect) + up * (ndc.y * tan_y)).normalize();
+        let mut rd = unit(fwd + right * (ndc.x * (tan_y * aspect)) + up * (ndc.y * tan_y));
         if let Some(hh) = self.camera.ortho_height {
-            ro = ro + right * (ndc.x * hh * 0.5 * aspect) + up * (ndc.y * hh * 0.5);
+            ro = ro + right * (ndc.x * (hh * 0.5 * aspect)) + up * (ndc.y * (hh * 0.5));
             rd = fwd;
         }
-        let hit = self.trace(ro, rd, 1.0e9, false, 0.0, -1);
+        let hit = self.trace(ro, rd, self.packed.ray_tmax(), false, 0.0, -1);
         if !hit.is_hit() {
             return (-1, 0.0, 0.0);
         }
@@ -942,7 +1096,7 @@ impl<'a> CpuTracer<'a> {
         let vis = if ng.dot(sun_dir) <= 0.0 {
             -2.0
         } else {
-            self.shadow(p, ng, sun_dir, 1.0e9, hit.tri)
+            self.shadow(p, ng, sun_dir, self.packed.ray_tmax(), hit.tri)
                 .map(|sh| (sh.transmittance.x + sh.transmittance.y + sh.transmittance.z) / 3.0)
                 .unwrap_or(0.0)
         };
@@ -970,8 +1124,8 @@ impl<'a> CpuTracer<'a> {
         let (jx, jy) = self.sample2(pseed, sidx, 0);
         let ro = self.camera.pos - self.packed.origin;
         let ndc = vec2f((px as f32 + jx) * inv.x * 2.0 - 1.0, 1.0 - (py as f32 + jy) * inv.y * 2.0);
-        let rd = (fwd + right * (ndc.x * tan_y * aspect) + up * (ndc.y * tan_y)).normalize();
-        let hit = self.trace(ro, rd, 1.0e9, false, 0.0, -1);
+        let rd = unit(fwd + right * (ndc.x * (tan_y * aspect)) + up * (ndc.y * tan_y));
+        let hit = self.trace(ro, rd, self.packed.ray_tmax(), false, 0.0, -1);
         if !hit.is_hit() {
             return -1.0;
         }
@@ -982,7 +1136,7 @@ impl<'a> CpuTracer<'a> {
         if ng.dot(rd) >= 0.0 {
             ng = -ng;
         }
-        let b = self.secondary_trace(p, ng, dir, 1.0e9, hit.tri);
+        let b = self.secondary_trace(p, ng, dir, self.packed.ray_tmax(), hit.tri);
         if b.is_hit() {
             b.t
         } else {
@@ -1048,6 +1202,176 @@ pub fn cpu_tracer<'a>(scene: &'a SceneInput, packed: &'a PackedScene) -> CpuTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scaled_scene(scene: &SceneInput, scale: f32) -> SceneInput {
+        let mut scene = scene.clone();
+        for position in &mut scene.positions {
+            for component in position {
+                *component *= scale;
+            }
+        }
+        scene.camera.pos = scene.camera.pos * scale;
+        scene.camera.target = scene.camera.target * scale;
+        scene.camera.focus_dist *= scale;
+        scene.camera.ortho_height = scene.camera.ortho_height.map(|height| height * scale);
+        // The aperture is a camera length (scene units): it scales with the camera.
+        scene.camera.bokeh_scale *= scale;
+        scene
+    }
+
+    #[test]
+    fn transport_is_invariant_under_scene_scaling() {
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![
+            Material::diffuse([0.7, 0.7, 0.7]),
+            Material::diffuse([0.7, 0.1, 0.1]),
+            Material::diffuse([0.1, 0.7, 0.1]),
+            Material::emissive([1.0, 0.9, 0.8], 2.0),
+        ];
+        // Sunlit floor, shadow-casting box, and two inward-facing walls
+        // meeting the floor in a concave corner.
+        scene.push_quad([[-50.0, 0.0, -50.0], [-50.0, 0.0, 50.0], [50.0, 0.0, 50.0], [50.0, 0.0, -50.0]], 0);
+        scene.tri_coplanar_group.fill(1);
+        scene.tri_priority.fill(1);
+        crate::scene::push_box(&mut scene, vec3f(-15.0, 0.0, 0.0), vec3f(16.0, 20.0, 20.0), 0.0, 0);
+        scene.push_quad([[-40.0, 0.0, -40.0], [40.0, 0.0, -40.0], [40.0, 30.0, -40.0], [-40.0, 30.0, -40.0]], 0);
+        scene.push_quad([[-40.0, 0.0, 40.0], [-40.0, 0.0, -40.0], [-40.0, 30.0, -40.0], [-40.0, 30.0, 40.0]], 0);
+        // Priority must select the farther green decal inside the tie band,
+        // even at scale 100 where the old fixed window missed this pair.
+        for (y, material, priority) in [(0.0, 1, 2), (-0.0005, 2, 9)] {
+            let first = scene.tri_count();
+            scene.push_quad([[10.0, y, -5.0], [10.0, y, 20.0], [35.0, y, 20.0], [35.0, y, -5.0]], material);
+            scene.tri_coplanar_group[first..].fill(1);
+            scene.tri_priority[first..].fill(priority);
+        }
+        // Also exercise area-valued emissive MIS guards. One light triangle
+        // keeps its random sample independent of BVH triangle reordering.
+        scene.push_mesh(
+            &[[15.0, 25.0, -25.0], [25.0, 25.0, -25.0], [25.0, 25.0, -15.0]],
+            None, None, &[0, 1, 2], 3,
+        );
+        scene.ensure_normals();
+        scene.camera = Camera {
+            pos: vec3f(85.0, 75.0, 110.0),
+            target: vec3f(0.0, 3.0, 0.0),
+            focus_dist: vec3f(85.0, 72.0, 110.0).length(),
+            f_stop: 2.0,
+            bokeh_scale: 8.0,
+            ..Default::default()
+        };
+        scene.sun.dir = vec3f(0.6, 0.8, 0.2).normalize();
+        let mut reference: Option<Vec<[f32; 3]>> = None;
+        let mut reference_scale = 0.0;
+        for scale in [1.0, 0.01, 100.0] {
+            let scene = scaled_scene(&scene, scale);
+            let packed = PackedScene::pack(&scene);
+            assert_eq!(packed.scene_scale, packed.accel.scene_scale, "BVH must use the packed scale");
+            if scale == 1.0 {
+                reference_scale = packed.scene_scale;
+            }
+            assert!((packed.scene_scale / scale / reference_scale - 1.0).abs() < 2.0e-6);
+            let mut tracer = cpu_tracer(&scene, &packed);
+            tracer.max_bounces = 4;
+            tracer.max_diffuse = 3;
+            let decal = packed.accel.trace(
+                vec3f(20.0, 10.0, 5.0) * scale - packed.origin,
+                vec3f(0.0, -1.0, 0.0), packed.ray_tmax(), false,
+            );
+            assert!(decal.is_hit() && !decal.truncated);
+            assert_eq!(packed.tri_material[decal.tri as usize], 2, "farther decal priority at scale {scale}");
+            let up = vec3f(0.0, 1.0, 0.0);
+            for (point, expected) in [(vec3f(-25.0, 0.0, -9.0), 0.0), (vec3f(40.0, 0.0, 30.0), 1.0)] {
+                let visibility = tracer.shadow(point * scale - packed.origin, up, scene.sun.dir, packed.ray_tmax(), -1).unwrap();
+                assert_eq!(visibility.transmittance.x, expected, "floor shadow at scale {scale}");
+            }
+            let image = tracer.render(16, 12, 32, 73);
+            assert_eq!(tracer.invalid_samples.get(), 0, "no rejected samples at scale {scale}");
+            assert!(tracer.stats().sun_nee_successes > 0);
+            if let Some(reference) = &reference {
+                let mut error2 = 0.0f64;
+                let mut signal2 = 0.0f64;
+                let mut worst = 0.0f32;
+                let mut peak = 0.0f32;
+                for (actual, expected) in image.iter().zip(reference) {
+                    for channel in 0..3 {
+                        let error = (actual[channel] - expected[channel]).abs();
+                        error2 += (error as f64).powi(2);
+                        signal2 += (expected[channel] as f64).powi(2);
+                        worst = worst.max(error);
+                        peak = peak.max(expected[channel]);
+                    }
+                }
+                assert!(signal2 > 0.0 && peak > 0.0);
+                // Common random numbers cancel Monte Carlo noise. Allow
+                // 0.2% relative RMS / 2% peak for f32 path-edge decisions,
+                // much less than independent 32-spp sampling noise.
+                assert!((error2 / signal2).sqrt() <= 0.002, "relative RMS at scale {scale}: {}", (error2 / signal2).sqrt());
+                assert!(worst <= peak * 0.02, "worst channel at scale {scale}: {worst}, peak {peak}");
+            } else {
+                reference = Some(image);
+            }
+        }
+    }
+
+    #[test]
+    fn micron_step_is_lit_without_acne_and_keeps_its_wall_shadow() {
+        // A 100 mm diagonal plate and a 35 micron raised pad. Only direct
+        // sun is enabled so visibility cannot hide behind indirect light.
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![Material::diffuse([0.7; 3])];
+        let half = 0.05 / 2.0f32.sqrt();
+        scene.push_quad([[-half, 0.0, -half], [-half, 0.0, half], [half, 0.0, half], [half, 0.0, -half]], 0);
+        crate::scene::push_box(&mut scene, Vec3f::default(), vec3f(0.02, 35.0e-6, 0.02), 0.0, 0);
+        scene.ensure_normals();
+        scene.camera = Camera {
+            pos: vec3f(0.0, 0.05, 0.0),
+            target: Vec3f::default(),
+            up: vec3f(0.0, 0.0, -1.0),
+            f_stop: 0.0,
+            focus_dist: 0.05,
+            ortho_height: Some(0.06),
+            ..Default::default()
+        };
+        scene.sun = crate::scene::Sun { dir: vec3f(-1.0, 0.5, 0.0).normalize(), sky_strength: 0.0, ..Default::default() };
+        let packed = PackedScene::pack(&scene);
+        assert!((packed.scene_scale - 0.1).abs() < 1.0e-6);
+        let mut tracer = cpu_tracer(&scene, &packed);
+        tracer.max_bounces = 1;
+        let up = vec3f(0.0, 1.0, 0.0);
+        let expected = bsdf_eval(up, up, scene.sun.dir, vec3f(0.7, 0.7, 0.7), vec3f(0.04, 0.04, 0.04), 1.0)
+            * tracer.sun_irradiance() * up.dot(scene.sun.dir);
+        assert!(expected.x > 0.0 && expected.y > 0.0 && expected.z > 0.0);
+        let image = tracer.render(12, 12, 32, 91);
+        for y in 0..12 {
+            for x in 0..12 {
+                // Exclude only the four cells straddling the physical shadow
+                // immediately to the pad's right; inspect that band below.
+                if x == 8 && (4..8).contains(&y) { continue; }
+                let pixel = image[y * 12 + x];
+                for (actual, expected) in pixel.into_iter().zip([expected.x, expected.y, expected.z]) {
+                    // The full solar disc changes cos(theta) by <1% at this
+                    // incidence. 2% also covers the smooth GGX variation;
+                    // this bounds every sample, not just the image average.
+                    assert!((actual / expected - 1.0).abs() <= 0.02, "acne at ({x},{y}): {pixel:?}, reference {expected}");
+                }
+            }
+        }
+        // Resolve the umbra 36..44 microns beside the wall with a 4x4 crop.
+        // Rays reach the wall below its top and beyond the 30 micron skin;
+        // the former fixed 2 mm minimum incorrectly skipped this blocker.
+        tracer.camera.pos = vec3f(0.01004, 0.05, 0.0);
+        tracer.camera.target = vec3f(0.01004, 0.0, 0.0);
+        tracer.camera.ortho_height = Some(8.0e-6);
+        for (pixel, value) in tracer.render(4, 4, 32, 91).iter().enumerate() {
+            let hit = tracer.primary_hit((pixel % 4) as u32, (pixel / 4) as u32, 4, 4, (0.0, 0.0));
+            assert!(hit.x >= 0.0, "shadow crop must hit the plate, not the black sky");
+            let tri = &packed.accel.tris[hit.x as usize];
+            let point = tri.v0 * (1.0 - hit.y - hit.z) + tri.v1 * hit.y + tri.v2 * hit.z + packed.origin;
+            assert!(point.y.abs() <= packed.scene_scale * 1.0e-7 && geom_ng(tri).dot(up) > 0.99, "shadow crop must see the plate top");
+            assert!(value.iter().all(|v| v.abs() <= expected.x * 1.0e-6), "light leak beside the step at pixel {pixel}: {value:?}");
+        }
+        assert_eq!(tracer.invalid_samples.get(), 0, "dark pixels must not be rejected samples");
+    }
 
     #[test]
     fn environment_importance_pdf_normalizes_and_sun_samples_the_disc() {
@@ -1222,13 +1546,13 @@ mod tests {
 
     #[test]
     fn shadow_skin_ignores_stacked_layers_but_keeps_real_casters() {
-        // A construction sandwich: a 100 m roof deck at z = 1.0 with a
-        // covering layer 15 mm up — the measured woodside regime (blocker
-        // distances p50 = 17 mm, p99 = 46 mm), past the 1 cm spurious-
-        // neighbour band that already absorbs sub-centimetre back-faces.
+        // A construction sandwich: a 100-unit roof deck at z = 1.0 with a
+        // covering layer 1.06e-4 diagonals up — the measured woodside regime
+        // (blocker distances p50 = 1.2e-4, p99 = 3.25e-4 diagonals), past the
+        // spurious-neighbour band that already absorbs closer back-faces.
         // Without the skin every NEE ray from the deck is blocked by the
         // covering (the roof noise); with the scene-scaled skin the stacked
-        // layer is stepped past while a real caster a metre up still
+        // layer is stepped past while a real caster farther up still
         // shadows.
         let quad = |z: f32| {
             [[-50.0, -50.0, z], [50.0, -50.0, z], [50.0, 50.0, z], [-50.0, 50.0, z]]
@@ -1240,29 +1564,30 @@ mod tests {
         s.ensure_normals();
         let packed = PackedScene::pack(&s);
         let skin = packed.auto_shadow_skin();
-        assert!(skin > 0.015 && skin <= 0.08, "scene-scaled skin: {skin}");
+        assert!(skin > 0.015, "skin must cover the stacked layer: {skin}");
+        assert!((skin / packed.scene_scale - 3.0e-4).abs() < 1.0e-10, "skin must remain bounded by the scene-relative band");
         let tracer = cpu_tracer(&s, &packed);
         assert_eq!(tracer.shadow_skin, skin);
-        // From the deck surface straight up: covering at t = 15 mm.
+        // From the deck surface straight up: covering inside the skin.
         let p = vec3f(0.2, 0.3, 1.0) - packed.origin;
         let up = vec3f(0.0, 0.0, 1.0);
-        let lit = tracer.shadow(p, up, up, 1.0e9, 0).expect("finite");
-        assert_eq!(lit.transmittance, vec3f(1.0, 1.0, 1.0), "mm layer must not shadow its own deck");
+        let lit = tracer.shadow(p, up, up, packed.ray_tmax(), 0).expect("finite");
+        assert_eq!(lit.transmittance, vec3f(1.0, 1.0, 1.0), "stacked layer must not shadow its own deck");
         // The unbiased reference (skin off) still sees the blocker.
         let mut reference = cpu_tracer(&s, &packed);
         reference.shadow_skin = 0.0;
-        let dark = reference.shadow(p, up, up, 1.0e9, 0).expect("finite");
+        let dark = reference.shadow(p, up, up, packed.ray_tmax(), 0).expect("finite");
         assert_eq!(dark.transmittance, Vec3f::default());
 
-        // A real caster 1 m above the deck shadows with the skin active.
+        // A real caster beyond the skin shadows with the skin active.
         let mut with_caster = s.clone();
         with_caster.push_quad(quad(2.0), 0);
         with_caster.ensure_normals();
         let packed2 = PackedScene::pack(&with_caster);
         let tracer2 = cpu_tracer(&with_caster, &packed2);
         let p2 = vec3f(0.2, 0.3, 1.0) - packed2.origin;
-        let shadowed = tracer2.shadow(p2, up, up, 1.0e9, 0).expect("finite");
-        assert_eq!(shadowed.transmittance, Vec3f::default(), "a 1 m caster is a real shadow");
+        let shadowed = tracer2.shadow(p2, up, up, packed2.ray_tmax(), 0).expect("finite");
+        assert_eq!(shadowed.transmittance, Vec3f::default(), "a separated caster is a real shadow");
     }
 
     #[test]
@@ -1271,7 +1596,7 @@ mod tests {
         let face = |z| Tri { v0: vec3f(-1.0, -1.0, z), v1: vec3f(1.0, -1.0, z), v2: vec3f(0.0, 1.0, z) };
         let bvh = Bvh::build(&[face(0.0), face(0.01)]);
         let p = vec3f(0.0, 0.0, 0.0);
-        let ro = offset_ray(p, vec3f(0.0, 0.0, 1.0), vec3f(0.0, 0.0, 1.0));
+        let ro = offset_ray(p, vec3f(0.0, 0.0, 1.0), vec3f(0.0, 0.0, 1.0), bvh.scene_scale);
         let h = bvh.trace_from(ro, vec3f(0.0, 0.0, 1.0), 0.0, 1.0, false);
         assert!(h.is_hit());
         assert_eq!(bvh.tri_order[h.tri as usize], 1, "self face must be behind the offset");
@@ -1398,6 +1723,256 @@ mod tests {
         assert!((e_blur - e_sharp).abs() / e_sharp < 0.3, "energy {e_blur} vs {e_sharp}");
     }
 
+    /// Closed-form lateral displacement measured on a receiver plane.
+    #[test]
+    fn solid_slab_lateral_shift_matches_snell() {
+        let thickness = 0.003f32;
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![
+            Material { solid: true, ..Material::glass([1.0; 3]) },
+            Material::diffuse([1.0; 3]),
+        ];
+        crate::scene::push_box(&mut scene, vec3f(0.0, -0.01, 0.0), vec3f(0.02, 0.02, thickness), 0.0, 0);
+        let plane_z = -thickness * 0.5 - 0.001;
+        scene.push_quad([[-0.012, -0.012, plane_z], [0.012, -0.012, plane_z], [0.012, 0.012, plane_z], [-0.012, 0.012, plane_z]], 1);
+        let packed = PackedScene::pack(&scene);
+        let tracer = cpu_tracer(&scene, &packed);
+        for degrees in [20.0f32, 45.0, 70.0] {
+            let theta = degrees.to_radians();
+            let initial = vec3f(theta.sin(), 0.0, -theta.cos());
+            let origin = vec3f(-0.002 * theta.tan(), 0.001, thickness * 0.5 + 0.002);
+            let mut direction = initial;
+            let mut hit = tracer.trace(origin - packed.origin, direction, packed.ray_tmax(), false, 0.0, -1);
+            for interface in 0..2 {
+                assert!(hit.is_hit() && !hit.truncated, "missing interface {interface} at {degrees}");
+                assert_eq!(packed.tri_material[hit.tri as usize], 0);
+                let tri = &packed.accel.tris[hit.tri as usize];
+                let ng = geom_ng(tri);
+                let point = tri.v0 * (1.0 - hit.u - hit.v) + tri.v1 * hit.u + tri.v2 * hit.v;
+                // Deterministic transmitted primary branch, using the same
+                // interface and spawn functions as radiance_checked.
+                let (next, reflected) = solid_interface(direction, ng, 1.5, 0.99999994);
+                assert!(!reflected, "unexpected reflection at interface {interface}, {degrees}");
+                direction = next;
+                hit = tracer.secondary_trace(point, ng, direction, packed.ray_tmax(), hit.tri);
+            }
+            assert!(hit.is_hit() && !hit.truncated);
+            assert_eq!(packed.tri_material[hit.tri as usize], 1, "ray must land on the rear plane");
+            assert!((direction - initial).length() < 1.0e-6, "parallel slab restores direction");
+            let tri = &packed.accel.tris[hit.tri as usize];
+            let point = tri.v0 * (1.0 - hit.u - hit.v) + tri.v1 * hit.u + tri.v2 * hit.v + packed.origin;
+            let unobstructed_x = origin.x + (origin.z - plane_z) * theta.tan();
+            // Lateral shift is perpendicular to the incident ray, not the
+            // larger x displacement measured on the z-constant receiver.
+            let shift = (unobstructed_x - point.x) * theta.cos();
+            let theta_t = (theta.sin() / 1.5).asin();
+            let expected = thickness * (theta - theta_t).sin() / theta_t.cos();
+            assert!((shift / expected - 1.0).abs() < 1.0e-4, "{degrees} degrees: {shift} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn solid_total_internal_reflection_and_inside_camera() {
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        // Deliberately not two_sided: inside-solid primary rays still see exits.
+        scene.materials = vec![Material { solid: true, transmission: 1.0, roughness: 0.9, ..Default::default() }];
+        crate::scene::push_box(&mut scene, vec3f(0.0, -2.0, 0.0), vec3f(8.0, 4.0, 2.0), 0.0, 0);
+        let packed = PackedScene::pack(&scene);
+        let mut tracer = cpu_tracer(&scene, &packed);
+        let theta = 60.0f32.to_radians();
+        assert!(theta > (1.0f32 / 1.5).asin());
+        let direction = vec3f(theta.sin(), 0.0, theta.cos());
+        let hit = tracer.trace(-packed.origin, direction, packed.ray_tmax(), false, 0.0, -1);
+        assert!(hit.is_hit() && !hit.truncated);
+        let ng = geom_ng(&packed.accel.tris[hit.tri as usize]);
+        assert!(ng.dot(direction) > 0.0, "primary arrives from inside");
+        assert_eq!(solid_fresnel(ng.dot(direction), 1.5), 1.0);
+        for sample in [0.0, 0.5, 0.99999994, 1.0] {
+            let (next, reflected) = solid_interface(direction, ng, 1.5, sample);
+            assert!(reflected && next.dot(ng) < 0.0, "TIR must reflect every sample");
+            assert!((next.length() - 1.0).abs() < 1.0e-6);
+        }
+        tracer.camera = Camera {
+            pos: Vec3f::default(), target: direction, f_stop: 0.0,
+            ortho_height: Some(1.0e-5), ..Default::default()
+        };
+        tracer.sky = SkyUniforms::uniform_white(1.0);
+        tracer.probe_bounce = 1;
+        let probe = tracer.radiance(0, 0, 1, 1, 17, 0);
+        assert!(probe.x >= 1000.0, "reflected primary must still hit the closed box: {probe:?}");
+        assert_eq!(tracer.stats().primary_backface_skips, 0, "solid exits are never primary-culled");
+        let shadow = tracer.shadow(-packed.origin, ng, direction, packed.ray_tmax(), -1).unwrap();
+        assert_eq!(shadow.transmittance, Vec3f::default(), "straight NEE also respects TIR");
+    }
+
+    #[test]
+    fn solid_absorption_matches_thickness_and_inside_segments() {
+        let absorption = [0.25f32, 0.5, 0.8];
+        for thickness in [1.0f32, 2.0, 4.0] {
+            let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+            scene.materials = vec![Material {
+                solid: true, absorption, transmission: 1.0, albedo: [0.01; 3],
+                ..Default::default()
+            }];
+            crate::scene::push_box(&mut scene, vec3f(0.0, -0.2, 0.0), vec3f(0.4, 0.4, thickness), 0.0, 0);
+            let packed = PackedScene::pack(&scene);
+            // Also guard the five-texel material layout/default-independent tint.
+            assert_eq!(&packed.mat.data[16..20], &[0.25, 0.5, 0.8, 1.0]);
+            let mut tracer = cpu_tracer(&scene, &packed);
+            let direction = vec3f(0.0, 0.0, -1.0);
+            for (origin, distance, interfaces) in [
+                (vec3f(0.01, 0.02, thickness * 0.5 + 1.0), thickness, 2),
+                (vec3f(0.01, 0.02, 0.0), thickness * 0.5, 1),
+            ] {
+                let actual = tracer.shadow(origin - packed.origin, -direction, direction, packed.ray_tmax(), -1).unwrap().transmittance;
+                for (value, a) in [actual.x, actual.y, actual.z].into_iter().zip(absorption) {
+                    let expected = a.powf(distance) * 0.96f32.powi(interfaces);
+                    assert!((value / expected - 1.0).abs() < 1.0e-4, "thickness {thickness}, distance {distance}: {value} vs {expected}");
+                }
+            }
+            // The path integrator must attenuate a camera-inside segment too.
+            // Select one actual Sobol sample that transmits the first interface.
+            tracer.camera = Camera {
+                pos: vec3f(0.01, 0.02, 0.0), target: vec3f(0.01, 0.02, -1.0),
+                f_stop: 0.0, ortho_height: Some(0.001), ..Default::default()
+            };
+            tracer.sky = SkyUniforms::uniform_white(1.0);
+            tracer.max_bounces = 2;
+            let sidx = (0..32).find(|&i| tracer.sample2(pixel_seed(0, 0, 7), i, bounce_pairs(0)[0]).0 > 0.04).unwrap();
+            let actual = tracer.radiance(0, 0, 1, 1, 7, sidx);
+            for (value, a) in [actual.x, actual.y, actual.z].into_iter().zip(absorption) {
+                let expected = a.powf(thickness * 0.5);
+                assert!((value / expected - 1.0).abs() < 1.0e-4, "inside-camera path: {value} vs {expected}");
+            }
+            assert_eq!(tracer.invalid_samples.get(), 0);
+        }
+    }
+
+    #[test]
+    fn solid_clear_sphere_furnace() {
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![Material { solid: true, ..Material::glass([1.0; 3]) }];
+        // Test Fresnel branch weights, not trapping in a coarse polyhedron.
+        // At distance 3, a square 4-degree view has impact parameter at most
+        // 3*sin(atan(sqrt(2)*tan(2 degrees))) < 0.148 radii, including jitter.
+        // 64 segments give 5.625-degree cells: facet/radial tilt is bounded
+        // by acos(cos(2.8125 degrees)^2) < 4 degrees, radius >= 0.99759.
+        // Entry incidence < asin(0.148/0.99759)+4 = 12.54 degrees, so the
+        // refracted angle is < 8.33 degrees. Each chord adds at most 8.2
+        // degrees (two facet tilts plus the radius variation here). Even
+        // after three internal reflections, incidence < 8.33+4*8.2 = 41.13
+        // degrees < asin(1/1.5) = 41.81 degrees: no forced TIR on those paths.
+        // Entry + three reflections + exit + sky take 6 of 16 iterations.
+        // Fresnel can still choose longer reflection chains; require every
+        // seeded path to escape below the cap with escaped_to_sky below.
+        crate::scene::push_sphere(&mut scene, Vec3f::default(), 1.0, 64, 0);
+        scene.camera = Camera {
+            pos: vec3f(0.0, 0.0, 3.0), target: Vec3f::default(),
+            fov_y: 4.0f32.to_radians(), f_stop: 0.0, ..Default::default()
+        };
+        let packed = PackedScene::pack(&scene);
+        let mut tracer = cpu_tracer(&scene, &packed);
+        tracer.sky = SkyUniforms::uniform_white(1.0);
+        tracer.max_bounces = 16;
+        for (i, pixel) in tracer.render(4, 4, 256, 43).iter().enumerate() {
+            assert!(pixel.iter().all(|&v| (v - 1.0).abs() < 0.02), "furnace pixel {i}: {pixel:?}");
+        }
+        assert_eq!(tracer.stats().primary_hits, 4 * 4 * 256, "test must cover the sphere, not empty sky");
+        assert_eq!(tracer.stats().escaped_to_sky, 4 * 4 * 256, "every furnace path must escape before the bounce cap");
+        assert_eq!(tracer.invalid_samples.get(), 0);
+    }
+
+    #[test]
+    fn solid_closed_box_sun_crosses_four_interfaces() {
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![
+            Material { solid: true, ..Material::glass([1.0; 3]) },
+            Material::diffuse([0.7; 3]),
+        ];
+        // Two separate closed shells: cavity -> glass -> air -> glass -> air.
+        // A single shell from an inside point would cross only TWO interfaces.
+        // Reversing each inner box makes its normals point into the cavity.
+        for (base, size, inward) in [
+            (0.0, 2.0, false), (0.1, 1.8, true),
+            (0.2, 1.6, false), (0.3, 1.4, true),
+        ] {
+            let first = scene.indices.len();
+            crate::scene::push_box(&mut scene, vec3f(0.0, base, 0.0), vec3f(size, size, size), 0.0, 0);
+            if inward {
+                for tri in scene.indices[first..].chunks_exact_mut(3) { tri.swap(1, 2); }
+            }
+        }
+        scene.push_quad([[-0.5, 0.4, -0.5], [-0.5, 0.4, 0.5], [0.5, 0.4, 0.5], [0.5, 0.4, -0.5]], 1);
+        scene.camera = Camera {
+            pos: vec3f(0.03, 0.5, 0.02), target: vec3f(0.03, 0.4, 0.02),
+            up: vec3f(0.0, 0.0, -1.0), ortho_height: Some(0.01), f_stop: 0.0,
+            ..Default::default()
+        };
+        scene.sun = crate::scene::Sun { dir: vec3f(0.0, 1.0, 0.0), sky_strength: 0.0, ..Default::default() };
+        let packed = PackedScene::pack(&scene);
+        let mut tracer = cpu_tracer(&scene, &packed);
+        tracer.max_bounces = 1;
+        let up = scene.sun.dir;
+        let point = vec3f(0.03, 0.4, 0.02) - packed.origin;
+        let vis = tracer.shadow(point, up, up, packed.ray_tmax(), -1).unwrap().transmittance;
+        let expected_visibility = 0.96f32.powi(4);
+        assert!((vis.x - expected_visibility).abs() < 1.0e-3, "closed case: {vis:?}");
+        assert_eq!(tracer.stats().glass_shadow_hits, 4, "every real boundary counts");
+        let unoccluded = bsdf_eval(up, up, up, vec3f(0.7, 0.7, 0.7), vec3f(0.04, 0.04, 0.04), 1.0)
+            * tracer.sun_irradiance();
+        assert!(unoccluded.x > 0.0);
+        let pixel = tracer.render(1, 1, 16, 29)[0];
+        for (actual, open) in pixel.into_iter().zip([unoccluded.x, unoccluded.y, unoccluded.z]) {
+            assert!((actual / open - expected_visibility).abs() < 1.0e-3, "direct-light ratio {actual}/{open}");
+        }
+        assert_eq!(tracer.invalid_samples.get(), 0);
+        scene.materials[0].transmission = 0.0;
+        let opaque_packed = PackedScene::pack(&scene);
+        let mut opaque = cpu_tracer(&scene, &opaque_packed);
+        opaque.max_bounces = 1;
+        assert_eq!(opaque.shadow(point, up, up, opaque_packed.ray_tmax(), -1).unwrap().transmittance, Vec3f::default());
+        assert_eq!(opaque.render(1, 1, 16, 29)[0], [0.0; 3], "opaque case must be black");
+        assert_eq!(opaque.invalid_samples.get(), 0);
+    }
+
+    #[test]
+    fn dielectric_guides_reach_the_board_and_solid_shadow_budget_is_bounded() {
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![
+            Material { solid: true, ..Material::glass([1.0; 3]) },
+            Material::diffuse([0.7; 3]),
+        ];
+        // Exit faces lie inside BOTH the neighbour band and shadow skin.
+        // They must still contribute Fresnel and count against the budget.
+        for z in [0.3, 0.2, 0.1, 0.0] {
+            crate::scene::push_box(&mut scene, vec3f(0.0, -1.0, z), vec3f(2.0, 2.0, 1.0e-5), 0.0, 0);
+        }
+        scene.push_quad([[-1.0, -1.0, -0.5], [1.0, -1.0, -0.3], [1.0, 1.0, -0.3], [-1.0, 1.0, -0.5]], 1);
+        scene.camera = Camera { pos: vec3f(0.0, 0.0, 0.6), target: Vec3f::default(), f_stop: 0.0, ..Default::default() };
+        let direction = vec3f(0.0, 0.0, -1.0);
+        let packed = PackedScene::pack(&scene);
+        let tracer = cpu_tracer(&scene, &packed);
+        let guide = tracer.denoise_guide(scene.camera.pos, direction);
+        let normal = vec3f(-0.1, 0.0, 1.0).normalize();
+        assert!((vec3f(guide.x, guide.y, guide.z) - normal).length() < 1.0e-6, "guide must be the board's normal: {guide:?}");
+        assert!((guide.w - 1.0).abs() < 1.0e-5, "guide must be the board's depth: {guide:?}");
+        let vis = tracer.shadow(scene.camera.pos - packed.origin, -direction, direction, 0.85, -1).unwrap().transmittance;
+        assert!((vis.x - 0.96f32.powi(8)).abs() < 1.0e-4, "eight solid boundaries: {vis:?}");
+        assert_eq!(tracer.stats().glass_shadow_hits, 8);
+        // The same deterministic guide continuation also supports legacy thin panes.
+        scene.materials[0].solid = false;
+        let thin_packed = PackedScene::pack(&scene);
+        let thin_guide = cpu_tracer(&scene, &thin_packed).denoise_guide(scene.camera.pos, direction);
+        assert!((vec3f(thin_guide.x, thin_guide.y, thin_guide.z) - normal).length() < 1.0e-6);
+        assert!((thin_guide.w - 1.0).abs() < 1.0e-5);
+        scene.materials[0].solid = true;
+        crate::scene::push_box(&mut scene, vec3f(0.0, -1.0, -0.1), vec3f(2.0, 2.0, 1.0e-5), 0.0, 0);
+        let packed = PackedScene::pack(&scene);
+        let tracer = cpu_tracer(&scene, &packed);
+        assert_eq!(tracer.shadow(scene.camera.pos - packed.origin, -direction, direction, 0.85, -1).unwrap().transmittance, Vec3f::default(), "ninth interface must occlude");
+        assert_eq!(tracer.denoise_guide(scene.camera.pos, direction).w, -1.0, "exhaustion must not invent a board guide");
+    }
+
     /// Thin glass passes most light straight through (a window, not a wall).
     #[test]
     fn thin_glass_transmits() {
@@ -1419,9 +1994,11 @@ mod tests {
         let mut s = SceneInput::default();
         s.materials = vec![Material::glass([0.8, 0.9, 1.0])];
         s.push_quad([[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]], 0);
-        // BIM exporters commonly model a nominally thin pane as a 10 mm box.
-        // Its opposite face must not apply transmittance a second time.
-        s.push_quad([[-2.0, 2.0, -0.01], [2.0, 2.0, -0.01], [2.0, -2.0, -0.01], [-2.0, -2.0, -0.01]], 0);
+        // A boxed pane inside the pairing band but beyond the spurious-
+        // neighbour band, so this exercises the material-aware pairing:
+        // its opposite face must not apply transmittance a second time.
+        let gap = (s.bounds().1 - s.bounds().0).length() * 7.5e-5;
+        s.push_quad([[-2.0, 2.0, -gap], [2.0, 2.0, -gap], [2.0, -2.0, -gap], [-2.0, -2.0, -gap]], 0);
         let packed = PackedScene::pack(&s);
         let t = cpu_tracer(&s, &packed);
         let tr = t
@@ -1464,6 +2041,7 @@ mod tests {
     fn shadow_budget_crosses_four_boxed_panes() {
         let mut s = SceneInput::default();
         s.materials = vec![Material::glass([1.0; 3])];
+        let gap = vec3f(4.0, 4.0, 0.3).length() * 7.5e-5;
         for z in [0.0f32, -0.1, -0.2, -0.3] {
             s.push_quad(
                 [[-2.0, -2.0, z], [2.0, -2.0, z], [2.0, 2.0, z], [-2.0, 2.0, z]],
@@ -1471,10 +2049,10 @@ mod tests {
             );
             s.push_quad(
                 [
-                    [-2.0, 2.0, z - 0.01],
-                    [2.0, 2.0, z - 0.01],
-                    [2.0, -2.0, z - 0.01],
-                    [-2.0, -2.0, z - 0.01],
+                    [-2.0, 2.0, z - gap],
+                    [2.0, 2.0, z - gap],
+                    [2.0, -2.0, z - gap],
+                    [-2.0, -2.0, z - gap],
                 ],
                 0,
             );
@@ -1758,7 +2336,7 @@ mod tests {
     /// overlapping floor from a second element — the BIM junction that turns
     /// a geometric-normal origin offset into an immediate shadow-ray hit.
     ///
-    /// The duplicate sits 0.1 mm above the floor so wall hits in a 2-pixel
+    /// The duplicate sits 5e-7 diagonals above the floor so hits in a 2-pixel
     /// band along the edge reconstruct *behind* it (unwelded BIM vertices).
     /// The camera is a tight ortho crop of that junction.
     fn concave_junction_scene() -> SceneInput {
@@ -1768,14 +2346,17 @@ mod tests {
         s.push_quad([[-2.0, 0.0, 0.0], [-2.0, 0.0, 4.0], [2.0, 0.0, 4.0], [2.0, 0.0, 0.0]], 0);
         // Wall z=0, y≥0, facing +Z.
         s.push_quad([[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 4.0, 0.0], [-2.0, 4.0, 0.0]], 0);
-        // Second element's floor slab, 0.1 mm above, overlapping the junction.
-        s.push_quad([[-2.0, 1.0e-4, -0.3], [-2.0, 1.0e-4, 0.3], [2.0, 1.0e-4, 0.3], [2.0, 1.0e-4, -0.3]], 0);
+        // Second element's floor slab, overlapping the junction. Scale the
+        // reconstruction-error fixture and its crop with the tolerance.
+        let relative = vec3f(4.0, 4.0, 4.3).length() * 0.005;
+        let layer = 1.0e-4 * relative;
+        s.push_quad([[-2.0, layer, -0.3], [-2.0, layer, 0.3], [2.0, layer, 0.3], [2.0, layer, -0.3]], 0);
         s.ensure_normals();
         s.camera = Camera {
-            pos: vec3f(0.0, 5.0e-4, 2.0),
-            target: vec3f(0.0, 5.0e-4, 0.0),
+            pos: vec3f(0.0, 5.0e-4 * relative, 2.0),
+            target: vec3f(0.0, 5.0e-4 * relative, 0.0),
             f_stop: 0.0,
-            ortho_height: Some(0.002),
+            ortho_height: Some(0.002 * relative),
             ..Default::default()
         };
         s.sun = crate::scene::Sun {
@@ -1831,22 +2412,22 @@ mod tests {
             (-1.0e-6, -1.0e-6, ng_wall),
             (-1.0e-6, -1.0e-6, ng_floor),
         ] {
-            let p = vec3f(0.0, y, z) - packed.origin;
+            let p = vec3f(0.0, y, z) * (packed.scene_scale * 0.005) - packed.origin;
             if ng.dot(ld) <= 0.0 {
                 continue;
             }
             tested += 1;
             let n = if ng.dot(ld) >= 0.0 { ng } else { -ng };
-            let old = packed.accel.trace(p + n * ray_error(p), ld, 1.0e9, false);
-            if old.is_hit() && old.t < 0.01 {
+            let old = packed.accel.trace(p + n * ray_error(p, packed.scene_scale), ld, packed.ray_tmax(), false);
+            if old.is_hit() && old.t < packed.scene_scale * 5.0e-5 {
                 legacy += 1;
             }
-            let h = t.secondary_trace(p, ng, ld, 1.0e9, skip_of(ng));
-            if h.is_hit() && h.t < 0.01 {
+            let h = t.secondary_trace(p, ng, ld, packed.ray_tmax(), skip_of(ng));
+            if h.is_hit() && h.t < packed.scene_scale * 5.0e-5 {
                 immediate += 1;
             }
         }
-        println!("concave-edge probes: legacy {legacy}/{tested} leaked at t<1cm; fixed {immediate}/{tested}");
+        println!("concave-edge probes: legacy {legacy}/{tested} leaked within the neighbour band; fixed {immediate}/{tested}");
         assert!(tested > 0);
         assert_eq!(immediate, 0, "{immediate}/{tested} concave-edge shadow rays leaked at t≈0");
     }

@@ -12,6 +12,8 @@
 //! ([`GraphicsTier::for_gpu`]); the host shows the choice as a direct
 //! control and the user's pick overrides it.
 
+use crate::cortao::CortaoTier;
+
 /// One of the quality tiers, cheapest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GraphicsTier {
@@ -34,7 +36,7 @@ pub struct TierBudget {
     pub csm_resolution: usize,
     pub csm_range: f32,
     /// Screen-space ambient occlusion.
-    pub ssao: bool,
+    pub ao: Option<CortaoTier>,
     /// The largest render scale the host's automatic scale may use.
     pub render_scale: f32,
     /// How far a level terrain tile blends its paint layers (the splat
@@ -60,10 +62,10 @@ impl GraphicsTier {
 
     pub fn budget(self) -> TierBudget {
         match self {
-            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_pixels: 6.0, csm_resolution: 1024, csm_range: 40.0, ssao: false, render_scale: 0.75, terrain_blend_reach: 150.0, trample: None },
-            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_pixels: 4.0, csm_resolution: 1536, csm_range: 60.0, ssao: false, render_scale: 1.0, terrain_blend_reach: 450.0, trample: Some(crate::trample::TrampleBudget { extent: 64.0, texels: 512 }) },
-            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_pixels: 2.5, csm_resolution: 2048, csm_range: 80.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
-            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_pixels: 1.6, csm_resolution: 4096, csm_range: 120.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
+            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_pixels: 6.0, csm_resolution: 1024, csm_range: 40.0, ao: None, render_scale: 0.75, terrain_blend_reach: 150.0, trample: None },
+            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_pixels: 4.0, csm_resolution: 1536, csm_range: 60.0, ao: None, render_scale: 1.0, terrain_blend_reach: 450.0, trample: Some(crate::trample::TrampleBudget { extent: 64.0, texels: 512 }) },
+            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_pixels: 2.5, csm_resolution: 2048, csm_range: 80.0, ao: Some(CortaoTier::High), render_scale: 1.0, terrain_blend_reach: f32::MAX, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
+            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_pixels: 1.6, csm_resolution: 4096, csm_range: 120.0, ao: Some(CortaoTier::Ultra), render_scale: 1.0, terrain_blend_reach: f32::MAX, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
         }
     }
 

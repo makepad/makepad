@@ -6,7 +6,9 @@
 //!
 //! The lighting products are built from a copy at most
 //! [`LIGHTING_MAX_WIDTH`] wide without the environment's key: the renderer's
-//! directional light carries that energy, so the SH and the atlas must not.
+//! directional light carries that energy, so the SH must not. By default
+//! the atlas also loses the key; `keep_key` retains it below a roughness
+//! cut while the renderer gives each directional lobe the complementary gain.
 //! How the key leaves is [`KeyRemoval`]: a generated map is lit from the
 //! same map baked without exactly its key's light (N3), so the lights beside
 //! a wide studio key stay; a sun found in a file has its covering cone
@@ -30,13 +32,33 @@ pub const DOME_MAX_WIDTH: usize = 2048;
 pub const HORIZON_BAND_DEG: f32 = 3.0;
 /// The IBL lane texture's atlas width (`ibl::ibl_texture` = prefilter 256, 6).
 pub const ATLAS_WIDTH: usize = 256;
-const ATLAS_LEVELS: usize = 6;
+pub const ATLAS_LEVELS: usize = 6;
+
+/// First atlas level without the key. GGX's half-width at half maximum in
+/// light space is `2 * atan(0.644 * alpha)`, with `alpha = rough^2`: the
+/// directional lobe may stand in for the key once it is at least as wide.
+/// For `theta = acos(sun.cos_radius)`, `rough_cut = sqrt(tan(theta / 2) / 0.644)`
+/// and `k = clamp(ceil(rough_cut * (levels - 1)), 1, levels - 1)`.
+/// Fewer than two levels cannot hold both sources and return zero.
+pub fn key_cut_level(sun: &EnvSun, levels: usize) -> usize {
+    if levels < 2 {
+        return 0;
+    }
+    // f64 keeps tan(theta / 2) on the positive side at the 180-degree limit.
+    let theta = (sun.cos_radius as f64).clamp(-1.0, 1.0).acos();
+    let rough_cut = ((theta * 0.5).tan() / 0.644).sqrt();
+    ((rough_cut * (levels - 1) as f64).ceil() as usize).clamp(1, levels - 1)
+}
 
 /// One environment, prepared for the renderer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedIbl {
     /// The lane texture (`TextureFormat::VecRGBAf32`, width x height).
     pub texture: ibl::IblTexture,
+    /// Levels `0..key_levels` retain the declared key; zero for Light/no key.
+    pub key_levels: u32,
+    /// The atlas level count, shared with the directional lobe's gain.
+    pub levels: u32,
     /// The dome, `dome_width` x `dome_height` RGBA f32 (alpha 1), the
     /// source resized to at most the cap and never upsampled.
     pub dome_width: usize,
@@ -93,7 +115,7 @@ pub fn prepare_ibl_sized(
 ) -> PreparedIbl {
     let sizes = PrepareSizes { dome: max_dome_width, atlas: atlas_width, lighting: LIGHTING_MAX_WIDTH };
     let removal = sun.map_or(KeyRemoval::Nothing, KeyRemoval::Fill);
-    prepare_ibl_until(env, removal, intensity, rotation_deg, sizes, &|| false, &|n, f| (0..n).for_each(f)).expect("a preparation nobody stops runs to its end")
+    prepare_ibl_until(env, removal, None, intensity, rotation_deg, sizes, &|| false, &|n, f| (0..n).for_each(f)).expect("a preparation nobody stops runs to its end")
 }
 
 /// The lighting copy is never wider than this. The prefilter reads its
@@ -114,13 +136,20 @@ pub struct PrepareSizes {
 
 /// [`prepare_ibl_sized`] at chosen sizes, with the key leaving the lighting
 /// copy as `removal` says, that asks `stop` between its stages (after the
-/// dome, after the lighting copy and its key removal, before every prefilter
+/// dome, after each lighting copy and its key removal, before every prefilter
 /// level, before the SH) and gives up (`None`) once it says so: a background
 /// job whose environment was replaced stops within a stage instead of
 /// finishing a preparation nobody will use.
+/// With `keep_key` and a key removal, atlas levels below [`key_cut_level`]
+/// read the full source narrowed to `sizes.lighting`; the remaining levels,
+/// SH, meter and band read the keyless copy. The dome is unchanged.
+/// Each level is prefiltered once. Cost: one extra lighting copy (about
+/// 8 MB at 1024 x 512) and one extra 512-wide pyramid. Without a key removal,
+/// both modes share the same copy and do no extra work.
 pub fn prepare_ibl_until(
     env: &EnvMap,
     removal: KeyRemoval,
+    keep_key: Option<&EnvSun>,
     intensity: f32,
     rotation_deg: f32,
     sizes: PrepareSizes,
@@ -142,7 +171,21 @@ pub fn prepare_ibl_until(
     if stop() {
         return None;
     }
-    let atlas = ibl::prefilter_spread(&lit, sizes.atlas, ATLAS_LEVELS, stop, run)?;
+    let key_levels = keep_key.filter(|_| !matches!(removal, KeyRemoval::Nothing)).map_or(0, |sun| key_cut_level(sun, ATLAS_LEVELS));
+    let full = if key_levels > 0 {
+        let full = lighting_copy_spread(&env, KeyRemoval::Nothing, sizes.lighting, run);
+        if stop() {
+            return None;
+        }
+        Some(full)
+    } else {
+        None
+    };
+    let atlas = if let Some(full) = full {
+        ibl::prefilter_split_spread(&full, &lit, key_levels, sizes.atlas, ATLAS_LEVELS, stop, run)?
+    } else {
+        ibl::prefilter_spread(&lit, sizes.atlas, ATLAS_LEVELS, stop, run)?
+    };
     if stop() {
         return None;
     }
@@ -150,6 +193,8 @@ pub fn prepare_ibl_until(
     let texture = ibl::pack_ibl(&atlas, &sh, intensity, rotation_deg);
     Some(PreparedIbl {
         texture,
+        key_levels: key_levels as u32,
+        levels: atlas.levels as u32,
         dome_width,
         dome_height,
         dome,
@@ -159,7 +204,7 @@ pub fn prepare_ibl_until(
     })
 }
 
-/// The copy the atlas, the SH, the meter and the band are taken from, at
+/// The copy the SH, the meter, the band and (by default) the atlas read, at
 /// most `max_width` wide (box-filtered down): the source with the key's
 /// covering cone filled there (`Fill`), the source as it is (`Nothing`), or
 /// the keyless map (`Exact`, made sane first like the source). A map that is
@@ -272,6 +317,115 @@ mod tests {
         d.y.clamp(-1.0, 1.0).asin().to_degrees()
     }
 
+    #[test]
+    fn key_cut_follows_the_declared_angular_radius_and_level_count() {
+        for (degrees, expected) in [(22.0f32, 3), (40.0, 4), (0.27, 1), (89.0, ATLAS_LEVELS - 1), (180.0, ATLAS_LEVELS - 1)] {
+            let sun = EnvSun { dir: vec3f(0.0, 1.0, 0.0), radiance: grey(1.0), cos_radius: degrees.to_radians().cos(), facing: 1.0, cos_cover: degrees.to_radians().cos() };
+            assert_eq!(key_cut_level(&sun, ATLAS_LEVELS), expected, "{degrees} degrees: the GGX width selects the cut");
+            assert_eq!(key_cut_level(&sun, 2), 1, "{degrees} degrees: two levels keep one keyed level");
+            assert_eq!(key_cut_level(&sun, 1), 0, "{degrees} degrees: one level cannot split the sources");
+        }
+    }
+
+    #[test]
+    fn key_reflection_changes_only_the_atlas_and_light_keeps_its_construction() {
+        let sun = EnvSun { dir: dir_from_az_el(90.0, 30.0), radiance: grey(20.0), cos_radius: 20.0f32.to_radians().cos(), facing: 1.0, cos_cover: 20.0f32.to_radians().cos() };
+        let fill = |d: Vec3f| grey(0.2 + 0.3 * d.y.max(0.0));
+        let keyless = map(64, fill);
+        let env = map(64, |d| fill(d) + grey(if d.dot(sun.dir) >= sun.cos_radius { 20.0 } else { 0.0 }));
+        let sizes = PrepareSizes { dome: 64, atlas: 16, lighting: 32 };
+        let prepare = |removal, keep| prepare_ibl_until(&env, removal, keep, 1.0, 0.0, sizes, &|| false, &|n, f| (0..n).for_each(f)).expect("the small preparation completes");
+        let bits = |data: &[f32]| data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let full = lighting_copy(&env, KeyRemoval::Nothing, sizes.lighting);
+        let full_atlas = ibl::prefilter(&full, sizes.atlas, ATLAS_LEVELS);
+        for (name, removal) in [("Exact", KeyRemoval::Exact(&keyless)), ("Fill", KeyRemoval::Fill(&sun))] {
+            let light = prepare(removal, None);
+            let kept = prepare(removal, Some(&sun));
+            let lit = lighting_copy(&env, removal, sizes.lighting);
+            let old = ibl::pack_ibl(&ibl::prefilter(&lit, sizes.atlas, ATLAS_LEVELS), &ibl::sh9(&lit), 1.0, 0.0);
+            assert_eq!(bits(&light.texture.data), bits(&old.data), "{name}: Light is bit-identical to prefiltering the keyless lighting copy");
+            let want = ibl::pack_ibl(&full_atlas, &light.sh, 1.0, 0.0);
+            let k = key_cut_level(&sun, ATLAS_LEVELS);
+            assert_eq!((light.key_levels, light.levels), (0, ATLAS_LEVELS as u32), "{name}: Light reports no keyed levels");
+            assert_eq!((kept.key_levels, kept.levels), (k as u32, ATLAS_LEVELS as u32), "{name}: Map reports its derived cut and actual level count");
+            let row = kept.texture.width * 4;
+            assert_eq!(bits(&kept.texture.data[..row]), bits(&light.texture.data[..row]), "{name}: the meta row stays keyless");
+            let level_size = row * full_atlas.level_height;
+            for level in 0..ATLAS_LEVELS {
+                let start = row + level * level_size;
+                let end = start + level_size;
+                let source = if level < k { &want } else { &light.texture };
+                assert_eq!(bits(&kept.texture.data[start..end]), bits(&source.data[start..end]), "{name}: level {level} is bit-identical to its selected source (cut {k})");
+            }
+            assert_ne!(bits(&kept.texture.data), bits(&light.texture.data), "{name}: the broad key contributes to Map reflections");
+            assert_eq!(kept.sh.map(|c| c.map(f32::to_bits)), light.sh.map(|c| c.map(f32::to_bits)), "{name}: SH is bit-identical across reflection modes");
+            assert_eq!(kept.mean_luminance.to_bits(), light.mean_luminance.to_bits(), "{name}: the exposure meter is bit-identical across reflection modes");
+            assert_eq!(arr(kept.horizon_rgb).map(f32::to_bits), arr(light.horizon_rgb).map(f32::to_bits), "{name}: the horizon band is bit-identical across reflection modes");
+            assert_eq!(bits(&kept.dome), bits(&light.dome), "{name}: the dome is bit-identical across reflection modes");
+        }
+        let light = prepare(KeyRemoval::Nothing, None);
+        let kept = prepare(KeyRemoval::Nothing, Some(&sun));
+        assert_eq!(bits(&kept.texture.data), bits(&light.texture.data), "without key removal the texture is bit-identical across reflection modes");
+        assert_eq!(kept, light, "without key removal every preparation product is unchanged");
+    }
+
+    #[test]
+    fn key_cut_weights_partition_and_keyed_minus_keyless_lookup_identity() {
+        let cos_radius = 22.0f32.to_radians().cos();
+        let sun = EnvSun { dir: dir_from_az_el(90.0, 30.0), radiance: grey(20.0), cos_radius, facing: 1.0, cos_cover: cos_radius };
+        let fill = |d: Vec3f| grey(0.2 + 0.3 * d.y.max(0.0));
+        let keyless = map(64, fill);
+        let env = map(64, |d| fill(d) + grey(if d.dot(sun.dir) >= cos_radius { 20.0 } else { 0.0 }));
+        let sizes = PrepareSizes { dome: 64, atlas: 16, lighting: 32 };
+        let prepare = |keep| prepare_ibl_until(&env, KeyRemoval::Exact(&keyless), keep, 1.0, 0.0, sizes, &|| false, &|n, f| (0..n).for_each(f)).expect("the small key-cut preparation completes");
+        let light = prepare(None);
+        let kept = prepare(Some(&sun));
+        let full = lighting_copy(&env, KeyRemoval::Nothing, sizes.lighting);
+        let full_atlas = ibl::prefilter(&full, sizes.atlas, ATLAS_LEVELS);
+        let levels = kept.levels as usize;
+        let k = kept.key_levels as usize;
+        assert_eq!((k, levels), (3, 6), "the 22-degree key cuts the six-level atlas at level three");
+        for step in 0..=10 {
+            let rough = step as f32 / 10.0;
+            // mat_ibl_sky_env in render_material/src/builtin.rs (also used
+            // by SdfEnv.env_reflect): the next level has zero weight at an
+            // integer lf, so this is the floor/ceil blend there too.
+            let lf = rough.clamp(0.0, 1.0) * (levels - 1) as f32;
+            let k0 = lf.floor() as usize;
+            let k1 = (k0 + 1).min(levels - 1);
+            let t = lf - k0 as f32;
+            let weights = [(k0, 1.0 - t), (k1, t)];
+            let keyed_weight: f32 = weights.iter().filter(|(i, _)| *i < k).map(|(_, w)| *w).sum();
+            let lobe_gain = 1.0 - (k as f32 - lf).clamp(0.0, 1.0);
+            assert!((keyed_weight + lobe_gain - 1.0).abs() <= 1e-6, "roughness {rough}: keyed level weights plus the lobe gain partition unity (atlas {keyed_weight}, lobe {lobe_gain})");
+            for (direction, dir) in [("key", sun.dir), ("90 degrees from key", vec3f(-sun.dir.y, sun.dir.x, 0.0))] {
+                // Read the nearest texel centre of each level, rather than
+                // bilinear sampling; only the level blend follows the shader.
+                let uv = ibl::dir_to_equirect_uv(arr(dir));
+                let x = (uv[0] * full_atlas.width as f32).floor() as usize % full_atlas.width;
+                let y = ((uv[1] * full_atlas.level_height as f32).floor() as usize).min(full_atlas.level_height - 1);
+                for channel in 0..3 {
+                    let read = |texture: &ibl::IblTexture, i: usize| {
+                        let row = 1 + i * full_atlas.level_height + y;
+                        texture.data[(row * texture.width + x) * 4 + channel] as f64
+                    };
+                    // Accumulate the f32 texel values in f64 so cancellation
+                    // does not mask the relative error of a small difference.
+                    let blend = |texture: &ibl::IblTexture| read(texture, k0) * (1.0 - t) as f64 + read(texture, k1) * t as f64;
+                    let map_lookup = blend(&kept.texture);
+                    let light_lookup = blend(&light.texture);
+                    let want: f64 = weights.iter().filter(|(i, _)| *i < k).map(|&(i, w)| {
+                        let full_i = full_atlas.data[(i * full_atlas.level_height + y) * full_atlas.width + x][channel] as f64;
+                        w as f64 * (full_i - read(&light.texture, i))
+                    }).sum();
+                    let got = map_lookup - light_lookup;
+                    let scale = got.abs().max(want.abs());
+                    assert!((got - want).abs() <= 1e-5 * scale, "roughness {rough}, {direction}, channel {channel}: Map minus Light equals the weighted full-minus-Light sum below the cut (got {got}, expected {want})");
+                }
+            }
+        }
+    }
+
     /// prepare_ibl is ibl_texture plus the dome, SH, meter and band: at the
     /// same atlas width the lane texture is bit-identical to render-material's
     /// own packing (prefilter is deterministic). 16 wide keeps the test fast;
@@ -306,7 +460,7 @@ mod tests {
             asked.fetch_add(1, Ordering::Relaxed);
             false
         };
-        assert_eq!(prepare_ibl_until(&env, KeyRemoval::Nothing, 1.0, 0.0, sizes, &never, &|n, f| (0..n).for_each(f)), Some(prepare_ibl_sized(&env, None, 1.0, 0.0, 2048, 16)));
+        assert_eq!(prepare_ibl_until(&env, KeyRemoval::Nothing, None, 1.0, 0.0, sizes, &never, &|n, f| (0..n).for_each(f)), Some(prepare_ibl_sized(&env, None, 1.0, 0.0, 2048, 16)));
         let stages = asked.load(Ordering::Relaxed);
         assert_eq!(stages, 2 + ATLAS_LEVELS * (1 + sizes.atlas / 2) + 1, "after the dome, lighting copy, before every level and row, before the SH");
         for k in 0..stages {
@@ -315,9 +469,18 @@ mod tests {
                 asked.fetch_add(1, Ordering::Relaxed);
                 asked.load(Ordering::Relaxed) > k
             };
-            assert_eq!(prepare_ibl_until(&env, KeyRemoval::Nothing, 1.0, 0.0, sizes, &at_k, &|n, f| (0..n).for_each(f)), None, "stopped at question {k}");
+            assert_eq!(prepare_ibl_until(&env, KeyRemoval::Nothing, None, 1.0, 0.0, sizes, &at_k, &|n, f| (0..n).for_each(f)), None, "stopped at question {k}");
             assert_eq!(asked.load(Ordering::Relaxed), k + 1, "nothing asked after the stop");
         }
+        asked.store(0, Ordering::Relaxed);
+        let sun = EnvSun { dir: vec3f(0.0, 1.0, 0.0), radiance: grey(1.0), cos_radius: 22.0f32.to_radians().cos(), facing: 1.0, cos_cover: 22.0f32.to_radians().cos() };
+        let keep = prepare_ibl_until(&env, KeyRemoval::Nothing, Some(&sun), 1.0, 0.0, sizes, &never, &|n, f| (0..n).for_each(f));
+        assert!(keep.is_some(), "keeping an undeclared key completes the preparation");
+        assert_eq!(asked.load(Ordering::Relaxed), stages, "without removal Map adds no preparation stage");
+        asked.store(0, Ordering::Relaxed);
+        let after_full_copy = || asked.fetch_add(1, Ordering::Relaxed) >= 2;
+        assert_eq!(prepare_ibl_until(&env, KeyRemoval::Exact(&env), Some(&sun), 1.0, 0.0, sizes, &after_full_copy, &|n, f| (0..n).for_each(f)), None, "Map can stop after the extra lighting copy before prefiltering");
+        assert_eq!(asked.load(Ordering::Relaxed), 3, "the extra copy's stop prevents every prefilter stage");
     }
 
     #[test]

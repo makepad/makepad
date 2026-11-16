@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// Screen AO for one view. The host supplies its frame/sample index and
+/// resets history on camera cuts; radius is in world units.
+#[derive(Clone, Copy, Debug)]
+pub struct ScreenAoParams {
+    pub strength: f32,
+    pub radius: f32,
+    pub tier: crate::cortao::CortaoTier,
+    /// The AO chain's internal size (`Auto`: half size for 4K-class frames).
+    pub resolution: crate::cortao::CortaoResolution,
+    pub history: bool,
+    pub frame: u64,
+    pub reset: bool,
+}
+
 impl Renderer {
     /// Apply a world's camera-following probe lighting without invalidating
     /// an unchanged field. Soft local shadows stay enabled after GI is disabled.
@@ -41,13 +55,21 @@ impl Renderer {
     /// frame, so the occlusion trails the image by one frame. It is bound
     /// through `set_ssao`: the model lanes apply it to their ambient term
     /// only (never sun or lamps), as dark as `params.strength` (0 turns
-    /// it off) over `params.radius` metres. Cost: a chain of passes at
-    /// half resolution and below (ssao.rs).
-    pub fn run_screen_ao(&mut self, cx: &mut Cx2d, scene_pass: &DrawPass, depth: &Texture, size: DVec2, params: crate::ssao::SsaoParams) {
+    /// it off) over `params.radius` metres. CORTAO returns full-resolution
+    /// visibility, with optional temporal history owned by this view.
+    pub fn run_screen_ao(&mut self, cx: &mut Cx2d, scene_pass: &DrawPass, depth: &Texture, size: DVec2, mut params: ScreenAoParams) {
         let strength = params.strength;
+        // Re-enabling AO must not blend a history from before it was off.
+        params.reset |= self.ssao.is_none();
         let out = if strength > 0.0 { self.gi.run_screen_ao(cx, scene_pass.draw_pass_id(), depth, size, params) } else { None };
         self.set_ssao(out.map(|t| (t, strength.min(1.0))));
     }
+
+    /// The last `run_screen_ao` bound nothing only because the AO's pipelines
+    /// are still being made (native compiles them in the background, and
+    /// `Cx::draw_shaders_pending` sees only WebGL's): a host settling a still
+    /// frame records again rather than taking one without its AO.
+    pub fn screen_ao_pending(&self) -> bool { self.gi.screen_ao_pending() }
 
     /// A host's own GI scene, replacing what the renderer would take from the
     /// world and its models: its solids (meshes or distance fields, in the

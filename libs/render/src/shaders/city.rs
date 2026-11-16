@@ -190,7 +190,7 @@ script_mod! {
                 if is_facade > 0.5 { fm = orm.z * (1.0 - glass) }
                 let f0 = mix(vec3(0.04, 0.04, 0.04), albedo, fm)
                 let fv = f0 + (vec3(1.0, 1.0, 1.0) - f0) * self.pow5(1.0 - ndv)
-                let spec = self.c_ggx(n, v, l, rough) * pi_hdr
+                let spec = self.c_ggx(n, v, l, rough) * pi_hdr * self.key_lobe_gain(rough)
                 let smooth3 = 1.0 - rough
                 let fr = max(vec3(smooth3, smooth3, smooth3), f0)
                 // Rough dielectrics keep little of the grazing sheen (the
@@ -208,7 +208,7 @@ script_mod! {
                     // Clear coat: a second, near-mirror interface on top.
                     let cf = 0.04 + 0.96 * self.pow5(1.0 - ndv)
                     let cenv = self.c_reflect(normalize(refl), 0.12, night, 0.0)
-                    let cspec = self.c_ggx(n, v, l, 0.06) * pi_hdr
+                    let cspec = self.c_ggx(n, v, l, 0.06) * pi_hdr * self.key_lobe_gain(0.12)
                     lit = lit * (1.0 - cf) + (cenv * (ao * sao * spec_occ) + direct * cspec) * cf
                 }
                 // The reveal faces sideways, out of the sun: mostly sky fill.
@@ -236,7 +236,7 @@ script_mod! {
                     let gf0 = mix(0.04, 0.5, orm.z)
                     let gf = gf0 + (1.0 - gf0) * self.pow5(1.0 - gdv)
                     let genv = self.c_reflect(normalize(grefl), grough, night, is_facade * (1.0 - step(1.5, kind)))
-                    let gspec = self.c_ggx(gn, v, l, grough) * pi_hdr
+                    let gspec = self.c_ggx(gn, v, l, grough) * pi_hdr * self.key_lobe_gain(grough)
                     // What is behind the glass.
                     var room = albedo * (ambient * 0.6)
                     var glow = on * mix(0.3, 0.8, night) * mix(0.45, 1.0, m)

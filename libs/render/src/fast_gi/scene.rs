@@ -21,7 +21,8 @@ fn gi_mesh(cache:&mut crate::fast_gi::MeshCache,cx:&mut Cx,geometry:&Geometry,re
     let key=(geometry.geometry_id(),rev);let texture_id=texture.map(|t|t.texture_id());
     if let Some(e)=cache.geometry.get_mut(&key).and_then(|v|v.iter_mut().find(|e|e.0==texture_id)){e.2=generation;return Some(e.1.clone());}
     let image=texture.and_then(|t|match t.get_format(cx){
-        TextureFormat::VecBGRAu8_32{width,height,data:Some(data),..}|TextureFormat::VecMipBGRAu8_32{width,height,data:Some(data),..}=>gi_image(*width,*height,data),_=>None
+        TextureFormat::VecBGRAu8_32{width,height,data:Some(data),..}=>gi_image(*width,*height,data.as_slice()),
+        TextureFormat::VecMipBGRAu8_32{width,height,data:Some(data),..}=>gi_image(*width,*height,data.as_slice()),_=>None
     });
     let (indices,vertices)=geometry.cpu_buffers(cx);
     let mesh=Arc::new(Mesh::new(vertices.as_f32()?.to_vec(),indices.as_u32()?.to_vec(),stride,color_lane,image)?);

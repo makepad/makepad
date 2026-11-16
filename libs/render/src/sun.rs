@@ -1157,6 +1157,7 @@ mod tests {
     fn env_world(sun: Option<makepad_scene::EnvSun>, rotation_deg: f32) -> makepad_scene::World {
         let mut world = makepad_scene::World::new();
         world.environment.ibl = Some(makepad_scene::Ibl {
+            key_reflection: makepad_scene::KeyReflection::Light,
             source: makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)),
             intensity: 1.0,
             rotation_deg,

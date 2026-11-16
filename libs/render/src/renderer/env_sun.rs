@@ -13,7 +13,27 @@
 use super::*;
 use crate::sun::{EnvLighting, SunLight};
 
+/// How close a directional light must aim to the map's turned key to be that key
+/// (`Renderer::key_spec`).
+const KEY_AIM_DEG: f32 = 1.0;
+
 impl Renderer {
+    /// `[keyed levels, levels - 1]` for a light aimed within a degree of the
+    /// bound Map preparation's key as the world's IBL turns it, else `[0, 0]`.
+    /// A lane's lobe gain is `1 - clamp(x - rough * y, 0, 1)`, using that
+    /// lobe's environment lookup roughness: exactly 1 for `[0, 0]`. Hosts
+    /// pass the direction they light with, so a key aimed elsewhere keeps
+    /// its lobe. Diffuse and shadows are unchanged. One rotation and dot product.
+    pub fn key_spec(&self, world: &World, sun_dir: Vec3f) -> [f32; 2] {
+        let Some((key_levels, levels)) = self.ibl_key_levels() else {
+            return [0.0, 0.0];
+        };
+        // The map's key as the world's IBL turns it (None without a world IBL).
+        let key = crate::sun::env_daylight_dir_with(world, self.ibl_sun().map(|key| key.dir));
+        let aimed = sun_dir.normalize();
+        if key.is_some_and(|key| aimed.dot(key) >= KEY_AIM_DEG.to_radians().cos()) { [key_levels as f32, (levels - 1) as f32] } else { [0.0, 0.0] }
+    }
+
     /// What the environment lends the rig this frame: `Some` once the world
     /// names a finite IBL and a preparation has landed. renderer/ibl.rs
     /// keeps the previous preparation while a new one runs, so this can be

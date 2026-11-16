@@ -373,7 +373,7 @@ script_mod! {
             let e = 1.0 - ndv
             let back = 0.35 + 0.65 * max(0.0 - dot(l, v), 0.0)
             let edge = (self.sun_color * (back * mix(1.0, 3.14159265, self.lin_ctl.x) * 0.45) + self.sun_sky * 0.8) * (e * e * e * amb_occ * rim / 255.0)
-            return base * (1.0 - fc) + env * (fc * amb_occ * spec_occ) + sun * (glint * fc) + edge
+            return base * (1.0 - fc) + env * (fc * amb_occ * spec_occ) + sun * (glint * fc) * self.key_lobe_gain(0.03) + edge
         }
         // Every discard of this shader goes through here, as in
         // DrawSceneSkinned: a pipeline that can discard costs a tile GPU its
@@ -476,7 +476,7 @@ script_mod! {
                 let distribution=a2/max(3.14159265*denominator*denominator,0.000001)
                 let k=(rough+1.0)*(rough+1.0)*0.125
                 let geometry=(ndv/max(ndv*(1.0-k)+k,0.0001))*(ndl/max(ndl*(1.0-k)+k,0.0001))
-                let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))
+                let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))*self.key_lobe_gain(rough)
                 let diffuse=(vec3(1.0,1.0,1.0)-f)*base*((1.0-metal)/3.14159265)
                 // Sun and fill arrive as irradiance/pi units: the HDR lane
                 // restores the pi the 1/pi BRDF divides out.

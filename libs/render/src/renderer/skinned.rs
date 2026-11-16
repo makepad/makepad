@@ -645,7 +645,7 @@ mod tests {
         // A closed pool prepares on the spot: the call binds the texture.
         cx.use_closed_task_pool();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
-        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         let lane = renderer.ibl_texture().expect("premise: the environment is bound").texture_id();
         renderer.bind_skin_ibl(&cx, &mut skin.draw_vars);

@@ -177,7 +177,37 @@ pub struct MsdfTextImage {
     pub plate_cells: Option<[f32; 4]>,
 }
 
-pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
+/// A bake's size, distance range and plate cells (`MsdfTextImage`), without its pixels: what
+/// a material that shows the text needs before the text is rendered (`msdf_text`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MsdfTextMetrics {
+    pub width: u32,
+    pub height: u32,
+    pub range: f32,
+    pub plate_cells: Option<[f32; 4]>,
+}
+
+/// The shaped text and the placement a bake renders it with.
+struct Layout {
+    top: TextLine,
+    strip: Vec<TextGlyph>,
+    badge: &'static str,
+    settings: makepad_font_core::msdfer::Settings,
+    res: f32,
+    width: f32,
+    row_height: f32,
+    bw: f32,
+    bh: f32,
+    ox: f32,
+    baseline: f32,
+    metrics: MsdfTextMetrics,
+}
+
+/// A text's bake metrics: its shaping and placement, the cheap part of `msdf_text`, which
+/// renders the same text at exactly this size.
+pub fn msdf_text_metrics(spec: &MsdfTextSpec) -> Result<MsdfTextMetrics, String> { layout(spec).map(|l| l.metrics) }
+
+fn layout(spec: &MsdfTextSpec) -> Result<Layout, String> {
     let count = spec.text.chars().count();
     if spec.text.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
         return Err("text needs one line without control characters".into());
@@ -188,7 +218,7 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
         return Err("letter_spacing must be finite; padding and border_width must be finite, nonnegative ems".into());
     }
     let badge = if spec.plate { "plate" } else { spec.badge.as_deref().unwrap_or("") };
-    if !["", "circle", "plate", "rect"].contains(&badge) { return Err(format!("unknown badge '{badge}' (circle, plate, rect)")); }
+    let Some(badge) = ["", "circle", "plate", "rect"].into_iter().find(|b| *b == badge) else { return Err(format!("unknown badge '{badge}' (circle, plate, rect)")) };
     let face = text_face(&spec.font, spec.weight, spec.width)?;
     let mut top = shape_text(&face, &spec.text, spec.letter_spacing);
     let mut strip = Vec::new();
@@ -243,11 +273,19 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
     if !width.is_finite() || !height.is_finite() || width.max(height) > Limits::default().max_texture_dimension as f32 {
         return Err(format!("resolution {} with text length {count} exceeds the 4096 texel texture side", spec.resolution));
     }
-    let (w, rh, h) = (width as u32, row_height as u32, height as u32);
     let ox = (width - tw * res) * 0.5 - top.bounds[0] * res;
     let baseline = (row_height - th * res) * 0.5 + top.bounds[3] * res;
-    let mut image = MsdfTextImage { width: w, height: h, pixels: vec![0; w as usize * h as usize * 4], range: settings.radius,
+    let metrics = MsdfTextMetrics { width: width as u32, height: height as u32, range: settings.radius,
         plate_cells: spec.plate.then_some([(ox + blank_x * res) / width, cell * res / width, ox / width, cell * res / width]) };
+    Ok(Layout { top, strip, badge, settings, res, width, row_height, bw, bh, ox, baseline, metrics })
+}
+
+/// Renders a text's distance field (`MsdfTextSpec`): the same spec gives the same bytes.
+pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
+    let Layout { top, strip, badge, settings, res, width, row_height, bw, bh, ox, baseline, metrics } = layout(spec)?;
+    let guard = settings.padding as f32;
+    let (w, rh, h) = (metrics.width, row_height as u32, metrics.height);
+    let mut image = MsdfTextImage { width: w, height: h, pixels: vec![0; w as usize * h as usize * 4], range: metrics.range, plate_cells: metrics.plate_cells };
     let mut msdfer = Msdfer::new(settings);
     // Repeated glyphs (including prefix digits reused in the strip) render
     // only once, and a glyph an earlier bake rendered is not rendered again.

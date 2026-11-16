@@ -596,6 +596,8 @@ pub fn apply_edges(mesh: &TriMesh, chains: &[&EdgeChain], op: EdgeOp, tol: &Tole
         });
     }
     let mut out = mesh.clone();
+    // New surfaces are untagged until tags can be projected onto them.
+    out.tags.clear();
     if let Some(c) = cut {
         out = crate::bool3::difference(&out, &c);
     }

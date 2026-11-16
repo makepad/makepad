@@ -2,8 +2,7 @@ use crate::boolean::{mesh_boolean_with, BoolOp, FinishParams};
 use makepad_csg_math::{dvec3, Mat4d};
 use makepad_csg_mesh::{validate::validate_mesh, volume::mesh_volume};
 
-#[test]
-fn twisted_star_exact_face_contact() {
+pub(crate) fn twisted_star_meshes() -> (makepad_csg_mesh::TriMesh, makepad_csg_mesh::TriMesh) {
     // twisted_stack seed 287: the first pair already exposed a cap seam.
     let outline = [
         [3.5322014275280327, 0.0],
@@ -23,6 +22,12 @@ fn twisted_star_exact_face_contact() {
         1.1435348187473924_f64.to_radians(),
     ));
     b.transform(Mat4d::translation(dvec3(0.0, height, 0.0)));
+    (a, b)
+}
+
+#[test]
+fn twisted_star_exact_face_contact() {
+    let (a, b) = twisted_star_meshes();
     assert_eq!(a.bounding_box().max.y, b.bounding_box().min.y);
     let expected = mesh_volume(&a) + mesh_volume(&b);
     let mesh = mesh_boolean_with(&a, &b, BoolOp::Union, FinishParams::default());
@@ -33,6 +38,7 @@ fn twisted_star_exact_face_contact() {
     assert!(report.is_manifold, "{report:?}");
     assert!(report.is_consistently_oriented, "{report:?}");
     assert_eq!(report.degenerate_triangles, 0, "{report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "no near-duplicate or coincident vertex pairs: {report:?}");
     assert!(
         (volume - expected).abs() <= expected.abs() * 1e-9,
         "volume={volume}, expected={expected}"

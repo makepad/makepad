@@ -30,6 +30,7 @@ fn join(parent: &mut [usize], a: usize, b: usize) {
 /// triangle scan finds their complete stars. Edge storage and fan traversal are
 /// local to those stars, and inactive corners keep their original indices.
 pub(crate) fn separate_contact_fans(mesh: &mut TriMesh, active: &[bool]) {
+    let tagged = mesh.is_tagged();
     debug_assert_eq!(active.len(), mesh.vertex_count());
     let triangles: Vec<usize> = mesh.triangles.iter().enumerate()
         .filter(|(_, tri)| tri.iter().any(|&v| active[v as usize]))
@@ -126,11 +127,13 @@ pub(crate) fn separate_contact_fans(mesh: &mut TriMesh, active: &[bool]) {
         let mut splits: Vec<_> = splits.into_iter().collect();
         splits.sort_unstable_by_key(|s| s.0);
         let old = std::mem::take(&mut mesh.triangles);
+        let old_tags = if tagged { std::mem::take(&mut mesh.tags) } else { Vec::new() };
         mesh.clear_normals();
         mesh.triangles.reserve(old.len() + splits.len());
         let mut from = 0;
         for (ti, split) in splits {
             mesh.triangles.extend_from_slice(&old[from..ti]);
+            if tagged { mesh.tags.extend_from_slice(&old_tags[from..ti]); }
             from = ti + 1;
             let tri = old[ti];
             match split.iter().filter(|s| s.is_some()).count() {
@@ -154,7 +157,9 @@ pub(crate) fn separate_contact_fans(mesh: &mut TriMesh, active: &[bool]) {
                     }
                 }
             }
+            if tagged { mesh.tags.resize(mesh.triangles.len(), old_tags[ti]); }
         }
         mesh.triangles.extend_from_slice(&old[from..]);
+        if tagged { mesh.tags.extend_from_slice(&old_tags[from..]); }
     }
 }

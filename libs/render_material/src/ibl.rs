@@ -786,13 +786,40 @@ pub fn prefilter_spread(
     stop: &(dyn Fn() -> bool + Sync),
     run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)),
 ) -> Option<EnvAtlas> {
+    let pyr = Pyramid::new(env, 512);
+    prefilter_pyramids_spread(&pyr, &pyr, 0, base_width, levels, stop, run)
+}
+
+/// [`prefilter_spread`] with two sources: levels below `split` read `first`,
+/// the rest read `second`. Each level is built once, through the same row
+/// path as the single-source prefilter, and is bit-identical to that source's
+/// level. The extra cost is one source pyramid (at most 512 wide).
+pub fn prefilter_split_spread(
+    first: &EnvMap,
+    second: &EnvMap,
+    split: usize,
+    base_width: usize,
+    levels: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+    run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)),
+) -> Option<EnvAtlas> {
+    let first = Pyramid::new(first, 512);
+    let second = Pyramid::new(second, 512);
+    prefilter_pyramids_spread(&first, &second, split, base_width, levels, stop, run)
+}
+
+fn prefilter_pyramids_spread(
+    first: &Pyramid,
+    second: &Pyramid,
+    split: usize,
+    base_width: usize,
+    levels: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+    run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)),
+) -> Option<EnvAtlas> {
     let width = base_width.max(8);
     let level_height = width / 2;
     let levels = levels.clamp(1, 10);
-    let pyr = Pyramid::new(env, 512);
-    let w0 = pyr.levels[0].width as f32;
-    let texel_sa = 4.0 * PI / (w0 * w0 * 0.5);
-    let base_lod = (w0 / width as f32).log2().max(0.0);
     let mut data = vec![[0.0; 4]; width * level_height * levels];
     // Per-texel directions and tangent frames, shared by every level.
     let mut frames = Vec::with_capacity(width * level_height);
@@ -810,6 +837,10 @@ pub fn prefilter_spread(
         if stop() {
             return None;
         }
+        let pyr = if k < split { first } else { second };
+        let w0 = pyr.levels[0].width as f32;
+        let texel_sa = 4.0 * PI / (w0 * w0 * 0.5);
+        let base_lod = (w0 / width as f32).log2().max(0.0);
         let r = if levels == 1 { 0.0 } else { k as f32 / (levels - 1) as f32 };
         let samples = if k == 0 || r <= 0.0 { Vec::new() } else { ggx_samples(r, 64, texel_sa) };
         let level = &mut data[k * width * level_height..(k + 1) * width * level_height];
@@ -1230,6 +1261,90 @@ mod tests {
             // even if workers finish in a different order.
             let stop = || asked.fetch_add(1, Ordering::Relaxed) >= 4;
             assert!(prefilter_spread(&env, 16, 4, &stop, run).is_none(), "a mid-level stop discards the atlas");
+        }
+    }
+
+    #[test]
+    fn split_prefilter_keeps_each_sources_bits_and_cancellation() {
+        // Different source sizes catch using the other pyramid's texel solid angle or LOD.
+        let first = EnvMap::procedural(&EnvPreset::Softbox, 64, 1.0, 0.0);
+        let second = EnvMap::procedural(&EnvPreset::Sunset, 32, 1.0, 0.0);
+        let levels = 4;
+        let a = prefilter(&first, 16, levels);
+        let b = prefilter(&second, 16, levels);
+        let reverse = |n, f: &(dyn Fn(usize) + Sync)| (0..n).rev().for_each(f);
+        let bits = |level: EnvMap| level.data.into_iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+        for split in [0, 2, levels] {
+            let got = prefilter_split_spread(&first, &second, split, 16, levels, &|| false, &reverse).unwrap();
+            for k in 0..levels {
+                let source = if k < split { &a } else { &b };
+                assert_eq!(bits(got.level(k)), bits(source.level(k)), "split {split}, level {k}: row order and source switching preserve every bit");
+            }
+        }
+        // Stop partway through a keyed level and partway through a keyless level.
+        for boundary in [4, 2 * (1 + a.level_height) + 4] {
+            let asked = std::sync::atomic::AtomicUsize::new(0);
+            let stop = || asked.fetch_add(1, Ordering::Relaxed) >= boundary;
+            assert!(prefilter_split_spread(&first, &second, 2, 16, levels, &stop, &reverse).is_none(), "boundary {boundary}: a stopped split preparation returns no atlas");
+            assert_eq!(asked.load(Ordering::Relaxed), boundary + 1, "boundary {boundary}: no stop calls after cancellation");
+        }
+    }
+
+    #[test]
+    fn small_key_atlas_matches_lobe_after_prefilter_normalisation() {
+        // One key cap near the equator (where the pyramid's box filter is closest to uniform in
+        // solid angle), centred on an atlas texel so no texel interpolation enters, read from a
+        // 512-wide source as the renderer's lighting copy is.
+        let width = 64;
+        let (x, y) = (width / 4, width / 4);
+        let key_dir = equirect_uv_to_dir([(x as f32 + 0.5) / width as f32, (y as f32 + 0.5) / (width / 2) as f32]);
+        let cap = 10.0f32.to_radians();
+        let radiance = 20.0;
+        let env = EnvMap::from_fn(512, |d| if dot3(d, key_dir) >= cap.cos() { [radiance; 3] } else { [0.0; 3] });
+        let atlas = prefilter(&env, width, 6);
+        // Three levels give roughness 0.5 exactly.
+        let half = prefilter(&env, width, 3);
+        let read = |atlas: &EnvAtlas, level: usize| atlas.data[(level * atlas.level_height + y) * atlas.width + x][0];
+        let pyramid = Pyramid::new(&env, 512);
+        let w0 = pyramid.levels[0].width as f32;
+        let texel_sa = 4.0 * PI / (w0 * w0 * 0.5);
+        // GGX D (the shaders' and the sampler's), alpha = rough^2, at n.h = c.
+        let ggx = |rough: f32, c: f32| {
+            let a2 = (rough * rough).max(1e-4).powi(2);
+            let x = c * c * (a2 - 1.0) + 1.0;
+            a2 / (PI * x * x)
+        };
+        // Over the cap, with n = v = the key's centre: theta from the centre, n.l = cos theta,
+        // n.h = cos(theta / 2), the sampler's pdf(l) = D / 4.
+        let over_cap = |f: &dyn Fn(f32) -> f32| {
+            let steps = 400;
+            (0..steps).map(|i| {
+                let theta = (i as f32 + 0.5) / steps as f32 * cap;
+                f(theta) * theta.sin() * (cap / steps as f32) * TAU
+            }).sum::<f32>()
+        };
+        let comparisons = [(0.4f32, read(&atlas, 2)), (0.5, read(&half, 1)), (0.6, read(&atlas, 3)), (0.8, read(&atlas, 4)), (1.0, read(&atlas, 5))].map(|(rough, value)| {
+            // The prefilter weights each sample by n.l and divides by the sum: E[n.l] over the
+            // same 64 draws (samples below the horizon count as zero, as they add no weight).
+            let e = ggx_samples(rough, 64, texel_sa).iter().map(|(_, w, _)| *w).sum::<f32>() / 64.0;
+            let sampled = radiance * over_cap(&|t| t.cos() * ggx(rough, (t * 0.5).cos()) / 4.0);
+            // The directional lobe's view of the same key at normal incidence (G = 1): L D / 4.
+            let lobe = radiance * over_cap(&|t| ggx(rough, (t * 0.5).cos()) / 4.0);
+            let expected = sampled / e;
+            eprintln!("small-key prefilter normalisation: roughness {rough:.1}: atlas {value:.6}, lobe {lobe:.6}, atlas / lobe {:.4}, E[n.l] {e:.4}, atlas / (lobe-side n.l integral / E) {:.4}", value / lobe, value / expected);
+            (rough, value, expected, value / lobe, e)
+        });
+        // The unit check. The prefilter's n.l weighting divided by the sum of the weights can
+        // raise a small key by at most 1 / E[n.l] over the lobe's estimate; filtered importance
+        // sampling (each draw reads a pyramid level as wide as its share of the lobe) keeps it
+        // between the two (measured 1.04, 1.11, 1.22, 1.71, 2.63 at 0.4 .. 1.0). A factor of pi
+        // or the old gain of 3 falls outside. Where the key cut cross-fades the two estimators
+        // (roughness 0.4 to 0.6 for a 22 degree key) they agree within 1.3x.
+        for (rough, value, expected, raw, e) in comparisons {
+            assert!(raw >= 0.9 && raw <= 1.1 / e, "roughness {rough}: the small-key atlas lies between the lobe and the lobe over E[n.l] (atlas/lobe {raw}, 1/E {}, atlas {value}, n.l-weighted expectation {expected})", 1.0 / e);
+            if rough <= 0.6 {
+                assert!(raw <= 1.3, "roughness {rough}: in the cut's cross-fade band the atlas and the lobe agree within 1.3x (atlas/lobe {raw})");
+            }
         }
     }
 

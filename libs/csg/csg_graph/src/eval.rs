@@ -5,6 +5,7 @@ use makepad_csg_cad as cad;
 use makepad_csg_cad::Region;
 use makepad_csg_math::{dvec3, Vec3d};
 use makepad_csg_mesh::subdiv::{catmull_clark, Levels};
+use makepad_csg_mesh::transfer_tags;
 use std::collections::{HashMap, HashSet};
 
 const SANS: &[u8] = include_bytes!("../../../../widgets/resources/IBMPlexSans-SemiBold.ttf");
@@ -102,6 +103,26 @@ fn place(mut m: TriMesh, frame: (Vec3d, Vec3d, Vec3d)) -> TriMesh {
     m
 }
 
+fn transform_mesh(mut out: TriMesh, at: P3, rotate: P3, scale: P3) -> TriMesh {
+    let m = transform_matrix(at, rotate, scale);
+    out.clear_normals();
+    for p in &mut out.vertices {
+        let q = [p.x, p.y, p.z];
+        *p = dvec3(
+            m[0][0] * q[0] + m[0][1] * q[1] + m[0][2] * q[2] + m[0][3],
+            m[1][0] * q[0] + m[1][1] * q[1] + m[1][2] * q[2] + m[1][3],
+            m[2][0] * q[0] + m[2][1] * q[1] + m[2][2] * q[2] + m[2][3],
+        );
+    }
+    // A mirroring scale turns the triangles inside out.
+    if scale[0] * scale[1] * scale[2] < 0.0 {
+        for t in &mut out.triangles {
+            t.swap(1, 2);
+        }
+    }
+    out
+}
+
 fn nonempty(m: TriMesh, what: &str) -> Result<TriMesh, String> {
     if m.triangles.is_empty() {
         return Err(format!("the {what} is empty"));
@@ -113,11 +134,43 @@ fn v3(p: P3) -> Vec3d {
     dvec3(p[0], p[1], p[2])
 }
 
-/// The gear a node is (through transforms).
+fn tag_mesh(mut mesh: TriMesh, tag: u32) -> TriMesh {
+    mesh.tags = if tag == 0 { Vec::new() } else { vec![tag; mesh.triangle_count()] };
+    mesh
+}
+
+fn field_has_slots(node: &SdfNode) -> bool {
+    use SdfNode::*;
+    match node {
+        Material { .. } => true,
+        Combine { of, .. } => of.iter().any(field_has_slots),
+        Shell { of, .. } | Round { of, .. } | Transform { of, .. } | Instance { of, .. } | Bone { of, .. } | Deform { of, .. } | Id { of, .. } | Sculpt { of, .. } | Texture { of, .. } => field_has_slots(of),
+        Sphere { .. } | Box { .. } | Cylinder { .. } | Torus { .. } | Capsule { .. } | Ellipsoid { .. } | Gyroid { .. } | Kernel(_) | Mesh(_) | Links(_) | Tubes(_) | Sketch(_) => false,
+    }
+}
+
+// A tag changes the mesh channel, not the exact body used in a recipe.
+fn brep_source(g: &Graph, mut id: NodeId) -> NodeId {
+    while let Op::Tag { source, .. } = &g.node(id).op {
+        id = *source;
+    }
+    id
+}
+
+// Do not tessellate earlier bodies just to transfer an absent channel.
+fn brep_has_tags(g: &Graph, id: NodeId) -> bool {
+    match &g.node(id).op {
+        Op::Tag { tag, .. } => *tag != 0,
+        Op::Brep { inputs, .. } => inputs.iter().any(|&i| brep_has_tags(g, i)),
+        _ => false,
+    }
+}
+
+/// The gear a node is (through transforms and tags).
 fn gear_of(g: &Graph, id: NodeId) -> Option<&GearSpec> {
     match &g.node(id).op {
         Op::Gear { gear, .. } => Some(gear),
-        Op::Transform { source, .. } => gear_of(g, *source),
+        Op::Transform { source, .. } | Op::Tag { source, .. } => gear_of(g, *source),
         _ => None,
     }
 }
@@ -125,6 +178,7 @@ fn gear_of(g: &Graph, id: NodeId) -> Option<&GearSpec> {
 /// The recipe of a body: its steps, inputs before what reads them, each once.
 pub fn brep_steps(g: &Graph, id: NodeId) -> Vec<BrepStep> {
     fn visit(g: &Graph, id: NodeId, seen: &mut Vec<NodeId>, out: &mut Vec<BrepStep>) {
+        let id = brep_source(g, id);
         if seen.contains(&id) {
             return;
         }
@@ -134,7 +188,7 @@ pub fn brep_steps(g: &Graph, id: NodeId) -> Vec<BrepStep> {
             for i in inputs {
                 visit(g, *i, seen, out);
             }
-            out.push(BrepStep { key: node.key, op: op.clone(), inputs: inputs.iter().map(|i| g.node(*i).key).collect() });
+            out.push(BrepStep { key: node.key, op: op.clone(), inputs: inputs.iter().map(|i| g.node(brep_source(g, *i)).key).collect() });
         }
     }
     let (mut seen, mut out) = (Vec::new(), Vec::new());
@@ -345,14 +399,39 @@ impl Evaluator {
         }
         // A recipe for the engine: bodies, no meshes of the steps before.
         let engine = self.brep.clone().ok_or_else(|| Failure { node: id, op: node.op.name(), message: "this build has no B-rep engine".into() })?;
-        let m = engine.mesh(brep_steps(g, id), chord, cancelled).map_err(|f| {
+        let mut m = engine.mesh(brep_steps(g, id), chord, cancelled).map_err(|f| {
             // The failure belongs at the step's own line, not the last op's.
             let at = f.step.and_then(|k| g.nodes.iter().position(|n| n.key == k)).map_or(id, |i| NodeId(i as u32));
             Failure { node: at, op: g.node(at).op.name(), message: f.message }
         })?;
+        if let Op::Brep { op, inputs } = &node.op {
+            if let [source] = inputs.as_slice() {
+                if brep_has_tags(g, *source) {
+                    let source = self.brep_tag_mesh(g, *source, chord, cancelled)?;
+                    let tagged = source.is_tagged();
+                    if tagged {
+                        if let BrepOp::Place { at, rotate, scale } = op {
+                            let placed = transform_mesh((*source).clone(), *at, *rotate, *scale);
+                            transfer_tags(&placed, Arc::make_mut(&mut m));
+                        } else {
+                            transfer_tags(&source, Arc::make_mut(&mut m));
+                        }
+                    }
+                }
+            }
+        }
         self.built += 1;
         self.cache.insert((node.key, chord.to_bits()), (m.clone(), self.round));
         Ok(m)
+    }
+
+    fn brep_tag_mesh(&mut self, g: &Graph, id: NodeId, chord: f64, cancelled: Option<&dyn Fn() -> bool>) -> Result<Arc<TriMesh>, Failure> {
+        if let Op::Tag { source, tag } = &g.node(id).op {
+            let source = self.brep_tag_mesh(g, *source, chord, cancelled)?;
+            Ok(Arc::new(tag_mesh((*source).clone(), *tag)))
+        } else {
+            self.brep_at(g, id, chord, cancelled)
+        }
     }
 
     /// The draft as a cell scale: above 1 coarser (live editing), below 1 finer (export);
@@ -376,7 +455,7 @@ impl Evaluator {
 
     fn build(&mut self, g: &Graph, op: &Op, inputs: &[Arc<TriMesh>], cancelled: Option<&dyn Fn() -> bool>) -> Result<TriMesh, String> {
         let tol = self.tolerance;
-        match op {
+        let mut out = match op {
             Op::Box { size, radius } => {
                 if !(size[0] > 0.0 && size[1] > 0.0 && size[2] > 0.0) {
                     return Err("a box needs three positive sizes".into());
@@ -388,6 +467,13 @@ impl Evaluator {
                     return Err(format!("a {radius} rounding does not fit a box of {:?}", size));
                 }
                 Ok(rounded_box(*size, *radius, tol.segments(*radius, std::f64::consts::FRAC_PI_2).max(2)))
+            }
+            Op::Hull { points } => makepad_csg_primitives::hull(&points.iter().map(|p| v3(*p)).collect::<Vec<_>>()),
+            Op::RingLoft { rings, prism } => {
+                let rings: Vec<_> = rings.iter().map(|ring| makepad_csg_primitives::LoftRing {
+                    origin: v3(ring.origin), u: v3(ring.u), v: v3(ring.v), points: ring.points.clone(), crease: ring.crease,
+                }).collect();
+                makepad_csg_primitives::ring_loft(&rings, *prism)
             }
             Op::Sphere { radius, segments, rings } => {
                 if !(*radius > 0.0) {
@@ -536,33 +622,24 @@ impl Evaluator {
                 }
                 nonempty(out, op.name())
             }
-            Op::Transform { at, rotate, scale, .. } => {
-                let m = transform_matrix(*at, *rotate, *scale);
-                let mut out = (*inputs[0]).clone();
-                out.clear_normals();
-                for p in &mut out.vertices {
-                    let q = [p.x, p.y, p.z];
-                    *p = dvec3(
-                        m[0][0] * q[0] + m[0][1] * q[1] + m[0][2] * q[2] + m[0][3],
-                        m[1][0] * q[0] + m[1][1] * q[1] + m[1][2] * q[2] + m[1][3],
-                        m[2][0] * q[0] + m[2][1] * q[1] + m[2][2] * q[2] + m[2][3],
-                    );
-                }
-                // A mirroring scale turns the triangles inside out.
-                if scale[0] * scale[1] * scale[2] < 0.0 {
-                    for t in &mut out.triangles {
-                        t.swap(1, 2);
-                    }
-                }
-                Ok(out)
-            }
+            Op::Transform { at, rotate, scale, .. } => Ok(transform_mesh((*inputs[0]).clone(), *at, *rotate, *scale)),
+            Op::Tag { tag, .. } => Ok(tag_mesh((*inputs[0]).clone(), *tag)),
             Op::Field { shape, cell } => {
                 let (min, max) = (v3(shape.min), v3(shape.max));
                 if !(max.x > min.x && max.y > min.y && max.z > min.z) {
                     return Err("an SDF's bounds need min below max on every axis".into());
                 }
                 let cell = cell.unwrap_or_else(|| makepad_csg_sdf::default_cell(min, max, self.finest_cell)) * self.draft_scale();
-                nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell, shape.clearance()), "shape (nothing inside its surface)")
+                let mut out = makepad_csg_sdf::mesh_field(shape.field(), min, max, cell, shape.clearance());
+                let tagged = field_has_slots(&shape.root);
+                if tagged {
+                    out.tags = (0..out.triangle_count()).map(|ti| {
+                        let (a, b, c) = out.triangle_vertices(ti);
+                        let p = a + ((b - a) + (c - a)) / 3.0;
+                        makepad_csg_sdf::distance_slot(&shape.root, p).1 as u32
+                    }).collect();
+                }
+                nonempty(out, "shape (nothing inside its surface)")
             }
             Op::Mesh { mesh } => Ok((**mesh).clone()),
             // `mesh` hands these to the engine before it gets here.
@@ -577,7 +654,14 @@ impl Evaluator {
                 };
                 catmull_clark(&points.iter().map(|p| v3(*p)).collect::<Vec<_>>(), faces, levels, self.draft_scale() > 1.0)
             }
+        }?;
+        if matches!(op, Op::Fillet { .. } | Op::Chamfer { .. } | Op::Shell { .. } | Op::Offset { .. }) {
+            let tagged = inputs[0].is_tagged();
+            if tagged {
+                transfer_tags(&inputs[0], &mut out);
+            }
         }
+        Ok(out)
     }
 }
 
@@ -707,7 +791,7 @@ fn hole(source: &TriMesh, kind: HoleKind, d: f64, depth: Option<f64>, points: &[
 
 /// The cavity of a shell: points deeper than `t` inside the source.
 struct Cavity {
-    bvh: cad::measure::Bvh,
+    bvh: makepad_csg_mesh::bvh::Bvh,
     t: f64,
 }
 
@@ -719,7 +803,7 @@ impl makepad_csg_sdf::Sdf3 for Cavity {
 
 /// A solid with its surface moved out by `d`.
 struct Grown {
-    bvh: cad::measure::Bvh,
+    bvh: makepad_csg_mesh::bvh::Bvh,
     d: f64,
 }
 
@@ -742,7 +826,7 @@ fn offset(source: &TriMesh, d: f64, cell: Option<f64>, draft: f64) -> Result<Tri
     let depth = ((largest / cell).log2().ceil() as usize).clamp(4, 8);
     let pad = d.max(0.0) + cell;
     let pad = dvec3(pad, pad, pad);
-    let mut grown = makepad_csg_sdf::sdf_to_mesh(Grown { bvh: cad::measure::Bvh::build(source), d }, bb.min - pad, bb.max + pad, depth);
+    let mut grown = makepad_csg_sdf::sdf_to_mesh(Grown { bvh: makepad_csg_mesh::bvh::Bvh::build(source), d }, bb.min - pad, bb.max + pad, depth);
     if grown.triangles.is_empty() {
         return Err(format!("an offset of {d} leaves nothing of the solid"));
     }
@@ -771,7 +855,7 @@ fn shell(source: &TriMesh, t: f64, open: Open, cell: Option<f64>, draft: f64) ->
     let cell = cell.unwrap_or((t / 3.0).clamp(0.1, 2.0) * draft);
     let largest = ext.x.max(ext.y).max(ext.z);
     let depth = ((largest / cell).log2().ceil() as usize).clamp(4, 8);
-    let field = Cavity { bvh: cad::measure::Bvh::build(source), t };
+    let field = Cavity { bvh: makepad_csg_mesh::bvh::Bvh::build(source), t };
     let pad = dvec3(cell, cell, cell);
     let mut cavity = makepad_csg_sdf::sdf_to_mesh(field, bb.min - pad, bb.max + pad, depth);
     if cavity.triangles.is_empty() {

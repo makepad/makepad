@@ -13,8 +13,9 @@ impl Renderer {
     /// new realm's first frame. It invalidates every cache derived from the
     /// old world while retaining uploaded asset geometry/textures, shader
     /// and pass pools, stage policy, bake settings, shadow budget, the
-    /// local shadow atlas (its cache is keyed on content, below), and the
-    /// adaptive-quality history owned by this device.
+    /// local shadow atlas (its cache is keyed on content, below), the
+    /// adaptive-quality history owned by this device, and the grass field
+    /// (the host's to replace or remove with [`Self::set_grass`]).
     pub fn enter_realm(&mut self) {
         self.volume_fog.reset();
         self.ssr.reset();
@@ -39,7 +40,9 @@ impl Renderer {
         self.placed_prefix = None;
         self.csm_static_casters.clear();
         self.csm_static_blocks.clear();
-        self.grass = None;
+        // The grass stays: the host replaces or removes it (set_grass), so a
+        // level re-evaluated in place keeps drawing its field instead of
+        // showing none until the same field is prepared again.
         self.world_attachments.clear();
         self.view_models.clear();
         self.placed_scene_signature = None;
@@ -540,6 +543,8 @@ impl Renderer {
     /// every view; a fork kept across frames mirrors it again each frame.
     pub fn fork_scene_for_review(&self) -> Self {
         let mut review = Self::default();
+        // The review draws the same scene: its uploads follow the host's plan too.
+        review.texture_first_level = self.texture_first_level.clone();
         review.static_models = self.static_models.clone();
         review.model_casts_shadow = self.model_casts_shadow.clone();
         review.model_anim_state = self.model_anim_state.clone();
@@ -580,6 +585,10 @@ impl Renderer {
         review.clustered.shadows.source_radius = self.clustered.shadows.source_radius;
         review.star_texture = self.star_texture.clone();
         review.star_map_loaded = self.star_map_loaded;
+        // Scene state the host's lanes rely on in every view: which elements the passes keep and
+        // cast (the element lookup with its casters' key) and the silhouette tier's caster budget.
+        review.set_element_lookup(self.element_lookup.clone(), self.gpu_baker.element_lookup_casters());
+        review.set_shadow_budget(self.shadow_budget);
         review.mirror_stream_from(self);
         review.set_gpu_lightmap_mode(crate::GpuLightmapMode::Realtime);
         review.set_clustered_lighting(true);
@@ -618,9 +627,14 @@ impl Renderer {
             .map(|m| m.model.as_str()).collect();
         self.static_models.iter().filter(|(id, _)| used.contains(id.as_str())).all(|(_, model)| {
             std::iter::once(model).chain(model.lods.iter().map(|(_, m)| m)).all(|m| {
-                (!m.wants_pbr || self.pbr_ready) && (self.splat_ready ||
-                    !std::iter::once(&m.material).chain(m.extra_draws.iter().map(|l| &l.4))
-                        .any(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some())))
+                let layers = || std::iter::once(&m.material).chain(m.extra_draws.iter().map(|l| &l.4));
+                (!m.wants_pbr || self.pbr_ready)
+                    && (self.splat_ready || !layers().any(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some())))
+                    // A model with a far stand-in draws its own layers at
+                    // every distance until the stand-in's shader exists: a
+                    // picture taken then shows the mesh where the stand-in
+                    // belongs, and the stand-in pops in a frame later.
+                    && (self.impostor_shader.is_some() || !layers().any(|m| m.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0)))
             })
         })
     }
@@ -687,6 +701,46 @@ impl Renderer {
     pub fn install_custom_material(&mut self, name: String, material: CustomMaterial) -> bool {
         if !material.draw.draw_vars.can_instance() { return false; }
         self.custom_draws.insert(name, Box::new(material));
+        true
+    }
+
+    /// Build `material`'s shader variants for the `set`th feature set a
+    /// world's frames draw it with (renderer/variants.rs) before it
+    /// is installed; false past the last set. Its first draw builds them
+    /// otherwise, a 10-15 ms step for a lit material in the first frame
+    /// that shows it. A host's load prepares one set per staging step, so
+    /// that frame only draws.
+    pub fn prepare_custom_material(&self, cx: &mut Cx, material: &mut CustomMaterial, set: usize) -> bool {
+        let Some(features) = self.world_frame_features().get(set).copied() else { return false };
+        material.shaders(cx, features);
+        true
+    }
+
+    /// Make the light map's draws (its 18 depth, gather, filter and encode
+    /// shaders) before a world's first frame needs them: that frame made
+    /// them otherwise, about 22 ms of a cold launch's first world frame. A
+    /// host's load makes them while it stages. True when they were made by
+    /// this call; false when they are there already or the VM is busy (a
+    /// world's first frame makes them then).
+    pub fn prepare_lightmap_draws(&mut self, cx: &mut Cx) -> bool {
+        !self.gpu_baker.has_draws() && self.gpu_baker.ensure_draws(cx)
+    }
+
+    /// Make the post chain's and the screen AO's draws, and with `lamp_shadows` (the world
+    /// has shadowed lamps) the lamp shadows' depth draws, before a world's first frame needs
+    /// them: that frame made them otherwise, 13 shaders and about 7 ms of a cold launch's
+    /// first world frame. Their passes and targets wait for that frame. False when they are
+    /// there already.
+    pub fn prepare_post_draws(&mut self, cx: &mut Cx, lamp_shadows: bool) -> bool {
+        let lamp_shadows = lamp_shadows && self.clustered_enabled;
+        if self.post.draws_ready() && self.gi.screen_ao_draws_ready() && (!lamp_shadows || self.clustered.shadows.draws_ready()) {
+            return false;
+        }
+        self.post.prepare_draws(cx);
+        self.gi.prepare_screen_ao_draws(cx);
+        if lamp_shadows {
+            self.clustered.shadows.prepare_draws(cx);
+        }
         true
     }
 
@@ -812,6 +866,21 @@ impl Renderer {
         let stock = self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Foliage, stock).0 } else { None };
         self.foliage_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+    }
+
+    /// Decide once per frame, before any model pass, whether far stand-ins
+    /// draw this frame. Their shader is built as soon as a resident model has
+    /// a stand-in (its follow-up installed), in parallel with the other
+    /// lanes, not at a stand-in's first draw; until its pipeline exists every
+    /// model draws its own layers at every distance, and a review waits for
+    /// it (`review_materials_ready`).
+    pub(super) fn prepare_impostor_lane(&mut self, cx: &mut Cx) {
+        self.impostor_shader = None;
+        if !self.pbr_materials_enabled || !self.a_resident_layer(|s| s.definition.impostor > 0.0) {
+            return;
+        }
+        let hdr = self.hdr_output;
+        self.impostor_shader = self.lane_shaders(cx, super::variants::ModelLane::Impostor, None).0.filter(|id| cx.draw_shader_ready(*id, hdr));
     }
 
     pub(super) fn draw_custom_models(

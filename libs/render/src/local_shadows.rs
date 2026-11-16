@@ -12,8 +12,9 @@
 //!   does not flicker, and a light dimmed to nothing (a street lamp at noon)
 //!   never takes atlas faces.
 //! * Static faces are CACHED: a face is re-rendered only when its light
-//!   moved, its tile moved, the static caster set changed, or a mover is (or
-//!   was last time) inside its frustum. Re-rendered faces go into a lower
+//!   moved, its tile moved, the static caster set changed, a mover is (or
+//!   was last time) inside its frustum, or its last render drew while a
+//!   depth pipeline was still being made. Re-rendered faces go into a lower
 //!   depth "generation" of the atlas so a tile can be cleared on its own
 //!   (the pass clears its depth only as a whole and tests LessEqual, so
 //!   generation g writes the slice `[(G-1-g)/G, (G-g)/G]` and a tile-sized
@@ -294,6 +295,8 @@ pub(crate) struct LocalShadows {
     /// atlas content is valid at all (cleared on allocation / config).
     generation: u32,
     atlas_valid: bool,
+    /// The last render drew shadowed lamps short of whole (`drew_unready()`).
+    drew_unready: bool,
     statics_hash: u64,
     frames: u64,
     acc_rendered: usize,
@@ -333,6 +336,7 @@ impl Default for LocalShadows {
             dirty: Vec::new(),
             generation: 0,
             atlas_valid: false,
+            drew_unready: false,
             statics_hash: 0,
             frames: 0,
             acc_rendered: 0,
@@ -749,6 +753,52 @@ impl LocalShadows {
         full
     }
 
+    /// Make the lamp shadow draws (their depth shaders) before the first render with a
+    /// shadowed lamp, which made them otherwise. False while the script VM is held elsewhere.
+    pub(crate) fn prepare_draws(&mut self, cx: &mut Cx) -> bool {
+        if self.rigid.is_none() {
+            let Some((rigid, inside, skinned)) = cx.try_with_vm(|vm| {
+                (
+                    DrawLmLampDepth::script_new_with_default(vm),
+                    DrawLmLampDepthInside::script_new_with_default(vm),
+                    DrawLocalShadowSkinned::script_new_with_default(vm),
+                )
+            }) else {
+                return false;
+            };
+            self.rigid = Some(rigid);
+            self.inside = Some(inside);
+            self.skinned = Some(skinned);
+        }
+        true
+    }
+
+    pub(crate) fn draws_ready(&self) -> bool {
+        self.rigid.is_some()
+    }
+
+    /// Whether every depth draw's pipeline has answered (made, or failed for good).
+    fn depth_draws_settled(&self, cx: &Cx) -> bool {
+        let settled = |vars: Option<&DrawVars>| {
+            vars.and_then(|v| v.draw_shader_id).is_some_and(|id| cx.draw_shader_ready(id, false) || cx.draw_shader_failed(id))
+        };
+        settled(self.rigid.as_ref().map(|d| &d.draw_vars))
+            && settled(self.inside.as_ref().map(|d| &d.depth.draw_vars))
+            && settled(self.skinned.as_ref().map(|d| &d.base.draw_vars))
+    }
+
+    /// Whether this frame's shadowed lamps wait for a depth pipeline: until it answers their
+    /// faces render without casters.
+    pub(crate) fn draws_waiting(&self, cx: &Cx) -> bool {
+        !self.faces.is_empty() && !self.depth_draws_settled(cx)
+    }
+
+    /// Whether the last render drew shadowed lamps short of whole: faces before their depth
+    /// pipelines were made, or none while the draws could not be made (the VM was held).
+    pub(crate) fn drew_unready(&self) -> bool {
+        self.drew_unready
+    }
+
     pub fn render(
         &mut self,
         cx: &mut CxDraw,
@@ -759,6 +809,7 @@ impl LocalShadows {
         movers: &[GpuLmMover],
     ) {
         let start = Cx::monotonic_now();
+        self.drew_unready = false;
         if let Some(pass) = &self.pass {
             for ms in pass.take_gpu_times_ms(cx.cx) {
                 self.gpu_ms = crate::gpu_lightmap::ema_ms(self.gpu_ms, ms);
@@ -772,29 +823,22 @@ impl LocalShadows {
             self.upload_metadata(cx.cx);
             return;
         }
-        if self.rigid.is_none() {
-            let Some((rigid, inside, skinned)) = cx.cx.try_with_vm(|vm| {
-                (
-                    DrawLmLampDepth::script_new_with_default(vm),
-                    DrawLmLampDepthInside::script_new_with_default(vm),
-                    DrawLocalShadowSkinned::script_new_with_default(vm),
-                )
-            }) else {
-                self.stats.omitted_lights += self.stats.lights;
-                self.stats.lights = 0;
-                self.stats.faces = 0;
-                for record in &mut self.records {
-                    if record.count > 0 {
-                        record.count = -1;
-                    }
+        // The draws (their depth shaders) wait for the first shadowed lamp: a world without one
+        // only needs the one-texel depth binding below.
+        if !self.faces.is_empty() && !self.prepare_draws(cx.cx) {
+            // The lamps light unshadowed this frame (the VM is held): not a whole frame either.
+            self.drew_unready = true;
+            self.stats.omitted_lights += self.stats.lights;
+            self.stats.lights = 0;
+            self.stats.faces = 0;
+            for record in &mut self.records {
+                if record.count > 0 {
+                    record.count = -1;
                 }
-                self.faces.clear();
-                self.upload_metadata(cx.cx);
-                return;
-            };
-            self.rigid = Some(rigid);
-            self.inside = Some(inside);
-            self.skinned = Some(skinned);
+            }
+            self.faces.clear();
+            self.upload_metadata(cx.cx);
+            return;
         }
         // An initialized one-texel depth binding is still required when the
         // shader has no active shadow lights. Do not allocate a full atlas;
@@ -995,6 +1039,13 @@ impl LocalShadows {
         }
         list.end(cx);
         cx.end_pass(pass);
+        // A depth draw whose pipeline is still being made draws nothing, so the faces this pass
+        // rendered hold no casters yet: they are not cached, and the next render draws the atlas
+        // whole again (a lamp's first frames made its draws just now).
+        if !self.depth_draws_settled(cx.cx) {
+            self.drew_unready = true;
+            self.atlas_valid = false;
+        }
         self.upload_metadata(cx.cx);
         self.stats.encode_us = ((Cx::monotonic_now() - start) * 1e6) as u64;
     }

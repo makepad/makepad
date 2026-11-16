@@ -46,6 +46,11 @@ fn far_operand_marginal_op() {
         "far-operand union must stay closed+manifold: {:?}",
         report
     );
+    assert!(
+        report.near_duplicate_pairs == 0 && report.coincident_pairs == 0,
+        "far-operand union must have no near-duplicate or coincident vertex pairs: {:?}",
+        report
+    );
 
     // The far sphere takes no part (it passes through), and of the cluster only
     // what the bit reaches does: the same triangles as cutting the cluster alone.

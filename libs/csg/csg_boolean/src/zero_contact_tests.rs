@@ -4,10 +4,14 @@ use makepad_csg_mesh::{mesh::TriMesh, validate::validate_mesh, volume::mesh_volu
 use makepad_csg_primitives::{cube, cylinder};
 use std::collections::{HashMap, HashSet};
 
-fn check(mesh: &TriMesh, expected: f64, relative: f64) -> usize {
+/// `contacts`: the most coincident vertex pairs (contact copies the boolean keeps apart: one position, no edge)
+/// the result may keep; a count may only fall.
+fn check(mesh: &TriMesh, expected: f64, relative: f64, contacts: usize) -> usize {
     let report = validate_mesh(mesh);
     assert!(report.is_closed && report.is_manifold && report.is_consistently_oriented, "{report:?}");
     assert_eq!(report.degenerate_triangles, 0, "{report:?}");
+    assert_eq!(report.near_duplicate_pairs, 0, "no near-duplicate vertex pairs: {report:?}");
+    assert!(report.coincident_pairs <= contacts, "at most {contacts} coincident vertex pairs: {report:?}");
     let volume = mesh_volume(mesh);
     assert!((volume - expected).abs() <= relative * expected.abs(), "volume={volume:.17}, expected={expected:.17}");
     let mut edges = HashMap::<(u32, u32), Vec<usize>>::new();
@@ -56,8 +60,11 @@ fn outside_line_and_face_contact() {
         let angle = if face { std::f64::consts::PI / 8.0 } else { 0.0 };
         b.transform(Mat4d::rotation(dvec3(0.0, 1.0, 0.0), angle));
         b.transform(Mat4d::translation(dvec3(0.5 + 0.5 * angle.cos(), 0.0, 0.0)));
-        assert_eq!(check(&difference(&a, &b), mesh_volume(&a), 1e-12), 1);
-        assert_eq!(check(&union(&a, &b), mesh_volume(&a) + mesh_volume(&b), 1e-12), if face { 1 } else { 2 });
+        assert_eq!(check(&difference(&a, &b), mesh_volume(&a), 1e-12, 0), 1);
+        assert_eq!(
+            check(&union(&a, &b), mesh_volume(&a) + mesh_volume(&b), 1e-12, if face { 0 } else { 5 }),
+            if face { 1 } else { 2 }
+        );
     }
 }
 
@@ -69,7 +76,7 @@ fn inside_disc_tangent_lines() {
             let b = cylinder(0.5, t, seg, true);
             let result = difference(&a, &b);
             eprintln!("disc t={t} seg={seg}");
-            check(&result, mesh_volume(&a) - mesh_volume(&b), 1e-9);
+            check(&result, mesh_volume(&a) - mesh_volume(&b), 1e-9, if seg == 8 { 12 } else { 3 });
         }
     }
 }
@@ -79,7 +86,7 @@ fn point_contact_union() {
     let a = cube(dvec3(1.0, 1.0, 1.0), true);
     let mut b = a.clone();
     b.transform(Mat4d::translation(dvec3(1.0, 1.0, 1.0)));
-    assert_eq!(check(&union(&a, &b), 2.0, 1e-12), 2);
+    assert_eq!(check(&union(&a, &b), 2.0, 1e-12, 1), 2);
 }
 
 #[test]
@@ -89,10 +96,10 @@ fn near_face_contact_has_no_duplicate_wall() {
     let a = cube(dvec3(1.0, 1.0, 1.0), false);
     let mut b = a.clone();
     b.transform(Mat4d::translation(dvec3(1.0 + 1e-9, 0.0, 0.0)));
-    assert_eq!(check(&union(&a, &b), 2.0, 2e-9), 1);
+    assert_eq!(check(&union(&a, &b), 2.0, 2e-9, 0), 1);
     let mut b = a.clone();
     b.transform(Mat4d::translation(dvec3(1.0 + 3e-9, 0.0, 0.0)));
-    assert_eq!(check(&union(&a, &b), 2.0, 1e-12), 2);
+    assert_eq!(check(&union(&a, &b), 2.0, 1e-12, 0), 2);
 }
 
 #[test]
@@ -112,12 +119,17 @@ fn overlapping_edge_faces_are_not_separated() {
         "opposite faces overlapping along one ray must stay flagged");
 }
 
-#[test]
-fn tangent_segment_without_an_interior_vertex() {
+pub(crate) fn tangent_segment_meshes() -> (TriMesh, TriMesh) {
     let a = cube(dvec3(1.0, 1.0, 1.0), true);
     let mut b = cylinder(0.5, 1e-3, 9, true);
     b.transform(Mat4d::translation(dvec3(0.0, 0.25, 0.0)));
-    check(&difference(&a, &b), mesh_volume(&a) - mesh_volume(&b), 1e-9);
+    (a, b)
+}
+
+#[test]
+fn tangent_segment_without_an_interior_vertex() {
+    let (a, b) = tangent_segment_meshes();
+    check(&difference(&a, &b), mesh_volume(&a) - mesh_volume(&b), 1e-9, 1);
 }
 
 #[test]
@@ -127,12 +139,12 @@ fn contact_operand_with_distant_second_seam() {
     b.transform(Mat4d::translation(dvec3(1.0, 0.0, 0.0)));
     let pinched = union(&a, &b);
     let volume = mesh_volume(&a) + mesh_volume(&b);
-    assert_eq!(check(&pinched, volume, 1e-12), 2);
+    assert_eq!(check(&pinched, volume, 1e-12, 5), 2);
     let mut c = cube(dvec3(0.25, 0.25, 0.25), true);
     c.transform(Mat4d::translation(dvec3(-0.5, -0.5, -0.5)));
     // The weld rejoins the two shells' contact copies even though this cut
     // reaches only the opposite corner. Each output vertex must have one fan.
-    assert_eq!(check(&union(&pinched, &c), volume + 7.0 / 512.0, 1e-12), 2);
+    assert_eq!(check(&union(&pinched, &c), volume + 7.0 / 512.0, 1e-12, 5), 2);
 }
 
 #[test]
@@ -142,10 +154,10 @@ fn contact_operand_with_second_seam_through_pinch() {
     b.transform(Mat4d::translation(dvec3(1.0, 0.0, 0.0)));
     let pinched = union(&a, &b);
     let volume = mesh_volume(&a) + mesh_volume(&b);
-    assert_eq!(check(&pinched, volume, 1e-12), 2);
+    assert_eq!(check(&pinched, volume, 1e-12, 5), 2);
     let mut cutter = cube(dvec3(3.0, 0.25, 2.0), true);
     cutter.transform(Mat4d::translation(dvec3(0.5, 0.0, 0.0)));
     // Both new horizontal seams cross the tangent line; the remaining four
     // pieces each need a separate fan at the ends of their contact segments.
-    assert_eq!(check(&difference(&pinched, &cutter), 0.75 + mesh_volume(&b) * 0.5, 1e-12), 4);
+    assert_eq!(check(&difference(&pinched, &cutter), 0.75 + mesh_volume(&b) * 0.5, 1e-12, 4), 4);
 }

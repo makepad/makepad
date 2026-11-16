@@ -12,8 +12,10 @@
 //! attr  (4/tri):  (n0.xyz, u0) (n1.xyz, v0) (n2.xyz, u1)
 //!                 (v1, u2, v2, coplanar-group/priority code)
 //! bvh   (2/node): see bvh.rs (threaded skip-link layout)
-//! mat   (4/mat):  (albedo.rgb, roughness) (emission.rgb, metal)
-//!                 (ior, transmission, texture, 0) (atlas rect x, y, w, h)
+//! mat   (5/mat):  (albedo.rgb, roughness) (emission.rgb, metal)
+//!                 (ior, transmission, texture, two_sided)
+//!                 (atlas rect x, y, w, h) (absorption.rgb, solid)
+//!                 Booleans are 0/1; absorption is clamped to [0,1].
 //! light (1/emissive tri, then 6 normal-conditioned sky CDFs/cell):
 //!                 (direction bin, solid angle, selection pdf, cdf)
 //! ```
@@ -31,6 +33,8 @@ const ATLAS_GUTTER: usize = 1;
 pub const ENV_THETA_BINS: usize = 8;
 pub const ENV_PHI_BINS: usize = 16;
 pub const ENV_DIR_BINS: usize = ENV_THETA_BINS * ENV_PHI_BINS;
+/// Eight interfaces allow four solid walls (two interfaces each). The ninth
+/// trace may only prove escape; a ninth boundary is conservatively occluded.
 pub(crate) const MAX_SHADOW_GLASS_HITS: usize = 8;
 
 #[derive(Clone, Debug, Default)]
@@ -78,6 +82,10 @@ pub struct PackedScene {
     pub tri_coplanar_group: Vec<u32>,
     pub tri_count: usize,
     pub bounds: (Vec3f, Vec3f),
+    /// Bounds diagonal in scene units, computed once before rebasing.
+    pub scene_scale: f32,
+    /// Cached square of `scene_scale` for area-valued numerical guards.
+    pub scene_area: f32,
     /// World-space origin subtracted from all ray-traced geometry. Keeping
     /// traversal near zero preserves f32 precision in georeferenced models.
     pub origin: Vec3f,
@@ -87,24 +95,29 @@ pub struct PackedScene {
 impl PackedScene {
     /// Shadow-ray self-occlusion skin, scaled to the scene: a next-event
     /// (shadow) ray ignores blockers closer than this to the surface it
-    /// leaves. Building models stack coincident construction layers a few
-    /// millimetres apart; those layers black out each other's sun/sky rays
+    /// leaves. Building models stack nearly coincident construction layers;
+    /// those layers black out each other's sun/sky rays
     /// (measured on the woodside roof: 99% of all sun blockers on roof
     /// pixels sat within 5 cm of the surface) which converges to a dirty,
     /// half-shadowed surface where a rasterizer shows a clean one. A real
-    /// shadow caster (dormer, eave, furniture) is centimetres-to-metres
-    /// away and is unaffected. Deliberate, documented bias; the CPU twin
+    /// shadow caster (dormer, eave, furniture) lies beyond that band
+    /// and is unaffected. Deliberate, documented bias; the CPU twin
     /// applies the identical value.
     pub fn auto_shadow_skin(&self) -> f32 {
-        let d = self.bounds.1 - self.bounds.0;
-        let diag = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
-        (diag * 3.0e-4).clamp(0.002, 0.08)
+        self.scene_scale * 3.0e-4
+    }
+
+    /// Finite sky/continuation ray sentinel, matching PtTrace's far limit.
+    pub fn ray_tmax(&self) -> f32 {
+        self.scene_scale * 5.0e6
     }
 
     pub fn pack(scene: &SceneInput) -> PackedScene {
         let tri_count = scene.tri_count();
         assert!(tri_count < (1 << 24), "path tracer supports fewer than 2^24 triangles (f32 exact-index limit)");
         let bounds = scene.bounds();
+        let scene_scale = (bounds.1 - bounds.0).length();
+        let scene_area = scene_scale * scene_scale;
         let origin = bounds.0 + (bounds.1 - bounds.0) * 0.5;
         let p = |i: u32| {
             let v = scene.positions[i as usize];
@@ -115,10 +128,11 @@ impl PackedScene {
             .chunks_exact(3)
             .map(|t| Tri { v0: p(t[0]), v1: p(t[1]), v2: p(t[2]) })
             .collect();
-        let accel = Bvh::build_with_coplanar(
+        let accel = Bvh::build_with_scene_scale(
             &tris,
             &scene.tri_priority,
             &scene.tri_coplanar_group,
+            Some(scene_scale),
         );
         let has_n = scene.normals.len() == scene.positions.len();
         let has_uv = scene.uvs.len() == scene.positions.len();
@@ -233,7 +247,7 @@ impl PackedScene {
         // ray or bounce to a rendered path.
         let env_grid_dim = if tri_count > 0 { 6 } else { 0 };
         // Grid the occupied glazing bounds, not the full model bounds. Site
-        // meshes often extend tens of metres below the building and would put
+        // meshes often extend far below the building and would put
         // every inhabited point in one high, poorly represented cell.
         let (env_min, env_max) = if n_portals > 0 {
             let mut lo = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
@@ -254,11 +268,10 @@ impl PackedScene {
             (bounds.0 - origin, bounds.1 - origin)
         };
         let env_extent = env_max - env_min;
-        let env_inv_extent = vec3f(
-            1.0 / env_extent.x.max(1.0e-6),
-            1.0 / env_extent.y.max(1.0e-6),
-            1.0 / env_extent.z.max(1.0e-6),
-        );
+        let inv_extent = |extent: f32| {
+            if scene_scale > 0.0 { 1.0 / extent.max(scene_scale * 5.0e-9) } else { 0.0 }
+        };
+        let env_inv_extent = vec3f(inv_extent(env_extent.x), inv_extent(env_extent.y), inv_extent(env_extent.z));
         if env_grid_dim > 0 {
             let d = env_grid_dim as usize;
             let solid_angle = std::f32::consts::TAU / ENV_DIR_BINS as f32;
@@ -336,7 +349,7 @@ impl PackedScene {
 
         // Atlas + materials.
         let (atlas, rects) = build_atlas(&scene.images);
-        let mut mat = Vec::with_capacity(scene.materials.len() * 16);
+        let mut mat = Vec::with_capacity(scene.materials.len() * 20);
         for m in &scene.materials {
             mat.extend([m.albedo[0], m.albedo[1], m.albedo[2], m.roughness.clamp(0.0, 1.0)]);
             mat.extend([m.emission[0], m.emission[1], m.emission[2], m.metal.clamp(0.0, 1.0)]);
@@ -346,9 +359,16 @@ impl PackedScene {
             };
             mat.extend([m.ior.max(1.0), m.transmission.clamp(0.0, 1.0), tex, if m.two_sided { 1.0 } else { 0.0 }]);
             mat.extend(rect);
+            mat.extend([
+                m.absorption[0].clamp(0.0, 1.0),
+                m.absorption[1].clamp(0.0, 1.0),
+                m.absorption[2].clamp(0.0, 1.0),
+                if m.solid { 1.0 } else { 0.0 },
+            ]);
         }
         if mat.is_empty() {
             mat.extend([0.8, 0.8, 0.8, 1.0, 0.0, 0.0, 0.0, 0.0, 1.5, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            mat.extend([1.0, 1.0, 1.0, 0.0]);
         }
 
         PackedScene {
@@ -371,6 +391,8 @@ impl PackedScene {
             tri_coplanar_group,
             tri_count,
             bounds,
+            scene_scale,
+            scene_area,
             origin,
             light_power,
         }
@@ -402,7 +424,7 @@ fn ray_reaches_environment(
 ) -> bool {
     // The extra trace proves that the ray escaped after the last allowed hit.
     for _ in 0..=MAX_SHADOW_GLASS_HITS {
-        let hit = accel.trace_skip(origin, direction, 0.0, 1.0e9, false, skip);
+        let hit = accel.trace_skip(origin, direction, 0.0, accel.scene_scale * 5.0e6, false, skip);
         if hit.truncated {
             return false;
         }
@@ -415,7 +437,7 @@ fn ray_reaches_environment(
         if scene.materials.get(material).map_or(0.0, |m| m.transmission) <= 0.0 {
             return false;
         }
-        origin = origin + direction * (hit.t + 1.0e-4);
+        origin = origin + direction * (hit.t + accel.scene_scale * 5.0e-7);
         skip = hit.tri;
     }
     false

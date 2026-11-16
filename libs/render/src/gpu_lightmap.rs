@@ -1541,6 +1541,11 @@ impl GpuLightmapBaker {
         self.element_lookup_casters = casters;
     }
 
+    /// The host's key of the casters the element lookup names (`set_element_lookup`).
+    pub(crate) fn element_lookup_casters(&self) -> u64 {
+        self.element_lookup_casters
+    }
+
     /// The off-tier `csm_map` binding (1x1 sampled depth), created once.
     pub fn ensure_csm_fallback(&mut self, cx: &mut Cx) {
         if self.csm_fallback.is_none() {
@@ -1861,7 +1866,11 @@ impl GpuLightmapBaker {
         Some(delivery)
     }
 
-    fn ensure_draws(&mut self, cx: &mut Cx) -> bool {
+    pub(crate) fn has_draws(&self) -> bool {
+        self.draws.is_some()
+    }
+
+    pub(crate) fn ensure_draws(&mut self, cx: &mut Cx) -> bool {
         if self.draws.is_some() {
             return true;
         }

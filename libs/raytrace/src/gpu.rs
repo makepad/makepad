@@ -11,7 +11,7 @@
 //! resolve converts a transient invalid-sample sentinel back to clean sum/N
 //! reject  increments a persistent per-pixel NaN/Inf/traversal diagnostic
 //! moments running mean/mean² of luminance for variance (ping-pong)
-//! guide   (denoise) G-buffer → (normal, depth) once per frame
+//! guide   (denoise) G-buffer + straight dielectric continuation → (normal, depth)
 //! atrous  (denoise) 4 edge-avoiding wavelet passes guided by normal,
 //!         depth and the accumulated variance
 //! tonemap exposure + ACES + sRGB → BGRA8 view target (captured for PNG)
@@ -47,6 +47,7 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.DepthMeshVertex, geom.DepthMeshGeom)
         color_format: @Rgba32F
+        alpha_blend: false
         backface_culling: false
         v_bary: varying(vec4f)
         v_depth: varying(1.0)
@@ -66,7 +67,11 @@ script_mod! {
     mod.draw.PtTrace = mod.std.set_type_default() do #(DrawTrace::script_shader(vm)){
         ..mod.draw.DrawQuad
         draw_call_always: true
+        // The float targets hold data (alpha is the sample count): a fragment replaces the texel
+        // under it on every backend. Blending, which some backends apply to float targets, would
+        // fold each tile into the carried copy beneath it.
         color_format: @Rgba32F
+        alpha_blend: false
         tri_tex: texture_2d(float)
         attr_tex: texture_2d(float)
         bvh_tex: texture_2d(float)
@@ -105,9 +110,11 @@ script_mod! {
         max_diffuse: uniform(4.0)
         preview_clamp: uniform(0.0)
         shadow_skin: uniform(0.0)
+        // Bounds diagonal and its cached square (PackedScene, CPU twin).
+        scene_scale: uniform(vec2f)
         // Texture minification: one texel of the atlas, and the world size
-        // one pixel of the CURRENT rung subtends (per metre of ray length
-        // for perspective, absolute metres for ortho).
+        // one pixel of the CURRENT rung subtends (per unit ray length
+        // for perspective, scene units for ortho).
         atlas_inv: uniform(vec2f)
         pixel_world: uniform(0.0)
         adaptive_min: uniform(0.0)
@@ -214,7 +221,7 @@ script_mod! {
         fetch_light: fn(i: u32) -> vec4 { return self.light_tex.sample_nearest(self.tx(i, self.light_inv)) }
 
         hit_tie_eps: fn(t: f32) -> f32 {
-            return 0.002 + abs(t) * 0.000002
+            return self.scene_scale.x * 0.00001 + abs(t) * 0.000002
         }
 
         // ---- BVH4 traversal with Woop watertight triangle tests ----
@@ -444,6 +451,10 @@ script_mod! {
         }
 
         // ---- BSDF: Lambert + GGX (height-correlated Smith), Schlick Fresnel ----
+        // cross as written: the backend builtin may fuse its products, the CPU twin does not
+        cross3: fn(a: vec3, b: vec3) -> vec3 {
+            return vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+        }
         to_world: fn(n: vec3, l: vec3) -> vec3 {
             let sgn = if n.z >= 0.0 { 1.0 } else { -1.0 }
             let a = (0.0 - 1.0) / (sgn + n.z)
@@ -505,14 +516,42 @@ script_mod! {
             let rp = (ior * cosi - cost) / (ior * cosi + cost)
             return 0.5 * (rs * rs + rp * rp)
         }
-        // Material classes stay numeric in the shader data path. Class 1 is
-        // thin transmission; class 0 is an ordinary opaque surface.
+        // Exact solid-interface Fresnel: eta = incident/transmitted IOR.
+        solid_fresnel: fn(cosi_in: f32, eta: f32) -> f32 {
+            if eta == 1.0 { return 0.0 }
+            let cosi = clamp(cosi_in, 0.0, 1.0)
+            let sint2 = eta * eta * (1.0 - cosi * cosi)
+            if sint2 >= 1.0 { return 1.0 }
+            let cost = sqrt(1.0 - sint2)
+            let rs = (eta * cosi - cost) / (eta * cosi + cost)
+            let rp = (cosi - eta * cost) / (cosi + eta * cost)
+            return 0.5 * (rs * rs + rp * rp)
+        }
+        // xyz = direction, w = reflected. ng is outward, not face-forward.
+        solid_interface: fn(rd: vec3, ng: vec3, ior: f32, sample: f32) -> vec4 {
+            let front = dot(ng, rd) < 0.0
+            let eta = if front { 1.0 / ior } else { ior }
+            let n = if front { ng } else { -ng }
+            let cosi = clamp(0.0 - dot(rd, n), 0.0, 1.0)
+            let fr = self.solid_fresnel(cosi, eta)
+            if fr >= 1.0 || sample < fr {
+                return vec4(rd - n * (2.0 * dot(rd, n)), 1.0)
+            }
+            let cost = sqrt(max(1.0 - eta * eta * (1.0 - cosi * cosi), 0.0))
+            return vec4(normalize(rd * eta + n * (eta * cosi - cost)), 0.0)
+        }
+        medium_transmittance: fn(absorption: vec3, distance: f32) -> vec3 {
+            if distance <= 0.0 { return vec3(1.0, 1.0, 1.0) }
+            return pow(clamp(absorption, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(distance, distance, distance))
+        }
+        // Material classes stay numeric: 1 is dielectric, 0 is opaque.
+        // Material row 4.w separately selects a solid versus a thin sheet.
         material_class: fn(m2: vec4) -> f32 {
             if m2.y > 0.0 { return 1.0 }
             return 0.0
         }
         ray_error: fn(p: vec3) -> f32 {
-            return 0.000001 + max(max(abs(p.x), abs(p.y)), abs(p.z)) * 0.0000019073486
+            return self.scene_scale.x * 0.000000005 + max(max(abs(p.x), abs(p.y)), abs(p.z)) * 0.0000019073486
         }
         offset_ray: fn(p: vec3, ng: vec3, dir: vec3) -> vec3 {
             let n = if dot(ng, dir) >= 0.0 { ng } else { -ng }
@@ -526,17 +565,68 @@ script_mod! {
             for step in 0..4 {
                 h = self.trace(ro, rd, tmax, 0.0, tmin, skip)
                 if h.y < 0.0 { return h }
-                if h.x >= 0.01 { return h }
+                if h.x >= self.scene_scale.x * 0.00005 { return h }
                 let ti = u32(h.y)
                 let t0 = self.fetch_tri(ti * 3u)
                 let t1 = self.fetch_tri(ti * 3u + 1u)
                 let t2 = self.fetch_tri(ti * 3u + 2u)
-                let n = normalize(cross(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
+                let n = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
                 if dot(n, rd) <= 0.0 { return h }
+                // A real solid exit must survive even inside the neighbour band.
+                let m2 = self.fetch_mat(u32(t0.w) * 5u + 2u)
+                let m4 = self.fetch_mat(u32(t0.w) * 5u + 4u)
+                if m4.w > 0.5 && m2.y > 0.0 { return h }
                 let plane = abs(dot(n, p - t0.xyz)) / max(abs(dot(n, rd)), 0.000001)
                 tmin = max(plane, h.x) + self.ray_error(p)
             }
             return h
+        }
+        // Legacy thin exported-pane pairing, shared by transport and guides.
+        thin_transmission_trace: fn(p: vec3, ng: vec3, rd: vec3, ti: u32) -> vec4 {
+            var hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+            if hit.y >= 0.0 && hit.x < self.scene_scale.x * 0.0001 {
+                let back_ti = u32(hit.y)
+                let back_t0 = self.fetch_tri(back_ti * 3u)
+                let back_t1 = self.fetch_tri(back_ti * 3u + 1u)
+                let back_t2 = self.fetch_tri(back_ti * 3u + 2u)
+                let back_ng = normalize(self.cross3(back_t1.xyz - back_t0.xyz, back_t2.xyz - back_t0.xyz))
+                let t0 = self.fetch_tri(ti * 3u)
+                let t1 = self.fetch_tri(ti * 3u + 1u)
+                let t2 = self.fetch_tri(ti * 3u + 2u)
+                let raw_ng = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
+                if back_t0.w == t0.w && dot(back_ng, raw_ng) < -0.9 {
+                    let back_w0 = 1.0 - hit.z - hit.w
+                    let back_p = back_t0.xyz * back_w0 + back_t1.xyz * hit.z + back_t2.xyz * hit.w
+                    hit = self.spawn_trace(back_p, back_ng, rd, self.scene_scale.x * 5000000.0, hit.y)
+                }
+            }
+            return hit
+        }
+        // Deterministic straight transmission; no RNG, reflection, or bend.
+        // No guide when TIR prevents transmission or the budget is exhausted.
+        guide_hit: fn(first: vec4, rd: vec3) -> vec4 {
+            var hit = first
+            for layer in 0..9 {
+                if hit.y < 0.0 { return hit }
+                let ti = u32(hit.y)
+                let t0 = self.fetch_tri(ti * 3u)
+                let m2 = self.fetch_mat(u32(t0.w) * 5u + 2u)
+                if m2.y <= 0.0 { return hit }
+                if layer == 8u { break }
+                let m4 = self.fetch_mat(u32(t0.w) * 5u + 4u)
+                let t1 = self.fetch_tri(ti * 3u + 1u)
+                let t2 = self.fetch_tri(ti * 3u + 2u)
+                let ng = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
+                let p = t0.xyz * (1.0 - hit.z - hit.w) + t1.xyz * hit.z + t2.xyz * hit.w
+                if m4.w > 0.5 {
+                    let eta = if dot(ng, rd) < 0.0 { 1.0 / m2.x } else { m2.x }
+                    if self.solid_fresnel(abs(dot(ng, -rd)), eta) >= 1.0 { break }
+                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                } else {
+                    hit = self.thin_transmission_trace(p, ng, rd, ti)
+                }
+            }
+            return vec4(self.scene_scale.x * 5000000.0, -1.0, 0.0, 0.0)
         }
         shading_correction: fn(ng: vec3, ns: vec3, v: vec3, l: vec3) -> f32 {
             // Bounded at 4x (CPU twin agrees): the raw ratio is unbounded at
@@ -644,6 +734,8 @@ script_mod! {
             let pe = self.sky_pdf(rd)
             return l * (prev_pdf * prev_pdf / (prev_pdf * prev_pdf + pe * pe))
         }
+        // Straight NEE ignores bending, counts every solid interface, and
+        // applies absorption only on back-side arrivals (CPU shadow twin).
         shadow: fn(p_in: vec3, ng_in: vec3, rd: vec3, tmax_in: f32, skip_in: f32) -> vec4 {
             var p = p_in
             var ng = ng_in
@@ -658,59 +750,73 @@ script_mod! {
                 let h = self.spawn_trace(p, ng, rd, tmax, skip)
                 if h.y < -1.5 { return vec4(0.0, 0.0, 0.0, -1.0) }
                 if h.y < 0.0 { return vec4(tr, 0.0) }
+                if layer == 8u { return vec4(0.0, 0.0, 0.0, 0.0) }
                 let ti = u32(h.y)
                 let t0 = self.fetch_tri(ti * 3u)
                 let t1 = self.fetch_tri(ti * 3u + 1u)
                 let t2 = self.fetch_tri(ti * 3u + 2u)
+                let m2 = self.fetch_mat(u32(t0.w) * 5u + 2u)
+                let m4 = self.fetch_mat(u32(t0.w) * 5u + 4u)
+                let solid = m4.w > 0.5 && m2.y > 0.0
                 // Self-occlusion skin: a blocker within `shadow_skin` of the
                 // ORIGINAL surface is a stacked construction layer of the same
                 // assembly (mm separations), not a shadow caster — step past
                 // it. `travelled` bounds the total skip to one skin depth.
-                if travelled + h.x < self.shadow_skin {
+                if !solid && travelled + h.x < self.shadow_skin {
                     travelled = travelled + h.x
-                    ng = normalize(cross(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
+                    ng = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
                     let w0s = 1.0 - h.z - h.w
                     p = t0.xyz * w0s + t1.xyz * h.z + t2.xyz * h.w
                     skip = h.y
-                    if tmax < 500000000.0 {
+                    if tmax < self.scene_scale.x * 2500000.0 {
                         tmax = tmax - h.x - self.ray_error(p)
                         if tmax <= 0.0 { return vec4(tr, 0.0) }
                     }
                     continue
                 }
-                let m0 = self.fetch_mat(u32(t0.w) * 4u)
-                let m2 = self.fetch_mat(u32(t0.w) * 4u + 2u)
+                let m0 = self.fetch_mat(u32(t0.w) * 5u)
                 let material_class = self.material_class(m2)
                 if material_class < 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
-                ng = normalize(cross(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
-                let paired_back_face = previous_glass_material == t0.w && h.x < 0.02 && dot(previous_glass_normal, ng) < -0.9
+                ng = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
+                let paired_back_face = previous_glass_material == t0.w && h.x < self.scene_scale.x * 0.0001 && dot(previous_glass_normal, ng) < -0.9
                 let w0 = 1.0 - h.z - h.w
+                let segment_start = p
                 p = t0.xyz * w0 + t1.xyz * h.z + t2.xyz * h.w
                 skip = h.y
                 if paired_back_face {
                     previous_glass_material = -1.0
-                    if tmax < 500000000.0 {
+                    if tmax < self.scene_scale.x * 2500000.0 {
                         tmax = tmax - h.x - self.ray_error(p)
                         if tmax <= 0.0 { return vec4(tr, 0.0) }
                     }
                     continue
                 }
-                var tint = m0.xyz
-                if m2.z > 0.0 {
-                    let a0 = self.fetch_attr(ti * 4u)
-                    let a1 = self.fetch_attr(ti * 4u + 1u)
-                    let a2 = self.fetch_attr(ti * 4u + 2u)
-                    let a3 = self.fetch_attr(ti * 4u + 3u)
-                    let uv = vec2(a0.w, a1.w) * w0 + vec2(a2.w, a3.x) * h.z + vec2(a3.y, a3.z) * h.w
-                    let m3 = self.fetch_mat(u32(t0.w) * 4u + 3u)
-                    let tc = self.atlas_tex.sample_nearest(m3.xy + fract(uv) * m3.zw).xyz
-                    tint = tint * pow(tc, vec3(2.2, 2.2, 2.2))
+                if solid {
+                    let front = dot(ng, rd) < 0.0
+                    let eta = if front { 1.0 / m2.x } else { m2.x }
+                    if !front {
+                        tr = tr * self.medium_transmittance(m4.xyz, length(p - segment_start))
+                    }
+                    tr = tr * (m2.y * (1.0 - self.solid_fresnel(abs(dot(ng, -rd)), eta)))
+                    previous_glass_material = -1.0
+                } else {
+                    var tint = m0.xyz
+                    if m2.z > 0.0 {
+                        let a0 = self.fetch_attr(ti * 4u)
+                        let a1 = self.fetch_attr(ti * 4u + 1u)
+                        let a2 = self.fetch_attr(ti * 4u + 2u)
+                        let a3 = self.fetch_attr(ti * 4u + 3u)
+                        let uv = vec2(a0.w, a1.w) * w0 + vec2(a2.w, a3.x) * h.z + vec2(a3.y, a3.z) * h.w
+                        let m3 = self.fetch_mat(u32(t0.w) * 5u + 3u)
+                        let tc = self.atlas_tex.sample_nearest(m3.xy + fract(uv) * m3.zw).xyz
+                        tint = tint * pow(tc, vec3(2.2, 2.2, 2.2))
+                    }
+                    let fr = self.fresnel_dielectric(abs(dot(ng, -rd)), m2.x)
+                    tr = tr * tint * (m2.y * (1.0 - fr))
+                    previous_glass_material = t0.w
+                    previous_glass_normal = ng
                 }
-                let fr = self.fresnel_dielectric(abs(dot(ng, -rd)), m2.x)
-                tr = tr * tint * (m2.y * (1.0 - fr))
-                previous_glass_material = t0.w
-                previous_glass_normal = ng
-                if tmax < 500000000.0 {
+                if tmax < self.scene_scale.x * 2500000.0 {
                     tmax = tmax - h.x - self.ray_error(p)
                     if tmax <= 0.0 { return vec4(tr, 0.0) }
                 }
@@ -749,7 +855,7 @@ script_mod! {
                     dir = normalize(fp - ro)
                 }
                 rd = dir
-                hit = self.trace(ro, rd, 1000000000.0, 0.0, 0.0, -1.0)
+                hit = self.trace(ro, rd, self.scene_scale.x * 5000000.0, 0.0, 0.0, -1.0)
             }
             if self.debug_mode > 2.5 && self.debug_mode < 3.5 {
                 let r = self.sobol2(sidx, pseed, 3u)
@@ -773,7 +879,7 @@ script_mod! {
                     return nn * 0.5 + vec3(0.5, 0.5, 0.5)
                 }
                 let mid = u32(self.fetch_tri(u32(hit.y) * 3u).w)
-                return self.fetch_mat(mid * 4u).xyz
+                return self.fetch_mat(mid * 5u).xyz
             }
             // Primary parity with the raster pane (CPU twin agrees): the
             // camera ray passes through one-sided backfaces exactly as
@@ -789,14 +895,15 @@ script_mod! {
                 let sk0 = self.fetch_tri(skt * 3u)
                 let sk1 = self.fetch_tri(skt * 3u + 1u)
                 let sk2 = self.fetch_tri(skt * 3u + 2u)
-                let skn = cross(sk1.xyz - sk0.xyz, sk2.xyz - sk0.xyz)
+                let skn = self.cross3(sk1.xyz - sk0.xyz, sk2.xyz - sk0.xyz)
                 if dot(skn, rd) < 0.0 { break }
-                let skm = self.fetch_mat(u32(sk0.w) * 4u + 2u)
-                if skm.w > 0.5 { break }
+                let skm = self.fetch_mat(u32(sk0.w) * 5u + 2u)
+                let skm4 = self.fetch_mat(u32(sk0.w) * 5u + 4u)
+                if skm.w > 0.5 || (skm4.w > 0.5 && skm.y > 0.0) { break }
                 let skw = 1.0 - hit.z - hit.w
                 let skp = sk0.xyz * skw + sk1.xyz * hit.z + sk2.xyz * hit.w
                 let sko = self.offset_ray(skp, normalize(skn), rd)
-                hit = self.trace(sko, rd, 1000000000.0, 0.0, 0.0, f32(skt))
+                hit = self.trace(sko, rd, self.scene_scale.x * 5000000.0, 0.0, 0.0, f32(skt))
             }
             var tp = vec3(1.0, 1.0, 1.0)
             var lsum = vec3(0.0, 0.0, 0.0)
@@ -823,7 +930,7 @@ script_mod! {
                 let p = t0.xyz * w0 + t1.xyz * hit.z + t2.xyz * hit.w
                 let e1 = t1.xyz - t0.xyz
                 let e2 = t2.xyz - t0.xyz
-                let gn = cross(e1, e2)
+                let gn = self.cross3(e1, e2)
                 var ng = normalize(gn)
                 let a0 = self.fetch_attr(ti * 4u)
                 let a1 = self.fetch_attr(ti * 4u + 1u)
@@ -832,11 +939,15 @@ script_mod! {
                 var ns = normalize(a0.xyz * w0 + a1.xyz * hit.z + a2.xyz * hit.w)
                 let uv = vec2(a0.w, a1.w) * w0 + vec2(a2.w, a3.x) * hit.z + vec2(a3.y, a3.z) * hit.w
                 let mi = u32(t0.w)
-                let m0 = self.fetch_mat(mi * 4u)
-                let m1 = self.fetch_mat(mi * 4u + 1u)
-                let m2 = self.fetch_mat(mi * 4u + 2u)
+                let m0 = self.fetch_mat(mi * 5u)
+                let m1 = self.fetch_mat(mi * 5u + 1u)
+                let m2 = self.fetch_mat(mi * 5u + 2u)
+                let m4 = self.fetch_mat(mi * 5u + 4u)
                 var front = 1.0
                 if dot(ng, rd) >= 0.0 { front = 0.0 }
+                if m4.w > 0.5 && m2.y > 0.0 && front < 0.5 {
+                    tp = tp * self.medium_transmittance(m4.xyz, length(p - ro))
+                }
                 if front < 0.5 {
                     // One-sided backfaces shade with the flipped normal
                     // instead of terminating black (CPU twin agrees);
@@ -847,7 +958,7 @@ script_mod! {
                 if dot(ns, ng) < 0.05 { ns = ng }
                 var albedo = m0.xyz
                 if m2.z > 0.0 {
-                    let m3 = self.fetch_mat(mi * 4u + 3u)
+                    let m3 = self.fetch_mat(mi * 5u + 3u)
                     var tc = self.atlas_tex.sample_nearest(m3.xy + fract(uv) * m3.zw).xyz
                     // Minification: a nearest fetch on a texture tiled tens
                     // to hundreds of times under one pixel is a per-sample
@@ -867,9 +978,9 @@ script_mod! {
                         // Take the worst of the area metric and the two
                         // edge densities, and stretch the footprint by the
                         // incidence angle.
-                        let d_area = sqrt(uv_area / max(length(gn), 0.000000000001))
-                        let d1 = length(duv1) / max(length(e1), 0.000001)
-                        let d2 = length(duv2) / max(length(e2), 0.000001)
+                        let d_area = sqrt(uv_area / max(length(gn), self.scene_scale.y * 0.000000000000000025))
+                        let d1 = length(duv1) / max(length(e1), self.scene_scale.x * 0.000000005)
+                        let d2 = length(duv2) / max(length(e2), self.scene_scale.x * 0.000000005)
                         let density = max(d_area, max(d1, d2))
                         var footprint_m = self.pixel_world * hit.x
                         if self.ortho.x > 0.0 { footprint_m = self.pixel_world }
@@ -893,9 +1004,9 @@ script_mod! {
                     var w = 1.0
                     if delta < 0.5 && self.brute < 0.5 {
                         let area = length(gn) * 0.5
-                        let raw_n = gn / max(length(gn), 0.00000000000000000001)
+                        let raw_n = gn / max(length(gn), self.scene_scale.y * 0.00000000000000000000000025)
                         let cosl = if m2.w > 0.5 { abs(dot(raw_n, -rd)) } else { max(dot(raw_n, -rd), 0.0) }
-                        let pl = hit.x * hit.x * t2.w / max(cosl * area, 0.000001)
+                        let pl = hit.x * hit.x * t2.w / max(cosl * area, self.scene_scale.y * 0.000000000025)
                         w = prev_pdf * prev_pdf / (prev_pdf * prev_pdf + pl * pl)
                     }
                     lsum = lsum + tp * emission * w
@@ -907,32 +1018,34 @@ script_mod! {
                 let r_light = self.sobol2(sidx, pseed, dim + 3u)
                 let r_misc = self.sobol2(sidx, pseed, dim + 4u)
                 let v = -rd
+                if m4.w > 0.5 && trans > 0.0 {
+                    let event = self.solid_interface(rd, normalize(gn), ior, r_lobe.x)
+                    rd = event.xyz
+                    if event.w > 0.5 {
+                        delta = 1.0
+                    } else {
+                        tp = tp * trans
+                        // Retain diffuse NEE ownership, as for thin sheets.
+                    }
+                    ro = p
+                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                    continue
+                }
                 // Thin dielectric: alpha is straight-through absorption, not
                 // a diffuse/opaque lobe probability. Fresnel alone selects
                 // reflection versus transmission.
                 if material_class > 0.5 {
+                    ro = p
                     let fr = self.fresnel_dielectric(abs(dot(ng, v)), ior)
                     if r_lobe.x < fr {
                         rd = rd - ng * (2.0 * dot(rd, ng))
                         delta = 1.0
-                        hit = self.spawn_trace(p, ng, rd, 1000000000.0, f32(ti))
+                        hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
                     } else {
                         tp = tp * albedo * trans
                         // Preserve a preceding diffuse event so its direct
                         // environment contribution remains owned by NEE.
-                        hit = self.spawn_trace(p, ng, rd, 1000000000.0, f32(ti))
-                        if hit.y >= 0.0 && hit.x < 0.02 {
-                            let back_ti = u32(hit.y)
-                            let back_t0 = self.fetch_tri(back_ti * 3u)
-                            let back_t1 = self.fetch_tri(back_ti * 3u + 1u)
-                            let back_t2 = self.fetch_tri(back_ti * 3u + 2u)
-                            let back_ng = normalize(cross(back_t1.xyz - back_t0.xyz, back_t2.xyz - back_t0.xyz))
-                            if back_t0.w == t0.w && dot(back_ng, normalize(gn)) < -0.9 {
-                                let back_w0 = 1.0 - hit.z - hit.w
-                                let back_p = back_t0.xyz * back_w0 + back_t1.xyz * hit.z + back_t2.xyz * hit.w
-                                hit = self.spawn_trace(back_p, back_ng, rd, 1000000000.0, hit.y)
-                            }
-                        }
+                        hit = self.thin_transmission_trace(p, ng, rd, ti)
                     }
                     continue
                 }
@@ -950,7 +1063,7 @@ script_mod! {
                         if dot(ng, ld) > 0.0 && dot(ns, ld) <= 0.0 { n_nee = ng }
                         let nl = dot(n_nee, ld)
                         if nl > 0.0 && dot(ng, ld) > 0.0 {
-                            let sh = self.shadow(p, ng, ld, 1000000000.0, f32(ti))
+                            let sh = self.shadow(p, ng, ld, self.scene_scale.x * 5000000.0, f32(ti))
                             if sh.w < 0.0 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
                             if sh.x + sh.y + sh.z > 0.0 {
                                 let omega = 6.28318530718 * (1.0 - self.sun_dir.w)
@@ -968,7 +1081,7 @@ script_mod! {
                     if dot(ng, ld) > 0.0 && dot(ns, ld) <= 0.0 { n_nee = ng }
                     let nl = dot(n_nee, ld)
                     if nl > 0.0 && dot(ng, ld) > 0.0 {
-                        let sh = self.shadow(p, ng, ld, 1000000000.0, f32(ti))
+                        let sh = self.shadow(p, ng, ld, self.scene_scale.x * 5000000.0, f32(ti))
                         if sh.w < 0.0 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
                         if pe > 0.0 && sh.x + sh.y + sh.z > 0.0 {
                             let ps_nee = self.spec_prob(f0, kd, max(dot(n_nee, v), 0.0001))
@@ -1000,7 +1113,7 @@ script_mod! {
                     let bw1 = su * (1.0 - r_light.y)
                     let bw2 = su * r_light.y
                     let lp = l0.xyz * (1.0 - su) + l1.xyz * bw1 + l2.xyz * bw2
-                    let lnrm = normalize(cross(l1.xyz - l0.xyz, l2.xyz - l0.xyz))
+                    let lnrm = normalize(self.cross3(l1.xyz - l0.xyz, l2.xyz - l0.xyz))
                     let nominal = normalize(lp - p)
                     let origin = self.offset_ray(p, ng, nominal)
                     var ld = lp - origin
@@ -1009,14 +1122,14 @@ script_mod! {
                     var n_nee = ns
                     if dot(ng, ld) > 0.0 && dot(ns, ld) <= 0.0 { n_nee = ng }
                     let nl = dot(n_nee, ld)
-                    let lm2 = self.fetch_mat(u32(l0.w) * 4u + 2u)
+                    let lm2 = self.fetch_mat(u32(l0.w) * 5u + 2u)
                     let cosl = if lm2.w > 0.5 { abs(dot(lnrm, -ld)) } else { max(dot(lnrm, -ld), 0.0) }
                     if nl > 0.0 && dot(ng, ld) > 0.0 && cosl > 0.0001 && dist > self.ray_error(p) + self.ray_error(lp) {
                         let sh = self.shadow(p, ng, ld, dist - self.ray_error(lp), f32(ti))
                         if sh.w < 0.0 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
                         if sh.x + sh.y + sh.z > 0.0 {
-                            let lm = self.fetch_mat(u32(l0.w) * 4u + 1u).xyz
-                            let pl = dist * dist * lrec.z / max(cosl * lrec.y, 0.00000001)
+                            let lm = self.fetch_mat(u32(l0.w) * 5u + 1u).xyz
+                            let pl = dist * dist * lrec.z / max(cosl * lrec.y, self.scene_scale.y * 0.00000000000025)
                             let ps_nee = self.spec_prob(f0, kd, max(dot(n_nee, v), 0.0001))
                             let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha)
                             let pb = self.bsdf_pdf(n_nee, v, ld, alpha, ps_nee)
@@ -1064,7 +1177,8 @@ script_mod! {
                     tp = tp / q
                 }
                 rd = ld
-                hit = self.spawn_trace(p, ng, rd, 1000000000.0, f32(ti))
+                ro = p
+                hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
             }
             let peak = max(max(lsum.x, lsum.y), lsum.z)
             if self.preview_clamp > 0.0 && peak > self.preview_clamp { lsum = lsum * (self.preview_clamp / peak) }
@@ -1132,6 +1246,7 @@ script_mod! {
     mod.draw.PtCopy = mod.std.set_type_default() do #(DrawCopy::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
+        alpha_blend: false
         src_tex: texture_2d(float)
         reset: uniform(0.0)
         vertex: fn() {
@@ -1159,6 +1274,7 @@ script_mod! {
     mod.draw.PtCarry = mod.std.set_type_default() do #(DrawCarry::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
+        alpha_blend: false
         src_tex: texture_2d(float)
         hold_tex: texture_2d(float)
         rej_tex: texture_2d(float)
@@ -1237,6 +1353,7 @@ script_mod! {
     mod.draw.PtResolve = mod.std.set_type_default() do #(DrawResolve::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
+        alpha_blend: false
         src_tex: texture_2d(float)
         vertex: fn() {
             let clipped = self.geom.pos * self.rect_size + self.rect_pos
@@ -1254,6 +1371,7 @@ script_mod! {
     mod.draw.PtReject = mod.std.set_type_default() do #(DrawReject::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
+        alpha_blend: false
         src_tex: texture_2d(float)
         prev_tex: texture_2d(float)
         reset: uniform(0.0)
@@ -1275,6 +1393,7 @@ script_mod! {
     mod.draw.PtMoments = mod.std.set_type_default() do #(DrawMoments::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
+        alpha_blend: false
         prev_tex: texture_2d(float)
         cur_tex: texture_2d(float)
         mom_tex: texture_2d(float)
@@ -1304,37 +1423,44 @@ script_mod! {
         }
     }
 
+    // PtTrace with correctly rounded division, roots and vector forms: a sample is the CPU
+    // twin's to the bit. It traces about 11% fewer paths per second, so only
+    // `RenderSettings::exact` (the parity selftest, a host's Exact setting) draws it.
+    mod.draw.PtTraceExact = mod.draw.PtTrace{precise_math: true}
+
     mod.draw.PtGuide = mod.std.set_type_default() do #(DrawGuide::script_shader(vm)){
-        ..mod.draw.DrawQuad
-        color_format: @Rgba32F
-        gbuf_tex: texture_2d(float)
-        attr_tex: texture_2d(float)
-        attr_inv: uniform(vec2f)
-        vertex: fn() {
-            let clipped = self.geom.pos * self.rect_size + self.rect_pos
-            self.pos = self.geom.pos
-            self.world = vec4(clipped.x, clipped.y, self.draw_depth, 1.0)
-            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
-        }
-        tx: fn(i: u32) -> vec2 {
-            return (vec2(f32(i & 2047u), f32(i >> 11u)) + vec2(0.5, 0.5)) * self.attr_inv
-        }
+        // Inherit the exact traversal/offset/material helpers used by transport.
+        ..mod.draw.PtTrace
         pixel: fn() {
             let g = self.gbuf_tex.sample_nearest(self.pos)
             if g.x < 0.0 { return vec4(0.0, 0.0, 0.0, -1.0) }
-            let ti = u32(g.x)
-            let a0 = self.attr_tex.sample_nearest(self.tx(ti * 4u))
-            let a1 = self.attr_tex.sample_nearest(self.tx(ti * 4u + 1u))
-            let a2 = self.attr_tex.sample_nearest(self.tx(ti * 4u + 2u))
-            let w0 = 1.0 - g.y - g.z
-            let n = normalize(a0.xyz * w0 + a1.xyz * g.y + a2.xyz * g.z)
-            return vec4(n, g.w)
+            let ndc = vec2((self.world.x + self.jitter.x) * self.inv_res.x * 2.0 - 1.0, 1.0 - (self.world.y + self.jitter.y) * self.inv_res.y * 2.0)
+            var rd = normalize(self.cam_fwd + self.cam_right * (ndc.x * self.cam_tan.x) + self.cam_up * (ndc.y * self.cam_tan.y))
+            if self.ortho.x > 0.0 { rd = self.cam_fwd }
+            let hit = self.guide_hit(vec4(g.w, g.x, g.y, g.z), rd)
+            if hit.y < 0.0 { return vec4(0.0, 0.0, 0.0, -1.0) }
+            let ti = u32(hit.y)
+            let a0 = self.fetch_attr(ti * 4u)
+            let a1 = self.fetch_attr(ti * 4u + 1u)
+            let a2 = self.fetch_attr(ti * 4u + 2u)
+            let w0 = 1.0 - hit.z - hit.w
+            let n = normalize(a0.xyz * w0 + a1.xyz * hit.z + a2.xyz * hit.w)
+            var depth = g.w
+            if hit.y != g.x {
+                let t0 = self.fetch_tri(ti * 3u)
+                let t1 = self.fetch_tri(ti * 3u + 1u)
+                let t2 = self.fetch_tri(ti * 3u + 2u)
+                let p = t0.xyz * w0 + t1.xyz * hit.z + t2.xyz * hit.w
+                depth = dot(p - self.cam_pos, self.cam_fwd)
+            }
+            return vec4(n, depth)
         }
     }
 
     mod.draw.PtAtrous = mod.std.set_type_default() do #(DrawAtrous::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
+        alpha_blend: false
         src_tex: texture_2d(float)
         guide_tex: texture_2d(float)
         mom_tex: texture_2d(float)
@@ -1342,6 +1468,7 @@ script_mod! {
         step: uniform(1.0)
         sigma_l: uniform(4.0)
         geom_weight: uniform(1.0)
+        scene_scale: uniform(0.0)
         // Absolute luminance sigma (radiance units), fading as 1/sqrt(N):
         // at one sample per pixel the moment variance is identically zero
         // and the edge-stopping weight otherwise refuses to smooth at all —
@@ -1391,7 +1518,7 @@ script_mod! {
                         } else {
                             if gq.w < 0.0 { w = 0.0 }
                             let wn = pow(max(dot(g.xyz, gq.xyz), 0.0), 32.0)
-                            let wz = exp((0.0 - abs(g.w - gq.w)) / (abs(g.w) * 0.03 * self.step + 0.0001))
+                            let wz = exp((0.0 - abs(g.w - gq.w)) / (abs(g.w) * 0.03 * self.step + self.scene_scale * 0.0000005))
                             w = w * wn * wz
                         }
                     }
@@ -1704,7 +1831,7 @@ pub struct RenderSettings {
     pub max_steps: u32,
     /// Shadow-ray self-occlusion skin in scene units: next-event rays ignore
     /// blockers closer than this to the surface they leave (stacked
-    /// construction layers a few mm apart otherwise black each other out).
+    /// nearly coincident construction layers otherwise black each other out).
     /// Negative = automatic ([`crate::pack::PackedScene::auto_shadow_skin`]);
     /// 0 disables the skin (unbiased reference).
     pub shadow_skin: f32,
@@ -1719,6 +1846,11 @@ pub struct RenderSettings {
     /// first few budgeted dispatches instead of a spiral of tiles crawling
     /// across an empty frame. Off = native-only (headless/F12/parity runs).
     pub progressive: bool,
+    /// Trace with `mod.draw.PtTraceExact`: correctly rounded arithmetic, so every sample is
+    /// the CPU twin's to the bit, at about 11% of the throughput (1080p, 16 spp: 0.96
+    /// against 1.07-1.10 Mpaths/s). Off = the fast trace, whose samples differ from the
+    /// twin's by rounding.
+    pub exact: bool,
 }
 
 impl Default for RenderSettings {
@@ -1748,6 +1880,7 @@ impl Default for RenderSettings {
             shadow_skin: -1.0,
             untraced_transparent: false,
             progressive: false,
+            exact: false,
         }
     }
 }
@@ -1949,12 +2082,18 @@ pub struct RayTracer {
     /// Index of the view texture written LAST (what `view_texture` returns).
     view_ping: usize,
     stages: Vec<Stage>,
+    /// Repaint id and stage count of the recording awaiting a whole paint.
+    /// A draw call is not a paint: the ping-pong buffers must hold its writes
+    /// before the next step reads them.
+    recorded: Option<(u64, usize)>,
     draw_gbuf: DrawGbuf,
     draw_copy: DrawCopy,
     draw_resolve: DrawResolve,
     draw_carry: DrawCarry,
     draw_reject: DrawReject,
     draw_trace: DrawTrace,
+    /// `mod.draw.PtTraceExact`, compiled the first time `settings.exact` traces.
+    draw_trace_exact: Option<DrawTrace>,
     draw_moments: DrawMoments,
     draw_guide: DrawGuide,
     draw_atrous: DrawAtrous,
@@ -1984,8 +2123,11 @@ pub struct RayTracer {
     sweep_wrapped: bool,
     /// Paused by the host (user stop, or the window lost focus): frames
     /// present the accumulation as it stands and trace nothing, and
-    /// `wants_frame` stops asking for redraws.
+    /// `wants_frame` stops asking for redraws once the last recording paints.
     paused: bool,
+    /// A host change the last recording does not show yet (display settings,
+    /// pause, framing): a finished or paused render records once more for it.
+    display_stale: bool,
     /// Skip tracing on this frame only (the host's interactive duty cycle);
     /// the post stages still run so the picture stays on screen.
     skip_trace: bool,
@@ -2211,12 +2353,14 @@ impl RayTracer {
             view: Vec::new(),
             view_ping: 0,
             stages: Vec::new(),
+            recorded: None,
             draw_gbuf,
             draw_copy,
             draw_resolve,
             draw_carry,
             draw_reject,
             draw_trace,
+            draw_trace_exact: None,
             draw_moments,
             draw_guide,
             draw_atrous,
@@ -2236,6 +2380,7 @@ impl RayTracer {
             rung_shift: 0,
             sweep_wrapped: false,
             paused: false,
+            display_stale: false,
             skip_trace: false,
             paths_last_frame: 0.0,
             draw_budget_ms: draw_budget_ms_from_env(),
@@ -2344,10 +2489,12 @@ impl RayTracer {
             || s.adaptive_min != self.settings.adaptive_min
             || s.adaptive_thresh != self.settings.adaptive_thresh
             || s.shadow_skin != self.settings.shadow_skin
-            || s.progressive != self.settings.progressive;
+            || s.progressive != self.settings.progressive
+            || s.exact != self.settings.exact;
         if invalidates {
             self.restart = true;
         }
+        self.display_stale |= s != self.settings;
         self.settings = s;
     }
 
@@ -2374,6 +2521,7 @@ impl RayTracer {
     /// Parent the pass chain under `pass` (the host viewport's offscreen
     /// pass) so the result is ready when that pass samples it.
     pub fn set_parent_pass(&mut self, pass: Option<DrawPassId>) {
+        self.display_stale |= pass != self.parent_pass;
         self.parent_pass = pass;
     }
 
@@ -2381,6 +2529,7 @@ impl RayTracer {
     /// host's own camera math, for pixel-for-pixel framing parity). The ray
     /// generator derives the same frustum from the camera's fov/aspect.
     pub fn set_view_projection(&mut self, vp: Option<Mat4f>) {
+        self.display_stale |= vp != self.view_proj_override;
         self.view_proj_override = vp;
     }
 
@@ -2423,7 +2572,7 @@ impl RayTracer {
     pub fn focus_distance_at(&self, x: f32, y: f32) -> Option<f32> {
         let packed = self.packed.as_ref()?;
         let (ro, rd) = self.pixel_ray(x, y);
-        let hit = packed.accel.trace(ro - packed.origin, rd, 1.0e30, false);
+        let hit = packed.accel.trace(ro - packed.origin, rd, packed.scene_scale * 5.0e27, false);
         if hit.is_hit() {
             Some(hit.t * rd.dot(self.camera.basis().2))
         } else {
@@ -2436,6 +2585,8 @@ impl RayTracer {
             return;
         }
         self.size = self.target_size;
+        // captures of the targets replaced here never come back
+        self.capture_tags.clear();
         let (w, h) = self.size;
         let f32_tex = |cx: &mut Cx| {
             Texture::new_with_format(
@@ -2449,7 +2600,10 @@ impl RayTracer {
         self.trace_scratch = Some(f32_tex(cx));
         self.rejected = vec![f32_tex(cx), f32_tex(cx)];
         self.moments = vec![f32_tex(cx), f32_tex(cx)];
-        self.atrous = vec![f32_tex(cx), f32_tex(cx)];
+        // One target per wavelet pass: a texture two passes of one recording write keeps the
+        // earlier one owed a paint (its picture is the later writer's), so the chain never
+        // paints whole and the paint wait above never lets the next step record.
+        self.atrous = vec![f32_tex(cx), f32_tex(cx), f32_tex(cx), f32_tex(cx)];
         self.gbuf = Some(f32_tex(cx));
         self.guide = Some(f32_tex(cx));
         self.gbuf_depth = Some(Texture::new_with_format(
@@ -2496,11 +2650,13 @@ impl RayTracer {
     fn view_proj(&self, jitter: Vec2f) -> Mat4f {
         let (w, h) = self.size;
         let aspect = w as f32 / h.max(1) as f32;
-        let (lo, hi) = self.packed.as_ref().map(|p| p.bounds).unwrap_or((vec3f(-1.0, -1.0, -1.0), vec3f(1.0, 1.0, 1.0)));
-        let diag = (hi - lo).length().max(1.0);
+        // Called only with a packed scene by draw(); no fixed-size fallback.
+        let packed = self.packed.as_ref().unwrap();
+        let (lo, hi) = packed.bounds;
+        let diag = packed.scene_scale;
         let dist = (self.camera.pos - (lo + hi) * 0.5).length();
         let far = (dist + diag) * 2.0;
-        let near = (far * 1.0e-5).max(0.01);
+        let near = (far * 1.0e-5).max(diag * 5.0e-5);
         let mut proj = match self.camera.ortho_height {
             Some(hh) => ortho_matrix(hh * 0.5 * aspect, hh * 0.5, near, far),
             None => Mat4f::perspective(self.camera.fov_y.to_degrees(), aspect, near, far),
@@ -2512,16 +2668,55 @@ impl RayTracer {
         Mat4f::mul(&proj, &view)
     }
 
+    fn attach_stage(cx: &mut Cx2d, stages: &[Stage], stage: usize, parent: Option<DrawPassId>) {
+        let pass = &stages[stage].pass;
+        let chain_parent = stages.get(stage + 1).map(|st| st.pass.draw_pass_id());
+        match chain_parent.or(parent) {
+            Some(parent_id) => pass.set_pass_parent(cx.cx, parent_id),
+            None => cx.make_child_pass(pass),
+        }
+    }
+
     /// Run one frame of the pipeline. Call from the widget's `draw_walk`;
     /// afterwards `view_texture()` holds the tonemapped image.
+    /// Keep the last recording attached until every stage painted whole:
+    /// another draw call must not read ping-pong buffers before those writes.
     pub fn draw(&mut self, cx: &mut Cx2d) {
         if self.packed.is_none() || self.target_size.0 == 0 {
             return;
         }
         self.ensure_targets(cx.cx);
+        // Replacing targets also sets restart, so their old recording cannot
+        // gate the first step at the new size.
+        if self.restart {
+            self.recorded = None;
+        } else if let Some((repaint, n)) = self.recorded {
+            let painted = self.stages[..n].iter().all(|st| st.pass.painted_whole_since(cx.cx, repaint));
+            if !painted {
+                for i in 0..n {
+                    Self::attach_stage(cx, &self.stages[..n], i, self.parent_pass);
+                }
+                return;
+            }
+            self.recorded = None;
+            // Painted: the next step records now. A finished (or paused) render records only
+            // for a capture or a change it does not show yet, so an idle pane stops asking for
+            // frames after its last paint.
+            if (self.stats.done || self.paused) && self.capture_pending.is_empty() && !self.display_stale {
+                return;
+            }
+        }
         let now = cx.time();
         let (w, h) = self.size;
         let s = self.settings.clone();
+        if s.exact && self.draw_trace_exact.is_none() {
+            self.draw_trace_exact = Some(cx.cx.cx.with_vm(|vm| {
+                let v = vm.eval(script! { mod.draw.PtTraceExact });
+                DrawTrace::script_from_value(vm, v)
+            }));
+        }
+        let packed = self.packed.as_ref().unwrap();
+        let scene_scale = vec2f(packed.scene_scale, packed.scene_area);
         let lens_radius = self.camera.lens_radius();
         let use_gbuffer = s.hybrid_primary && lens_radius <= 0.0 && (s.debug_mode == 0 || s.debug_mode == 7 || s.debug_mode == 8);
 
@@ -2773,11 +2968,7 @@ impl RayTracer {
         macro_rules! run_stage {
             ($target:expr, $depth:expr, $clear:expr, $draw:expr) => {{
                 let size = dvec2(w as f64, h as f64);
-                let chain_parent = if stage + 1 < total_stages {
-                    Some(self.stages[stage + 1].pass.draw_pass_id())
-                } else {
-                    None
-                };
+                Self::attach_stage(cx, &self.stages[..total_stages], stage, self.parent_pass);
                 {
                     let st = &mut self.stages[stage];
                     st.pass.set_size(cx, size);
@@ -2787,12 +2978,6 @@ impl RayTracer {
                         st.pass.set_depth_texture(cx, d, DrawPassClearDepth::ClearWith(1.0));
                     } else {
                         st.pass.clear_depth_texture(cx.cx);
-                    }
-                    match chain_parent.or(self.parent_pass) {
-                        Some(parent_id) => {
-                            st.pass.set_pass_parent(cx.cx, parent_id);
-                        }
-                        None => cx.make_child_pass(&st.pass),
                     }
                     cx.begin_pass(&st.pass, Some(1.0));
                     st.pass.set_size(cx, size);
@@ -2849,7 +3034,11 @@ impl RayTracer {
             let mom = self.moments[prev].clone();
             let rejected = self.rejected[prev].clone();
             let gbuf = self.gbuf.clone().unwrap();
-            let dv = &mut self.draw_trace.draw_super.draw_vars;
+            let draw_trace = match &mut self.draw_trace_exact {
+                Some(exact) if s.exact => exact,
+                _ => &mut self.draw_trace,
+            };
+            let dv = &mut draw_trace.draw_super.draw_vars;
             dv.set_texture(0, &self.tex_tri);
             dv.set_texture(1, &self.tex_attr);
             dv.set_texture(2, &self.tex_bvh);
@@ -2898,6 +3087,7 @@ impl RayTracer {
                 s.shadow_skin
             };
             dv.set_uniform(c, id!(shadow_skin), &[skin]);
+            dv.set_uniform(c, id!(scene_scale), &[scene_scale.x, scene_scale.y]);
             let (aw, ah) = self
                 .packed
                 .as_ref()
@@ -2905,8 +3095,8 @@ impl RayTracer {
                 .map(|a| (a.width as f32, a.height as f32))
                 .unwrap_or((1.0, 1.0));
             dv.set_uniform(c, id!(atlas_inv), &[1.0 / aw, 1.0 / ah]);
-            // One pixel of the current rung: world metres per metre of ray
-            // length (perspective), or absolute metres (ortho).
+            // One pixel of the current rung: scene units per unit ray
+            // length (perspective), or scene units (ortho).
             let pixel_world = match self.camera.ortho_height {
                 Some(hh) => hh / rh as f32,
                 None => 2.0 * tan_y / rh as f32,
@@ -2943,7 +3133,6 @@ impl RayTracer {
             dv.set_uniform(c, id!(debug_mode), &[s.debug_mode as f32]);
             dv.set_uniform(c, id!(brute), &[if s.brute { 1.0 } else { 0.0 }]);
             dv.set_uniform(c, id!(dbg_b), &[s.dbg_b]);
-            let draw_trace = &mut self.draw_trace;
             let draw_copy = &mut self.draw_copy;
             draw_copy.draw_super.draw_vars.set_texture(0, &src);
             draw_copy.draw_super.draw_vars.set_uniform(c, id!(reset), &[if clear_accum { 1.0 } else { 0.0 }]);
@@ -2976,7 +3165,7 @@ impl RayTracer {
             if self.capture_pending.contains(&CaptureKind::Accum) {
                 self.capture_pending.retain(|k| *k != CaptureKind::Accum);
                 cx.cx.request_render_texture_capture(&target);
-                self.capture_tags.push((target.texture_id(), CaptureKind::Accum, self.stats.spp, now - self.start_time));
+                self.tag_capture(&target, CaptureKind::Accum, now);
             }
         }
 
@@ -2993,7 +3182,7 @@ impl RayTracer {
             if self.capture_pending.contains(&CaptureKind::Diagnostics) {
                 self.capture_pending.retain(|k| *k != CaptureKind::Diagnostics);
                 cx.cx.request_render_texture_capture(&target);
-                self.capture_tags.push((target.texture_id(), CaptureKind::Diagnostics, self.stats.spp, now - self.start_time));
+                self.tag_capture(&target, CaptureKind::Diagnostics, now);
             }
         }
 
@@ -3015,9 +3204,33 @@ impl RayTracer {
             let guide = self.guide.clone().unwrap();
             {
                 let dv = &mut self.draw_guide.draw_super.draw_vars;
-                dv.set_texture(0, self.gbuf.as_ref().unwrap());
+                // PtGuide inherits PtTrace's texture slots and transport helpers.
+                dv.set_texture(0, &self.tex_tri);
                 dv.set_texture(1, &self.tex_attr);
+                dv.set_texture(2, &self.tex_bvh);
+                dv.set_texture(3, &self.tex_mat);
+                dv.set_texture(4, &self.tex_light);
+                dv.set_texture(5, &self.tex_atlas);
+                dv.set_texture(6, &self.accum[cur]);
+                dv.set_texture(7, self.gbuf.as_ref().unwrap());
+                dv.set_texture(8, &self.moments[cur]);
+                dv.set_texture(9, &self.rejected[cur]);
+                dv.set_uniform(cx.cx, id!(tri_inv), &[packed_inv.0.x, packed_inv.0.y]);
                 dv.set_uniform(cx.cx, id!(attr_inv), &[packed_inv.1.x, packed_inv.1.y]);
+                dv.set_uniform(cx.cx, id!(bvh_inv), &[packed_inv.2.x, packed_inv.2.y]);
+                dv.set_uniform(cx.cx, id!(mat_inv), &[packed_inv.3.x, packed_inv.3.y]);
+                dv.set_uniform(cx.cx, id!(n_nodes), &[n_nodes]);
+                dv.set_uniform(cx.cx, id!(max_steps), &[s.max_steps.clamp(64, crate::bvh::MAX_STEPS) as f32]);
+                dv.set_uniform(cx.cx, id!(scene_scale), &[scene_scale.x, scene_scale.y]);
+                dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
+                dv.set_uniform(cx.cx, id!(jitter), &[jitter.x, jitter.y]);
+                dv.set_uniform(cx.cx, id!(ortho), &[ortho.x, ortho.y]);
+                let local_cam = self.camera.pos - packed_inv.6;
+                dv.set_uniform(cx.cx, id!(cam_pos), &[local_cam.x, local_cam.y, local_cam.z]);
+                dv.set_uniform(cx.cx, id!(cam_right), &[right.x, right.y, right.z]);
+                dv.set_uniform(cx.cx, id!(cam_up), &[up.x, up.y, up.z]);
+                dv.set_uniform(cx.cx, id!(cam_fwd), &[fwd.x, fwd.y, fwd.z]);
+                dv.set_uniform(cx.cx, id!(cam_tan), &[tan_y * aspect, tan_y]);
                 let draw_guide = &mut self.draw_guide;
                 run_stage!(&guide, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_guide.draw_abs(cx, r));
             }
@@ -3032,7 +3245,7 @@ impl RayTracer {
                 size: dvec2(rw as f64, rh as f64),
             };
             for it in 0..4 {
-                let dst = self.atrous[it & 1].clone();
+                let dst = self.atrous[it].clone();
                 let dv = &mut self.draw_atrous.draw_super.draw_vars;
                 dv.set_texture(0, &src);
                 dv.set_texture(1, &guide);
@@ -3040,6 +3253,7 @@ impl RayTracer {
                 dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
                 dv.set_uniform(cx.cx, id!(step), &[(1u32 << it) as f32]);
                 dv.set_uniform(cx.cx, id!(sigma_l), &[s.denoise_sigma]);
+                dv.set_uniform(cx.cx, id!(scene_scale), &[scene_scale.x]);
                 dv.set_uniform(
                     cx.cx,
                     id!(geom_weight),
@@ -3059,7 +3273,7 @@ impl RayTracer {
             if self.capture_pending.contains(&CaptureKind::Denoised) {
                 self.capture_pending.retain(|k| *k != CaptureKind::Denoised);
                 cx.cx.request_render_texture_capture(&src);
-                self.capture_tags.push((src.texture_id(), CaptureKind::Denoised, self.stats.spp, now - self.start_time));
+                self.tag_capture(&src, CaptureKind::Denoised, now);
             }
             tonemap_src = src;
         }
@@ -3126,7 +3340,7 @@ impl RayTracer {
             if self.capture_pending.contains(&CaptureKind::View) {
                 self.capture_pending.retain(|k| *k != CaptureKind::View);
                 cx.cx.request_render_texture_capture(&view);
-                self.capture_tags.push((view.texture_id(), CaptureKind::View, self.stats.spp, now - self.start_time));
+                self.tag_capture(&view, CaptureKind::View, now);
             }
         }
         debug_assert_eq!(stage, total_stages);
@@ -3150,6 +3364,17 @@ impl RayTracer {
         self.stats.rung_shift = shift;
         self.stats.last_frame_ms = dt_ms;
         self.stats.done = done;
+        self.recorded = Some((cx.cx.repaint_id(), stage));
+        self.display_stale = false;
+    }
+
+    /// Tag a capture asked of `texture`. The platform folds a request into one still in flight
+    /// for the same texture, and a capture whose copy fails never comes back: the texture's
+    /// older tag goes, so it cannot label a later capture.
+    fn tag_capture(&mut self, texture: &Texture, kind: CaptureKind, now: f64) {
+        let id = texture.texture_id();
+        self.capture_tags.retain(|(tagged, ..)| *tagged != id);
+        self.capture_tags.push((id, kind, self.stats.spp, now - self.start_time));
     }
 
     /// Poll finished captures; call once per frame from `handle_event`.
@@ -3180,6 +3405,7 @@ impl RayTracer {
     }
 
     pub fn set_paused(&mut self, paused: bool) {
+        self.display_stale |= paused != self.paused;
         self.paused = paused;
     }
 
@@ -3192,6 +3418,9 @@ impl RayTracer {
     }
 
     pub fn wants_frame(&self) -> bool {
+        if self.recorded.is_some() {
+            return true;
+        }
         if self.paused {
             return false;
         }

@@ -27,6 +27,7 @@
 //! device by every backend); a GPU without them stays off and allocates
 //! nothing.
 use makepad_draw::*;
+use crate::cortao::{CortaoCamera, CortaoConfig, CortaoDepth, CortaoInput, CortaoOutput, CortaoPass, CortaoTable};
 use std::sync::Arc;
 
 #[path = "fast_gi/shaders.rs"]
@@ -238,11 +239,6 @@ struct EncodeKey {
     reload_generation: u64,
 }
 
-/// Screen-space AO for hosts without a depth prepass: ssao.rs over the
-/// previous frame's hardware depth, bound to the model lanes' `ssao_map`.
-#[derive(Default)]
-struct ScreenAo { pass:crate::ssao::SsaoPass }
-
 /// Mesh copies shared across snapshots, keyed by render geometry.
 #[derive(Default)]
 pub(crate) struct MeshCache {
@@ -296,13 +292,16 @@ pub(crate) struct FastGi {
     /// The host holds a scene newer than the last one submitted.
     scene_stale:bool,
     pub(crate) meshes:MeshCache,
-    ao:ScreenAo,
+    /// This view's screen AO, independent of the probe field.
+    ao:CortaoPass,
+    /// Lazily generated once per ray count (16 and 32).
+    ao_tables:[Option<CortaoTable>;2],
     pub stats:GiStats,
 }
 impl Default for FastGi {
     fn default()->Self{Self{mode:GiMode::Off,config:GiConfig::default(),debug:GiDebug::Off,linear_albedo:false,emission_gain:1.0,gpu:None,probe_counts:diagnostics::ProbeCounts::default(),retired:Vec::new(),screen:None,voxels:None,voxel_job:None,generation:0,
         scene_key:None,scene_center:None,pending_scene:None,scene_bounds:Default::default(),has_scene:false,requested:Vec::new(),committed:Vec::new(),cascades:Vec::new(),
-        controller:BatchController::default(),frame_times:FrameTimes::default(),batch:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:ScreenAo::default(),stats:GiStats::default()}}
+        controller:BatchController::default(),frame_times:FrameTimes::default(),batch:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:CortaoPass::default(),ao_tables:[None,None],stats:GiStats::default()}}
 }
 impl FastGi {
     pub fn mode(&self)->GiMode{self.mode}
@@ -710,19 +709,31 @@ impl FastGi {
         }
     }
 
-    /// Run SSAO over `depth` (the scene pass's hardware depth, holding the
-    /// PREVIOUS frame) as child passes of `scene_pass`, at half resolution;
-    /// returns the (ao, view distance) target. The scene pass's camera
+    /// Make the screen AO's draws before its first run (see `CortaoPass::prepare_draws`).
+    pub(crate) fn prepare_screen_ao_draws(&mut self,cx:&mut Cx)->bool { self.ao.prepare_draws(cx) }
+    pub(crate) fn screen_ao_draws_ready(&self)->bool { self.ao.draws_ready() }
+    pub(crate) fn screen_ao_pending(&self)->bool { self.ao.pipelines_pending() }
+
+    /// Run CORTAO over `depth` (the scene pass's hardware depth, holding the
+    /// PREVIOUS frame) as child passes of `scene_pass`; returns visibility in
+    /// red at the frame's size (the chain itself may run at half size). The scene pass's camera
     /// uniforms still hold the matrices that depth was drawn with.
-    pub fn run_screen_ao(&mut self,cx:&mut Cx2d,scene_pass:DrawPassId,depth:&Texture,size:DVec2,params:crate::ssao::SsaoParams)->Option<Texture> {
-        let p=cx.passes[scene_pass].pass_uniforms.camera_projection;
+    pub fn run_screen_ao(&mut self,cx:&mut Cx2d,scene_pass:DrawPassId,depth:&Texture,size:DVec2,params:crate::renderer::ScreenAoParams)->Option<Texture> {
+        let uniforms=&cx.passes[scene_pass].pass_uniforms;
+        let p=uniforms.camera_projection;
         // Nothing is drawn before the first frame (no projection yet).
         if p.v[0]==0.0||p.v[5]==0.0||size.x<2.0||size.y<2.0 {return None;}
-        // The view's own matrices: the world frame is view space.
-        let general=crate::ssao::SsaoGeneral::from_clip(p);
-        self.ao.pass.run_general(cx,size*0.5,depth,general,params,scene_pass);
-        self.stats.ao_gpu_ms=self.ao.pass.gpu_min_ms();
-        self.ao.pass.output().cloned()
+        let clip_from_world=Mat4f::mul(&p,&uniforms.camera_view);
+        let camera=CortaoCamera::from_clip(&clip_from_world.v)?;
+        let rays=params.tier.rays();
+        let table=self.ao_tables[usize::from(rays==32)].get_or_insert_with(||CortaoTable::new(cx.cx,rays));
+        let output=self.ao.run(cx,&CortaoInput{
+            size,depth,depth_frame:CortaoDepth::Previous,camera,tier:params.tier,
+            config:CortaoConfig{radius:params.radius,resolution:params.resolution,..Default::default()},
+            frame:params.frame,history:params.history,reset:params.reset,table,
+        },scene_pass);
+        self.stats.ao_gpu_ms=self.ao.gpu_ms();
+        output.map(|CortaoOutput::Visibility(texture)|texture)
     }
 
     /// Whether the scene shaders' GI sampling and its debug views do

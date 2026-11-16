@@ -141,6 +141,9 @@ pub(super) struct ItemState {
     pub(super) glow: Vec<Vec3f>,
     /// The custom materials this frame's items draw through.
     used_custom: Vec<String>,
+    /// This frame drew an item through another lane than its own because
+    /// its own lane's pipeline was not ready.
+    pub(super) fallback: bool,
     /// Items this frame the model lanes do not draw (lines, points, cards,
     /// models, unresolved buffers), for a host's diagnostics.
     pub(super) skipped: usize,
@@ -270,7 +273,9 @@ impl Renderer {
     /// (`environment_pending`); the host's next draw adopts it. Under an
     /// environment the stock IBL program's pipeline is waited for too
     /// (`stock_ibl_ready`): until it exists shiny stock models draw on the
-    /// analytic PBR lane.
+    /// analytic PBR lane. While a lamp casts shadows, the lamp shadows'
+    /// depth pipelines are waited for too: until they exist its faces hold
+    /// no casters.
     pub fn items_ready(&self, cx: &Cx) -> bool {
         if self.environment_pending() {
             return false;
@@ -281,7 +286,14 @@ impl Renderer {
         // Shiny models draw matte (no emission, no maps) until the PBR
         // pipeline exists; it is made once a frame has any.
         let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)));
-        custom && pbr && self.stock_ibl_ready(cx)
+        // Shadowed lamps render their faces without casters until the depth pipelines exist.
+        custom && pbr && self.stock_ibl_ready(cx) && !self.clustered.shadows.draws_waiting(cx)
+    }
+
+    /// Whether this frame drew short of whole: an item through a fallback lane, or the lamps'
+    /// shadow faces before their depth pipelines were made (the next frame draws them again).
+    pub fn drew_fallback(&self) -> bool {
+        self.items.fallback || self.clustered.shadows.drew_unready()
     }
 
     /// What `items_ready` waits for, by name (empty: nothing), for a host's
@@ -302,6 +314,9 @@ impl Renderer {
         }
         if !self.stock_ibl_ready(cx) {
             waits.push("the stock IBL program's pipeline".to_string());
+        }
+        if self.clustered.shadows.draws_waiting(cx) {
+            waits.push("the lamp shadows' depth pipelines".to_string());
         }
         waits
     }
@@ -477,6 +492,7 @@ impl Renderer {
         self.items.glow.clear();
         self.items.skipped = 0;
         self.items.used_custom.clear();
+        self.items.fallback = false;
         if world.items.is_empty() {
             return;
         }

@@ -129,9 +129,11 @@ pub struct RenderStats {
     pub stream_lights: usize,
     /// Extra triangles actually submitted for material fur this frame.
     pub fur_triangles: usize,
-    /// Grass patches drawn (one instance each) and their blade budget.
+    /// Grass patches drawn (one instance each) and their blade budget, and
+    /// the flowers' budget (their patches draw one more instance each).
     pub grass_patches: usize,
     pub grass_blades: usize,
+    pub grass_flowers: usize,
     pub gi: crate::fast_gi::GiStats,
     /// Device-local clustered light assignment/upload cost and overflow.
     pub clustered: crate::clustered::ClusterStats,
@@ -464,6 +466,10 @@ pub struct Renderer {
     /// (else painted tiles draw their main layer on the PBR lane).
     splat_draw: Option<Box<crate::shaders::DrawSceneSplat>>,
     splat_ready: bool,
+    /// The far stand-ins' shader (shaders/impostor.rs) for this frame's
+    /// features once its pipeline exists, else None: every model then draws
+    /// its own layers at every distance (`prepare_impostor_lane`).
+    impostor_shader: Option<DrawShaderId>,
     /// Multiplier on every model's stand-in distance (`makepadShading.impostor`):
     /// the quality tier's say in where trees turn into impostors.
     impostor_scale: f32,
@@ -473,6 +479,7 @@ pub struct Renderer {
     terrain_blend_reach: f32,
     graphics_tier: crate::quality_tier::GraphicsTier,
     grass_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
+    grass_flower_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
     pbr_ready: bool,
     /// A secondary camera may borrow the live probe field for sampling only.
@@ -485,9 +492,9 @@ pub struct Renderer {
     /// default so existing hosts keep their rendering unchanged; CAD-style
     /// views can temporarily request the diffuse textured lane instead.
     pbr_materials_enabled: bool,
-    /// A host's screen-space AO output (ssao.rs) and its strength, bound to
+    /// This view's screen-space AO visibility and its strength, bound to
     /// BOTH model lanes' `ssao_map` / `ssao_ctl` each frame. `None` (the
-    /// default, and what every game host leaves it at) writes the strength
+    /// default) writes the strength
     /// OFF, so the shaders never sample the slot.
     ssao: Option<(Texture, f32)>,
     /// Follow-camera occluder fade (occluder_fade.rs); off unless a host
@@ -520,6 +527,13 @@ pub struct Renderer {
     /// chunk (see `PreparedTexture::upload_cached`); pruned to what loaded
     /// models still reference whenever a model is replaced or unloaded.
     texture_cache: std::collections::HashMap<u64, Texture>,
+    /// See [`Renderer::set_texture_first_level`].
+    texture_first_level: Option<std::rc::Rc<dyn Fn(u64) -> usize>>,
+    /// The GPU device generation this renderer last drew on, and whether models were installed
+    /// since its last look for textures to remake (`Renderer::restore_textures`).
+    #[cfg(not(target_arch = "wasm32"))]
+    device_generation: Option<u64>,
+    restore_walk: bool,
     /// See [`Renderer::set_shadow_debug`].
     shadow_debug: bool,
     /// See [`Renderer::set_hdr_output`].
@@ -724,6 +738,7 @@ pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSF
 pub use ibl::PROCEDURAL_ENVIRONMENTS;
 pub use stock_ibl::STOCK_IBL_MATERIAL;
 pub use settings::star_map_path;
+pub use gi::ScreenAoParams;
 
 pub use draw_items::*;
 pub use prepared::*;
@@ -819,11 +834,13 @@ impl Default for Renderer {
             foliage_ready: false,
             splat_draw: None,
             splat_ready: false,
+            impostor_shader: None,
             impostor_scale: crate::quality_tier::GraphicsTier::High.budget().impostor_scale,
             grass_pixels: crate::quality_tier::GraphicsTier::High.budget().grass_pixels,
             terrain_blend_reach: f32::MAX,
             graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),
+            grass_flower_rings: Default::default(),
             pbr_ready: false,
             review_gi: false,
             review_lights: None,
@@ -844,6 +861,10 @@ impl Default for Renderer {
             gi_snapshot_omitted: 0,
             shadow_debug: false,
             texture_cache: Default::default(),
+            texture_first_level: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            device_generation: None,
+            restore_walk: false,
             hdr_output: false,
             output_dither: true,
             hdr_exposure: 1.0,

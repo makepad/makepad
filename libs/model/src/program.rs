@@ -69,6 +69,11 @@ pub enum ProgramOp {
     /// A material layer of an image the host resolves by name when the program builds
     /// (`fetch`: PNG bytes), e.g. a generated texture the document keeps.
     ImageLayer { material: u32, channel: crate::SurfaceChannel, layer: String, image: String },
+    /// A material layer of text, rendered as a distance field (`msdf_text`) when the program
+    /// builds, on the building worker: a program carries the text, not its pixels.
+    /// `msdf_text_metrics` gives its size beforehand. The program's key covers the spec only,
+    /// so a change to what a spec renders is a `MODEL_GENERATOR_VERSION` change.
+    TextLayer { material: u32, channel: crate::SurfaceChannel, layer: String, text: crate::MsdfTextSpec },
     /// A joint added under `parent` (by name) at a parent-local offset: the skeleton
     /// grows by one, after whatever rig the program made so far (a humanoid, a
     /// soft body's attachment frames).
@@ -195,6 +200,7 @@ impl ProgramOp {
             Self::Impostor { .. } => "impostor",
             Self::Mesh(_) => "mesh",
             Self::ImageLayer { .. } => "image_layer",
+            Self::TextLayer { .. } => "text_layer",
             Self::Joint { .. } => "joint",
             Self::Rig { .. } => "rig",
             Self::Clip { .. } => "clip",
@@ -222,6 +228,15 @@ impl ProgramOp {
             Self::Joint { name, parent, translation } => { w.u8(11)?; w.string(name)?; w.string(parent)?; for v in translation { w.f64(*v)?; } Ok(()) }
             Self::Rig { joints, op } => { w.u8(12)?; w.count(joints.len())?; for j in joints { w.string(j)?; } op.write(w) }
             Self::Clip { joints, clip } => { w.u8(13)?; w.count(joints.len())?; for j in joints { w.string(j)?; } Operation::SetClip { clip: clip.clone() }.write(w) }
+            Self::TextLayer { material, channel, layer, text } => {
+                w.u8(14)?; w.u32(*material)?; w.u8(*channel as u8)?; w.string(layer)?;
+                let crate::MsdfTextSpec { text, font, weight, width, letter_spacing, resolution, badge, padding, border_width, plate } = text;
+                w.string(text)?; w.string(font)?;
+                for v in [weight, width] { match v { None => w.u8(0)?, Some(v) => { w.u8(1)?; w.f64(*v as f64)? } } }
+                w.f64(*letter_spacing as f64)?; w.u32(*resolution)?;
+                match badge { None => w.u8(0)?, Some(b) => { w.u8(1)?; w.string(b)? } }
+                w.f64(*padding as f64)?; w.f64(*border_width as f64)?; w.u8(*plate as u8)
+            }
         }
     }
 }
@@ -454,6 +469,14 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
                 run.pending.push((index, Operation::Surface(S::Material { material: *material, value: factors })));
                 run.pending.push((index, Operation::Surface(S::Layer { material: *material, channel: *channel, layer })));
                 record_texture_time(image_start.elapsed());
+            }
+            ProgramOp::TextLayer { material, channel, layer, text } => {
+                let image_start = ProgramInstant::now();
+                let nested_textures = texture_time();
+                let image = crate::msdf_text(text).map_err(|e| fail(index, format!("text '{}': {e}", text.text)))?;
+                let layer = crate::SurfaceLayer::new(layer.clone(), crate::RgbaImage { width: image.width, height: image.height, pixels: image.pixels });
+                run.pending.push((index, Operation::Surface(crate::SurfaceOperation::Layer { material: *material, channel: *channel, layer })));
+                record_texture_time(image_start.elapsed().saturating_sub(texture_time() - nested_textures));
             }
             ProgramOp::HumanoidRig { height, clips, sockets } => {
                 let height = *height;

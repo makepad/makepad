@@ -28,6 +28,7 @@ fn check(label: &str, mesh: &TriMesh, expected_volume: f64) {
     assert!(report.is_closed, "{label}: {report:?}");
     assert!(report.is_manifold, "{label}: {report:?}");
     assert!(report.is_consistently_oriented, "{label}: {report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "{label}: no near-duplicate or coincident vertex pairs: {report:?}");
     assert!((volume - expected_volume).abs() < expected_volume.abs() * 1e-9, "{label}: volume");
 }
 
@@ -100,6 +101,7 @@ fn a_local_cut_preserves_distant_triangles() {
     assert_eq!(triangles_where(&result, distant), triangles_where(&near, distant), "a distant cap must pass through bit for bit");
     let report = validate_mesh(&result);
     assert!(report.is_closed && report.is_manifold && report.is_consistently_oriented, "{report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "no near-duplicate or coincident vertex pairs: {report:?}");
     assert_eq!(measure::shells(&result).len(), 2);
 }
 
@@ -116,6 +118,7 @@ fn a_cavity_far_from_every_face_is_cut() {
     let result = bool3::difference(&outer, &cavity);
     let report = validate_mesh(&result);
     assert!(report.is_closed && report.is_manifold && report.is_consistently_oriented, "{report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "no near-duplicate or coincident vertex pairs: {report:?}");
     assert_eq!(measure::shells(&result).len(), 2, "the solid and its cavity");
     let expected = solids::signed_volume(&outer) - solids::signed_volume(&cavity);
     assert!((solids::signed_volume(&result) - expected).abs() < expected * 1e-12, "volume");

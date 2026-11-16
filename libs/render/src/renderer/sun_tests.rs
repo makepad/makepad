@@ -115,7 +115,7 @@ fn env_sun_of(dir: Vec3f, radiance: f32, radius_deg: f32, facing: f32) -> makepa
 
 fn env_named(source: makepad_scene::IblSource, sun: Option<makepad_scene::EnvSun>) -> World {
     let mut world = World::new();
-    world.environment.ibl = Some(makepad_scene::Ibl { source, intensity: 1.0, rotation_deg: 0.0 });
+    world.environment.ibl = Some(makepad_scene::Ibl { key_reflection: makepad_scene::KeyReflection::Light, source, intensity: 1.0, rotation_deg: 0.0 });
     world.environment.sun = sun;
     world
 }
@@ -593,6 +593,7 @@ fn a_prepared_environment_colours_the_host_fog_only() {
     r.feed_environment_numbers_for_tests(sh9(&map), 1.0, vec3f(0.5, 0.6, 0.7));
     let mut world = World::new();
     world.environment.ibl = Some(makepad_scene::Ibl {
+        key_reflection: makepad_scene::KeyReflection::Light,
         source: makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)),
         intensity: 1.0,
         rotation_deg: 0.0,
@@ -672,6 +673,7 @@ fn a_prepared_environment_colours_the_host_fog_only() {
 fn the_host_fog_takes_the_backgrounds_intensity_and_waits_for_the_preparation() {
     let mut world = World::new();
     world.environment.ibl = Some(makepad_scene::Ibl {
+        key_reflection: makepad_scene::KeyReflection::Light,
         source: makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)),
         intensity: 2.0,
         rotation_deg: 0.0,

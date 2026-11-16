@@ -442,7 +442,7 @@ mod tests {
         cx.use_closed_task_pool();
         let mut renderer = Renderer::default();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
-        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
         assert!(renderer.stock_ibl_ready(&cx) && renderer.items_ready(&cx), "no draw has installed the program: nothing to wait for");
@@ -498,7 +498,7 @@ mod tests {
         assert!(renderer.custom_draws.is_empty(), "no environment, no program");
 
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
-        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
         renderer.prepare_stock_ibl(&mut cx);
@@ -630,7 +630,7 @@ mod tests {
         // A closed pool prepares on the spot: the call binds the texture.
         cx.use_closed_task_pool();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(32, [0.5, 0.4, 0.3])));
-        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
         renderer.prepare_stock_ibl(&mut cx);
@@ -690,7 +690,7 @@ mod tests {
             cx.use_closed_task_pool();
             let mut renderer = Renderer::default();
             renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
-            let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+            let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
             renderer.resolve_ibl(&mut cx, &env);
             assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
 
@@ -730,7 +730,7 @@ mod tests {
         cx.use_closed_task_pool();
         let mut renderer = Renderer::default();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
-        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         let frame = |cx: &mut Cx, renderer: &mut Renderer| {
             renderer.follow_reload(cx);
@@ -837,7 +837,7 @@ mod tests {
         cx.use_closed_task_pool();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(map));
         let mut world = World::new();
-        world.environment.ibl = Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 });
+        world.environment.ibl = Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 });
         renderer.resolve_ibl(cx, &world.environment);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
         renderer.prepare_stock_ibl(cx);

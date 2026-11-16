@@ -318,6 +318,13 @@ script_mod! {
         ..mod.draw.ClusteredLighting,
         ..mod.draw.FastGiSampling,
         ..mod.draw.SceneOutputDither,
+        // Screen-space AO (CORTAO), as the model lanes take it (skinned.rs): the Renderer binds
+        // `set_ssao`'s visibility here; `ssao_ctl.x` is its strength on the AMBIENT light only
+        // (never the sun or lamps), 0 skips the sample. Declared after every inherited texture so
+        // the fixed slots before it keep their places.
+        ssao_map: texture_2d(float)
+        ssao_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        v_spos: varying(vec4f)
 
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {
@@ -425,6 +432,7 @@ script_mod! {
             self.v_dl_nrm = (self.transform * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
+            self.v_spos = self.vertex_pos
         }
 
         pixel: fn() {
@@ -453,7 +461,18 @@ script_mod! {
                 )
             }
             let ambient=mix(self.sun_ground,self.sun_sky,clamp(self.v_dl_nrm.y*0.5+0.5,0.0,1.0))
-            let c = self.lit_color.xyz + self.v_albedo*(self.gi_ambient(self.v_dl_pos,self.v_dl_nrm,ambient)-ambient) + self.v_direct_col * sun_lit
+            let gi = self.gi_ambient(self.v_dl_pos,self.v_dl_nrm,ambient)-ambient
+            var sao = 1.0
+            if self.ssao_ctl.x > 0.001 {
+                let sp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
+                let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
+                sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
+            }
+            // lit_color holds albedo x the hemisphere ambient (the vertex's) and gi the rest of
+            // the ambient light: the screen AO scales both, nothing else. Not rebuilt from the
+            // interpolated albedo and normal: smooth voxel terrain varies both per vertex.
+            let c = (self.lit_color.xyz + self.v_albedo*gi) * sao
+                + self.v_direct_col * sun_lit
                 + self.v_albedo * local
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(c, self.v_fog, self.v_dl_pos, self.fog_density), self.lit_color.w),self.v_dl_pos,self.v_dl_nrm),self.v_dl_pos,self.v_dl_nrm)
         }

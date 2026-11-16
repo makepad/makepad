@@ -236,6 +236,7 @@ impl Renderer {
             (Subsystem::AutoExposure, exposure),
             (Subsystem::RenderScale, if self.thermometer.level() == 0 { Usage::Analytic } else { Usage::History }),
             (Subsystem::LightmapBake, bake),
+            // Even without CORTAO's temporal resolve, screen AO reads previous-frame depth.
             (Subsystem::Ssao, if self.ssao.is_some() { Usage::History } else { Usage::Off }),
             (Subsystem::PassHistory, if self.hdr_output && (self.volume_fog.params.active() || self.ssr.active() || self.ssr.pass.applied().is_some()) { Usage::History } else { Usage::Off }),
             (Subsystem::FastGi, if self.gi.mode() == crate::fast_gi::GiMode::Off { Usage::Off } else { Usage::History }),
@@ -542,8 +543,8 @@ impl Renderer {
         self.pbr_materials_enabled
     }
 
-    /// Bind a screen-space AO target (`ssao::SsaoPass::output`; x =
-    /// occlusion, 1 = unoccluded) for this frame's model lanes, with its
+    /// Bind a screen-space AO target (x = visibility, 1 = unoccluded)
+    /// for this view's model lanes, with its
     /// strength.
     /// The factor multiplies the AMBIENT fill only — the shaders never
     /// apply it to the direct sun or the shadow-mapped light. `None`

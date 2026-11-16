@@ -35,7 +35,7 @@ use super::*;
 use crate::env_map::prepare::{prepare_ibl_until, KeyRemoval, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
 use makepad_draw::makepad_platform::thread::{checkpoint, CancellationToken, Class, SubmitError, TaskHandle};
 use makepad_render_material::ibl::{EnvMap, EnvPreset};
-use makepad_scene::{Background, EnvSun, Environment, IblSource, TextureRef};
+use makepad_scene::{Background, EnvSun, Environment, IblSource, KeyReflection, TextureRef};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -182,8 +182,9 @@ pub(super) enum EnvScope {
     Aux,
 }
 
-/// What a preparation is for: the source, the sun its lighting copy is
-/// made without, and the map's own sun the world reports for the daylight
+/// What a preparation is for: the source, whether its key stays in the
+/// reflection atlas, the sun its diffuse lighting copy is made without,
+/// and the map's own sun the world reports for the daylight
 /// switches (`Environment.daylight_sun`: it changes nothing in the
 /// preparation, but it is the map's, so it binds with it and the switches
 /// follow the sky that is drawn). Intensity and rotation are not here: they
@@ -191,6 +192,7 @@ pub(super) enum EnvScope {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PrepareKey {
     source: IblSource,
+    key_reflection: KeyReflection,
     sun: Option<EnvSun>,
     daylight_sun: Option<Vec3f>,
 }
@@ -294,6 +296,8 @@ pub(super) struct IblState {
     horizon_rgb: Vec3f,
     /// The sun the bound lighting copy was made without: the declared one.
     filled_sun: Option<EnvSun>,
+    /// The bound atlas's keyed level count and total level count, if Map retains a key.
+    key_levels: Option<(u32, u32)>,
     /// The bound map's own sun for the daylight switches: the one the world
     /// reported.
     daylight_sun: Option<Vec3f>,
@@ -329,6 +333,7 @@ impl IblState {
             mean_luminance,
             horizon_rgb,
             filled_sun,
+            key_levels,
             daylight_sun,
             registrations: _,
             wanted: _,
@@ -349,6 +354,7 @@ impl IblState {
         self.mean_luminance = *mean_luminance;
         self.horizon_rgb = *horizon_rgb;
         self.filled_sun = *filled_sun;
+        self.key_levels = *key_levels;
         self.daylight_sun = *daylight_sun;
         self.mirror = true;
     }
@@ -394,8 +400,8 @@ fn procedural_env_map(i: u32) -> Option<EnvMap> {
 }
 
 /// Build everything for one key: the map (registered, or painted for a
-/// procedural index), then `prepare_ibl_until` without the key the
-/// directional light carries. Pure apart from `stop`, so the job and the
+/// procedural index), then `prepare_ibl_until` with the requested key
+/// reflection mode. Pure apart from `stop`, so the job and the
 /// synchronous fallback share it. `None` when the source cannot be built or
 /// `stop` said so.
 #[allow(clippy::too_many_arguments)]
@@ -423,15 +429,17 @@ fn build_ibl(
     }
     // The key the lighting copy is made without: the one the world declares.
     // The directional light carries it (`ibl_sun`, renderer/env_sun.rs) and
-    // the SH, the atlas and the meter do not. A generated map loses exactly
-    // that key's light (N3); a key the map has no keyless copy for (a file's
+    // the SH and the meter do not; Map retains it only in the atlas.
+    // A generated map loses exactly that key's light (N3); a key the map
+    // has no keyless copy for (a file's
     // detected sun) has its covering cone filled.
     let removal = match (key.sun.as_ref(), keyless.as_deref()) {
         (Some(_), Some(keyless)) => KeyRemoval::Exact(keyless),
         (Some(sun), None) => KeyRemoval::Fill(sun),
         (None, _) => KeyRemoval::Nothing,
     };
-    let prepared = prepare_ibl_until(&map, removal, intensity, rotation_deg, sizes, stop, run)?;
+    let keep_key = key.sun.as_ref().filter(|_| key.key_reflection == KeyReflection::Map);
+    let prepared = prepare_ibl_until(&map, removal, keep_key, intensity, rotation_deg, sizes, stop, run)?;
     Some(IblJobResult { generation, key, intensity, rotation_deg, prepared })
 }
 
@@ -596,6 +604,12 @@ impl Renderer {
     /// at once.
     pub fn mirror_environment_from(&mut self, live: &Renderer) {
         self.ibl.mirror_from(&live.ibl);
+        // The star panorama comes from a pool job: a fork made before it was in takes the
+        // live renderer's once it is, the same texture, never a copy.
+        if live.star_map_loaded && live.star_texture.as_ref().map(Texture::texture_id) != self.star_texture.as_ref().map(Texture::texture_id) {
+            self.star_texture = live.star_texture.clone();
+            self.star_map_loaded = true;
+        }
     }
 
     /// The IBL lane texture for this frame, when the environment asks for one.
@@ -704,6 +718,13 @@ impl Renderer {
         self.ibl.sh.and(self.ibl.filled_sun)
     }
 
+    /// The bound Map preparation's `(keyed levels, total levels)`, or None
+    /// without a retained key. Old textures stay bound until a job lands,
+    /// so this flips with them, never with the wanted IBL.
+    pub fn ibl_key_levels(&self) -> Option<(u32, u32)> {
+        self.ibl.key_levels
+    }
+
     /// The bound map's own sun for the daylight switches, in the map's frame:
     /// the `Environment.daylight_sun` the job saw. `None` when the map knows no sun of its own (a
     /// studio, a loaded file, an engine look) or nothing is bound: the
@@ -732,7 +753,7 @@ impl Renderer {
         };
         let sun = env.sun.filter(|s| s.validate().is_ok());
         let daylight_sun = env.daylight_sun.filter(|d| d.is_finite() && d.length() >= 1.0e-3);
-        let wanted = PrepareKey { source: ibl.source, sun, daylight_sun };
+        let wanted = PrepareKey { source: ibl.source, key_reflection: ibl.key_reflection, sun, daylight_sun };
         // Set before the submit: a source that cannot be built drops it again.
         self.ibl.wanted = Some(wanted);
         // Another environment named is a change of map: the job in flight is
@@ -791,6 +812,7 @@ impl Renderer {
         s.mean_luminance = 0.0;
         s.horizon_rgb = Vec3f::default();
         s.filled_sun = None;
+        s.key_levels = None;
         s.daylight_sun = None;
     }
 
@@ -926,6 +948,7 @@ impl Renderer {
         s.mean_luminance = p.mean_luminance;
         s.horizon_rgb = p.horizon_rgb;
         s.filled_sun = r.key.sun;
+        s.key_levels = (p.key_levels > 0).then_some((p.key_levels, p.levels));
         s.daylight_sun = r.key.daylight_sun;
     }
 
@@ -1031,7 +1054,7 @@ mod tests {
 
     fn env_of(source: IblSource, intensity: f32, rotation_deg: f32) -> Environment {
         Environment {
-            ibl: Some(Ibl { source, intensity, rotation_deg }),
+            ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source, intensity, rotation_deg }),
             background: Background::Environment { blur: 0.0, intensity: 1.0 },
             ..Default::default()
         }
@@ -1607,7 +1630,7 @@ mod tests {
             if let Some((key, generation)) = renderer.ibl.bound {
                 if last != Some(generation) {
                     let source = env.ibl.unwrap().source;
-                    landed.push(Landing { generation, key, mean: renderer.ibl_mean_luminance().unwrap(), declared: PrepareKey { source, sun: env.sun, daylight_sun: env.daylight_sun } });
+                    landed.push(Landing { generation, key, mean: renderer.ibl_mean_luminance().unwrap(), declared: PrepareKey { key_reflection: KeyReflection::Light, source, sun: env.sun, daylight_sun: env.daylight_sun } });
                     last = Some(generation);
                 }
             }
@@ -1658,7 +1681,7 @@ mod tests {
 
         // The key holds: the last declared one lands.
         settle(&mut renderer, &mut cx, &env);
-        assert_eq!(renderer.ibl.bound.map(|b| b.0), Some(PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: env.sun, daylight_sun: env.daylight_sun }));
+        assert_eq!(renderer.ibl.bound.map(|b| b.0), Some(PrepareKey { key_reflection: KeyReflection::Light, source: IblSource::Hdri(TextureRef(5)), sun: env.sun, daylight_sun: env.daylight_sun }));
         assert!(!renderer.environment_pending());
     }
 
@@ -1868,7 +1891,7 @@ mod tests {
     /// told to stop it builds nothing.
     #[test]
     fn a_build_asks_to_stop_after_its_map() {
-        let key = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
+        let key = PrepareKey { key_reflection: KeyReflection::Light, source: IblSource::Procedural(0), sun: None, daylight_sun: None };
         let asked = std::sync::atomic::AtomicUsize::new(0);
         use std::sync::atomic::Ordering;
         let at_once = || {
@@ -1893,7 +1916,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut renderer = Renderer::default();
         assert_eq!(renderer.ibl_daylight_sun(), None, "nothing bound");
-        let look = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
+        let look = PrepareKey { key_reflection: KeyReflection::Light, source: IblSource::Procedural(0), sun: None, daylight_sun: None };
         renderer.adopt_ibl(&mut cx, build_ibl(1, look, None, 1.0, 0.0, SYNC_SIZES, &|| false, &|n, f| (0..n).for_each(f)).unwrap());
         assert_eq!(renderer.ibl_daylight_sun(), None, "a look reports no sun");
         let reported = vec3f(0.0, -1.0, 0.0);
@@ -1939,7 +1962,7 @@ mod tests {
         let build = |key: PrepareKey, map: Option<RegisteredMap>| build_ibl(1, key, map, 1.0, 0.0, SYNC_SIZES, &|| false, &|n, f| (0..n).for_each(f)).expect("built").prepared;
 
         // A registered generated map: the keyless copy while a key is declared.
-        let hdri = PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: Some(sun), daylight_sun: None };
+        let hdri = PrepareKey { key_reflection: KeyReflection::Light, source: IblSource::Hdri(TextureRef(5)), sun: Some(sun), daylight_sun: None };
         let generated = RegisteredMap { map: Arc::new(map.clone()), keyless: Some(Arc::new(keyless.clone())), bakes: 1 };
         let lit = build(hdri, Some(generated.clone()));
         assert_eq!((lit.sh, lit.mean_luminance), (sh9(&keyless), crate::env_map::mean_luminance(&keyless)));

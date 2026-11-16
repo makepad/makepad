@@ -48,6 +48,16 @@ pub struct DrawMaterialShadow {
 
 script_mod! {
     use mod.prelude.widgets_internal.*
+    // Default BGRA8 and source-over for this base and generated variants; alpha_blend starts false.
+    // An Over recipe enables blending/no depth writes; layer binding can select both again per draw.
+    // Scene colour targets are BGRA8/RGBA16F: clear is the host background, zero, or white for contact.
+    // Ordinary passes are single-sample; XR may use MSAA. Depth clears to 1; surviving fragments combine in submission order.
+    // Blended layers follow opaque layers (far-to-near within each lane), depth-tested without depth writes.
+    // surface/finish hooks supply straight RGB; stock shading premultiplies finish alpha for coverage over prior colour.
+    // Nonzero final RGB with alpha 0 adds light; stock premultiplication makes a zero-alpha finish contribute none.
+    // Blend-off replaces colour/alpha; on the MSAA alpha-to-coverage path alpha selects samples, with straight RGB.
+    // Linear-light output decodes using the draw's premultiplied flag; data-format declarations always write raw.
+    // Earlier draws in this pass supply colour only through blending, never target reads; auxiliary MRT alpha is payload.
     mod.draw.DrawSceneCustom = mod.std.set_type_default() do #(DrawSceneCustom::script_shader(vm)) {
         ..mod.draw.DrawScenePbr
         // The material's four keyable floats (`self.params` in the hooks),
@@ -158,13 +168,17 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
     // partial list here made different shaders (and shader-pack keys)
     // depending on which registration ran first.
     let scene = vm.heap().type_default_for_id(DrawScenePbr::script_type_id_static()).is_none();
-    // Outside any `script_mod` of the VM's: its live-edit reload passes run it
-    // again (the scene shaders too where this registered them), so the
-    // materials it builds after an edit build on the edited shaders.
+    keep_for_reload(vm, scene);
+    register_with(vm, scene)
+}
+
+/// Outside any `script_mod` of the VM's: its live-edit reload passes run the
+/// registration again (the scene shaders too where it registered them), so
+/// the materials it builds after an edit build on the edited shaders.
+fn keep_for_reload(vm: &mut ScriptVm, scene: bool) {
     vm.keep_for_reload(live_id!(render_materials), move |vm| {
         register_with(vm, scene);
     });
-    register_with(vm, scene)
 }
 
 fn register_with(vm: &mut ScriptVm, scene: bool) -> ScriptValue {
@@ -173,6 +187,44 @@ fn register_with(vm: &mut ScriptVm, scene: bool) -> ScriptValue {
     }
     builtin::register(vm);
     script_mod(vm)
+}
+
+/// [`register`] spread over calls, for a host that prepares a VM over frames
+/// before its first material builds there: a VM without the scene shaders
+/// registers them a module a call (`crate::script_mod_steps`; 14-23 ms in one
+/// call in such a VM), then the materials' own module, then makes the
+/// material draw once, which builds the stock shaders its type derives from
+/// (the first material's build made them otherwise). [`register`] then finds
+/// it all in place.
+#[derive(Default)]
+pub struct Registration {
+    next: usize,
+    scene: Option<bool>,
+    made: bool,
+}
+
+impl Registration {
+    /// Take the next step: true when one was taken, false once none is left.
+    pub fn step(&mut self, vm: &mut ScriptVm) -> bool {
+        if vm.heap().type_default_for_id(DrawSceneCustom::script_type_id_static()).is_none() {
+            let scene = *self.scene.get_or_insert_with(|| vm.heap().type_default_for_id(DrawScenePbr::script_type_id_static()).is_none());
+            if scene {
+                if let Some((_, step)) = crate::script_mod_steps().nth(self.next) {
+                    step(vm);
+                    self.next += 1;
+                    return true;
+                }
+            }
+            keep_for_reload(vm, scene);
+            register_with(vm, false);
+            return true;
+        }
+        if std::mem::replace(&mut self.made, true) {
+            return false;
+        }
+        DrawSceneCustom::script_new(vm);
+        true
+    }
 }
 
 /// Runs `f` in the VM that owns a material's program (a level isolate's);

@@ -355,3 +355,13 @@ fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
     assert_eq!(renderer.stage().yaw, 0.4);
     assert_eq!(renderer.stage().scale, 0.08);
 }
+
+#[test]
+fn a_review_fork_carries_the_hosts_element_lookup_and_shadow_budget() {
+    let mut live = Renderer::default();
+    live.set_shadow_budget(7);
+    live.set_element_lookup(None, 0x5eed);
+    let fork = live.fork_scene_for_review();
+    assert_eq!(fork.shadow_budget(), 7, "the fork keeps the host's silhouette caster budget");
+    assert_eq!(fork.gpu_baker.element_lookup_casters(), 0x5eed, "the fork keeps the host's element casters key");
+}

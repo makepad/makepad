@@ -10,6 +10,7 @@ fn closed(mesh: &TriMesh) {
     eprintln!("open={} nonmanifold={} degenerate={} volume={:.12}", r.boundary_edges, r.non_manifold_edges, r.degenerate_triangles, mesh_volume(mesh));
     assert_eq!((r.boundary_edges, r.non_manifold_edges, r.degenerate_triangles), (0, 0, 0), "{r:?}");
     assert!(r.is_consistently_oriented, "{r:?}");
+    assert!(r.near_duplicate_pairs == 0 && r.coincident_pairs == 0, "no near-duplicate or coincident vertex pairs: {r:?}");
 }
 
 fn boolean(a: &TriMesh, b: &TriMesh, op: BoolOp) -> TriMesh {
@@ -18,8 +19,7 @@ fn boolean(a: &TriMesh, b: &TriMesh, op: BoolOp) -> TriMesh {
     mesh_boolean_with(a,b,op,FinishParams { tolerance })
 }
 
-#[test]
-fn rounded_grid_cap() {
+pub(crate) fn rounded_grid_cap_mesh() -> TriMesh {
     // A cap produced by several constructions can straddle zero at rounding
     // scale. Every patch must reach the same coplanar classification rule.
     let n = 3u32;
@@ -41,6 +41,12 @@ fn rounded_grid_cap() {
     ring.extend(0..n);ring.extend((0..n).map(|z|z*(n+1)+n));
     ring.extend((1..=n).rev().map(|x|n*(n+1)+x));ring.extend((1..=n).rev().map(|z|z*(n+1)));
     for i in 0..ring.len(){let u=ring[i];let v=ring[(i+1)%ring.len()];a.add_triangle(u,v+count,v);a.add_triangle(u,u+count,v+count);}
+    a
+}
+
+#[test]
+fn rounded_grid_cap() {
+    let a = rounded_grid_cap_mesh();
     let b=cylinder(1.4,3.0,16,false);
     closed(&a);closed(&b);
     let area=8.0*1.4f64.powi(2)*(PI/8.0).sin();

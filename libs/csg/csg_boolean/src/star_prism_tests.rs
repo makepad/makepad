@@ -5,7 +5,7 @@ use makepad_csg_mesh::{validate::validate_mesh, volume::mesh_volume, TriMesh};
 
 // csg_graph's cylinder primitive and Y-axis transform, as used by mod.model.
 // Coordinates are millimetres; the two cap planes are initially y = 0 and 8.
-fn prism(segments: u32, degrees: f64, lift: f64) -> TriMesh {
+pub(crate) fn prism(segments: u32, degrees: f64, lift: f64) -> TriMesh {
     let mut mesh = makepad_csg_primitives::cylinder(3.0, 8.0, segments, true);
     let (s, c) = degrees.to_radians().sin_cos();
     for p in &mut mesh.vertices {
@@ -20,6 +20,7 @@ fn check_solid(mesh: &TriMesh, expected: f64, context: &str) {
     assert_eq!(report.non_manifold_edges, 0, "{context}: {report:?}");
     assert!(report.is_consistently_oriented, "{context}: {report:?}");
     assert_eq!(report.degenerate_triangles, 0, "{context}: {report:?}");
+    assert!(report.near_duplicate_pairs == 0 && report.coincident_pairs == 0, "{context}: no near-duplicate or coincident vertex pairs: {report:?}");
     let volume = mesh_volume(mesh);
     assert!(
         (volume - expected).abs() < expected * 0.001,

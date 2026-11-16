@@ -80,7 +80,9 @@ pub fn classify_triangles_in(mesh_to_classify: &TriMesh, other: &MeshAccel, on_b
         }
     }
     let origins: Vec<_> = (0..source.len() as u32).collect();
-    let coplanar = crate::corefine::coplanar_regions(mesh_to_classify, &origins, &pairs, source, target);
+    let coplanar = crate::corefine::coplanar_regions(
+        mesh_to_classify, &origins, &pairs, |i| source[i as usize], |i| target[i as usize],
+    );
     classify_triangles_with_coplanar(mesh_to_classify, &InsideTest::whole(other), on_boundary, &coplanar)
 }
 
@@ -128,7 +130,7 @@ impl InsideTest {
         InsideTest { ctx: near.ctx.clone(), refs: Some(refs) }
     }
 
-    fn inside(&self, point: Vec3d) -> bool {
+    pub(crate) fn inside(&self, point: Vec3d) -> bool {
         let Some(refs) = &self.refs else { return point_inside_bvh(point, &self.ctx.tree, &self.ctx.tris) };
         let mut inside_votes = 0u32;
         for &(r, r_inside) in refs {
@@ -196,7 +198,7 @@ pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other
     // edges) does not cross the other mesh's surface, so it lies wholly
     // inside or outside: classify a few of its triangles (majority) and give
     // the patch their answer. Boundary triangles are classified one by one.
-    let (patch, patches) = non_boundary_patches(mesh_to_classify, on_boundary);
+    let (patch, patches) = patches(mesh_to_classify, on_boundary);
     let mut members: Vec<Vec<u32>> = vec![Vec::new(); patches];
     let mut work_tris: Vec<u32> = Vec::new();
     for ti in 0..n {
@@ -258,13 +260,15 @@ pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other
     out
 }
 
-/// Connected patches of non-boundary triangles over shared edges: per
-/// triangle its patch (`u32::MAX` for boundary triangles), and the count.
+/// Connected patches over shared edges: per triangle its patch, and the count. Only
+/// the non-boundary triangles join (`u32::MAX` for boundary triangles).
 /// A union keeps the lower root, so a patch's root is its lowest triangle
 /// whichever order its shared edges join it in: the patches are numbered in
 /// the order of their lowest triangles.
-fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usize) {
+pub(crate) fn patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usize) {
     let n = mesh.triangle_count();
+    // Only the uncut triangles join patches.
+    let joins = |ti: usize| !on_boundary[ti];
     let mut parent: Vec<u32> = (0..n as u32).collect();
     fn find(parent: &mut [u32], mut x: u32) -> u32 {
         while parent[x as usize] != x {
@@ -277,7 +281,7 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
     let vertices = mesh.vertex_count();
     let mut first = vec![0u32; vertices + 1];
     for (ti, t) in mesh.triangles.iter().enumerate() {
-        if !on_boundary[ti] {
+        if joins(ti) {
             for &v in t {
                 first[v as usize + 1] += 1;
             }
@@ -289,7 +293,7 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
     let mut next = first.clone();
     let mut around = vec![0u32; first[vertices] as usize];
     for (ti, t) in mesh.triangles.iter().enumerate() {
-        if !on_boundary[ti] {
+        if joins(ti) {
             for &v in t {
                 around[next[v as usize] as usize] = ti as u32;
                 next[v as usize] += 1;
@@ -299,7 +303,7 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
     let edges = |[a, b, c]: [u32; 3]| [(a, b), (b, c), (c, a)].map(|(u, v)| if u < v { (u, v) } else { (v, u) });
     // A triangle joins each later one with an edge of its own: one round the edge's lower end.
     for (ti, &t) in mesh.triangles.iter().enumerate() {
-        if on_boundary[ti] {
+        if !joins(ti) {
             continue;
         }
         for e in edges(t) {
@@ -318,7 +322,7 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
     let mut ids = vec![u32::MAX; n];
     let mut count = 0usize;
     for ti in 0..n {
-        if on_boundary[ti] {
+        if !joins(ti) {
             continue;
         }
         let r = find(&mut parent, ti as u32) as usize;

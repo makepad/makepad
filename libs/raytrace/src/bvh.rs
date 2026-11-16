@@ -126,6 +126,8 @@ pub struct Bvh {
     pub priorities: Vec<u16>,
     /// Coplanar conflict group in NEW/BVH order; zero disables tie-breaking.
     pub coplanar_groups: Vec<u32>,
+    /// Scene bounds diagonal; packing supplies its already-computed value.
+    pub scene_scale: f32,
     pub max_depth: u32,
     pub leaf_tris: u32,
 }
@@ -233,12 +235,12 @@ impl RayPrep {
     }
 }
 
-/// Building geometry is authored in metres. Two hits closer than the scene's
-/// 2 mm coplanar analysis tolerance (plus a small relative f32 term) are a
-/// depth tie when either triangle carries a non-zero overlap priority.
+/// Scene-relative coplanar tolerance plus a relative f32 distance term.
+/// Calibrated to the building fixtures at a 200-unit diagonal; priority
+/// remains restricted to triangles in the same measured conflict group.
 #[inline]
-pub fn hit_tie_epsilon(t: f32) -> f32 {
-    0.002 + t.abs() * 2.0e-6
+pub fn hit_tie_epsilon(t: f32, scene_scale: f32) -> f32 {
+    scene_scale * 1.0e-5 + t.abs() * 2.0e-6
 }
 
 #[inline]
@@ -253,17 +255,18 @@ fn candidate_wins(
     hit_priority: u16,
     hit_group: u32,
     hit_original: u32,
+    scene_scale: f32,
 ) -> bool {
     if !hit.is_hit() {
         return true;
     }
     let prioritized = group != 0 && group == hit_group;
-    if prioritized && (t - hit.t).abs() <= hit_tie_epsilon(t.max(hit.t)) {
+    if prioritized && (t - hit.t).abs() <= hit_tie_epsilon(t.max(hit.t), scene_scale) {
         // Facing outranks priority inside a coplanar tie: stacked
         // construction layers carry priorities for the EXPOSED side, and a
         // face turned away from the viewer is never the exposed one.
         // Measured on the woodside roof: framing boards are front/back pairs
-        // 0.1..0.4 mm apart, and priority-first deterministically picked the
+        // 0.1..0.4 mm apart in a metre-scale scene; priority-first deterministically picked the
         // farther back face on alternating pixels — the black stripe of the
         // pair of stripes the roof drew.
         if front != hit_front {
@@ -298,9 +301,15 @@ impl Bvh {
     /// Build with render-only priority and measured conflict group per
     /// original triangle. Priority comparisons are only valid within a group.
     pub fn build_with_coplanar(tris: &[Tri], priorities: &[u16], groups: &[u32]) -> Bvh {
+        Self::build_with_scene_scale(tris, priorities, groups, None)
+    }
+
+    pub(crate) fn build_with_scene_scale(
+        tris: &[Tri], priorities: &[u16], groups: &[u32], scene_scale: Option<f32>,
+    ) -> Bvh {
         let n = tris.len();
         if n == 0 {
-            return Bvh::default();
+            return Bvh { scene_scale: scene_scale.unwrap_or(0.0), ..Default::default() };
         }
         let boxes: Vec<Aabb> = tris
             .iter()
@@ -320,6 +329,10 @@ impl Bvh {
         // Flatten to DFS order with skip links.
         let mut nodes = Vec::with_capacity(nodes2.len());
         flatten(&nodes2, 0, &mut nodes);
+        let scene_scale = scene_scale.unwrap_or_else(|| {
+            let bounds = nodes2[0].bounds();
+            (bounds.max - bounds.min).length()
+        });
         let tris_new: Vec<Tri> = order.iter().map(|&i| tris[i as usize].clone()).collect();
         let priorities_new: Vec<u16> = order
             .iter()
@@ -340,6 +353,7 @@ impl Bvh {
             tris: tris_new,
             priorities: priorities_new,
             coplanar_groups: groups_new,
+            scene_scale,
             max_depth,
             leaf_tris,
         }
@@ -417,7 +431,7 @@ impl Bvh {
             let near = t0x.min(t1x).max(t0y.min(t1y)).max(t0z.min(t1z).max(tmin));
             // Conservative WBW slab expansion: 2*gamma(3), rounded up.
             let hit_limit = if !any_hit && hit.is_hit() && hit_group != 0 {
-                (hit.t + hit_tie_epsilon(hit.t)).min(tmax)
+                (hit.t + hit_tie_epsilon(hit.t, self.scene_scale)).min(tmax)
             } else {
                 hit.t
             };
@@ -439,7 +453,7 @@ impl Bvh {
                         let priority = self.priorities.get(k as usize).copied().unwrap_or(0);
                         let group = self.coplanar_groups.get(k as usize).copied().unwrap_or(0);
                         let tri_limit = if !any_hit && hit.is_hit() && group != 0 && group == hit_group {
-                            (hit.t + hit_tie_epsilon(hit.t)).min(tmax)
+                            (hit.t + hit_tie_epsilon(hit.t, self.scene_scale)).min(tmax)
                         } else {
                             hit.t
                         };
@@ -459,6 +473,7 @@ impl Bvh {
                                 hit_priority,
                                 hit_group,
                                 hit_original,
+                                self.scene_scale,
                             ) {
                                 hit = Hit { t, tri: k as i32, u, v, truncated: false };
                                 hit_front = front;
@@ -502,7 +517,7 @@ impl Bvh {
             let priority = self.priorities.get(i).copied().unwrap_or(0);
             let group = self.coplanar_groups.get(i).copied().unwrap_or(0);
             let limit = if hit.is_hit() && group != 0 && group == hit_group {
-                (hit.t + hit_tie_epsilon(hit.t)).min(tmax)
+                (hit.t + hit_tie_epsilon(hit.t, self.scene_scale)).min(tmax)
             } else {
                 hit.t
             };
@@ -519,6 +534,7 @@ impl Bvh {
                     hit_priority,
                     hit_group,
                     hit_original,
+                    self.scene_scale,
                 ) {
                     hit = Hit { t, tri: i as i32, u, v, truncated: false };
                     hit_front = front;
@@ -585,7 +601,7 @@ fn build2(
     let ext = cbounds.max - cbounds.min;
     let axis = if ext.x >= ext.y && ext.x >= ext.z { 0 } else if ext.y >= ext.z { 1 } else { 2 };
     let (cmin, cmax) = cbounds.axis(axis);
-    if cmax - cmin < 1.0e-9 {
+    if cmax <= cmin {
         // All centroids coincide: median split keeps the tree finite.
         let mid = (start + end) / 2;
         let id = nodes.len() as u32;
@@ -822,19 +838,21 @@ mod tests {
             v1: vec3f(1.0, -1.0, z),
             v2: vec3f(0.0, 1.0, z),
         };
-        let near_tie = Bvh::build_with_priorities(&[make(0.0), make(-0.001)], &[1, 9]);
+        let scale = Bvh::build(&[make(0.0)]).scene_scale;
+        let epsilon = hit_tie_epsilon(1.0, scale);
+        let near_tie = Bvh::build_with_priorities(&[make(0.0), make(-0.5 * epsilon)], &[1, 9]);
         let ray = (vec3f(0.0, 0.0, 1.0), vec3f(0.0, 0.0, -1.0));
         let h = near_tie.trace(ray.0, ray.1, 10.0, false);
-        assert_eq!(near_tie.tri_order[h.tri as usize], 1, "priority must resolve the 1 mm tie");
+        assert_eq!(near_tie.tri_order[h.tri as usize], 1, "priority must resolve a half-window tie");
 
-        let separated = Bvh::build_with_priorities(&[make(0.0), make(-0.01)], &[1, 9]);
+        let separated = Bvh::build_with_priorities(&[make(0.0), make(-5.0 * epsilon)], &[1, 9]);
         let h = separated.trace(ray.0, ray.1, 10.0, false);
         assert_eq!(separated.tri_order[h.tri as usize], 0, "nearest geometry wins beyond epsilon");
     }
 
     #[test]
     fn facing_beats_priority_inside_a_tie() {
-        // A backfacing board bottom 0.5 mm CLOSER and with HIGHER priority
+        // A backfacing board bottom a quarter-window CLOSER, with HIGHER priority,
         // still loses to the viewer-facing top inside the coplanar tie: the
         // exposed side of a stacked assembly is the one facing the ray.
         let front = Tri {
@@ -842,10 +860,11 @@ mod tests {
             v1: vec3f(1.0, -1.0, 0.0),
             v2: vec3f(0.0, 1.0, 0.0),
         };
+        let gap = 0.25 * hit_tie_epsilon(1.0, Bvh::build(&[front.clone()]).scene_scale);
         let back = Tri {
-            v0: vec3f(-1.0, -1.0, 0.0005),
-            v1: vec3f(0.0, 1.0, 0.0005),
-            v2: vec3f(1.0, -1.0, 0.0005),
+            v0: vec3f(-1.0, -1.0, gap),
+            v1: vec3f(0.0, 1.0, gap),
+            v2: vec3f(1.0, -1.0, gap),
         };
         let bvh = Bvh::build_with_coplanar(&[front, back], &[1, 9], &[7, 7]);
         let h = bvh.trace(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 0.0, -1.0), 10.0, false);
@@ -910,8 +929,9 @@ mod tests {
             v1: vec3f(1.0, -1.0, z),
             v2: vec3f(0.0, 1.0, z),
         };
+        let gap = 0.5 * hit_tie_epsilon(1.0, Bvh::build(&[make(0.0)]).scene_scale);
         let bvh = Bvh::build_with_coplanar(
-            &[make(0.0), make(-0.001)],
+            &[make(0.0), make(-gap)],
             &[1, 9],
             &[10, 11],
         );

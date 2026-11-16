@@ -13,7 +13,7 @@
 //! | sun and day cycle | analytic at `t`; eased values refused |
 //! | render-scale governor | a fixed scale; the governor refused |
 //! | lightmap bakes | baked to completion before the frame, or refused |
-//! | SSAO | current frame (a depth pre-pass), or off; previous-frame depth refused |
+//! | SSAO | current frame (a depth pre-pass) without history, or off; previous-frame depth and the temporal resolve's history refused |
 //! | fast GI | off until its cold-converge mode exists |
 //! | VFX particles | a closed form of (spawn time, index, seed) or the stepper; free-running refused |
 //! | TAA | refused (supersampling instead) |
@@ -117,7 +117,7 @@ fn rule(s: Subsystem, u: Usage) -> Result<(), &'static str> {
         (LightmapBake, Analytic | Synchronous) => Ok(()),
         (LightmapBake, _) => Err("spreads its bake over frames: bake to completion before the frame"),
         (Ssao, Synchronous | Analytic) => Ok(()),
-        (Ssao, _) => Err("reads the previous frame's depth: use current-frame AO (a depth pre-pass) or turn it off"),
+        (Ssao, _) => Err("reads an earlier frame (the previous frame's depth or its own history): use current-frame AO (a depth pre-pass) with history off, or turn it off"),
         (FastGi, _) => Err("carries last frame's field and a timing-dependent budget: turn GI off for locked time (its cold-converge mode is not built)"),
         (VfxParticles, Analytic | Synchronous) => Ok(()),
         (VfxParticles, _) => Err("free-running emitters are realtime only: use a closed-form (spawn time, index, seed) kernel or the effect stepper"),

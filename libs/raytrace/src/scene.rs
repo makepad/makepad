@@ -11,13 +11,15 @@
 
 use makepad_draw::*;
 
-/// One physically based material. Roughness/metal follow glTF; `transmission`
-/// turns the surface into THIN glass (a window pane: Fresnel reflection off
-/// the front, the rest passes straight through tinted by `albedo`) — the
-/// right model for a building's glazing, which is never a closed solid.
+/// One physically based material. Roughness/metal follow glTF. With
+/// `transmission > 0`, the default is thin glass: Fresnel reflection, otherwise
+/// straight through with an `albedo` tint. `solid` instead describes a closed,
+/// outward-wound dielectric boundary, with air outside and this material
+/// inside. Solids must not overlap. Solid interfaces are smooth: roughness,
+/// metal and the albedo/texture tint are ignored for their transport.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
-    /// Linear-space base colour (the tint for glass).
+    /// Linear-space base colour (the tint for thin glass).
     pub albedo: [f32; 3],
     /// Perceptual roughness 0..1 (GGX alpha = r*r).
     pub roughness: f32,
@@ -28,8 +30,14 @@ pub struct Material {
     pub emission: [f32; 3],
     /// Index of refraction for the Fresnel term (1.5 = glass).
     pub ior: f32,
-    /// 0 opaque .. 1 thin glass.
+    /// 0 opaque .. 1 dielectric; scales each transmitted interface's weight.
     pub transmission: f32,
+    /// Closed solid dielectric when transmitting; false preserves thin sheets.
+    pub solid: bool,
+    /// Linear RGB fraction retained after ONE scene unit inside a solid.
+    /// Clamped to 0..1; Beer-Lambert transmittance is `absorption^distance`.
+    /// `[1.0; 3]` is clear. Thin sheets ignore this field.
+    pub absorption: [f32; 3],
     /// Base-colour image (index into `SceneInput::images`), multiplied with `albedo`.
     pub texture: Option<usize>,
     /// Explicit sidedness. Opaque architectural faces are front-facing;
@@ -46,6 +54,8 @@ impl Default for Material {
             emission: [0.0; 3],
             ior: 1.5,
             transmission: 0.0,
+            solid: false,
+            absorption: [1.0; 3],
             texture: None,
             two_sided: false,
         }

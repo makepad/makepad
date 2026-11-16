@@ -23,31 +23,45 @@ mod lm_depth;
 mod lm_gather;
 mod lm_encode;
 
-/// Register every scene shader block, in the order the single block used to
-/// declare them (later blocks spread earlier `mod.draw` objects).
-pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    mixins::script_mod(vm);
-    csm::script_mod(vm);
-    cube::script_mod(vm);
-    effects::script_mod(vm);
-    sky_dome::script_mod(vm);
-    skinned::script_mod(vm);
-    pbr::script_mod(vm);
-    city::script_mod(vm);
-    grass::script_mod(vm);
-    foliage::script_mod(vm);
-    splat::script_mod(vm);
-    impostor::script_mod(vm);
+/// Every scene shader block, in the order the single block used to declare
+/// them (later blocks spread earlier `mod.draw` objects): `script_mod` runs
+/// them all, `crate::script_mod_steps` one at a time.
+pub(crate) const SCRIPT_MOD_STEPS: &[crate::ScriptModStep] = &[
+    ("shaders: mixins", mixins::script_mod),
+    ("shaders: csm", csm::script_mod),
+    ("shaders: cube", cube::script_mod),
+    ("shaders: effects", effects::script_mod),
+    ("shaders: sky_dome", sky_dome::script_mod),
+    ("shaders: skinned", skinned::script_mod),
+    ("shaders: pbr", pbr::script_mod),
+    ("shaders: city", city::script_mod),
+    ("shaders: grass", grass::script_mod),
+    ("shaders: foliage", foliage::script_mod),
+    ("shaders: splat", splat::script_mod),
+    ("shaders: impostor", impostor::script_mod),
     // The skin lane assigns render-material's IBL lookups by name
     // (skinned_gpu.rs), so they exist before it is declared. Idempotent:
     // custom_material.rs registers them again for the material programs.
+    ("shaders: material builtins", material_builtins),
+    ("shaders: skinned_gpu", skinned_gpu::script_mod),
+    ("shaders: world", world::script_mod),
+    ("shaders: water", water::script_mod),
+    ("shaders: lm_depth", lm_depth::script_mod),
+    ("shaders: lm_gather", lm_gather::script_mod),
+    ("shaders: lm_encode", lm_encode::script_mod),
+];
+
+fn material_builtins(vm: &mut ScriptVm) -> ScriptValue {
     makepad_render_material::builtin::register(vm);
-    skinned_gpu::script_mod(vm);
-    world::script_mod(vm);
-    water::script_mod(vm);
-    lm_depth::script_mod(vm);
-    lm_gather::script_mod(vm);
-    lm_encode::script_mod(vm)
+    NIL
+}
+
+/// Register every scene shader block (`SCRIPT_MOD_STEPS`).
+pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    for (_, step) in SCRIPT_MOD_STEPS {
+        step(vm);
+    }
+    NIL
 }
 
 /// The concatenated shader source, for the tests that pin shader text.

@@ -452,12 +452,22 @@ impl Renderer {
         // diffuse pass; the PBR pass that follows reads the same answer.
         if phase == LayerPhase::Opaque && !pbr_lane {
             let hdr = self.hdr_output;
+            if self.pbr_materials_enabled && self.pbr_draw.is_none() && self.has_pbr_instances(instances) {
+                // Held VM (a script-driven draw is mid-apply): try again next
+                // frame rather than drawing with no shader.
+                self.pbr_draw = cx
+                    .cx
+                    .try_with_vm(|vm| Box::new(DrawScenePbr::script_new_with_default(vm)));
+            }
             // The PBR lane's shader for this frame's features (variants.rs).
             if let Some(d) = self.pbr_draw.as_deref_mut() {
                 d.skinned.draw_vars.refresh_after_reload(cx.cx);
             }
             let stock = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id);
             let shader = if stock.is_some() { self.lane_shaders(cx.cx, variants::ModelLane::Pbr, stock).0 } else { None };
+            if let Some(d) = self.pbr_draw.as_deref_mut() {
+                d.skinned.draw_vars.draw_shader_id = shader;
+            }
             self.pbr_ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
             // Likewise shiny stock models leave the PBR lane for the
             // engine's IBL program only once its variant for this frame's
@@ -518,14 +528,11 @@ impl Renderer {
         // the foliage/PBR lanes' layout: the lane swaps only the shader id
         // for that layer. Without it (the diffuse lane, or before its
         // pipeline exists) the model draws its own layers at every distance:
-        // the stand-in's quad is not a picture on its own. Its pipelines are built when a resident
-        // model has a stand-in.
+        // the stand-in's quad is not a picture on its own. The frame builds
+        // it as soon as a resident model has a stand-in (realm.rs
+        // `prepare_impostor_lane`).
         let lane_shader = draw.base().draw_vars.draw_shader_id;
-        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) && self.a_resident_layer(|s| s.definition.impostor > 0.0) {
-            self.lane_shaders(cx.cx, variants::ModelLane::Impostor, None).0.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
-        } else {
-            None
-        };
+        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) { self.impostor_shader } else { None };
         let impostor_scale = self.impostor_scale;
         let terrain_blend_reach = self.terrain_blend_reach;
         let occluder_focus = self.occluder.focus();
@@ -716,6 +723,12 @@ impl Renderer {
                     stock_ibl::stock_lane_skips(wanted_custom.is_some(), takes_stock_ibl, sways, foliage_lane, uses_pbr_lane, pbr_lane)
                 } {
                     continue;
+                }
+                if custom_name.is_none() && !pbr_lane
+                    && ((self.pbr_materials_enabled && loaded.wants_pbr && !self.pbr_ready)
+                        || (wanted_custom.is_none() && inst.custom_material.as_ref().is_some_and(|m| self.custom_draws.get(&m.name).is_some())))
+                {
+                    self.items.fallback = true;
                 }
             }
             if !stock_ibl_lane {
@@ -932,7 +945,10 @@ impl Renderer {
                 // A static copy's own layers take no shadow from its stand-in,
                 // which casts for it past the first cascade (shaders/csm.rs
                 // `csm_own_limit`); a mover casts its own layers everywhere.
-                let own = match root.stand_in { Some(c) if !stand_in && !dynamic => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
+                // The stand-in itself never takes its own shadow either, so
+                // mesh and stand-in agree where one takes over from the other
+                // (shaders/impostor.rs).
+                let own = match root.stand_in { Some(c) if stand_in || !dynamic => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &own);
                 draw.base().draw_vars.set_texture(0, texture);
                 // A painted tile's slot 0 is its layers' albedo array; a
@@ -1165,7 +1181,7 @@ impl Renderer {
         }
         // Screen-space AO, once for the whole lane (both lanes pass through
         // here). Ambient-only by shader law; strength 0 = the slot is never
-        // sampled, which is every game host's path.
+        // sampled. The visibility remains in ssao_map.x for both lanes.
         {
             let ssao = self.ssao.clone();
             let vars = &mut draw.base().draw_vars;
@@ -1175,6 +1191,9 @@ impl Renderer {
                     vars.set_uniform(cx.cx, live_id!(ssao_ctl), &[*strength, 0.0, 0.0, 0.0]);
                 }
                 None => {
+                    // Nor bound (by name: the slot differs between programs): no AO texture of an
+                    // earlier frame, or of the scene's draw for an aux one, stays the lane's input.
+                    super::frame::unbind_texture_named(cx.cx, vars, live_id!(ssao_map));
                     vars.set_uniform(cx.cx, live_id!(ssao_ctl), &[0.0, 0.0, 0.0, 0.0]);
                 }
             }
@@ -1213,6 +1232,12 @@ impl Renderer {
         }
     }
 
+    fn has_pbr_instances(&self, instances: &[ModelInstance]) -> bool {
+        let shiny: std::collections::HashSet<&str> = self.static_models.iter()
+            .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
+        !shiny.is_empty() && instances.iter().any(|inst| shiny.contains(inst.model.as_str()))
+    }
+
     /// The specular half of the model pass: the same instance list, walked
     /// again for the models whose material carries shininess.
     ///
@@ -1249,20 +1274,11 @@ impl Renderer {
             if order.key == (instances.as_ptr() as usize, instances.len(), lod_scale.to_bits()) {
                 order.slots.iter().any(|slot| slot.is_some_and(|at| self.static_models[at].1.wants_pbr))
             } else {
-                let shiny: std::collections::HashSet<&str> = self.static_models.iter()
-                    .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
-                !shiny.is_empty() && instances.iter().any(|inst| shiny.contains(inst.model.as_str()))
+                self.has_pbr_instances(instances)
             }
         };
         if !any {
             return;
-        }
-        if self.pbr_draw.is_none() {
-            // Held VM (a script-driven draw is mid-apply): try again next
-            // frame rather than drawing with no shader.
-            self.pbr_draw = cx
-                .cx
-                .try_with_vm(|vm| Box::new(DrawScenePbr::script_new_with_default(vm)));
         }
         if !self.pbr_ready {
             // The diffuse pass drew them this frame.
@@ -1405,7 +1421,7 @@ impl Renderer {
                     } => format!(
                         "VecMipBGRAu8_32({width}x{height}, texels={}, first={:#010x}, \
                          max_level={max_level:?}, wrap={wrap:?}, {updated:?})",
-                        data.as_ref().map_or(0, Vec::len),
+                        data.as_ref().map_or(0, |data| data.len()),
                         data.as_ref()
                             .and_then(|pixels| pixels.first())
                             .copied()

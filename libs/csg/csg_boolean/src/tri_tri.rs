@@ -16,7 +16,6 @@
 // 10. If they do, compute the intersection segment.
 
 use makepad_csg_math::{orient2d, orient3d, Vec3d};
-use makepad_csg_exact::ExactVec3;
 
 /// Identifies which edge of which triangle produced an intersection point.
 /// The edge is defined by its operand and the two mesh-level vertex indices.
@@ -128,20 +127,106 @@ pub(crate) fn tri_tri_intersection_indexed_with_tolerance(
     b_ti: u32,
     tol: f64,
 ) -> TriTriResult {
-    let db = [orient3d(b0, b1, b2, a0), orient3d(b0, b1, b2, a1), orient3d(b0, b1, b2, a2)];
-    let da = [orient3d(a0, a1, a2, b0), orient3d(a0, a1, a2, b1), orient3d(a0, a1, a2, b2)];
-    // Keep the existing recognition of whole faces that coincide up to
-    // transform rounding. Never snap individual vertices of a crossing
-    // triangle: doing so erases a real interval next to a shared cap.
-    let na_len = (a1 - a0).cross(a2 - a0).length();
-    let nb_len = (b1 - b0).cross(b2 - b0).length();
-    if db.iter().all(|d| snap_to_plane(*d, nb_len, tol) == 0.0)
-        && da.iter().all(|d| snap_to_plane(*d, na_len, tol) == 0.0)
-    {
+    let planes = Planes::new((a0, a1, a2), (b0, b1, b2), tol);
+    if planes.coplanar((a0, a1, a2), (b0, b1, b2)) {
         return if coplanar_tri_tri(a0, a1, a2, b0, b1, b2) {
             TriTriResult::coplanar_intersection()
         } else { TriTriResult::no_intersection() };
     }
+    crossing(a0, a1, a2, a_vi, a_ti, b0, b1, b2, b_vi, b_ti, &planes, [[false; 3]; 2])
+}
+
+/// A pair's plane tests: each triangle's corners against the other's plane, as `orient3d` (the
+/// plane normal's length times the signed distance).
+pub(crate) struct Planes {
+    /// A's corners against B's plane.
+    db: [f64; 3],
+    /// B's corners against A's plane.
+    da: [f64; 3],
+    na_len: f64,
+    nb_len: f64,
+    tol: f64,
+}
+
+impl Planes {
+    pub(crate) fn new((a0, a1, a2): (Vec3d, Vec3d, Vec3d), (b0, b1, b2): (Vec3d, Vec3d, Vec3d), tol: f64) -> Planes {
+        Planes {
+            db: [orient3d(b0, b1, b2, a0), orient3d(b0, b1, b2, a1), orient3d(b0, b1, b2, a2)],
+            da: [orient3d(a0, a1, a2, b0), orient3d(a0, a1, a2, b1), orient3d(a0, a1, a2, b2)],
+            na_len: (a1 - a0).cross(a2 - a0).length(),
+            nb_len: (b1 - b0).cross(b2 - b0).length(),
+            tol,
+        }
+    }
+
+    /// The same tests, or `None` when the pair can neither cross nor be coplanar: the worse-shaped
+    /// triangle's corners lie strictly on one side of the better one's plane, beyond the
+    /// tolerance. None of them is near, so no crossing; and `coplanar` would need the worse plane
+    /// to win, which it allows only on a tie. A pair it keeps gets exactly the values of `new`.
+    pub(crate) fn unless_apart((a0, a1, a2): (Vec3d, Vec3d, Vec3d), (b0, b1, b2): (Vec3d, Vec3d, Vec3d), tol: f64) -> Option<Planes> {
+        let na_len = (a1 - a0).cross(a2 - a0).length();
+        let nb_len = (b1 - b0).cross(b2 - b0).length();
+        let (qa, qb) = (plane_quality(na_len, a0, a1, a2), plane_quality(nb_len, b0, b1, b2));
+        let apart = |d: [f64; 3], normal_len: f64| {
+            let side = d.map(|d| snap_to_plane(d, normal_len, tol));
+            side.iter().all(|d| *d > 0.0) || side.iter().all(|d| *d < 0.0)
+        };
+        let da = || [orient3d(a0, a1, a2, b0), orient3d(a0, a1, a2, b1), orient3d(a0, a1, a2, b2)];
+        let db = || [orient3d(b0, b1, b2, a0), orient3d(b0, b1, b2, a1), orient3d(b0, b1, b2, a2)];
+        let (db, da) = if qa > qb {
+            let da = da();
+            if apart(da, na_len) {
+                return None;
+            }
+            (db(), da)
+        } else if qb > qa {
+            let db = db();
+            if apart(db, nb_len) {
+                return None;
+            }
+            (db, da())
+        } else {
+            (db(), da())
+        };
+        Some(Planes { db, da, na_len, nb_len, tol })
+    }
+
+    /// Which corners lie within the tolerance of the other's plane: A's on B's, then B's on A's.
+    pub(crate) fn near(&self) -> [[bool; 3]; 2] {
+        [self.db.map(|d| snap_to_plane(d, self.nb_len, self.tol) == 0.0), self.da.map(|d| snap_to_plane(d, self.na_len, self.tol) == 0.0)]
+    }
+
+    /// Whether the two lie in one plane: whole faces that coincide up to transform rounding. A
+    /// triangle lying in the plane of the better-shaped one is coplanar with it. A needle's own
+    /// plane is ill-conditioned: the other's far corners can miss it although the needle lies
+    /// flat in the other's plane (the near-coincident points an earlier boolean leaves on a cap).
+    pub(crate) fn coplanar(&self, (a0, a1, a2): (Vec3d, Vec3d, Vec3d), (b0, b1, b2): (Vec3d, Vec3d, Vec3d)) -> bool {
+        let [a_near, b_near] = self.near();
+        match (a_near.iter().all(|n| *n), b_near.iter().all(|n| *n)) {
+            (true, true) => true,
+            (true, false) => plane_quality(self.nb_len, b0, b1, b2) >= plane_quality(self.na_len, a0, a1, a2),
+            (false, true) => plane_quality(self.na_len, a0, a1, a2) >= plane_quality(self.nb_len, b0, b1, b2),
+            (false, false) => false,
+        }
+    }
+}
+
+pub(crate) fn crossing(
+    a0: Vec3d,
+    a1: Vec3d,
+    a2: Vec3d,
+    a_vi: [u32; 3],
+    a_ti: u32,
+    b0: Vec3d,
+    b1: Vec3d,
+    b2: Vec3d,
+    b_vi: [u32; 3],
+    b_ti: u32,
+    planes: &Planes,
+    on: [[bool; 3]; 2],
+) -> TriTriResult {
+    let set = |d: [f64; 3], on: [bool; 3]| [0, 1, 2].map(|k| if on[k] { 0.0 } else { d[k] });
+    let (db, da) = (set(planes.db, on[0]), set(planes.da, on[1]));
     if [da, db].iter().any(|d| d.iter().all(|d| *d > 0.0) || d.iter().all(|d| *d < 0.0)) {
         return TriTriResult::no_intersection();
     }
@@ -320,28 +405,6 @@ fn edge_plane_intersection(a: Vec3d, b: Vec3d, da: f64, db: f64) -> Vec3d {
     a.lerp(b, da / (da - db))
 }
 
-/// Construct only accepted intersections, once per shared edge/plane pair.
-pub(crate) fn construct_edge_plane_intersection(a: Vec3d, b: Vec3d, plane: (Vec3d, Vec3d, Vec3d)) -> Vec3d {
-    let da = orient3d(plane.0, plane.1, plane.2, a);
-    let db = orient3d(plane.0, plane.1, plane.2, b);
-    if da == 0.0 { return a; }
-    if db == 0.0 { return b; }
-    // Construct the homogeneous intersection before rounding. Interpolating
-    // with a rounded t can put a cut vertex on the wrong side of its plane,
-    // so the next boolean's AABB search misses a coincident face altogether.
-    let a = ExactVec3::from_vec3d(a);
-    let b = ExactVec3::from_vec3d(b);
-    let p = ExactVec3::from_vec3d(plane.0);
-    let q = ExactVec3::from_vec3d(plane.1);
-    let r = ExactVec3::from_vec3d(plane.2);
-    let normal = q.sub(&p).cross(&r.sub(&p));
-    let da = normal.dot(&a.sub(&p));
-    let db = normal.dot(&b.sub(&p));
-    let numerator = b.scale(&da).sub(&a.scale(&db));
-    let denominator = da.sub(&db).estimate();
-    Vec3d::new(numerator.x.estimate() / denominator, numerator.y.estimate() / denominator, numerator.z.estimate() / denominator)
-}
-
 /// Project a point onto the intersection line direction using one coordinate.
 fn project_onto(p: Vec3d, _dir: Vec3d, axis: usize) -> f64 {
     match axis {
@@ -361,6 +424,48 @@ pub fn plane_tolerance(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2
     scale * 1e-9
 }
 
+/// How well a triangle fixes its plane: twice its area (`normal_len`) over its longest edge
+/// squared, about 0.87 for an equilateral triangle and zero for a needle.
+pub(crate) fn plane_quality(normal_len: f64, a: Vec3d, b: Vec3d, c: Vec3d) -> f64 {
+    let (ab, bc, ca) = (b - a, c - b, a - c);
+    let longest = ab.dot(ab).max(bc.dot(bc)).max(ca.dot(ca));
+    if longest > 0.0 { normal_len / longest } else { 0.0 }
+}
+
+/// The plane normal of two coplanar triangles: the better-conditioned one's, whichever comes
+/// first; on a tie their sum, the second turned to face the first's way (equal up to sign).
+pub(crate) fn shared_normal(a: (Vec3d, Vec3d, Vec3d), b: (Vec3d, Vec3d, Vec3d)) -> Vec3d {
+    let na = (a.1 - a.0).cross(a.2 - a.0);
+    let nb = (b.1 - b.0).cross(b.2 - b.0);
+    let (qa, qb) = (plane_quality(na.length(), a.0, a.1, a.2), plane_quality(nb.length(), b.0, b.1, b.2));
+    shared_normal_from_quality(na, qa, nb, qb)
+}
+
+/// Use the same plane choice when source normals and qualities have already been cached.
+pub(crate) fn shared_normal_from_quality(na: Vec3d, qa: f64, nb: Vec3d, qb: f64) -> Vec3d {
+    if qa > qb {
+        na
+    } else if qb > qa {
+        nb
+    } else if na.dot(nb) >= 0.0 {
+        na + nb
+    } else {
+        na - nb
+    }
+}
+
+/// The two axes kept when projecting onto a plane of this normal: the dominant axis is dropped.
+pub(crate) fn kept_axes(normal: Vec3d) -> (usize, usize) {
+    let (ax, ay, az) = (normal.x.abs(), normal.y.abs(), normal.z.abs());
+    if ax >= ay && ax >= az {
+        (1, 2)
+    } else if ay >= az {
+        (0, 2)
+    } else {
+        (0, 1)
+    }
+}
+
 /// `orient3d` is the plane normal's length times the signed distance: zero
 /// when the distance is within `tol`.
 fn snap_to_plane(d: f64, normal_len: f64, tol: f64) -> f64 {
@@ -372,21 +477,9 @@ fn snap_to_plane(d: f64, normal_len: f64, tol: f64) -> f64 {
 }
 
 /// Test if two coplanar triangles overlap using 2D projected tests.
-fn coplanar_tri_tri(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2: Vec3d) -> bool {
+pub(crate) fn coplanar_tri_tri(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2: Vec3d) -> bool {
     // Project to 2D by dropping the axis most aligned with the shared normal
-    let normal = (a1 - a0).cross(a2 - a0);
-    let ax = normal.x.abs();
-    let ay = normal.y.abs();
-    let az = normal.z.abs();
-
-    // Choose which two axes to keep
-    let (i, j) = if ax >= ay && ax >= az {
-        (1, 2)
-    } else if ay >= az {
-        (0, 2)
-    } else {
-        (0, 1)
-    };
+    let (i, j) = kept_axes(shared_normal((a0, a1, a2), (b0, b1, b2)));
 
     let proj = |v: Vec3d| -> (f64, f64) {
         let coords = [v.x, v.y, v.z];

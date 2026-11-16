@@ -60,7 +60,7 @@ script_mod! {
             let glint = a2 / max(3.14159265 * den * den, 0.0001) * 0.25
             let coat_env = env * (fc * amb_occ)
             self.ssr_coat(coat_env, vec3(fc, fc, fc), 1.0 - fc)
-            var out = base * (1.0 - fc) + coat_env + sun * (glint * fc)
+            var out = base * (1.0 - fc) + coat_env + sun * (glint * fc) * self.key_lobe_gain(0.03)
             if flake > 0.0 {
                 let cell = floor(self.v_csm.xyz * 900.0)
                 let fh = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453)
@@ -69,7 +69,7 @@ script_mod! {
                 let sparkle = pow(max(dot(tilt, h), 0.0), 220.0) * step(0.55, fh2)
                 let flake_env = env * albedo * (flake * 0.12 * amb_occ)
                 self.ssr_coat(flake_env, albedo * (flake * 0.12), 1.0)
-                out = out + sun * albedo * (sparkle * flake * 6.0) + flake_env
+                out = out + sun * albedo * (sparkle * flake * 6.0) * self.key_lobe_gain(0.03) + flake_env
             }
             if rim > 0.0 { out = out + self.toy_rim(n, v, l, amb_occ) * (rim / 255.0) }
             return out
@@ -164,7 +164,7 @@ script_mod! {
             let spec_occ=self.gi_specular_occlusion(surface_ambient,hemisphere_ambient)
             // Light arrives as irradiance/pi units (the diffuse lobe carries
             // no 1/pi), so the HDR lane lifts the lobe by pi to match.
-            let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
+            let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x) * self.key_lobe_gain(clamp(rough, 0.0, 1.0))
                 * (sun_lit * ao_direct)
 
             // Ambient specular from the analytic sky environment (sky_env)
@@ -197,7 +197,7 @@ script_mod! {
             // The sun as the light hook sees it: its radiance (colour and
             // shadow, before N.L) and its specular lobe per unit N.L.
             let sun_rad = self.sun_color * (ao_direct * sun_lit)
-            let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
+            let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x) * self.key_lobe_gain(clamp(rough, 0.0, 1.0))
             let spec_sun = sun_spec * f
             let added_env = amb_spec * occlusion
             let spec_local = local_pbr * ao_direct
@@ -393,14 +393,14 @@ script_mod! {
             let a2 = 0.0016
             let den = ndh * ndh * (a2 - 1.0) + 1.0
             let glint = a2 / max(3.14159265 * den * den, 0.0001) * 0.25
-            var out = base * (1.0 - fc) + env * (fc * amb_occ) + sun * (glint * fc)
+            var out = base * (1.0 - fc) + env * (fc * amb_occ) + sun * (glint * fc) * self.key_lobe_gain(0.03)
             if flake > 0.0 {
                 let cell = floor(self.v_csm.xyz * 900.0)
                 let fh = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453)
                 let fh2 = fract(fh * 17.13 + 0.37)
                 let tilt = normalize(n + (vec3(fh, fh2, fract(fh * 7.7)) - vec3(0.5, 0.5, 0.5)) * 0.5)
                 let sparkle = pow(max(dot(tilt, h), 0.0), 220.0) * step(0.55, fh2)
-                out = out + sun * albedo * (sparkle * flake * 6.0) + env * albedo * (flake * 0.12 * amb_occ)
+                out = out + sun * albedo * (sparkle * flake * 6.0) * self.key_lobe_gain(0.03) + env * albedo * (flake * 0.12 * amb_occ)
             }
             if rim > 0.0 { out = out + self.toy_rim(n, v, l, amb_occ) * (rim / 255.0) }
             return out
@@ -686,7 +686,7 @@ script_mod! {
             let spec_occ=self.gi_specular_occlusion(surface_ambient,hemisphere_ambient)
             // Light arrives as irradiance/pi units (the diffuse lobe carries
             // no 1/pi), so the HDR lane lifts the lobe by pi to match.
-            let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
+            let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x) * self.key_lobe_gain(clamp(rough, 0.0, 1.0))
                 * (sun_lit * ao_direct)
 
             // Ambient specular from the analytic sky environment (sky_env)
@@ -719,7 +719,7 @@ script_mod! {
             // The sun as the light hook sees it: its radiance (colour and
             // shadow, before N.L) and its specular lobe per unit N.L.
             let sun_rad = self.sun_color * (ao_direct * sun_lit)
-            let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
+            let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x) * self.key_lobe_gain(clamp(rough, 0.0, 1.0))
             let spec_sun = sun_spec * f
             let added_env = amb_spec * occlusion
             let spec_local = local_pbr * ao_direct
