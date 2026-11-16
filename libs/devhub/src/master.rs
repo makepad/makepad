@@ -244,6 +244,12 @@ impl Master {
         );
         let ib = inbox.clone();
         ep.register("inbox", 1, makepad_remote::lines::service("inbox", Arc::new(move |line, out| inbox_cmd(&ib, line, out))));
+        let (s, o) = (sink.clone(), on_record.clone());
+        let asks = crate::ask::Asks::open(proto::home().join("ask.jsonl"), name, Arc::new(move |r: Record| {
+            s.emit(&r.to_json());
+            o(&r);
+        }));
+        crate::ask::register(&ep, asks);
         crate::sync::register_control(&ep, &hub);
         let (s, o) = (sink.clone(), on_record.clone());
         let leases = crate::lease::master::register(&ep, name, Arc::new(move |r: Record| {
@@ -280,6 +286,13 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // the land rule's binary's periodic work ([`crate::gate`]), said on these events, while
+        // the rule is not switched off
+        let (s, o, rule) = (sink.clone(), on_record.clone(), land.clone());
+        crate::gate::start_ticks(crate::lease::wt::default_repo(), name.to_string(), Arc::new(move || rule.rule_off().is_none()), Arc::new(move |r: Record| {
+            s.emit(&r.to_json());
+            o(&r);
+        }));
         // a landing holds what reaches a Mac show until its tip is proven (orch/show.rs)
         #[cfg(feature = "checkout")]
         land.before_ff(Arc::new(crate::orch::show::before_landing));
@@ -294,7 +307,7 @@ impl Master {
             crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, |_| None);
+            }), run, |_| None, Some(crate::bucket::fast_probe(repo.clone(), home.clone(), proofs.clone())));
             // the reached test targets under the JIT, after landing and in the background
             let run = crate::bucket::tests(repo.clone(), home.clone(), proofs.clone());
             let (s, o) = (sink.clone(), on_record.clone());
@@ -302,31 +315,33 @@ impl Master {
             crate::bucket::spawn("tests", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, |_| None);
+            }), run, |_| None, None);
             // every package's tests, no proof reused: once a day at 17:00 on this Mac's clock, done
-            // before the daily push review (19:13) reads its red list, and on demand
+            // before the daily push review (19:13) reads its red list; early once no lane's ask
+            // queued a minute for 20 min (12 h after its last start at the soonest: its 17:00
+            // run on a busy fleet held boxes against lane work, 11-16); and on demand
             let run = crate::bucket::full(repo.clone(), home.clone(), proofs);
             let (s, o) = (sink.clone(), on_record.clone());
-            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(17) };
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(17), quiet_queue: Some(Duration::from_secs(20 * 60)) };
             crate::bucket::spawn(crate::bucket::FULL, timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, |_| None);
+            }), run, |_| None, None);
             let run = crate::bucket::hot(repo.clone(), home.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing::after(Duration::ZERO, Duration::ZERO);
             crate::bucket::spawn("hot", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, |_| None);
+            }), run, |_| None, None);
             let run = crate::orch::ci::regression(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             // once a night, 02:00 on this Mac's clock, of the tip then (user, 11-05)
-            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2) };
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2), quiet_queue: None };
             crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, crate::orch::ci::last_rolling);
+            }), run, crate::orch::ci::last_rolling, None);
             ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |line, out| {
                 match line.split_whitespace().skip_while(|w| *w == "bucket").collect::<Vec<_>>()[..] {
                     ["run", name] => out.push(crate::bucket::kick(&home, name)),

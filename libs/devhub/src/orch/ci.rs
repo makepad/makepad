@@ -237,6 +237,10 @@ pub struct Krate {
     /// why its tests run in the lane's tree, never a JIT overlay: its
     /// `[package.metadata.makepad] test-tree` (an overlay's root is one only the JIT reads)
     pub test_tree: Option<String>,
+    /// the test targets that run under cargo, never the JIT, each with why: its
+    /// `[package.metadata.makepad.native-tests]` (`lib`, `bin:<name>`, `test:<name>`); the tests
+    /// bucket gives each a unit of its own and `devhub test` routes a run of one to cargo
+    pub native_tests: BTreeMap<String, String>,
 }
 
 fn dir_of(path: &str) -> &str {
@@ -295,7 +299,9 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
         }
     }
     let test_tree = doc.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(Toml::as_str).map(str::to_string);
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree })
+    let native_tests = doc.get_path(&["package", "metadata", "makepad", "native-tests"]).and_then(Toml::as_table)
+        .map(|t| t.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()).unwrap_or_default();
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {
@@ -305,12 +311,21 @@ fn skipped(package: &str, dir: &str) -> bool {
 
 /// Every package in the tree; a duplicate name keeps the shorter directory.
 pub fn package_dirs(tree: &Tree) -> BTreeMap<String, String> {
+    package_dirs_of(&manifests(tree))
+}
+
+fn manifests(tree: &Tree) -> BTreeMap<&str, makepad_toml_parser::TomlDocument> {
+    tree.files.iter().filter(|p| p.as_str() == "Cargo.toml" || p.ends_with("/Cargo.toml"))
+        .filter_map(|path| Some((dir_of(path), parse_toml(&tree.read(path)?).ok()?))).collect()
+}
+
+fn package_dirs_of(docs: &BTreeMap<&str, makepad_toml_parser::TomlDocument>) -> BTreeMap<String, String> {
     let mut dirs = BTreeMap::<String, String>::new();
-    for path in tree.files.iter().filter(|p| p.as_str() == "Cargo.toml" || p.ends_with("/Cargo.toml")) {
+    for (dir, doc) in docs {
         // (the name alone: `krate` walks every file of the tree per manifest)
-        let Some(name) = tree.read(path).and_then(|t| parse_toml(&t).ok()).and_then(|d| d.get_path(&["package", "name"]).and_then(Toml::as_str).map(str::to_string)) else { continue };
-        let d = dir_of(path).to_string();
-        let dir = dirs.entry(name).or_insert_with(|| d.clone());
+        let Some(name) = doc.get_path(&["package", "name"]).and_then(Toml::as_str) else { continue };
+        let d = (*dir).to_string();
+        let dir = dirs.entry(name.to_string()).or_insert_with(|| d.clone());
         if d.len() < dir.len() { *dir = d; }
     }
     dirs
@@ -320,6 +335,10 @@ pub fn package_dirs(tree: &Tree) -> BTreeMap<String, String> {
 /// `workspace.exclude`) that are packages in the tree.
 pub fn members(tree: &Tree) -> Vec<Krate> {
     let Some(doc) = tree.read("Cargo.toml").and_then(|t| parse_toml(&t).ok()) else { return Vec::new() };
+    member_dirs(tree, &doc).into_iter().filter_map(|d| krate(tree, &join(&d, "Cargo.toml"))).collect()
+}
+
+fn member_dirs(tree: &Tree, doc: &makepad_toml_parser::TomlDocument) -> BTreeSet<String> {
     let list = |k: &str| -> Vec<String> {
         doc.get_path(&["workspace", k]).and_then(Toml::as_array).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect()
     };
@@ -338,18 +357,37 @@ pub fn members(tree: &Tree) -> Vec<Krate> {
     }
     dirs.into_iter()
         .filter(|d| !exclude.iter().any(|e| d == e || d.starts_with(&format!("{e}/"))))
-        .filter_map(|d| krate(tree, &join(&d, "Cargo.toml")))
         .collect()
+}
+
+/// The names of [`workspace_crates`]: what cargo builds in the root workspace, the commercial
+/// crates its members reach by path included.
+fn workspace_packages(tree: &Tree, docs: &BTreeMap<&str, makepad_toml_parser::TomlDocument>) -> BTreeSet<String> {
+    workspace_dirs(tree).into_iter()
+        .filter_map(|dir| docs.get(dir.as_str())?.get_path(&["package", "name"])?.as_str().map(str::to_string)).collect()
+}
+
+/// The names of [`workspace_crates`], each manifest read once.
+pub fn workspace_names(tree: &Tree) -> BTreeSet<String> {
+    workspace_packages(tree, &manifests(tree))
 }
 
 /// Every crate cargo builds in the workspace: the members and, as cargo takes them, the path
 /// dependencies they reach (the commercial apps come in so, through `apps/commercial`'s
 /// `cfg(any())` dependencies), minus `workspace.exclude` and crates with a workspace of their own.
 pub fn workspace_crates(tree: &Tree) -> Vec<Krate> {
+    let mut out: Vec<Krate> = workspace_dirs(tree).iter().filter_map(|d| krate(tree, &join(d, "Cargo.toml"))).collect();
+    out.sort_by(|a, b| a.package.cmp(&b.package));
+    out.dedup_by(|a, b| a.package == b.package);
+    out
+}
+
+/// The dirs of [`workspace_crates`], without reading each crate's files.
+fn workspace_dirs(tree: &Tree) -> Vec<String> {
     let Some(doc) = tree.read("Cargo.toml").and_then(|t| parse_toml(&t).ok()) else { return Vec::new() };
     let exclude: Vec<String> = doc.get_path(&["workspace", "exclude"]).and_then(Toml::as_array).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
     let excluded = |d: &str| exclude.iter().any(|e| d == e || d.starts_with(&format!("{e}/")));
-    let mut todo: Vec<String> = members(tree).into_iter().map(|k| k.dir).collect();
+    let mut todo: Vec<String> = member_dirs(tree, &doc).into_iter().collect();
     // `apps/*/src/..`: the dirs of the matches' parents
     for p in doc.get_path(&["workspace", "members"]).and_then(Toml::as_array).unwrap_or(&[]).iter().filter_map(|v| v.as_str()).filter(|p| p.ends_with("/src/..")) {
         let segs: Vec<&str> = p.trim_end_matches("/src/..").split('/').collect();
@@ -373,12 +411,10 @@ pub fn workspace_crates(tree: &Tree) -> Vec<Krate> {
             continue;
         }
         todo.extend(path_deps_of(tree, &dir, &doc));
-        if let Some(k) = krate(tree, &manifest) {
-            out.push(k);
+        if doc.get_path(&["package", "name"]).is_some() {
+            out.push(dir);
         }
     }
-    out.sort_by(|a, b| a.package.cmp(&b.package));
-    out.dedup_by(|a, b| a.package == b.package);
     out
 }
 
@@ -544,6 +580,177 @@ pub fn slices(tree: &Tree) -> Vec<(String, Vec<String>)> {
         .map(|(app, roots)| (app, roots.as_arr().unwrap_or(&[]).iter().filter_map(|r| r.as_str().map(str::to_string)).collect::<Vec<_>>()))
         .filter(|(_, r)| !r.is_empty())
         .collect()
+}
+
+// ---- dependents' feature sets
+
+/// A dependent's requested features; `features` is sorted and deduplicated.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FeatureSet {
+    pub default: bool,
+    pub features: Vec<String>,
+}
+
+impl FeatureSet {
+    pub fn flags(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.default { out.push("--no-default-features".into()); }
+        if !self.features.is_empty() { out.extend(["--features".into(), self.features.join(",")]); }
+        out
+    }
+
+    pub fn said(&self) -> String {
+        let flags = self.flags();
+        if flags.is_empty() { "default".into() } else { flags.join(" ") }
+    }
+}
+
+/// Non-plain feature sets, each with its first dependent by package name (11-15). One read of
+/// every manifest of the tree (measured on a Linux node: 0.27 s for the whole workspace, beside
+/// 0.53 s for the tree itself); its one caller, a hand-in, reads it once per process, so nothing
+/// keeps it.
+pub fn dependent_feature_sets(tree: &Tree) -> BTreeMap<String, BTreeMap<FeatureSet, String>> {
+    let docs = manifests(tree);
+    let default = |dep: &makepad_toml_parser::TomlTable| dep.get("default-features").or_else(|| dep.get("default_features")).and_then(Toml::as_bool);
+    let mut out = BTreeMap::<String, BTreeMap<FeatureSet, String>>::new();
+    walk_dependencies(&docs, |dep| {
+        if dep.dev { return; }
+        let mut features: Vec<String> = [dep.base, dep.local].into_iter().flat_map(|d| d.get("features").and_then(Toml::as_array).unwrap_or(&[])).filter_map(|f| f.as_str().map(str::to_string)).collect();
+        features.sort();
+        features.dedup();
+        // Inherited defaults can be enabled locally, but not disabled there.
+        let set = FeatureSet { default: !dep.has_default || default(dep.base).unwrap_or(true) || default(dep.local) == Some(true), features };
+        if set.default && set.features.is_empty() { return; }
+        let first = out.entry(dep.package.to_string()).or_default().entry(set).or_insert_with(|| dep.dependent.to_string());
+        if dep.dependent < first.as_str() { *first = dep.dependent.to_string(); }
+    });
+    out
+}
+
+struct ManifestDep<'a> {
+    dependent: &'a str,
+    package: &'a str,
+    has_default: bool,
+    dev: bool,
+    /// under `[target.'cfg(any())']`, which never holds: the dependency makes its crate a member
+    /// of the workspace and is never built, linked or feature-resolved through `dependent`
+    never: bool,
+    base: &'a makepad_toml_parser::TomlTable,
+    local: &'a makepad_toml_parser::TomlTable,
+}
+
+/// Path edges of every kind and target, with nearest-workspace inheritance (11-15).
+fn walk_dependencies(docs: &BTreeMap<&str, makepad_toml_parser::TomlDocument>, mut visit: impl FnMut(ManifestDep<'_>)) {
+    let packages: BTreeMap<&str, (&str, bool)> = docs.iter().filter_map(|(dir, doc)| Some((*dir, (doc.get_path(&["package", "name"])?.as_str()?, doc.get_path(&["features", "default"]).is_some())))).collect();
+    for (dir, doc) in docs {
+        let Some((dependent, _)) = packages.get(dir) else { continue };
+        let mut ancestor = *dir;
+        let workspace = loop {
+            if let Some(ws) = docs.get(ancestor).and_then(|d| d.root.get("workspace")).and_then(Toml::as_table) { break Some((ancestor, ws)); }
+            if ancestor.is_empty() { break None; }
+            ancestor = dir_of(ancestor);
+        };
+        let kinds = ["dependencies", "build-dependencies", "dev-dependencies"];
+        let mut tables: Vec<(&str, &Toml, bool)> = kinds.iter().filter_map(|k| Some((*k, doc.root.get(*k)?, false))).collect();
+        if let Some(targets) = doc.root.get("target").and_then(Toml::as_table) {
+            for (spec, target) in targets.iter().filter_map(|(spec, t)| Some((spec, t.as_table()?))) {
+                let never = spec.split_whitespace().collect::<String>() == "cfg(any())";
+                tables.extend(kinds.iter().filter_map(|k| Some((*k, target.get(*k)?, never))));
+            }
+        }
+        for (kind, deps, never) in tables.into_iter().filter_map(|(kind, table, never)| Some((kind, table.as_table()?, never))) {
+            for (name, entry) in deps {
+                let Some(dep) = entry.as_table() else { continue };
+                let (base_dir, base) = if dep.get("path").and_then(Toml::as_str).is_some() {
+                    (*dir, dep)
+                } else if dep.get("workspace").and_then(Toml::as_bool) == Some(true) {
+                    let Some((ws_dir, ws)) = workspace else { continue };
+                    let Some(base) = ws.get("dependencies").and_then(Toml::as_table).and_then(|deps| deps.get(name)).and_then(Toml::as_table) else { continue };
+                    (ws_dir, base)
+                } else {
+                    continue;
+                };
+                let Some(path) = base.get("path").and_then(Toml::as_str).and_then(|p| feature_dep_dir(base_dir, p)) else { continue };
+                let Some((package, has_default)) = packages.get(path.as_str()) else { continue };
+                if package == dependent { continue; }
+                visit(ManifestDep { dependent, package, has_default: *has_default, dev: kind == "dev-dependencies", never, base, local: dep });
+            }
+        }
+    }
+}
+
+/// Resolve within the tree; walking above its root must not alias a package inside it.
+fn feature_dep_dir(dir: &str, path: &str) -> Option<String> {
+    if path.starts_with('/') { return None; }
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => { parts.pop()?; }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+// ---- the crates a change reaches
+// In(X) is touched crates plus the reverse closure of wide crates (11-15); for now wide = touched.
+
+/// Root workspace crates holding changed text, including their tests, benches and examples (11-15).
+pub fn touched_crates(tree: &Tree, paths: &[String]) -> BTreeSet<String> {
+    let docs = manifests(tree);
+    let dirs = package_dirs_of(&docs);
+    let root = workspace_packages(tree, &docs);
+    let mut out = BTreeSet::new();
+    for path in paths.iter().filter(|p| !makepad_ci_merge::doc_file(p)) {
+        let holds = |d: &&String| d.is_empty() || path.strip_prefix(d.as_str()).is_some_and(|r| r.starts_with('/'));
+        let Some((name, _)) = dirs.iter().filter(|(_, d)| holds(d)).max_by_key(|(_, d)| d.len()) else { continue };
+        if root.contains(name) { out.insert(name.clone()); }
+    }
+    out
+}
+
+/// Root workspace crates reached backwards through normal/build edges, then one terminal dev edge (11-15).
+pub fn reverse_closure(tree: &Tree, wide: &BTreeSet<String>) -> BTreeSet<String> {
+    let docs = manifests(tree);
+    let root = workspace_packages(tree, &docs);
+    let mut normal = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut dev = BTreeMap::<String, BTreeSet<String>>::new();
+    // (a `cfg(any())` edge builds nothing: the commercial root's members package, reached by every
+    // commercial crate through one, put each commercial hand-in in every other's re-check, 11-15)
+    walk_dependencies(&docs, |dep| {
+        if dep.never { return; }
+        let edges = if dep.dev { &mut dev } else { &mut normal };
+        edges.entry(dep.package.to_string()).or_default().insert(dep.dependent.to_string());
+    });
+    let mut reached = wide.clone();
+    let mut todo: Vec<String> = wide.iter().cloned().collect();
+    while let Some(package) = todo.pop() {
+        for dependent in normal.get(&package).into_iter().flatten() {
+            if reached.insert(dependent.clone()) { todo.push(dependent.clone()); }
+        }
+    }
+    let terminal: BTreeSet<String> = reached.iter().filter_map(|p| dev.get(p)).flatten().cloned().collect();
+    reached.extend(terminal);
+    reached.retain(|p| root.contains(p));
+    reached
+}
+
+/// The workspace's members packages: every path dependency of theirs is under `cfg(any())`, which
+/// never holds, so they only bring crates into the workspace (the commercial root's) and build
+/// none of them.
+pub fn members_packages(tree: &Tree) -> BTreeSet<String> {
+    let docs = manifests(tree);
+    let (mut never, mut built) = (BTreeSet::new(), BTreeSet::new());
+    walk_dependencies(&docs, |dep| { if dep.never { never.insert(dep.dependent.to_string()); } else { built.insert(dep.dependent.to_string()); } });
+    never.difference(&built).cloned().collect()
+}
+
+/// Touched crates together with the crates reached by changed interfaces (11-15).
+pub fn in_set(tree: &Tree, touched: &BTreeSet<String>, wide: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = reverse_closure(tree, wide);
+    out.extend(touched.iter().cloned());
+    out
 }
 
 // ---------------------------------------------------------------- the plan
@@ -1281,6 +1488,145 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
     Ok((out, lines, urgency))
 }
 
+/// The live replays: fixtures run through `makepad run`, `makepad test` and the check server (in
+/// tools/run/fixture and the compiler's tests), each judged by its exit, on Linux and Windows. The
+/// CI run takes them besides the sweep ([`gate_held`]): no sweep starts on its own, and in the
+/// sweep alone most of them never ran (by 11-14 only the kinds, restart, replay and rebuild ones
+/// had ever logged, and four `--allow-c` ones that failed read as nothing wrong). Like every live
+/// shard they read the JIT's crates ([`units_of`]), so a run takes them again when those move.
+/// `rotation` picks the app of the replay and the rebuild. A shard's guess is its time in one run
+/// on a Linux box on 11-14 (the CI's own timing replaces it after its first run; the replay's is
+/// the CI's); the Windows ones and the `--allow-c` ones did not run then and keep a guess.
+fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64) -> Vec<Shard> {
+    let app = REPLAY_APPS[rotation as usize % REPLAY_APPS.len()];
+    let mut rebuild = vec!["python3", "tools/run/fixture/live_replay.py", "--host", "--app", app];
+    if rotation % 2 == 0 {
+        rebuild.push("--wm");
+    }
+    let ps = |file| vec!["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file];
+    let (build, screen, linux, windows, exit) = (Kind::Build, Kind::Screen, Os::Linux, Os::Windows, Judge::Exit);
+    // (id, kind, os, gui, judge, step, seconds): the step's first path is the file it runs
+    let rows: Vec<(&str, Kind, Os, bool, Judge, Vec<&str>, f64)> = vec![
+        // nothing breaks a running app: every edit kind, and the real landings replayed as live edits
+        ("live:kinds", screen, linux, true, exit, vec!["python3", "tools/run/fixture/live_kinds.py", "--jobs", "6"], 134.0),
+        // a restart keeps the process and the window: a restart-rung edit, a panic, a repeated
+        // relaunch; the state kept, no leftovers
+        ("live:restart", screen, linux, true, exit, vec!["python3", "tools/run/fixture/restart_in_place.py"], 495.0),
+        // a live edit that is refused, or puts the boot text back, leaves no crate edited, and the
+        // next start restores what the run recorded
+        ("live:edit-undone", screen, linux, false, exit, vec!["python3", "tools/run/fixture/edit_undone_warm.py"], 83.0),
+        // a patch reaches the O1 code a warm start placed from the startup image: the code holding
+        // an unguarded copy of the patched body is built again
+        ("live:warm-image-patch", screen, linux, false, exit, vec!["python3", "tools/run/fixture/warm_image_patch.py"], 3.0),
+        // a landing devhub holds back in a show's JIT waits, and the person's own saves apply live
+        // meanwhile
+        ("live:landing-hold", screen, linux, false, exit, vec!["python3", "tools/run/fixture/landing_hold.py"], 9.0),
+        // the window manager at rest draws nothing: a sticky toast, a window waiting to be hidden,
+        // the closed AI pane's client and the bar's thermometer each kept every node's WM drawing
+        // (11-07)
+        ("live:wm-rest", screen, linux, false, exit, vec!["python3", "tools/run/fixture/wm_rest.py"], 66.0),
+        // a boot that panics after its unit is published ends with the panic's code and message,
+        // cold and warm, and the run's exit work never walks a freed program
+        ("live:boot-panic", build, linux, false, exit, vec!["sh", "tools/run/fixture/boot_panic.sh"], 160.0),
+        // a build script's run and its package's test (a load that records lint uses) on one cache
+        // share the std code they have in common: no miss, no failed link, no internal compiler error
+        ("live:shared-std", build, linux, false, exit, vec!["python3", "tools/run/fixture/shared_std.py"], 117.0),
+        // a landing that moves one of makepad's inputs and the program's sources at once: the
+        // sources patch, the input waits for the offered restart
+        ("live:landing-whole", build, linux, false, exit, vec!["python3", "tools/run/fixture/landing_whole.py"], 3.0),
+        // an edit's restart-only items wait alone, the rest patches; `inspect live` says what waits
+        // and which commit the run loaded
+        ("live:hold-back", build, linux, false, exit, vec!["python3", "tools/run/fixture/hold_back.py"], 4.0),
+        // `makepad test` prints the warnings `cargo test` does, and no import it reads (through a
+        // fn's `use X as Y`, through a test's macro call) as unused
+        ("live:test-warnings", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/test_warnings/run.py"], 94.0),
+        // a live test session answers each test's outcome and whether it ran for the edit, and
+        // refuses another edit's group
+        ("live:test-results", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_test_results/run.py"], 67.0),
+        // a live test session in a workspace of several crates applies each save: a member's, the
+        // package's and the test file's, in a checkout a crashed git left a lock in (relax issue 33)
+        ("live:test-workspace", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_workspace/run.py"], 5.0),
+        // the live driver of a bare relax run: a body edit patches, a type error is refused, a
+        // layout edit restarts in place with the program's state, edits wait for a first present,
+        // the terminal status keeps ticking, and the transcript outlives an abnormal exit
+        ("live:relax-app", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_app/run_all.py"], 15.0),
+        // Relax's built-in smallvec and arrayvec (libs/relax/compiler/std) behave as the real
+        // crates do under rustc: their differential tests, a rustc build of its own (not under the
+        // JIT, whose `smallvec` is the built-in one)
+        ("rustc:check-ext", build, linux, false, exit, vec!["cargo", "test", "--release", "-q", "--manifest-path", "tools/run/tests/check_ext/Cargo.toml"], 1.0),
+        // the code that replaced inline assembly (libm's sqrt and fma, f16 conversions) gives the
+        // instructions' results bit for bit (the instructions this box has). Linux x86_64 only: its
+        // aarch64 half (fma, rint, sqrt, the half conversions, f16 arithmetic, fcvtl) runs on no CI box
+        ("rustc:asm-identity", build, linux, false, exit, vec!["cargo", "run", "--release", "-q", "--manifest-path", "tools/run/tests/asm_identity/Cargo.toml"], 1.0),
+        // the check server's edits of one file declared as two modules: the import stays in scope
+        // in both, and a file that includes itself ends the module walk
+        ("live:two-module-file", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/two_module_file/run.py"], 4.0),
+        // the check server: protocol, CLI and one-shot parity, and a server of another compiler
+        // (what an upgrade leaves running) stopped by its recorded pid, the check run in-process
+        ("live:check-server", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/serve/run.py"], 6.0),
+        // a test's and a program's process have cargo's run-time environment (their package's
+        // variables, its build script's rustc-env, `[env]`; a test in its package's folder), for a
+        // member of a virtual workspace run from the workspace root too
+        ("live:run-env", build, linux, false, exit, vec!["bash", "tools/run/fixture/run_env.sh"], 2.0),
+        // `makepad run --allow-c` (the allow_c*/verify.py scripts): cargo and the system C compiler
+        // build a fixture's C, and the run must do what the cargo-built binary does. A path crate
+        // whose build script compiles C with the system cc runs as under cargo; its native build is
+        // keyed and reused, and a bad native library is refused with the symbol and crate named
+        ("live:allow-c", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c/verify.py"], 120.0),
+        // a check without --allow-c reads the build script outputs a cached --allow-c build left
+        // (relax#41), and names the missing OUT_DIR when there is none
+        ("live:allow-c-cached", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"], 120.0),
+        // a build script that calls into a C crate it build-depends on: its own child run compiles
+        // that crate from the run's native build, a warm run does not run the script again
+        // (relax#76), and a check runs it only with --allow-c
+        ("live:allow-c-script-native", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c_script_native/verify.py"], 120.0),
+        // a shared library the build script names in a search folder outside the loader's path: the
+        // program's link arguments (an rpath) reach the native library, one that fails to load is
+        // linked again on the next run (relax#54), and a warm run builds no native code
+        ("live:allow-c-dylib", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"], 120.0),
+        // a save the live session holds, or one that changes nothing the program runs, says so in a
+        // line naming the file: a deferred module's file, a save while a restart is pending (relax#33)
+        ("live:gates", build, linux, false, exit, vec!["bash", "tools/run/fixture/live_gates.sh"], 6.0),
+        // a panic the program catches gets no report after std's message (as under rustc); one
+        // that ends a thread or a test is reported, and a failed unit's summary lists those
+        ("live:caught-report", build, linux, false, exit, vec!["python3", "tools/run/fixture/caught_report.py"], 1.0),
+        // `makepad check`'s diagnostics of its fixtures are rustc's, at rustc's positions: errors,
+        // lints and their spans (dead code, unused, unsafe, ...)
+        ("live:check-rustc", build, linux, false, exit, vec!["bash", "libs/relax/compiler/tests/check_rustc/run.sh"], 4.0),
+        // the test dependency check keys a crate's verdict by its own text and its dependencies'
+        // interfaces: a body edit checks that crate again, not the one above it
+        ("live:test-dep-keys", build, linux, false, exit, vec!["bash", "libs/relax/compiler/tests/test_dep_keys/run.sh"], 1.0),
+        // a dependency's body Relax cannot compile (the fixture's own registry crate): its error is
+        // printed once, each test that calls it fails with its one-line message, the run's end names it
+        ("live:test-dep-gaps", build, linux, false, exit, vec!["bash", "libs/relax/compiler/tests/test_dep_gaps/run.sh"], 2.0),
+        // a failed hot load is a warm restart and a ledger report, never a parked panic
+        ("live:hot-fail", screen, linux, false, exit, vec!["python3", "tools/run/fixture/hot_fail.py"], 365.0),
+        // the same on Windows, where a restart is another process under one parent
+        ("live:hot-fail-windows", screen, windows, false, exit, ps("tools/run/fixture/hot_fail.ps1"), 180.0),
+        // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
+        // new landing's to clear, so a miss reports and does not fail the run), and a landing into
+        // what makepad is built from (offer, click, back), under a WM every other run, which gates
+        ("live:replay", screen, linux, true, Judge::Report, vec!["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", "40"], 1793.0),
+        ("live:rebuild", screen, linux, true, exit, rebuild, 336.0),
+    ];
+    // a live shard on Linux builds the JIT its script runs first, in its own step: on a box whose
+    // build was cold (every run after the JIT moved), the build ran inside the script's first
+    // `cargo run`, past its wait for the program to start, and failed it (live:kinds,
+    // live:edit-undone, 11-14). A step naming makepad-run also has the box build it before its
+    // first shard ([`tool_first`]); this step is then a no-op
+    let shard = |id: &str, kind, os, gui, judge, step: &[&str], secs: f64, dirs| {
+        let build = (os == Os::Linux && id.starts_with("live:")).then(|| argv(&["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad"]));
+        Shard { id: id.to_string(), kind, os, gui, gpu: false, steps: build.into_iter().chain([argv(step)]).collect(), judge, est: timing(id).unwrap_or(secs), dirs, whole: false, cores: None }
+    };
+    // a tree without a row's file (a bisect's baseline) has no shard for it
+    let mut out: Vec<Shard> = rows.into_iter().filter(|r| r.5.iter().find(|a| a.contains('/')).is_some_and(|f| tree.has(f))).map(|(id, kind, os, gui, judge, step, secs)| shard(id, kind, os, gui, judge, &step, secs, None)).collect();
+    // Runner on Windows: its list, a live run and Stop, in real windows (a tree with the commercial apps)
+    if tree.has("tools/run/fixture/runner_windows.ps1") && tree.has("apps/commercial/runner/Cargo.toml") {
+        out.push(shard("live:runner-windows", screen, windows, true, exit, &ps("tools/run/fixture/runner_windows.ps1"), 240.0, Some(vec!["apps/commercial/runner".to_string()])));
+    }
+    out
+}
+
 /// Every shard of the sweep on `tree` (`devhub ci sweep`: background work alongside the gate,
 /// never a gate): the JIT checks of every crate, the cross targets, every crate's tests, the
 /// slices, the smoke scripts and the live replays. Its report lists the failures by crate.
@@ -1290,9 +1636,10 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     let (_apps, scripts) = discover(tree);
     let m = matrix(tree, &scripts);
     let own = jit_own_dirs(tree);
-    // `test <package> <args>`: the release profile, under the JIT as under cargo
+    // `test <package> <args>`: the JIT's own crates under cargo, release; every other crate under
+    // the JIT, release with the checks, as `devhub test` runs it ([`crate::lease::JIT_TEST_PROFILE`])
     let test_step = |dir: &str, args: &[&str]| {
-        let mut step = if own.contains(dir) { argv(&["cargo", "test", "--release", "-p", args[1]]) } else { jit(&["test", args[1], "--release"]) };
+        let mut step = if own.contains(dir) { argv(&["cargo", "test", "--release", "-p", args[1]]) } else { jit(&[&["test", args[1]][..], &crate::lease::JIT_TEST_PROFILE[..]].concat()) };
         step.extend(args[2..].iter().map(|a| a.to_string()));
         step
     };
@@ -1470,144 +1817,15 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
         }
         push(format!("smoke:{}", sc.dir), Kind::Screen, os, true, vec![step], Judge::Exit, 30.0, Some(vec![sc.dir.clone()]));
     }
-    // nothing breaks a running app: every edit kind, and the real landings replayed as live edits
-    if tree.has("tools/run/fixture/live_kinds.py") {
-        push("live:kinds".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/live_kinds.py", "--jobs", "6"])], Judge::Exit, 300.0, None);
-    }
-    // a restart keeps the process and the window: a restart-rung edit, a panic, a repeated relaunch; the state kept, no leftovers
-    if tree.has("tools/run/fixture/restart_in_place.py") {
-        push("live:restart".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/restart_in_place.py"])], Judge::Exit, 240.0, None);
-    }
-    // every static of the JIT's crates is reset at a run's end or stays with a reason: a new one is a
-    // decision, or the next run sees the last one's
-    if tree.has("tools/run/fixture/restart_statics.py") {
-        push("live:restart-statics".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/restart_statics.py"])], Judge::Exit, 5.0, None);
-    }
-    // a live edit that is refused, or puts the boot text back, leaves no crate edited, and the
-    // next start restores what the run recorded
-    if tree.has("tools/run/fixture/edit_undone_warm.py") {
-        push("live:edit-undone".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/edit_undone_warm.py"])], Judge::Exit, 120.0, None);
-    }
-    // a patch reaches the O1 code a warm start placed from the startup image: the code holding an
-    // unguarded copy of the patched body is built again
-    if tree.has("tools/run/fixture/warm_image_patch.py") {
-        push("live:warm-image-patch".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/warm_image_patch.py"])], Judge::Exit, 30.0, None);
-    }
-    // a landing devhub holds back in a show's JIT waits, and the person's own saves apply live meanwhile
-    if tree.has("tools/run/fixture/landing_hold.py") {
-        push("live:landing-hold".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/landing_hold.py"])], Judge::Exit, 30.0, None);
-    }
-    // the window manager at rest draws nothing: a sticky toast, a window waiting to be hidden, the
-    // closed AI pane's client and the bar's thermometer each kept every node's WM drawing (11-07)
-    if tree.has("tools/run/fixture/wm_rest.py") {
-        push("live:wm-rest".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/wm_rest.py"])], Judge::Exit, 120.0, None);
-    }
-    // a boot that panics after its unit is published ends with the panic's code and message, cold
-    // and warm, and the run's exit work never walks a freed program
-    if tree.has("tools/run/fixture/boot_panic.sh") {
-        push("live:boot-panic".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["sh", "tools/run/fixture/boot_panic.sh"])], Judge::Exit, 60.0, None);
-    }
-    // a build script's run and its package's test (a load that records lint uses) on one cache
-    // share the std code they have in common: no miss, no failed link, no internal compiler error
-    if tree.has("tools/run/fixture/shared_std.py") {
-        push("live:shared-std".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/shared_std.py"])], Judge::Exit, 120.0, None);
-    }
-    // a landing that moves one of makepad's inputs and the program's sources at once: the sources
-    // patch, the input waits for the offered restart
-    if tree.has("tools/run/fixture/landing_whole.py") {
-        push("live:landing-whole".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/landing_whole.py"])], Judge::Exit, 90.0, None);
-    }
-    // an edit's restart-only items wait alone, the rest patches; `inspect live` says what waits
-    // and which commit the run loaded
-    if tree.has("tools/run/fixture/hold_back.py") {
-        push("live:hold-back".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hold_back.py"])], Judge::Exit, 90.0, None);
-    }
-    // `makepad test` prints the warnings `cargo test` does, and no import it reads (through a
-    // fn's `use X as Y`, through a test's macro call) as unused
-    if tree.has("libs/relax/compiler/tests/test_warnings/run.py") {
-        push("live:test-warnings".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/test_warnings/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // a live test session answers each test's outcome and whether it ran for the edit, and
-    // refuses another edit's group
-    if tree.has("libs/relax/compiler/tests/live_test_results/run.py") {
-        push("live:test-results".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/live_test_results/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // the check server's edits of one file declared as two modules: the import stays in scope in
-    // both, and a file that includes itself ends the module walk
-    if tree.has("libs/relax/compiler/tests/two_module_file/run.py") {
-        push("live:two-module-file".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/two_module_file/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // the check server: protocol, CLI and one-shot parity, and a server of another compiler (what
-    // an upgrade leaves running) stopped by its recorded pid, the check run in-process
-    if tree.has("libs/relax/compiler/tests/serve/run.py") {
-        push("live:check-server".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/serve/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // a test's and a program's process have cargo's run-time environment (their package's
-    // variables, its build script's rustc-env, `[env]`; a test in its package's folder), for a
-    // member of a virtual workspace run from the workspace root too
-    if tree.has("tools/run/fixture/run_env.sh") {
-        push("live:run-env".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/run_env.sh"])], Judge::Exit, 120.0, None);
-    }
-    // `makepad run --allow-c`: a path crate whose build script compiles C with the system cc runs
-    // as under cargo; its native build is keyed and reused, and a bad native library is refused
-    // with the symbol and crate named
-    if tree.has("libs/relax/compiler/tests/allow_c/verify.py") {
-        push("live:allow-c".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c/verify.py"])], Judge::Exit, 120.0, None);
-    }
-    // a check without --allow-c reads the build script outputs a cached --allow-c build left
-    // (relax#41), and names the missing OUT_DIR when there is none
-    if tree.has("libs/relax/compiler/tests/allow_c_cached_check/verify.py") {
-        push("live:allow-c-cached".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"])], Judge::Exit, 120.0, None);
-    }
-    // a build script that calls into a C crate it build-depends on: its own child run compiles
-    // that crate from the run's native build, and a warm run does not run the script again (relax#76)
-    if tree.has("libs/relax/compiler/tests/allow_c_script_native/verify.py") {
-        push("live:allow-c-script-native".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_script_native/verify.py"])], Judge::Exit, 120.0, None);
-    }
-    // a shared library the build script names in a search folder outside the loader's path: the
-    // program's link arguments (an rpath) reach the native library, and one that fails to load
-    // is linked again on the next run (relax#54)
+    // the live replays are [`live_replays`], which the CI run takes too. Only the sweep runs the
+    // macOS one: `makepad run --allow-c` on a Mac, where dyld also binds a dependency to a loaded
+    // image of its install name: the callback lookup's copy of the library must not answer the
+    // native library's @rpath
     if tree.has("libs/relax/compiler/tests/allow_c_dylib/verify.py") {
-        push("live:allow-c-dylib".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"])], Judge::Exit, 120.0, None);
-        // and on a Mac, where dyld also binds a dependency to a loaded image of its install name:
-        // the callback lookup's copy of the library must not answer the native library's @rpath
         push("live:allow-c-dylib-macos".to_string(), Kind::Build, Os::Macos, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"])], Judge::Exit, 120.0, None);
     }
-    // a save the live session holds, or one that changes nothing the program runs, says so in a
-    // line naming the file: a deferred module's file, a save while a restart is pending (relax#33)
-    if tree.has("tools/run/fixture/live_gates.sh") {
-        push("live:gates".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/live_gates.sh"])], Judge::Exit, 120.0, None);
-    }
-    // a panic the program catches has its report tagged `(caught)`; a failed unit's summary lists
-    // only the panics that ended a thread or a test
-    if tree.has("tools/run/fixture/caught_report.py") {
-        push("live:caught-report".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/caught_report.py"])], Judge::Exit, 60.0, None);
-    }
-    // a failed hot load is a warm restart and a ledger report, never a parked panic
-    if tree.has("tools/run/fixture/hot_fail.py") {
-        push("live:hot-fail".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hot_fail.py"])], Judge::Exit, 60.0, None);
-    }
-    // the same on Windows, where a restart is another process under one parent
-    if tree.has("tools/run/fixture/hot_fail.ps1") {
-        push("live:hot-fail-windows".to_string(), Kind::Screen, Os::Windows, false, vec![argv(&["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/run/fixture/hot_fail.ps1"])], Judge::Exit, 180.0, None);
-    }
-    // Runner on Windows: its list, a live run and Stop, in real windows
-    if tree.has("tools/run/fixture/runner_windows.ps1") && tree.has("apps/commercial/runner/Cargo.toml") {
-        push("live:runner-windows".to_string(), Kind::Screen, Os::Windows, true, vec![argv(&["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/run/fixture/runner_windows.ps1"])], Judge::Exit, 240.0, Some(vec!["apps/commercial/runner".to_string()]));
-    }
-    if tree.has("tools/run/fixture/live_replay.py") {
-        // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
-        // new landing's to clear, so a miss reports and does not fail the run), and a landing into
-        // what makepad is built from (offer, click, back), under a WM every other run, which gates
-        let app = REPLAY_APPS[rotation as usize % REPLAY_APPS.len()];
-        push("live:replay".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", "40"])], Judge::Report, 900.0, None);
-        let mut rebuild = vec!["python3", "tools/run/fixture/live_replay.py", "--host", "--app", app];
-        if rotation % 2 == 0 {
-            rebuild.push("--wm");
-        }
-        push("live:rebuild".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&rebuild)], Judge::Exit, 500.0, None);
-    }
     shards.extend(extra);
+    shards.extend(live_replays(tree, timing, rotation));
     shards
 }
 
@@ -2617,6 +2835,10 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     if !sweep && arm.full {
         shards.extend(sweep_plan(&tree, &timing_of, rotation).into_iter().filter(|s| s.id.starts_with("mjit:")));
     }
+    // a run of the CI bucket takes the live replays too: in the sweep alone they never ran
+    if !sweep && !calling && !own {
+        shards.extend(live_replays(&tree, &timing_of, rotation));
+    }
     if sweep || calling {
         // Whole crate proofs need every test target, independently of sweep rotation.
         shards.retain(|s| !s.id.starts_with("test:") && !s.id.starts_with("wtest:"));
@@ -2962,11 +3184,14 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         }
     }
     let mut g = pool.0.lock().unwrap();
-    // a gate failure goes to the inbox for the lane that fixes it, with its first error lines
-    if !sweep && !dry {
+    // a failure goes to the inbox for the lane that fixes it, with its first error lines: a gate's,
+    // and a sweep's (its shards run nowhere else, and a failure nobody hears of read as nothing
+    // wrong: none of its live replays had logged a failure, 11-14)
+    if !dry {
+        let run = if sweep { "sweep" } else { "gate" };
         for st in g.state.iter().filter(|s| s.state == "fail") {
             let errors: Vec<&str> = st.errors.iter().map(String::as_str).take(3).collect();
-            ctx.store.event("ci", Sev::Err, format!("ci gate {} FAILED at {} on {} ({}): {}{}", st.id, pair.short(), st.node, st.log, st.summary, if errors.is_empty() { String::new() } else { format!(" | {}", errors.join(" | ")) }), None);
+            ctx.store.event("ci", Sev::Err, format!("ci {run} {} FAILED at {} on {} ({}): {}{}", st.id, pair.short(), st.node, st.log, st.summary, if errors.is_empty() { String::new() } else { format!(" | {}", errors.join(" | ")) }), None);
         }
     }
     // an own-units failure goes to the inbox with its crate and its tests (the step's name and
@@ -4214,6 +4439,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 if !sweep && arm.full {
                     shards.extend(sweep_plan(&tree, &|s| d.ci.timing(s), rotation).into_iter().filter(|s| s.id.starts_with("mjit:")));
                 }
+                if !sweep {
+                    shards.extend(live_replays(&tree, &|s| d.ci.timing(s), rotation));
+                }
                 shards
             });
             let skipped = arm_plan(&tree, &mut shards, &arm);
@@ -4453,6 +4681,9 @@ mod tests {
     /// input hashed once for every OS: each document's sources read again from the repository
     /// found again for each blob, the input and its OS line hashed whole by another SHA-256 (the
     /// network crate's). A digest that changed would prove a unit on sources it never ran (11-06).
+    /// Unix only: a tree with no lock gets one in a farm of symlinks, and one run hashes every
+    /// OS's digest, so a Windows host would only repeat it.
+    #[cfg(unix)]
     #[test]
     fn digests_of_real_tips_are_as_before() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
@@ -4595,6 +4826,167 @@ mod tests {
         drop(sweep);
     }
 
+    /// Land checks include dependent builds and terminal tests, within the root workspace (11-15).
+    #[test]
+    fn changes_reach_member_builds_and_terminal_tests() {
+        let t = Tree::mem(vec![
+            ("Cargo.toml", r#"
+[workspace]
+members = ["crates/*", "crates/shared/inner", "apps/commercial/*"]
+exclude = ["crates/excluded"]
+[workspace.dependencies]
+shared = { package = "makepad-shared", path = "crates/./shared/" }
+"#),
+            ("crates/leaf/Cargo.toml", "[package]\nname = \"leaf\"\n"),
+            ("crates/shared/Cargo.toml", "[package]\nname = \"makepad-shared\"\n"),
+            ("crates/shared/inner/Cargo.toml", "[package]\nname = \"inner\"\n"),
+            ("crates/normal/Cargo.toml", "[package]\nname = \"normal\"\n[dependencies]\nshared = { workspace = true }\n"),
+            ("crates/renamed/Cargo.toml", "[package]\nname = \"renamed\"\n[dependencies.alias]\npackage = \"makepad-shared\"\npath = \"../shared\"\n"),
+            ("crates/build-user/Cargo.toml", "[package]\nname = \"build-user\"\n[build-dependencies]\nshared = { package = \"makepad-shared\", path = \"../shared\" }\n"),
+            ("crates/transitive/Cargo.toml", "[package]\nname = \"transitive\"\n[dependencies]\nnormal = { path = \"../normal\" }\n[build-dependencies]\nrenamed = { path = \"../renamed\" }\n"),
+            ("crates/build-transitive/Cargo.toml", "[package]\nname = \"build-transitive\"\n[dependencies]\nbuild-user = { path = \"../build-user\" }\n"),
+            ("crates/dev-user/Cargo.toml", "[package]\nname = \"dev-user\"\n[dev-dependencies]\nshared = { package = \"makepad-shared\", path = \"../shared\" }\n"),
+            ("crates/dev-client/Cargo.toml", "[package]\nname = \"dev-client\"\n[dependencies]\ndev-user = { path = \"../dev-user\" }\n"),
+            ("crates/dev-chain/Cargo.toml", "[package]\nname = \"dev-chain\"\n[dev-dependencies]\ndev-user = { path = \"../dev-user\" }\n"),
+            ("crates/transitive-dev/Cargo.toml", "[package]\nname = \"transitive-dev\"\n[dev-dependencies]\ntransitive = { path = \"../transitive\" }\n"),
+            ("crates/target-user/Cargo.toml", "[package]\nname = \"target-user\"\n[target.'cfg(windows)'.dependencies]\nshared = { workspace = true, optional = true }\n"),
+            ("crates/target-build/Cargo.toml", "[package]\nname = \"target-build\"\n[target.'cfg(unix)'.build-dependencies.shared]\nworkspace = true\n"),
+            ("crates/target-dev/Cargo.toml", "[package]\nname = \"target-dev\"\n[target.'cfg(unix)'.dev-dependencies]\nshared = { workspace = true }\n"),
+            ("apps/commercial/client/Cargo.toml", "[package]\nname = \"commercial-client\"\n[dependencies]\nshared = { workspace = true }\n"),
+            ("crates/shared/nonmember/Cargo.toml", "[package]\nname = \"nonmember\"\n[dependencies]\nshared = { workspace = true }\n"),
+            ("crates/excluded/Cargo.toml", "[package]\nname = \"excluded\"\n[dependencies]\nshared = { workspace = true }\n"),
+            ("crates/reacher/Cargo.toml", "[package]\nname = \"reacher\"\n[target.'cfg(any())'.dependencies]\nreached = { path = \"../../libs/reached\" }\n"),
+            ("libs/reached/Cargo.toml", "[package]\nname = \"reached\"\n[dependencies]\nshared = { workspace = true }\n"),
+        ]);
+        let set = |names: &[&str]| -> BTreeSet<String> { names.iter().map(|s| s.to_string()).collect() };
+        let touched = |paths: &[&str]| touched_crates(&t, &paths.iter().map(|p| p.to_string()).collect::<Vec<_>>());
+        assert_eq!(reverse_closure(&t, &set(&["leaf"])), set(&["leaf"]), "a leaf with no dependents reaches only itself");
+        let shared = reverse_closure(&t, &set(&["makepad-shared"]));
+        assert_eq!(shared, set(&["makepad-shared", "normal", "renamed", "build-user", "transitive", "build-transitive", "dev-user", "transitive-dev", "target-user", "target-build", "target-dev", "commercial-client", "reached"]),
+            "normal, build, renamed, inherited and target edges are transitive; dev users of that closure are terminal; only root members appear");
+        // a `cfg(any())` edge never builds: its dependent, a members package (the commercial
+        // root's), is reached by none of its crates' changes, and is the one members package
+        assert!(!shared.contains("reacher"), "a cfg(any()) edge reaches nothing (11-15)");
+        assert_eq!(members_packages(&t), set(&["reacher"]), "a package whose every path dependency is under cfg(any())");
+        assert!(!shared.contains("dev-client") && !shared.contains("dev-chain"), "neither normal nor dev dependents of terminal dev users are expanded");
+        assert!(shared.contains("commercial-client"), "a commercial member inherits makepad paths from the root workspace");
+        assert!(shared.contains("reached"), "a crate cargo takes in through a member's path dependency (as the commercial crates come in) is in the workspace");
+        assert_eq!(reverse_closure(&t, &set(&["nonmember", "excluded"])), BTreeSet::new(), "even wide seeds must be root members to appear in the result");
+        assert_eq!(reverse_closure(&t, &BTreeSet::new()), BTreeSet::new(), "no wide crates reaches no crates");
+        assert_eq!(touched(&["crates/shared/tests/own.rs"]), set(&["makepad-shared"]), "a test file touches its package");
+        assert_eq!(touched(&["libs/reached/src/lib.rs"]), set(&["reached"]), "a path-reached workspace crate is touched by its text");
+        assert_eq!(touched(&["crates/leaf/src/lib.rs", "crates/normal/benches/run.rs", "crates/renamed/examples/demo.rs"]), set(&["leaf", "normal", "renamed"]), "source, benches and examples touch their packages");
+        assert_eq!(touched(&["crates/shared/src/lib.rs", "crates/shared/inner/src/lib.rs", "crates/shared/Cargo.toml"]), set(&["makepad-shared", "inner"]), "the closest package wins and repeated touches deduplicate");
+        assert_eq!(touched(&["crates/shared/README.md", "crates/shared/nonmember/src/lib.rs", "crates/excluded/src/lib.rs", "crates/shared-extra/src/lib.rs", "docs/code.rs"]), BTreeSet::new(), "documents, non-members and paths outside a package touch nothing");
+        let text = set(&["leaf", "dev-user"]);
+        assert_eq!(in_set(&t, &text, &set(&["makepad-shared"])), shared.union(&text).cloned().collect::<BTreeSet<_>>(), "touched crates are unioned without expanding their own dependents");
+        assert_eq!(in_set(&t, &text, &BTreeSet::new()), text, "text-only changes keep exactly their touched crates");
+    }
+
+    /// A module gated by a default feature broke a featureless dependent (11-15).
+    #[test]
+    fn dependents_keep_their_distinct_feature_sets() {
+        let t = Tree::mem(vec![
+            ("Cargo.toml", r#"
+[workspace]
+[workspace.dependencies]
+shared = { package = "core", path = "crates/./core/", default_features = false, features = ["workspace", "shared"] }
+enabled = { package = "core", path = "crates/core", default-features = false, features = ["enabled"] }
+"#),
+            ("crates/core/Cargo.toml", "[package]\nname = \"core\"\n[features]\ndefault = []\na = []\nb = []\nshared = []\nworkspace = []\nlocal = []\nenabled = []\nbuild = []\ntarget = []\ntarget-build = []\nsandbox = []\nmember = []\ndev-only = []\ntarget-dev = []\nversion-only = []\noutside = []\nboundary = []\nvirtual = []\n"),
+            ("crates/bare/Cargo.toml", "[package]\nname = \"bare\"\n[features]\nextra = []\n"),
+            ("apps/a/Cargo.toml", r#"
+[package]
+name = "z-last"
+[dependencies]
+core = { path = "../../crates/./core/", default-features = false }
+extra = { package = "core", path = "../../crates/core", features = ["b", "a", "a"] }
+plain = { package = "core", path = "../../crates/core" }
+bare = { path = "../../crates/bare", default_features = false }
+bare-extra = { package = "bare", path = "../../crates/bare", default-features = false, features = ["extra"], optional = true }
+"#),
+            ("apps/z/Cargo.toml", r#"
+[package]
+name = "a-first"
+[dependencies]
+renamed = { package = "core", path = "../../crates/core", default-features = false }
+extra = { package = "core", path = "../../crates/core", features = ["a", "b"] }
+"#),
+            ("apps/inherit/Cargo.toml", r#"
+[package]
+name = "inherit"
+[dependencies]
+shared = { workspace = true, features = ["local", "workspace"] }
+enabled = { workspace = true, default-features = true }
+[build-dependencies]
+core = { path = "../../crates/core", features = ["build"] }
+[target.'cfg(unix)'.dependencies]
+core = { path = "../../crates/core", default_features = false, features = ["target"] }
+[target.'cfg(any())'.build-dependencies]
+shared = { workspace = true, features = ["target-build"] }
+[dev-dependencies]
+core = { path = "../../crates/core", features = ["dev-only"] }
+[target.'cfg(unix)'.dev-dependencies]
+core = { path = "../../crates/core", features = ["target-dev"] }
+"#),
+            ("apps/ignored/Cargo.toml", r#"
+[package]
+name = "ignored"
+[dependencies]
+core = "1"
+by-version = { package = "core", version = "1", default-features = false, features = ["version-only"] }
+missing = { path = "../../missing", default-features = false }
+outside = { package = "core", path = "../../../crates/core", features = ["outside"] }
+virtual = { path = "../../virtual", default-features = false }
+"#),
+            ("virtual/Cargo.toml", "[dependencies]\ncore = { path = \"../crates/core\", features = [\"virtual\"] }\n"),
+            ("apps/commercial/sandbox/Cargo.toml", r#"
+[package]
+name = "sandbox"
+[workspace]
+[workspace.dependencies]
+shared = { package = "core", path = "../../../crates/core", default-features = false, features = ["sandbox"] }
+[dependencies]
+shared = { workspace = true }
+"#),
+            ("apps/commercial/sandbox/member/Cargo.toml", "[package]\nname = \"sandbox-member\"\n[dependencies]\nshared = { workspace = true, features = [\"member\"] }\n"),
+            ("apps/isolated/Cargo.toml", "[package]\nname = \"isolated\"\n[workspace]\n[dependencies]\nshared = { workspace = true, features = [\"boundary\"] }\n"),
+        ]);
+        let sets = dependent_feature_sets(&t);
+        let set = |default, features: &[&str]| FeatureSet { default, features: features.iter().map(|s| s.to_string()).collect() };
+        let from = |package: &str, default, features: &[&str]| sets.get(package).and_then(|s| s.get(&set(default, features))).map(String::as_str);
+        assert_eq!(from("core", false, &[]), Some("a-first"), "a featureless path dependency survives, with its first dependent by name, not directory");
+        assert_eq!(from("core", true, &["a", "b"]), Some("a-first"), "explicit features keep defaults on and sort/deduplicate their names");
+        assert_eq!(sets["core"].len(), 9, "two dependents with the same set share one entry; only non-plain build sets remain");
+        assert_eq!(from("core", false, &["local", "shared", "workspace"]), Some("inherit"), "workspace paths and defaults are inherited and both feature lists are unioned");
+        assert_eq!(from("core", true, &["enabled"]), Some("inherit"), "a dependent can enable inherited defaults");
+        assert_eq!(from("core", true, &["build"]), Some("inherit"), "build dependencies contribute their feature sets");
+        assert_eq!(from("core", false, &["target"]), Some("inherit"), "target dependencies and the default_features spelling are included");
+        assert_eq!(from("core", false, &["shared", "target-build", "workspace"]), Some("inherit"), "every target's build dependencies inherit workspace features");
+        assert_eq!(from("core", false, &["sandbox"]), Some("sandbox"), "a package with its own workspace is included and resolves its own paths");
+        assert_eq!(from("core", false, &["member", "sandbox"]), Some("sandbox-member"), "the nearest ancestor workspace wins");
+        assert_eq!(from("core", false, &["boundary", "shared", "workspace"]), None, "a workspace without the entry does not fall through to its parent workspace");
+        assert_eq!(from("core", true, &["dev-only"]), None, "dev-dependencies are ignored");
+        assert_eq!(from("core", true, &["target-dev"]), None, "target dev-dependencies are ignored");
+        assert_eq!(from("core", false, &["version-only"]), None, "version tables without paths or workspace inheritance are ignored");
+        assert!(!sets.values().flat_map(|s| s.values()).any(|p| p == "ignored"), "version strings and dependencies outside the package map are ignored");
+        assert_eq!(from("core", true, &["virtual"]), None, "a manifest without a package name is not a dependent");
+        assert_eq!(from("core", true, &[]), None, "the plain set is omitted even when a default entry exists but is empty");
+        assert_eq!(from("bare", false, &[]), None, "without a default entry, disabling defaults is normalised away");
+        assert_eq!(from("bare", true, &[]), None, "normalising defaults does not retain a plain set");
+        assert_eq!(from("bare", true, &["extra"]), Some("z-last"), "normalising defaults keeps explicit features, including optional dependencies");
+        assert_eq!(sets["bare"].len(), 1, "normalisation leaves only the bare package's explicit feature set");
+        assert_eq!(sets.len(), 2, "only packages depended on with non-plain sets are returned");
+        assert!(set(true, &[]).flags().is_empty(), "the plain set has no cargo flags");
+        assert_eq!(set(true, &[]).said(), "default", "the plain set is said as default");
+        assert_eq!(set(false, &[]).flags(), ["--no-default-features"], "disabling defaults is one cargo word");
+        assert_eq!(set(false, &[]).said(), "--no-default-features", "a featureless build says its flag");
+        assert_eq!(set(true, &["a", "b"]).flags(), ["--features", "a,b"], "feature names form one comma-separated cargo word");
+        assert_eq!(set(true, &["a", "b"]).said(), "--features a,b", "explicit features with defaults say both cargo words");
+        assert_eq!(set(false, &["a", "b"]).flags(), ["--no-default-features", "--features", "a,b"], "the no-default flag precedes explicit features");
+        assert_eq!(set(false, &["a", "b"]).said(), "--no-default-features --features a,b", "said joins cargo words with spaces");
+    }
+
     fn tree() -> Tree {
         Tree::mem(vec![
             ("Cargo.toml", "[workspace]\nmembers = [\"platform\", \"widgets\", \"apps/*\", \"tools/ci_leg\"]\nexclude = [\"apps/gone\"]\n"),
@@ -4625,6 +5017,33 @@ mod tests {
             ("apps/commercial/slices.json", "{\"foo\": [\"makepad-foo\"]}"),
             (".claude/x/ci.splash", "nil"),
         ])
+    }
+
+    #[test]
+    fn every_live_shard_runs_in_the_ci_run_but_the_macos_one() {
+        let t = Tree::mem(vec![
+            ("Cargo.toml", "[workspace]\nmembers = [\"tools/ci_leg\"]\n"),
+            ("tools/ci_leg/Cargo.toml", "[package]\nname = \"makepad-ci-leg\"\n"),
+            ("tools/ci_leg/src/main.rs", ""),
+            ("tools/run/fixture/live_kinds.py", ""),
+            ("tools/run/fixture/hot_fail.ps1", ""),
+            ("tools/run/fixture/live_replay.py", ""),
+            ("tools/run/tests/check_ext/Cargo.toml", ""),
+            ("libs/relax/compiler/tests/allow_c_dylib/verify.py", ""),
+        ]);
+        // the sweep alone ran almost none of them (11-14): each is the CI run's too, but the Mac's
+        let ci = live_replays(&t, &|_| None, 0);
+        let sweep = sweep_plan(&t, &|_| None, 0);
+        let only_sweep: Vec<&str> = sweep.iter().map(|s| s.id.as_str()).filter(|id| (id.starts_with("live:") || id.starts_with("rustc:")) && !ci.iter().any(|c| c.id == *id)).collect();
+        assert_eq!(only_sweep, ["live:allow-c-dylib-macos"], "a live shard only the sweep runs");
+        let ids: Vec<&str> = ci.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["live:kinds", "rustc:check-ext", "live:allow-c-dylib", "live:hot-fail-windows", "live:replay", "live:rebuild"], "a shard for each script the tree has");
+        // a Linux live shard builds its JIT in a step of its own: in its script's first `cargo run`
+        // a cold build ran past the wait for the program to start
+        for s in &ci {
+            let builds = s.steps.len() == 2 && s.steps[0].join(" ") == "cargo build --profile host -q -p makepad-run --bin makepad";
+            assert_eq!(builds, s.os == Os::Linux && s.id.starts_with("live:"), "{}: {:?}", s.id, s.steps);
+        }
     }
 
     #[test]
@@ -4683,8 +5102,8 @@ mod tests {
             for os in [Os::Linux, Os::Windows] {
                 let steps: Vec<_> = p.iter().filter(|s| s.kind == Kind::Test && s.os == os).flat_map(|s| &s.steps).collect();
                 assert!(steps.contains(&&argv(&["cargo", "test", "--release", "-p", "makepad-run"])), "loader on {os:?}");
-                assert!(steps.contains(&&jit(&["test", "relax-base", "--release"])), "shared dependency on {os:?}");
-                assert!(steps.contains(&&jit(&["test", "makepad-devhub", "--release", "--lib"])), "other member on {os:?}");
+                assert!(steps.contains(&&jit(&["test", "relax-base", "--profile", "release-checks"])), "shared dependency on {os:?}");
+                assert!(steps.contains(&&jit(&["test", "makepad-devhub", "--profile", "release-checks", "--lib"])), "other member on {os:?}");
                 assert_eq!(steps.contains(&&compiler), !failing || os == Os::Linux, "compiler on {os:?}, failing={failing}");
             }
             if failing {
@@ -4704,14 +5123,14 @@ mod tests {
         let p = sweep_plan(&t, &|_| None, 0);
         let check = p.iter().find(|s| s.id == "checks:story:every_profile").unwrap_or_else(|| panic!("the named check has its own shard: {:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
         assert_eq!((check.os, check.kind, check.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS), "the named check's OS, kind and default estimate");
-        assert_eq!(check.steps, vec![jit(&["test", "story", "--release", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])], "the named check's exact JIT test command");
+        assert_eq!(check.steps, vec![jit(&["test", "story", "--profile", "release-checks", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])], "the named check's exact JIT test command");
         let run = p.iter().find(|s| s.id == "runs:story:--export-web talks/a.deck.splash").unwrap_or_else(|| panic!("the named run has its own shard: {:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
         assert_eq!((run.os, run.kind, run.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS), "the named run's OS, kind and default estimate");
         assert!(matches!(run.judge, Judge::Exit), "the named run is judged by its exit status");
         assert_eq!(run.steps, vec![jit(&["run", "story", "--", "--export-web", "talks/a.deck.splash"])], "the named run's JIT command and arguments");
         // its own proof: the crate's tests are another unit, so a pass runs both
         assert_eq!(units_of(check)[0].section, "job.checks_story_every_profile", "the named check has its own proof");
-        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story", "--release"]))), "the crate's tests still have a separate shard");
+        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story", "--profile", "release-checks"]))), "the crate's tests still have a separate shard");
         let conf = read_conf("[ci]\nchecks = \"a::b, c\"\nruns = \"--x 1; --y\"\n").unwrap();
         assert_eq!(conf.checks, ["a::b", "c"], "the named checks are split and trimmed");
         assert_eq!(conf.runs, ["--x 1", "--y"], "the named runs are split and trimmed");

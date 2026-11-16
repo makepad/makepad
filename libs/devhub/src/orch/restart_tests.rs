@@ -1,8 +1,9 @@
 //! A master restart ends nothing, end to end: a real master process (leases, jobs, verify, CI,
-//! allapps) over real node executors in another process, killed under a job, a job whose lease is
-//! still building its JIT, a verify leg, a CI shard and its own allapps run, and started again on
-//! its state after the nodes went longer than their no-beat limit without it. All finish with their
-//! real exit codes, each command and that build run once. The tools wait for a release file, created once the restarted master has taken its state
+//! allapps, warm) over real node executors in another process, killed under a job, a job whose
+//! lease is still building its JIT, a verify leg, a CI shard, its own allapps run and a box's JIT
+//! prebuild mid-build, and started again on its state after the nodes went longer than their
+//! no-beat limit without it. All finish with their real exit codes, each command and each build run
+//! once. The tools wait for a release file, created once the restarted master has taken its state
 //! back.
 
 use super::*;
@@ -136,6 +137,12 @@ fn restart_role_master() {
     jitlegs::start(ctx.clone());
     allapps::start(ctx.clone());
     verify::start(ctx.clone());
+    // the warm legs the previous master ran come back (`warm::start` without its planner: these
+    // boxes report no JIT store); the first master plans one box's prebuild
+    warm::take_back(&ctx);
+    if std::env::var_os("DEVHUB_RESTART_SUBMIT").is_some() {
+        warm::prebuild_on(&ctx, "n6", &snapshot(&ctx.repo).unwrap().rev());
+    }
     // as `go` does: the master's own leases no record names end
     let named = ctx.store.read(|d| {
         let mut ids = std::collections::HashSet::new();
@@ -154,9 +161,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
 }
 
 fn script(path: &std::path::Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, text).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testenv::exec_script(path, text);
 }
 
 /// Kills the role processes it started, by the pids it holds.
@@ -209,7 +214,7 @@ fn a_master_restart_ends_nothing() {
     // (a lease's `cargo run` of the JIT builds it first, `cargo build`, then runs what it built: this
     // script again, as the JIT; the JIT stage before a box's shards is `makepad --version`; a run
     // that asks holds its build until the release)
-    let jit = format!("#!/bin/sh\ncase \"$1\" in\nbuild)\n  if [ -n \"$BUILD_HELD\" ]; then echo \"$*\" >> {ran}/build; echo building; while [ ! -e \"{release}\" ]; do sleep 0.02; done; fi\n  mkdir -p \"$CARGO_TARGET_DIR/host\" && cp \"$0\" \"$CARGO_TARGET_DIR/host/makepad\"; exit;;\n--version) echo makepad; exit 0;;\nbuilt-job) echo \"$*\" >> {ran}/built-job; echo the built JIT ran; exit 0;;\nesac\n", ran = ran.display(), release = release.display());
+    let jit = format!("#!/bin/sh\ncase \"$1\" in\nbuild)\n  case \"$PWD\" in */prebuild-*) echo \"$*\" >> {ran}/prebuild; echo building the box prebuild; while [ ! -e \"{release}\" ]; do sleep 0.02; done;; esac\n  if [ -n \"$BUILD_HELD\" ]; then echo \"$*\" >> {ran}/build; echo building; while [ ! -e \"{release}\" ]; do sleep 0.02; done; fi\n  mkdir -p \"$CARGO_TARGET_DIR/host\" && cp \"$0\" \"$CARGO_TARGET_DIR/host/makepad\"; exit;;\n--version) echo makepad; exit 0;;\nbuilt-job) echo \"$*\" >> {ran}/built-job; echo the built JIT ran; exit 0;;\nesac\n", ran = ran.display(), release = release.display());
     script(&bin.join("cargo"), &once("cargo", "echo 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0").replacen("#!/bin/sh\n", &jit, 1));
     script(&bin.join("git"), &format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo {main}; else echo {work}; fi\n"));
     script(&bin.join("leg"), &once("leg", "echo TESTLEG-OK\nexit 0"));
@@ -261,6 +266,8 @@ fn a_master_restart_ends_nothing() {
     let shards_of = |s: &makepad_strict_json::Value| s.get("ci").and_then(|c| c.get("run")).and_then(|r| r.get("shards")).and_then(|x| x.as_arr()).map(|a| a.to_vec()).unwrap_or_default();
     let shard_running = |s: &makepad_strict_json::Value| shards_of(s).into_iter().find(|x| num(x, "run_n") > 0);
     let allapps_running = |s: &makepad_strict_json::Value| s.get("allapps").and_then(|a| a.get("running")).filter(|r| !r.is_null()).cloned();
+    // the box prebuild's progress in the warm plan
+    let prebuild = |s: &makepad_strict_json::Value| s.get("warm").and_then(|w| w.get("plan")).and_then(|p| p.get("nodes")).and_then(|n| n.as_arr()).and_then(|n| n.first()).and_then(|n| n.get("progress")).cloned();
     // The kill must land on a settled fleet. A shard whose lease is granted but whose run the master
     // has not recorded yet is mid-start: killed then, the new master starts its command a second
     // time (the "each command once" count below fails), and how long that window is depends on the
@@ -272,15 +279,20 @@ fn a_master_restart_ends_nothing() {
             && allapps_running(s).is_some_and(|r| num(&r, "run_n") > 0)
             // and a job on its lease, its JIT's build running
             && built(s).is_some_and(|j| !text(&j, "lease").is_empty()) && count("build") == 1
+            // and the box's prebuild on its lease, its build running
+            && prebuild(s).is_some_and(|p| text(&p, "state") == "building" && !text(&p, "lease").is_empty()) && count("prebuild") == 1
     });
     let s = state().unwrap();
     let mid_build = built(&s).unwrap();
     assert_eq!(num(&mid_build, "run_n"), 0, "killed before its command: {}", mid_build.to_json());
     let (job_lease, leg_lease, shard) = (text(&job0(&s).unwrap(), "lease"), text(&leg0(&s).unwrap(), "lease"), shard_running(&s).unwrap());
     let allapps_lease = text(&allapps_running(&s).unwrap(), "lease");
+    let prebuild_lease = text(&prebuild(&s).unwrap(), "lease");
     let (shard_id, shard_lease) = (text(&shard, "id"), text(&shard, "lease"));
     // the boxes those leases are on
     let mut held: Vec<String> = [job0(&s).unwrap(), mid_build.clone(), leg0(&s).unwrap(), allapps_running(&s).unwrap()].iter().chain(shards_of(&s).iter().filter(|x| !text(x, "lease").is_empty())).map(|x| text(x, "node")).collect();
+    // (and the prebuild's box)
+    held.push("n6".into());
     held.sort();
     held.dedup();
     assert!(!held.is_empty() && held.iter().all(|n| NODES.contains(&n.as_str())), "{held:?}: {}", s.to_json());
@@ -365,6 +377,14 @@ fn a_master_restart_ends_nothing() {
     let last = state().unwrap().get("allapps").and_then(|a| a.get("last")).cloned().unwrap();
     assert_eq!((text(&last, "verdict").as_str(), text(&last, "lease")), ("ok", allapps_lease.clone()), "{}", last.to_json());
     assert_eq!(count("allapps"), 1, "allapps ran once");
+    // the box's prebuild went on on its lease under the new master, its build once, and its JIT
+    // ran on what that build made (`--version`): the restart lost none of it
+    until("the prebuild's end", &|s| prebuild(s).is_some_and(|p| num(&p, "ended_ms") > 0));
+    let p = prebuild(&state().unwrap()).unwrap();
+    assert_eq!((text(&p, "state").as_str(), count("prebuild")), ("done", 1), "the prebuild finished, its build run once: {}", p.to_json());
+    let warm_log = std::fs::read_to_string(home.join("devhub/warm/n6.log")).unwrap_or_default();
+    assert!(warm_log.contains(&format!("{prebuild_lease} on n6: taken back after the master's restart")), "taken back on its lease {prebuild_lease}: {warm_log}");
+    assert!(warm_log.contains("devhub: cargo built this tree's JIT in") && warm_log.contains("makepad\n"), "its build made the JIT its step ran: {warm_log}");
     let ended = std::fs::read_to_string(home.join("devhub/leases.jsonl")).unwrap_or_default();
     assert!(ended.lines().any(|l| l.contains(&format!("\"id\":\"{leg_lease}\""))), "the leg kept its lease {leg_lease}: {ended}");
     drop(roles);

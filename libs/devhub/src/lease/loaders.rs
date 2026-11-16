@@ -52,26 +52,25 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// The compiler's commit as this box's last lease start read it ([`refresh_compiler`]; read now
-/// when none did yet): a rustup update on this box means new binaries. A hub that kept the commit
-/// it started with labelled another rustc's builds with it (stale code under the old key).
+/// The compiler's commit as this box last read it ([`super::caps::read_rustc`]; read now when
+/// none did yet): a rustup update on this box means new binaries. A hub that kept the commit it
+/// started with labelled another rustc's builds with it (stale code under the old key).
 static COMPILER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub(crate) fn compiler() -> String {
-    let mut c = COMPILER.lock().unwrap();
-    c.get_or_insert_with(|| super::caps::read_rustc().commit).clone()
+    if let Some(c) = COMPILER.lock().unwrap().clone() {
+        return c;
+    }
+    super::caps::read_rustc().commit
 }
 
-/// A lease's start: reads the toolchain again, so that lease's keys name the rustc its builds use.
-/// What it read: the lease keeps it, and its end compares ([`super::exec`]'s toolchain verdict).
-pub(crate) fn refresh_compiler() -> super::caps::Rustc {
-    let rustc = super::caps::read_rustc();
-    let now = rustc.commit.clone();
-    let was = COMPILER.lock().unwrap().replace(now.clone());
-    if let Some(was) = was.filter(|w| !w.is_empty() && *w != now) {
+/// Each read of the toolchain ([`super::caps::read_rustc`]) keys the JIT binaries by the commit it
+/// found; empty when rustc did not answer, which keys nothing (no binary under a guessed compiler).
+pub(crate) fn rekey(now: &str) {
+    let was = COMPILER.lock().unwrap().replace(now.to_string());
+    if let Some(was) = was.filter(|w| !w.is_empty() && w != now) {
         eprintln!("devhub: rustc changed ({was} -> {now}): JIT binaries are keyed by the new compiler");
     }
-    rustc
 }
 
 /// The key of `inputs` with `blob` (path to its git blob); None when one is not tracked.
@@ -487,6 +486,9 @@ pub struct OverlayBuild<'a> {
     /// a warning for the master's inbox (a store build that died or failed)
     pub warn: &'a dyn Fn(&str),
     pub active: &'a dyn Fn() -> Result<(), String>,
+    /// An offline run's (the test spool's sandbox): its edits never reach a JIT build, which runs
+    /// outside the namespace with build scripts and the network (11-15).
+    pub sandboxed: bool,
 }
 
 /// Use the explicit --jit loader id: build it from the pin when it matches, otherwise require
@@ -522,6 +524,9 @@ pub fn find_overlay(work: &Path, lane: &str, edits: &Path, lease: &str, pin: &su
     // change the JIT's inputs, and builds it here when the box lacks it: placement counted on that
     // (sched's gets_jit)
     let own = own.filter(|_| requested != Some(pinned.as_str()));
+    if let Some((_, _, changed, _)) = own.as_ref().filter(|_| build.sandboxed) {
+        return Err(format!("an offline run builds no JIT of its own: its edits change the JIT's inputs ({}{}), and that build runs outside the sandbox; take them into the lane first", changed.iter().take(3).cloned().collect::<Vec<_>>().join(", "), if changed.len() > 3 { ", ..." } else { "" }));
+    }
     let (id, files, mut changed, apply) = match own { Some((id, files, changed, e)) => (id, files, changed, Some(e)), None => (pinned, inputs.files, Vec::new(), None) };
     changed.sort();
     if !changed.is_empty() {
@@ -895,6 +900,21 @@ pub fn cargo_run_args(argv: &[String]) -> Option<&[String]> {
     next.is_none().then(|| &argv[sep + 1..])
 }
 
+/// A JIT `run` (bare `makepad run ..` or its cargo form, past any `env` prefix) as a run nobody
+/// attends: `--unattended` among its flags ([`super::nobody_attends`]); any other command, or a
+/// run that says it already, as it was.
+pub fn unattended_run(mut argv: Vec<String>) -> Vec<String> {
+    let Some(args) = cargo_run_args(&argv) else { return argv };
+    let flags = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if args.first().map(String::as_str) != Some("run") || args[..flags].iter().any(|a| a == "--unattended") {
+        return argv;
+    }
+    // (both parses take a suffix of the argv: the JIT's words start where that suffix does)
+    let at = argv.len() - args.len();
+    argv.insert(at + 1, "--unattended".into());
+    argv
+}
+
 /// The JIT's build alone, as a JIT run's cargo builds it ([`cargo_run_args`] takes the run's argv):
 /// `cargo build` with that run's flags.
 #[cfg(feature = "checkout")]
@@ -946,8 +966,21 @@ pub struct TreeBuild {
     pub store: super::jitstore::Store,
     /// [`tree_id`] of the tree
     pub key: String,
-    /// taken before the key was read: a file written later is not what the key says
+    /// taken before the key was read, on the file times' clock ([`file_clock_now`]): a file written
+    /// later is not what the key says
     pub asked: std::time::SystemTime,
+}
+
+/// Now as a file's modified time says it: the time a file made now gets. File times come from a
+/// coarser clock than `SystemTime::now()` (Linux stamps them from its tick), so a file written just
+/// after a `now()` can carry an earlier time than it; no file written after this one carries an
+/// earlier time than this.
+pub fn file_clock_now(dir: &Path) -> Result<std::time::SystemTime, String> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let p = dir.join(format!(".now-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let made = std::fs::create_dir_all(dir).and_then(|_| std::fs::File::create(&p)).and_then(|f| f.metadata()).and_then(|m| m.modified());
+    let _ = std::fs::remove_file(&p);
+    made.map_err(|e| format!("{}: {e}", p.display()))
 }
 
 /// Publishes the binary a run built, when it left [`MARK`]. Ok(Some(key)): published; Ok(None): no
@@ -973,15 +1006,17 @@ pub fn publish(root: &Path, target: &Path, own: Option<&TreeBuild>) -> Result<Op
     if let Some(p) = inputs.iter().find(|p| dirty.contains(*p)) {
         let Some(own) = own else { return Err(format!("{p} is edited")) };
         let generated = |f: &String| Path::new(f).starts_with(target) || root.join(f).starts_with(target);
-        // newer than the binary: cargo failed, the binary is an earlier tree's; newer than the key: not what it says
-        if let Some(p) = dep_files(&dep, root).iter().find(|f| !generated(f) && std::fs::metadata(root.join(f)).and_then(|m| m.modified()).map_or(true, |t| t > built || t > own.asked)) {
+        // not older than the binary: cargo failed, the binary is an earlier tree's; not older than the
+        // key: not what it says (a file time equal to either cannot say which came first)
+        if let Some(p) = dep_files(&dep, root).iter().find(|f| !generated(f) && std::fs::metadata(root.join(f)).and_then(|m| m.modified()).map_or(true, |t| t >= built || t >= own.asked)) {
             return Err(format!("{p} changed after the build started"));
         }
         own.store.keep(&own.key, &bin)?;
         return Ok(Some(own.key.clone()));
     }
-    // cargo's own rule: an input newer than the binary means it was not built from this
-    if let Some(p) = inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t > built)) {
+    // cargo's own rule: an input newer than the binary means it was not built from this (and one
+    // as old, written in the same tick of the file clock, may not have been)
+    if let Some(p) = inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t >= built)) {
         return Err(format!("{p} changed after the build"));
     }
     let k = key(&compiler(), &inputs, &|f| on_disk(root, f, index.get(f)?).map(|(b, _)| b)).ok_or("an input is not tracked")?;
@@ -1374,7 +1409,7 @@ mod tests {
         // with the key its run read before the build: cargo failed, the binary is the earlier tree's
         std::thread::sleep(std::time::Duration::from_millis(20));
         let key = "0123456789abcdef01234567";
-        let own = TreeBuild { store: super::super::jitstore::Store::new(&d), key: key.to_string(), asked: std::time::SystemTime::now() };
+        let own = TreeBuild { store: super::super::jitstore::Store::new(&d), key: key.to_string(), asked: file_clock_now(&d).unwrap() };
         std::fs::write(target.join(MARK), "").unwrap();
         assert!(publish(&root, &target, Some(&own)).unwrap_err().contains("f3.rs"));
         assert!(own.store.lookup(key).is_none());

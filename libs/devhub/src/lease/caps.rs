@@ -10,7 +10,8 @@
 //! takes work again, [`super::UserSense`]).
 //! `native_trees` (default 3) bounds per-lane native trees and their targets.
 
-use super::{Caps, Kind, Role};
+use super::{Caps, HotTemp, Kind, Role, Temp};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The node's lease policy (`lease.conf`).
@@ -184,8 +185,8 @@ pub fn rust_command(prog: &str) -> std::process::Command {
 }
 
 /// The toolchain a lease's run finds ([`rust_command`]): `rustc -vV`'s release (`1.100.0`) and
-/// commit hash. The box's report and the JIT store's keys (loaders::compiler) read it again on
-/// their own, so a rustup update reaches both without a hub restart.
+/// commit hash. Each read ([`read_rustc`]) keys the JIT store too (loaders::compiler), so a rustup
+/// update reaches the box's report and its keys without a hub restart.
 #[derive(Clone, Default)]
 pub struct Rustc {
     pub release: String,
@@ -200,10 +201,14 @@ fn parse_rustc(vv: &str) -> Rustc {
     Rustc { release: line("release: "), commit: line("commit-hash: ") }
 }
 
-/// Reads the toolchain again now: a lease's start ([`super::loaders::refresh_compiler`]).
+/// Reads the toolchain again now, and keys the box's JIT binaries by what it read
+/// ([`super::loaders::rekey`]): a lease's start and end, the box's report when 5 min old, and the
+/// toolchain probe each read it. A key changed only at lease starts left a rustup update between
+/// two leases unseen by the hub's report and its prebuilds (11-13).
 pub fn read_rustc() -> Rustc {
     let r = rust_command("rustc").arg("-vV").output().ok().map(|o| parse_rustc(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
     *RUSTC.lock().unwrap() = Some((std::time::Instant::now(), r.clone()));
+    super::loaders::rekey(&r.commit);
     r
 }
 
@@ -279,6 +284,8 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     { c.wm_drain = crate::sync::serve::wm_drain(); }
     #[cfg(feature = "checkout")]
     { c.prewarming = crate::sync::prewarm::running(); }
+    #[cfg(feature = "checkout")]
+    { c.cef_dist = cef_dist(&crate::sync::SyncConf::load().checkout).map(|d| d.display().to_string()).unwrap_or_default(); }
     c.jit_store = Some(std::sync::Arc::new(super::jitstore::Store::new(&conf.work).snapshot()));
     c.native_trees = conf.native_trees;
     c.cpus_shared = cpu_count(&conf.cpus_shared);
@@ -286,6 +293,26 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     #[cfg(feature = "checkout")]
     { c.native = super::tree::natives(&conf.work).into_iter().map(|(lane, _)| lane).collect(); }
     c
+}
+
+/// The CEF distribution a checkout holds: `local/cef-prebuilt/current-<platform>.txt` names it
+/// (makepad-cef-fetch writes it), or the older `current-<platform>` link; one with `include/`.
+/// A live session runs from an overlay, which carries no `local/`: its browser host found none
+/// and panicked in its CEF bootstrap (W11267, 11-16).
+pub fn cef_dist(checkout: &Path) -> Option<PathBuf> {
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "macosarm64",
+        ("macos", "x86_64") => "macosx64",
+        ("linux", "x86_64") => "linux64",
+        ("linux", "aarch64") => "linuxarm64",
+        ("windows", "x86_64") => "windows64",
+        ("windows", "aarch64") => "windowsarm64",
+        _ => return None,
+    };
+    let prebuilt = checkout.join("local/cef-prebuilt");
+    let named = std::fs::read_to_string(prebuilt.join(format!("current-{platform}.txt"))).ok()
+        .and_then(|t| t.lines().next().map(str::trim).filter(|n| !n.is_empty()).map(|n| prebuilt.join(n)));
+    named.into_iter().chain([prebuilt.join(format!("current-{platform}"))]).find(|d| d.join("include").is_dir()).and_then(|d| d.canonicalize().ok())
 }
 
 /// The kernel's current clock source on an x86 Linux box (`tsc`; `hpet` or `acpi_pm` when the
@@ -428,7 +455,12 @@ pub fn probe_git() -> (Option<String>, bool) {
 
 /// Links a small program the way a build does, system libraries included (a damaged SDK fails every
 /// lane's job at its last step). The first line that says why, or None. `changed`: the verdict moved.
+/// One probe at a time: the hub's loop and a `toolchain-probe` ask write and link the same files in
+/// `dir`, and two rustc runs on them at once could fail one falsely and take the box out of
+/// rotation (a second waits for the first, seconds).
 pub fn probe_toolchain(dir: &std::path::Path) -> (Option<String>, bool) {
+    static PROBING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = PROBING.lock().unwrap_or_else(|e| e.into_inner());
     let src = dir.join("toolchain-probe.rs");
     let out = dir.join(if cfg!(windows) { "toolchain-probe.exe" } else { "toolchain-probe" });
     let text = "#[cfg(target_os = \"macos\")] #[link(name = \"objc\")] #[link(name = \"m\")] #[link(name = \"Foundation\", kind = \"framework\")] #[link(name = \"Metal\", kind = \"framework\")] unsafe extern \"C\" {}\nfn main() {}\n";
@@ -474,6 +506,16 @@ pub fn hub_rev() -> &'static str {
 /// checkout's HEAD has moved on when a landing came during the build or the drain, and a master
 /// that took that HEAD for its own never built the landing (its CLI stayed behind, 11-04).
 pub const BUILT_AT: &str = "DEVHUB_BUILT_AT";
+
+/// The commit the master's own build of this binary was built at ([`BUILD_REV`], which its build
+/// sets: `orch::roll`'s `build_devhub`); none for a build by hand or under the JIT. A CLI compares
+/// it with the master's (`master_rev` in an error's answer) to say which side lags.
+pub fn cli_build_rev() -> Option<&'static str> {
+    option_env!("DEVHUB_BUILD_REV").filter(|rev| !rev.is_empty())
+}
+
+/// The variable the master's build of devhub's binary names its commit in ([`cli_build_rev`]).
+pub const BUILD_REV: &str = "DEVHUB_BUILD_REV";
 
 /// HEAD's commit of a checkout, from its files (a linked worktree's `.git` file, a loose ref or
 /// packed-refs).
@@ -566,6 +608,84 @@ pub fn parse_loadavg(text: &str) -> f64 {
     text.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0.0)
 }
 
+/// Chip limits may replace a class default only nearby; low DIMM maxima are not load alerts.
+fn temp_limit(chip: &str, label: &str, max: Option<f64>, crit: Option<f64>) -> Option<f64> {
+    let default = match chip {
+        "k10temp" if label == "Tctl" || label.starts_with("Tccd") => Some(90.0),
+        "coretemp" if label.starts_with("Package") => Some(90.0),
+        "amdgpu" => Some(90.0),
+        "nvme" => Some(80.0),
+        "spd5118" => Some(70.0),
+        c if c.starts_with("r8169") => Some(95.0),
+        c if c.starts_with("mt7921") => Some(90.0),
+        _ => None,
+    };
+    let own = max.or(crit);
+    match default {
+        Some(d) => Some(own.filter(|l| (*l - d).abs() <= 10.0).unwrap_or(d)),
+        None => own.filter(|l| (50.0..=120.0).contains(l)),
+    }
+}
+
+/// All readable hwmon inputs, in Celsius. A root parameter keeps sysfs out of fixture tests.
+pub fn hwmon_temps(root: &Path) -> Vec<Temp> {
+    let degrees = |path: &Path| std::fs::read_to_string(path).ok()?.trim().parse::<i64>().ok().map(|m| m as f64 / 1000.0);
+    let mut temps = Vec::new();
+    for chip_dir in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        if !chip_dir.file_name().to_string_lossy().starts_with("hwmon") { continue; }
+        let dir = chip_dir.path();
+        let Ok(chip) = std::fs::read_to_string(dir.join("name")) else { continue };
+        let chip = chip.trim();
+        if chip.is_empty() { continue; }
+        for input in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = input.file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix("_input") else { continue };
+            if !stem.strip_prefix("temp").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) { continue; }
+            let Some(c) = degrees(&input.path()) else { continue };
+            let label = std::fs::read_to_string(dir.join(format!("{stem}_label"))).unwrap_or_else(|_| stem.to_string());
+            let label = label.trim();
+            let limit = temp_limit(chip, label, degrees(&dir.join(format!("{stem}_max"))), degrees(&dir.join(format!("{stem}_crit"))));
+            let sensor = format!("{chip}:{label}").split_whitespace().collect::<Vec<_>>().join("_");
+            temps.push(Temp { sensor, c, limit });
+        }
+    }
+    temps.sort_by(|a, b| a.sensor.cmp(&b.sensor).then(a.c.total_cmp(&b.c)));
+    temps
+}
+
+/// Uses the GPU query caps already made; no second nvidia-smi process per poll.
+#[cfg(any(target_os = "linux", test))]
+fn nvidia_temps(gpus: &[crate::top::GpuUse]) -> Vec<Temp> {
+    gpus.iter().enumerate().filter(|(_, g)| g.temp_c.is_finite()).map(|(i, g)| Temp { sensor: format!("gpu{i}"), c: g.temp_c, limit: Some(85.0) }).collect()
+}
+
+/// Hysteresis lives with the hub, so master polls do not flap at the alert limit.
+#[derive(Default)]
+pub(super) struct Thermal {
+    hot: BTreeMap<String, HotTemp>,
+}
+
+impl Thermal {
+    /// A hot sensor needs a reading below limit - 5 to cool; a missing reading is not cooling.
+    pub(super) fn update(&mut self, temps: &[Temp]) -> Vec<HotTemp> {
+        let previous = std::mem::take(&mut self.hot);
+        for t in temps {
+            let Some(limit) = t.limit else { continue };
+            let hot = if previous.contains_key(&t.sensor) { t.c >= limit - 5.0 } else { t.c >= limit };
+            if hot {
+                // Identically named chips (several DIMMs) stay hot while any of them is hot.
+                if self.hot.get(&t.sensor).is_none_or(|h| t.c - limit > h.c - h.limit) {
+                    self.hot.insert(t.sensor.clone(), HotTemp { sensor: t.sensor.clone(), c: t.c, limit });
+                }
+            }
+        }
+        for (sensor, t) in previous {
+            if !temps.iter().any(|t| t.sensor == sensor) { self.hot.insert(sensor, t); }
+        }
+        self.hot.values().cloned().collect()
+    }
+}
+
 /// `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`: (name, VRAM GB).
 pub fn parse_nvidia(text: &str) -> Vec<(String, f64)> {
     text.lines()
@@ -588,13 +708,21 @@ pub fn parse_battery(capacity: &str, status: &str) -> Option<(u32, bool)> {
     Some((pct, matches!(status.trim(), "Charging" | "Full")))
 }
 
-/// How long [`load_now`] measures the CPU for.
+/// How long [`load_now`] measures the CPU for on Linux and Windows, whose counters move as the
+/// time goes; macOS publishes its own about once a second, and a measure there spans the next
+/// publication (at most [`LOAD_WAIT`] after its first read).
 pub const LOAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The box's load now: (CPU use in percent over [`LOAD_WINDOW`], available RAM in GB). A lease-end
-/// answers it after the teardown: the caps the master holds are a 10 s average from up to 10 s ago
-/// and still count the ended lease's work (a medium lease waited 23 s, two caps rounds, after two
-/// small tests that pegged its box had ended, 11-04).
+/// How long a macOS [`load_now`] waits for its CPU counters to move: past it (the counters stood
+/// still for three of their periods) the answer has no load, said in one line.
+#[cfg(target_os = "macos")]
+pub const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The box's load now: (CPU use in percent over [`LOAD_WINDOW`], or on macOS over the counters'
+/// last whole period, available RAM in GB). A lease-end answers it after the teardown: the caps
+/// the master holds are a 10 s average from up to 10 s ago and still count the ended lease's work
+/// (a medium lease waited 23 s, two caps rounds, after two small tests that pegged its box had
+/// ended, 11-04).
 pub fn load_now() -> Option<(f64, f64)> {
     os::load_now()
 }
@@ -631,6 +759,8 @@ mod os {
         let cpu_target = cpu_target(&cpu);
         let (ram, avail) = parse_meminfo(&read("/proc/meminfo"));
         let gpu = crate::top::gpu_use();
+        let mut temps = hwmon_temps(Path::new("/sys/class/hwmon"));
+        temps.extend(nvidia_temps(&gpu));
         // CPU use since the previous measure (the master asks every 10 s)
         static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
         let now = crate::top::parse_proc_stat(&read("/proc/stat"));
@@ -639,6 +769,7 @@ mod os {
             _ => None,
         };
         Caps {
+            temps,
             cpu_pct,
             gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
             arch: std::env::consts::ARCH.to_string(),
@@ -719,8 +850,13 @@ mod os {
     /// is asked the legacy `hello <wire>` with the apps' wire fingerprint. A WM on another wire
     /// cannot host them (Fab could not start on a node, 2026-11-02), so the box is no display for
     /// gui work until its WM restarts. A slow answer is no evidence of another wire.
+    /// A WM that speaks a common hosted-protocol version hosts them whatever its wire fingerprint:
+    /// an app admitted at a version states that version and the WM's own fingerprint at its hub
+    /// (hal `wm_socket.rs` `adopt_with`, libs/app_host `hub.rs`). Before apps did, a pool box's WM
+    /// of an older fingerprint adopted each at the socket and its hub closed it: a lane's live Fab
+    /// 6 s into its boot, the node's tray and AI Hub every few seconds (L1206053, 11-16).
     /// `Err(Some(answer))`: a WM on another wire; `Err(None)`: none answers there.
-    fn hosts_apps(path: &Path) -> Result<(), Option<String>> {
+    pub(super) fn hosts_apps(path: &Path) -> Result<(), Option<String>> {
         use std::io::{BufRead, ErrorKind, Read, Write};
         use std::os::unix::net::UnixStream;
         enum Answer { Dead, Slow, Line(String) }
@@ -739,12 +875,13 @@ mod os {
             }
         };
         let said = |a: &str, what: &str| a.strip_prefix("makepad-wm ").is_some_and(|r| r.starts_with(what));
+        let legacy = || ask(format!("makepad-wm hello {:016x}\n", makepad_studio_protocol::WIRE));
         match ask("makepad-wm hello2 1-65535\n".into()) {
             Answer::Dead => Err(None),
             Answer::Slow => Ok(()),
             Answer::Line(a) if said(&a, "ok ") => Ok(()),
             Answer::Line(a) if said(&a, "incompatible ") => Err(Some(a)),
-            Answer::Line(_) => match ask(format!("makepad-wm hello {:016x}\n", makepad_studio_protocol::WIRE)) {
+            Answer::Line(_) => match legacy() {
                 Answer::Slow => Ok(()),
                 Answer::Line(a) if said(&a, "ok") => Ok(()),
                 Answer::Line(a) if said(&a, "mismatch ") => Err(Some(a)),
@@ -854,7 +991,10 @@ mod os {
     }
 
     /// (busy, total) CPU ticks of all cores: `host_statistics(HOST_CPU_LOAD_INFO)` (user, system,
-    /// idle, nice), the macOS twin of `/proc/stat`'s `cpu` line.
+    /// idle, nice), the macOS twin of `/proc/stat`'s `cpu` line. The kernel publishes them about
+    /// once a second, every core's period at once: on a 16-core M-series box two in three windows
+    /// of 100 ms saw them stand still, idle or with every core spinning, and windows of 1 s each
+    /// saw a period's 1600 ticks (11-14).
     fn cpu_ticks() -> Option<(u64, u64)> {
         let mut t = [0u32; 4];
         let mut count = 4u32;
@@ -866,19 +1006,32 @@ mod os {
         Some((busy, busy + t[2] as u64))
     }
 
+    /// The CPU over the counters' last whole period: from the first read (the last publication)
+    /// to the next publication, which comes within about a second. A fixed window of 100 ms most
+    /// often saw no tick at all, and the lease-end answer then had no load.
     pub fn load_now() -> Option<(f64, f64)> {
         let a = cpu_ticks()?;
-        std::thread::sleep(LOAD_WINDOW);
-        let b = cpu_ticks()?;
-        (b.1 > a.1).then(|| (crate::top::cpu_pct(a, b), crate::procinfo::machine().mem_avail_mb as f64 / 1024.0))
+        let t0 = std::time::Instant::now();
+        let b = loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let b = cpu_ticks()?;
+            if b.1 > a.1 {
+                break b;
+            }
+            if t0.elapsed() >= LOAD_WAIT {
+                eprintln!("devhub: the CPU counters stood still for {LOAD_WAIT:?}: a lease-end answers no load");
+                return None;
+            }
+        };
+        Some((crate::top::cpu_pct(a, b), crate::procinfo::machine().mem_avail_mb as f64 / 1024.0))
     }
 
     pub fn hardware() -> Caps {
         let m = crate::procinfo::machine();
         // CPU use since the previous measure (the master asks every 10 s): what decides "busy", not
         // the 1-minute load average, which stays high for a minute after a lease's build ended
-        // (a measure within the same tick as the last one, from another caller, answers the last
-        // value and keeps its base: the ticks advance at 100 Hz)
+        // (a measure within the same period of the counters as the last one, from another caller,
+        // answers the last value and keeps its base: the kernel publishes them about once a second)
         static LAST: std::sync::Mutex<(Option<(u64, u64)>, Option<f64>)> = std::sync::Mutex::new((None, None));
         let now = cpu_ticks();
         let cpu_pct = {
@@ -1007,6 +1160,99 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+    /// A WM is asked the way an app is: one that speaks a common version hosts apps whatever its
+    /// wire fingerprint, as an app admitted at that version states the WM's own at its hub.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wm_that_speaks_a_common_version_hosts_apps_whatever_its_fingerprint() {
+        use std::io::{BufRead, Write};
+        let serve = |name: &str, legacy: &'static str| {
+            let path = std::env::temp_dir().join(format!("devhub-wmwire-{name}-{}-{}", std::process::id(), crate::proto::wall_ms()));
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().take(2) {
+                    let Ok(stream) = stream else { return };
+                    let mut line = String::new();
+                    let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                    let answer = if line.starts_with("makepad-wm hello2 ") { "makepad-wm ok 1\n" } else { legacy };
+                    let _ = (&stream).write_all(answer.as_bytes());
+                }
+            });
+            path
+        };
+        let other = serve("other", "makepad-wm mismatch 0123456789abcdef\n");
+        assert_eq!(super::os::hosts_apps(&other), Ok(()), "a common version on another fingerprint hosts apps");
+        let same = serve("same", "makepad-wm ok\n");
+        assert_eq!(super::os::hosts_apps(&same), Ok(()), "a WM of the apps' wire hosts them");
+        for path in [other, same] { let _ = std::fs::remove_file(path); }
+    }
+
+    #[test]
+    fn hwmon_reads_labels_millidegrees_and_class_limits() {
+        let dir = std::env::temp_dir().join(format!("devhub-hwmon-{}-{}", std::process::id(), crate::proto::wall_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cases = [
+            ("k10temp", Some("Tctl"), Some(95_000), Some(100_000), Some(95.0)),
+            ("k10temp", Some("Tccd1"), None, Some(100_000), Some(100.0)),
+            ("coretemp", Some("Package id 0"), Some(70_000), None, Some(90.0)),
+            ("amdgpu", Some("junction"), None, None, Some(90.0)),
+            ("nvme", Some("Composite"), Some(70_000), None, Some(70.0)),
+            ("r8169_phy", None, None, Some(105_000), Some(105.0)),
+            ("spd5118", None, Some(55_000), Some(85_000), Some(70.0)),
+            ("mt7921_phy", None, None, None, Some(90.0)),
+            ("unknown chip", Some("Board temp"), Some(60_000), Some(75_000), Some(60.0)),
+            ("unknown", Some("critical"), None, Some(88_500), Some(88.5)),
+            ("unknown", Some("low"), Some(49_000), Some(95_000), None),
+            ("unknown", Some("high"), None, Some(121_000), None),
+            ("unknown", Some("lower edge"), Some(50_000), None, Some(50.0)),
+            ("unknown", Some("upper edge"), None, Some(120_000), Some(120.0)),
+            ("unknown", None, None, None, None),
+        ];
+        for (i, (chip, label, max, crit, _)) in cases.iter().enumerate() {
+            let chip_dir = dir.join(format!("hwmon{i}"));
+            std::fs::create_dir(&chip_dir).unwrap();
+            std::fs::write(chip_dir.join("name"), format!("{chip}\n")).unwrap();
+            std::fs::write(chip_dir.join("temp1_input"), "61125\n").unwrap();
+            if let Some(label) = label { std::fs::write(chip_dir.join("temp1_label"), format!("{label}\n")).unwrap(); }
+            for (suffix, value) in [("max", max), ("crit", crit)] {
+                if let Some(value) = value { std::fs::write(chip_dir.join(format!("temp1_{suffix}")), format!("{value}\n")).unwrap(); }
+            }
+        }
+        std::fs::write(dir.join("hwmon0/temp2_input"), "42125\n").unwrap();
+        std::fs::write(dir.join("hwmon0/temp3_input"), "unreadable\n").unwrap();
+        std::fs::write(dir.join("hwmon0/in1_input"), "1200\n").unwrap();
+        let temps = super::hwmon_temps(&dir);
+        assert_eq!(temps.len(), cases.len() + 1, "every temperature input, excluding invalid input and voltage");
+        for (chip, label, _, _, limit) in cases {
+            let name = format!("{chip}:{}", label.unwrap_or("temp1")).replace(' ', "_");
+            let t = temps.iter().find(|t| t.sensor == name).expect(&name);
+            assert_eq!((t.c, t.limit), (61.125, limit), "{name}: millidegrees and the class or chip limit");
+        }
+        let second = temps.iter().find(|t| t.sensor == "k10temp:temp2").unwrap();
+        assert_eq!((second.c, second.limit), (42.125, None), "an unlabelled second input uses its stem and has no CPU-class default");
+        assert!(super::hwmon_temps(&dir.join("absent")).is_empty(), "no hwmon is an empty reading");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let gpus = crate::top::parse_gpu_use("GPU-A, 20, 1024, 8192, 39, 50\nGPU-B, 30, 2048, 8192, 85, 90\n");
+        let temps = super::nvidia_temps(&gpus);
+        assert_eq!(temps, vec![super::Temp { sensor: "gpu0".into(), c: 39.0, limit: Some(85.0) }, super::Temp { sensor: "gpu1".into(), c: 85.0, limit: Some(85.0) }], "the existing GPU query supplies every NVIDIA temperature");
+    }
+
+    #[test]
+    fn thermal_hysteresis_waits_for_five_degrees_of_cooling() {
+        let mut thermal = super::Thermal::default();
+        let dimm = |c| super::Temp { sensor: "spd5118:temp1".into(), c, limit: Some(70.0) };
+        let unknown = super::Temp { sensor: "unknown:temp1".into(), c: 150.0, limit: None };
+        assert!(thermal.update(&[dimm(69.0), unknown.clone()]).is_empty(), "below the limit stays cool; a sensor with no limit never alerts");
+        assert_eq!(thermal.update(&[dimm(70.0), unknown.clone()]), vec![super::HotTemp { sensor: "spd5118:temp1".into(), c: 70.0, limit: 70.0 }], "the limit itself goes hot");
+        assert_eq!(thermal.update(&[dimm(67.0), unknown.clone()])[0].c, 67.0, "three degrees below stays hot and updates the reading");
+        assert_eq!(thermal.update(&[dimm(65.0)]).len(), 1, "exactly five degrees below stays hot");
+        assert_eq!(thermal.update(&[]).len(), 1, "a missing reading cannot cool a hot sensor");
+        assert!(thermal.update(&[dimm(64.999), unknown]).is_empty(), "below limit minus five cools");
+        assert_eq!(thermal.update(&[dimm(71.0), dimm(40.0)])[0].c, 71.0, "a cool DIMM sharing the name cannot hide a hot one");
+        assert_eq!(thermal.update(&[dimm(40.0), dimm(67.0)])[0].c, 67.0, "duplicate names retain hysteresis independent of order");
+        assert!(thermal.update(&[dimm(40.0), dimm(64.0)]).is_empty(), "every DIMM sharing the name has cooled");
+    }
+
     /// The JIT store's keys take the commit and the box's report the release from `rustc -vV`;
     /// one that says neither leaves both empty (no key: the store builds nothing under a guess).
     #[test]

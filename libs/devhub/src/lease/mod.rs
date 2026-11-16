@@ -29,6 +29,7 @@ pub mod jit;
 pub mod disk;
 pub mod exec;
 pub mod master;
+pub mod offline;
 #[cfg(feature = "checkout")]
 pub mod native;
 pub mod panel;
@@ -161,6 +162,17 @@ impl Priority {
     }
 }
 
+/// Whether nobody attends a lease's runs as they go: a timed run, or background work, never a
+/// live session, a screen lease or an inspection (someone drives those). Its JIT runs are
+/// `makepad run --unattended` ([`loaders::unattended_run`], the run's own `makepad` on PATH): a
+/// panic unwinds and a compile error ends the run, exiting non-zero, where an attended run parks
+/// for a decision. A timed lease on a bench box waited 13 min on an app parked at a compile
+/// refusal with its window up, for someone to stop it (11-14). One that still parks (a JIT that
+/// started some other way) is ended once it has gone quiet ([`sched::PANIC_QUIET_MS`]).
+pub fn nobody_attends(kind: Kind, priority: Priority, live: bool) -> bool {
+    !live && !matches!(kind, Kind::Screen | Kind::Inspect) && (kind == Kind::Timed || priority == Priority::Background)
+}
+
 /// Placement class from measured walls, estimates or kind defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CostClass { Small, Medium, Large }
@@ -260,7 +272,14 @@ pub(crate) fn filter_key(args: &[&str]) -> String {
 }
 
 /// The JIT's flags that take a value (the value is no package).
-const JIT_VALUE_FLAGS: &[&str] = &["--report-to", "--run-dir", "--cfg", "--boundary", "--workspace-dir", "--features", "-F", "--target", "--logfile", "--agent", "--domain", "--idle-min", "--print", "--crate-name", "--crate-type", "--check-cfg", "--cap-lints", "--harness", "--manifest-path"];
+/// The profile of every JIT test run devhub drives (`devhub test`, --live, the warm prebuild, CI's
+/// JIT shards, the land gate's and the tests bucket's units): release with cargo test's checks, debug
+/// assertions and overflow checks on (the root Cargo.toml's `[profile.release-checks]`), so a red
+/// reproduces as it ran. A test routed to cargo stays `cargo test --release`: a checked cargo build
+/// would be a second copy of every crate in target/.
+pub const JIT_TEST_PROFILE: [&str; 2] = ["--profile", "release-checks"];
+
+const JIT_VALUE_FLAGS: &[&str] = &["--profile", "--report-to", "--run-dir", "--cfg", "--boundary", "--workspace-dir", "--features", "-F", "--target", "--logfile", "--agent", "--domain", "--idle-min", "--print", "--crate-name", "--crate-type", "--check-cfg", "--cap-lints", "--harness", "--manifest-path"];
 
 /// What a JIT command runs, from its arguments (before any `--`): its subcommand, its package (the
 /// first word that is no flag and no flag's value, or `-p`'s), and the test, bin or example it
@@ -364,6 +383,47 @@ pub fn native_lane(lane: &str, kind: Kind, role: Role) -> bool {
     kind.writes() && !matches!(kind, Kind::Ci | Kind::Gate) && !matches!(lane, sched::CI_LANE | sched::LANDING_LANE) && !role.users()
 }
 
+/// One temperature in Celsius; an unclassified sensor without a sane limit is display-only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Temp {
+    pub sensor: String,
+    pub c: f64,
+    pub limit: Option<f64>,
+}
+
+impl Temp {
+    fn to_json(&self) -> String {
+        format!("{{\"sensor\":{},\"c\":{},\"limit\":{}}}", json_str(&self.sensor), self.c, self.limit.map_or("null".into(), |l| l.to_string()))
+    }
+
+    fn parse(v: &makepad_strict_json::Value) -> Option<Self> {
+        Some(Self {
+            sensor: v.get("sensor")?.as_str()?.to_string(),
+            c: v.get("c").and_then(num).filter(|c| c.is_finite())?,
+            limit: v.get("limit").and_then(num).filter(|l| l.is_finite() && *l > 0.0),
+        })
+    }
+}
+
+/// A sensor still above its hub's cooling threshold; new leases wait for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HotTemp {
+    pub sensor: String,
+    pub c: f64,
+    pub limit: f64,
+}
+
+impl HotTemp {
+    fn to_json(&self) -> String {
+        format!("{{\"sensor\":{},\"c\":{},\"limit\":{}}}", json_str(&self.sensor), self.c, self.limit)
+    }
+
+    fn parse(v: &makepad_strict_json::Value) -> Option<Self> {
+        let t = Temp::parse(v)?;
+        Some(Self { sensor: t.sensor, c: t.c, limit: t.limit? })
+    }
+}
+
 /// A node's capabilities and health, as its hub measures them (`caps` service).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Caps {
@@ -396,6 +456,9 @@ pub struct Caps {
     pub gpus: Vec<(String, f64)>,
     /// per GPU, in the order of `gpus`: (use %, VRAM used GB)
     pub gpu_busy: Vec<(f64, f64)>,
+    /// Temperatures and the hub's hysteresis state; empty on older hubs and other platforms.
+    pub temps: Vec<Temp>,
+    pub hot: Vec<HotTemp>,
     /// CPU use of all cores since the previous measure (None: the first one)
     pub cpu_pct: Option<f64>,
     /// the box's CPU since the previous measure by whose it was ([`crate::top::cpu_split`]), cores
@@ -465,6 +528,9 @@ pub struct Caps {
     /// the kernel's clock source on an x86 Linux box (`tsc`, `hpet`); empty elsewhere
     /// ([`caps::slow_clock`])
     pub clocksource: String,
+    /// the CEF distribution its checkout holds ([`caps::cef_dist`]): a live session's app is given
+    /// it (`MAKEPAD_CEF_DIST_DIR`); empty: none, or a hub too old to say, and the app is given none
+    pub cef_dist: String,
     /// a Mac's memory pressure (`kern.memorystatus_vm_pressure_level`: 1 normal, 2 warn, 4
     /// critical); 0 elsewhere ([`caps::mac_pressure`])
     pub mem_pressure: u32,
@@ -613,6 +679,7 @@ pub const FEATURES: &[&str] = &[
     "deploy-jobs", // an apply's prebuild takes the jobs its room was granted, `apply ... jobs=N`
     "gpu-quiet", // a GPU timing (`gpu` in its lease-start) waits for its GPU, not the box's CPU
     "jit-jobs", // a lease's JIT build admitted on fewer cores than it measures builds on those, `cost.jit_jobs`
+    "live-threads", // a live session that asked its cores runs its JIT and app on them, `cost.threads`
 ];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
@@ -654,9 +721,11 @@ impl Caps {
             })
             .collect();
         let exec_limits = self.exec_limits.map_or("null".into(), |l| l.to_json());
+        let temps = self.temps.iter().map(Temp::to_json).collect::<Vec<_>>().join(",");
+        let hot = self.hot.iter().map(HotTemp::to_json).collect::<Vec<_>>().join(",");
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"user\":{},\"hand_held\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"temps\":[{temps}],\"hot\":[{hot}],\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"cef_dist\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"user\":{},\"hand_held\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -692,6 +761,7 @@ impl Caps {
             self.stalls.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","),
             json_str(&self.sick),
             json_str(&self.clocksource),
+            json_str(&self.cef_dist),
             self.mem_pressure,
             self.mem_stall,
             json_str(&self.trouble),
@@ -718,6 +788,8 @@ impl Caps {
         let f = |k: &str| v.get(k).and_then(num).unwrap_or(0.0);
         let mut c = Caps {
             exec_limits: v.get("exec_limits").and_then(crate::os::ExecLimits::parse),
+            temps: v.get("temps").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(Temp::parse).collect(),
+            hot: v.get("hot").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(HotTemp::parse).collect(),
             node: s("node"),
             arch: s("arch"),
             os: s("os"),
@@ -755,6 +827,7 @@ impl Caps {
             hub_heap_mb: f("hub_heap_mb") as u64,
             sick: s("sick"),
             clocksource: s("clocksource"),
+            cef_dist: s("cef_dist"),
             mem_pressure: f("mem_pressure") as u32,
             mem_stall: f("mem_stall"),
             trouble: s("trouble"),
@@ -1016,6 +1089,28 @@ pub fn rev_said(spec: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Timed work and background work run their JIT runs unattended: `--unattended` among a
+    /// `makepad run`'s flags, bare or in its cargo form, past an `env` prefix, once; nothing else
+    /// changes. A live session, a screen lease or an inspection is someone's, background or not.
+    #[test]
+    fn a_lease_nobody_attends_runs_its_jit_runs_unattended() {
+        assert!(nobody_attends(Kind::Timed, Priority::Interactive, false), "timed work runs alone");
+        assert!(nobody_attends(Kind::Test, Priority::Background, false) && nobody_attends(Kind::Build, Priority::Background, false));
+        assert!(!nobody_attends(Kind::Test, Priority::Interactive, false), "an agent waits on it");
+        assert!(!nobody_attends(Kind::Test, Priority::Background, true), "a live session");
+        assert!(!nobody_attends(Kind::Screen, Priority::Background, false) && !nobody_attends(Kind::Inspect, Priority::Background, false));
+        let argv = |a: &str| a.split(' ').map(String::from).collect::<Vec<_>>();
+        let un = |a: &str| loaders::unattended_run(argv(a)).join(" ");
+        assert_eq!(un("makepad run -p app -- --x"), "makepad run --unattended -p app -- --x");
+        assert_eq!(un("env A=1 makepad run app"), "env A=1 makepad run --unattended app");
+        assert_eq!(un("cargo run --profile host -q -p makepad-run --bin makepad -- run app"), "cargo run --profile host -q -p makepad-run --bin makepad -- run --unattended app");
+        assert_eq!(un("makepad run --unattended app"), "makepad run --unattended app", "once");
+        assert_eq!(un("makepad run app -- --unattended"), "makepad run --unattended app -- --unattended", "the app's own words are not the JIT's");
+        for same in ["makepad test makepad-x", "makepad check app", "sh -c walk.py", "cargo run -p other -- run"] {
+            assert_eq!(un(same), same);
+        }
+    }
+
     /// A nested build's lease line said only "sources at the worktree's HEAD" (11-07: a lane's
     /// nested tree was right, and nothing said which it was).
     #[test]
@@ -1093,6 +1188,8 @@ mod tests {
             disk_total_gb: 1200.0,
             gpus: vec![("GPU-B".into(), 32.0)],
             gpu_busy: vec![(37.0, 4.5)],
+            temps: vec![Temp { sensor: "k10temp:Tctl".into(), c: 87.125, limit: Some(90.0) }, Temp { sensor: "unknown:temp1".into(), c: 55.5, limit: None }],
+            hot: vec![HotTemp { sensor: "k10temp:Tctl".into(), c: 87.125, limit: 90.0 }],
             cpu_pct: Some(12.5),
             busy_leases: vec![("L7".into(), 11.5), ("L9".into(), 0.25)],
             busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
@@ -1122,6 +1219,7 @@ mod tests {
             hub_heap_mb: 410,
             sick: String::new(),
             clocksource: "hpet".into(),
+            cef_dist: "/srv/cef/dist".into(),
             mem_pressure: 2,
             mem_stall: 12.5,
             trouble: "devhub on node-a could not run for 12 s (2 tries): exited (signal: 9 (SIGKILL))".into(),
@@ -1136,6 +1234,8 @@ mod tests {
             hand_held: Some(HandHeld { app: "Fab".into(), pid: 41, how: "an XR headset".into() }),
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
+        let old = Caps::parse(r#"{"node":"box-a"}"#).unwrap();
+        assert!(old.temps.is_empty() && old.hot.is_empty(), "an older hub reports no temperatures or alerts");
         let wire = c.to_json();
         let value = makepad_strict_json::parse(wire.as_bytes()).unwrap();
         let user = &value.get("mac_gpu").unwrap().get("on").unwrap().as_arr().unwrap()[0];

@@ -12,8 +12,11 @@
 //! Entries are checked against targets at the pin; missing ones are dropped with one note, and live defaults resolve by M30.
 //! Both keep at most one leg per lane and one warm start per ten minutes.
 //! Spare legs stay at background priority under Held's lane-work and N-2 admission rules.
-//! Plans and spare assignments live only in this master; a restart rebuilds them cheaply
-//! from activity and the caches already on each box.
+//! Plans, spares and their running legs are state (the store's `warm`, [`persist`]): a master
+//! restart, its self-update's exec or a crash, takes each leg back on its lease ([`take_back`]),
+//! and its steps are asked again by name, which the box answers with the run the previous master
+//! started: a box's prebuild goes on through the restart with its build. The restart waits for none
+//! of them (it waited up to 16 min for prebuilds, 11-15).
 
 use super::leg::{self, Held, Spec};
 use super::Ctx;
@@ -105,8 +108,8 @@ impl Package {
     }
 
     fn argv(&self) -> Vec<String> {
-        // the release profile, as `devhub test` runs the package (lease/client.rs)
-        let mut argv: Vec<_> = ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", &self.pkg, "--release"].into_iter().map(String::from).collect();
+        // the profile `devhub test` runs the package with ([`crate::lease::JIT_TEST_PROFILE`])
+        let mut argv: Vec<_> = ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", &self.pkg].into_iter().chain(crate::lease::JIT_TEST_PROFILE).map(String::from).collect();
         argv.extend(self.select());
         argv.extend(["--".into(), "--list".into()]);
         argv
@@ -284,18 +287,18 @@ struct Run {
     key: Key,
     started_ms: u64,
     since_ms: Option<u64>,
+    /// the lease a previous master held this leg on, and whether it shipped there: taken back, not
+    /// asked again ([`take_back`]); never persisted
+    adopt: Option<(String, bool)>,
 }
 
 static PLAN: Mutex<Option<Plan>> = Mutex::new(None);
 static SPARES: Mutex<Spares> = Mutex::new(Spares { lanes: BTreeMap::new(), running: BTreeMap::new(), last_started: BTreeMap::new(), generation: 0 });
 
 pub fn start(ctx: Arc<Ctx>) {
+    take_back(&ctx);
     let c = ctx.clone();
     if let Err(e) = std::thread::Builder::new().name(AGENT.into()).spawn(move || {
-        // No plan survives an exec. Give up the previous master's legs before planning anew.
-        for l in c.leases.view().iter().filter(|l| l.req.agent.as_deref() == Some(AGENT)) {
-            c.leases.release_live(&l.id);
-        }
         let mut seen = None;
         loop {
             tick(&c, &mut seen);
@@ -303,6 +306,113 @@ pub fn start(ctx: Arc<Ctx>) {
         }
     }) {
         ctx.store.event("warm", Sev::Warn, format!("warm: thread: {e}"), None);
+    }
+}
+
+/// The legs running now, by [`leg_key`]: the state's `legs`.
+static LEGS: Mutex<BTreeMap<(String, u64), Run>> = Mutex::new(BTreeMap::new());
+/// The state [`persist`] wrote last.
+static PERSISTED: Mutex<String> = Mutex::new(String::new());
+
+/// A leg's name (its lane, else its box) and start: the same through a newer plan it follows.
+fn leg_key(run: &Run) -> (String, u64) {
+    (run.lane.as_ref().map_or_else(|| format!("box {}", run.node), |lane| format!("lane {lane}")), run.started_ms)
+}
+
+/// Writes the plan, the spares and the running legs to the store when they changed: what a
+/// restarted master takes back ([`take_back`]). Called after a leg's lease or step changed, a leg
+/// started or ended, and each tick; never for a wait line (none is kept).
+fn persist() {
+    let Some(ctx) = super::ctx() else { return };
+    let mut last = PERSISTED.lock().unwrap();
+    let legs: Vec<Run> = LEGS.lock().unwrap().values().cloned().collect();
+    let plan = PLAN.lock().unwrap().clone();
+    let value = state_value(plan.as_ref(), &SPARES.lock().unwrap(), &legs);
+    let json = value.to_json();
+    if *last == json { return; }
+    match ctx.store.update(|d| d.warm = Some(value)) {
+        Ok(()) => *last = json,
+        Err(e) => ctx.store.event("warm", Sev::Warn, format!("warm: its state: {e}"), None),
+    }
+}
+
+/// A plan of one box's prebuild at `rev`, its leg started: what a landed JIT plans, without the
+/// fleet's caps (the master restart's end-to-end test, orch/restart_tests.rs).
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn prebuild_on(ctx: &Arc<Ctx>, node: &str, rev: &str) {
+    let now = wall_ms();
+    let key = Key { id: "test-jit".into(), rev: rev.into(), packages: Vec::new() };
+    let progress = Progress::waiting(&key.id, now);
+    *PLAN.lock().unwrap() = Some(Plan { generation: 1, pair: Pair::new("", ""), base: None, ids: vec![key.id.clone()], started_ms: now, nodes: vec![Node { name: node.into(), os: "linux".into(), activity: 0, key: key.clone(), progress }], judged: false });
+    spawn(ctx, Run { generation: 1, lane: None, native: false, node: node.into(), os: "linux".into(), key, started_ms: now, since_ms: Some(now), adopt: None });
+}
+
+/// A leg that follows a newer plan's target for its box: its state says the new one.
+fn moved(run: &Run) {
+    LEGS.lock().unwrap().insert(leg_key(run), run.clone());
+    persist();
+}
+
+/// Takes back what the previous master left in the store: its plan, its spares and each leg it
+/// ran ([`restore`]). Its other warm leases end. Called before the master's own leases that no
+/// record names end: the state names the kept ones.
+pub(super) fn take_back(ctx: &Arc<Ctx>) {
+    let Some((mut plan, mut spares, runs)) = ctx.store.read(|d| d.warm.clone()).and_then(|v| state_parse(&v)) else { return };
+    let legs = restore(&mut plan, &mut spares, runs, &|l| leg::lease_held(ctx, l));
+    *PLAN.lock().unwrap() = plan;
+    *SPARES.lock().unwrap() = spares;
+    let kept: BTreeSet<String> = legs.iter().filter_map(|r| r.adopt.as_ref().map(|(l, _)| l.clone())).collect();
+    for l in ctx.leases.view().iter().filter(|l| l.req.agent.as_deref() == Some(AGENT) && !kept.contains(&l.id)) {
+        ctx.leases.release_live(&l.id);
+    }
+    for run in &legs {
+        let who = run.lane.as_deref().unwrap_or(&run.key.rev);
+        let how = run.adopt.as_ref().map_or_else(|| "it asks for a box again, keeping its age".to_string(), |(l, _)| format!("taken back on {l}: its runs go on"));
+        ctx.store.event("warm", Sev::Info, format!("warm {who} on {}: the master restarted; {how}", run.node), None);
+    }
+    spawn_all(ctx, legs);
+}
+
+/// What [`take_back`] resumes of a previous master's state, on its values. A leg whose progress
+/// has not ended goes on on its lease while `held` says that lease still is ([`Run::adopt`]), else
+/// asks again in its place, keeping its age. A plan box the state names no leg for (a restart
+/// between a plan and its legs) starts one; a lane marked running without a leg may start again.
+fn restore(plan: &mut Option<Plan>, spares: &mut Spares, runs: Vec<Run>, held: &dyn Fn(&str) -> bool) -> Vec<Run> {
+    let mut legs = Vec::new();
+    for mut run in runs {
+        // (a leg its plan or spare left behind, or one that ended, is not taken back)
+        let Some(p) = progress_in(plan, spares, &run).filter(|p| p.ended_ms == 0) else { continue };
+        run.adopt = p.lease.clone().filter(|l| held(l)).map(|l| (l, p.state != "held"));
+        if run.adopt.is_none() { p.lease = None; p.state = "waiting".into(); }
+        legs.push(run);
+    }
+    if let Some(p) = plan.as_mut() {
+        let (generation, started_ms, len) = (p.generation, p.started_ms, p.nodes.len());
+        for (rank, n) in p.nodes.iter_mut().enumerate() {
+            if n.progress.ended_ms != 0 || legs.iter().any(|r| r.lane.is_none() && r.node == n.name) { continue; }
+            n.progress.lease = None;
+            n.progress.state = "waiting".into();
+            let since_ms = Some(started_ms.saturating_sub((len - rank) as u64));
+            legs.push(Run { generation, lane: None, native: false, node: n.name.clone(), os: n.os.clone(), key: n.key.clone(), started_ms, since_ms, adopt: None });
+        }
+    }
+    let stale: Vec<String> = spares.running.iter().filter(|(lane, g)| !legs.iter().any(|r| r.lane.as_ref() == Some(*lane) && r.generation == **g)).map(|(lane, _)| lane.clone()).collect();
+    for lane in stale {
+        spares.running.remove(&lane);
+        spares.last_started.remove(&lane);
+        if let Some(s) = spares.lanes.get_mut(&lane).filter(|s| s.progress.ended_ms == 0) {
+            s.progress.lease = None;
+            s.progress.state = "waiting".into();
+        }
+    }
+    legs
+}
+
+/// A leg's progress in a plan and spares: its plan box's, or its lane spare's, of its generation.
+fn progress_in<'a>(plan: &'a mut Option<Plan>, spares: &'a mut Spares, run: &Run) -> Option<&'a mut Progress> {
+    match &run.lane {
+        Some(lane) => spares.lanes.get_mut(lane).filter(|s| s.generation == run.generation).map(|s| &mut s.progress),
+        None => plan.as_mut().filter(|p| p.generation == run.generation)?.nodes.iter_mut().find(|n| n.name == run.node).map(|n| &mut n.progress),
     }
 }
 
@@ -416,6 +526,9 @@ fn activity(ctx: &Ctx, since_ms: u64) -> Activity {
 }
 
 fn tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>) {
+    // (until the boxes answer after the master's start: a plan or a spare judged on boxes not
+    // heard yet would end what the previous master left running there)
+    if ctx.leases.settling() { return; }
     let nodes = ctx.leases.nodes();
     let now = wall_ms();
     let activity = activity(ctx, now.saturating_sub(ACTIVE_MS));
@@ -424,6 +537,7 @@ fn tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>) {
     // Spares follow lane pins even while the landed tip is unchanged or unavailable.
     spare_tick(ctx, &nodes, &compilers, &activity, now);
     plan_tick(ctx, seen, &nodes, &compilers, &activity, now);
+    persist();
 }
 
 /// Clears the plan's and the overlay spares' failures whose JIT their box's store holds now.
@@ -475,11 +589,12 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
         }
     }
     ctx.store.event("warm", Sev::Info, format!("warm {}: {} on {}", super::short(&plan.pair.work), plan.ids.join(", "), plan.nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")), None);
-    for (rank, node) in plan.nodes.iter().enumerate().filter(|(_, n)| !followed.contains(&n.name)) {
+    let runs = plan.nodes.iter().enumerate().filter(|(_, n)| !followed.contains(&n.name)).map(|(rank, node)| {
         // Keep every timestamp in the past: the scheduler clamps future queue times to now.
         let since_ms = Some(plan.started_ms.saturating_sub((plan.nodes.len() - rank) as u64));
-        spawn(ctx, Run { generation: plan.generation, lane: None, native: false, node: node.name.clone(), os: node.os.clone(), key: node.key.clone(), started_ms, since_ms });
-    }
+        Run { generation: plan.generation, lane: None, native: false, node: node.name.clone(), os: node.os.clone(), key: node.key.clone(), started_ms, since_ms, adopt: None }
+    }).collect();
+    spawn_all(ctx, runs);
 }
 
 /// The boxes a new JIT id is built on: every up dev box that lacks it, per OS/arch group the most
@@ -656,21 +771,34 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
         s.progress = Progress::waiting(id, now);
         spares.running.insert(lane.clone(), generation);
         spares.last_started.insert(lane.clone(), now);
-        runs.push(Run { generation, lane: Some(lane.clone()), native, node, os: caps.os.clone(), key, started_ms: now, since_ms: None });
+        runs.push(Run { generation, lane: Some(lane.clone()), native, node, os: caps.os.clone(), key, started_ms: now, since_ms: None, adopt: None });
     }
     drop(spares);
     for id in release { ctx.leases.release_live(&id); }
-    for run in runs { spawn(ctx, run); }
+    spawn_all(ctx, runs);
 }
 
 /// The measurement class of the JIT warm legs (prebuilds and lane warms), whatever they run.
 const WARM_CLASS: &str = "build jit warm";
 
 fn spawn(ctx: &Arc<Ctx>, run: Run) {
+    LEGS.lock().unwrap().insert(leg_key(&run), run.clone());
+    persist();
     let (c, r) = (ctx.clone(), run.clone());
     if let Err(e) = std::thread::Builder::new().name(format!("{AGENT}-{}", run.lane.as_deref().unwrap_or(&run.node))).spawn(move || run_leg(&c, &r)) {
         finish(ctx, &run, "", Err(format!("thread: {e}")));
     }
+}
+
+/// Starts legs, the whole batch in the state before the first starts: a restart in between takes
+/// back every one ([`take_back`]).
+fn spawn_all(ctx: &Arc<Ctx>, runs: Vec<Run>) {
+    {
+        let mut legs = LEGS.lock().unwrap();
+        for run in &runs { legs.insert(leg_key(run), run.clone()); }
+    }
+    persist();
+    for run in runs { spawn(ctx, run); }
 }
 
 fn log_name(run: &Run) -> String {
@@ -729,62 +857,76 @@ fn run_leg(ctx: &Ctx, run: &Run) {
             let plan = PLAN.lock().unwrap();
             plan.as_ref().is_none_or(|p| p.generation != r.generation && !p.nodes.iter().any(|n| n.name == r.node))
         };
-        // a request still queued gives way to a master restart's drain and asks again after it
-        let give_up = || (if prebuild { gone() } else { stale() }) || super::roll::draining();
+        let give_up = || if prebuild { gone() } else { stale() };
+        // the lease a previous master held it on: taken back once, its runs asked again by name
+        let mut adopted = run.borrow_mut().adopt.take();
         loop {
             if stale() { return Ok(String::new()); }
-            if prebuild {
+            let (asked, ship) = if let Some((lease, shipped)) = adopted.take() {
                 let r = run.borrow();
-                let plan = PLAN.lock().unwrap();
-                if !plan.as_ref().is_some_and(|p| p.generation == r.generation) { return Ok(String::new()); }
-                ASKING.lock().unwrap().insert(r.node.clone(), r.generation);
-            }
-            let spec = spec_of(&run.borrow());
-            // counted while it asks and runs; waits out a drain (the exec ends this thread)
-            let _drain = super::roll::holding();
-            let mut on_wait = |line: &str| {
-                let _ = writeln!(log, "{line}");
-                set(&run.borrow(), |p| p.note = line.into());
-            };
-            // a newer plan's target for its box, taken in place while it asks
-            let mut follow = || {
-                if !prebuild { return None; }
-                let mut r = run.borrow_mut();
-                let plan = PLAN.lock().unwrap();
-                if plan.as_ref().is_none_or(|p| p.generation == r.generation) { return None; }
-                let before = r.key.rev.clone();
-                if !adopt(&plan, &mut r) { return None; }
-                ASKING.lock().unwrap().insert(r.node.clone(), r.generation);
-                (r.key.rev != before).then(|| r.key.rev.clone())
-            };
-            let asked = Held::acquire_following(&spec, &|r| {
-                r.src = Src::Overlay;
-                r.cores = Some(if prebuild { 4.0 } else { 2.0 });
-                // RAM as measured (a dev JIT build and a test listing peak at 2.4 GB): an 8 GB ask
-                // kept prebuilds off the 16 GB boxes beside a live session for minutes (11-02).
-                // Measured under a class of their own: unnamed, they were measured as nothing and
-                // took a build's 12 GB default (three pool boxes' prebuilds waited 23 min an hour
-                // on RAM, holding their box meanwhile, 11-03)
-                r.class = WARM_CLASS.into();
-                if run.borrow().os == "macos" { r.needs.push(("os".into(), "macos".into())); }
-            }, &mut on_wait, &give_up, &mut follow);
-            if prebuild {
-                // out of the asking legs; a plan that came meanwhile left its box to this leg
-                let mut r = run.borrow_mut();
-                let plan = PLAN.lock().unwrap();
-                let mut asking = ASKING.lock().unwrap();
-                if asking.get(&r.node) == Some(&r.generation) { asking.remove(&r.node); }
-                drop(asking);
-                if !adopt(&plan, &mut r) {
-                    drop((plan, r));
-                    if let Ok(held) = asked { held.release(None); }
-                    return Ok(String::new());
+                let mut held = Held::attach(&lease, &r.node);
+                held.rev = r.key.rev.clone();
+                let _ = writeln!(log, "{lease} on {}: taken back after the master's restart; its runs are asked again by name", r.node);
+                (Ok(held), !shipped)
+            } else {
+                if prebuild {
+                    let r = run.borrow();
+                    let plan = PLAN.lock().unwrap();
+                    if !plan.as_ref().is_some_and(|p| p.generation == r.generation) { return Ok(String::new()); }
+                    ASKING.lock().unwrap().insert(r.node.clone(), r.generation);
                 }
-            }
+                let spec = spec_of(&run.borrow());
+                let mut on_wait = |line: &str| {
+                    let _ = writeln!(log, "{line}");
+                    set(&run.borrow(), |p| p.note = line.into());
+                };
+                // a newer plan's target for its box, taken in place while it asks
+                let mut follow = || {
+                    if !prebuild { return None; }
+                    let to = {
+                        let mut r = run.borrow_mut();
+                        let plan = PLAN.lock().unwrap();
+                        if plan.as_ref().is_none_or(|p| p.generation == r.generation) { return None; }
+                        let before = r.key.rev.clone();
+                        if !adopt(&plan, &mut r) { return None; }
+                        ASKING.lock().unwrap().insert(r.node.clone(), r.generation);
+                        (r.key.rev != before).then(|| r.key.rev.clone())
+                    };
+                    moved(&run.borrow());
+                    to
+                };
+                let asked = Held::acquire_following(&spec, &|r| {
+                    r.src = Src::Overlay;
+                    r.cores = Some(if prebuild { 4.0 } else { 2.0 });
+                    // RAM as measured (a dev JIT build and a test listing peak at 2.4 GB): an 8 GB ask
+                    // kept prebuilds off the 16 GB boxes beside a live session for minutes (11-02).
+                    // Measured under a class of their own: unnamed, they were measured as nothing and
+                    // took a build's 12 GB default (three pool boxes' prebuilds waited 23 min an hour
+                    // on RAM, holding their box meanwhile, 11-03)
+                    r.class = WARM_CLASS.into();
+                    if run.borrow().os == "macos" { r.needs.push(("os".into(), "macos".into())); }
+                }, &mut on_wait, &give_up, &mut follow);
+                if prebuild {
+                    // out of the asking legs; a plan that came meanwhile left its box to this leg
+                    let kept = {
+                        let mut r = run.borrow_mut();
+                        let plan = PLAN.lock().unwrap();
+                        let mut asking = ASKING.lock().unwrap();
+                        if asking.get(&r.node) == Some(&r.generation) { asking.remove(&r.node); }
+                        drop(asking);
+                        adopt(&plan, &mut r)
+                    };
+                    if !kept {
+                        if let Ok(held) = asked { held.release(None); }
+                        return Ok(String::new());
+                    }
+                    moved(&run.borrow());
+                }
+                (asked, true)
+            };
             let held = match asked {
                 Ok(held) => held,
                 Err(_) if stale() => return Ok(String::new()),
-                Err(_) if super::roll::draining() => continue,
                 Err(e) if e.split_whitespace().next().is_some_and(leg::was_preempted) => continue,
                 Err(e) if missing_commit(&e) => {
                     let _ = writeln!(log, "{e}; retrying in {} s", RETRY.as_secs());
@@ -805,16 +947,21 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                 continue;
             }
             let r = run.borrow().clone();
+            // (taken back, its listings are asked again: the box answers each from its run)
             if !set(&r, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); p.listed.clear(); }) { return Ok(String::new()); }
+            persist();
             let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages, true);
             dropped = note;
             if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
             let mut failures = Vec::new();
-            let result = held.ship_nothing().and_then(|_| {
+            // each step asked by its name in the lease: a master that takes the lease back asks
+            // again, and the box answers with the run the first ask started (the build goes on)
+            let result = (if ship { held.ship_nothing() } else { Ok(()) }).and_then(|_| {
                 if stale() { return Ok(0); }
                 set(&r, |p| p.state = "building".into());
+                persist();
                 let argv = ["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "--version"].map(String::from);
-                let code = held.run(&argv, &mut log)?;
+                let code = held.run_asked("warm-jit", ".", &argv, &mut log, &mut |_| {})?;
                 if code != 0 { return Ok(code); }
                 for package in &packages {
                     if stale() { break; }
@@ -822,7 +969,7 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                     set(&r, |p| p.state = format!("warming {label}"));
                     let _ = writeln!(log, "warming {label}");
                     let mut tee = Tee(&mut log, Vec::new());
-                    let result = held.run(&package.argv(), &mut tee);
+                    let result = held.run_asked(&format!("warm-list-{label}"), ".", &package.argv(), &mut tee, &mut |_| {});
                     // a listing that ran is a verdict on the tip (a lease's error is none); a failed
                     // one keeps its output (its errors), a passing one only its line
                     if let Ok(code) = result {
@@ -860,28 +1007,24 @@ fn run_leg(ctx: &Ctx, run: &Run) {
 
 fn native_leg(run: &Run, spec: &Spec, packages: &[Package], log: &mut dyn Write) -> Result<String, String> {
     let stale = || !set(run, |_| {});
-    // a request still queued gives way to a master restart's drain and asks again after it
-    let give_up = || stale() || super::roll::draining();
-    let mut on_wait = |line: &str| {
-        let _ = writeln!(log, "{line}");
-        set(run, |p| p.note = line.into());
-    };
-    // counted while it asks and runs; waits out a drain (the exec ends this thread)
-    let _drain;
-    let held = loop {
-        if stale() { return Ok(String::new()); }
-        let drain = super::roll::holding();
+    if stale() { return Ok(String::new()); }
+    let held = if let Some((lease, _)) = &run.adopt {
+        let mut held = Held::attach(lease, &run.node);
+        held.rev = run.key.rev.clone();
+        let _ = writeln!(log, "{lease} on {}: taken back after the master's restart; its runs are asked again by name", run.node);
+        held
+    } else {
+        let mut on_wait = |line: &str| {
+            let _ = writeln!(log, "{line}");
+            set(run, |p| p.note = line.into());
+        };
         match Held::acquire_with(spec, &|r| {
             r.warms = run.lane.clone();
             r.cores = Some(4.0);
             r.ram_gb = Some(8.0);
             if run.os == "macos" { r.needs.push(("os".into(), "macos".into())); }
-        }, &mut on_wait, &give_up) {
-            Ok(held) => {
-                _drain = drain;
-                break held;
-            }
-            Err(_) if !stale() && super::roll::draining() => continue,
+        }, &mut on_wait, &stale) {
+            Ok(held) => held,
             Err(e) => {
                 if let Some(id) = e.split_whitespace().next() { let _ = leg::was_preempted(id); }
                 return Err(e);
@@ -889,18 +1032,20 @@ fn native_leg(run: &Run, spec: &Spec, packages: &[Package], log: &mut dyn Write)
         }
     };
     if !set(run, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); }) { return Ok(String::new()); }
+    persist();
+    // each step asked by its name in the lease, as a box prebuild's ([`run_leg`])
     let result = (|| -> Result<i32, String> {
         if stale() { return Ok(0); }
         if packages.is_empty() {
             set(run, |p| p.state = "syncing".into());
-            return held.run(&["git", "rev-parse", "HEAD"].map(String::from), log);
+            return held.run_asked("warm-sync", ".", &["git", "rev-parse", "HEAD"].map(String::from), log, &mut |_| {});
         }
         for package in packages {
             if stale() { return Ok(0); }
             let label = package.label();
             set(run, |p| p.state = format!("warming {label}"));
             let _ = writeln!(log, "warming native {label}");
-            let code = held.run(&package.native_argv(&run.os), log)?;
+            let code = held.run_asked(&format!("warm-native-{label}"), ".", &package.native_argv(&run.os), log, &mut |_| {})?;
             if code != 0 { return Ok(code); }
         }
         Ok(0)
@@ -918,6 +1063,10 @@ fn missing_commit(e: &str) -> bool {
 }
 
 fn finish(ctx: &Ctx, run: &Run, dropped: &str, result: Result<String, String>) {
+    // The leg leaves the state together with its end, under [`persist`]'s lock: a state written
+    // between the two would have a restarted master run it again, or never end it.
+    let persisted = PERSISTED.lock().unwrap();
+    LEGS.lock().unwrap().remove(&leg_key(run));
     let ended_ms = wall_ms();
     let seconds = ended_ms.saturating_sub(run.started_ms) / 1000;
     let (sev, state, result_note) = match result {
@@ -938,6 +1087,7 @@ fn finish(ctx: &Ctx, run: &Run, dropped: &str, result: Result<String, String>) {
             true
         } else { false }
     } else { set(run, update) };
+    drop(persisted);
     if changed && run.lane.is_none() {
         let done = listings_done(PLAN.lock().unwrap().as_mut(), run.generation);
         if let Some(plan) = done { judge(ctx, &plan, false); }
@@ -951,6 +1101,7 @@ fn finish(ctx: &Ctx, run: &Run, dropped: &str, result: Result<String, String>) {
         }
         ctx.store.event("warm", sev, line(&note), None);
     }
+    persist();
 }
 
 /// The plan of `generation` once every box of it that lists tests has ended: judged once, by the
@@ -1047,9 +1198,289 @@ pub fn render(v: &Value) -> String {
     out
 }
 
+impl Package {
+    fn value(&self) -> Value {
+        obj(vec![("pkg", s(&self.pkg)), ("harness", self.harness.value()), ("features", Value::Arr(self.features.iter().map(s).collect()))])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            pkg: v.get("pkg")?.as_str()?.to_string(),
+            harness: Harness::parse(v.get("harness")?)?,
+            features: v.get("features")?.as_arr()?.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        })
+    }
+}
+
+impl Harness {
+    fn value(&self) -> Value {
+        match self {
+            Self::All => s("all"), Self::Default => s("default"), Self::Lib => s("lib"),
+            Self::Bin(name) => s(format!("bin:{name}")), Self::Test(name) => s(format!("test:{name}")),
+            Self::Tests => s("tests"),
+        }
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(match v.as_str()? {
+            "all" => Self::All, "default" => Self::Default, "lib" => Self::Lib, "tests" => Self::Tests,
+            text => match text.split_once(':')? {
+                ("bin", name) if !name.is_empty() && !name.contains(':') => Self::Bin(name.to_string()),
+                ("test", name) if !name.is_empty() => Self::Test(name.to_string()),
+                _ => return None,
+            },
+        })
+    }
+}
+
+impl Key {
+    fn value(&self) -> Value {
+        obj(vec![("id", s(&self.id)), ("rev", s(&self.rev)), ("packages", Value::Arr(self.packages.iter().map(Package::value).collect()))])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            id: v.get("id")?.as_str()?.to_string(), rev: v.get("rev")?.as_str()?.to_string(),
+            packages: v.get("packages")?.as_arr()?.iter().filter_map(Package::parse).collect(),
+        })
+    }
+}
+
+impl Listed {
+    fn value(&self) -> Value {
+        obj(vec![("unit", s(&self.unit)), ("ok", Value::Bool(self.ok)), ("text", s(&self.text))])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self { unit: v.get("unit")?.as_str()?.to_string(), ok: v.get("ok")?.as_bool()?, text: v.get("text")?.as_str()?.to_string() })
+    }
+}
+
+impl Progress {
+    fn value(&self) -> Value {
+        obj(vec![
+            ("state", s(&self.state)), ("id", s(&self.id)), ("lease", self.lease.as_ref().map_or(Value::Null, s)),
+            ("started_ms", Value::Int(self.started_ms as i64)), ("ended_ms", Value::Int(self.ended_ms as i64)),
+            ("listed", Value::Arr(self.listed.iter().map(Listed::value).collect())),
+        ])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            state: v.get("state")?.as_str()?.to_string(), note: String::new(), id: v.get("id")?.as_str()?.to_string(),
+            lease: match v.get("lease")? { Value::Null => None, v => Some(v.as_str()?.to_string()) },
+            started_ms: v.get("started_ms")?.as_u64()?, ended_ms: v.get("ended_ms")?.as_u64()?,
+            listed: v.get("listed")?.as_arr()?.iter().filter_map(Listed::parse).collect(),
+        })
+    }
+}
+
+impl Node {
+    fn value(&self) -> Value {
+        obj(vec![
+            ("name", s(&self.name)), ("os", s(&self.os)), ("activity", Value::Int(self.activity as i64)),
+            ("key", self.key.value()), ("progress", self.progress.value()),
+        ])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            name: v.get("name")?.as_str()?.to_string(), os: v.get("os")?.as_str()?.to_string(),
+            activity: v.get("activity")?.as_u64()? as usize,
+            key: Key::parse(v.get("key")?)?, progress: Progress::parse(v.get("progress")?)?,
+        })
+    }
+}
+
+impl Plan {
+    fn value(&self) -> Value {
+        let pair = |p: &Pair| obj(vec![("work", s(&p.work)), ("main", s(&p.main))]);
+        obj(vec![
+            ("generation", Value::Int(self.generation as i64)), ("pair", pair(&self.pair)),
+            ("base", self.base.as_ref().map_or(Value::Null, pair)), ("ids", Value::Arr(self.ids.iter().map(s).collect())),
+            ("started_ms", Value::Int(self.started_ms as i64)), ("nodes", Value::Arr(self.nodes.iter().map(Node::value).collect())),
+            ("judged", Value::Bool(self.judged)),
+        ])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        let pair = |v: &Value| Some(Pair { work: v.get("work")?.as_str()?.to_string(), main: v.get("main")?.as_str()?.to_string() });
+        Some(Self {
+            generation: v.get("generation")?.as_u64()?, pair: pair(v.get("pair")?)?,
+            base: match v.get("base")? { Value::Null => None, v => Some(pair(v)?) },
+            ids: v.get("ids")?.as_arr()?.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            started_ms: v.get("started_ms")?.as_u64()?,
+            nodes: v.get("nodes")?.as_arr()?.iter().filter_map(Node::parse).collect(),
+            judged: v.get("judged")?.as_bool()?,
+        })
+    }
+}
+
+impl Spare {
+    fn value(&self) -> Value {
+        obj(vec![
+            ("node", s(&self.node)), ("native", Value::Bool(self.native)), ("generation", Value::Int(self.generation as i64)),
+            ("warmed", self.warmed.as_ref().map_or(Value::Null, Key::value)), ("progress", self.progress.value()),
+        ])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            node: v.get("node")?.as_str()?.to_string(), native: v.get("native")?.as_bool()?,
+            generation: v.get("generation")?.as_u64()?,
+            warmed: match v.get("warmed")? { Value::Null => None, v => Some(Key::parse(v)?) },
+            progress: Progress::parse(v.get("progress")?)?,
+        })
+    }
+}
+
+impl Spares {
+    fn value(&self) -> Value {
+        obj(vec![
+            ("lanes", Value::Obj(self.lanes.iter().map(|(lane, spare)| (lane.clone(), spare.value())).collect())),
+            ("running", Value::Obj(self.running.iter().map(|(lane, generation)| (lane.clone(), Value::Int(*generation as i64))).collect())),
+            ("last_started", Value::Obj(self.last_started.iter().map(|(lane, ms)| (lane.clone(), Value::Int(*ms as i64))).collect())),
+            ("generation", Value::Int(self.generation as i64)),
+        ])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        let Value::Obj(lanes) = v.get("lanes")? else { return None };
+        let Value::Obj(running) = v.get("running")? else { return None };
+        let Value::Obj(last_started) = v.get("last_started")? else { return None };
+        Some(Self {
+            lanes: lanes.iter().filter_map(|(lane, v)| Some((lane.clone(), Spare::parse(v)?))).collect(),
+            running: running.iter().filter_map(|(lane, v)| Some((lane.clone(), v.as_u64()?))).collect(),
+            last_started: last_started.iter().filter_map(|(lane, v)| Some((lane.clone(), v.as_u64()?))).collect(),
+            generation: v.get("generation")?.as_u64()?,
+        })
+    }
+}
+
+impl Run {
+    fn value(&self) -> Value {
+        obj(vec![
+            ("generation", Value::Int(self.generation as i64)), ("lane", self.lane.as_ref().map_or(Value::Null, s)),
+            ("native", Value::Bool(self.native)), ("node", s(&self.node)), ("os", s(&self.os)), ("key", self.key.value()),
+            ("started_ms", Value::Int(self.started_ms as i64)), ("since_ms", self.since_ms.map_or(Value::Null, |ms| Value::Int(ms as i64))),
+        ])
+    }
+
+    fn parse(v: &Value) -> Option<Self> {
+        Some(Self {
+            generation: v.get("generation")?.as_u64()?,
+            lane: match v.get("lane")? { Value::Null => None, v => Some(v.as_str()?.to_string()) },
+            native: v.get("native")?.as_bool()?, node: v.get("node")?.as_str()?.to_string(), os: v.get("os")?.as_str()?.to_string(),
+            key: Key::parse(v.get("key")?)?, started_ms: v.get("started_ms")?.as_u64()?,
+            since_ms: match v.get("since_ms")? { Value::Null => None, v => Some(v.as_u64()?) },
+            adopt: None,
+        })
+    }
+}
+
+/// The warm state a master restart takes back.
+/// Progress preserves durable fields, never a wait line.
+fn state_value(plan: Option<&Plan>, spares: &Spares, legs: &[Run]) -> Value {
+    obj(vec![
+        ("plan", plan.map_or(Value::Null, Plan::value)), ("spares", spares.value()),
+        ("legs", Value::Arr(legs.iter().map(Run::value).collect())),
+    ])
+}
+
+fn state_parse(v: &Value) -> Option<(Option<Plan>, Spares, Vec<Run>)> {
+    let plan = match v.get("plan")? { Value::Null => None, v => Some(Plan::parse(v)?) };
+    let spares = match v.get("spares") {
+        Some(v) => Spares::parse(v)?,
+        None => Spares { lanes: BTreeMap::new(), running: BTreeMap::new(), last_started: BTreeMap::new(), generation: 0 },
+    };
+    let legs = v.get("legs")?.as_arr()?.iter().filter_map(Run::parse).collect();
+    Some((plan, spares, legs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Key, Listed, Node, Package, Plan, Progress, Role, Src};
+
+    #[test]
+    fn the_warm_state_survives_its_round_trip() {
+        use super::{state_parse, state_value, Harness, Pair, Run, Spare, Spares};
+        let key = Key {
+            id: "jit".into(), rev: "work@x".into(),
+            packages: vec![
+                Package { pkg: "package".into(), harness: Harness::Test("t".into()), features: vec!["f".into()] },
+                Package { pkg: "package".into(), harness: Harness::Bin("b".into()), features: Vec::new() },
+            ],
+        };
+        let progress = Progress {
+            state: "waiting".into(), note: "waiting for a box".into(), id: "jit".into(), lease: Some("L9".into()),
+            started_ms: 10, ended_ms: 0, listed: vec![Listed { unit: "suite package".into(), ok: true, text: "t: test\n".into() }],
+        };
+        let plan = Plan {
+            generation: 3, pair: Pair::new("work", "main"), base: Some(Pair::new("base-work", "base-main")),
+            ids: vec!["jit".into(), "other".into()], started_ms: 10,
+            nodes: vec![Node { name: "node".into(), os: "linux".into(), activity: 2, key: key.clone(), progress: progress.clone() }],
+            judged: true,
+        };
+        let spares = Spares {
+            lanes: [("lane".into(), Spare { node: "node".into(), native: true, generation: 4, warmed: Some(key.clone()), progress })].into(),
+            running: [("lane".into(), 4)].into(), last_started: [("lane".into(), 20)].into(), generation: 4,
+        };
+        let legs = [
+            Run { generation: 3, lane: None, native: false, node: "node".into(), os: "linux".into(), key: key.clone(), started_ms: 10, since_ms: Some(5), adopt: None },
+            Run { generation: 4, lane: Some("lane".into()), native: true, node: "node".into(), os: "linux".into(), key, started_ms: 20, since_ms: None, adopt: None },
+        ];
+        let value = state_value(Some(&plan), &spares, &legs);
+        let (plan, spares, legs) = state_parse(&value).expect("serialized warm state parses");
+        assert_eq!(state_value(plan.as_ref(), &spares, &legs).to_json(), value.to_json(), "warm state JSON survives its round trip");
+        let node = &plan.expect("the plan survives").nodes[0];
+        assert_eq!(node.progress.lease.as_deref(), Some("L9"), "progress keeps its lease");
+        assert!(node.progress.note.is_empty(), "the wait note is not persisted");
+        assert_eq!(node.key.packages.len(), 2, "both packages survive");
+        assert_eq!(node.key.packages[0].harness, Harness::Test("t".into()), "the test harness survives");
+        assert_eq!(node.key.packages[0].features, ["f"], "the test features survive");
+        assert_eq!(node.key.packages[1].harness, Harness::Bin("b".into()), "the binary harness survives");
+        assert!(node.key.packages[1].features.is_empty(), "the binary keeps its empty features");
+        assert_eq!(legs.len(), 2, "both running legs survive");
+        assert_eq!((legs[0].lane.as_deref(), legs[0].native, legs[0].since_ms), (None, false, Some(5)), "the prebuild keeps its lane, native flag and since time");
+        assert_eq!((legs[1].lane.as_deref(), legs[1].native, legs[1].since_ms), (Some("lane"), true, None), "the native lane run keeps its lane, native flag and since time");
+    }
+
+    /// A restarted master takes back its warm legs on the leases still held and asks again for
+    /// the others, keeping their age; an ended leg stays ended; a plan box or a running lane the
+    /// state names no leg for (a restart between a plan and its legs) starts again.
+    #[test]
+    fn a_restart_takes_back_each_warm_leg_once() {
+        use super::{restore, Pair, Run, Spare, Spares};
+        let key = Key { id: "jit".into(), rev: "work@x".into(), packages: Vec::new() };
+        let progress = |state: &str, lease: Option<&str>, ended_ms: u64| Progress { state: state.into(), note: String::new(), id: "jit".into(), lease: lease.map(Into::into), started_ms: 10, ended_ms, listed: Vec::new() };
+        let node = |name: &str, p: Progress| Node { name: name.into(), os: "linux".into(), activity: 0, key: key.clone(), progress: p };
+        let mut plan = Some(Plan {
+            generation: 3, pair: Pair::new("work", "main"), base: None, ids: vec!["jit".into()], started_ms: 100,
+            nodes: vec![node("held", progress("building", Some("L1"), 0)), node("gone", progress("building", Some("L2"), 0)), node("unled", progress("waiting", None, 0)), node("ended", progress("done", None, 150))],
+            judged: false,
+        });
+        let spare = |generation: u64, p: Progress| Spare { node: "node".into(), native: false, generation, warmed: None, progress: p };
+        let mut spares = Spares {
+            lanes: [("shipping".into(), spare(5, progress("held", Some("L3"), 0))), ("unled".into(), spare(4, progress("building", Some("L4"), 0)))].into(),
+            running: [("shipping".into(), 5), ("unled".into(), 4)].into(),
+            last_started: [("shipping".into(), 90), ("unled".into(), 80)].into(),
+            generation: 5,
+        };
+        let run = |generation: u64, lane: Option<&str>, node: &str| Run { generation, lane: lane.map(Into::into), native: false, node: node.into(), os: "linux".into(), key: key.clone(), started_ms: 100, since_ms: Some(96), adopt: None };
+        let runs = vec![run(3, None, "held"), run(3, None, "gone"), run(3, None, "ended"), run(2, None, "unled"), run(5, Some("shipping"), "node")];
+        let legs = restore(&mut plan, &mut spares, runs, &|l| l != "L2");
+        let leg = |lane: Option<&str>, node: &str| legs.iter().find(|r| r.lane.as_deref() == lane && (lane.is_some() || r.node == node));
+        assert_eq!(legs.len(), 4, "the held, the gone, the unled box and the shipping lane go on; nothing else: {:?}", legs.iter().map(|r| (&r.lane, &r.node)).collect::<Vec<_>>());
+        assert_eq!(leg(None, "held").and_then(|r| r.adopt.clone()), Some(("L1".into(), true)), "a leg whose lease is held goes on on it, shipped");
+        assert_eq!(leg(Some("shipping"), "").and_then(|r| r.adopt.clone()), Some(("L3".into(), false)), "a lane leg held but not shipped ships on its lease");
+        let plan = plan.unwrap();
+        assert!(leg(None, "gone").is_some_and(|r| r.adopt.is_none() && r.since_ms == Some(96)), "a leg whose lease went asks again, keeping its age");
+        assert_eq!((plan.nodes[1].progress.lease.as_deref(), plan.nodes[1].progress.state.as_str()), (None, "waiting"), "its box waits for a lease again");
+        assert!(leg(None, "ended").is_none(), "an ended leg is not run again");
+        assert!(leg(None, "unled").is_some_and(|r| r.generation == 3 && r.adopt.is_none() && r.since_ms == Some(98)), "a plan box whose leg the state missed starts one of the plan's generation, at its rank's age");
+        assert!(leg(Some("unled"), "").is_none() && !spares.running.contains_key("unled") && !spares.last_started.contains_key("unled"), "a lane marked running without a leg may start again at once");
+        assert_eq!((spares.lanes["unled"].progress.lease.as_deref(), spares.lanes["unled"].progress.state.as_str()), (None, "waiting"), "its spare waits again");
+    }
 
     /// A warm replay builds a target with the features it requires (`required-features`): a
     /// test target selected without them is an error (makepad-motion's `effect_modules` needs
@@ -1077,7 +1508,7 @@ mod tests {
         let (packages, note) = super::resolve_in(&tree, &asked, true);
         assert_eq!(note, "dropped stamped:lib (runs in the lane's tree: its build script runs cargo on the checkout)", "an overlay one leaves it out");
         let argv: Vec<String> = packages.iter().map(|p| p.argv()[11..].join(" ")).collect();
-        assert_eq!(argv, ["motion --release --test effect_modules --features scene3d -- --list", "motion --release --test plain -- --list", "motion --release --bin viewer --features scene3d,gpu -- --list", "motion --release --lib -- --list"]);
+        assert_eq!(argv, ["motion --profile release-checks --test effect_modules --features scene3d -- --list", "motion --profile release-checks --test plain -- --list", "motion --profile release-checks --bin viewer --features scene3d,gpu -- --list", "motion --profile release-checks --lib -- --list"]);
         let native = packages.iter().find(|p| p.label() == "motion:effect_modules").unwrap().native_argv("linux");
         assert!(native.ends_with(&["--test".to_string(), "effect_modules".into(), "--features".into(), "scene3d".into()]), "{native:?}");
     }

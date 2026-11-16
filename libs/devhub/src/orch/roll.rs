@@ -42,13 +42,16 @@
 //!   shards go on from where their logs stand; queued ones stay queued). Only an allapps run is
 //!   started over, so it is waited for up to [`MASTER_DEADLINE`]. It execs with its own args into
 //!   each devhub build it lacks as that build ends ([`prebuild`]: devhub's own small binary,
-//!   never the JIT, built apart from `target/host` and swapped in at
-//!   `target/host/makepad-devhub`, [`build_devhub`]; a master that runs as the devhub app, the
+//!   never the JIT, built apart from `target/host` ([`build_devhub`]) and swapped in at
+//!   `target/host/makepad-devhub` as the master execs into it, so the lanes' CLI moves with it
+//!   ([`swap_cli`]); a master that runs as the devhub app, the
 //!   one with a menu-bar item, execs into the app's build: [`MasterBin`]), before the next landing's build starts: a
 //!   landing during a build is the next one's, and the master takes it as that ends (the node rolls
-//!   start over from the new master). `devhub master restart` builds work's tip first: a build
-//!   that fails keeps it running and is an inbox error (it waits for the build and answers with
-//!   it; it never waits out the self-update's retry pause).
+//!   start over from the new master). The exec waits for none of the master's own work: its
+//!   leases, jobs, live sessions, warm legs (orch/warm.rs) and the boxes' deployment builds
+//!   ([`follow_rooms`]) go on under the new master. `devhub master restart` builds work's tip
+//!   first: a build that fails keeps it running and is an inbox error (it waits for the build and
+//!   answers with it; it never waits out the self-update's retry pause).
 //! - the WM (with its window handover, never over unsaved work) and the dock apps (patched live,
 //!   or a restart offered) are the auto-sync's apply (`restart=auto`) and live deploy.
 //!
@@ -396,11 +399,15 @@ fn last_change_ms(repo: &Path, to: &str, dirs: &BTreeSet<String>) -> u64 {
     ms
 }
 
+/// An update event, also in the master's log: its feed keeps none past its readers, and a restart
+/// that waited 6 and 8 min for its drain left nothing to read it by (11-15).
 fn event(ctx: &Ctx, sev: Sev, line: String) {
+    eprintln!("{line}");
     ctx.store.event("update", sev, line, None);
 }
 
 pub fn start(ctx: Arc<Ctx>) {
+    follow_rooms(&ctx);
     let record = std::fs::read_to_string(rolls_path()).unwrap_or_default();
     if let Some(kept) = rolls_kept(&record) {
         if let Err(e) = std::fs::write(rolls_path(), kept) {
@@ -460,6 +467,8 @@ pub fn start(ctx: Arc<Ctx>) {
         let mut app_at = mine.clone();
         *APP_GOOD.lock().unwrap() = mine;
         let mut tips_at = String::new();
+        // the private checkout's commit the land-rule binary was last looked at for, and its last build try
+        let (mut gate_seen, mut gate_try) = (String::new(), None);
         loop {
             std::thread::sleep(TICK);
             note_fds(&ctx, &mut fds_said);
@@ -515,6 +524,7 @@ pub fn start(ctx: Arc<Ctx>) {
                 wait_since = None;
             }
             prebuild(&ctx, &work, &closures["devhub"], (bin == MasterBin::App).then_some(&master_dirs), &mut cli_at, &mut app_at);
+            prebuild_gate(&ctx, &mut gate_seen, &mut gate_try);
             // the hubs' target: the newest devhub build the master completed
             let good = cli_good();
             // each service rolls once its own code settled: the hub's frequent landings never hold
@@ -669,8 +679,10 @@ fn due(repo: &Path, work: &str, dirs: &BTreeSet<String>, at: &mut String, good: 
 
 /// Lanes call the built binary (`target/host/makepad-devhub`, through `makepad devhub`): right
 /// after a landing that changes its inputs the master builds it once, a background build on 4
-/// jobs, and swaps it in when done ([`build_devhub`]); a landing's CLI goes live when its rebuild
-/// finishes.
+/// jobs ([`build_devhub`]), and swaps it in as it execs into that build ([`restart_master`],
+/// [`swap_cli`]): a landing's CLI goes live with its master, never ahead of it. Swapped in as its
+/// build ended, the CLI of a landing asked the master that still ran the tip before it for a new
+/// request (`stats route`) on every lane's `devhub test` for 8 min (11-15).
 /// Landings during a build get one more after it. A build that succeeds is the hubs' target
 /// ([`CLI_GOOD`]). A master that runs as the devhub app (`app_dirs`: what it rolls for, libs/devhub's
 /// graph and the app's own crate; the app's other crates come along with the next one) builds the
@@ -689,17 +701,17 @@ fn prebuild(ctx: &Arc<Ctx>, work: &str, dirs: &BTreeSet<String>, app_dirs: Optio
     let spawned = std::thread::Builder::new().name("devhub-cli-build".into()).spawn(move || {
         if cli {
             let t = Instant::now();
-            match build_devhub(&ctx.repo) {
+            match build_devhub(&ctx.repo, Some(&work), rule_builds(&ctx), &|l| event(&ctx, Sev::Warn, l)) {
                 Ok(()) => {
                     *CLI_GOOD.lock().unwrap() = work.clone();
-                    event(&ctx, Sev::Info, format!("update: devhub's CLI is built at {} in {:.0} s; the hubs roll to it", super::short(&work), t.elapsed().as_secs_f64()));
+                    event(&ctx, Sev::Info, format!("update: devhub's CLI is built at {} in {:.0} s; the hubs roll to it, the lanes' CLI moves with the master's restart onto it", super::short(&work), t.elapsed().as_secs_f64()));
                 }
                 Err(e) => event(&ctx, Sev::Warn, format!("update: devhub's CLI at {}: {e}; the hubs stay at {}", super::short(&work), super::short(&cli_good()))),
             }
         }
         if app {
             let t = Instant::now();
-            match build_master_app(&ctx.repo) {
+            match build_master_app(&ctx.repo, &|l| event(&ctx, Sev::Warn, l)) {
                 Ok(()) => {
                     *APP_GOOD.lock().unwrap() = work.clone();
                     event(&ctx, Sev::Info, format!("update: the devhub app is built at {} in {:.0} s; the master takes it", super::short(&work), t.elapsed().as_secs_f64()));
@@ -1134,16 +1146,21 @@ fn tree_busy(ctx: &Ctx, node: &str) -> Option<&'static str> {
     let applying = ctx.leases.nodes().into_iter().find(|n| n.name == node).and_then(|n| n.caps).is_some_and(|c| c.applying);
     let leases = ctx.leases.view();
     let running = leases.iter().filter(|l| matches!(l.state, State::Starting | State::Granted) && l.node.as_deref() == Some(node));
-    tree_busy_of(applying, running.map(|l| (l.req.deploy_build(), l.req.kind == crate::lease::Kind::Timed)))
+    let deploy_queued = leases.iter().any(|l| l.state == State::Queued && l.req.deploy_build() && l.req.node.as_deref() == Some(node));
+    tree_busy_of(applying, deploy_queued, running.map(|l| (l.req.deploy_build(), l.req.kind == crate::lease::Kind::Timed)))
 }
 
-/// [`tree_busy`] of whether the box applies, and of each lease running there whether it is its
-/// deployment's build and whether it is timed.
-fn tree_busy_of(applying: bool, running: impl Iterator<Item = (bool, bool)>) -> Option<&'static str> {
+/// [`tree_busy`] of whether the box applies, whether its deployment's build waits in line for it,
+/// and of each lease running there whether it is its deployment's build and whether it is timed.
+/// A hub room asked beside a deployment build in line was granted with it, and given back at once
+/// as the hub waited on that build's apply: the room held its cores for nothing, and the box's
+/// background work waited on the update it announced (L1169056, 11-16).
+fn tree_busy_of(applying: bool, deploy_queued: bool, running: impl Iterator<Item = (bool, bool)>) -> Option<&'static str> {
     if applying { return Some("a sync's apply"); }
     let (mut deploy, mut timed) = (false, false);
     for (d, t) in running { deploy |= d; timed |= t; }
     if deploy { return Some("its deployment's build"); }
+    if deploy_queued { return Some("its deployment's build in line"); }
     timed.then_some("a timed run")
 }
 
@@ -1169,16 +1186,15 @@ fn hub_build_room(ctx: &Ctx, node: &str, gone: &dyn Fn() -> bool, waits: &dyn Fn
 /// answers. `repo` is the master's checkout. It waits in line like any build, but never behind the
 /// box's timed work, which goes first there: a timed run on the box, or a timed ask first in line
 /// for it (the box holds its deployment for that ask, sync/autosync.rs), gives it up (None) and
-/// the apply waits for the gap after. It is one of the master's own holders ([`holding`]): a
-/// restart lets its apply end first, and a queued one gives its request up for the next master.
+/// the apply waits for the gap after. A master restart does not wait for it: the apply goes on on
+/// its node, and the next master holds the room until that apply ends ([`follow_rooms`]).
 pub(crate) fn deploy_build_room(repo: &std::path::Path, node: &str, waits: &mut dyn FnMut(&str)) -> Result<Option<DeployRoom>, String> {
     use crate::lease::sched::{DEFAULT_PRIO, DEPLOY_BUILD, HUB_BUILD};
     let timed = || super::leases().is_some_and(|lm| lm.update_pin(node).is_some() || lm.view().iter().any(|l| matches!(l.state, crate::lease::sched::State::Starting | crate::lease::sched::State::Granted) && l.req.kind == crate::lease::Kind::Timed && l.node.as_deref() == Some(node)));
     if timed() { return Ok(None); }
-    let drain = holding();
     let spec = super::leg::Spec { lane: format!("{DEPLOY_BUILD}-{node}"), agent: "devhub-sync".into(), kind: crate::lease::Kind::Build, needs: String::new(), prio: DEFAULT_PRIO, rev: String::new(), repo_dir: repo.to_string_lossy().into_owned(), node: Some(node.to_string()), since_ms: None };
-    match super::leg::Held::acquire_with(&spec, &|r| r.class = HUB_BUILD.into(), waits, &|| timed() || draining()) {
-        Ok(held) => Ok(Some(DeployRoom { held, _drain: drain })),
+    match super::leg::Held::acquire_with(&spec, &|r| r.class = HUB_BUILD.into(), waits, &timed) {
+        Ok(held) => Ok(Some(DeployRoom { held })),
         Err(_) if timed() => Ok(None),
         Err(e) => Err(e),
     }
@@ -1195,7 +1211,6 @@ pub(crate) fn is_bench(node: &str) -> bool {
 /// A box's deployment-build room ([`deploy_build_room`]), held until dropped.
 pub(crate) struct DeployRoom {
     held: super::leg::Held,
-    _drain: Holding,
 }
 
 impl DeployRoom {
@@ -1235,54 +1250,49 @@ const RUSTUP_DEPTH: &str = "RUST_RECURSION_COUNT";
 /// One master restart at a time: the self-update's and `devhub master restart`'s.
 pub(super) static RESTARTING: Mutex<()> = Mutex::new(());
 
-/// The master's own lease holders an exec cannot carry over (the show's prewarms, the warm and
-/// prebuild legs: their work is this process's threads), and whether a restart drains them. A
-/// cut prewarm lost its build's last step and its lease expired (11-02). Draining: no new one
-/// starts (it waits in [`holding`]; the exec ends that wait and the new master plans its own), a
-/// queued one gives its request up ([`draining`]), a running one finishes. Waiting, never a cap.
-static DRAIN: (Mutex<(bool, usize)>, std::sync::Condvar) = (Mutex::new((false, 0)), std::sync::Condvar::new());
+/// The deployment-build rooms a previous master granted whose apply still runs on its node: held
+/// until it ends ([`follow_rooms`]).
+static FOLLOWED_ROOMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-fn drain_state() -> std::sync::MutexGuard<'static, (bool, usize)> {
-    DRAIN.0.lock().unwrap_or_else(|e| e.into_inner())
-}
+/// How often a taken-back room asks its node whether the apply still runs.
+const ROOM_LOOK: Duration = Duration::from_secs(5);
 
-/// One of the master's own lease holders, counted until dropped.
-pub struct Holding(());
-
-impl Drop for Holding {
-    fn drop(&mut self) {
-        drain_state().1 -= 1;
-        DRAIN.1.notify_all();
+/// A master restart waits for none of its own work: a box's deployment build goes on on its node
+/// (the sync apply that asked for it is the node's), and its room, the box's charge for that build,
+/// is held by the new master until the node's apply ends, the node answering that no apply runs
+/// (`sync status`), or until the lease ends (the box gone off the network, the user). A restart
+/// that waited for them waited minutes (a box's deployment build: p90 230 s, up to 19 min, 11-15).
+/// Called once at the start, before the master's own leases no record names end.
+fn follow_rooms(ctx: &Arc<Ctx>) {
+    use crate::lease::sched::State;
+    for l in ctx.leases.view().into_iter().filter(|l| l.req.master && l.req.deploy_build() && l.state == State::Granted) {
+        let Some(node) = l.node.clone() else { continue };
+        FOLLOWED_ROOMS.lock().unwrap().insert(l.id.clone());
+        let (c, id) = (ctx.clone(), l.id.clone());
+        let followed = std::thread::Builder::new().name("devhub-room".into()).spawn(move || {
+            let held = super::leg::Held::attach(&id, &node);
+            event(&c, Sev::Info, format!("update: {node}'s deployment build goes on under this master: its room {id} is held until the box's apply ends"));
+            let ctl = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-update");
+            while super::leg::lease_held(&c, &id) && !apply_ended(crate::cli::ask(&ctl, Some(&node), "sync", "status")) {
+                std::thread::sleep(ROOM_LOOK);
+            }
+            held.release(None);
+            FOLLOWED_ROOMS.lock().unwrap().remove(&id);
+        });
+        if followed.is_err() { FOLLOWED_ROOMS.lock().unwrap().remove(&l.id); }
     }
 }
 
-/// Before one of the master's own holders asks for its lease: waits out a drain, then counts it.
-pub fn holding() -> Holding {
-    let mut d = drain_state();
-    while d.0 {
-        d = DRAIN.1.wait(d).unwrap_or_else(|e| e.into_inner());
-    }
-    d.1 += 1;
-    Holding(())
+/// A node's `sync status` answer says no apply runs there. An unreachable node (its hub
+/// restarting after the build) is asked again.
+fn apply_ended(status: Result<Vec<String>, String>) -> bool {
+    status.ok().and_then(|lines| lines.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok())).and_then(|v| v.get("busy").and_then(|b| b.as_bool())) == Some(false)
 }
 
-/// The master drains for its restart: a holder still queued gives its request up.
-pub fn draining() -> bool {
-    drain_state().0
-}
-
-fn set_draining(on: bool) {
-    drain_state().0 = on;
-    DRAIN.1.notify_all();
-}
-
-/// Waits until no holder of the master's own runs; `say` hears how many there were, once.
-fn drained(say: impl FnOnce(usize)) {
-    let mut d = drain_state();
-    if d.1 > 0 { say(d.1); }
-    while d.1 > 0 {
-        d = DRAIN.1.wait(d).unwrap_or_else(|e| e.into_inner());
-    }
+/// A room the master holds for a box's apply a previous master started ([`follow_rooms`]): a
+/// record of its work, so it does not end with the unfollowed ones.
+pub fn follows_room(id: &str) -> bool {
+    FOLLOWED_ROOMS.lock().unwrap().contains(id)
 }
 
 /// What a master runs as, and so what its self-update builds and execs into: devhub's own binary
@@ -1348,9 +1358,10 @@ impl MasterBin {
 /// (`by`: it waits for it). Never a silent no-op (11-02: a hand restart after a failed self-update
 /// was dropped by its retry pause, and clients met the old master's "unsupported service" for 15
 /// min). The self-update builds nothing: `work` is the newest devhub build the master completed
-/// ([`CLI_GOOD`]), swapped in at `target/host/makepad-devhub` already (a newer one swapped in since
-/// runs under its older name, and the new master takes the rest at once). Ok: the exec follows in
-/// a moment, after the answer went out.
+/// ([`CLI_GOOD`]), swapped in at `target/host/makepad-devhub` as the master execs into it
+/// ([`swap_cli`]: the lanes' CLI with it; a newer one built since runs under its older name, and
+/// the new master takes the rest at once). Ok: the exec follows in a moment, after the answer went
+/// out.
 pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str, build: bool) -> Result<String, String> {
     let _one = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
     let mine = super::short(crate::lease::caps::hub_rev()).to_string();
@@ -1360,25 +1371,27 @@ pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str, build: bool) -> Resu
     let how = if build { format!("it builds in {} first", ctx.repo.display()) } else { "its build is done".to_string() };
     event(ctx, Sev::Info, format!("update: the master restarts on {} ({by}; {how})", super::short(work)));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // its own lease holders drain while it builds: none starts, the running ones finish
-    set_draining(true);
-    // built first: a build that fails keeps this master running; a prewarm of the JIT would take
-    // the cores all that time
+    // built first: a build that fails keeps this master running. Its own work waits for nothing:
+    // its leases, jobs, live sessions, warm legs and deployment rooms go on under the next master
     let t = Instant::now();
     let built_at = if build { crate::lease::caps::head_sha(&ctx.repo) } else { Some(work.to_string()) };
     let built = if !build {
         Ok(())
     } else {
-        build_devhub(&ctx.repo).and_then(|()| if bin == MasterBin::App { build_master_app(&ctx.repo) } else { Ok(()) })
+        let say = |l: String| event(ctx, Sev::Warn, l);
+        build_devhub(&ctx.repo, built_at.as_deref(), rule_builds(ctx), &say).and_then(|()| if bin == MasterBin::App { build_master_app(&ctx.repo, &say) } else { Ok(()) })
     };
     if let Err(why) = built {
-        set_draining(false);
         let line = format!("update: the master's build of {} failed ({why}); it keeps running {mine} ({by})", super::short(work));
         event(ctx, Sev::Err, line.clone());
         return Err(line);
     }
-    let t_drain = Instant::now();
-    drained(|n| event(ctx, Sev::Info, format!("update: the master's restart waits for {n} of its own leases (prewarms, prebuilds) to finish; no new ones start")));
+    // the lanes' CLI moves with the master: swapped in now, as it execs into the same build
+    if let Err(e) = swap_cli(&ctx.repo) {
+        let line = format!("update: the master's restart on {}: {e}; it keeps running {mine} ({by})", super::short(work));
+        event(ctx, Sev::Err, line.clone());
+        return Err(line);
+    }
     // the build just swapped in, exec'd as it is: a `cargo run` here would wait on the build lock
     // of every other cargo in `target/host` while no master beats
     let mut cmd = std::process::Command::new(bin.live(&ctx.repo));
@@ -1396,16 +1409,13 @@ pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str, build: bool) -> Resu
             std::thread::sleep(Duration::from_millis(300));
             let _held = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
             let e = crate::node::exec(&mut cmd);
-            set_draining(false);
             event(&c2, Sev::Err, format!("update: the master could not restart itself: {e}; it keeps running {}", super::short(crate::lease::caps::hub_rev())));
         });
-        let waited = t_drain.elapsed().as_secs();
-        Ok(format!("built {} in {:.0} s{}; the master execs into it now (the same pid: leases, jobs and live sessions go on)", super::short(work), t.elapsed().as_secs_f64() - waited as f64, if waited > 0 { format!(", its own leases drained in {waited} s") } else { String::new() }))
+        Ok(format!("built {} in {:.0} s; the master execs into it now (the same pid: leases, jobs, live sessions, warm legs and deployment builds go on)", super::short(work), t.elapsed().as_secs_f64()))
     }
     #[cfg(not(unix))]
     {
-        let _ = (cmd, t, t_drain);
-        set_draining(false);
+        let _ = (cmd, t);
         let line = "update: restart the master by hand (no exec on this OS)".to_string();
         event(ctx, Sev::Err, line.clone());
         Err(line)
@@ -1417,28 +1427,184 @@ pub(super) fn cargo_bin() -> PathBuf {
 }
 
 /// devhub's binary, built apart from `target/host` ([`MasterBin::cli_target`]: never the lock of
-/// that one, where the apps and the JIT build) and swapped in at `target/host/makepad-devhub` through a rename: a
-/// caller runs the old build or the new one, never a missing or half-written file. A background
+/// that one, where the apps and the JIT build), swapped in at `target/host/makepad-devhub` through a
+/// rename as the master execs into it ([`swap_cli`]): a caller runs the old build or the new one,
+/// never a missing or half-written file, and never one ahead of its master. A background
 /// build ([`crate::os::background`]: background QoS on the person's Mac) on 4 jobs, the master's
 /// own restart too: the running master beats on while it builds, and only the exec's gap counts.
-/// One build at a time, its swap included: cargo on macOS copies the binary up out of `deps`
+/// One build at a time, and its swap apart from either: cargo on macOS copies the binary up out of `deps`
 /// (no hard link), removing the old copy first even when nothing rebuilt, so the swap of a build
 /// that ended while another one's cargo ran found no file (11-07: the CLI's rebuild and the
 /// master's restart at one landing; the master stayed behind for its retry pause).
-pub fn build_devhub(repo: &Path) -> Result<(), String> {
+pub fn build_devhub(repo: &Path, rev: Option<&str>, rule: bool, say: &dyn Fn(String)) -> Result<(), String> {
     let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let target = MasterBin::this().cli_target(repo);
     let mut cmd = crate::os::background(cargo_bin().as_os_str());
-    cmd.args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    cmd.args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub"]);
+    // the land rule's binary from the same tree ([`crate::gate`]), when the private checkout holds
+    // it and the rule is not switched off (`rule`, [`rule_builds`])
+    let gate = rule && crate::gate::present(repo);
+    if gate {
+        cmd.args(["-p", crate::gate::BIN, "--bin", crate::gate::BIN]);
+    }
+    let gate_at = gate_head(repo);
+    cmd.arg("--target-dir").arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    // the commit it builds, which its CLI says beside a master's refusal (`caps::cli_build_rev`)
+    match rev {
+        Some(rev) => { cmd.env(crate::lease::caps::BUILD_REV, rev); }
+        None => { cmd.env_remove(crate::lease::caps::BUILD_REV); }
+    }
     match cmd.output() {
         Ok(o) if o.status.success() => {}
         Ok(o) => return Err(format!("does not build: {}", build_failure(&o))),
         Err(e) => return Err(format!("cargo: {e}")),
     }
-    let name = format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX);
-    let built = target.join("host").join(&name);
-    sign_stable(repo, &built, CLI_SIGN_ID);
-    swap_in(&built, &repo.join("target/host").join(&name))
+    let built = target.join("host").join(cli_name());
+    sign_stable(repo, &built, CLI_SIGN_ID, say);
+    if gate {
+        built_gate(repo, &target, gate_at.as_deref(), say);
+    }
+    Ok(())
+}
+
+/// Whether the master builds the land rule's binary: the private checkout holds it, and the rule
+/// is not switched off ([`crate::state::Doc::land_rule_off`]).
+fn rule_builds(ctx: &Ctx) -> bool {
+    crate::gate::present(&ctx.repo) && ctx.store.read(|d| d.land_rule_off.is_empty())
+}
+
+fn cli_name() -> String {
+    format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The private checkout's HEAD, the source a land-rule binary built now is of.
+fn gate_head(repo: &Path) -> Option<String> {
+    crate::gitread::rev(&repo.join("apps/commercial"), "HEAD")
+}
+
+/// The file beside a land-rule binary naming the private checkout's commit it was built at.
+fn gate_stamp(bin: &Path) -> PathBuf {
+    bin.with_extension("rev")
+}
+
+/// A land-rule binary just built in `target`: signed, and stamped with the commit it is of.
+fn built_gate(repo: &Path, target: &Path, at: Option<&str>, say: &dyn Fn(String)) {
+    let bin = target.join("host").join(crate::gate::bin(repo).file_name().unwrap_or_default());
+    sign_stable(repo, &bin, GATE_SIGN_ID, say);
+    let _ = std::fs::write(gate_stamp(&bin), at.unwrap_or_default());
+}
+
+/// Whether the land-rule binary is due a build of its own: none is live (`last_try`: when a build
+/// was last tried, so a failing one is tried again only every [`GATE_RETRY`]), or the private
+/// checkout moved under its package since the live one was built (`touched`).
+fn gate_due(live: bool, built_at: &str, head: &str, touched: impl FnOnce() -> bool, last_try: Option<Instant>) -> bool {
+    if !live {
+        return last_try.is_none_or(|t| t.elapsed() >= GATE_RETRY);
+    }
+    !built_at.is_empty() && built_at != head && touched()
+}
+
+const GATE_RETRY: Duration = Duration::from_secs(600);
+
+/// The land rule's binary alone ([`crate::gate`]): built and swapped in at once when none is live
+/// (a master's first start with the private checkout, or one whose build failed) or when the
+/// private checkout moved under its package (a landing there changes nothing of devhub's own, so
+/// no devhub build takes it along). The binary runs per call, so it goes live as it is swapped
+/// in. On its own thread, one cargo at a time ([`BUILDING`]); a landing waits for it. Its flag is
+/// its own ([`GATE_BUILDING`]): devhub's CLI build and the master's self-update never wait for it.
+/// A land-rule build whose signing waited 36 min on the Mac's keychain held the CLI's flag, and
+/// the master took none of three devhub landings (11-16).
+fn prebuild_gate(ctx: &Arc<Ctx>, seen: &mut String, last_try: &mut Option<Instant>) {
+    if !rule_builds(ctx) || CLI_BUILDING.load(Ordering::Acquire) || GATE_BUILDING.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(head) = gate_head(&ctx.repo) else { return };
+    let live = crate::gate::bin(&ctx.repo);
+    if live.is_file() && *seen == head {
+        return;
+    }
+    *seen = head.clone();
+    let built_at = std::fs::read_to_string(gate_stamp(&live)).unwrap_or_default().trim().to_string();
+    let commercial = ctx.repo.join("apps/commercial");
+    let dir = BTreeSet::from([crate::gate::CRATE_DIR.trim_start_matches("apps/commercial/").to_string()]);
+    if !gate_due(live.is_file(), &built_at, &head, || touches(&commercial, &built_at, &head, &dir), *last_try) {
+        return;
+    }
+    *last_try = Some(Instant::now());
+    GATE_BUILDING.store(true, Ordering::Release);
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new().name("devhub-gate-build".into()).spawn(move || {
+        let t = Instant::now();
+        match build_gate(&ctx.repo, &head, &|l| event(&ctx, Sev::Warn, l)) {
+            Ok(()) => event(&ctx, Sev::Info, format!("update: the land rule's binary is built at {} in {:.0} s and live", super::short(&head), t.elapsed().as_secs_f64())),
+            Err(e) => event(&ctx, Sev::Warn, format!("update: the land rule's binary at {}: {e}", super::short(&head))),
+        }
+        GATE_BUILDING.store(false, Ordering::Release);
+    });
+    if spawned.is_err() {
+        GATE_BUILDING.store(false, Ordering::Release);
+    }
+}
+
+/// A land-rule build runs now ([`prebuild_gate`]).
+static GATE_BUILDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`prebuild_gate`]'s build: the binary alone, into devhub's build dir, then swapped in.
+fn build_gate(repo: &Path, head: &str, say: &dyn Fn(String)) -> Result<(), String> {
+    let target = MasterBin::this().cli_target(repo);
+    {
+        let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cmd = crate::os::background(cargo_bin().as_os_str());
+        cmd.args(["build", "-j4", "--profile", "host", "-p", crate::gate::BIN, "--bin", crate::gate::BIN, "--target-dir"]).arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+        match cmd.output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => return Err(format!("does not build: {}", build_failure(&o))),
+            Err(e) => return Err(format!("cargo: {e}")),
+        }
+    }
+    finish_gate(repo, &target, head, |staged| sign_stable(repo, staged, GATE_SIGN_ID, say))
+}
+
+/// A built land-rule binary goes live signed: a copy of it is signed outside the build lock
+/// ([`BUILDING`]), so a signing that waits (the keychain) holds no devhub build, then it takes the
+/// built one's place, with its stamp, and goes live ([`swap_gate`]).
+fn finish_gate(repo: &Path, target: &Path, head: &str, sign: impl FnOnce(&Path)) -> Result<(), String> {
+    let built = target.join("host").join(crate::gate::bin(repo).file_name().unwrap_or_default());
+    let staged = built.with_extension("signing");
+    {
+        let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+        std::fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+    }
+    sign(&staged);
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    std::fs::rename(&staged, &built).map_err(|e| format!("{}: {e}", built.display()))?;
+    std::fs::write(gate_stamp(&built), head).map_err(|e| format!("{}: {e}", gate_stamp(&built).display()))?;
+    swap_gate(repo, target)
+}
+
+/// The land-rule binary of devhub's build dir goes live, with its stamp (none built: nothing).
+fn swap_gate(repo: &Path, target: &Path) -> Result<(), String> {
+    let live = crate::gate::bin(repo);
+    let built = target.join("host").join(live.file_name().unwrap_or_default());
+    if !built.is_file() {
+        return Ok(());
+    }
+    swap_in(&built, &live)?;
+    let _ = std::fs::copy(gate_stamp(&built), gate_stamp(&live));
+    Ok(())
+}
+
+/// The lanes' CLI takes the newest devhub build ([`build_devhub`]), as the master execs into it
+/// ([`restart_master`]): one build at a time, so never a binary cargo is writing. None built yet:
+/// the CLI stays as it is.
+fn swap_cli(repo: &Path) -> Result<(), String> {
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let target = MasterBin::this().cli_target(repo);
+    let built = target.join("host").join(cli_name());
+    if !built.is_file() { return Ok(()); }
+    swap_in(&built, &repo.join("target/host").join(cli_name()))?;
+    // the land rule's binary built with it goes live with it
+    swap_gate(repo, &target)
 }
 
 /// The fixed code identifiers of devhub's binaries on a Mac: with the local signing identity their
@@ -1447,17 +1613,24 @@ pub fn build_devhub(repo: &Path) -> Result<(), String> {
 /// bundle id of its Dock wrapper (`~/Applications/devhub.app`).
 pub const APP_SIGN_ID: &str = "nl.makepad.devhub";
 pub const CLI_SIGN_ID: &str = "nl.makepad.devhub-cli";
+pub const GATE_SIGN_ID: &str = "nl.makepad.devhub-gate";
 
 /// Signs a just-built devhub binary on macOS (tools/macos/sign-app.sh: the stable identity
 /// "makepad local signing", else ad-hoc with a one-line hint to run tools/macos/make-signing-identity.sh),
 /// before it is swapped in and started. Never fails a build or an update: an error is logged and the
 /// binary starts as the linker left it (ad-hoc). Nothing on other OSes.
-fn sign_stable(repo: &Path, bin: &Path, id: &str) {
+/// A signing that runs this long is said once ([`run_said`]): it is not stopped.
+const SIGN_SAY: Duration = Duration::from_secs(180);
+
+fn sign_stable(repo: &Path, bin: &Path, id: &str, say: &dyn Fn(String)) {
     if !cfg!(target_os = "macos") {
         return;
     }
     let script = repo.join("tools/macos/sign-app.sh");
-    let said = std::process::Command::new("/bin/bash").arg(&script).arg(bin).arg(id).stdin(std::process::Stdio::null()).output();
+    let mut cmd = std::process::Command::new("/bin/bash");
+    cmd.arg(&script).arg(bin).arg(id);
+    let what = format!("signing {} as {id}", bin.display());
+    let said = run_said(cmd, &what, SIGN_SAY, say);
     match said {
         Ok(o) if o.status.success() => {
             let out = String::from_utf8_lossy(&o.stdout);
@@ -1468,6 +1641,34 @@ fn sign_stable(repo: &Path, bin: &Path, id: &str) {
     }
 }
 
+/// Runs `cmd` to its end (stdin null, its output kept) and says, once, when it runs past `after`:
+/// what waits for it waits on. Nothing stops it (no wall-clock kills): a signing waited 36 min on
+/// the Mac's keychain with nothing said, and the master took no devhub build all that time (11-16).
+fn run_said(mut cmd: std::process::Command, what: &str, after: Duration, say: &dyn Fn(String)) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let started = Instant::now();
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut said = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if !said && started.elapsed() >= after {
+            said = true;
+            say(format!("update: {what} has run {} s (pid {}): most likely it waits on the Mac's keychain, locked or a prompt on its screen; the build waits until it ends", started.elapsed().as_secs(), child.id()));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    if let Some(mut out) = child.stdout.take() { let _ = out.read_to_end(&mut stdout); }
+    if let Some(mut err) = child.stderr.take() { let _ = err.read_to_end(&mut stderr); }
+    if said {
+        say(format!("update: {what} ended after {} s ({status})", started.elapsed().as_secs()));
+    }
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 /// One devhub build at a time ([`build_devhub`], [`build_master_app`]).
 static BUILDING: Mutex<()> = Mutex::new(());
 
@@ -1475,13 +1676,13 @@ static BUILDING: Mutex<()> = Mutex::new(());
 /// ([`APP_TARGET`]): a background build on 4 jobs, as [`build_devhub`], with its login item's
 /// wrapper's exact command (the same fingerprint: neither rebuilds the other's). Cargo replaces
 /// the binary in place; the running master's image is not that file.
-pub fn build_master_app(repo: &Path) -> Result<(), String> {
+pub fn build_master_app(repo: &Path, say: &dyn Fn(String)) -> Result<(), String> {
     let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let mut cmd = crate::os::background(cargo_bin().as_os_str());
     cmd.args(["build", "-j4", "--profile", "host", "-p", APP_NAME, "--bin", APP_NAME, "--target-dir"]).arg(repo.join(APP_TARGET)).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
     match cmd.output() {
         Ok(o) if o.status.success() => {
-            sign_stable(repo, &repo.join(APP_TARGET).join("host").join(APP_NAME), APP_SIGN_ID);
+            sign_stable(repo, &repo.join(APP_TARGET).join("host").join(APP_NAME), APP_SIGN_ID, say);
             Ok(())
         }
         Ok(o) => Err(format!("does not build: {}", build_failure(&o))),
@@ -1547,8 +1748,6 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
     }
     event(ctx, Sev::Warn, format!("update: the master rolls back from {} to its previous build ({by})", super::short(crate::lease::caps::hub_rev())));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    set_draining(true);
-    drained(|n| event(ctx, Sev::Info, format!("update: the master's rollback waits for {n} of its own leases to finish")));
     let mut cmd = std::process::Command::new(&prev);
     cmd.args(&args).current_dir(&ctx.repo).env_remove(crate::lease::caps::BUILT_AT);
     #[cfg(unix)]
@@ -1559,7 +1758,6 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
             std::thread::sleep(Duration::from_millis(300));
             let _held = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
             let e = crate::node::exec(&mut cmd);
-            set_draining(false);
             event(&c2, Sev::Err, format!("update: the master could not roll back: {e}; it keeps running {}", super::short(crate::lease::caps::hub_rev())));
         });
         Ok(format!("the master execs into its previous build {} now (the same pid)", prev.display()))
@@ -1567,7 +1765,6 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
     #[cfg(not(unix))]
     {
         let _ = cmd;
-        set_draining(false);
         Err("update: roll the master back by hand (no exec on this OS)".to_string())
     }
 }
@@ -1591,6 +1788,44 @@ pub fn build_failure(o: &std::process::Output) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A land-rule binary is signed outside the build lock: a signing that waits on the keychain
+    /// holds no devhub build (one waited 36 min, and the master took none of three landings, 11-16).
+    /// Signed, it takes the built one's place with its stamp and goes live.
+    #[test]
+    fn a_land_rule_binary_is_signed_outside_the_build_lock() {
+        let d = std::env::temp_dir().join(format!("devhub-gate-sign-{}-{}", std::process::id(), crate::proto::wall_ms()));
+        let target = super::MasterBin::this().cli_target(&d);
+        let name = crate::gate::bin(&d).file_name().unwrap().to_owned();
+        std::fs::create_dir_all(target.join("host")).unwrap();
+        std::fs::write(target.join("host").join(&name), b"built").unwrap();
+        super::finish_gate(&d, &target, "abc", |staged| {
+            assert!(super::BUILDING.try_lock().is_ok(), "the build lock is free while it signs");
+            std::fs::write(staged, b"signed").unwrap();
+        }).unwrap();
+        assert_eq!(std::fs::read(crate::gate::bin(&d)).unwrap(), b"signed", "the signed binary is live");
+        assert_eq!(std::fs::read(target.join("host").join(&name)).unwrap(), b"signed", "and in the build dir, for the next swap");
+        assert_eq!(std::fs::read_to_string(super::gate_stamp(&crate::gate::bin(&d))).unwrap(), "abc", "with its stamp");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A run past its time is said once, and its end too; it is never stopped. A quick one says
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_signing_is_said_once_and_left_to_end() {
+        let said = std::cell::RefCell::new(Vec::new());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 0.3; echo signed"]);
+        let out = super::run_said(cmd, "signing x", std::time::Duration::from_millis(50), &|l| said.borrow_mut().push(l)).unwrap();
+        assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "signed", "it runs to its end: {out:?}");
+        let said = said.into_inner();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("update: signing x has run 0 s (pid ") && said[0].contains("keychain"), "{said:?}");
+        assert!(said[1].starts_with("update: signing x ended after 0 s"), "{said:?}");
+        let quick = super::run_said(std::process::Command::new("true"), "signing y", std::time::Duration::from_secs(60), &|l| panic!("a quick run says nothing: {l}"));
+        assert!(quick.unwrap().status.success());
+    }
+
     /// A restart keeps the running build beside the new one; a master that runs that copy keeps it.
     #[test]
     fn the_previous_master_build_is_kept_for_a_rollback() {
@@ -1636,6 +1871,51 @@ mod tests {
         assert!(app.contains("apps/devhub") && devhub.iter().all(|d| app.contains(d)), "{app:?}");
     }
 
+    /// The lanes' CLI takes the master's newest build only as the master execs into it: a build
+    /// leaves `target/host` alone, the swap puts it there, and with none built the CLI stays. Swapped
+    /// in as its build ended, a landing's CLI asked the old master for `stats route` for 8 min (11-15).
+    #[test]
+    fn the_cli_moves_with_the_master_s_restart() {
+        let d = std::env::temp_dir().join(format!("devhub-cli-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let live = d.join("target/host").join(super::cli_name());
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, b"old build").unwrap();
+        super::swap_cli(&d).unwrap();
+        assert_eq!(std::fs::read(&live).unwrap(), b"old build", "nothing built: the CLI stays");
+        let built = super::MasterBin::this().cli_target(&d).join("host").join(super::cli_name());
+        std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+        std::fs::write(&built, b"new build").unwrap();
+        assert_eq!(std::fs::read(&live).unwrap(), b"old build", "a build alone leaves the CLI as it is");
+        super::swap_cli(&d).unwrap();
+        assert_eq!(std::fs::read(&live).unwrap(), b"new build", "the restart's swap puts the build in place");
+        // the land rule's binary built with it goes live with it, with the commit it is of
+        let gate = built.with_file_name(crate::gate::bin(&d).file_name().unwrap());
+        std::fs::write(&gate, b"rule build").unwrap();
+        std::fs::write(super::gate_stamp(&gate), b"c7").unwrap();
+        assert!(!crate::gate::bin(&d).exists(), "a build alone leaves the rule as it is");
+        super::swap_cli(&d).unwrap();
+        assert_eq!(std::fs::read(crate::gate::bin(&d)).unwrap(), b"rule build", "the rule moves with the CLI");
+        assert_eq!(std::fs::read(super::gate_stamp(&crate::gate::bin(&d))).unwrap(), b"c7", "and its stamp");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The land rule's binary is built on its own when none is live (tried again only after a pause
+    /// when its build fails), and when the private checkout moved under its package.
+    #[test]
+    fn the_land_rule_binary_is_built_when_missing_or_its_source_moved() {
+        use std::time::{Duration, Instant};
+        let never = || panic!("not asked");
+        assert!(super::gate_due(false, "", "h", never, None), "none live, never tried: build");
+        assert!(!super::gate_due(false, "", "h", never, Some(Instant::now())), "a failed build is not tried every tick");
+        let long_ago = Instant::now().checked_sub(super::GATE_RETRY + Duration::from_secs(1));
+        assert!(long_ago.is_none() || super::gate_due(false, "", "h", never, long_ago), "but again after the pause");
+        assert!(!super::gate_due(true, "h", "h", never, None), "live at the checkout's commit: nothing");
+        assert!(!super::gate_due(true, "", "h", never, None), "live from devhub's own build without a stamp: nothing");
+        assert!(super::gate_due(true, "g", "h", || true, None), "the checkout moved under the package: build");
+        assert!(!super::gate_due(true, "g", "h", || false, None), "it moved elsewhere: nothing");
+    }
+
     /// The live binary is replaced whole: the old one or the new one, never a partial file.
     #[test]
     fn a_built_binary_is_swapped_in_whole() {
@@ -1671,6 +1951,15 @@ mod tests {
     }
 
     #[test]
+    fn a_taken_back_room_holds_until_its_nodes_apply_ends() {
+        let status = |busy: &str| Ok(vec![format!("{{\"machine\":\"box-a\",\"busy\":{busy},\"prewarm\":false}}")]);
+        assert!(super::apply_ended(status("false")), "the node says no apply runs: the room goes");
+        assert!(!super::apply_ended(status("true")), "its apply still runs: the room stays");
+        assert!(!super::apply_ended(Err("box-a: unreachable".into())), "a node away (its hub restarting after the build) is asked again");
+        assert!(!super::apply_ended(Ok(Vec::new())) && !super::apply_ended(Ok(vec!["{}".into()])), "an answer that says nothing keeps the room");
+    }
+
+    #[test]
     fn drains_stay_at_most_at_once_and_a_roll_gives_its_back() {
         let drains = std::sync::Arc::new(super::AtomicUsize::new(0));
         let slot = || super::Slot { drains: drains.clone(), held: false };
@@ -1680,29 +1969,6 @@ mod tests {
         assert!(!b.try_take());
         drop(a);
         assert!(b.try_take());
-    }
-
-    #[test]
-    fn a_restart_drains_the_masters_own_holders() {
-        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-        let running = super::holding();
-        super::set_draining(true);
-        let started = std::sync::Arc::new(AtomicBool::new(false));
-        let s2 = started.clone();
-        // a new one waits out the drain
-        let new = std::thread::spawn(move || {
-            let _h = super::holding();
-            s2.store(true, SeqCst);
-        });
-        // the running one finishes: drained, the new one not started
-        let drain = std::thread::spawn(|| super::drained(|n| assert_eq!(n, 1)));
-        drop(running);
-        drain.join().unwrap();
-        assert!(!started.load(SeqCst) && super::draining());
-        // no exec (its build failed): it goes on
-        super::set_draining(false);
-        new.join().unwrap();
-        assert!(started.load(SeqCst));
     }
 
     /// The master takes each devhub build it lacks as that build ends: no settle, no uptime (11-08:
@@ -1738,10 +2004,11 @@ mod tests {
         ] {
             assert_eq!(super::gives_room_back(&answer(w)), back, "{w}");
         }
-        assert_eq!(super::tree_busy_of(true, std::iter::empty()), Some("a sync's apply"));
-        assert_eq!(super::tree_busy_of(false, [(false, false), (true, false)].into_iter()), Some("its deployment's build"));
-        assert_eq!(super::tree_busy_of(false, [(false, true)].into_iter()), Some("a timed run"));
-        assert_eq!(super::tree_busy_of(false, [(false, false)].into_iter()), None, "other work beside it: the hub builds");
+        assert_eq!(super::tree_busy_of(true, false, std::iter::empty()), Some("a sync's apply"));
+        assert_eq!(super::tree_busy_of(false, false, [(false, false), (true, false)].into_iter()), Some("its deployment's build"));
+        assert_eq!(super::tree_busy_of(false, true, [(false, false)].into_iter()), Some("its deployment's build in line"), "its room is not asked beside a deployment build in line");
+        assert_eq!(super::tree_busy_of(false, false, [(false, true)].into_iter()), Some("a timed run"));
+        assert_eq!(super::tree_busy_of(false, false, [(false, false)].into_iter()), None, "other work beside it: the hub builds");
     }
 
     /// The hubs follow the newest devhub build, not the master's restart (Mac hubs lagged the

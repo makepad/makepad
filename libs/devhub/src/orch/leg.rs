@@ -151,7 +151,14 @@ pub fn lease_held(ctx: &super::Ctx, id: &str) -> bool {
 /// What a run's holder hears of a lease that ended under it. Disk: why too, it is the job's result.
 fn ended_error(id: &str, st: &Value) -> String {
     let how = s(st, "how");
-    if matches!(how.as_str(), "disk" | "memory") { format!("{id} ended ({how}): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
+    // (a lease devhub ended for its app's parked panic says the panic: a job's result carries it)
+    if matches!(how.as_str(), "disk" | "memory" | "panicked") { format!("{id} ended ({how}): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
+}
+
+/// [`ended_error`] of a granted lease that ended `how` for `reason`, as a run hears it.
+#[cfg(test)]
+pub(crate) fn ended_error_for_test(id: &str, how: &str, reason: &str) -> String {
+    ended_error(id, &json(&format!("{{\"how\":{},\"reason\":{}}}", makepad_remote::json_str(how), makepad_remote::json_str(reason))).unwrap())
 }
 
 /// What an asker hears of its lease that ended before its grant.
@@ -450,8 +457,8 @@ impl Held {
 
     /// A live job holds its run until the JIT ends; a hub restart may lose the exit status.
     /// `named` as in [`Self::run_asked`].
-    pub fn run_live(&self, named: &str, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
-        self.run_at_live(named, ".", argv, true, log, started)
+    pub fn run_live(&self, named: &str, argv: &[String], offline: bool, log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
+        self.run_at_live(named, ".", argv, true, offline, log, started)
     }
 
     /// As [`Self::run_noted`] in `cwd`, asked under `named`: the run's name among its lease's asks. A
@@ -460,12 +467,14 @@ impl Held {
     /// started, never a second one beside it (a fresh name was refused as "resolving another
     /// cwd or argv" while the lane's dev JIT built, and the job or live start failed, 11-03).
     pub fn run_asked(&self, named: &str, cwd: &str, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
-        self.run_at_live(named, cwd, argv, false, log, started)
+        self.run_at_live(named, cwd, argv, false, false, log, started)
     }
 
-    fn run_at_live(&self, named: &str, cwd: &str, argv: &[String], live: bool, log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
+    fn run_at_live(&self, named: &str, cwd: &str, argv: &[String], live: bool, offline: bool, log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
         let b64 = makepad_network::digest::base64_encode(argv.join("\0").as_bytes());
-        let extra = format!(" {{\"live\":{live},\"request_id\":{}}}", makepad_remote::json_str(named));
+        // Old hubs reject this key: an offline run never reaches one networked (11-15).
+        let sandbox = if offline { ",\"offline\":true" } else { "" };
+        let extra = format!(" {{\"live\":{live},\"request_id\":{}{sandbox}}}", makepad_remote::json_str(named));
         // the node's hub restarting for its self-update (at a run boundary: this one) takes the
         // lease back from its ledger: the run starts on the new hub
         let (mut failing, mut last, mut beat) = (None::<Instant>, String::new(), Instant::now());

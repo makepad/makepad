@@ -41,6 +41,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           paused is refused: `job cancel` ends it)
   live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
         [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--home <archive>]
+        [--joins <W id>]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
                                           for this lane: every file saved in this worktree ships to it as it comes and
                                           hot-patches in; overlay by default (--tree opts out), small cost on a hot box. Returns its id at once.
@@ -50,6 +51,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           a save during an app's start applies once it is up
                                           --home: a tar archive of files the app finds in a home of its own on
                                           its box (MAKEPAD_TEST_HOME, where an app keeps its per-user state), gone with the session
+                                          --joins W<n>: its app joins that session's app (a hidden test WM it reaches
+                                          through --env MAKEPAD_WM_SOCKET=<path>): it runs on that session's box, and
+                                          that session is never parked or ended idle while this one runs
   live look <id> [timeout_s]              that one look (before any edit: the app up and drawing); default 300 s
   live start <pkg> --test [--env K=V ..] [--lib|--bin B|--test T] [-- args...]
                                           warm JIT tests: rerun after each saved edit, including restarts
@@ -74,7 +78,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
   lane new <name> [--from work] [--no-commercial]
                                           a lane worktree: <lanes root>/<name> on rc-<name> from work, with
                                           apps/commercial on rc-<name> from main; prints its path. Lanes never run
-                                          git worktree themselves; the master removes a landed lane (30 min idle)
+                                          git worktree themselves; once it lands the master cleans its node dirs
+                                          after 30 min idle, its worktree and branches once its agents are idle 1 h
   lane drop <name>                        abandon a lane: unlanded commits (uncommitted work committed first) are
                                           bundled into ~/.makepad/devhub/dropped, then worktrees, branches, node dirs go
   lane stop <name>                        end its live and queued leases; it may take new leases at once
@@ -91,6 +96,10 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           its branches stay, its ignored local/ files are copied into the main
                                           checkout's local/ (never over a file there); refused while anything
                                           uncommitted or untracked is in it
+  lane retire --clean-offers              retire offered lanes with no runs, holds or dirty files and both halves' content in work/main
+  lane slot <lane> <n> [--job J]             a Codex slot of the lane (1-4): its path, made or reset at the lane's HEAD
+  lane slots <lane>                          the lane's slots: base, job, changed files
+  lane slot diff|take|drop <lane> <n>        review a slot's change, apply it to the lane (--commit \"<msg>\"), or drop it (diff kept)
   lane offers [--check]                   the lanes offered for retirement, one row each; --check reads (here) what
                                           retiring them frees on the Mac and the nodes and which refuse, by reason
   lane live <name> on|off                 the manager's mark: the user waits for this lane. Its landings take the
@@ -539,6 +548,7 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
             if let Err(e) = retry_master(|| one(c, "job", &format!("job waiting {}", ids.join(" ")))) {
                 eprintln!("makepad devhub job wait: {e}"); return 1;
             }
+            let mut told: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
                 // a master restart (its self-update) is waited out: the jobs go on under it
                 let list = match retry_master(|| one(c, "job", &format!("job wait {}{}", if any { "--any " } else { "" }, ids.join(" ")))) {
@@ -548,6 +558,11 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                         return 1;
                     }
                 };
+                // what each one's lease waits for, as it changes (the wait answers each change)
+                for j in &list {
+                    let said = told.entry(j.id.clone()).or_default();
+                    if crate::lease::client::waits_said(j, said) { eprintln!("{}: {said}", j.id); }
+                }
                 if let Some(u) = list.iter().find(|j| j.state == "unknown") {
                     eprintln!("makepad devhub job wait: no job {}", u.id);
                     return 2;
@@ -727,6 +742,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             let (mut test, mut test_args, mut selected) = (false, Vec::new(), false);
             let mut env = Vec::new();
             let mut home = String::new();
+            let mut joins = String::new();
             let mut i = 0;
             while i < rest.len() {
                 match (rest[i], rest.get(i + 1)) {
@@ -747,6 +763,10 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--lane", Some(l)) => {
                         lane = Some(l.to_string());
+                        i += 1;
+                    }
+                    ("--joins", Some(w)) if w.len() > 1 && w.starts_with('W') && w[1..].bytes().all(|b| b.is_ascii_digit()) => {
+                        joins = w.to_string();
                         i += 1;
                     }
                     ("--env", pair) => {
@@ -790,7 +810,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -806,7 +826,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
         // goes on through a master or hub restart when asking again does nothing twice ([`cut_act`])
@@ -1049,6 +1069,50 @@ fn push_answer(v: &Value) -> String {
     out
 }
 
+/// Check each offer in this process, then let the master re-check it at retire (11-14).
+fn clean_offers(c: &Client, json: bool) -> i32 {
+    let offers = match one(c, "lane", "lane offers") {
+        Ok(v) => v,
+        Err(e) => { eprintln!("makepad devhub lane retire --clean-offers: {e}"); return 1; }
+    };
+    let Some(list) = offers.get("lanes").and_then(|v| v.as_arr()) else {
+        eprintln!("makepad devhub lane retire --clean-offers: lane offers: bad answer");
+        return 1;
+    };
+    let (mut retired, mut kept): (Vec<(String, String)>, Vec<(String, String)>) = (Vec::new(), Vec::new());
+    let mut code = 0;
+    for offer in list {
+        let name = offer.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Some(why) = super::lane::clean_offer_refusal(offer) {
+            kept.push((name, why));
+            continue;
+        }
+        // Keep a master's refusal distinct from a failed ask: only the latter fails the command.
+        let answer = ask(c, None, "lane", &format!("lane retire {name}")).and_then(|lines| lines.first().and_then(|line| makepad_strict_json::parse_depth(line.as_bytes(), 16).ok()).ok_or_else(|| "lane retire: no answer or bad answer".to_string()));
+        match answer {
+            Ok(v) => {
+                if let Some(why) = v.get("err").and_then(|v| v.as_str()) {
+                    kept.push((name, why.to_string()));
+                } else if let Some(freed) = v.get("note").and_then(|v| v.as_str()) {
+                    retired.push((name, freed.to_string()));
+                } else {
+                    code = 1;
+                    kept.push((name, "lane retire: bad answer".into()));
+                }
+            }
+            Err(why) => { code = 1; kept.push((name, why)); }
+        }
+    }
+    if json {
+        println!("{{\"retired\":[{}],\"kept\":[{}]}}", retired.iter().map(|(name, freed)| format!("{{\"name\":{},\"freed\":{}}}", json_str(name), json_str(freed))).collect::<Vec<_>>().join(","), kept.iter().map(|(name, why)| format!("{{\"name\":{},\"why\":{}}}", json_str(name), json_str(why))).collect::<Vec<_>>().join(","));
+    } else {
+        for (name, freed) in &retired { println!("retired {name}: {freed}"); }
+        for (name, why) in &kept { println!("kept {name}: {why}"); }
+        println!("{} retired, {} kept", retired.len(), kept.len());
+    }
+    code
+}
+
 fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
     match words {
         ["new", name, rest @ ..] => {
@@ -1071,6 +1135,11 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             let req = format!("{{\"name\":{},\"from\":{},\"commercial\":{commercial}}}", json_str(name), json_str(&from));
             done(one(c, "lane", &format!("lane new {req}")), json, &|v| format!("{}\n", v.get("path").and_then(|p| p.as_str()).unwrap_or("")))
         }
+        ["retire", "--clean-offers"] => clean_offers(c, json),
+        ["slot" | "slots", ..] => match super::slot::request(words) {
+            Ok(req) => done(one(c, "lane", &format!("lane slot {req}")), json, &|v| v.get("text").and_then(Value::as_str).unwrap_or("").to_string()),
+            Err(e) => { eprintln!("makepad devhub {e}"); 2 }
+        },
         [verb @ ("drop" | "remove" | "retire" | "keep" | "unkeep" | "unpark"), name] => done(one(c, "lane", &format!("lane {verb} {name}")), json, &flat),
         ["park", name, why @ ..] => {
             let r = one(c, "lane", &format!("lane park {name} {}", why.join(" ")));

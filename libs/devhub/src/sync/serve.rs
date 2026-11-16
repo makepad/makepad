@@ -128,8 +128,9 @@ impl Sync {
                     continue;
                 }
                 last = Some(Instant::now());
+                let asked = wm_generation();
                 let _busy = me.busy.lock().unwrap();
-                if let Err(e) = me.wm_restart(&format!("its WM speaks another hosted wire ({answer}): no app starts under it")) {
+                if let Err(e) = me.wm_restart(&format!("its WM speaks another hosted wire ({answer}): no app starts under it"), asked) {
                     me.event(Sev::Warn, format!("sync: WM restart refused: {e}"), String::new());
                 }
             }
@@ -196,8 +197,10 @@ impl Sync {
             },
             ["wm-restart", order] => match self.seen.check(order) {
                 Ok(o) if o.words.first().map(String::as_str) == Some("wm-restart") => {
+                    // asked now: a restart made while it waits for an apply is the one it asked for
+                    let asked = wm_generation();
                     let _busy = self.busy.lock().unwrap();
-                    match self.wm_restart(&format!("asked by {}", o.signer)) {
+                    match self.wm_restart(&format!("asked by {}", o.signer), asked) {
                         Ok(l) => out.push(l),
                         Err(e) => self.refuse(out, format!("sync: WM restart refused: {e}")),
                     }
@@ -289,6 +292,16 @@ impl Sync {
         if plan.is_empty() {
             return out.push(err_line("apply names no commit (makepad=<sha> <nested repository>=<sha>..)"));
         }
+        for (repo, store, from, _) in &plan {
+            let Some(from) = from.as_deref() else { continue };
+            let dir = self.conf.repo_dir(repo).unwrap();
+            match store.repair(&dir, from) {
+                Ok(lines) => for line in lines {
+                    self.event(Sev::Warn, format!("sync: {repo} {}: put back after a cut-short move: {line}", dir.display()), String::new());
+                },
+                Err(e) => return self.refuse(out, format!("sync: apply waits: {}: {e}", dir.display())),
+            }
+        }
         // edits in a checkout that its move would overwrite are someone's work: they stay, and no
         // repository of the deployment moves until they are gone (no move half done, no reset)
         for (repo, store, from, to) in &plan {
@@ -353,6 +366,9 @@ impl Sync {
             let r = store.move_checkout(&dir, from.as_deref(), to).and_then(|m| store.set_ref(SYNCED_REF, to).map(|_| m));
             match r {
                 Ok(m) => {
+                    for line in &m.repaired {
+                        self.event(Sev::Warn, format!("sync: {repo} {}: put back after a cut-short move: {line}", dir.display()), String::new());
+                    }
                     if !m.files.is_empty() {
                         MOVED_IN_APPLY.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
@@ -488,17 +504,8 @@ impl Sync {
         // pre-warm (asked by the master for an idle dev-on node): the JIT built and its cache warm
         // for the smoke apps, in the background, preempted by the next lease
         if o.get("prewarm") == Some("on") {
-            let why_not = if !crate::lease::exec::writes_allowed() {
-                Some("dev off")
-            } else if crate::lease::exec::user_present() {
-                Some("a person uses it")
-            } else if !crate::lease::exec::held().is_empty() {
-                Some("a lease holds the node")
-            } else if !built_ok {
-                Some("the prebuild failed")
-            } else {
-                None
-            };
+            use crate::lease::exec;
+            let why_not = super::prewarm::refusal(exec::writes_allowed(), exec::bench_box(), exec::user_present(), !exec::held().is_empty(), built_ok);
             let at = deployed.as_ref().map_or("-".to_string(), crate::lease::Pin::short);
             match why_not {
                 None => super::prewarm::start(self.conf.checkout.clone(), at, self.ctx.publish.clone(), self.ctx.machine.clone()),
@@ -643,7 +650,7 @@ impl Sync {
     }
 
     fn restart_or_refuse(self: &Arc<Self>, why: &str, out: &mut Vec<String>) {
-        match self.wm_restart(why) {
+        match self.wm_restart(why, wm_generation()) {
             Ok(l) => out.push(l),
             Err(e) => self.refuse(out, format!("sync: WM restart refused: {e}")),
         }
@@ -658,9 +665,10 @@ impl Sync {
     /// (`makepad_app_registry::machine::unsaved_work`, what apps publish) and while a lease shows
     /// on the WM ([`crate::lease::exec::on_the_wm`]; a headless one runs on through it). The wait
     /// is reported once; one waiter per node, which restarts the moment the node is clear.
-    fn wm_restart(self: &Arc<Self>, why: &str) -> Result<String, String> {
+    /// `asked`: the WM's restart generation when it was asked ([`wm_generation`]).
+    fn wm_restart(self: &Arc<Self>, why: &str, asked: u64) -> Result<String, String> {
         if restart_blockers().is_empty() {
-            match self.restart_wm_now(why) {
+            match self.restart_wm_now(why, asked) {
                 Ok(line) => return Ok(line),
                 Err(NotRestarted::Failed(e)) => return Err(e),
                 // a lease that started while the hub built: waited for like any other
@@ -689,7 +697,7 @@ impl Sync {
                     continue;
                 }
                 let _busy = me.busy.lock().unwrap();
-                match me.restart_wm_now(&format!("{why}, after the wait")) {
+                match me.restart_wm_now(&format!("{why}, after the wait"), asked) {
                     Ok(_) => break,
                     Err(NotRestarted::Blocked(list)) => me.event(Sev::Info, format!("sync: the WM restart ({why}) waits on: {list} (it started while the hub built)"), String::new()),
                     Err(NotRestarted::Failed(e)) => {
@@ -731,8 +739,9 @@ impl Sync {
         if auto_wm_restart(false, &stale).is_none() && crate::lease::caps::other_wire().is_none() {
             return;
         }
+        let asked = wm_generation();
         let _busy = self.busy.lock().unwrap();
-        if let Err(e) = self.wm_restart(why.trim()) {
+        if let Err(e) = self.wm_restart(why.trim(), asked) {
             self.event(Sev::Warn, format!("sync: WM restart refused: {e}"), String::new());
         }
     }
@@ -742,7 +751,20 @@ impl Sync {
     /// hub, the AI Hub) run in scopes of their own and outlive it; the marker lets a hub that
     /// does restart report it. Its last look at what the restart ends and the restart run while
     /// no lease starts here.
-    fn restart_wm_now(&self, why: &str) -> Result<String, NotRestarted> {
+    /// `asked`: the WM's restart generation when it was asked; a restart made since is the one
+    /// it asked for, and it skips ([`restart_once`]).
+    fn restart_wm_now(&self, why: &str, asked: u64) -> Result<String, NotRestarted> {
+        match restart_once(&WM_GENERATION, asked, || self.restart_wm(why))? {
+            Some(line) => Ok(line),
+            None => {
+                let skipped = format!("sync: the WM restart ({why}) skipped: the WM restarted since it was asked");
+                self.event(Sev::Info, skipped.clone(), String::new());
+                Ok(format!("{{\"wm_restart\":\"skipped\",\"why\":{}}}", json_str(&skipped)))
+            }
+        }
+    }
+
+    fn restart_wm(&self, why: &str) -> Result<String, NotRestarted> {
         let failed = NotRestarted::Failed;
         if !crate::lease::exec::writes_allowed() {
             return Err(failed(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine)));
@@ -764,12 +786,12 @@ impl Sync {
             // filed the WM's aichat as one, 11-06)
             crate::lease::exec::note_stopped_pids(&format!("by the WM restart ({why})"), super::jits::list().into_iter().filter(|j| wm_own(&j.app)).map(|j| j.pid).collect());
             self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
-            let st = makepad_remote::group::command("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| failed(format!("sudo: {e}")))?;
+            let st = makepad_remote::group::command(crate::os::tool("sudo")).args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| failed(format!("sudo: {e}")))?;
             if !st.status.success() {
                 let _ = std::fs::remove_file(Self::marker());
                 return Err(failed(format!("sudo -n systemctl restart {svc}: {}", proto::clean(String::from_utf8_lossy(&st.stderr).trim(), 300))));
             }
-            let active = makepad_remote::group::command("systemctl").args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            let active = makepad_remote::group::command(crate::os::tool("systemctl")).args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
             let _ = std::fs::remove_file(Self::marker());
             let line = format!("sync: WM restarted ({svc} {active})");
             self.event(if active == "active" { Sev::Info } else { Sev::Err }, line, String::new());
@@ -883,6 +905,29 @@ pub fn building_jit(pin: &crate::lease::Pin) -> bool {
 
 /// A WM restart is waiting on this node (`Sync::wm_restart`).
 static WM_RESTART_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The WM's restart generation: each restart this hub makes moves it on ([`restart_once`]).
+static WM_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn wm_generation() -> u64 {
+    WM_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Runs `restart` for an ask made at generation `asked` (a waiter's, an order's) unless the WM
+/// restarted since: then the restart it asked for was made, and it skips (None). A restart that
+/// went through moves the generation on; a refused or failed one does not. Called under the sync
+/// lock, so asks queued behind one another see each other's restart: a deferred waiter and an
+/// order that queued behind an apply restarted the WM 2 s apart, every session on the box ended
+/// twice (11-14).
+fn restart_once(generation: &std::sync::atomic::AtomicU64, asked: u64, restart: impl FnOnce() -> Result<String, NotRestarted>) -> Result<Option<String>, NotRestarted> {
+    use std::sync::atomic::Ordering::SeqCst;
+    if generation.load(SeqCst) != asked {
+        return Ok(None);
+    }
+    let line = restart()?;
+    generation.fetch_add(1, SeqCst);
+    Ok(Some(line))
+}
 
 /// Why a WM restart did not happen.
 enum NotRestarted {
@@ -1092,6 +1137,37 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deferred waiter and an order that queued behind an apply both asked for a WM restart at
+    /// one generation: whichever gets the sync lock first restarts, the other skips (one restart,
+    /// not two 2 s apart). An ask after it restarts again, and a failed restart moves nothing.
+    #[test]
+    fn a_waiter_and_a_queued_order_restart_the_wm_once() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+        let (generation, restarts, busy) = (&AtomicU64::new(7), &AtomicUsize::new(0), &Mutex::new(()));
+        let asked = generation.load(SeqCst);
+        let outcomes: Vec<Option<String>> = std::thread::scope(|s| {
+            let ask = |who: &'static str| s.spawn(move || {
+                let _busy = busy.lock().unwrap();
+                restart_once(generation, asked, || {
+                    restarts.fetch_add(1, SeqCst);
+                    Ok(format!("restarted for the {who}"))
+                }).ok().flatten()
+            });
+            let (waiter, order) = (ask("waiter"), ask("order"));
+            vec![waiter.join().unwrap(), order.join().unwrap()]
+        });
+        assert_eq!(restarts.load(SeqCst), 1, "two asks at one generation restarted the WM twice: {outcomes:?}");
+        assert_eq!(outcomes.iter().filter(|o| o.is_none()).count(), 1, "the second ask skips: {outcomes:?}");
+        assert_eq!(generation.load(SeqCst), 8);
+        // a new ask, after that restart, is one of its own
+        let again = restart_once(generation, generation.load(SeqCst), || Ok("again".into()));
+        assert!(matches!(again, Ok(Some(_))), "an ask after the restart restarts: {:?}", again.as_ref().err().map(|_| ()));
+        // a refused restart (blocked, failed) moves nothing: the ask's later try still restarts
+        let asked = generation.load(SeqCst);
+        assert!(restart_once(generation, asked, || Err(NotRestarted::Blocked("a screen lease".into()))).is_err());
+        assert!(matches!(restart_once(generation, asked, || Ok("after the wait".into())), Ok(Some(_))), "a blocked try kept the ask");
+    }
 
     /// An apply moves each repository its order names, makepad first, and the deployment's
     /// FLEET-REVISION.txt keeps every repository it holds, moved or not.

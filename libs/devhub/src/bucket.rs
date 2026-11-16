@@ -15,7 +15,8 @@
 //! more at once, and lost again it is no verdict on the landings, only a warn: the bucket takes the
 //! tip again at its next turn.
 //! The full bucket ([`full`]) runs every package's tests with no proof reused, once a day before
-//! the daily push review and on demand (`devhub bucket run full`): the tests bucket runs what the
+//! the daily push review, early on a quiet lease queue ([`Timing::quiet_queue`]) and on demand
+//! (`devhub bucket run full`): the tests bucket runs what the
 //! landings reach and takes passes as proofs, and a red no landing's reach caught stayed unseen
 //! (makepad-script's, 11-07). It reports; it gates nothing.
 //! `devhub bucket run <bucket>` starts a bucket's run at once, of the tip then ([`kick`]).
@@ -48,12 +49,26 @@ pub struct Timing {
     /// Once a day at this hour of the local clock, after a landing it has not checked: in place
     /// of `every`, `quiet` and `cap`.
     pub daily: Option<u32>,
+    /// Also once the lease queue stayed quiet this long (no lane's ask queued a minute,
+    /// [`crate::lease::sched::Sched::queue_busy_ms`]), [`QUIET_RUN_GAP_MS`] after its last start at
+    /// the soonest ([`quiet_queue_due`]).
+    pub quiet_queue: Option<Duration>,
+}
+
+/// The least time between a bucket's starts on a quiet queue ([`Timing::quiet_queue`]).
+const QUIET_RUN_GAP_MS: u64 = 12 * 3_600_000;
+
+/// Whether a bucket starts now on a quiet queue ([`Timing::quiet_queue`]): `busy`, when a lane's
+/// ask last queued a minute (None: no lease master to ask).
+fn quiet_queue_due(t: &Timing, last_start: u64, now: u64, busy: Option<u64>) -> bool {
+    let (Some(quiet), Some(busy)) = (t.quiet_queue, busy) else { return false };
+    now >= last_start.saturating_add(QUIET_RUN_GAP_MS) && now.saturating_sub(busy) >= quiet.as_millis() as u64
 }
 
 impl Timing {
     /// Due at once after the last landing, waiting `quiet` for the tip to settle, at most `cap`.
     pub fn after(quiet: Duration, cap: Duration) -> Timing {
-        Timing { every: Duration::ZERO, quiet, cap, daily: None }
+        Timing { every: Duration::ZERO, quiet, cap, daily: None, quiet_queue: None }
     }
 
     /// The fast bucket's: pipelined, a run of the newest tip at the first landing it has not
@@ -146,6 +161,7 @@ fn gate_needs() -> String {
     }
 }
 static LEDGER: Mutex<()> = Mutex::new(());
+static BISECTS: Mutex<()> = Mutex::new(());
 /// The pool's slots, one per tests shard its boxes take ([`pool_shape`]), passed shard by shard: a
 /// run's shard takes one as its lease is asked and frees it as its lease ends, so the next run
 /// starts on the first box that frees. The shards in flight, of every run, are never more than the
@@ -750,6 +766,44 @@ fn landings(repo: &Path, base: &Pair, tip: &Pair, entries: &[Entry]) -> Result<V
     }).cloned().collect())
 }
 
+/// A tip's first-parent chain, oldest first, including `from` at position zero (11-15).
+fn bisect_chain(dir: &Path, from: &str, tip: &str) -> Result<Vec<String>, String> {
+    if from == tip { return Ok(vec![from.to_string()]); }
+    crate::gitread::with(dir, |p, repo| {
+        let base = crate::gitread::resolve(p, repo, from).ok_or_else(|| format!("bisect: cannot read {from}"))?;
+        let tip = crate::gitread::resolve(p, repo, tip).ok_or_else(|| format!("bisect: cannot read {tip}"))?;
+        let mut chain = Vec::new();
+        for c in repo.first_parents(tip) {
+            let (oid, _) = c.map_err(|e| format!("bisect first-parent chain: {e}"))?;
+            chain.push(oid.to_hex());
+            if oid == base { chain.reverse(); return Ok(chain); }
+        }
+        Err(format!("bisect: {from} is not on {tip}'s first-parent chain"))
+    }).ok_or_else(|| format!("bisect: cannot read repository {}", dir.display()))?
+}
+
+/// Serial landings grow along both chains; an unchanged side stays at its pre's position.
+/// Record times and hand-in numbers do not order the commits they landed (11-15).
+fn order_landings(work: &[String], main: &[String], entries: &[Entry]) -> (Vec<Entry>, Vec<String>) {
+    let positions = |chain: &[String]| chain.iter().enumerate().map(|(i, sha)| (sha.clone(), i)).collect::<HashMap<_, _>>();
+    let (work, main) = (positions(work), positions(main));
+    let (mut ordered, mut left_out) = (Vec::new(), Vec::new());
+    for e in entries {
+        let (Some(pre), Some(landed)) = (entry_pair(&e.pre), entry_pair(&e.landed)) else {
+            left_out.push(format!("#{} has no commit pair: left out", e.id));
+            continue;
+        };
+        if pre == landed { continue; }
+        let w = work.get(if pre.work == landed.work { &pre.work } else { &landed.work });
+        let m = main.get(if pre.main == landed.main { &pre.main } else { &landed.main });
+        if w.is_none() { left_out.push(format!("#{} is not on work's first-parent chain: left out", e.id)); }
+        if m.is_none() { left_out.push(format!("#{} is not on main's first-parent chain: left out", e.id)); }
+        if let (Some(w), Some(m)) = (w, m) { ordered.push(((*w, *m), e.clone())); }
+    }
+    ordered.sort_by_key(|(at, _)| *at);
+    (ordered.into_iter().map(|(_, e)| e).collect(), left_out)
+}
+
 fn attribute(repo: &Path, entries: &[Entry], failing: &[String]) -> (Vec<Vec<String>>, bool) {
     let changed = changed_by(repo, entries, failing);
     let mut attributed = vec![Vec::new(); entries.len()];
@@ -829,13 +883,13 @@ pub fn unit_key(unit: &str) -> String {
 /// ends at a tab: a present's summary line carries the error as a tab-separated record whose next
 /// field changes from run to run, and each run after a break named the landing of its own bucket
 /// as the breaker (a missing field broke Fab's build at #1926, then #1927-#1931 were named, 11-06).
-fn error_key(line: &str) -> Option<String> {
+pub(crate) fn error_key(line: &str) -> Option<String> {
     let (path, said) = location(line)?;
     Some(format!("{}: {}", path.rsplit('/').next().unwrap_or(path), message(said)))
 }
 
 /// rustc's `<path>:<line>:<col>: <message>`, as its path and message.
-fn location(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn location(line: &str) -> Option<(&str, &str)> {
     let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
     let mut from = 0;
     while let Some(c) = line[from..].find(':') {
@@ -1044,79 +1098,20 @@ fn named_tests(row: &Value, key: &str) -> Vec<(String, Vec<String>)> {
         .filter(|(_, tests)| !tests.is_empty()).collect()
 }
 
-/// The new warnings a bucket row keeps per unit (`warn_lines`), as rustc said them.
-const WARN_LINES_KEPT: usize = 5;
-
-/// A run's units with warnings of their own (`GATEUNIT warn <unit>`, after its warning lines), by
-/// package: each warning's key and its line, and the units it took as proven, not compiled: such a
-/// run says nothing of their warnings.
-fn warn_lines(text: &str) -> (BTreeMap<String, Vec<(String, String)>>, BTreeSet<String>) {
-    let (mut warned, mut proven, mut own) = (BTreeMap::new(), BTreeSet::new(), Vec::new());
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("GATEUNIT ") {
-            match rest.split_once(' ') {
-                Some(("warn", unit)) => {
-                    let mut w: Vec<(String, String)> = std::mem::take(&mut own);
-                    w.sort();
-                    w.dedup_by(|a, b| a.0 == b.0);
-                    warned.insert(unit_key(unit), w);
-                }
-                Some(("proven", unit)) => { proven.insert(unit_key(unit)); }
-                _ => {}
-            }
-            own.clear();
-        } else if line.starts_with("STEP ") {
-            own.clear();
-        } else if let Some(key) = error_key(line) {
-            own.push((key, line.to_string()));
-        }
-    }
-    (warned, proven)
+/// A run's proven unit keys, by package, read from `GATEUNIT proven <unit>` lines.
+fn proven_lines(text: &str) -> BTreeSet<String> {
+    text.lines().filter_map(|l| l.strip_prefix("GATEUNIT proven ")).map(unit_key).collect()
 }
 
 /// The command each unit of a run said shows it alone (`GATEREPRO <unit> :: <command>`: a unit
-/// that warned or failed), by package, for the lane that owns it to run: a unit's name is no
-/// command (the members package's `tests` unit took the warnings of Fab's tests, and its own
-/// `cargo check --tests` compiled none of them, 11-06).
+/// that failed), by package, for the lane that owns it to run: a unit's name is no command.
 fn repro_lines(text: &str) -> BTreeMap<String, String> {
     text.lines().filter_map(|l| l.strip_prefix("GATEREPRO ")?.split_once(" :: ")).map(|(unit, cmd)| (unit_key(unit), cmd.trim().to_string())).collect()
 }
 
-/// A unit's command, as `bucket status` and the bucket's WARN and FAILED lines say it.
+/// A unit's command, as `bucket status` and the bucket's FAILED lines say it.
 pub fn repro_said(unit: &str, cmd: &str) -> String {
     format!("{unit}: shown alone by `{cmd}`")
-}
-
-/// Unit `key`'s warnings `now` that it did not have at the bucket's last look at it (a run that
-/// took it as proven did not look), or None when no row says what it had: its first look, or a
-/// look from before rows kept warnings. Such a warning is of unknown origin, no landing's: a unit
-/// that warned for weeks would name whoever changed its inputs next. `rows`: newest first.
-fn new_warnings(rows: &[Value], key: &str, now: &[String]) -> Option<Vec<String>> {
-    let lists = |list: &str, row: &Value| row.get(list).and_then(Value::as_arr).is_some_and(|l| l.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
-    let of = |map: Option<&Value>| match map {
-        Some(Value::Obj(m)) => m.iter().find(|(u, _)| unit_key(u) == key).map(|(_, w)| w.as_arr().unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
-        _ => None,
-    };
-    for row in rows {
-        let before = if row.get("warned").is_none() {
-            if lists("passed", row) || lists("failing", row) { return None; }
-            continue;
-        } else if let Some(warned) = of(row.get("warned")) {
-            warned
-        } else if lists("proven", row) {
-            continue;
-        } else if lists("passed", row) {
-            Vec::new()
-        } else if let Some(errors) = of(row.get("errors")) {
-            errors
-        } else if lists("failing", row) {
-            return None;
-        } else {
-            continue;
-        };
-        return Some(now.iter().filter(|w| !before.contains(w)).cloned().collect());
-    }
-    None
 }
 
 /// The failing units already broken at this bucket's last look at them, with who broke them: a
@@ -1175,33 +1170,14 @@ fn origin(rows: &[Value], key: &str) -> String {
 /// A failure older than what the ledger can name a landing for.
 pub const ORIGIN_UNKNOWN: &str = "origin unknown";
 
-/// A new warning in a file no landing of the bucket's range touched.
-pub const FROM_BEFORE: &str = "from before this range";
-
-/// Who brought a unit's new warnings, by their `files` (rustc's paths: the tree's own, or under
-/// the node's tree): the landings of the range whose change touched one (`touched`, each one's
-/// files; None: its diff could not be read, so it is not cleared), else none of them, and the row
-/// says the warnings are from before this range with the commit that `last` touched each file.
-/// A landing that changed the unit's other inputs touched no warning: every landing of a range
-/// was named for an unused function in a Fab test file none of them changed (#2239 and #2240,
-/// then #2242-#2244, for FABPRINTERS' simulated_profiles.rs, 11-06).
-fn warn_blame(files: &[&str], entries: &[Entry], touched: &[Option<Vec<String>>], last: &dyn Fn(&str) -> Option<String>) -> String {
-    let who: Vec<String> = entries.iter().zip(touched).filter(|(_, t)| t.as_ref().is_none_or(|t| t.iter().any(|p| files.iter().any(|f| touches(f, p)))))
-        .map(|(e, _)| format!("{} ({}) #{}", e.label(), e.agent, e.id)).collect();
-    if !who.is_empty() { return who.join(", "); }
-    let mut commits: Vec<String> = Vec::new();
-    for c in files.iter().filter_map(|f| last(f)) {
-        if !commits.contains(&c) { commits.push(c); }
-    }
-    if commits.is_empty() { FROM_BEFORE.to_string() } else { format!("{FROM_BEFORE} (last touched by {})", commits.join(", ")) }
-}
-
 /// The files landing `e` changed, the nested commercial checkout's under `apps/commercial/`.
-/// None: a side's commits are not in the repository.
+/// None: a moved side's commits are not in the repository.
 fn landing_files(repo: &Path, e: &Entry) -> Option<Vec<String>> {
     let (pre, landed) = (entry_pair(&e.pre)?, entry_pair(&e.landed)?);
-    let mut files = crate::gitread::files_differing(repo, &pre.work, &landed.work)?;
-    files.extend(crate::gitread::files_differing(&repo.join("apps/commercial"), &pre.main, &landed.main)?.into_iter().map(|f| format!("apps/commercial/{f}")));
+    let mut files = if pre.work == landed.work { Vec::new() } else { crate::gitread::files_differing(repo, &pre.work, &landed.work)? };
+    if pre.main != landed.main {
+        files.extend(crate::gitread::files_differing(&repo.join("apps/commercial"), &pre.main, &landed.main)?.into_iter().map(|f| format!("apps/commercial/{f}")));
+    }
     Some(files)
 }
 
@@ -1218,6 +1194,43 @@ fn last_touch(repo: &Path, at: &Pair, file: &str) -> Option<String> {
     })
 }
 
+/// The source lines the statics step names (restart_statics.py: a static with no reset and no
+/// reason, `<key> (<path>:<line>)`), as the bucket's tip has them, with the raw failing line.
+fn statics_lines(text: &str) -> Vec<(String, usize, String)> {
+    text.lines().filter_map(|l| {
+        let rest = l.strip_prefix("no reset and no reason: ")?;
+        let (path, n) = rest.rsplit_once(" (")?.1.strip_suffix(')')?.rsplit_once(':')?;
+        Some((path.to_string(), n.parse().ok()?, l.to_string()))
+    }).collect()
+}
+
+/// The text of `path` at `at`, the nested commercial checkout's under `apps/commercial/`.
+fn file_text(repo: &Path, at: &Pair, path: &str) -> Option<String> {
+    let (dir, commit, rel) = match path.strip_prefix("apps/commercial/") {
+        Some(rel) => (repo.join("apps/commercial"), at.main.as_str(), rel),
+        None => (repo.to_path_buf(), at.work.as_str(), path),
+    };
+    let oid = crate::gitread::entries_at(&dir, commit, &[rel])?.pop().filter(|o| !o.is_empty())?;
+    crate::gitread::blob(&dir, &oid).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Of `since` (oldest first), the landing whose diff added `line`, the text of `path`'s line `n`
+/// at `tip`: the newest one that lacked it before and had it after. None when none did (an older
+/// line a landing broke otherwise, or one from before the range).
+fn line_blame<'a>(since: &'a [Entry], tip: &Pair, path: &str, n: usize, text: &dyn Fn(&Pair, &str) -> Option<String>) -> Option<&'a Entry> {
+    let line = text(tip, path)?.lines().nth(n.checked_sub(1)?)?.trim().to_string();
+    if line.is_empty() { return None; }
+    let has = |at: &Pair| text(at, path).is_some_and(|t| t.lines().any(|l| l.trim() == line));
+    since.iter().rev().find(|e| entry_pair(&e.landed).is_some_and(|at| has(&at)) && entry_pair(&e.pre).is_some_and(|at| !has(&at)))
+}
+
+/// The statics step's who (`<landing> (it added <file>:<line>)`, comma-separated) less the landings
+/// `last`, its who at its previous red run, named already (`#12` is not `#123`).
+fn statics_new(who: &str, last: &str) -> String {
+    let named = |w: &str| last.match_indices(w).any(|(at, _)| !last[at + w.len()..].starts_with(|c: char| c.is_ascii_digit()));
+    who.split(", ").filter(|w| !named(w.split(" (it added ").next().unwrap_or(w))).collect::<Vec<_>>().join(", ")
+}
+
 /// Whether `file`, as rustc or the JIT names it (the tree's path, or one under a node's tree), is
 /// `p`, a file of the tree.
 fn touches(file: &str, p: &str) -> bool {
@@ -1227,15 +1240,15 @@ fn touches(file: &str, p: &str) -> bool {
 /// Each failing unit's error files, as its errors name them, in the unit's own lines as
 /// [`unit_lines`] reads them. A present's summary names a file after the text before it: its path
 /// is the last word. A warning's file is one only for a unit a warning turns red (a JIT check of a
-/// package's program build, a depcheck: zero warnings) when no error names a file; a present's or
-/// a test's warning is not why it failed. A red on one unused method was named for all 8 landings
-/// of its range, the one that added it among them (11-12).
+/// package's program build, a depcheck, a test target's check, a wasm check: zero warnings) when
+/// no error names a file; a present's or a test run's warning is not why it failed. A red on one
+/// unused method was named for all 8 landings of its range, the one that added it among them (11-12).
 fn error_files(text: &str) -> BTreeMap<String, Vec<String>> {
     let (mut files, mut own, mut warned) = (BTreeMap::new(), Vec::new(), Vec::new());
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("GATEUNIT ") {
             if let Some(("fail", unit)) = rest.split_once(' ') {
-                let warns_red = unit.starts_with("check ") || unit.starts_with("cargo ");
+                let warns_red = ["check ", "cargo ", "tests ", "wasm "].iter().any(|p| unit.starts_with(p));
                 let mut f = if own.is_empty() && warns_red { std::mem::take(&mut warned) } else { std::mem::take(&mut own) };
                 f.sort();
                 f.dedup();
@@ -1284,6 +1297,253 @@ fn last_pass(rows: &[Value], key: &str) -> Option<Pair> {
         .and_then(|row| row.get("tip")).and_then(read_tip).map(|t| t.pair())
 }
 
+/// A new red whose attribution names nobody or several landings: one search since its last
+/// pass, kept across master restarts (11-15).
+#[derive(Clone)]
+pub(crate) struct Bisect {
+    bucket: String, unit: String, key: String, from: Pin, tip: Pin, line: String, log: String,
+}
+
+impl Bisect {
+    fn value(&self, state: &str, extra: Vec<(&str, Value)>) -> Value {
+        let mut fields = vec![("bucket", s(&self.bucket)), ("key", s(&self.key)), ("unit", s(&self.unit)),
+            ("from", tip_value(&self.from)), ("tip", tip_value(&self.tip)), ("line", s(&self.line)), ("log", s(&self.log)), ("state", s(state))];
+        fields.extend(extra);
+        obj(fields)
+    }
+
+    fn read(v: &Value) -> Option<Bisect> {
+        let text = |k| v.get(k).and_then(Value::as_str).map(str::to_string);
+        Some(Bisect { bucket: text("bucket")?, unit: text("unit")?, key: text("key")?, from: read_tip(v.get("from")?)?,
+            tip: read_tip(v.get("tip")?)?, line: text("line")?, log: text("log")? })
+    }
+}
+
+fn named_ids(who: &str) -> BTreeSet<u64> {
+    who.split('#').skip(1).filter_map(|rest| {
+        let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+        rest[..n].parse().ok()
+    }).collect()
+}
+
+/// The pair's pin with the other repositories the red run pinned (11-15).
+fn bisect_pin(pair: &Pair, tip: &Pin) -> Pin {
+    let mut pin = pin_of(pair);
+    for (name, sha) in &tip.nested { pin.nested.entry(name.clone()).or_insert_with(|| sha.clone()); }
+    pin
+}
+
+fn bisect_key(v: &Value) -> Option<(&str, &str, &str)> {
+    Some((v.get("bucket")?.as_str()?, v.get("key")?.as_str()?, v.get("from")?.get("work")?.as_str()?))
+}
+
+// The callers hold BISECTS across the read and write (11-15).
+fn bisect_rows(home: &Path) -> std::io::Result<Vec<Value>> {
+    let file = match std::fs::File::open(home.join("bisects.jsonl")) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut rows = Vec::new();
+    for line in BufReader::new(file).lines() {
+        if let Ok(v) = makepad_strict_json::parse(line?.as_bytes()) { rows.push(v); }
+    }
+    Ok(rows)
+}
+
+fn append_bisect(home: &Path, row: Value) -> std::io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(home.join("bisects.jsonl"))?;
+    let mut line = row.to_json();
+    line.push('\n');
+    file.write_all(line.as_bytes())
+}
+
+fn queue_bisect(home: &Path, job: &Bisect) -> std::io::Result<bool> {
+    let _lock = BISECTS.lock().unwrap();
+    let key = (job.bucket.as_str(), job.key.as_str(), job.from.makepad.as_str());
+    if bisect_rows(home)?.iter().any(|v| bisect_key(v) == Some(key)) { return Ok(false); }
+    append_bisect(home, job.value("queued", Vec::new()))?;
+    Ok(true)
+}
+
+fn pending_bisects(home: &Path, name: &str) -> std::io::Result<Vec<Bisect>> {
+    let _lock = BISECTS.lock().unwrap();
+    let rows = bisect_rows(home)?;
+    let done: BTreeSet<_> = rows.iter().filter(|v| v.get("state").and_then(Value::as_str) == Some("done")).filter_map(bisect_key).collect();
+    let mut seen = BTreeSet::new();
+    Ok(rows.iter().filter(|v| v.get("bucket").and_then(Value::as_str) == Some(name) && v.get("state").and_then(Value::as_str) == Some("queued"))
+        .filter(|v| bisect_key(*v).is_some_and(|key| !done.contains(&key) && seen.insert(key))).filter_map(Bisect::read).collect())
+}
+
+fn done_bisect(home: &Path, job: &Bisect, extra: Vec<(&str, Value)>) -> std::io::Result<()> {
+    let _lock = BISECTS.lock().unwrap();
+    append_bisect(home, job.value("done", extra))
+}
+
+/// The last candidate is red already; only the earlier ones need probing (11-15).
+fn first_red(n: usize, probe: &mut dyn FnMut(usize) -> Option<bool>) -> Result<(usize, Vec<(usize, bool)>), (usize, Vec<(usize, bool)>)> {
+    assert!(n > 0, "bisect needs a red landing");
+    let (mut lo, mut hi, mut probes) = (0, n - 1, Vec::new());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let Some(red) = probe(mid) else { return Err((mid, probes)) };
+        probes.push((mid, red));
+        if red { hi = mid; } else { lo = mid + 1; }
+    }
+    Ok((lo, probes))
+}
+
+/// A unit the gate skipped as proven at the probe's inputs passed there: a landing that did not
+/// touch it writes no GATEUNIT line for it, only the proof (#5223's probe had no answer, 11-15).
+fn probe_says(key: &str, outcome: &Outcome, text: &str) -> Option<bool> {
+    if outcome.no_verdict.is_some() { return None; }
+    if outcome.failing.iter().any(|u| unit_key(u) == key) { return Some(true); }
+    if outcome.ok || unit_lines(last_run(text)).1.contains(key) || proven_units(text).contains(key) { return Some(false); }
+    None
+}
+
+/// The units a log says were proven at its inputs, by package: gateproof's `GATEPROOF proven <unit>
+/// (<source>)` lines, written once above the first run, so they hold for a rerun too.
+fn proven_units(text: &str) -> BTreeSet<String> {
+    text.lines().filter_map(|l| l.strip_prefix("GATEPROOF proven ")?.split_once(" (")).map(|(unit, _)| unit_key(unit)).collect()
+}
+
+/// A cancelled probe has no verdict, even if its partial log names a red or green unit.
+fn probe_verdict(status: Result<Option<i32>, String>, text: &str, log: &Path, rev: &str) -> Outcome {
+    if matches!(&status, Ok(Some(code)) if *code == crate::lease::client::CANCELLED_EXIT) {
+        return Outcome { log: log.display().to_string(), ..no_verdict(format!("probe {rev} cancelled before it completed ({})", log.display())) };
+    }
+    verdict(status, text, log)
+}
+
+/// Files in the red's rustc locations and restart_statics.py's `(path:row)` locations (11-15).
+fn bisect_files(text: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for line in text.lines() {
+        if let Some((path, _)) = location(line) { files.push(path.split_whitespace().last().unwrap_or(path).to_string()); }
+        for rest in line.split('(').skip(1) {
+            let Some((path, row)) = rest.split_once(')').and_then(|(at, _)| at.rsplit_once(':')) else { continue };
+            if !path.is_empty() && !row.is_empty() && row.bytes().all(|b| b.is_ascii_digit()) { files.push(path.to_string()); }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Only a proven landing gets a lane note; doubtful attributions go to main (11-15).
+fn bisect_result(home: &Path, job: &Bisect, emit: &dyn Fn(Sev, String, String), landing: Option<&Entry>, probes: Vec<Value>, line: String) -> Result<(), String> {
+    let mut extra = vec![("result", s(&line)), ("probes", Value::Arr(probes))];
+    if let Some(e) = landing { extra.push(("landing", Value::Int(e.id as i64))); }
+    done_bisect(home, job, extra).map_err(|e| format!("bisect ledger: {e}"))?;
+    emit(if landing.is_some() { Sev::Err } else { Sev::Warn }, line.clone(), String::new());
+    for agent in landing.map(|e| e.agent.as_str()).into_iter().filter(|a| *a != "main").chain(std::iter::once("main")) {
+        if let Err(e) = crate::notes::leave(home, agent, &line) { eprintln!("devhub bucket {}: agent notes: {e}", job.bucket); }
+    }
+    Ok(())
+}
+
+/// Retire a failed search too; a ledger failure must not hide its reason from the event feed.
+fn bisect_job(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String, String), probe: &Run, job: Bisect) {
+    let failed = job.clone();
+    if let Err(e) = run_bisect(repo, home, store, emit, probe, job) {
+        let line = format!("bucket {} {}: bisect unresolved: {e}", failed.bucket, tip_short(&failed.tip));
+        if let Err(record) = bisect_result(home, &failed, emit, None, Vec::new(), line.clone()) {
+            emit(Sev::Warn, format!("{line}; {record}"), String::new());
+        }
+    }
+}
+
+/// Distinct probe logs keep the start last, where the lease runner reads it.
+fn bisect_log(logs: &Path, bucket: &str, started: u64, i: Option<usize>) -> PathBuf {
+    let label = i.map_or_else(|| "from".to_string(), |i| i.to_string());
+    logs.join(format!("{bucket}-{label}-{started}.log"))
+}
+
+fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String, String), probe: &Run, job: Bisect) -> Result<(), String> {
+    let history = store.history("land")?.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed).collect::<Vec<_>>();
+    let (from, tip) = (job.from.pair(), job.tip.pair());
+    let work = bisect_chain(repo, &from.work, &tip.work)?;
+    let main = bisect_chain(&repo.join("apps/commercial"), &from.main, &tip.main)?;
+    let (candidates, left_out) = order_landings(&work, &main, &landings(repo, &from, &tip, &history)?);
+    let heading = format!("bucket {} {}: bisect", job.bucket, tip_short(&job.tip));
+    let finish = |landing, probes, mut line: String| {
+        for why in &left_out { line.push_str(&format!("; {why}")); }
+        bisect_result(home, &job, emit, landing, probes, line)
+    };
+    if candidates.is_empty() { return finish(None, Vec::new(), format!("{heading} of {}: no landings on its first-parent chains", job.unit)); }
+    let logs = home.join("bucket-logs/bisect");
+    std::fs::create_dir_all(&logs).map_err(|e| format!("bisect logs: {e}"))?;
+    let started = wall_ms();
+    let log_at = |i: Option<usize>| bisect_log(&logs, &job.bucket, started, i);
+    let pin_at = |i: usize| bisect_pin(&entry_pair(&candidates[i].landed).expect("landed pair"), &job.tip);
+    let (mut why, mut probes, mut said) = (String::new(), Vec::new(), Vec::new());
+    let mut check = |i: Option<usize>| {
+        let pin = i.map_or_else(|| job.from.clone(), pin_at);
+        // against the last pass, not the candidate before it: the gate runs only what its base
+        // changed, and a candidate whose own landing missed the unit ran nothing for it (11-15)
+        let log = log_at(i);
+        let outcome = probe(Some(&job.from), &pin, &log);
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let answer = probe_says(&job.key, &outcome, &text);
+        if answer.is_none() {
+            let stopped = if outcome.summary.is_empty() { outcome.failing.join(", ") } else { outcome.summary.clone() };
+            why = outcome.no_verdict.clone().unwrap_or_else(|| format!("no verdict for {}{}", job.unit, if stopped.is_empty() { String::new() } else { format!("; {stopped}") }));
+        }
+        let mut fields = vec![("tip", tip_value(&pin)), ("red", answer.map_or(Value::Null, Value::Bool)), ("log", s(log.display().to_string()))];
+        if let Some(i) = i { fields.push(("id", Value::Int(candidates[i].id as i64))); } else { fields.push(("base", Value::Bool(true))); }
+        if answer.is_none() { fields.push(("why", s(&why))); }
+        probes.push(obj(fields));
+        let at = i.map_or_else(|| format!("last pass {}", tip_short(&job.from)), |i| format!("#{}", candidates[i].id));
+        said.push(format!("{at} {}", match answer { Some(true) => "red", Some(false) => "green", None => "no answer" }));
+        answer
+    };
+    // Leaving a landing out can leave the last candidate short of the known red tip (11-15).
+    let last = candidates.len() - 1;
+    if pin_at(last).pair() != tip {
+        match check(Some(last)) {
+            Some(true) => {}
+            Some(false) => return finish(None, probes, format!("{heading} of {}: attribution doubtful: last candidate #{} is green; log {}", job.unit, candidates[last].id, log_at(Some(last)).display())),
+            None => return finish(None, probes, format!("{heading} of {} stopped at #{}: {why}; log {}", job.unit, candidates[last].id, log_at(Some(last)).display())),
+        }
+    }
+    let i = match first_red(candidates.len(), &mut |i| check(Some(i))) {
+        Ok((i, _)) => i,
+        Err((i, _)) => {
+            let id = candidates[i].id;
+            return finish(None, probes, format!("{heading} of {} stopped at #{id}: no answer: {why}; log {}", job.unit, log_at(Some(i)).display()));
+        }
+    };
+    // A step's last pass only omitted its failure; prove the base before naming candidate zero.
+    // A unit's last pass explicitly listed it passed and remains a green proof (11-15).
+    if i == 0 && !is_unit(&job.key) {
+        match check(None) {
+            Some(false) => {}
+            answer => {
+                let result = if answer == Some(true) { format!("red at its last pass {} already; no landing of this range broke it", tip_short(&job.from)) }
+                    else { format!("attribution doubtful: its last pass {} did not answer: {why}", tip_short(&job.from)) };
+                return finish(None, probes, format!("{heading} of {}: {result}; log {}", job.unit, log_at(None).display()));
+            }
+        }
+    }
+    let e = &candidates[i];
+    let log = if probes.iter().any(|p| p.get("id").and_then(Value::as_u64) == Some(e.id)) { log_at(Some(i)).display().to_string() } else { job.log.clone() };
+    if SOURCE_STEPS.contains(&job.key.as_str()) {
+        let files = bisect_files(&job.line);
+        let touched = landing_files(repo, e);
+        if !touched.as_ref().is_some_and(|t| t.iter().any(|p| files.iter().any(|f| touches(f, p)))) {
+            let reason = if files.is_empty() { "changed none of the reported files (the red line names no file)".to_string() }
+                else if touched.is_none() { format!("could not read its diff for {}", files.join(", ")) }
+                else { format!("changed none of {}", files.join(", ")) };
+            return finish(None, probes, format!("{heading} of {}: attribution doubtful: #{} ({}) {reason}; log {log}", job.unit, e.id, e.label()));
+        }
+    }
+    let said = said.join(", ");
+    finish(Some(e), probes, format!("{heading}: #{} {} ({}) lane {} turned {} red: {}; first red of {} landings since it last passed (probes: {said}); log {log}",
+        e.id, e.label(), e.agent, e.branch, job.unit, crate::proto::clean(&job.line, 300), candidates.len()))
+}
+
 /// Who broke a failing unit whose errors sit in `files`: of `since`, the landings since the unit
 /// last passed, each one whose change touched one of those files (`touched`, each landing's
 /// files; None: its diff could not be read). Each is named with the commit of it that changed the
@@ -1307,6 +1567,12 @@ fn file_blame(files: &[String], since: &[Entry], touched: &[Option<&[String]>], 
 pub fn still_since(who: &str) -> String {
     if who.starts_with(ORIGIN_UNKNOWN) || who.starts_with(BY_TEST) { who.to_string() } else { format!("since {who}") }
 }
+
+/// The fast bucket's statics step (land_gate.sh join_statics: restart_statics.py).
+const STATICS_STEP: &str = "statics";
+
+/// Source failures need a matching file in the named landing's own diff (11-15).
+const SOURCE_STEPS: [&str; 3] = [STATICS_STEP, "private", "rustfmt"];
 
 /// The buckets whose next run looks again at what failed (land_gate.sh's GATE_RETRY). CI needs no
 /// telling: a shard with no proof at its inputs runs; prebuild lists its legs under each new JIT;
@@ -1398,7 +1664,10 @@ fn retry_env(rows: &[Value]) -> String {
 }
 
 /// `devhub bucket`'s lines: what each bucket is at now (`{"now":..}`: running or queued since when,
-/// what it waits for), what each still owes a pass, then the last runs, newest first.
+/// what it waits for), what each still owes a pass (`stale`: those a later run of another bucket
+/// passed), when each bucket's last run ended and whether it passed (`last_runs`), then the last
+/// runs, newest first. The full bucket's red of a unit the tests bucket passed hours later read as
+/// a current break, and a bucket's red a day old as today's (11-16).
 pub fn status(home: &Path) -> Vec<String> {
     let mut out: Vec<String> = BOARD.now_lines(home, wall_ms()).iter().map(|l| obj(vec![("now", s(l))]).to_json()).collect();
     // each running shard's unit far past its measure, with its box: an oversubscribed box beside it
@@ -1407,13 +1676,35 @@ pub fn status(home: &Path) -> Vec<String> {
     }
     // a run that never got its verdict and still holds its shards' JITs, a day on
     out.extend(stale_holds(home, wall_ms()).iter().map(|l| obj(vec![("now", s(l))]).to_json()));
+    let rows: Vec<Value> = ledger(home, 2_000).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+    let bucket = |r: &Value| r.get("bucket").and_then(Value::as_str).unwrap_or("").to_string();
+    let started = |r: &Value| r.get("started_ms").and_then(Value::as_u64).unwrap_or(0);
     for name in RERUNS.into_iter().chain([FULL]) {
-        let still = still_failing(&rows_of(home, name));
+        let still = still_failing(&rows.iter().filter(|r| bucket(r) == name).cloned().collect::<Vec<_>>());
         if still.is_empty() { continue; }
+        // a red that a later run of another bucket passed (the same unit: the tests bucket's run of
+        // a package after the full bucket's): stale, with the first such run
+        let stale: Vec<(String, Value)> = still.values().filter_map(|(unit, _, log)| {
+            let failed = log_started(Path::new(log))?;
+            let key = unit_key(unit);
+            let passed = rows.iter().filter(|r| bucket(r) != name && started(r) > failed)
+                .filter(|r| r.get("passed").and_then(Value::as_arr).is_some_and(|p| p.iter().any(|k| k.as_str() == Some(key.as_str()))))
+                .min_by_key(|r| started(r))?;
+            Some((unit.clone(), obj(vec![("bucket", s(&bucket(passed))), ("started_ms", Value::Int(started(passed) as i64))])))
+        }).collect();
         // and where each failed last: a green kept log beside a red bucket read as a miscount (11-05)
-        out.push(obj(vec![("still_failing", s(name)), ("units", Value::Obj(still.values().map(|(unit, who, _)| (unit.clone(), s(who))).collect())),
-            ("logs", Value::Obj(still.into_values().map(|(unit, _, log)| (unit, s(&log))).collect()))]).to_json());
+        let mut line = vec![("still_failing", s(name)), ("units", Value::Obj(still.values().map(|(unit, who, _)| (unit.clone(), s(who))).collect())),
+            ("logs", Value::Obj(still.into_values().map(|(unit, _, log)| (unit, s(&log))).collect()))];
+        if !stale.is_empty() { line.push(("stale", Value::Obj(stale))); }
+        out.push(obj(line).to_json());
     }
+    // each bucket's last run: when it ended, and whether it passed
+    let last: Vec<(String, Value)> = KICKED.into_iter().filter_map(|name| {
+        let r = rows.iter().find(|r| bucket(r) == name)?;
+        let ended = r.get("ended_ms").and_then(Value::as_u64).unwrap_or_else(|| started(r));
+        Some((name.to_string(), obj(vec![("ended_ms", Value::Int(ended as i64)), ("ok", Value::Bool(r.get("ok").and_then(Value::as_bool) == Some(true)))])))
+    }).collect();
+    if !last.is_empty() { out.push(obj(vec![("last_runs", Value::Obj(last))]).to_json()); }
     out.extend(ledger(home, 10));
     out
 }
@@ -1540,7 +1831,7 @@ fn finish_run(log: &Path, result: Result<(), JudgeError>) -> Result<(), JudgeErr
 /// for the units they changed, a ledger row and a feed line (`emit`). Err: no verdict.
 #[allow(clippy::too_many_arguments)]
 fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev, String, String), started: u64, base: Option<Pin>, tip: &Pin,
-    run: impl FnOnce(Option<&Pin>) -> Result<Outcome, String>) -> Result<(), JudgeError> {
+    bisect: &dyn Fn(Bisect), run: impl FnOnce(Option<&Pin>) -> Result<Outcome, String>) -> Result<(), JudgeError> {
     let history = store.history("land")?.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed).collect::<Vec<_>>();
     let entries = || history.clone();
     let base = base.or_else(|| {
@@ -1571,7 +1862,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     let text = std::fs::read_to_string(&outcome.log).unwrap_or_default();
     let (errors, passed) = unit_lines(last_run(&text));
     let (tests_failed, ran_ok) = test_lines(last_run(&text));
-    let (warned, proven) = warn_lines(last_run(&text));
+    let proven = proven_lines(last_run(&text));
     let repro = repro_lines(last_run(&text));
     let secs = unit_secs(last_run(&text));
     let mb = unit_mb(last_run(&text));
@@ -1593,7 +1884,23 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     for step in blame.iter().filter(|u| !is_unit(u) && !own.is_empty()) { located.entry(step.clone()).or_insert_with(|| own.clone()); }
     let (mut since, mut diffs): (HashMap<Option<Pair>, Vec<Entry>>, HashMap<u64, Option<Vec<String>>>) = (HashMap::new(), HashMap::new());
     let mut by_file: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
-    for unit in &blame {
+    let mut statics_errors: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    // the statics step names each static's line: the landing that added it, alone (the fast
+    // bucket named all four lanes of its range "(ambiguous)" for two statics one landing added, 11-14)
+    if blame.iter().any(|u| u.as_str() == STATICS_STEP) {
+        let from = last_pass(&earlier, STATICS_STEP).or_else(|| base.clone());
+        let landed = since.entry(from.clone()).or_insert_with(|| from.as_ref().and_then(|from| landings(repo, from, tip, &history).ok()).unwrap_or_default());
+        let mut who: Vec<(u64, String)> = Vec::new();
+        for (path, n, line) in statics_lines(last_run(&text)) {
+            let Some(e) = line_blame(landed, tip, &path, n, &|at, p| file_text(repo, at, p)) else { continue };
+            statics_errors.entry(e.id).or_default().push(line);
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            if !who.iter().any(|(id, _)| *id == e.id) { who.push((e.id, format!("{} (it added {name}:{n})", who_of(e)))); }
+        }
+        if !who.is_empty() { by_file.insert(STATICS_STEP.to_string(), who); }
+    }
+    let by_files: Vec<String> = blame.iter().filter(|u| !by_file.contains_key(*u)).cloned().collect();
+    for unit in &by_files {
         let Some(files) = located.get(unit) else { continue };
         let from = last_pass(&earlier, &unit_key(unit)).or_else(|| base.clone());
         let landed = since.entry(from.clone()).or_insert_with(|| from.as_ref().and_then(|from| landings(repo, from, tip, &history).ok()).unwrap_or_default());
@@ -1629,39 +1936,39 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
             .map(|(e, _)| who_of(e)).collect::<Vec<_>>().join(", "));
         if !who.is_empty() { broke.entry(unit_key(unit)).or_insert(who); }
     }
-    // a warning a unit did not have at its last look: zero warnings is the rule, so a WARN to the
-    // landings that changed the unit, the bucket green (a test target's unused const, 11-05)
-    let mut fresh: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut unknown: Vec<String> = Vec::new();
-    for (key, lines) in &warned {
-        let now: Vec<String> = lines.iter().map(|(k, _)| k.clone()).collect();
-        match new_warnings(&earlier, key, &now) {
-            Some(new) if new.is_empty() => {}
-            Some(new) => { fresh.insert(key.clone(), new); }
-            None => unknown.push(key.clone()),
+    // a step its own lines name the landing of (the statics step by each static's line): that
+    // landing's agent is told at once, as for a unit
+    if let Some((_, who)) = by_file.get(STATICS_STEP) { broke.entry(STATICS_STEP.to_string()).or_insert_with(|| who.clone()); }
+    // the command that shows each failing unit's own lines alone
+    let repro: BTreeMap<String, String> = repro.into_iter().filter(|(u, _)| outcome.failing.iter().any(|f| unit_key(f) == *u)).collect();
+    // the agents of the landings a new red names: told at their next devhub call ([`crate::notes`])
+    // (the statics step stays red until its statics are fixed: a landing it names is told at the
+    // first red run that names it, not at each run after)
+    let mut tell = broke.clone();
+    if let Some(who) = tell.get_mut(STATICS_STEP) {
+        let last = earlier.first().filter(|r| r.get("failing").and_then(Value::as_arr).unwrap_or_default().iter().any(|u| u.as_str() == Some(STATICS_STEP)))
+            .and_then(|r| r.get("broke")).and_then(|b| b.get(STATICS_STEP)).and_then(Value::as_str).unwrap_or("");
+        *who = statics_new(who, last);
+    }
+    tell.retain(|_, who| !who.is_empty());
+    let before = still_failing(&earlier);
+    let told = if outcome.ok { BTreeMap::new() } else { told_agents(&tell, &before, &history) };
+    // One event per newly named landing, with its own failing lines; main hears it too (11-14).
+    let mut broken: Vec<(String, String)> = Vec::new();
+    for (agent, ids) in &told {
+        for id in ids {
+            let Some(e) = history.iter().find(|e| e.id == *id) else { continue };
+            let named = who_of(e);
+            let reds: Vec<String> = tell.iter().filter(|(key, who)| !before.contains_key(*key) && who.match_indices(&named)
+                .any(|(at, _)| !who[at + named.len()..].starts_with(|c: char| c.is_ascii_digit()))).map(|(key, _)| {
+                let failing = statics_errors.get(id).filter(|_| key == STATICS_STEP).and_then(|lines| lines.first())
+                    .or_else(|| [&errors, &tests_failed].into_iter().find_map(|lines| lines.iter().filter(|(u, _)| unit_key(u) == *key).find_map(|(_, lines)| lines.first())))
+                    .map(String::as_str).unwrap_or(key);
+                format!("{key} red: {}", crate::proto::clean(failing, 300))
+            }).collect();
+            broken.push((agent.clone(), format!("bucket {name} {}: #{} {} ({}) lane {} turned {}; log {}", tip_short(tip_pin), e.id, e.label(), e.agent, e.branch, reds.join("; "), outcome.log)));
         }
     }
-    // who brought them: the landings that touched a new warning's file (without a range, nobody knows)
-    let touched: Vec<Option<Vec<String>>> = if fresh.is_empty() || attribution_error.is_some() { Vec::new() } else { entries.iter().map(|e| landing_files(repo, e)).collect() };
-    let warn_ambiguous = attribution_error.is_some() || touched.iter().any(Option::is_none);
-    let mut warns: BTreeMap<String, String> = unknown.iter().map(|k| (k.clone(), ORIGIN_UNKNOWN.to_string())).collect();
-    for (key, new) in &fresh {
-        let Some(base) = base.as_ref().filter(|_| attribution_error.is_none()) else {
-            warns.insert(key.clone(), ORIGIN_UNKNOWN.to_string());
-            continue;
-        };
-        let mut files: Vec<&str> = warned.get(key).into_iter().flatten().filter(|(k, _)| new.contains(k)).filter_map(|(_, l)| location(l).map(|(path, _)| path)).collect();
-        files.sort_unstable();
-        files.dedup();
-        warns.insert(key.clone(), warn_blame(&files, &entries, &touched, &|f| last_touch(repo, base, f)));
-    }
-    // each new warning as rustc said it (file:line), by unit; one of unknown origin, all of its unit's
-    let new_lines: BTreeMap<String, Vec<String>> = warned.iter().filter(|(u, _)| warns.contains_key(*u)).map(|(u, lines)| (u.clone(), lines.iter()
-        .filter(|(k, _)| fresh.get(u).is_none_or(|new| new.contains(k))).map(|(_, l)| crate::proto::clean(l, 300)).collect())).collect();
-    // the command that shows each new warning's or failing unit's own lines alone
-    let repro: BTreeMap<String, String> = repro.into_iter().filter(|(u, _)| warns.contains_key(u) || outcome.failing.iter().any(|f| unit_key(f) == *u)).collect();
-    // the agents of the landings a new red names: told at their next devhub call ([`crate::notes`])
-    let told = if outcome.ok { BTreeMap::new() } else { told_agents(&broke, &still_failing(&earlier), &history) };
     let rows = entries.iter().zip(&units).map(|(e, units)| obj(vec![
         ("id", Value::Int(e.id as i64)), ("label", s(&e.label())), ("agent", s(&e.agent)),
         ("land_to_verdict_ms", Value::Int(ended.saturating_sub(e.changed_ms) as i64)),
@@ -1682,22 +1989,26 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         ("ran_ok", ran_value),
         ("changed", changed_value),
         ("still", Value::Obj(still.iter().map(|(u, (who, _))| (u.clone(), s(who))).collect())),
-        ("broke", Value::Obj(broke.into_iter().map(|(k, who)| (k, s(who))).collect())),
-        ("warned", Value::Obj(warned.iter().map(|(u, w)| (u.clone(), Value::Arr(w.iter().map(|(k, _)| s(k)).collect()))).collect())),
+        ("broke", Value::Obj(broke.iter().map(|(k, who)| (k.clone(), s(who))).collect())),
         ("proven", Value::Arr(proven.iter().map(s).collect())),
-        ("warns", Value::Obj(warns.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
-        // the first few, for `bucket status` to show the owner without a rerun
-        ("warn_lines", Value::Obj(new_lines.iter().map(|(u, l)| (u.clone(), Value::Arr(l.iter().take(WARN_LINES_KEPT).map(s).collect()))).collect())),
         ("repro", Value::Obj(repro.iter().map(|(u, cmd)| (u.clone(), s(cmd))).collect())),
         // each unit's seconds, which the next runs deal the slowest out by first (tests)
         ("unit_s", Value::Obj(secs.iter().map(|(u, n)| (u.clone(), Value::Int(*n as i64))).collect())),
         ("unit_mb", Value::Obj(mb.iter().map(|(u, n)| (u.clone(), Value::Int(*n as i64))).collect())),
     ])).map_err(|e| format!("bucket ledger: {e}"))?;
-    if !warns.is_empty() {
-        let named = warns.iter().map(|(u, who)| if who == ORIGIN_UNKNOWN { format!("{u}: {ORIGIN_UNKNOWN} (its first look)") }
-            else if who.starts_with(FROM_BEFORE) { format!("{u}: {who}") } else { format!("{who} changed {u}") }).collect::<Vec<_>>().join("; ");
-        let detail: Vec<String> = new_lines.iter().flat_map(|(u, lines)| lines.iter().cloned().chain(repro.get(u).map(|cmd| repro_said(u, cmd)))).collect();
-        emit(Sev::Warn, format!("bucket {name} {} WARN new warnings in {}: {named}{}", tip_short(tip_pin), warns.keys().cloned().collect::<Vec<_>>().join(", "), if warn_ambiguous { " (ambiguous)" } else { "" }), detail.join("\n"));
+    // The red row must precede its probes: GATE_RETRY then includes the red unit (11-15).
+    if name == "fast" && !outcome.ok {
+        for unit in &outcome.failing {
+            let key = unit_key(unit);
+            if before.contains_key(&key) || !(is_unit(unit) || unit == STATICS_STEP) || broke.get(&key).is_some_and(|who| named_ids(who).len() == 1) { continue; }
+            let Some(from) = last_pass(&earlier, &key).map(|pair| bisect_pin(&pair, tip_pin)).or_else(|| base_pin.clone()) else { continue };
+            let landed = since.entry(Some(from.pair())).or_insert_with(|| landings(repo, &from.pair(), tip, &history).unwrap_or_default());
+            if landed.len() < 2 { continue; }
+            let line = if unit == STATICS_STEP { statics_lines(last_run(&text)).into_iter().next().map(|(_, _, line)| line) } else { None }
+                .or_else(|| [&errors, &tests_failed].into_iter().find_map(|lines| lines.iter().filter(|(u, _)| unit_key(u) == key).find_map(|(_, lines)| lines.first()).cloned()))
+                .unwrap_or_else(|| key.clone());
+            bisect(Bisect { bucket: name.to_string(), unit: unit.clone(), key, from, tip: tip_pin.clone(), line, log: outcome.log.clone() });
+        }
     }
     let latency = entries.iter().map(|e| e.changed_ms).max().map(|landed| {
         format!("land->verdict {} s; ", ended.saturating_sub(landed) / 1000)
@@ -1713,13 +2024,18 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
             .chain(by_file.iter().map(|(u, (_, who))| format!("{u} broken by {who}")))
             .chain(by_test.iter().map(|(key, who)| format!("{key} failing {who} (log {})", outcome.log))).collect::<Vec<_>>().join("; ");
         let mut detail = crate::land::failure_lines(&text);
-        detail.extend(repro.iter().filter(|(u, _)| !warns.contains_key(*u)).map(|(u, cmd)| repro_said(u, cmd)));
+        detail.extend(repro.iter().map(|(u, cmd)| repro_said(u, cmd)));
         if let Some(e) = attribution_error { detail.push(e); }
         (Sev::Err, format!("bucket {name} {} FAILED {}: {blamed}{} ({latency}{})", tip_short(tip_pin), outcome.failing.join(", "), if ambiguous { " (ambiguous)" } else { "" }, outcome.summary), detail.join("\n"))
     };
-    for (agent, ids) in &told {
-        let yours = ids.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
-        if let Err(e) = crate::notes::leave(home, agent, &format!("{line}; it names your landing {yours}; log {}", outcome.log)) {
+    let mut notes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (agent, line) in broken {
+        emit(Sev::Err, line.clone(), String::new());
+        if agent != "main" { notes.entry(agent).or_default().push(line.clone()); }
+        notes.entry("main".to_string()).or_default().push(line);
+    }
+    for (agent, lines) in notes {
+        if let Err(e) = crate::notes::leave(home, &agent, &lines.join("\n")) {
             eprintln!("devhub bucket {name}: agent notes: {e}");
         }
     }
@@ -1729,11 +2045,11 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
 
 /// The prebuild legs' test listings of a landed tip under the JIT it brought (orch/warm.rs), as
 /// bucket `prebuild`'s verdict: a listing that fails there is a break on the branch, named for the
-/// landings that changed its package (only a warm WARN before, 11-03). `outcome.log` holds each
+/// landings that changed its package. `outcome.log` holds each
 /// listing's output and its `GATEUNIT` line; `base` is the previous prebuild's tip.
 pub fn prebuild(home: &Path, repo: &Path, store: &Store, started: u64, base: Option<Pair>, tip: &Pair, outcome: Outcome) -> Result<(), String> {
     let emit = |sev: Sev, line: String, detail: String| store.event("bucket", sev, line, Some(detail));
-    judge("prebuild", home, repo, store, &emit, started, base.as_ref().map(pin_of), &pin_of(tip), |_| Ok(outcome)).map_err(|e| e.to_string())
+    judge("prebuild", home, repo, store, &emit, started, base.as_ref().map(pin_of), &pin_of(tip), &|_| {}, |_| Ok(outcome)).map_err(|e| e.to_string())
 }
 
 /// Bucket `name` at a stage of its run ([`Board::doing`]) until this drops.
@@ -1767,12 +2083,12 @@ fn unfinished(logs: &Path, name: &str, last_start: Option<u64>) -> Option<(u64, 
 }
 
 /// Each bucket owns one timer and runs synchronously on its own thread.
-pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: Publish, run: Run, prior: Prior) {
+pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: Publish, run: Run, prior: Prior, probe: Option<Run>) {
     let name = name.to_string();
     let thread = std::thread::Builder::new().name(format!("devhub-bucket-{name}"));
     if let Err(e) = thread.spawn(move || {
         let machine = makepad_devhub_conf::default_machine_name();
-        let store = match Store::open_quiet(&home, "") { Ok(s) => s, Err(e) => { eprintln!("devhub bucket: {e}"); return; } };
+        let store = match Store::open_quiet(&home, "") { Ok(s) => Arc::new(s), Err(e) => { eprintln!("devhub bucket: {e}"); return; } };
         let latest = ledger(&home, usize::MAX).iter().find_map(|line| {
             let v = makepad_strict_json::parse(line.as_bytes()).ok()?;
             (v.get("bucket")?.as_str()? == name).then_some(v)
@@ -1782,10 +2098,35 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
         let logs = home.join("bucket-logs");
         let kick = kick_file(&home, &name);
         let emit = |sev: Sev, line: String, detail: String| publish(hub_record(&machine, "", 0, "bucket", sev, line, detail));
+        let tx = probe.and_then(|probe| {
+            let (tx, rx) = std::sync::mpsc::channel::<Bisect>();
+            match pending_bisects(&home, &name) {
+                Ok(jobs) => for job in jobs { let _ = tx.send(job); },
+                Err(e) => eprintln!("devhub bucket {name}: bisect restart: {e}"),
+            }
+            let (name, repo, home, store, publish, machine) = (name.clone(), repo.clone(), home.clone(), store.clone(), publish.clone(), machine.clone());
+            match std::thread::Builder::new().name(format!("devhub-bisect-{name}")).spawn(move || {
+                let emit = |sev: Sev, line: String, detail: String| publish(hub_record(&machine, "", 0, "bucket", sev, line, detail));
+                for job in rx {
+                    bisect_job(&repo, &home, &store, &emit, &probe, job);
+                }
+            }) {
+                Ok(_) => Some(tx),
+                Err(e) => { eprintln!("bucket bisect thread: {e}"); None }
+            }
+        });
+        let bisect = |job| {
+            let Some(tx) = &tx else { return };
+            match queue_bisect(&home, &job) {
+                Ok(true) => { let _ = tx.send(job); }
+                Ok(false) => {}
+                Err(e) => eprintln!("devhub bucket {name}: bisect queue: {e}"),
+            }
+        };
         let ask_node = ask_box;
         let record = |started: u64, base: Option<Pin>, tip: Pin, log: PathBuf| -> Result<Pin, JudgeError> {
             let _at = Stage::at(&BOARD, &name, ("running", started, format!("its run of {}; log {}", tip_short(&tip), log.display())));
-            let result = judge(&name, &home, &repo, &store, &emit, started, base, &tip, |base| match base {
+            let result = judge(&name, &home, &repo, &store, &emit, started, base, &tip, &bisect, |base| match base {
                 Some(base) => {
                     std::fs::create_dir_all(&logs).map_err(|e| format!("bucket logs: {e}"))?;
                     Ok(run(Some(base), &tip, &log))
@@ -1794,7 +2135,7 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
             });
             finish_run(&log, result)?;
             BOARD.doing(&name, Some(("keeping its failed run's JITs", wall_ms(), format!("asks the boxes that ran them to hold them; log {}", log.display()))));
-            keep_failed_jits(&name, &home, &log, &ask_node, &emit);
+            keep_failed_jits(&name, &home, &log, &ask_node, &away_nodes(), &emit);
             Ok(tip)
         };
         if let Some((ms, sidecar)) = unfinished(&logs, &name, latest.as_ref().map(|_| last_start)) {
@@ -1832,7 +2173,7 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
                 let landed = landed_ms(&store);
                 let first = landed.iter().copied().filter(|ms| *ms > last_start).min().unwrap_or_else(|| *unlanded.get_or_insert(now));
                 let last_changed = landed.iter().copied().max().unwrap_or(0).max(changed);
-                if now < starts_at(&timing, last_start, first, last_changed) { continue; }
+                if now < starts_at(&timing, last_start, first, last_changed) && !quiet_queue_due(&timing, last_start, now, crate::orch::leases().map(|lm| lm.queue_busy_ms())) { continue; }
             }
             let started = now;
             last_start = started;
@@ -1846,6 +2187,17 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
 }
 
 pub fn fast(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
+    fast_gate(repo, home, proofs, ["gate", "landq-fast", "interactive"], Some("0"))
+}
+
+/// The fast gate at one landing of a bisect: a background test lease, never a gate one, so it
+/// takes no box's gate slot and no landing waits behind it (a `landq` gate lease is a landing
+/// gate to the scheduler, 11-15).
+pub fn fast_probe(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
+    fast_gate(repo, home, proofs, ["test", "landq-bisect", "background"], None)
+}
+
+fn fast_gate(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, [kind, lane, priority]: [&'static str; 3], prio: Option<&'static str>) -> Run {
     Arc::new(move |base, tip, log| {
         let (units, why) = proofs.proven(&repo, &tip.pair());
         let retry = retry_env(&rows_of(&home, "fast"));
@@ -1857,13 +2209,19 @@ pub fn fast(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>) 
         // shard on the third, every landing behind it 15 min, and it ran at a background CPU
         // weight beside live calls (L657290, 11-08).
         let needs = gate_needs();
-        let lease = ["lease", "gate", "--needs", &needs, "--cores", "8", "--priority", "interactive", "--lane", "landq-fast", "--prio", "0", "--rev", &rev];
+        let mut lease = vec!["lease", kind, "--needs", &needs, "--cores", "8", "--priority", priority, "--lane", lane];
+        if let Some(prio) = prio { lease.extend(["--prio", prio]); }
+        lease.extend(["--rev", &rev]);
         let proven = format!("GATE_PROVEN={}", units.join(";"));
         let (bases, nested) = (base.pair(), nested_bases(base, tip));
         let gate = ["env", &proven, &retry, &nested, "bash", "tools/run/fixture/land_gate.sh", "fast", &bases.work, &bases.main];
         let (status, text) = lease_run(&repo, &lease, &gate, &why, log, (base, tip), &|| true, &mut |_| true);
-        proofs.record_log(&repo, &tip.pair(), &text, &format!("bucket fast {}", tip_short(tip)));
-        verdict(status, &text, log)
+        let probing = lane == "landq-bisect";
+        let outcome = if probing { probe_verdict(status, &text, log, &rev) } else { verdict(status, &text, log) };
+        if !probing || outcome.no_verdict.is_none() {
+            proofs.record_log(&repo, &tip.pair(), &text, &format!("bucket fast {}", tip_short(tip)));
+        }
+        outcome
     })
 }
 
@@ -1934,11 +2292,14 @@ fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, 
         let (ask, class) = (cores.to_string(), shard_class(cores, full));
         // the run's one queue, dealt as the shards' slots free ([`Dealer`])
         let dealer = Mutex::new(Dealer::new(shards));
+        // when it took its tip: by day its shards hold a box only once it is old (`--run-since`)
+        let since = log_started(log).unwrap_or_else(wall_ms).to_string();
         let ended: Vec<AtomicBool> = (0..shards).map(|_| AtomicBool::new(false)).collect();
         let ran: Vec<(PathBuf, (Result<Option<i32>, String>, String))> = std::thread::scope(|scope| {
             scope.spawn(|| deal(&dealer, &ended, log));
             let shard = |i: usize| {
                 let (repo, home, first, say, proven, retry, times, peaks, reach, ask, class, dealer, ended, rev, bases, nested, floor) = (&repo, &home, &first, &say, &proven, &retry, &times, &peaks, &reach, &ask, &class, &dealer, &ended, &rev, &bases, &nested, &floor);
+                let since = since.as_str();
                 move || {
                     let _ended = Ends(&ended[i - 1]);
                     let shard_log = shard_log(log, i);
@@ -1948,7 +2309,7 @@ fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, 
                     // never resized below its largest unit's last peak: a unit runs alone at most
                     // (land_gate.sh ram_room) and starts within the RAM its lease got
                     let needs = gate_needs();
-                    let mut lease = vec!["lease", "test", "--needs", needs.as_str(), "--cores", ask, "--cost", "large", "--class", class, "--priority", "background", "--lane", crate::lease::sched::TESTS_LANE, "--rev", rev];
+                    let mut lease = vec!["lease", "test", "--needs", needs.as_str(), "--cores", ask, "--cost", "large", "--class", class, "--priority", "background", "--lane", crate::lease::sched::TESTS_LANE, "--rev", rev, "--run-since", since];
                     if let Some(gb) = floor { lease.extend(["--ram-floor-gb", gb.as_str()]); }
                     let gate = ["env", proven, retry, times, peaks, reach, nested, "GATE_QUEUE=1", "bash", "tools/run/fixture/land_gate.sh", "testrun", &bases.work, &bases.main];
                     let needed = || dealer.lock().unwrap_or_else(|e| e.into_inner()).needed();
@@ -1980,7 +2341,7 @@ fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, 
             let only = format!("GATE_ONLY={}", units.join(";"));
             let (ask, class) = (cores.to_string(), shard_class(cores, full));
             let needs = gate_needs();
-            let mut lease = vec!["lease", "test", "--needs", needs.as_str(), "--cores", ask.as_str(), "--cost", "large", "--class", class.as_str(), "--priority", "background", "--lane", crate::lease::sched::TESTS_LANE, "--rev", rev.as_str()];
+            let mut lease = vec!["lease", "test", "--needs", needs.as_str(), "--cores", ask.as_str(), "--cost", "large", "--class", class.as_str(), "--priority", "background", "--lane", crate::lease::sched::TESTS_LANE, "--rev", rev.as_str(), "--run-since", since.as_str()];
             if let Some(gb) = &floor { lease.extend(["--ram-floor-gb", gb.as_str()]); }
             if !avoid.is_empty() { lease.extend(["--avoid", avoid.as_str()]); }
             let gate = ["env", proven.as_str(), retry.as_str(), times.as_str(), peaks.as_str(), reach.as_str(), nested.as_str(), only.as_str(), "bash", "tools/run/fixture/land_gate.sh", "testrun", bases.work.as_str(), bases.main.as_str()];
@@ -2130,7 +2491,11 @@ fn hold_run_jits(log: &Path, part: &str, ask: &dyn Fn(&str, &str) -> Result<(), 
         let hold = format!("{stem}-run-{}", &key[..8]);
         match ask(&node, &format!("jit-keep {hold} {key}{}", bin.map_or(String::new(), |b| format!(" {b}")))) {
             Ok(()) => {
-                if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(run_holds(log)).and_then(|mut f| writeln!(f, "{node} {hold}")) {
+                // one write of the whole line: the run's shards end on their own threads, and a
+                // `writeln!` to the file wrote the node, the space, the hold and the newline apart,
+                // so two shards ending at once ran their lines together (two boxes' names as one, 11-14)
+                let line = format!("{node} {hold}\n");
+                if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(run_holds(log)).and_then(|mut f| f.write_all(line.as_bytes())) {
                     eprintln!("bucket: {}: {e} (the hold of JIT {key} on {node} stays until released by hand)", run_holds(log).display());
                 }
             }
@@ -2182,14 +2547,32 @@ fn stale_holds(home: &Path, now_ms: u64) -> Vec<String> {
     })).collect()
 }
 
+/// The nodes no verb reaches now: down, or dev off (the master's `nodes`); none when it does not
+/// answer.
+fn away_nodes() -> BTreeSet<String> {
+    crate::cli::control().and_then(|c| crate::cli::ask(&c, None, "nodes", "nodes")).map(|lines| away_of(&lines)).unwrap_or_default()
+}
+
+/// [`away_nodes`] from the `nodes` answer's lines.
+fn away_of(lines: &[String]) -> BTreeSet<String> {
+    lines.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).filter_map(|v| {
+        let yes = |k: &str| v.get(k).and_then(Value::as_bool) == Some(true);
+        let node = v.get("node").and_then(Value::as_str)?.to_string();
+        (!yes("up") || !yes("dev")).then_some(node)
+    }).collect()
+}
+
 /// A failed bucket run's JITs stay on the boxes that ran them, held in their dev stores
 /// (`jit-keep`, where `--jit <key>` finds them), until its failure is gone: [`KEEP_RUNS`] newest
 /// runs of its bucket without any of its units failing (fixed, or a flake that did not come back).
+/// One kept on a box that is `away` (down, or dev off) waits for it without a word, and goes once
+/// it is back: a box unplugged for days had each fast verdict warn again that its JITs stay
+/// (11-16), and a hold its store keeps has no end but its release.
 /// Its run dir is the run's kept files beside its log (`<log>.keep`), which stay with the log.
 /// Every box evicted the JIT under which the fast bucket's csg-brep aborted in each run within the
 /// hour, a lane's build of the same source never aborted, and `--jit` reached it nowhere (11-10).
 /// `ask(node, line)`: a node's answer to a verb, its `err` an error.
-fn keep_failed_jits(name: &str, home: &Path, log: &Path, ask: &dyn Fn(&str, &str) -> Result<(), String>, emit: &dyn Fn(Sev, String, String)) {
+fn keep_failed_jits(name: &str, home: &Path, log: &Path, ask: &dyn Fn(&str, &str) -> Result<(), String>, away: &BTreeSet<String>, emit: &dyn Fn(Sev, String, String)) {
     let rows = rows_of(home, name);
     let units = |r: &Value| -> BTreeSet<String> { r.get("failing").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(unit_key).collect() };
     let mut keeps: Vec<Value> = std::fs::read_to_string(keeps_file(home)).unwrap_or_default().lines().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
@@ -2220,7 +2603,7 @@ fn keep_failed_jits(name: &str, home: &Path, log: &Path, ask: &dyn Fn(&str, &str
         // (a run gone from the ledger is far older than its newest runs)
         let at = rows.iter().position(|r| log_name(r).as_deref() == Some(field(k, "log").as_str())).unwrap_or(usize::MAX);
         let gone = at >= KEEP_RUNS && rows.len() >= KEEP_RUNS && rows[..KEEP_RUNS].iter().all(|r| units(r).is_disjoint(&kept));
-        if !gone { return true; }
+        if !gone || away.contains(&field(k, "node")) { return true; }
         match ask(&field(k, "node"), &format!("jit-unkeep {}", field(k, "hold"))) {
             Ok(()) => false,
             Err(e) => {
@@ -3015,6 +3398,282 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bisect_finds_each_first_red_and_stops_without_an_answer() {
+        for (n, max) in [(1, 0), (2, 1), (3, 2), (5, 3), (8, 3)] {
+            for red in 0..n {
+                let (found, probes) = first_red(n, &mut |i| Some(i >= red)).unwrap();
+                assert_eq!(found, red, "first red of {n}");
+                assert!(probes.len() <= max, "{n} landings, first red {red}: {probes:?}");
+                assert!(probes.iter().all(|(i, answer)| *i < n - 1 && *answer == (*i >= red)), "the tip's red is known: {probes:?}");
+                assert!(found == 0 || probes.contains(&(found - 1, false)), "a later first red has a proven green parent: {probes:?}");
+                assert!(found == n - 1 || probes.contains(&(found, true)), "a first red short of the tip is probed red: {probes:?}");
+            }
+        }
+        let mut calls = Vec::new();
+        let result = first_red(8, &mut |i| { calls.push(i); if i == 3 { Some(true) } else { None } });
+        assert_eq!(result, Err((1, vec![(3, true)])));
+        assert_eq!(calls, [3, 1], "no probes after the one with no answer");
+    }
+
+    fn bisect_fixture(d: &Path) -> (Vec<Pair>, Vec<Entry>, String) {
+        use makepad_git::{Commit, ObjectId, Signature, Tree, TreeEntry};
+        let _ = std::fs::remove_dir_all(d);
+        let c = d.join("apps/commercial");
+        std::fs::create_dir_all(&c).unwrap();
+        for (dir, branch) in [(d, "work"), (c.as_path(), "main")] {
+            let o = std::process::Command::new("git").arg("-C").arg(dir).args(["init", "-q", "--template=", "-b", branch])
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE").output().unwrap();
+            assert!(o.status.success(), "the fixture repository initializes: {}", String::from_utf8_lossy(&o.stderr));
+        }
+        // Objects in process keep the fixture small; only repository initialization starts git.
+        let commit = |dir: &Path, parents: &[&str], text: &str| crate::gitread::with(dir, |_, repo| {
+            let blob = repo.write_blob(text.as_bytes()).unwrap();
+            let tree = repo.write_tree(&Tree { entries: vec![TreeEntry { name: "a.rs".into(), mode: 0o100644, oid: blob }] }).unwrap();
+            let sig = Signature { name: String::new(), email: String::new(), timestamp: 0, tz_offset: "+0000".into() };
+            repo.write_commit(&Commit { tree, parents: parents.iter().map(|s| ObjectId::from_hex(s).unwrap()).collect(), author: sig.clone(), committer: sig, message: text.into() }).unwrap().to_hex()
+        }).unwrap();
+        let (w0, m0) = (commit(d, &[], "base\n"), commit(&c, &[], "base\n"));
+        let w1 = commit(d, &[&w0], "first\n");
+        let ws = commit(d, &[&w0], "work side\n");
+        let ms = commit(&c, &[&m0], "main side\n");
+        let m1 = commit(&c, &[&m0, &ms], "second\n");
+        let w2 = commit(d, &[&w1, &ws], "third\n");
+        let pins = vec![Pair::new(&w0, &m0), Pair::new(&w1, &m0), Pair::new(&w1, &m1), Pair::new(&w2, &m1)];
+        let entry = |id: u64, pre: &Pair, landed: &Pair, changed_ms| Entry { id, branch: format!("rc-l{id}"), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
+            ms: String::new(), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: format!("work {} main {}", landed.work, landed.main), pre: format!("work {} main {}", pre.work, pre.main), detail: Vec::new(),
+            agent: format!("bisect-{id}"), proof: false, wire: false, asked_ms: 0, changed_ms };
+        let entries = vec![entry(10, &pins[1], &pins[2], 3), entry(11, &pins[2], &pins[3], 1), entry(12, &pins[0], &pins[1], 2),
+            entry(98, &pins[0], &Pair::new(&w0, &ms), 4), entry(99, &pins[0], &Pair::new(&ws, &m0), 5)];
+        (pins, entries, ws)
+    }
+
+    #[test]
+    fn bisect_orders_landings_and_requires_proof_before_naming_a_lane() {
+        let d = std::env::temp_dir().join(format!("devhub-bucket-bisect-proof-{}", std::process::id()));
+        let (pins, entries, ws) = bisect_fixture(&d);
+        let c = d.join("apps/commercial");
+        let (w0, w1, w2) = (&pins[0].work, &pins[1].work, &pins[3].work);
+        let (m0, m1) = (&pins[0].main, &pins[3].main);
+        let store = Store::open_quiet(&d.join("store"), "").unwrap();
+        store.update(|doc| doc.land = entries.iter().map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
+        let work = bisect_chain(&d, w0, w2).unwrap();
+        let main = bisect_chain(&c, m0, m1).unwrap();
+        assert_eq!(work, [w0.clone(), w1.clone(), w2.clone()], "work's base is position zero and second parents stay out");
+        assert_eq!(main, [m0.clone(), m1.clone()], "main's base is position zero and second parents stay out");
+        let (ordered, left_out) = order_landings(&work, &main, &entries);
+        assert_eq!(ordered.iter().map(|e| e.id).collect::<Vec<_>>(), [12, 10, 11], "paired chain positions order work-only and commercial-only landings, not ids or record times");
+        assert_eq!(left_out, ["#98 is not on main's first-parent chain: left out", "#99 is not on work's first-parent chain: left out"], "each off-chain landing names the side that excluded it");
+        assert!(bisect_chain(&d, &ws, w2).is_err(), "a base reachable only through a second parent is no first-parent base");
+        let run = |case: &str, key: &str, line: &str, answers: [Option<bool>; 4], expected: Option<u64>| {
+            let home = d.join(case);
+            let job = Bisect { bucket: "fast".into(), unit: key.into(), key: key.into(), from: pin_of(&pins[0]), tip: pin_of(&pins[3]), line: line.into(), log: "known-red.log".into() };
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let (called, at, unit) = (calls.clone(), pins.clone(), key.to_string());
+            let probe: Run = Arc::new(move |base, tip, log| {
+                let i = at.iter().position(|p| *p == tip.pair()).expect("only a chain candidate or the base is probed");
+                assert_eq!(base.map(Pin::pair), Some(at[0].clone()), "{unit}: every probe is gated against the last pass, the chain's from");
+                called.lock().unwrap().push(i);
+                std::fs::write(log, "").unwrap();
+                Outcome { ok: answers[i] == Some(false), failing: if answers[i] == Some(true) { vec![unit.clone()] } else { Vec::new() }, log: log.display().to_string(), summary: String::new(),
+                    no_verdict: answers[i].is_none().then(|| "probe did not answer".into()) }
+            });
+            let feed = Mutex::new(Vec::new());
+            run_bisect(&d, &home, &store, &|sev, line, detail| feed.lock().unwrap().push((sev, line, detail)), &probe, job).unwrap();
+            let feed = feed.into_inner().unwrap();
+            let rows = bisect_rows(&home).unwrap();
+            assert_eq!(rows.len(), 1, "{case}: one completed ledger row");
+            let row = rows.into_iter().next().unwrap();
+            assert_eq!(row.get("state").and_then(Value::as_str), Some("done"), "{case}: the bisect is retired");
+            assert_eq!(row.get("landing").and_then(Value::as_u64), expected, "{case}: only a proven landing is named");
+            assert_eq!(feed.len(), 1, "{case}: one result event");
+            assert_eq!(feed[0].0, if expected.is_some() { Sev::Err } else { Sev::Warn }, "{case}: doubtful attribution is a warning");
+            assert_eq!(row.get("result").and_then(Value::as_str), Some(feed[0].1.as_str()), "{case}: the ledger keeps the result line");
+            assert!(feed[0].1.contains("#99 is not on work's first-parent chain: left out") && feed[0].1.contains("#98 is not on main's first-parent chain: left out"), "{case}: the result explains both excluded landings");
+            if let Some(id) = expected {
+                assert!(feed[0].1.contains(&format!("#{} rc-l{} (bisect-{}) lane rc-l{} turned {key} red:", id, id, id, id)), "{case}: proven attribution keeps its wording");
+            } else {
+                assert!(!feed[0].1.contains(" lane ") && !feed[0].1.contains(" turned "), "{case}: a doubtful result blames no lane");
+            }
+            for agent in entries.iter().map(|e| (e.agent.as_str(), Some(e.id))).chain(std::iter::once(("main", None))) {
+                let notes = crate::notes::take(&home, agent.0);
+                let named = agent.0 == "main" || agent.1 == expected;
+                assert_eq!(notes.len(), usize::from(named), "{case}: only main and a proven landing's agent get a note ({})", agent.0);
+                if named { assert_eq!(notes[0].1, feed[0].1, "{case}: the note carries the result"); }
+            }
+            let calls = calls.lock().unwrap().clone();
+            assert_eq!(row.get("probes").and_then(Value::as_arr).unwrap().len(), calls.len(), "{case}: all probes, including unanswered ones, survive in the ledger");
+            (row, calls)
+        };
+        let (row, calls) = run("ordered", "check pkg", "error: failed", [Some(false), Some(false), Some(true), Some(true)], Some(10));
+        assert_eq!(calls, [2, 1], "the first red is #10, with #12 probed green, despite both conflicting record orders");
+        let probes = row.get("probes").and_then(Value::as_arr).unwrap();
+        assert_eq!(probes.iter().map(|p| (p.get("id").and_then(Value::as_u64), p.get("red").and_then(Value::as_bool))).collect::<Vec<_>>(), [(Some(10), Some(true)), (Some(12), Some(false))], "the ledger proves the named landing's red and its parent's green");
+        for (case, answer, text) in [("base-red", Some(true), "red at its last pass"), ("base-unknown", None, "attribution doubtful: its last pass")] {
+            let (row, calls) = run(case, "build", "build failed", [answer, Some(true), Some(true), Some(true)], None);
+            assert_eq!(calls, [2, 1, 0], "{case}: candidate zero needs a base probe");
+            let result = row.get("result").and_then(Value::as_str).unwrap();
+            assert!(result.contains(&format!("{text} {}", pins[0].short())), "{case}: the result identifies the doubtful last pass");
+            assert!(result.contains(if answer.is_some() { "already; no landing of this range broke it" } else { "did not answer" }), "{case}: the result explains why nobody is blamed");
+            let base = row.get("probes").and_then(Value::as_arr).unwrap().last().unwrap();
+            assert_eq!(base.get("base").and_then(Value::as_bool), Some(true), "{case}: the base probe is distinguished from a landing");
+            assert_eq!(base.get("red").and_then(Value::as_bool), answer, "{case}: the ledger retains the base's actual answer");
+        }
+        let (_, calls) = run("unit-base", "check pkg", "error: failed", [None, Some(true), Some(true), Some(true)], Some(12));
+        assert_eq!(calls, [2, 1], "a unit trusts its explicit last pass without probing from");
+        let (_, calls) = run("step-base", "statics", "no reset and no reason: crate::STATE (a.rs:1)", [Some(false), Some(true), Some(true), Some(true)], Some(12));
+        assert_eq!(calls, [2, 1, 0], "a step names candidate zero only after its base is green");
+        for key in SOURCE_STEPS {
+            let (row, _) = run(&format!("{key}-miss"), key, "no reset and no reason: crate::STATE (untouched.rs:1)", [Some(false), Some(false), Some(true), Some(true)], None);
+            assert!(row.get("result").and_then(Value::as_str).unwrap().contains("attribution doubtful: #10 (rc-l10) changed none of untouched.rs"), "{key}: an unrelated source change names no lane");
+        }
+        let (row, _) = run("source-hit", "statics", "no reset and no reason: crate::STATE (apps/commercial/a.rs:1)", [Some(false), Some(false), Some(true), Some(true)], Some(10));
+        assert_eq!(row.get("landing").and_then(Value::as_u64), Some(10), "a commercial diff uses the apps/commercial prefix");
+        let (row, _) = run("source-unnamed", "statics", "source failed", [Some(false), Some(false), Some(true), Some(true)], None);
+        assert!(row.get("result").and_then(Value::as_str).unwrap().contains("attribution doubtful: #10 (rc-l10) changed none of the reported files"), "a source failure without a file cannot blame a lane");
+        let (row, calls) = run("probe-unknown", "check pkg", "error: failed", [Some(false), None, Some(true), Some(true)], None);
+        assert_eq!(calls, [2, 1], "an unanswered candidate stops the search");
+        assert_eq!(row.get("probes").and_then(Value::as_arr).unwrap()[0].get("red").and_then(Value::as_bool), Some(true), "a stopped search keeps its earlier red probe");
+        store.update(|doc| doc.land.retain(|v| v.get("id").and_then(Value::as_u64) != Some(11))).unwrap();
+        let (_, calls) = run("tip-not-candidate", "check pkg", "error: failed", [Some(false), Some(false), Some(false), Some(true)], None);
+        assert_eq!(calls, [2], "a last candidate short of the red tip must itself prove red before searching");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_bisect_ends_with_a_landing_or_a_reason() {
+        let d = std::env::temp_dir().join(format!("devhub-bucket-bisect-terminal-{}", std::process::id()));
+        let (pins, entries, ws) = bisect_fixture(&d);
+        let home = d.join("home");
+        let started = 1794010109906;
+        let logs = [None, Some(0), Some(1), Some(2)].map(|i| bisect_log(&home.join("bucket-logs/bisect"), "fast", started, i));
+        assert_eq!(logs.iter().collect::<BTreeSet<_>>().len(), 4, "the base and three candidates have distinct logs");
+        for log in &logs {
+            assert_eq!(log_started(log), Some(started), "each probe's lease reads the bisect start from {}", log.display());
+        }
+
+        let store = Store::open_quiet(&d.join("store"), "").unwrap();
+        store.update(|doc| doc.land = entries.iter().map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
+        let job = Bisect { bucket: "fast".into(), unit: "check pkg".into(), key: "check pkg".into(), from: pin_of(&Pair::new(&ws, &pins[0].main)),
+            tip: pin_of(&pins[3]), line: "error: failed".into(), log: "known-red.log".into() };
+        assert!(queue_bisect(&home, &job).unwrap(), "the off-chain job starts queued");
+        let probe: Run = Arc::new(|_, _, _| panic!("an off-chain base must stop before probing"));
+        let feed = Mutex::new(Vec::new());
+        let emit = |sev, line, detail| feed.lock().unwrap().push((sev, line, detail));
+        bisect_job(&d, &home, &store, &emit, &probe, job.clone());
+        let rows = bisect_rows(&home).unwrap();
+        let done: Vec<_> = rows.iter().filter(|v| v.get("state").and_then(Value::as_str) == Some("done")).collect();
+        assert_eq!(done.len(), 1, "a setup error writes exactly one terminal record");
+        let result = done[0].get("result").and_then(Value::as_str).unwrap();
+        assert!(result.contains("bisect unresolved") && result.contains("is not on") && result.contains("first-parent chain"), "the terminal result names the first-parent reason: {result}");
+        assert!(done[0].get("landing").is_none(), "an unresolved search names no landing");
+        assert!(done[0].get("probes").and_then(Value::as_arr).unwrap().is_empty(), "a setup failure made no probes");
+        let events = feed.lock().unwrap();
+        assert_eq!(events.len(), 1, "a setup error emits exactly one event");
+        assert_eq!((events[0].0, events[0].1.as_str()), (Sev::Warn, result), "the warning carries the terminal result");
+        drop(events);
+        let notes = crate::notes::take(&home, "main");
+        assert_eq!(notes.len(), 1, "main gets one unresolved note");
+        assert_eq!(notes[0].1, result, "the note keeps the reason");
+        assert!(pending_bisects(&home, "fast").unwrap().is_empty(), "a restarted worker does not retry the finished job");
+
+        let blocked = d.join("blocked-ledger");
+        std::fs::create_dir_all(blocked.join("bisects.jsonl")).unwrap();
+        feed.lock().unwrap().clear();
+        bisect_job(&d, &blocked, &store, &emit, &probe, job.clone());
+        let events = feed.lock().unwrap();
+        assert_eq!(events.len(), 1, "a failed terminal write still emits one event");
+        assert_eq!(events[0].0, Sev::Warn, "a ledger failure is a warning");
+        assert!(events[0].1.contains("bisect unresolved") && events[0].1.contains("first-parent chain") && events[0].1.contains("bisect ledger:"), "the event keeps both the setup and ledger errors: {}", events[0].1);
+        drop(events);
+
+        let rev = format!("work@{}", pins[1].work);
+        for text in ["GATEUNIT fail check pkg\n", "GATEUNIT ok check pkg\nNODEGATE-OK\n"] {
+            let outcome = probe_verdict(Ok(Some(crate::lease::client::CANCELLED_EXIT)), text, &logs[1], &rev);
+            assert_eq!(probe_says(&job.key, &outcome, text), None, "a cancelled probe's partial evidence gives no answer");
+            assert!(!outcome.ok && outcome.failing.is_empty(), "cancellation is classified before red or green evidence");
+            assert_eq!(outcome.no_verdict.as_deref(), Some(format!("probe {rev} cancelled before it completed ({})", logs[1].display()).as_str()), "the reason names the cancelled revision and log");
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn bisect_reads_both_source_location_forms() {
+        let files = bisect_files("error: libs/example/src/lib.rs:12:4: missing value\n\
+            no reset and no reason: relax_compiler::jit::TEST_PROGRESS (libs/relax/compiler/src/jit.rs:1643)\n\
+            no reset and no reason: example::STATE (libs/example/src/lib.rs:12)\n\
+            no reset and no reason: example::OTHER (apps/commercial/example/src/lib.rs:7)\n\
+            no file here (not a path:row)\n");
+        assert_eq!(files, ["apps/commercial/example/src/lib.rs", "libs/example/src/lib.rs", "libs/relax/compiler/src/jit.rs"], "both location forms yield distinct paths, without the diagnostic prefix");
+        assert!(bisect_files("error: no location (file.rs:) (file.rs:bad)").is_empty(), "missing or nonnumeric rows are not source locations");
+        assert!(touches("checkout/libs/example/src/lib.rs", &files[1]), "a diagnostic's checkout prefix still matches the landing's relative path");
+        assert!(!touches("checkout/notlibs/example/src/lib.rs", &files[1]), "a suffix inside a path component is no match");
+    }
+
+    #[test]
+    fn named_landings_are_distinct_whole_numbers() {
+        assert_eq!(named_ids("rc-a (A) #12 (it added x.rs:1), rc-b (B) #3"), BTreeSet::from([3, 12]));
+        assert!(named_ids("").is_empty());
+        assert!(!named_ids("rc-a (A) #12").contains(&1), "#1 is not inside #12");
+        assert_eq!(named_ids("#1, #12, #1, #12"), BTreeSet::from([1, 12]));
+    }
+
+    #[test]
+    fn a_probe_answers_only_for_the_unit_it_judged() {
+        let key = "test pkg";
+        let mut outcome = Outcome { ok: false, failing: vec!["test pkg --lib".into()], log: String::new(), summary: String::new(), no_verdict: None };
+        assert_eq!(probe_says(key, &outcome, "GATEUNIT ok test pkg --test other\n"), Some(true), "a red target wins over a passed target");
+        outcome.failing.clear();
+        outcome.ok = true;
+        assert_eq!(probe_says(key, &outcome, ""), Some(false), "the whole gate passed");
+        outcome.ok = false;
+        outcome.failing.push("test other".into());
+        assert_eq!(probe_says(key, &outcome, "GATEUNIT ok test pkg --lib\n"), Some(false), "this unit passed while another failed");
+        assert_eq!(probe_says(key, &outcome, ""), None, "an unjudged unit has no answer");
+        assert_eq!(probe_says(key, &outcome, &format!("GATEUNIT ok test pkg --lib\n{RERUN}\n")), None, "only the last run counts");
+        let proof = "GATEPROOF proven test pkg --lib (bucket fast 4d334b18a6,1f614334b6)\n";
+        assert_eq!(probe_says(key, &outcome, proof), Some(false), "a unit proven at the probe's inputs passed there");
+        assert_eq!(probe_says(key, &outcome, &format!("{proof}{RERUN}\n")), Some(false), "a proof of the inputs holds for the rerun too");
+        assert_eq!(probe_says(key, &outcome, "GATEPROOF proven test pkgs (bucket fast a,b)\nGATEPROOF none: no store\n"), None, "another unit's proof is no answer");
+        outcome.failing.push("test pkg --lib".into());
+        assert_eq!(probe_says(key, &outcome, proof), Some(true), "a red run wins over a proof");
+        outcome.failing.pop();
+        outcome.no_verdict = Some("lease lost".into());
+        assert_eq!(probe_says(key, &outcome, "GATEUNIT ok test pkg --lib\n"), None);
+        outcome.failing.push("test pkg --lib".into());
+        assert_eq!(probe_says(key, &outcome, ""), None, "no verdict also voids a red");
+    }
+
+    #[test]
+    fn a_bisect_range_is_queued_once_and_resumes_until_done() {
+        let home = std::env::temp_dir().join(format!("devhub-bucket-bisect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let from = pin_of(&Pair::new(&"a".repeat(40), &"b".repeat(40))).with("repo-b", &"c".repeat(40));
+        let tip = pin_of(&Pair::new(&"d".repeat(40), &"e".repeat(40))).with("repo-b", &"f".repeat(40));
+        let mut job = Bisect { bucket: "fast".into(), unit: "check pkg".into(), key: "check pkg".into(), from: from.clone(), tip: tip.clone(), line: "error: missing value".into(), log: "fast-1.log".into() };
+        assert_eq!(bisect_pin(&from.pair(), &tip).nested.get("repo-b"), tip.nested.get("repo-b"), "the pair takes the red run's other nested pins");
+        assert_eq!(bisect_pin(&from.pair(), &tip).pair(), from.pair(), "its paired side stays at the candidate");
+        assert!(queue_bisect(&home, &job).unwrap());
+        assert!(!queue_bisect(&home, &job).unwrap());
+        job.tip = from.clone();
+        job.from.nested.insert(crate::state::PAIRED.to_string(), "e".repeat(40));
+        assert!(!queue_bisect(&home, &job).unwrap(), "bucket, key and from work identify the range");
+        assert_eq!(std::fs::read_to_string(home.join("bisects.jsonl")).unwrap().lines().count(), 1, "one queued row");
+        assert!(pending_bisects(&home, "tests").unwrap().is_empty());
+        let mut pending = pending_bisects(&home, "fast").unwrap();
+        assert_eq!(pending.len(), 1, "a restarted master finds the queued job");
+        let saved = pending.pop().unwrap();
+        assert_eq!((&saved.from, &saved.tip), (&from, &tip), "both pins keep their other nested repositories");
+        assert_eq!((&saved.unit, &saved.key, &saved.line, &saved.log), (&job.unit, &job.key, &job.line, &job.log));
+        done_bisect(&home, &saved, vec![("landing", Value::Int(12)), ("probes", Value::Arr(Vec::new()))]).unwrap();
+        assert!(pending_bisects(&home, "fast").unwrap().is_empty(), "done jobs do not resume");
+        assert!(!queue_bisect(&home, &saved).unwrap(), "done ranges never queue again");
+        job.from.makepad = "b".repeat(40);
+        assert!(queue_bisect(&home, &job).unwrap(), "a later last pass is a new range");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn a_no_verdict_run_retires_its_sidecar_but_other_errors_keep_it() {
         let home = std::env::temp_dir().join(format!("devhub-bucket-no-verdict-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
@@ -3027,7 +3686,7 @@ mod tests {
         assert!(finish_run(&log, Err(JudgeError::Other(error))).is_err());
         assert!(sidecar.exists(), "an ordinary error keeps the run even with no-verdict text");
         let outcome = Outcome { ok: false, failing: Vec::new(), log: log.display().to_string(), summary: "incomplete".into(), no_verdict: Some("unavailable".into()) };
-        let result = judge("ci", &home, &home, &store, &|_, _, _| {}, 1, None, &pin_of(&tip), |_| Ok(outcome));
+        let result = judge("ci", &home, &home, &store, &|_, _, _| {}, 1, None, &pin_of(&tip), &|_| {}, |_| Ok(outcome));
         assert!(matches!(finish_run(&log, result), Err(JudgeError::NoVerdict(_))));
         assert!(!sidecar.exists(), "a no-verdict end must never be adopted again");
         assert!(rows_of(&home, "ci").is_empty(), "no verdict writes no ledger row");
@@ -3896,136 +4555,20 @@ mod tests {
         assert_eq!(repro_lines(log)["test b"], "makepad test b -- m::t::waits_on_eos --exact");
     }
 
-    /// Zero warnings is the rule: a test target's new warning is a WARN to who brought it, the bucket
-    /// green. One it had at its last look is nobody's news; a first look cannot say whose it is.
+    /// Proven units and failing-unit repro commands keep their package keys.
     #[test]
-    fn a_new_warning_warns_once_and_the_bucket_stays_green() {
+    fn proven_units_and_repro_commands_are_parsed() {
         let warn = |at: &str, what: &str| format!("/n/tree/apps/f/tests/common/p.rs:{at}: warning: {what}");
-        let log = format!("STEP depcheck 1 s\n{}\n{}\nGATEUNIT warn tests f\nGATEUNIT ok tests f\nGATEUNIT proven tests g\nGATEUNIT ok tests h\n",
+        let log = format!("STEP depcheck 1 s\n{}\n{}\nGATEUNIT ok tests f\nGATEUNIT proven tests g\nGATEUNIT ok tests h\n",
             warn("5:11", "constant `MACHINE` is never used"), warn("5:11", "constant `MACHINE` is never used"));
-        let (warned, proven) = warn_lines(&log);
-        assert_eq!(warned["tests f"].iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["p.rs: warning: constant `MACHINE` is never used"], "each once");
-        assert!(warned["tests f"][0].1.contains("p.rs:5:11"), "its line as rustc said it");
-        assert!(proven.contains("tests g") && !warned.contains_key("tests h"));
+        let proven = proven_lines(&log);
+        assert!(proven.contains("tests g") && !proven.contains("tests f") && !proven.contains("tests h"), "only the proven unit: {proven:?}");
         let (errors, passed) = unit_lines(&log);
         assert!(errors.is_empty() && passed.contains("tests f"), "a warning is no failure");
-        let had = vec!["p.rs: warning: constant `MACHINE` is never used".to_string()];
-        let more = vec![had[0].clone(), "q.rs: warning: unused import".to_string()];
-        let row = |warned: &[(&str, &[String])], passed: &[&str], proven: &[&str]| obj(vec![
-            ("warned", Value::Obj(warned.iter().map(|(u, w)| (u.to_string(), Value::Arr(w.iter().map(s).collect()))).collect())),
-            ("passed", Value::Arr(passed.iter().map(|u| s(*u)).collect())),
-            ("proven", Value::Arr(proven.iter().map(|u| s(*u)).collect())),
-        ]);
-        let looked = row(&[("tests f", &had)], &["tests f"], &[]);
-        assert_eq!(new_warnings(&[looked.clone()], "tests f", &had), Some(Vec::new()), "it had it at its last look");
-        assert_eq!(new_warnings(&[looked.clone()], "tests f", &more), Some(vec!["q.rs: warning: unused import".to_string()]));
-        // a run that took it as proven did not look; one that never reached it says nothing either
-        let skipped = [row(&[], &["tests f"], &["tests f"]), row(&[], &["tests z"], &[]), looked.clone()];
-        assert_eq!(new_warnings(&skipped, "tests f", &had), Some(Vec::new()));
-        // a clean look since: the warning is new
-        assert_eq!(new_warnings(&[row(&[], &["tests f"], &[]), looked], "tests f", &had), Some(had.clone()));
-        // its first look, or a look from before rows kept warnings: nobody's to name
-        assert_eq!(new_warnings(&[], "tests f", &had), None);
-        assert_eq!(new_warnings(&[obj(vec![("passed", Value::Arr(vec![s("tests f")]))])], "tests f", &had), None);
-
-        // the bucket's verdict: the first look warns of unknown origin, green; the same warning again is quiet
-        use crate::proto::Record;
-        let home = std::env::temp_dir().join(format!("devhub-bucket-test-warn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let fed: Arc<Mutex<Vec<Record>>> = Arc::default();
-        let feed = fed.clone();
-        let store = Store::open(&home, "mac", Arc::new(move |r: Record| { feed.lock().unwrap().push(r); 0 })).unwrap();
-        let tip = Pair::new("a1", "b1");
-        let judged = |text: &str| {
-            let log = home.join("fast.log");
-            std::fs::write(&log, text).unwrap();
-            let outcome = verdict(Ok(Some(0)), text, &log);
-            assert!(outcome.ok, "{:?}", outcome.failing);
-            judge("fast", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &pin_of(&tip), |_| Ok(outcome)).unwrap();
-            let warns: Vec<(Sev, String, String)> = fed.lock().unwrap().drain(..).filter(|r| r.kind == "bucket" && r.sev == Sev::Warn)
-                .map(|r| (r.sev, r.line, r.detail)).collect();
-            warns
-        };
-        let first = judged(&format!("{log}NODEGATE-OK\n"));
-        assert_eq!(first.len(), 1, "{first:?}");
-        assert!(first[0].1.contains("WARN new warnings in tests f: tests f: origin unknown"), "{}", first[0].1);
-        assert!(first[0].2.contains("p.rs:5:11: warning: constant `MACHINE` is never used"), "{}", first[0].2);
-        assert!(judged(&format!("{log}NODEGATE-OK\n")).is_empty(), "the same warning at its next look is no news");
-        let again = judged(&format!("{}\n{}\nGATEREPRO tests f :: cargo check --release --tests -p f\nGATEUNIT warn tests f\nGATEUNIT ok tests f\nNODEGATE-OK\n", warn("5:11", "constant `MACHINE` is never used"), warn("9:1", "unused import: `x`")));
-        assert_eq!(again.len(), 1, "{again:?}");
-        assert!(again[0].2.contains("p.rs:9:1: warning: unused import") && !again[0].2.contains("MACHINE"), "only the new one: {}", again[0].2);
-        // with the command that shows it alone, for the lane that owns it
-        assert!(again[0].2.ends_with("\ntests f: shown alone by `cargo check --release --tests -p f`"), "{}", again[0].2);
-        let rows: Vec<Value> = rows_of(&home, "fast");
-        assert!(rows.iter().all(|r| r.get("ok").and_then(Value::as_bool) == Some(true)), "a warning never turns it red");
-        assert_eq!(rows[0].get("warns").and_then(|w| w.get("tests f")).and_then(Value::as_str), Some(ORIGIN_UNKNOWN), "no landing in its range to name");
-        // the row keeps the new one with its file and line, for `bucket status`
-        let kept: Vec<&str> = rows[0].get("warn_lines").and_then(|w| w.get("tests f")).and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).collect();
-        assert_eq!(kept, ["/n/tree/apps/f/tests/common/p.rs:9:1: warning: unused import: `x`"]);
-        assert_eq!(rows[0].get("repro").and_then(|r| r.get("tests f")).and_then(Value::as_str), Some("cargo check --release --tests -p f"));
-        assert!(rows[1].get("repro").is_some_and(|r| r.get("tests f").is_none()), "a warning it had before says no command");
         // a failing unit's, by its package (its flips aside)
         let repro = repro_lines("GATEREPRO check w --also=x :: cd libs/w && makepad check --also=x w\nGATEUNIT fail check w --also=x\nGATEREPRO test t :: makepad test t\n");
         assert_eq!(repro.get("check w").map(String::as_str), Some("cd libs/w && makepad check --also=x w"));
         assert_eq!(repro.get("test t").map(String::as_str), Some("makepad test t"));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// A new warning names the landing of the range that touched its file; none touched it: the row
-    /// says it is from before this range, with the commit that last touched the file, and names no
-    /// landing (one that changed only the unit's other inputs was named before).
-    #[test]
-    fn a_new_warning_is_from_before_this_range_unless_a_landing_touched_its_file() {
-        let g = |dir: &Path, args: &[&str]| -> String {
-            let o = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)
-                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
-            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        };
-        let d = std::env::temp_dir().join(format!("devhub-bucket-warn-blame-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let c = d.join("apps/commercial");
-        std::fs::create_dir_all(d.join("apps/f/tests/common")).unwrap();
-        std::fs::create_dir_all(c.join("fab/tests")).unwrap();
-        g(&d, &["init", "-q", "-b", "work"]);
-        g(&c, &["init", "-q", "-b", "main"]);
-        std::fs::write(d.join(".gitignore"), "apps/commercial/\n").unwrap();
-        std::fs::write(d.join("apps/f/tests/common/p.rs"), "fn model() {}\n").unwrap();
-        g(&d, &["add", "-A"]);
-        g(&d, &["commit", "-q", "-m", "fab: printer profiles"]);
-        let profiles = g(&d, &["rev-parse", "HEAD"]);
-        std::fs::write(c.join("fab/tests/q.rs"), "fn unused() {}\n").unwrap();
-        g(&c, &["add", "-A"]);
-        g(&c, &["commit", "-q", "-m", "fab: a test helper"]);
-        let helper = g(&c, &["rev-parse", "HEAD"]);
-        // the range: a landing that changed another file of the unit
-        std::fs::write(d.join("libs.rs"), "\n").unwrap();
-        g(&d, &["add", "-A"]);
-        g(&d, &["commit", "-q", "-m", "elsewhere"]);
-        let elsewhere = g(&d, &["rev-parse", "HEAD"]);
-        let entry = |id: u64, pre: &str, landed: &str| Entry { id, branch: format!("rc-l{id}"), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
-            ms: String::new(), cs: String::new(), landed: format!("work {landed} main {helper}"), pre: format!("work {pre} main {helper}"), detail: Vec::new(),
-            agent: format!("L{id}"), proof: false, wire: false, asked_ms: 0, changed_ms: 0 };
-        let base = Pair::new(&profiles, &helper);
-        let entries = vec![entry(1, &profiles, &elsewhere)];
-        let touched: Vec<Option<Vec<String>>> = entries.iter().map(|e| landing_files(&d, e)).collect();
-        assert_eq!(touched, [Some(vec!["libs.rs".to_string()])]);
-        let last = |f: &str| last_touch(&d, &base, f);
-        // rustc's path under the node's tree, and one of the nested commercial checkout
-        let line = "/n/tree/apps/f/tests/common/p.rs:1:4: warning: function `model` is never used";
-        let file = location(line).map(|(path, _)| path).unwrap();
-        assert_eq!(warn_blame(&[file], &entries, &touched, &last), format!("from before this range (last touched by {} fab: printer profiles)", &profiles[..10]));
-        assert_eq!(warn_blame(&["apps/commercial/fab/tests/q.rs"], &entries, &touched, &last), format!("from before this range (last touched by {} fab: a test helper)", &helper[..10]));
-        // a landing that touched the file is named, and only it
-        std::fs::write(d.join("apps/f/tests/common/p.rs"), "fn model() {}\nfn more() {}\n").unwrap();
-        g(&d, &["commit", "-q", "-am", "fab: another profile"]);
-        let entries = vec![entries[0].clone(), entry(2, &elsewhere, &g(&d, &["rev-parse", "HEAD"]))];
-        let touched: Vec<Option<Vec<String>>> = entries.iter().map(|e| landing_files(&d, e)).collect();
-        assert_eq!(warn_blame(&[file], &entries, &touched, &last), "rc-l2 (L2) #2");
-        // a landing whose diff cannot be read is not cleared
-        assert_eq!(warn_blame(&[file], &entries[..1], &[None], &last), "rc-l1 (L1) #1");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A unit that fails with errors in a file is named for the landing that changed that file
@@ -4044,7 +4587,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let c = d.join("apps/commercial");
         std::fs::create_dir_all(d.join("platform/script/std/src")).unwrap();
-        std::fs::create_dir_all(d.join("apps/fab/src")).unwrap();
+        std::fs::create_dir_all(d.join("apps/example/src")).unwrap();
         std::fs::create_dir_all(&c).unwrap();
         g(&d, &["init", "-q", "-b", "work"]);
         g(&c, &["init", "-q", "-b", "main"]);
@@ -4060,55 +4603,99 @@ mod tests {
             g(&d, &["rev-parse", "HEAD"])
         };
         commit("platform/script/std/src/vm.rs", "fn with_vm() {}\n", "script std: the vm");
-        let w0 = commit("apps/fab/src/main.rs", "fn main() {}\n", "fab");
+        let w0 = commit("apps/example/src/main.rs", "fn main() {}\n", "example");
         // the break: a lane's two commits, the second changing the function the JIT cannot take
         commit("platform/script/std/src/lib.rs", "\n", "script std: a module");
         let w1 = commit("platform/script/std/src/vm.rs", "fn with_vm() {}\nfn resume_if_panicked() {}\n", "script std: a panic in a with_vm closure no longer loses the VM");
         // what landed after it, each changing the apps' inputs elsewhere
-        let w2 = commit("apps/fab/src/main.rs", "fn main() { tree() }\n", "fab: trees");
+        let w2 = commit("apps/example/src/main.rs", "fn main() { tree() }\n", "example: trees");
         let w3 = commit("platform/script/std/src/lib.rs", "\n\n", "script std: more");
         let entry = |id: u64, pre: &str, landed: &str| Entry { id, branch: format!("rc-l{id}"), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
-            ms: String::new(), cs: String::new(), landed: format!("work {landed} main {m}"), pre: format!("work {pre} main {m}"), detail: Vec::new(),
+            ms: String::new(), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: format!("work {landed} main {m}"), pre: format!("work {pre} main {m}"), detail: Vec::new(),
             agent: format!("L{id}"), proof: false, wire: false, asked_ms: 0, changed_ms: 0 };
         let history = vec![entry(1, &w0, &w1), entry(2, &w1, &w2), entry(3, &w2, &w3)];
         // the present's summary, under a node's tree, and a rustc error in a test file of its own
         let log = "app: no present (failed before its first frame: relax: compile error in makepad_script_std::vm::ScriptVmCall::resume_if_panicked: platform/script/std/src/vm.rs:2:4: `resume_if_panicked` calls\terror\tcompile error)\n\
-            /n/tree/apps/fab/src/main.rs:1:13: warning: unused\nGATEUNIT fail present fab\n/n/tree/apps/fab/src/main.rs:1:13: E0425: cannot find function `tree`\nGATEUNIT fail check fab\n";
+            /n/tree/apps/example/src/main.rs:1:13: warning: unused\nGATEUNIT fail present example\n/n/tree/apps/example/src/main.rs:1:13: E0425: cannot find function `tree`\nGATEUNIT fail check example\n";
         let files = error_files(log);
-        assert_eq!(files["present fab"], ["platform/script/std/src/vm.rs"], "the summary's file, not the warning's");
-        assert_eq!(files["check fab"], ["/n/tree/apps/fab/src/main.rs"]);
+        assert_eq!(files["present example"], ["platform/script/std/src/vm.rs"], "the summary's file, not the warning's");
+        assert_eq!(files["check example"], ["/n/tree/apps/example/src/main.rs"]);
         // the present last passed before the break; this run's range holds only the landings after it
-        let rows = [obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w2, &m)))), ("passed", Value::Arr(vec![s("check fab")]))]),
-            obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w0, &m)))), ("passed", Value::Arr(vec![s("present fab")]))])];
+        let rows = [obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w2, &m)))), ("passed", Value::Arr(vec![s("check example")]))]),
+            obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w0, &m)))), ("passed", Value::Arr(vec![s("present example")]))])];
         let tip = Pair::new(&w3, &m);
-        let from = last_pass(&rows, "present fab").unwrap();
+        let from = last_pass(&rows, "present example").unwrap();
         assert_eq!(from, Pair::new(&w0, &m));
         let since = landings(&d, &from, &tip, &history).unwrap();
         assert_eq!(since.iter().map(|e| e.id).collect::<Vec<_>>(), [1, 2, 3]);
         let diffs: Vec<Option<Vec<String>>> = since.iter().map(|e| landing_files(&d, e)).collect();
         let touched: Vec<Option<&[String]>> = diffs.iter().map(Option::as_deref).collect();
         let commit_of = |e: &Entry, p: &str| entry_pair(&e.landed).and_then(|at| last_touch(&d, &at, p));
-        assert_eq!(file_blame(&files["present fab"], &since, &touched, &commit_of), [(1, format!("rc-l1 (L1) #1 ({} changed vm.rs)", &w1[..10]))]);
+        assert_eq!(file_blame(&files["present example"], &since, &touched, &commit_of), [(1, format!("rc-l1 (L1) #1 ({} changed vm.rs)", &w1[..10]))]);
         // the same with the box's path to the tree
         assert_eq!(file_blame(&["/n/tree/platform/script/std/src/vm.rs".to_string()], &since, &touched, &commit_of).len(), 1);
         // a landing whose diff cannot be read is not named for it
-        assert!(file_blame(&files["present fab"], &since, &[None, None, None], &commit_of).is_empty());
+        assert!(file_blame(&files["present example"], &since, &[None, None, None], &commit_of).is_empty());
+        // the statics step names each static's line: the landing whose diff added that line, alone,
+        // not the others of the range; a line from before the range names nobody
+        let statics = "STEP statics 1 s [0-1]\nno reset and no reason: makepad_script_std::vm::PANICKED (platform/script/std/src/vm.rs:2)\n\
+            no reset and no reason: example::TREES (apps/example/src/main.rs:1)\nno reset and no reason: makepad_script_std::vm::VMS (platform/script/std/src/vm.rs:1)\nNODEGATE-FAIL: statics\n";
+        let lines = statics_lines(statics);
+        assert_eq!(lines.iter().map(|(p, n, _)| (p.as_str(), *n)).collect::<Vec<_>>(), [("platform/script/std/src/vm.rs", 2), ("apps/example/src/main.rs", 1), ("platform/script/std/src/vm.rs", 1)]);
+        let text = |at: &Pair, p: &str| file_text(&d, at, p);
+        let named: Vec<Option<u64>> = lines.iter().map(|(p, n, _)| line_blame(&since, &tip, p, *n, &text).map(|e| e.id)).collect();
+        assert_eq!(named, [Some(1), Some(2), None], "the adder of each static's line, and nobody for one older than the range");
+        assert!(line_blame(&since, &tip, "platform/script/std/src/vm.rs", 9, &text).is_none(), "a line the file does not have");
+        // its landing is told at the first red run that names it, not again while the step stays red
+        let who = format!("{} (it added vm.rs:2), {} (it added main.rs:1)", who_of(&since[0]), who_of(&since[1]));
+        assert_eq!(statics_new(&who, ""), who);
+        assert_eq!(statics_new(&who, &format!("{} (it added vm.rs:2)", who_of(&since[0]))), format!("{} (it added main.rs:1)", who_of(&since[1])));
+        assert_eq!(statics_new(&who, &format!("rc-l1 (L1) #12 (it added x.rs:1), {} (it added main.rs:1)", who_of(&since[1]))), format!("{} (it added vm.rs:2)", who_of(&since[0])), "#1 is not #12");
+        // The first red names its landing to the event stream, its agent and main, once (11-14).
+        let home = d.join("bucket-notes");
+        std::fs::create_dir_all(&home).unwrap();
+        let store = Store::open_quiet(&home, "").unwrap();
+        store.update(|doc| doc.land = history.iter().map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
+        let raw = "no reset and no reason: makepad_script_std::vm::PANICKED (platform/script/std/src/vm.rs:2)";
+        let judged = || {
+            let log = home.join("fast.log");
+            let text = format!("STEP statics 1 s [0-1]\n{raw}\nNODEGATE-FAIL: statics\n");
+            std::fs::write(&log, &text).unwrap();
+            let outcome = verdict(Ok(Some(1)), &text, &log);
+            let fed = Mutex::new(Vec::new());
+            judge("fast", &home, &d, &store, &|sev, line, detail| fed.lock().unwrap().push((sev, line, detail)), 1,
+                Some(pin_of(&Pair::new(&w0, &m))), &pin_of(&tip), &|_| {}, |_| Ok(outcome)).unwrap();
+            fed.into_inner().unwrap()
+        };
+        let first = judged();
+        let broke: Vec<&String> = first.iter().filter(|(sev, line, _)| *sev == Sev::Err && line.contains(" turned ")).map(|(_, line, _)| line).collect();
+        assert_eq!(broke.len(), 1, "one event for the landing: {first:?}");
+        assert!(broke[0].contains("#1 rc-l1 (L1) lane rc-l1 turned statics red:") && broke[0].contains(raw), "{}", broke[0]);
+        assert_eq!(first.iter().filter(|(_, line, _)| line.contains(" FAILED ")).count(), 1, "the run still has its FAILED event");
+        for agent in ["L1", "main"] {
+            let notes = crate::notes::take(&home, agent);
+            assert_eq!(notes.iter().map(|(_, line)| line).collect::<Vec<_>>(), broke, "{agent} gets the landing's message once");
+        }
+        let next = judged();
+        assert_eq!(next.len(), 1, "only the run's FAILED event on the next red: {next:?}");
+        assert!(next[0].1.contains(" FAILED ") && !next[0].1.contains(" turned "), "{next:?}");
+        for agent in ["L1", "main"] { assert!(crate::notes::take(&home, agent).is_empty(), "no repeated note to {agent}"); }
         // the check last passed at w2: since then only #3, which did not touch main.rs (the callee changed elsewhere)
-        let from = last_pass(&rows, "check fab").unwrap();
+        let from = last_pass(&rows, "check example").unwrap();
         let since = landings(&d, &from, &tip, &history).unwrap();
         let diffs: Vec<Option<Vec<String>>> = since.iter().map(|e| landing_files(&d, e)).collect();
         let touched: Vec<Option<&[String]>> = diffs.iter().map(Option::as_deref).collect();
-        assert!(file_blame(&files["check fab"], &since, &touched, &commit_of).is_empty(), "the landings that changed its inputs answer for it");
+        assert!(file_blame(&files["check example"], &since, &touched, &commit_of).is_empty(), "the landings that changed its inputs answer for it");
         assert!(last_pass(&rows, "guard x").is_none());
         // a failing step (the JIT's build, no unit) by the files its own lines name, a warning's too;
         // a unit's lines (a test target's warning) are the unit's. The build last got through at w0:
         // its two red runs since are one range, and only #1 touched vm.rs
         let log = "/n/tree/platform/script/std/src/vm.rs:2:4: warning: function `resume_if_panicked` is never used\n\
             warning: `makepad-script-std` (lib) generated 1 warning\nLOADER-FAIL warnings\nSTEP jit 1 s [0-1]\n\
-            /n/tree/apps/fab/src/main.rs:1:13: warning: unused\nGATEUNIT warn tests fab\nGATEUNIT ok tests fab\nSTEP testcheck 1 s [1-2]\nNODEGATE-FAIL: build\n";
+            /n/tree/apps/example/src/main.rs:1:13: warning: unused\nGATEUNIT ok tests example\nSTEP testcheck 1 s [1-2]\nNODEGATE-FAIL: build\n";
         assert_eq!(step_files(log), ["/n/tree/platform/script/std/src/vm.rs"]);
         let rows = [obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w2, &m)))), ("failing", Value::Arr(vec![s("build")]))]),
-            obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w0, &m)))), ("failing", Value::Arr(vec![s("check fab")]))])];
+            obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w0, &m)))), ("failing", Value::Arr(vec![s("check example")]))])];
         let from = last_pass(&rows, "build").unwrap();
         assert_eq!(from, Pair::new(&w0, &m), "a row without the step failing got through it");
         let since = landings(&d, &from, &tip, &history).unwrap();
@@ -4155,13 +4742,14 @@ mod tests {
                 _ => m = commit(&c, "demo/src/y.rs", &format!("{id}\n")),
             }
             history.push(Entry { id, branch: format!("rc-l{id}"), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
-                ms: String::new(), cs: String::new(), landed: format!("work {w} main {m}"), pre, detail: Vec::new(), agent: format!("L{id}"), proof: false, wire: false, asked_ms: 0, changed_ms: 0 });
+                ms: String::new(), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: format!("work {w} main {m}"), pre, detail: Vec::new(), agent: format!("L{id}"), proof: false, wire: false, asked_ms: 0, changed_ms: 0 });
         }
         let log = "makepad-demo: 0 errors\n/n/ci-tree/apps/commercial/demo/src/x.rs:12:4: warning: function `unused_helper` is never used [dead_code]\n\
             makepad-demo: 1 warnings\nGATEREPRO check makepad-demo :: cd apps/commercial/demo && makepad check makepad-demo\nGATEUNIT fail check makepad-demo\n";
         let files = error_files(log);
         assert_eq!(files["check makepad-demo"], ["/n/ci-tree/apps/commercial/demo/src/x.rs"], "the warning's file, as no error names one");
         assert!(!error_files(&log.replace("GATEUNIT fail check", "GATEUNIT fail present")).contains_key("present makepad-demo"), "a present's warning is not why it failed");
+        assert_eq!(error_files(&log.replace("GATEUNIT fail check", "GATEUNIT fail tests"))["tests makepad-demo"], ["/n/ci-tree/apps/commercial/demo/src/x.rs"], "a test target's check fails on its warning: its file");
         let since = landings(&d, &base, &Pair::new(&w, &m), &history).unwrap();
         assert_eq!(since.len(), 8);
         let diffs: Vec<Option<Vec<String>>> = since.iter().map(|e| landing_files(&d, e)).collect();
@@ -4210,7 +4798,7 @@ mod tests {
         let m1 = commit(&c, "m1");
         let m2 = commit(&c, "m2");
         let entry = |id: u64, pre: (&str, &str), landed: (&str, &str)| Entry { id, branch: format!("rc-l{id}"), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
-            ms: String::new(), cs: String::new(), landed: format!("work {} main {}", landed.0, landed.1), pre: format!("work {} main {}", pre.0, pre.1), detail: Vec::new(),
+            ms: String::new(), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: format!("work {} main {}", landed.0, landed.1), pre: format!("work {} main {}", pre.0, pre.1), detail: Vec::new(),
             agent: format!("L{id}"), proof: false, wire: false, asked_ms: 0, changed_ms: 0 };
         let entries = [entry(1, (&w0, &m0), (&w1, &m0)), entry(2, (&w1, &m0), (&w1, &m1)), entry(3, (&w1, &m1), (&w1, &m2))];
         let ids = |base: Pair, tip: Pair| landings(&d, &base, &tip, &entries).unwrap().iter().map(|e| e.id).collect::<Vec<_>>();
@@ -4227,7 +4815,7 @@ mod tests {
     #[test]
     fn a_new_red_tells_the_agents_of_the_landings_it_names() {
         let entry = |id: u64, branch: &str, agent: &str| Entry { id, branch: branch.to_string(), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
-            ms: String::new(), cs: String::new(), landed: String::new(), pre: String::new(), detail: Vec::new(),
+            ms: String::new(), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: String::new(), pre: String::new(), detail: Vec::new(),
             agent: agent.to_string(), proof: false, wire: false, asked_ms: 0, changed_ms: 0 };
         let history = [entry(12, "rc-x", "LANE-A"), entry(123, "rc-x", "LANE-A"), entry(124, "rc-y", "LANE-B"), entry(125, "rc-z", ""), entry(126, "rc-w", "LANE-C")];
         let broke: BTreeMap<String, String> = [
@@ -4389,7 +4977,7 @@ mod tests {
             let log = home.join(format!("tests-{n}.log"));
             std::fs::write(&log, text).unwrap();
             let outcome = verdict(Ok(Some(if text.contains("NODEGATE-OK") { 0 } else { 1 })), text, &log);
-            judge("tests", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &pin_of(&tip), |_| Ok(outcome)).unwrap();
+            judge("tests", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &pin_of(&tip), &|_| {}, |_| Ok(outcome)).unwrap();
             let red: Vec<String> = fed.lock().unwrap().drain(..).filter(|r| r.kind == "bucket" && r.sev == Sev::Err).map(|r| r.line).collect();
             (log.display().to_string(), red)
         };
@@ -4420,7 +5008,7 @@ mod tests {
             let log = home.join(format!("fast-{n}.log"));
             std::fs::write(&log, text).unwrap();
             let outcome = verdict(Ok(Some(if text.contains("NODEGATE-OK") { 0 } else { 1 })), text, &log);
-            judge("fast", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &pin_of(&tip), |_| Ok(outcome)).unwrap();
+            judge("fast", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &pin_of(&tip), &|_| {}, |_| Ok(outcome)).unwrap();
             let red: Vec<String> = fed.lock().unwrap().drain(..).filter(|r| r.kind == "bucket" && r.sev == Sev::Err).map(|r| r.line).collect();
             (log.display().to_string(), red)
         };
@@ -4436,6 +5024,48 @@ mod tests {
         let status = status(&home);
         let still = status.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).find(|v| v.get("still_failing").is_some()).expect("a STILL FAILING line");
         assert_eq!(still.get("logs").and_then(|l| l.get("check f")).and_then(Value::as_str), Some(third.as_str()));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The full bucket starts early once no lane's ask queued a minute for its quiet time, 12 h
+    /// after its last start at the soonest; with no lease master to ask, only by its hour.
+    #[test]
+    fn a_quiet_queue_starts_the_full_bucket_early_twice_a_day_at_most() {
+        let (min, h) = (60_000u64, 3_600_000u64);
+        let full = Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(17), quiet_queue: Some(Duration::from_secs(20 * 60)) };
+        let now = 30 * h;
+        assert!(quiet_queue_due(&full, now - 13 * h, now, Some(now - 25 * min)), "quiet 25 min, its last run 13 h ago");
+        assert!(!quiet_queue_due(&full, now - 13 * h, now, Some(now - 5 * min)), "an ask queued a minute 5 min ago");
+        assert!(!quiet_queue_due(&full, now - 6 * h, now, Some(now - 3 * h)), "its last run 6 h ago");
+        assert!(!quiet_queue_due(&full, now - 13 * h, now, None), "no lease master");
+        assert!(!quiet_queue_due(&Timing::pipelined(), 0, now, Some(0)), "a bucket with no quiet_queue");
+    }
+
+    /// `devhub bucket` says when each bucket's last run ended and how, and marks a red stale when
+    /// a later run of another bucket passed that unit: the full bucket's red of a unit the tests
+    /// bucket passed hours later read as a current break (11-16).
+    #[test]
+    fn a_red_another_bucket_passed_since_is_stale_and_each_bucket_says_its_last_run() {
+        let home = std::env::temp_dir().join(format!("devhub-bucket-test-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let row = |bucket: &str, started: u64, failing: &[&str], passed: &[&str]| {
+            let log = home.join(format!("{bucket}-{started}.log")).display().to_string();
+            let units = |u: &[&str]| Value::Arr(u.iter().map(|u| s(*u)).collect());
+            append(&home, obj(vec![("bucket", s(bucket)), ("started_ms", Value::Int(started as i64)), ("ended_ms", Value::Int(started as i64 + 5)), ("ok", Value::Bool(failing.is_empty())),
+                ("failing", units(failing)), ("passed", units(passed)), ("log", s(&log))])).unwrap();
+        };
+        row("full", 100, &["tests pkg-a", "tests pkg-b"], &[]);
+        row("tests", 50, &[], &["tests pkg-b"]);
+        row("tests", 200, &[], &["tests pkg-a"]);
+        let lines: Vec<Value> = status(&home).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+        let still = lines.iter().find(|v| v.get("still_failing").and_then(Value::as_str) == Some(FULL)).expect("the full bucket's reds");
+        let stale = still.get("stale").expect("a stale red");
+        assert_eq!(stale.get("tests pkg-a").and_then(|p| p.get("started_ms")).and_then(Value::as_u64), Some(200), "the tests run after it passed it");
+        assert!(stale.get("tests pkg-b").is_none(), "a pass before the red is no pass of it");
+        let last = lines.iter().find_map(|v| v.get("last_runs")).expect("the last runs");
+        assert_eq!((last.get(FULL).and_then(|r| r.get("ended_ms")).and_then(Value::as_u64), last.get(FULL).and_then(|r| r.get("ok")).and_then(Value::as_bool)), (Some(105), Some(false)));
+        assert_eq!(last.get("tests").and_then(|r| r.get("ended_ms")).and_then(Value::as_u64), Some(205), "its newest run");
+        assert!(last.get("ci").is_none(), "a bucket with no run says none");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -4459,7 +5089,7 @@ mod tests {
         assert_eq!(starts_at(&tests, 0, 100, 100 + 20 * min), 100 + 10 * min, "at most 10 min after the first");
         let fast = Timing::pipelined();
         assert_eq!(starts_at(&fast, 0, 100, 100 + 20 * min), 100, "at the first landing it has not checked, quiet or not");
-        let every = Timing { every: Duration::from_secs(3600), quiet: Duration::ZERO, cap: Duration::ZERO, daily: None };
+        let every = Timing { every: Duration::from_secs(3600), quiet: Duration::ZERO, cap: Duration::ZERO, daily: None, quiet_queue: None };
         assert_eq!(starts_at(&every, 1_000, 2_000, 2_000), 1_000 + h, "not before every after its last start");
         assert_eq!(log_started(Path::new("/x/bucket-logs/ci-1793673952236.log")), Some(1793673952236));
     }
@@ -4519,7 +5149,7 @@ mod tests {
         // a zone that leaves summer time before the night's 02:00: UTC+2 at the landing, UTC+1 then
         let dst = |secs: i64| if secs < (midnight / 1000) as i64 - 3600 { 7200 } else { 3600 };
         assert_eq!(daily_after(midnight - 6 * h, 2, &dst), midnight + h, "02:00 on the clock after the change");
-        let nightly = Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2) };
+        let nightly = Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2), quiet_queue: None };
         let at = starts_at(&nightly, midnight - day, midnight + 10 * min, midnight + 50 * min);
         assert_eq!(at % (h / 60), 0, "on the minute");
         assert!(at > midnight + 10 * min && at <= midnight + 10 * min + day, "within a day of the landing");
@@ -4574,12 +5204,13 @@ mod tests {
         let ask = |node: &str, line: &str| { asked.borrow_mut().push(format!("{node}: {line}")); if refuse.get() { Err("no link".to_string()) } else { Ok(()) } };
         let warned = std::cell::RefCell::new(Vec::<String>::new());
         let emit = |_: Sev, line: String, _: String| warned.borrow_mut().push(line);
+        let away = std::cell::RefCell::new(BTreeSet::<String>::new());
         let run = |n: usize, failing: &[&str]| {
             let log = home.join("bucket-logs").join(format!("fast-{n}.log"));
             std::fs::write(&log, format!("L{n} box-a: sources at work@0123456789\njit: kept {}\n", if n == 1 { k1 } else { k2 })).unwrap();
             append(&home, obj(vec![("bucket", s("fast")), ("started_ms", Value::Int(n as i64)), ("failing", Value::Arr(failing.iter().map(|u| s(*u)).collect())), ("log", s(&log.display().to_string()))])).unwrap();
             asked.borrow_mut().clear();
-            keep_failed_jits("fast", &home, &log, &ask, &emit);
+            keep_failed_jits("fast", &home, &log, &ask, &away.borrow(), &emit);
             asked.borrow().clone()
         };
         assert_eq!(run(1, &["jit-suite:makepad-csg-brep"]), vec![format!("box-a: jit-keep fast-1-c0da2f54 {k1}")], "a failed run's JIT is kept");
@@ -4587,20 +5218,26 @@ mod tests {
         assert_eq!(run(3, &["jit-suite:makepad-csg-brep"]), vec![format!("box-a: jit-keep fast-3-01234567 {k2}")], "it failed again: that run's JIT too");
         for n in 4..=12 { assert!(run(n, &[]).is_empty(), "run {n}: the failure is among the newest {KEEP_RUNS} runs, so even the first run's JIT stays"); }
         let both = vec!["box-a: jit-unkeep fast-1-c0da2f54".to_string(), "box-a: jit-unkeep fast-3-01234567".to_string()];
+        // their box is down (or dev off): they wait for it without a word, and go once it is back
+        let nodes = [r#"{"node":"box-a","up":false,"dev":true}"#, r#"{"node":"box-b","up":true,"dev":false}"#, r#"{"node":"box-c","up":true,"dev":true}"#].map(String::from);
+        assert_eq!(away_of(&nodes), ["box-a", "box-b"].map(String::from).into_iter().collect::<BTreeSet<_>>(), "a box down or dev off is away");
+        away.borrow_mut().insert("box-a".into());
+        assert!(run(13, &[]).is_empty() && warned.borrow().is_empty(), "an away box is asked nothing and warned of nothing: {:?}", warned.borrow());
+        away.borrow_mut().clear();
         refuse.set(true);
-        assert_eq!(run(13, &[]), both, "both go once the newest runs are clean of their failure");
+        assert_eq!(run(14, &[]), both, "both go once the newest runs are clean of their failure");
         assert!(warned.borrow().len() == 2 && warned.borrow().iter().all(|w| w.contains("stays: no link")), "{:?}", warned.borrow());
         refuse.set(false);
-        assert_eq!(run(14, &[]), both, "what a box did not release is asked again at the next run");
+        assert_eq!(run(15, &[]), both, "what a box did not release is asked again at the next run");
         assert!(std::fs::read_to_string(keeps_file(&home)).unwrap().is_empty(), "nothing kept now");
         // a shard's JIT is held from its end to its run's verdict, and that hold goes after a red
         // run's JIT is kept: never a moment unheld (11-13)
-        let log = home.join("bucket-logs").join("fast-15.log");
-        std::fs::write(&log, format!("L15 box-a: sources at work@0123456789\njit: kept {k1}\n")).unwrap();
+        let log = home.join("bucket-logs").join("fast-16.log");
+        std::fs::write(&log, format!("L16 box-a: sources at work@0123456789\njit: kept {k1}\n")).unwrap();
         asked.borrow_mut().clear();
         hold_run_jits(&log, &std::fs::read_to_string(&log).unwrap(), &ask);
-        assert_eq!(asked.borrow().clone(), vec![format!("box-a: jit-keep fast-15-run-c0da2f54 {k1}")], "held at its shard's end");
-        append(&home, obj(vec![("bucket", s("fast")), ("started_ms", Value::Int(15)), ("failing", Value::Arr(vec![s("jit-suite:makepad-csg-brep")])), ("log", s(&log.display().to_string()))])).unwrap();
+        assert_eq!(asked.borrow().clone(), vec![format!("box-a: jit-keep fast-16-run-c0da2f54 {k1}")], "held at its shard's end");
+        append(&home, obj(vec![("bucket", s("fast")), ("started_ms", Value::Int(16)), ("failing", Value::Arr(vec![s("jit-suite:makepad-csg-brep")])), ("log", s(&log.display().to_string()))])).unwrap();
         // an older run that never got its verdict still holds its JIT; a newer one runs on
         let logs = home.join("bucket-logs");
         std::fs::write(logs.join("fast-9.log.holds"), "box-b fast-9-run-01234567\n").unwrap();
@@ -4612,10 +5249,43 @@ mod tests {
         let said = stale_holds(&home, 6 + day);
         assert!(said.len() == 1 && said[0].contains("its run tests-5 (24 h ago) got no verdict") && said[0].contains("tests-5-run-abcdef01 on box-c"), "{said:?}");
         asked.borrow_mut().clear();
-        keep_failed_jits("fast", &home, &log, &ask, &emit);
-        assert_eq!(asked.borrow().clone(), vec![format!("box-a: jit-keep fast-15-c0da2f54 {k1}"), "box-a: jit-unkeep fast-15-run-c0da2f54".to_string(), "box-b: jit-unkeep fast-9-run-01234567".to_string()], "kept for its red, then its run's hold goes, and the superseded run's");
+        keep_failed_jits("fast", &home, &log, &ask, &BTreeSet::new(), &emit);
+        assert_eq!(asked.borrow().clone(), vec![format!("box-a: jit-keep fast-16-c0da2f54 {k1}"), "box-a: jit-unkeep fast-16-run-c0da2f54".to_string(), "box-b: jit-unkeep fast-9-run-01234567".to_string()], "kept for its red, then its run's hold goes, and the superseded run's");
         assert!(!run_holds(&log).exists() && !logs.join("fast-9.log.holds").exists(), "the run's holds and the older unjudged run's are let go once");
         assert!(logs.join("fast-20.log.holds").exists(), "a newer run's stay: no verdict superseded it");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Shards that end at once on two boxes each list their JIT's hold whole, and the verdict lets
+    /// each go on its own box: a holds line written in pieces ran two shards' together, and its
+    /// release asked for two holds at once on a "box" named by two boxes' names run together (11-14).
+    #[test]
+    fn shards_ending_at_once_on_two_boxes_hold_and_release_each_on_its_box() {
+        let home = std::env::temp_dir().join(format!("devhub-bucket-twoholds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let log = home.join("tests-7.log");
+        let (ka, kb) = ("0123456789abcdef01234567", "fedcba9876543210fedcba98");
+        let parts = [format!("L1 box-a: sources at work@0123456789\njit: kept {ka}\n"), format!("L2 box-b: sources at work@0123456789\njit: kept {kb}\n")];
+        let rounds = 200;
+        std::thread::scope(|scope| {
+            for part in &parts {
+                let log = &log;
+                scope.spawn(move || {
+                    for _ in 0..rounds { hold_run_jits(log, part, &|_, _| Ok(())); }
+                });
+            }
+        });
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |node: &str, line: &str| { asked.borrow_mut().push(format!("{node}: {line}")); Ok(()) };
+        let warned = std::cell::RefCell::new(Vec::new());
+        release_holds("tests", &run_holds(&log), &ask, &|_, line, _| warned.borrow_mut().push(line));
+        let asked = asked.into_inner();
+        let (a, b) = ("box-a: jit-unkeep tests-7-run-01234567", "box-b: jit-unkeep tests-7-run-fedcba98");
+        assert_eq!(asked.len(), 2 * rounds, "one release per hold taken: {:?}", &asked[..asked.len().min(4)]);
+        assert!(asked.iter().all(|l| l == a || l == b), "each hold is released on its own box by its own name: {:?}", asked.iter().find(|l| *l != a && *l != b));
+        assert_eq!(asked.iter().filter(|l| *l == a).count(), rounds, "box-a's holds, every one");
+        assert!(warned.into_inner().is_empty() && !run_holds(&log).exists(), "all released, the holds file gone");
         let _ = std::fs::remove_dir_all(&home);
     }
 

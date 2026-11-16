@@ -342,6 +342,9 @@ impl Local {
             let mut feed = if born_here { jit.client.feed_from("observe", 0) } else { jit.client.feed("observe") };
             let mut log_off = 0u64;
             let mut log_look = Instant::now();
+            // the panic it parked on in a lease's run, until its `panics` no longer lists it
+            let mut parked: Option<String> = None;
+            let mut park_look = Instant::now();
             loop {
                 if self.stop.load(Ordering::Acquire) {
                     return;
@@ -350,12 +353,30 @@ impl Local {
                     log_look = Instant::now();
                     self.config_errors(&jit, &mut log_off);
                 }
+                if let (Some(id), Some(mark)) = (parked.as_deref(), jit.lease.as_deref()) {
+                    if park_look.elapsed() >= Duration::from_secs(5) {
+                        park_look = Instant::now();
+                        let held = format!("\"id\":{}", json_str(id));
+                        if let Ok(lines) = jit.client.cmd("panics") {
+                            if !lines.flatten().any(|l| l.contains(&held)) {
+                                crate::lease::exec::app_unparked(mark, jit.pid);
+                                parked = None;
+                            }
+                        }
+                    }
+                }
                 match feed.next(Duration::from_secs(1), 3) {
                     Ok(Some((_, line))) => {
                         let line = String::from_utf8_lossy(&line);
                         if let Some(r) = proto::from_jit_event(&self.machine, &jit.app, jit.pid, &line, self.hitch_ms) {
                             if r.kind == "panic" {
                                 self.keep_log(&jit);
+                                // parked in a lease's run: its beats say so while it is (a crash its
+                                // process said it expects is its test's own)
+                                if let (Some(mark), Some((id, text))) = (jit.lease.as_deref(), crate::lease::exec::parked_panic(&r.detail, &r.line)) {
+                                    crate::lease::exec::app_panicked(mark, jit.pid, &text);
+                                    (parked, park_look) = (Some(id), Instant::now());
+                                }
                             }
                             self.emit(r);
                         }

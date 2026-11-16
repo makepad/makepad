@@ -53,6 +53,21 @@ pub fn clean(s: &str, max: usize) -> String {
     out
 }
 
+/// Refuse flags quoted into one argv word before cargo sees them (J14665, 11-14).
+pub fn joined_flags(words: &[String]) -> Option<String> {
+    for word in words.iter().skip(1) {
+        if !word.starts_with('-') { continue; }
+        let mut parts = word.split_whitespace();
+        let first = parts.next().unwrap_or("");
+        // `--format=%h -x` is one value: a flag that takes its value with `=` joins nothing
+        if !first.contains('=') && parts.any(|p| p.starts_with('-')) {
+            let split = word.split_whitespace().collect::<Vec<_>>().join(" ");
+            return Some(format!("its argument `{}` holds several flags in one word (quoted together): pass each {} separately, as `{}`", clean(word, 200), clean(first, 200), clean(&split, 200)));
+        }
+    }
+    None
+}
+
 /// One submission identity, generated before entering any transport retry loop.
 pub fn request_id() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

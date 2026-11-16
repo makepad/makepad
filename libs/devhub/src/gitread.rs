@@ -111,6 +111,40 @@ pub fn with_common<T>(common: &Path, f: impl FnOnce(&mut Repository) -> T) -> Op
     Some(f(&mut repo))
 }
 
+/// The manifests a merge wrote line by line (a `Cargo.toml` that is neither side's blob) that no
+/// longer parse, each as "<path>:<line>: <error>". A textual merge passes both sides' additions of
+/// one key (a duplicate dependency in one lane's crate, 11-03), and then no build reads
+/// the lane: the merge is a conflict instead. Here, not in sync (a checkout-only module), so the
+/// land gate builds without the checkout feature too (11-15).
+pub fn broken_manifests(dir: &Path, ours: &str, theirs: &str, tree: &str) -> Result<Vec<String>, String> {
+    let id = |s: &str| ObjectId::from_hex(s).map_err(|e| format!("{s}: {e}"));
+    let (ours, theirs, tree) = (id(ours)?, id(theirs)?, id(tree)?);
+    with(dir, |_, repo| {
+        let e = |e: GitError| e.to_string();
+        let ours = repo.read_commit(&ours).map_err(e)?.tree;
+        let theirs = repo.read_commit(&theirs).map_err(e)?.tree;
+        let mut bad = Vec::new();
+        for change in repo.diff_trees(&ours, &tree).map_err(e)? {
+            let (path, oid) = match change {
+                makepad_git::TreeChange::Modified { path, new_oid, .. } => (path, new_oid),
+                makepad_git::TreeChange::Added { path, oid, .. } => (path, oid),
+                makepad_git::TreeChange::Deleted { .. } => continue,
+            };
+            if path.rsplit('/').next() != Some("Cargo.toml") || repo.entry_at(&theirs, &path).map_err(e)? == Some(oid) {
+                continue;
+            }
+            let blob = repo.read_blob(&oid).map_err(e)?;
+            let text = String::from_utf8_lossy(&blob);
+            if let Err(err) = makepad_toml_parser::parse_toml(&text) {
+                let line = text.get(..err.span.start).unwrap_or(&text).matches('\n').count() + 1;
+                bad.push(format!("{path}:{line}: {} (the merged manifest does not parse)", err.msg));
+            }
+        }
+        Ok(bad)
+    })
+    .unwrap_or_else(|| Err(format!("{} is not a git repository", dir.display())))
+}
+
 /// What `name` names, unchecked: a full commit id, `HEAD` (the worktree's own), `refs/…`, or a
 /// branch, tag or remote branch name; a `^{commit}` suffix is allowed.
 fn oid_of(p: &RepositoryPaths, name: &str) -> Option<ObjectId> {
@@ -143,6 +177,167 @@ pub fn branch(dir: &Path) -> Option<String> {
 /// [`resolve`] in the repository of `dir`, as hex.
 pub fn rev(dir: &Path, name: &str) -> Option<String> {
     with(dir, |p, repo| resolve(p, repo, name)).flatten().map(|o| o.to_hex())
+}
+
+/// [`rev`] in the bare store `store` (`git --git-dir <store> rev-parse -q --verify <name>^{commit}`).
+pub fn store_rev(store: &Path, name: &str) -> Option<String> {
+    let common = store.canonicalize().ok()?;
+    let p = RepositoryPaths { workdir: common.clone(), git_dir: common.clone(), common_dir: common.clone() };
+    with_common(&common, |repo| resolve(&p, repo, name)).flatten().map(|o| o.to_hex())
+}
+
+/// The tree and the parents of commit `name` ([`resolve`]), as hex (`git rev-list --parents -n 1`
+/// with its `^{tree}`). None: no such commit.
+pub fn commit_parts(dir: &Path, name: &str) -> Option<(String, Vec<String>)> {
+    with(dir, |p, repo| {
+        let oid = resolve(p, repo, name)?;
+        let c = repo.read_commit(&oid).ok()?;
+        Some((c.tree.to_hex(), c.parents.iter().map(ObjectId::to_hex).collect()))
+    })
+    .flatten()
+}
+
+/// Paths a landing returns to the versions the target's last changes replaced, with those
+/// commits' ids. `merged` is the tree of the hand-in merged onto `tip` (the landing's own
+/// merge-tree): only what that merge changes at the tip counts. A lane read an old main tree, then
+/// a newer parent, undoing 25 landed files (11-15). One first-parent walk from the tip until each
+/// path's last change is found; only that last change counts. `since_s` (the lane's start, in
+/// seconds; 0: none) ends the walk at the first commit made before it: a version that commit
+/// replaced is one the lane never saw, and without the bound a path the target never changed (a
+/// new file, a file untouched for a year) walked the whole history on every hand-in. A path the
+/// merge leaves as the tip has it is never an undo, whatever the hand-in's history held: a lane
+/// that merged a target commit setting a file back, and never touched the file, was refused as
+/// undoing the change that commit set back, its tree read against one merge base of several
+/// (EINST, 11-16); a hand-in equal to a tip a later landing set back was refused as undoing the
+/// first (#4941 then rc-e3d, 11-15).
+pub fn undone(dir: &Path, tip: &str, merged: &str, since_s: i64) -> Result<Vec<(String, String)>, String> {
+    with(dir, |p, repo| {
+        let e = |e: GitError| e.to_string();
+        let mut at = resolve(p, repo, tip).ok_or_else(|| format!("cannot read commit {tip}"))?;
+        let tree = ObjectId::from_hex(merged).map_err(|_| format!("cannot read tree {merged}"))?;
+        let mut commit = repo.read_commit(&at).map_err(e)?;
+        let mut pending = HashMap::new();
+        for change in repo.diff_trees(&commit.tree, &tree).map_err(e)? {
+            let (path, version) = match change {
+                makepad_git::TreeChange::Added { path, oid, .. } => (path, Some(oid)),
+                makepad_git::TreeChange::Modified { path, new_oid, .. } => (path, Some(new_oid)),
+                makepad_git::TreeChange::Deleted { path, .. } => (path, None),
+            };
+            pending.insert(path, version);
+        }
+        let mut out = Vec::new();
+        while !pending.is_empty() && commit.committer.timestamp >= since_s {
+            let Some(parent) = commit.first_parent() else { break };
+            let before = repo.read_commit(&parent).map_err(e)?;
+            for change in repo.diff_trees(&before.tree, &commit.tree).map_err(e)? {
+                let (path, version) = match change {
+                    makepad_git::TreeChange::Added { path, .. } => (path, None),
+                    makepad_git::TreeChange::Modified { path, old_oid, .. } => (path, Some(old_oid)),
+                    makepad_git::TreeChange::Deleted { path, oid, .. } => (path, Some(oid)),
+                };
+                if pending.remove(&path).is_some_and(|v| v == version) { out.push((path, at.to_hex())); }
+            }
+            (at, commit) = (parent, before);
+        }
+        out.sort();
+        Ok(out)
+    })
+    .unwrap_or_else(|| Err(format!("{} is not a git repository", dir.display())))
+}
+
+/// The files where commit `merge`'s tree differs from the clean merge of commits `p1` and `p2`
+/// (`git merge-tree --write-tree p1 p2`, then `git diff-tree -r --name-only` against `merge`), for
+/// the repository of `dir`, where that clean merge is plain: one merge base, and every path as the
+/// side that changed it has it. None where only git's merge decides the clean merge: several
+/// merge bases (a criss-cross: a merged base) or none, a path both sides changed differently (a
+/// content merge or a conflict), a path of the base's both sides deleted or a directory one side
+/// removed while the other changed in it (rename and directory-rename detection may move a change
+/// there), or a commit that does not read. A tree one side left as the base has it is taken whole
+/// from the other side and compared by id, not walked.
+pub fn one_sided_strays(dir: &Path, merge: &str, p1: &str, p2: &str) -> Option<Vec<String>> {
+    with(dir, |p, repo| {
+        let (m, o, t) = (resolve(p, repo, merge)?, resolve(p, repo, p1)?, resolve(p, repo, p2)?);
+        let bases = makepad_git::merge_bases(repo, o, t).ok()?;
+        let &[base] = bases.as_slice() else { return None };
+        let mut tree = |c: ObjectId| repo.read_commit(&c).ok().map(|c| Some((TREE, c.tree)));
+        let (b, o, t, m) = (tree(base)?, tree(o)?, tree(t)?, tree(m)?);
+        let mut out = Vec::new();
+        merged(repo, "", [b, o, t], m, &mut out)?;
+        out.sort();
+        out.dedup();
+        Some(out)
+    })
+    .flatten()
+}
+
+const TREE: u32 = 0o040000;
+/// A tree entry's (mode, id); None: nothing at the path.
+type Entry = Option<(u32, ObjectId)>;
+
+fn is_tree(e: Entry) -> bool {
+    e.is_some_and(|(mode, _)| mode == TREE)
+}
+
+/// The entries of a tree entry by name: none for a file or nothing.
+fn children(repo: &mut Repository, e: Entry) -> Option<HashMap<String, (u32, ObjectId)>> {
+    match e {
+        Some((TREE, oid)) => Some(repo.read_tree(&oid).ok()?.entries.into_iter().map(|e| (e.name, (e.mode, e.oid))).collect()),
+        _ => Some(HashMap::new()),
+    }
+}
+
+fn join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") }
+}
+
+/// [`one_sided_strays`] at `path`: the clean merge of (base, side 1, side 2) against `m`. None:
+/// git's merge decides it.
+fn merged(repo: &mut Repository, path: &str, [b, o, t]: [Entry; 3], m: Entry, out: &mut Vec<String>) -> Option<()> {
+    let clean = if o == b {
+        t
+    } else if t == b {
+        o
+    } else if o == t && (b.is_none() || o.is_some() && !is_tree(o) && !is_tree(b)) {
+        // added alike on both sides, or a file changed alike: nothing of the base's is gone on both
+        o
+    } else if is_tree(o) && is_tree(t) && (b.is_none() || is_tree(b)) {
+        // both sides changed in this directory (alike too: a file of the base's both deleted is a
+        // rename source to git): each entry of it on its own
+        if m.is_some() && !is_tree(m) {
+            out.push(path.to_string());
+        }
+        let kids = [children(repo, b)?, children(repo, o)?, children(repo, t)?, children(repo, m)?];
+        let names: std::collections::BTreeSet<&str> = kids.iter().flat_map(|k| k.keys()).map(String::as_str).collect();
+        let at = |i: usize, n: &str| kids[i].get(n).copied();
+        for n in names {
+            merged(repo, &join(path, n), [at(0, n), at(1, n), at(2, n)], at(3, n), out)?;
+        }
+        return Some(());
+    } else {
+        return None;
+    };
+    differ(repo, path, clean, m, out)
+}
+
+/// The files at or below `path` that differ between entries `x` and `y` (`git diff-tree -r
+/// --name-only`).
+fn differ(repo: &mut Repository, path: &str, x: Entry, y: Entry, out: &mut Vec<String>) -> Option<()> {
+    if x == y {
+        return Some(());
+    }
+    if !is_tree(x) && !is_tree(y) || x.is_some() && !is_tree(x) || y.is_some() && !is_tree(y) {
+        out.push(path.to_string());
+    }
+    if !is_tree(x) && !is_tree(y) {
+        return Some(());
+    }
+    let kids = [children(repo, x)?, children(repo, y)?];
+    let names: std::collections::BTreeSet<&str> = kids.iter().flat_map(|k| k.keys()).map(String::as_str).collect();
+    let at = |i: usize, n: &str| kids[i].get(n).copied();
+    for n in names {
+        differ(repo, &join(path, n), at(0, n), at(1, n), out)?;
+    }
+    Some(())
 }
 
 /// Whether the repository of `dir` definitely has no commit `sha` (a read that failed for another
@@ -365,6 +560,44 @@ mod tests {
         let o = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
         assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// Only a path's last first-parent change counts, including additions and deletions (11-15),
+    /// and only what the merged tree changes at the tip (EINST, 11-16).
+    #[test]
+    fn undone_names_paths_and_their_last_changes() {
+        use makepad_git::{Commit, ObjectId, Signature, Tree, TreeEntry};
+        let d = std::env::temp_dir().join(format!("devhub-gitread-undone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        g(&d, &["init", "-q", "-b", "work"]);
+        let tree = |files: &[(&str, &str)]| super::with(&d, |_, repo| {
+            let entries = files.iter().map(|(name, text)| TreeEntry { mode: 0o100644, name: name.to_string(), oid: repo.write_blob(text.as_bytes()).unwrap() }).collect();
+            repo.write_tree(&Tree { entries }).unwrap().to_hex()
+        }).unwrap();
+        let commit = |at: i64, parents: &[&str], files: &[(&str, &str)], message: &str| {
+            let tree = tree(files);
+            super::with(&d, |_, repo| {
+                let author = Signature { name: "t".into(), email: "t@t".into(), timestamp: at, tz_offset: "+0000".into() };
+                repo.write_commit(&Commit { tree: ObjectId::from_hex(&tree).unwrap(), parents: parents.iter().map(|s| ObjectId::from_hex(s).unwrap()).collect(), author: author.clone(), committer: author, message: message.into() }).unwrap().to_hex()
+            }).unwrap()
+        };
+        let root = commit(1, &[], &[("a", "0"), ("b", "0"), ("c", "0"), ("gone", "restore")], "base");
+        let first = commit(2, &[&root], &[("a", "1"), ("added", "new"), ("b", "1"), ("c", "1")], "first");
+        let last = commit(3, &[&first], &[("a", "1"), ("added", "new"), ("b", "2"), ("c", "2")], "last");
+        let tip = commit(4, &[&last], &[("a", "3"), ("added", "new"), ("b", "2"), ("c", "2")], "later target");
+        // merged onto the tip: a and b set back, the added file gone, the deleted one back, c as the tip has it
+        let merged = tree(&[("a", "1"), ("b", "1"), ("c", "2"), ("gone", "restore"), ("own", "new")]);
+        let before = crate::git_exec::on_this_thread();
+        assert_eq!(super::undone(&d, &tip, &merged, 0).unwrap(), vec![("a".into(), tip.clone()), ("added".into(), first.clone()), ("b".into(), last.clone()), ("gone".into(), first.clone())], "each undo names its last change");
+        assert_eq!(super::undone(&d, &tip, &merged, 3).unwrap(), vec![("a".into(), tip.clone()), ("b".into(), last.clone())], "a lane started at the last change never saw what the first one replaced: the walk ends before it");
+        assert!(super::undone(&d, &tip, &merged, 5).unwrap().is_empty(), "a lane started after every change walks nothing");
+        // whatever versions the hand-in's history held, a path the merge leaves as the tip has it is no undo
+        let kept = tree(&[("a", "3"), ("added", "new"), ("b", "2"), ("c", "2"), ("own", "new")]);
+        assert!(super::undone(&d, &tip, &kept, 0).unwrap().is_empty(), "a merge that keeps the tip's files undoes nothing");
+        assert!(super::undone(&d, "refs/heads/missing", &merged, 0).is_err(), "an unreadable target must not pass");
+        assert_eq!(crate::git_exec::on_this_thread(), before, "the undo walk must not start git");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A tree's files and blobs, and whether HEAD is work only this checkout has, as `git ls-tree

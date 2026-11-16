@@ -16,13 +16,34 @@
 //!   node ([`Board`], `prewarm.state` in its state dir) for `devhub prewarm` and the panel.
 //!
 //! Only dev-on nodes that hold no lease and are under their load limits start one: the master
-//! asks for it in the apply order (`prewarm=on`), the node checks its own switch and leases again.
+//! asks for it in the apply order (`prewarm=on`), the node checks its own switch and leases again
+//! ([`refusal`]). A bench box never pre-warms: its `makepad check` ran outside any lease at 2.3
+//! cores and kept a timed lease waiting for a quiet box (11-14).
 
 use crate::proto::{self, Record};
 use makepad_remote::json_str;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+/// Why a node does not pre-warm after an apply that asks for it (None: it does): dev off, a
+/// bench box (timed work there needs the box quiet, and a pre-warm runs outside any lease), a
+/// person at it, a lease on it, or a failed prebuild.
+pub fn refusal(dev: bool, bench: bool, person: bool, leased: bool, built_ok: bool) -> Option<&'static str> {
+    if !dev {
+        Some("dev off")
+    } else if bench {
+        Some("a bench box: timed work needs it quiet")
+    } else if person {
+        Some("a person uses it")
+    } else if leased {
+        Some("a lease holds the node")
+    } else if !built_ok {
+        Some("the prebuild failed")
+    } else {
+        None
+    }
+}
 
 /// The smoke apps: (registry id, package, dir from the tree's root, extra run args).
 pub const SMOKE: &[(&str, &str, &str, &[&str])] = &[
@@ -95,6 +116,19 @@ pub fn rows(lines: &[String]) -> Vec<(String, String)> {
 mod board_tests {
     use super::*;
     use crate::proto::Sev;
+
+    /// A bench box never pre-warms, whatever else holds: its pre-warm's `makepad check` ran
+    /// outside any lease and kept a timed lease waiting for a quiet box (11-14). An idle dev box
+    /// that built pre-warms; each other reason keeps it from it.
+    #[test]
+    fn a_bench_box_never_prewarms() {
+        assert_eq!(refusal(true, true, false, false, true), Some("a bench box: timed work needs it quiet"), "an idle bench box that built");
+        assert_eq!(refusal(true, false, false, false, true), None, "an idle pool box that built pre-warms");
+        assert_eq!(refusal(false, true, false, false, true), Some("dev off"), "dev off says so first");
+        for (person, leased, built, why) in [(true, false, true, "a person uses it"), (false, true, true, "a lease holds the node"), (false, false, false, "the prebuild failed")] {
+            assert_eq!(refusal(true, false, person, leased, built), Some(why));
+        }
+    }
 
     #[test]
     fn the_board_keeps_the_last_record_per_node_across_restarts() {

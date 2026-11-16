@@ -1,12 +1,16 @@
 //! Git stores shared by the deployment and work trees: one bare store per repo
-//! (`~/devhub/git/<repo>.git`, DESIGN.md §10.12). Sync moves the deployment checkout with
-//! `read-tree -m -u`: only changed files get new mtimes, preserving cargo and JIT caches.
+//! (DESIGN.md §10.12). Sync renames verified, synced copies over changed files,
+//! preserving unchanged mtimes and cargo and JIT caches.
 //! Local edits or untracked files in the way make the move refuse. Leases use detached
 //! worktree HEADs ([`crate::lease::tree`]), independently of the deployment refs.
 //!
-//! Every call is `git` with fixed arguments (never a shell); hooks are off (`core.hooksPath` to
-//! /dev/null), so nothing that arrives in a bundle ever runs.
+//! Moves use makepad-git. Remaining git commands have fixed arguments and hooks disabled.
 
+use makepad_git::{Index, IndexEntry, ObjectId, Repository, TreeChangeRecord};
+use makepad_git::text_clean::{self, Conversion};
+use std::collections::{BTreeSet, HashMap};
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -123,6 +127,209 @@ pub struct Store {
 pub struct Moved {
     /// the files that changed between the two commits
     pub files: Vec<String>,
+    /// the crash debris restored before this move
+    pub repaired: Vec<String>,
+}
+
+#[derive(Clone)]
+struct Entry {
+    path: String,
+    value: Option<(ObjectId, u32)>,
+}
+
+struct Revision {
+    files: HashMap<String, (ObjectId, u32)>,
+    attributes: HashMap<String, Option<String>>,
+}
+
+impl Revision {
+    fn read(repo: &mut Repository, rev: &str) -> Result<Self, String> {
+        let oid = ObjectId::from_hex(rev).map_err(|e| e.to_string())?;
+        let tree = repo.read_commit(&oid).map_err(|e| e.to_string())?.tree;
+        Ok(Self { files: repo.flatten_tree_with_mode(&tree).map_err(|e| e.to_string())?, attributes: HashMap::new() })
+    }
+
+    fn entry(&self, path: &str) -> Entry {
+        Entry { path: path.into(), value: self.files.get(path).copied() }
+    }
+
+    fn has_directory(&self, path: &str) -> bool {
+        let prefix = format!("{path}/");
+        self.files.keys().any(|p| p.starts_with(&prefix))
+    }
+
+    fn conversion(&mut self, repo: &mut Repository, common: &Path, path: &str) -> Result<Conversion, String> {
+        text_clean::conversion(common, path, |dir| {
+            if let Some(rules) = self.attributes.get(dir) { return Ok(rules.clone()); }
+            let name = if dir.is_empty() { ".gitattributes".into() } else { format!("{dir}/.gitattributes") };
+            let rules = match self.files.get(&name) {
+                Some(&(oid, 0o100644 | 0o100755)) => {
+                    let raw = repo.read_blob(&oid).map_err(|e| e.to_string())?;
+                    verify_blob(&name, oid, &raw)?;
+                    Some(String::from_utf8(raw).map_err(|e| format!("{name}: {e}"))?)
+                }
+                _ => None,
+            };
+            self.attributes.insert(dir.into(), rules.clone());
+            Ok(rules)
+        }).map_err(|e| format!("{path}: {e}"))
+    }
+}
+
+fn verify_blob(path: &str, oid: ObjectId, raw: &[u8]) -> Result<(), String> {
+    if makepad_git::oid::hash_object("blob", raw) != oid {
+        return Err(format!("{path}: blob {oid} read back as {} bytes that are not it: nothing moved", raw.len()));
+    }
+    Ok(())
+}
+
+fn checked(work: &Path, path: &str) -> Result<PathBuf, String> {
+    if path.split('/').next().is_some_and(|p| p.eq_ignore_ascii_case(".devhub-move")) {
+        return Err(format!("{path}: reserved move staging path"));
+    }
+    makepad_git::worktree::checked_worktree_path(work, path).map_err(|e| e.to_string())
+}
+
+fn sync_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    File::open(dir).and_then(|f| f.sync_all()).map_err(|e| format!("{}: {e}", dir.display()))?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+fn remove_staging(work: &Path) -> Result<(), String> {
+    let staging = work.join(".devhub-move");
+    match fs::symlink_metadata(&staging) {
+        Ok(m) => {
+            if m.is_dir() { fs::remove_dir_all(&staging) } else { fs::remove_file(&staging) }
+                .map_err(|e| format!("{}: {e}", staging.display()))?;
+            sync_dir(work)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn zero_stat(path: String, oid: ObjectId, mode: u32) -> IndexEntry {
+    IndexEntry { ctime_sec: 0, ctime_nsec: 0, mtime_sec: 0, mtime_nsec: 0, dev: 0, ino: 0,
+        mode, uid: 0, gid: 0, file_size: 0, oid, flags: path.len().min(0xfff) as u16, path }
+}
+
+fn link_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let target = fs::read_link(path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    { use std::os::unix::ffi::OsStrExt; Ok(target.as_os_str().as_bytes().to_vec()) }
+    #[cfg(not(unix))]
+    { Ok(target.to_string_lossy().as_bytes().to_vec()) }
+}
+
+fn verify_staged(staged: &Path, path: &str, oid: ObjectId, mode: u32, raw: &[u8], smudged: &[u8], conversion: &Conversion, config: &str) -> Result<(), String> {
+    let meta = fs::symlink_metadata(staged).ok();
+    let size = meta.as_ref().map_or(0, |m| m.len());
+    let good = if mode == 0o120000 && cfg!(unix) {
+        size == raw.len() as u64 && meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) && link_bytes(staged).is_ok_and(|b| b == raw)
+    } else if meta.as_ref().is_some_and(|m| m.is_file()) && size == smudged.len() as u64 {
+        if *conversion == Conversion::default() && raw == smudged {
+            makepad_git::hash_file_blob(staged).is_ok_and(|id| id == oid)
+        } else {
+            fs::read(staged).ok().map(|b| text_clean::bytes_clean_to(&b, oid, conversion, config)).transpose()?.unwrap_or(false)
+        }
+    } else { false };
+    if good { Ok(()) } else {
+        Err(format!("{path}: the staged copy ({size} bytes{}) is not blob {oid} ({} bytes): nothing moved",
+            if meta.is_none() { ", missing" } else { "" }, raw.len()))
+    }
+}
+
+// No traversal through a parent symlink: a descendant blocked by a file is absent.
+enum Disk { Missing, Directory, File(Vec<u8>, u32), Symlink(Vec<u8>), Other }
+
+impl Disk {
+    fn read(work: &Path, path: &str) -> Result<Self, String> {
+        let mut parent = work.to_path_buf();
+        let parts: Vec<_> = path.split('/').collect();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            makepad_git::tree::validate_entry_name(part).map_err(|e| e.to_string())?;
+            parent.push(part);
+            match fs::symlink_metadata(&parent) {
+                Ok(m) if !m.is_dir() => return Ok(Self::Missing),
+                Ok(_) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Missing),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        let file = checked(work, path)?;
+        match fs::symlink_metadata(&file) {
+            Ok(m) if m.file_type().is_symlink() => link_bytes(&file).map(Self::Symlink),
+            Ok(m) if m.is_file() => {
+                #[cfg(unix)]
+                let mode = { use std::os::unix::fs::PermissionsExt; if m.permissions().mode() & 0o100 != 0 { 0o100755 } else { 0o100644 } };
+                #[cfg(not(unix))]
+                let mode = 0o100644;
+                fs::read(&file).map(|bytes| Self::File(bytes, mode)).map_err(|e| format!("{path}: {e}"))
+            }
+            Ok(m) if m.is_dir() => Ok(Self::Directory),
+            Ok(_) => Ok(Self::Other),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(Self::Missing),
+            Err(e) => Err(format!("{path}: {e}")),
+        }
+    }
+
+    fn matches(&self, entry: &Entry, rev: &mut Revision, repo: &mut Repository, common: &Path, config: &str) -> Result<bool, String> {
+        let Some((oid, mode)) = entry.value else {
+            return Ok(matches!(self, Self::Missing) || (matches!(self, Self::Directory) && rev.has_directory(&entry.path)));
+        };
+        match (self, mode) {
+            (Self::Directory, 0o160000) => Ok(true),
+            (Self::Symlink(bytes), 0o120000) => Ok(makepad_git::oid::hash_object("blob", bytes) == oid),
+            (Self::File(bytes, _), 0o120000) if !cfg!(unix) => Ok(makepad_git::oid::hash_object("blob", bytes) == oid),
+            (Self::File(bytes, actual_mode), 0o100644 | 0o100755) => {
+                let filemode = makepad_git::config::get(config, "core.filemode").map_err(|e| e.to_string())?
+                    .as_deref().and_then(makepad_git::config::parse_bool).unwrap_or(cfg!(unix));
+                if filemode && *actual_mode != mode { return Ok(false); }
+                if makepad_git::oid::hash_object("blob", bytes) == oid { return Ok(true); }
+                let c = rev.conversion(repo, common, &entry.path)?;
+                text_clean::bytes_clean_to(bytes, oid, &c, config)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+// A directory replacing a file is debris only when all its leaves belong to
+// one of the marked trees. Unknown contents must survive the repair too.
+fn directory_copy(work: &Path, path: &str, old: &mut Revision, new: &mut Revision, repo: &mut Repository, common: &Path, config: &str) -> Result<bool, String> {
+    if !old.has_directory(path) && !new.has_directory(path) { return Ok(false); }
+    let mut dirs = vec![path.to_string()];
+    while let Some(dir) = dirs.pop() {
+        for item in fs::read_dir(checked(work, &dir)?).map_err(|e| e.to_string())? {
+            let item = item.map_err(|e| e.to_string())?;
+            let name = item.file_name().into_string().map_err(|_| "non-UTF-8 path in move directory")?;
+            let path = format!("{dir}/{name}");
+            let disk = Disk::read(work, &path)?;
+            if matches!(disk, Disk::Directory) && (old.has_directory(&path) || new.has_directory(&path)) {
+                dirs.push(path);
+            } else {
+                let a = old.entry(&path);
+                let b = new.entry(&path);
+                if !(a.value.is_some() && disk.matches(&a, old, repo, common, config)?)
+                    && !(b.value.is_some() && disk.matches(&b, new, repo, common, config)?) { return Ok(false); }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn changes(repo: &mut Repository, from: &str, to: &str) -> Result<Vec<TreeChangeRecord>, String> {
+    let id = |s: &str| ObjectId::from_hex(s).map_err(|e| e.to_string());
+    // Address-space bounds, not repository-size limits. Incomplete is never a move.
+    let limits = makepad_git::TreeDiffLimits { max_records: usize::MAX, max_result_bytes: usize::MAX,
+        max_scratch_bytes: usize::MAX, max_path_bytes: usize::MAX, max_depth: usize::MAX };
+    let diff = repo.diff_commits_bounded(Some(id(from)?), Some(id(to)?), &limits,
+        &makepad_git::memory::MemoryAccount::new(usize::MAX), &|| false).map_err(|e| e.to_string())?;
+    if !diff.complete { return Err(format!("incomplete checkout tree diff: {:?}", diff.reason)); }
+    Ok(diff.records)
 }
 
 impl Store {
@@ -140,8 +347,9 @@ impl Store {
     }
 
     /// The commit a ref names, if any.
+    /// The commit `r` names here (makepad-git: a node's caps read three of these every 10 s).
     pub fn rev(&self, r: &str) -> Option<String> {
-        self.git(&["rev-parse", "-q", "--verify", &format!("{r}^{{commit}}")]).ok().map(|s| s.trim().to_string()).filter(|s| valid_sha(s))
+        crate::gitread::store_rev(&self.git_dir, r)
     }
 
     pub fn has(&self, sha: &str) -> bool {
@@ -187,8 +395,41 @@ impl Store {
         let b = bundle.to_string_lossy();
         self.git(&["bundle", "verify", "-q", &b])?;
         let dst = format!("{PUSHED}{branch}");
-        self.git(&["fetch", "-q", "--no-tags", "--no-write-fetch-head", &b, &format!("+refs/heads/{branch}:{dst}")])?;
+        let fetch = || self.git(&["fetch", "-q", "--no-tags", "--no-write-fetch-head", &b, &format!("+refs/heads/{branch}:{dst}")]);
+        if let Err(e) = fetch() {
+            // A ref of the store's own it cannot read (this branch's, or another the fetch names:
+            // git reads them all) is only its copy of a master's branch: dropped, and the fetch
+            // made again. A box's store that could not resolve one refused a lane's lease start
+            // ("cannot lock ref ... unable to resolve reference", 11-13).
+            let named = e.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ':' | '!' | ',')).filter(|w| w.starts_with("refs/devhub/")).map(str::to_string);
+            let broken: std::collections::BTreeSet<String> = std::iter::once(dst.clone()).chain(named).filter(|r| self.broken_ref(r)).collect();
+            if broken.is_empty() {
+                return Err(e);
+            }
+            for r in &broken {
+                self.drop_ref(r);
+            }
+            let dropped = broken.into_iter().collect::<Vec<_>>().join(", ");
+            fetch().map_err(|again| format!("{again} (after dropping {dropped}, which it could not read: {e})"))?;
+            eprintln!("sync: {}: dropped {dropped}, which it could not read, and fetched again", self.git_dir.display());
+        }
         self.rev(&dst).ok_or_else(|| format!("the bundle holds no branch {branch}"))
+    }
+
+    /// Whether `r` is there but names no commit the store holds: a loose ref file that is empty,
+    /// not a sha, or a sha of a missing object (a crash mid-write), or a packed one of a missing
+    /// object.
+    fn broken_ref(&self, r: &str) -> bool {
+        let loose = self.git_dir.join(r);
+        let packed = std::fs::read_to_string(self.git_dir.join("packed-refs")).is_ok_and(|t| t.lines().any(|l| l.split_once(' ').is_some_and(|(_, n)| n == r)));
+        (loose.is_file() || packed) && self.rev(r).is_none()
+    }
+
+    /// Drops `r` whatever it holds: its loose file, then its packed line (git refuses to delete a
+    /// ref it cannot read).
+    fn drop_ref(&self, r: &str) {
+        let _ = std::fs::remove_file(self.git_dir.join(r));
+        let _ = self.git(&["update-ref", "--no-deref", "-d", r]);
     }
 
     /// Drops `refs/devhub/pushed/<branch>` of each branch, in one git process: the master's word
@@ -215,6 +456,21 @@ impl Store {
     /// had no dotfiles; an empty dir gets every file). A `.git` that is not ours: refused.
     pub fn link(&self, work: &Path, at: &str) -> Result<(), String> {
         let root = if self.name() == "commercial" { work.parent().and_then(Path::parent).unwrap_or(work) } else { work };
+        let exclude = self.git_dir.join("info/exclude");
+        let mut ex = fs::read_to_string(&exclude).unwrap_or_default();
+        let mut changed = false;
+        for line in ["/FLEET-REVISION.txt", "/.devhub-move/"] {
+            if !ex.lines().any(|l| l == line) {
+                if !ex.is_empty() && !ex.ends_with('\n') { ex.push('\n'); }
+                ex.push_str(line);
+                ex.push('\n');
+                changed = true;
+            }
+        }
+        if changed {
+            fs::create_dir_all(self.git_dir.join("info")).map_err(|e| e.to_string())?;
+            fs::write(&exclude, ex).map_err(|e| e.to_string())?;
+        }
         let dotgit = work.join(".git");
         if let Some(admin) = self.admin_of(work) {
             if admin.join("HEAD").exists() {
@@ -241,13 +497,6 @@ impl Store {
         let _ = std::fs::remove_dir(&tmp);
         let _ = std::fs::remove_dir(&adopt);
         self.git(&["worktree", "repair", &work.to_string_lossy()])?;
-        // FLEET-REVISION.txt is the tree's own record, never a change of the tree
-        let exclude = self.git_dir.join("info").join("exclude");
-        let ex = std::fs::read_to_string(&exclude).unwrap_or_default();
-        if !ex.lines().any(|l| l == "/FLEET-REVISION.txt") {
-            let _ = std::fs::create_dir_all(self.git_dir.join("info"));
-            let _ = std::fs::write(&exclude, format!("{ex}{}/FLEET-REVISION.txt\n", if ex.is_empty() || ex.ends_with('\n') { "" } else { "\n" }));
-        }
         self.read_index(work, at)?;
         crate::ci_merge::install_merge_driver(work, root)
     }
@@ -279,24 +528,295 @@ impl Store {
         std::fs::canonicalize(&dir).ok().filter(|d| d.starts_with(common.join("worktrees")))
     }
 
-    /// Moves the deployment checkout from `from` (None: empty or missing) to `to`. Only changed
-    /// files are written, keeping cargo and JIT caches warm. The caller checks forward movement;
-    /// local edits or untracked files blocking the move make it refuse.
+    /// Move only changed files, using verified, fsynced copies renamed over the old
+    /// ones. A durable marker lets the next move repair an interrupted checkout. Its error says
+    /// which step met it: a node's sync once read only "IO error: No such file or directory"
+    /// (11-16), naming neither step nor file.
     pub fn move_checkout(&self, work: &Path, from: Option<&str>, to: &str) -> Result<Moved, String> {
-        let g = |args: &[&str]| run(Some(work), None, &[], args);
+        let short = |s: &str| s.get(..10).unwrap_or(s).to_string();
+        self.move_steps(work, from, to).map_err(|(step, e)| format!("{step} ({} -> {}): {e}", from.map_or("(new)".into(), short), short(to)))
+    }
+
+    fn move_steps(&self, work: &Path, from: Option<&str>, to: &str) -> Result<Moved, (&'static str, String)> {
+        let at = |step: &'static str| move |e: String| (step, e);
         let Some(from) = from else {
-            self.link(work, to)?;
-            self.set_ref(CHECKOUT_REF, to)?;
-            return Ok(Moved { files: Vec::new() });
+            self.link(work, to).map_err(at("linking the worktree"))?;
+            self.set_ref(CHECKOUT_REF, to).map_err(at("its checkout ref"))?;
+            return Ok(Moved::default());
         };
-        self.at_from(work, from)?;
-        if from != to {
-            g(&["read-tree", "-m", "-u", from, to])?;
-            g(&["update-ref", "--no-deref", "HEAD", to])?;
+        let repaired = self.repair(work, from).map_err(at("repairing a cut-short move"))?;
+        if from == to { return Ok(Moved { files: Vec::new(), repaired }); }
+        let p = crate::gitread::paths(work).ok_or(("reading the worktree", "not a worktree".to_string()))?;
+        let config = text_clean::conversion_config(&p).map_err(at("reading its config"))?;
+        let delta = crate::gitread::with_common(&self.git_dir, |repo| {
+            let delta = changes(repo, from, to)?;
+            let mut before = Revision::read(repo, from)?;
+            let index = makepad_git::index::read_index_for_update(&p.git_dir).map_err(|e| e.to_string())?;
+            let indexed: HashMap<_, _> = index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+            // Direct callers have the same edit protection as apply's check_move.
+            for d in &delta {
+                let entry = before.entry(&d.path);
+                let staged = indexed.get(d.path.as_str());
+                let disk = Disk::read(work, &d.path)?;
+                let empty_dir = d.old.is_none() && matches!(disk, Disk::Directory)
+                    && fs::read_dir(checked(work, &d.path)?).map_err(|e| e.to_string())?.next().is_none();
+                let mut clean = empty_dir || disk.matches(&entry, &mut before, repo, &p.common_dir, &config)?;
+                if !empty_dir && matches!(disk, Disk::Directory) && matches!(d.new, Some((_, 0o100644 | 0o100755 | 0o120000))) {
+                    let mut after = Revision::read(repo, to)?;
+                    clean &= directory_copy(work, &d.path, &mut before, &mut after, repo, &p.common_dir, &config)?;
+                }
+                if staged.map(|e| (e.oid, e.mode)) != d.old || staged.is_some_and(|e| e.stage() != 0) || !clean {
+                    return Err(format!("{}: holds edits its move would overwrite", d.path));
+                }
+            }
+            Ok(delta)
+        }).ok_or("cannot read shared object store".to_string()).and_then(|r| r).map_err(at("checking the disk against the move"))?;
+        let files = delta.iter().map(|d| d.path.clone()).collect();
+        let entries: Vec<_> = delta.into_iter().map(|d| Entry { path: d.path, value: d.new }).collect();
+        self.mark_move(work, from, to).map_err(at("marking the move"))?;
+        self.write_paths(work, to, &entries).map_err(at("writing its files and index"))?;
+        let oid = ObjectId::from_hex(to).map_err(|e| ("its commit", e.to_string()))?;
+        makepad_git::refs::update_head_durable(&p.git_dir, &makepad_git::RefTarget::Direct(oid)).map_err(|e| ("its HEAD", e.to_string()))?;
+        makepad_git::refs::write_ref_durable(&p.common_dir, CHECKOUT_REF, &oid).map_err(|e| ("its checkout ref", e.to_string()))?;
+        self.unmark_move(work).map_err(at("unmarking the move"))?;
+        Ok(Moved { files, repaired })
+    }
+
+    fn mark_move(&self, work: &Path, from: &str, to: &str) -> Result<(), String> {
+        let admin = self.admin_of(work).ok_or("not a devhub worktree")?;
+        let tmp = admin.join("devhub-move.tmp");
+        match fs::remove_file(&tmp) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.to_string()),
         }
-        let files = if from == to { Vec::new() } else { self.git(&["diff", "--name-only", "--no-renames", from, to])?.lines().map(str::to_string).collect() };
-        self.set_ref(CHECKOUT_REF, to)?;
-        Ok(Moved { files })
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(format!("{from} {to}\n").as_bytes()).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+        drop(file);
+        fs::rename(tmp, admin.join("devhub-move")).map_err(|e| e.to_string())?;
+        sync_dir(&admin)
+    }
+
+    fn unmark_move(&self, work: &Path) -> Result<(), String> {
+        let admin = self.admin_of(work).ok_or("not a devhub worktree")?;
+        fs::remove_file(admin.join("devhub-move")).map_err(|e| e.to_string())?;
+        sync_dir(&admin)
+    }
+
+    fn write_paths(&self, work: &Path, rev: &str, entries: &[Entry]) -> Result<(), String> {
+        let admin = self.admin_of(work).ok_or("not a devhub worktree")?;
+        let mut index = makepad_git::index::read_index_for_update(&admin).map_err(|e| e.to_string())?;
+        let p = crate::gitread::paths(work).ok_or("not a worktree")?;
+        let config = text_clean::conversion_config(&p)?;
+        remove_staging(work)?;
+        let staging = work.join(".devhub-move");
+        // All reads, writes and verification finish before any destination changes.
+        let stage = crate::gitread::with_common(&self.git_dir, |repo| {
+            let mut revision = Revision::read(repo, rev)?;
+            fs::create_dir(&staging).map_err(|e| e.to_string())?;
+            for entry in entries {
+                let copy = checked(&staging, &entry.path)?;
+                let Some((oid, mode)) = entry.value else { continue };
+                if mode == 0o160000 { continue; }
+                if !matches!(mode, 0o100644 | 0o100755 | 0o120000) { return Err(format!("{}: unsupported mode {mode:o}", entry.path)); }
+                let raw = repo.read_blob(&oid).map_err(|e| format!("{}: {e}", entry.path))?;
+                verify_blob(&entry.path, oid, &raw)?;
+                let conversion = if mode == 0o120000 { Conversion::default() } else { revision.conversion(repo, &p.common_dir, &entry.path)? };
+                let bytes = if mode == 0o120000 { raw.clone() } else { text_clean::smudge(&raw, oid, &conversion, &config).map_err(|e| format!("{}: {e}", entry.path))? };
+                fs::create_dir_all(copy.parent().unwrap()).map_err(|e| e.to_string())?;
+                if mode == 0o120000 && cfg!(unix) {
+                    #[cfg(unix)] {
+                        use std::os::unix::ffi::OsStrExt;
+                        std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&raw), &copy).map_err(|e| format!("{}: {e}", entry.path))?;
+                    }
+                } else {
+                    let mut options = fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)] {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(if mode == 0o100755 { 0o755 } else { 0o644 });
+                    }
+                    let mut file = options.open(&copy).map_err(|e| format!("{}: {e}", entry.path))?;
+                    file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| format!("{}: {e}", entry.path))?;
+                }
+                verify_staged(&copy, &entry.path, oid, mode, &raw, &bytes, &conversion, &config)?;
+            }
+            Ok(())
+        }).ok_or_else(|| "cannot read shared object store".to_string()).and_then(|r| r);
+        if let Err(e) = stage {
+            let cleanup = remove_staging(work);
+            return Err(match cleanup { Ok(()) => e, Err(c) => format!("{e}; staging cleanup: {c}") });
+        }
+        let mut dirs = BTreeSet::new();
+        for entry in entries.iter().filter(|e| e.value.is_none()) {
+            let path = checked(work, &entry.path)?;
+            match fs::symlink_metadata(&path) {
+                Ok(m) if m.is_dir() => {
+                    // A populated gitlink (or a directory replacing a deleted file) stays.
+                    let _ = fs::remove_dir(&path);
+                }
+                Ok(_) => fs::remove_file(&path).map_err(|e| format!("{}: {e}", entry.path))?,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {},
+                Err(e) => return Err(format!("{}: {e}", entry.path)),
+            }
+            let mut parent = path.parent().unwrap();
+            dirs.insert(parent.to_path_buf());
+            while parent != work && parent.starts_with(work) && fs::remove_dir(parent).is_ok() {
+                parent = parent.parent().unwrap();
+                dirs.insert(parent.to_path_buf());
+            }
+        }
+        for entry in entries {
+            let Some((_, mode)) = entry.value else { continue };
+            let path = checked(work, &entry.path)?;
+            let parent = path.parent().unwrap();
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", entry.path))?;
+            for dir in parent.ancestors().take_while(|d| d.starts_with(work)) { dirs.insert(dir.to_path_buf()); }
+            if mode == 0o160000 {
+                if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
+                    fs::remove_file(&path).map_err(|e| format!("{}: {e}", entry.path))?;
+                }
+                fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", entry.path))?;
+                dirs.insert(path);
+                continue;
+            }
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                fs::remove_dir(&path).map_err(|_| format!("{}: a directory with other files is where {rev} has a file", entry.path))?;
+            }
+            let copy = checked(&staging, &entry.path)?;
+            dirs.insert(copy.parent().unwrap().to_path_buf());
+            fs::rename(copy, &path).map_err(|e| format!("{}: {e}", entry.path))?;
+        }
+        // Children first; removed directories have no entries left to sync.
+        let mut dirs: Vec<_> = dirs.into_iter().collect();
+        dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        for dir in dirs {
+            match fs::symlink_metadata(&dir) {
+                Ok(m) if m.is_dir() => sync_dir(&dir)?,
+                Ok(_) => {},
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {},
+                Err(e) => return Err(format!("{}: {e}", dir.display())),
+            }
+        }
+        let touched: BTreeSet<_> = entries.iter().map(|e| e.path.as_str()).collect();
+        index.entries.retain(|e| !touched.contains(e.path.as_str()));
+        for entry in entries {
+            let Some((oid, mode)) = entry.value else { continue };
+            let e = if mode == 0o160000 { zero_stat(entry.path.clone(), oid, mode) } else {
+                let meta = fs::symlink_metadata(checked(work, &entry.path)?).map_err(|e| e.to_string())?;
+                makepad_git::index_entry_from_metadata(entry.path.clone(), oid, mode, &meta)
+            };
+            index.entries.push(e);
+        }
+        index.entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()).then(a.stage().cmp(&b.stage())));
+        makepad_git::index::write_index_durable(&admin, &index).map_err(|e| e.to_string())?;
+        remove_staging(work)
+    }
+
+    /// Restore missing, empty or old/new-blob copies left by a marked move, and
+    /// tracked nonempty blobs truncated to zero. Anything else is someone's content and stays.
+    pub fn repair(&self, work: &Path, from: &str) -> Result<Vec<String>, String> {
+        if !valid_sha(from) { return Err("invalid checkout commit".into()); }
+        let marker = match self.admin_of(work) {
+            Some(admin) => match fs::read_to_string(admin.join("devhub-move")) {
+                Ok(s) => Some(s),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.to_string()),
+            },
+            None => None,
+        };
+        let mut repaired = Vec::new();
+        if let Some(marker) = marker {
+            let words: Vec<_> = marker.split_whitespace().collect();
+            if words.len() != 2 || !words.iter().all(|w| valid_sha(w)) { return Err("invalid devhub move marker".into()); }
+            let (f, t) = (words[0], words[1]);
+            let admin = self.admin_of(work).ok_or("not a devhub worktree")?;
+            match fs::read(admin.join("index")) {
+                Ok(data) if !data.is_empty() => {
+                    if makepad_git::index::is_split_or_sparse(&data).map_err(|e| e.to_string())? {
+                        return Err("cannot repair a split or sparse index".into());
+                    }
+                }
+                Ok(_) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(e) => return Err(e.to_string()),
+            }
+            let mut wanted = crate::gitread::with_common(&self.git_dir, |repo| Revision::read(repo, from)).ok_or("cannot read shared object store")??;
+            let mut entries: Vec<_> = wanted.files.iter().map(|(path, &(oid, mode))| zero_stat(path.clone(), oid, mode)).collect();
+            entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+            makepad_git::index::write_index_durable(&admin, &Index { version: 2, entries }).map_err(|e| e.to_string())?;
+            // Prevent at_from from checking missing files out before they are classified.
+            let oid = ObjectId::from_hex(from).map_err(|e| e.to_string())?;
+            makepad_git::refs::update_head_durable(&admin, &makepad_git::RefTarget::Direct(oid)).map_err(|e| e.to_string())?;
+            self.at_from(work, from)?;
+            remove_staging(work)?;
+            let p = crate::gitread::paths(work).ok_or("not a worktree")?;
+            let config = text_clean::conversion_config(&p)?;
+            let fixes = crate::gitread::with_common(&self.git_dir, |repo| {
+                let mut old = Revision::read(repo, f)?;
+                let mut new = Revision::read(repo, t)?;
+                let mut fixes = Vec::new();
+                for d in changes(repo, f, t)? {
+                    let entry = wanted.entry(&d.path);
+                    let disk = Disk::read(work, &d.path)?;
+                    if disk.matches(&entry, &mut wanted, repo, &p.common_dir, &config)? { continue; }
+                    let old_copy = d.old.is_some() && disk.matches(&old.entry(&d.path), &mut old, repo, &p.common_dir, &config)?;
+                    let new_copy = d.new.is_some() && disk.matches(&new.entry(&d.path), &mut new, repo, &p.common_dir, &config)?;
+                    let directory = matches!(disk, Disk::Directory) && entry.value.is_some()
+                        && directory_copy(work, &d.path, &mut old, &mut new, repo, &p.common_dir, &config)?;
+                    let short = &from[..8];
+                    let line = match (&disk, entry.value) {
+                        (Disk::Missing, Some(_)) => Some(format!("{}: missing -> {short}", d.path)),
+                        (Disk::File(bytes, _), Some((oid, 0o100644 | 0o100755 | 0o120000))) if bytes.is_empty() && oid != makepad_git::oid::hash_object("blob", b"") => Some(format!("{}: 0 bytes on disk -> {short}", d.path)),
+                        (_, None) if new_copy || old_copy => Some(format!("{}: an extra file of {} -> removed", d.path, if new_copy { &t[..8] } else { &f[..8] })),
+                        (_, Some(_)) if directory => Some(format!("{}: the directory copy -> {short}", d.path)),
+                        (_, Some(_)) if new_copy || old_copy => Some(format!("{}: the {} copy -> {short}", d.path, if new_copy { &t[..8] } else { &f[..8] })),
+                        _ => None,
+                    };
+                    if let Some(line) = line { fixes.push(entry); repaired.push(line); }
+                }
+                Ok::<_, String>(fixes)
+            }).ok_or("cannot read shared object store")??;
+            if !fixes.is_empty() { self.write_paths(work, from, &fixes)?; }
+            // at_from may have replaced the fresh index while refreshing its stats.
+            File::open(admin.join("index")).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+            sync_dir(&admin)?;
+            self.unmark_move(work)?;
+        } else {
+            self.at_from(work, from)?;
+        }
+        let admin = self.admin_of(work).ok_or("not a devhub worktree")?;
+        let index = makepad_git::index::read_index_for_update(&admin).map_err(|e| e.to_string())?;
+        let mut empty = Vec::new();
+        for entry in index.entries.iter().filter(|e| e.stage() == 0 && matches!(e.mode, 0o100644 | 0o100755) && e.file_size != 0) {
+            // One lstat per eligible path. Nonempty files need no content read.
+            match fs::symlink_metadata(work.join(&entry.path)) {
+                Ok(m) if m.is_file() && m.len() == 0 => empty.push(entry.path.clone()),
+                Ok(_) => {},
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {},
+                Err(e) => return Err(format!("{}: {e}", entry.path)),
+            }
+        }
+        if !empty.is_empty() {
+            let fixes = crate::gitread::with_common(&self.git_dir, |repo| {
+                let wanted = Revision::read(repo, from)?;
+                let mut fixes = Vec::new();
+                for path in empty {
+                    let entry = wanted.entry(&path);
+                    if let Some((oid, 0o100644 | 0o100755)) = entry.value {
+                        let raw = repo.read_blob(&oid).map_err(|e| e.to_string())?;
+                        verify_blob(&path, oid, &raw)?;
+                        if !raw.is_empty() {
+                            repaired.push(format!("{path}: 0 bytes on disk, {} bytes in {} -> restored", raw.len(), &from[..8]));
+                            fixes.push(entry);
+                        }
+                    }
+                }
+                Ok::<_, String>(fixes)
+            }).ok_or("cannot read shared object store")??;
+            if !fixes.is_empty() { self.write_paths(work, from, &fixes)?; }
+        }
+        Ok(repaired)
     }
 
     /// Whether [`Self::move_checkout`] from `from` to `to` would go through: Err names the edits
@@ -312,13 +832,16 @@ impl Store {
     fn at_from(&self, work: &Path, from: &str) -> Result<(), String> {
         let g = |args: &[&str]| run(Some(work), None, &[], args);
         self.link(work, from)?;
-        let head = g(&["rev-parse", "-q", "--verify", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_default();
+        let head = crate::gitread::rev(work, "HEAD").unwrap_or_default();
         if head != from {
             // the index describes HEAD: read it from `from` (what the tree holds) first
-            g(&["update-ref", "--no-deref", "HEAD", from])?;
+            let p = crate::gitread::paths(work).ok_or("not a worktree")?;
+            let oid = ObjectId::from_hex(from).map_err(|e| e.to_string())?;
+            makepad_git::refs::update_head_durable(&p.git_dir, &makepad_git::RefTarget::Direct(oid)).map_err(|e| e.to_string())?;
             self.read_index(work, from)?;
         }
-        // (exit 1 names the edits: read-tree refuses those the move changes)
+        // the move's one git process: the stats of the whole index refreshed in one batch (exit 1
+        // names the edits: the move refuses those it changes)
         let _ = g(&["update-index", "-q", "--refresh"]);
         Ok(())
     }
@@ -439,6 +962,184 @@ mod tests {
         std::fs::metadata(p).unwrap().modified().unwrap()
     }
 
+    fn source() -> (makepad_git::test_support::TempDir, PathBuf) {
+        let base = makepad_git::test_support::tempdir().unwrap();
+        let src = base.path().join("src");
+        fs::create_dir(&src).unwrap();
+        sh(&src, &["init", "-q", "-b", "work"]);
+        sh(&src, &["config", "core.autocrlf", "false"]);
+        (base, src)
+    }
+
+    fn put(root: &Path, files: &[(&str, &str)]) {
+        for (path, bytes) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+    }
+
+    fn revision(src: &Path, message: &str) -> String {
+        sh(src, &["add", "-A"]);
+        sh(src, &["commit", "-q", "-m", message]);
+        sh(src, &["rev-parse", "HEAD"]).trim().into()
+    }
+
+    fn linked(src: &Path, work: &Path, at: &str) -> Store {
+        sh(src, &["worktree", "add", "-q", "--detach", &work.to_string_lossy(), at]);
+        let store = Store { git_dir: src.join(".git") };
+        store.link(work, at).unwrap();
+        makepad_git::refs::write_ref_durable(&store.git_dir, CHECKOUT_REF, &ObjectId::from_hex(at).unwrap()).unwrap();
+        store
+    }
+
+    #[test]
+    fn a_durable_move_writes_modes_links_directories_and_new_attributes() {
+        let (base, src) = source();
+        put(&src, &[("modified", "before\n"), ("gone/file", "delete\n"), ("run", "script\n"), ("replace/child", "child\n"), ("unchanged", "keep\n"), ("run.bat", "old\n")]);
+        let from = revision(&src, "before");
+        put(&src, &[("modified", "after\n"), ("new/file", "added\n"), ("run.bat", "echo done\n"), (".gitattributes", "*.bat text eol=crlf\n")]);
+        fs::remove_dir_all(src.join("gone")).unwrap();
+        fs::remove_dir_all(src.join("replace")).unwrap();
+        fs::write(src.join("replace"), b"now a file\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(src.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+            std::os::unix::fs::symlink("modified", src.join("link")).unwrap();
+        }
+        let to = revision(&src, "after");
+        let work = base.path().join("work");
+        let store = linked(&src, &work, &from);
+        let kept = mtime(&work.join("unchanged"));
+        let spawned = crate::git_exec::on_this_thread();
+        let m = store.move_checkout(&work, Some(&from), &to).unwrap();
+        assert_eq!(crate::git_exec::on_this_thread() - spawned, 1, "one git process per move: the index refresh");
+        let expected = sh(&src, &["diff", "--name-only", "--no-renames", &from, &to]);
+        assert_eq!(m.files, expected.lines().collect::<Vec<_>>(), "the manifest is every changed leaf");
+        assert!(m.repaired.is_empty(), "a clean move has no repairs");
+        assert_eq!(fs::read(work.join("modified")).unwrap(), b"after\n", "modified file replaced");
+        assert_eq!(fs::read(work.join("new/file")).unwrap(), b"added\n", "new parent created");
+        assert!(!work.join("gone").exists(), "the deleted file's empty parent is gone");
+        assert_eq!(fs::read(work.join("replace")).unwrap(), b"now a file\n", "directory replaced by file");
+        assert_eq!(fs::read(work.join("run.bat")).unwrap(), b"echo done\r\n", "new tree attributes govern checkout");
+        assert_eq!(mtime(&work.join("unchanged")), kept, "unchanged mtimes stay warm");
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(work.join("run")).unwrap().permissions().mode() & 0o777, 0o755, "executable mode written");
+            assert_eq!(fs::read_link(work.join("link")).unwrap(), Path::new("modified"), "symlink target written");
+        }
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "the final index and worktree are clean");
+        let admin = store.admin_of(&work).unwrap();
+        assert!(!work.join(".devhub-move").exists(), "staging removed");
+        assert!(!admin.join("devhub-move").exists(), "marker removed");
+        assert_eq!(makepad_git::refs::resolve_head_in(&admin, &store.git_dir).unwrap().to_hex(), to, "HEAD published");
+        assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(to.as_str()), "checkout ref published");
+        store.move_checkout(&work, Some(&to), &from).unwrap();
+        assert_eq!(fs::read(work.join("replace/child")).unwrap(), b"child\n", "reverse move replaces file by directory");
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "the reverse move is clean too");
+        let entries = crate::gitread::with_common(&store.git_dir, |repo| changes(repo, &from, &to)).unwrap().unwrap()
+            .into_iter().map(|d| Entry { path: d.path, value: d.new }).collect::<Vec<_>>();
+        store.mark_move(&work, &from, &to).unwrap();
+        let spawned = crate::git_exec::on_this_thread();
+        store.write_paths(&work, &to, &entries).unwrap();
+        assert_eq!(crate::git_exec::on_this_thread(), spawned, "staging, verification and the durable index are in-process");
+        let repairs = store.repair(&work, &from).unwrap();
+        assert!(repairs.iter().any(|l| l.starts_with("run.bat:")), "repair recognizes the target's converted bytes");
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "repair reverses file/directory and mode changes too");
+    }
+
+    #[test]
+    fn bad_staged_copies_and_blob_reads_do_not_touch_the_destination() {
+        let dir = makepad_git::test_support::tempdir().unwrap();
+        let raw = b"complete contents\n";
+        let oid = makepad_git::oid::hash_object("blob", raw);
+        let destination = dir.path().join("file");
+        fs::write(&destination, b"old bytes").unwrap();
+        let staging = dir.path().join(".devhub-move");
+        fs::create_dir(&staging).unwrap();
+        let copy = staging.join("file");
+        let corrupt = vec![b'x'; raw.len()];
+        for bytes in [Some(&raw[..3]), Some(corrupt.as_slice()), Some(&b""[..]), None] {
+            match bytes {
+                Some(bytes) => fs::write(&copy, bytes).unwrap(),
+                None => fs::remove_file(&copy).unwrap(),
+            }
+            let err = verify_staged(&copy, "file", oid, 0o100644, raw, raw, &Conversion::default(), "").unwrap_err();
+            assert!(err.contains("file:") && err.contains("staged copy") && err.contains("nothing moved"), "verification names the failed path: {err}");
+            assert_eq!(fs::read(&destination).unwrap(), b"old bytes", "verification never changes the destination");
+        }
+        let err = verify_blob("file", oid, b"wrong").unwrap_err();
+        assert!(err.contains("file:") && err.contains("5 bytes") && err.contains("nothing moved"), "a short blob read is named: {err}");
+        assert_eq!(fs::read(&destination).unwrap(), b"old bytes", "bad object bytes never change the destination");
+    }
+
+    #[test]
+    fn a_cut_short_move_restores_only_recognizable_debris() {
+        let (base, src) = source();
+        let original = [("changed", "old changed\n"), ("empty", "old empty\n"), ("missing", "old missing\n"), ("edited", "old edited\n")];
+        put(&src, &original);
+        let from = revision(&src, "before");
+        put(&src, &[("changed", "new changed\n"), ("empty", "new empty\n"), ("missing", "new missing\n"), ("edited", "new edited\n"), ("added", "new added\n")]);
+        let to = revision(&src, "interrupted");
+        put(&src, &[("changed", "next changed\n"), ("edited", "next edited\n")]);
+        let next = revision(&src, "next");
+        let work = base.path().join("work");
+        let store = linked(&src, &work, &from);
+        store.mark_move(&work, &from, &to).unwrap();
+        put(&work, &[("changed", "new changed\n"), ("empty", ""), ("added", "new added\n"), ("edited", "someone's content\n")]);
+        fs::remove_file(work.join("missing")).unwrap();
+        fs::create_dir(work.join(".devhub-move")).unwrap();
+        fs::write(work.join(".devhub-move/leftover"), b"partial").unwrap();
+        let lines = store.repair(&work, &from).unwrap();
+        assert_eq!(lines.len(), 4, "only the four debris paths are reported: {lines:?}");
+        for name in ["changed", "empty", "missing", "added"] {
+            assert!(lines.iter().any(|l| l.starts_with(&format!("{name}:"))), "repair reports {name}");
+        }
+        for (name, bytes) in &original[..3] {
+            assert_eq!(fs::read(work.join(name)).unwrap(), bytes.as_bytes(), "{name} restored to the from tree");
+        }
+        assert!(!work.join("added").exists(), "the interrupted addition is removed");
+        assert!(!work.join(".devhub-move").exists(), "leftover staging removed");
+        assert_eq!(fs::read(work.join("edited")).unwrap(), b"someone's content\n", "unrecognized content stays");
+        assert!(store.check_move(&work, &from, &next).unwrap_err().contains("edited"), "preflight still names the real edit");
+        let e = store.move_checkout(&work, Some(&from), &next).unwrap_err();
+        assert!(e.contains("edited") && e.starts_with("checking the disk against the move ("), "a direct move also protects the edit, and says which step: {e}");
+        fs::write(work.join("edited"), b"old edited\n").unwrap();
+        store.move_checkout(&work, Some(&from), &next).unwrap();
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "the later move reaches its own target cleanly");
+        assert_eq!(fs::read(work.join("changed")).unwrap(), b"next changed\n", "the later target, not the interrupted one");
+        assert!(!store.admin_of(&work).unwrap().join("devhub-move").exists(), "no marker remains");
+    }
+
+    #[test]
+    fn an_unmarked_empty_file_and_a_lost_index_are_repaired() {
+        let (base, src) = source();
+        put(&src, &[("file", "before\n"), ("untouched", "stay\n")]);
+        let from = revision(&src, "before");
+        put(&src, &[("file", "after\n")]);
+        let to = revision(&src, "after");
+        let work = base.path().join("work");
+        let store = linked(&src, &work, &from);
+        fs::write(work.join("file"), b"").unwrap();
+        let lines = store.repair(&work, &from).unwrap();
+        assert_eq!(lines, [format!("file: 0 bytes on disk, 7 bytes in {} -> restored", &from[..8])], "unmarked truncation is reported");
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"before\n", "unmarked truncation is restored");
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "unmarked repair refreshes the index");
+        assert!(store.repair(&work, &from).unwrap().is_empty(), "repair is idempotent");
+        store.mark_move(&work, &from, &to).unwrap();
+        let admin = store.admin_of(&work).unwrap();
+        fs::write(admin.join("index"), b"").unwrap();
+        fs::write(work.join("file"), b"").unwrap();
+        let lines = store.repair(&work, &from).unwrap();
+        assert_eq!(lines.len(), 1, "a lost index does not hide the damaged file");
+        assert!(lines[0].starts_with("file:"), "lost-index recovery names the file");
+        assert_eq!(makepad_git::index::read_index(&admin).unwrap().entries.len(), 2, "the complete from index is rebuilt");
+        store.move_checkout(&work, Some(&from), &to).unwrap();
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"after\n", "the move after index recovery succeeds");
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "recovered index matches the final tree");
+        assert!(!admin.join("devhub-move").exists(), "recovery removes the marker");
+    }
+
     /// A first move of a shipped tree (no .git, dotfiles missing) links it as a worktree of the
     /// store; moves to any commit write only the changed files; a local edit in a changing file
     /// makes it refuse; a lease's leftovers are bundled and the tree goes back to its commit.
@@ -475,6 +1176,15 @@ mod tests {
         store.prune_pushed(&["rc-x", "rc-never"]).unwrap();
         assert_eq!(store.refs().iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["refs/devhub/pushed/work"]);
         assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane);
+        // a ref the store cannot read (empty, not a sha, a missing object) is dropped and fetched again
+        for broken in ["", "garbage\n", "0123456789012345678901234567890123456789\n"] {
+            std::fs::write(stores.join("makepad.git/refs/devhub/pushed/rc-x"), broken).unwrap();
+            assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane, "{broken:?}");
+        }
+        // as is another one of its refs the fetch trips on
+        std::fs::write(stores.join("makepad.git/refs/devhub/pushed/work"), "garbage\n").unwrap();
+        assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane, "another broken ref");
+        assert_eq!(store.fetch_bundle(&bundle, "work").unwrap(), two);
 
         // a tree shipped at `one` by a deploy script: no .git, no dotfiles, a target and FLEET-REVISION
         std::fs::create_dir_all(work.join("target")).unwrap();
@@ -492,6 +1202,12 @@ mod tests {
         assert_eq!(run(Some(&work), None, &[], &["rev-parse", "HEAD"]).unwrap().trim(), two);
         assert!(!store.tree_dirty(&work).unwrap(), "target/ is ignored, FLEET-REVISION.txt excluded");
         assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        // what a node's caps read every 10 s starts no git
+        let spawned = crate::git_exec::on_this_thread();
+        assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        assert_eq!(store.rev("refs/devhub/never"), None, "a ref the store lacks");
+        assert_eq!(crate::lease::tree::current(&work).map(|p| p.makepad), Some(two.clone()), "the tree's HEAD");
+        assert_eq!(crate::git_exec::on_this_thread(), spawned, "the caps reads are makepad-git's");
 
         // a lease moves it to an unlanded lane commit (not a fast-forward) and back: only changed files
         let a_time = mtime(&work.join("a.txt"));

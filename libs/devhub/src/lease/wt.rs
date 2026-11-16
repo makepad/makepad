@@ -67,14 +67,13 @@ pub fn in_work(repo: &Path, rev: &str) -> bool {
     m.lines().next().map(str::trim) == Some(w.trim())
 }
 
-/// Tracked changes or untracked files (ignored ones do not count), apart from `except`.
+/// Tracked changes or untracked files (ignored ones do not count), apart from `except`: what
+/// `git status --porcelain` lists, read by makepad-git (the lane cleanup asks it of every landed
+/// lane's trees each pass). A tree whose status cannot be read counts as dirty.
 pub fn dirty(dir: &Path, except: Option<&str>) -> bool {
-    let ex = except.map(|e| format!(":(exclude){e}"));
-    let mut args = vec!["status", "--porcelain", "--", "."];
-    if let Some(e) = &ex {
-        args.push(e);
-    }
-    git(Some(dir), None, &args).map_or(true, |o| !o.trim().is_empty())
+    let Ok(Some(paths)) = makepad_git::repository_paths(dir) else { return true };
+    let Ok(status) = crate::gitread::worktree(paths).and_then(|mut r| r.status()) else { return true };
+    status.entries.iter().any(|e| except.is_none_or(|x| e.path.strip_prefix(x).is_none_or(|rest| !rest.is_empty() && !rest.starts_with('/'))))
 }
 
 /// Every live process's cwd: Linux `/proc/*/cwd`, macOS one `lsof -a -d cwd -Fn`.
@@ -93,7 +92,7 @@ pub fn live_cwds() -> Vec<(u32, PathBuf)> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let o = makepad_remote::group::command("lsof").args(["-a", "-d", "cwd", "-Fn"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+        let o = makepad_remote::group::command(crate::os::tool("lsof")).args(["-a", "-d", "cwd", "-Fn"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
         o.map_or_else(|_| Vec::new(), |o| parse_lsof(&String::from_utf8_lossy(&o.stdout)))
     }
 }
@@ -261,10 +260,26 @@ pub type Pruned = (String, Result<String, String>);
 /// `wt prune`: removes what [`decide`] allows, reports the rest.
 pub fn prune(repo: &Path) -> Result<Vec<Pruned>, String> {
     let mut out = Vec::new();
+    #[cfg(feature = "checkout")]
+    let slots = crate::orch::slot::protected(&crate::proto::home())?;
     for i in infos(repo)? {
+        #[cfg(feature = "checkout")]
+        if slots.contains(&std::fs::canonicalize(&i.entry.path).unwrap_or_else(|_| i.entry.path.clone())) {
+            out.push((i.lane, Err("a live lane's Codex slot (11-15)".into())));
+            continue;
+        }
         if let Err(why) = decide(&i) {
             out.push((i.lane, Err(why)));
             continue;
+        }
+        #[cfg(feature = "checkout")]
+        {
+            // A synthetic live lease need not carry the lane's name (11-15).
+            let lane = crate::state::LaneRec { name: i.lane.clone(), path: i.entry.path.to_string_lossy().into_owned(), branch: i.entry.branch.clone().unwrap_or_default(), ..Default::default() };
+            if let Some(why) = crate::orch::lane::saved_open_run(&crate::proto::home(), &lane)? {
+                out.push((i.lane, Err(why)));
+                continue;
+            }
         }
         out.push((i.lane.clone(), remove(repo, &i)));
     }
@@ -464,6 +479,17 @@ mod tests {
         g(&root.join("ahead"), &["add", "-A"]);
         g(&root.join("ahead"), &["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "two"]);
         std::fs::write(root.join("dirty/new.txt"), "x").unwrap();
+        // the status is makepad-git's: an ignored dir is no change, an untracked file is, and a
+        // nested checkout's dir counts only when it is not the one excepted
+        std::fs::create_dir_all(root.join("ahead/apps/commercial")).unwrap();
+        std::fs::write(root.join("ahead/apps/commercial/x.txt"), "x").unwrap();
+        let spawned = crate::git_exec::on_this_thread();
+        assert!(!dirty(&root.join("merged"), None), "an ignored target dir made the tree dirty");
+        assert!(dirty(&root.join("dirty"), None), "an untracked file did not make the tree dirty");
+        assert!(dirty(&root.join("ahead"), None) && !dirty(&root.join("ahead"), Some("apps/commercial")), "the excepted dir was not skipped alone");
+        assert!(dirty(&root.join("ahead"), Some("apps/comm")), "a prefix of the excepted dir's name skipped it");
+        assert_eq!(crate::git_exec::on_this_thread(), spawned, "dirty started a git process");
+        std::fs::remove_dir_all(root.join("ahead/apps")).unwrap();
         // a process working in a worktree keeps it (Unix: its cwd is seen; Windows: an open cwd
         // cannot be removed)
         let mut child = if cfg!(windows) { makepad_remote::group::command("ping.exe").args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null()).current_dir(root.join("busy")).spawn().unwrap() } else { makepad_remote::group::command("sleep").arg("30").current_dir(root.join("busy")).spawn().unwrap() };

@@ -329,6 +329,9 @@ fn start_master() -> Result<MasterCore, String> {
     // a self-update's exec keeps this process: the children the last image started (its git,
     // cargo and lease children) are reaped as they end, before this image starts any
     makepad_devhub::procinfo::reap_inherited();
+    // what the platform holds by this pid (the App Nap activity) goes before a self-update's exec,
+    // which keeps the pid, and comes back when the exec fails
+    makepad_devhub::node::set_exec_hooks(makepad_widgets::makepad_platform::makepad_hal::before_exec, makepad_widgets::makepad_platform::makepad_hal::exec_failed);
     // its log with the time on every line, by a stamper that outlives its exec and a crash
     #[cfg(unix)]
     if let Err(e) = makepad_devhub::logstamp::stamp_output(makepad_devhub::logstamp::stamper) {
@@ -535,7 +538,8 @@ impl App {
                 menu.push(TrayMenuItem::Item { id: DEVSW, label: "Dev: this machine takes work from the network".into(), enabled: true, checked: Some(makepad_devhub::lease::exec::writes_allowed()) });
             }
             menu.push(TrayMenuItem::item(QUIT, "Quit devhub"));
-            cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: format!("devhub \u{b7} {status}"), menu, dropdown: glance.is_none() });
+            // no tooltip: AppKit shows a status item's changed tooltip wherever the pointer is
+            cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: String::new(), menu, dropdown: glance.is_none() });
         }
         if let Some(Core::Node(n)) = &self.core {
             if self.node_drop.is_open() {
@@ -845,9 +849,10 @@ impl MatchEvent for App {
         match start_core() {
             Ok(core) => self.core = core,
             Err(e) => {
+                // with an error code: its start wrapper (a Windows box's logon task) waits longer
+                // before each next try, and says why
                 log_line(&format!("devhub: {e}"));
-                cx.quit();
-                return;
+                std::process::exit(2);
             }
         }
         if self.core.is_none() {

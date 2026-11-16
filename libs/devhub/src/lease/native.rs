@@ -6,6 +6,8 @@
 //! - a platform without a JIT: no JIT leg ([`crate::orch::verify::legs`]) runs on its os and arch;
 //! - a test devhub's measured routing sends to cargo (`native:<class>`, the JIT measured slower end
 //!   to end: [`super::master::LeaseMaster::test_route`]);
+//! - a test run that selects a target its package's Cargo.toml runs under cargo
+//!   ([`crate::jit_misses::native_selected`]: `[package.metadata.makepad.native-tests]`);
 //! - `--native "<reason>"`: native-vs-JIT baselines and timed perf series.
 //!
 //! Every verdict but the JIT's own crates is a line of `native.jsonl` (what `devhub prof` counts
@@ -58,6 +60,10 @@ pub struct Built {
     pub verb: &'static str,
     /// `--target`'s triple; empty: the host's
     pub target: String,
+    /// the targets a test selects, as a Cargo.toml's native-tests names them (`lib`,
+    /// `bin:<name>`, `test:<name>`), or `bins`, `tests`, `all-targets`; empty: cargo's default (or
+    /// no test)
+    pub select: Vec<String>,
 }
 
 /// What `cmd` builds with cargo: each `cargo build|run|test|bench` (never check, clippy or doc)
@@ -113,13 +119,20 @@ fn built_in(w: &[String]) -> Vec<Built> {
             Some("bench") => "bench",
             _ => { i = j; continue; }
         };
-        let (mut pkgs, mut target) = (Vec::new(), String::new());
+        let (mut pkgs, mut target, mut select) = (Vec::new(), String::new(), Vec::new());
         let mut k = j + 1;
         while k < w.len() && w[k] != ";" && w[k] != "--" {
             let x = w[k].as_str();
             if (x == "-p" || x == "--package" || x == "--target") && k + 1 < w.len() {
                 if x == "--target" { target = w[k + 1].clone(); } else { pkgs.push(w[k + 1].clone()); }
                 k += 1;
+            } else if matches!(x, "--lib" | "--bins" | "--tests" | "--all-targets") {
+                select.push(x[2..].to_string());
+            } else if (x == "--bin" || x == "--test") && k + 1 < w.len() {
+                select.push(format!("{}:{}", &x[2..], w[k + 1]));
+                k += 1;
+            } else if let Some((kind, name)) = x.strip_prefix("--bin=").map(|n| ("bin", n)).or_else(|| x.strip_prefix("--test=").map(|n| ("test", n))) {
+                select.push(format!("{kind}:{name}"));
             } else if let Some(t) = x.strip_prefix("--target=") {
                 target = t.to_string();
             } else if let Some(p) = x.strip_prefix("--package=").or_else(|| x.strip_prefix("-p").filter(|p| !p.is_empty() && !p.starts_with('-'))) {
@@ -129,7 +142,7 @@ fn built_in(w: &[String]) -> Vec<Built> {
         }
         if pkgs.is_empty() { pkgs.push("*".into()); }
         for pkg in pkgs {
-            let b = Built { pkg, verb, target: target.clone() };
+            let b = Built { pkg, verb, target: target.clone(), select: if verb == "test" { select.clone() } else { Vec::new() } };
             if !out.contains(&b) { out.push(b); }
         }
         i = k;
@@ -254,12 +267,20 @@ pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
     }
     let on_jit = |b: &Built| if b.target.is_empty() { jit_runs(a.os, a.arch) } else { let (os, arch) = target_platform(&b.target); jit_runs(&os, &arch) };
     let mut not_over = if a.kind == Kind::Timed || runs_jit(&words) || builds_made_tree(&words) { "baseline" } else { "" };
+    // a test whose every build on a JIT platform selects a target its Cargo.toml runs under cargo
+    let mut declared = Vec::new();
     if built.iter().any(on_jit) {
         let pair = pair_of(a.repo_dir, a.rev)?;
         let mut own = BTreeSet::new();
-        for b in &built {
-            if on_jit(b) && !own.contains(&b.pkg) && crate::jit_misses::jit_own(a.repo_dir, &pair, &b.pkg)? { own.insert(b.pkg.clone()); }
+        let mut all_declared = a.kind == Kind::Test;
+        for b in built.iter().filter(|b| on_jit(b)) {
+            let p = crate::jit_misses::test_package(a.repo_dir, &pair, &b.pkg)?;
+            if p.own { own.insert(b.pkg.clone()); continue; }
+            let said = if b.verb == "test" { crate::jit_misses::native_selected(&p.native, &b.select) } else { Vec::new() };
+            all_declared &= !said.is_empty();
+            declared.extend(said.into_iter().map(|(target, why)| format!("{} {target}: {why}", b.pkg)));
         }
+        if !all_declared { declared.clear(); }
         built.retain(|b| !(on_jit(b) && own.contains(&b.pkg)));
         if built.is_empty() { return Ok(String::new()); }
         if not_over.is_empty() {
@@ -268,14 +289,16 @@ pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
         }
     }
     let (gated, elsewhere): (Vec<Built>, Vec<Built>) = built.into_iter().partition(on_jit);
-    verdict(home, a, &gated, &elsewhere, not_over, now)
+    verdict(home, a, &gated, &elsewhere, not_over, &declared.join("; "), now)
 }
 
 /// The verdict on what the command builds natively on a JIT platform (`gated`) and elsewhere,
-/// appended to the ledger.
-fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over: &str, now: u64) -> Result<String, String> {
+/// appended to the ledger. `declared`: the targets its Cargo.toml runs under cargo that a test
+/// selects, each with why (empty: none, or a build that selects none).
+fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over: &str, declared: &str, now: u64) -> Result<String, String> {
     let names = |bs: &[Built]| bs.iter().map(|b| b.pkg.clone()).fold(Vec::<String>::new(), |mut v, p| { if !v.contains(&p) { v.push(p); } v });
     let reason = a.reason.trim();
+    let mut measured_reason = None;
     let mut miss = None;
     let (word, pkgs, answer) = if gated.is_empty() {
         let pkgs = names(elsewhere);
@@ -291,15 +314,21 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over:
         let routed = a.class.strip_prefix("native:").map(super::base_class).filter(|c| a.kind == Kind::Test && c.split(':').nth(1).is_some_and(|p| pkgs.iter().all(|q| q == p))).and_then(|c| (a.route)(c));
         let (word, answer) = if let Some((pkg, id)) = &miss {
             ("miss", Ok(format!("devhub: native build of {list}: {pkg} has the open JIT miss {id}, so cargo is the way until it closes")))
+        } else if !declared.is_empty() {
+            ("declared", Ok(format!("devhub: native test of {list}: its Cargo.toml runs {declared} (native-tests)")))
         } else if let Some(why) = &routed {
+            // both medians belong in the ledger: fab-shell's 136 s cargo vs 40 s JIT route
+            // could not be explained by its empty measured reason (11-15)
+            measured_reason = Some(why.clone());
             ("measured", Ok(format!("devhub: native test of {list}: devhub's measured routing picked {why}")))
         } else if !reason.is_empty() {
             ("reason", Ok(format!("devhub: native build of {list} (--native \"{reason}\", logged)")))
         } else {
-            ("refused", Err(format!("native build of {list} refused: lanes iterate and check under the JIT: {}. Native runs only for the JIT's own crates, a package with an open JIT miss, a platform without a JIT, a test devhub's measured routing sends to cargo, or with --native \"<reason>\" (a native-vs-JIT baseline, a timed perf series; logged)", hint(a.lane, a.rev, &gated[0]))))
+            ("refused", Err(format!("native build of {list} refused: lanes iterate and check under the JIT: {}. Native runs only for the JIT's own crates, a package with an open JIT miss, a platform without a JIT, a test devhub's measured routing sends to cargo, a test target its Cargo.toml's native-tests names, or with --native \"<reason>\" (a native-vs-JIT baseline, a timed perf series; logged)", hint(a.lane, a.rev, &gated[0]))))
         };
         (word, pkgs, answer)
     };
+    let reason = measured_reason.as_deref().unwrap_or(reason);
     let line = format!("{{\"ms\":{now},\"lane\":{},\"agent\":{},\"kind\":{},\"pkgs\":[{}],\"platform\":{},\"verdict\":{},\"reason\":{},\"not_over\":{},\"class\":{},\"miss\":{},\"cmd\":{}}}\n",
         json_str(a.lane), json_str(a.agent), json_str(a.kind.as_str()), pkgs.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), json_str(&format!("{} {}", a.os, a.arch)),
         json_str(word), json_str(reason), json_str(not_over), json_str(a.class), json_str(miss.as_ref().map_or("", |(_, id)| id.as_str())), json_str(&crate::proto::clean(&a.cmd.join(" "), 200)));
@@ -332,7 +361,7 @@ mod tests {
 
     fn argv(s: &str) -> Vec<String> { s.split(' ').map(str::to_string).collect() }
 
-    fn built(pkg: &str, verb: &'static str, target: &str) -> Built { Built { pkg: pkg.into(), verb, target: target.into() } }
+    fn built(pkg: &str, verb: &'static str, target: &str) -> Built { Built { pkg: pkg.into(), verb, target: target.into(), select: Vec::new() } }
 
     #[test]
     fn refused_unless_a_miss_a_route_a_reason_or_no_jit() {
@@ -342,21 +371,26 @@ mod tests {
         let route = |class: &str| (class == "test:demo-model:lib").then(|| "cargo (cargo 2m, JIT 4m)".to_string());
         let ask = |reason, class, os| Ask { lane: "l1", agent: "", kind: Kind::Test, cmd: &cmd, repo_dir: &home, cwd: ".", rev: "", reason, class, route: &route, os, arch: "x64" };
         let test = [built("demo-model", "test", "")];
-        let refused = verdict(&home, &ask("", "", "linux"), &test, &[], "", 1).unwrap_err();
+        let refused = verdict(&home, &ask("", "", "linux"), &test, &[], "", "", 1).unwrap_err();
         assert!(refused.contains("`devhub test l1 demo-model --live`") && refused.contains("--native"), "{refused}");
         // a cargo test of a landed commit is pointed at the JIT's run of those commits
-        let refused = verdict(&home, &Ask { rev: "work@0123456789", ..ask("", "", "linux") }, &test, &[], "", 1).unwrap_err();
+        let refused = verdict(&home, &Ask { rev: "work@0123456789", ..ask("", "", "linux") }, &test, &[], "", "", 1).unwrap_err();
         assert!(refused.contains("`devhub test l1 demo-model --rev work@0123456789` runs it under the JIT at those commits alone"), "{refused}");
-        assert!(verdict(&home, &ask("perf baseline", "", "linux"), &test, &[], "baseline", 2).unwrap().contains("perf baseline"));
-        assert!(verdict(&home, &ask("", "native:test:other:lib", "linux"), &test, &[], "", 3).is_err(), "another package's class routes nothing");
-        assert!(verdict(&home, &ask("", "native:test:demo-model:lib", "linux"), &test, &[], "", 3).unwrap().contains("cargo 2m, JIT 4m"));
-        assert!(verdict(&home, &ask("", "", "windows"), &[], &test, "", 4).unwrap().contains("for windows x64: no JIT runs there"));
-        assert!(verdict(&home, &ask("", "", "linux"), &[], &[built("app", "build", "wasm32-unknown-unknown")], "", 5).unwrap().contains("for wasm32-unknown-unknown: no JIT runs there"));
+        assert!(verdict(&home, &ask("perf baseline", "", "linux"), &test, &[], "baseline", "", 2).unwrap().contains("perf baseline"));
+        assert!(verdict(&home, &ask("", "native:test:other:lib", "linux"), &test, &[], "", "", 3).is_err(), "another package's class routes nothing");
+        assert!(verdict(&home, &ask("", "native:test:demo-model:lib", "linux"), &test, &[], "", "", 3).unwrap().contains("cargo 2m, JIT 4m"));
+        assert!(verdict(&home, &ask("", "", "windows"), &[], &test, "", "", 4).unwrap().contains("for windows x64: no JIT runs there"));
+        assert!(verdict(&home, &ask("", "", "linux"), &[], &[built("app", "build", "wasm32-unknown-unknown")], "", "", 5).unwrap().contains("for wasm32-unknown-unknown: no JIT runs there"));
+        // a test of a target its Cargo.toml runs under cargo (native-tests)
+        let said = verdict(&home, &ask("", "", "linux"), &test, &[], "", "demo-model test:spawns: its runner is its own binary", 6).unwrap();
+        assert!(said.contains("its Cargo.toml runs demo-model test:spawns: its runner is its own binary (native-tests)"), "{said}");
         std::fs::write(home.join("jit_misses.jsonl"), "{\"id\":\"M7\",\"pkg\":\"demo-model\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n").unwrap();
-        assert!(verdict(&home, &ask("", "", "linux"), &test, &[], "", 6).unwrap().contains("open JIT miss M7"));
+        assert!(verdict(&home, &ask("", "", "linux"), &test, &[], "", "", 6).unwrap().contains("open JIT miss M7"));
         let ledger = std::fs::read_to_string(home.join(LEDGER)).unwrap();
         let verdicts: Vec<&str> = ledger.lines().map(|l| l.split("\"verdict\":\"").nth(1).unwrap().split('"').next().unwrap()).collect();
-        assert_eq!(verdicts, ["refused", "refused", "reason", "refused", "measured", "platform", "platform", "miss"]);
+        assert_eq!(verdicts, ["refused", "refused", "reason", "refused", "measured", "platform", "platform", "declared", "miss"]);
+        let measured = makepad_strict_json::parse_depth(ledger.lines().nth(4).unwrap().as_bytes(), 8).unwrap();
+        assert_eq!(measured.get("reason").and_then(Value::as_str), Some("cargo (cargo 2m, JIT 4m)"), "a measured native verdict records the route and both medians");
         assert!(ledger.lines().nth(2).unwrap().contains(r#""not_over":"baseline""#), "{ledger}");
         std::fs::remove_dir_all(&home).unwrap();
     }
@@ -399,6 +433,8 @@ mod tests {
         assert_eq!(b("cargo run --release -p makepad-example-demo -- --flag -p x"), vec![built("makepad-example-demo", "run", "")]);
         assert_eq!(b("env A=1 nice -n 10 cargo +nightly -q test --release --package=a -pb"), vec![built("a", "test", ""), built("b", "test", "")]);
         assert!(b("cargo check --release -p a").is_empty());
+        // the targets a test selects, as a Cargo.toml's native-tests names them
+        assert_eq!(b("cargo test --release -p a --test spawns --lib --bin=x --tests -- --test y").into_iter().map(|b| b.select).collect::<Vec<_>>(), vec![vec!["test:spawns", "lib", "bin:x", "tests"]]);
         assert_eq!(b("cargo build --release --target wasm32-unknown-unknown"), vec![built("*", "build", "wasm32-unknown-unknown")]);
         let script = |p: &str| (p == "drive.sh").then(|| "#!/bin/bash\n# cargo build -p commented\ncargo build --release \\\n  -q -p makepad-run --bin makepad || exit 1\nM=x; cargo run -p app; ./x -p y\n".to_string());
         assert_eq!(builds(&argv("bash drive.sh"), &script), vec![built("makepad-run", "build", ""), built("app", "run", "")]);

@@ -674,8 +674,16 @@ pub struct LaneRec {
     /// `live`, `removed` (landed and cleaned up), `dropped`, `retired` (its worktree went, its
     /// branches stay)
     pub state: String,
-    /// when the cleanup first saw both halves landed (it waits out a grace period of no activity)
+    /// when cleanup first saw both halves landed, advanced by later landings (11-15)
     pub landed_ms: u64,
+    /// newest file activity heard in either half, kept across master restarts (11-15)
+    pub active_ms: u64,
+    /// when the cleanup emptied the landed lane's node dirs; its worktree and branches wait for
+    /// its agents to be idle (11-16)
+    pub dirs_ms: u64,
+    /// newest devhub call of the lane's agents the cleanup heard, or the end of its newest run,
+    /// kept across master restarts (11-16)
+    pub agent_ms: u64,
     /// `devhub lane keep`: never cleaned up automatically
     pub keep: bool,
     /// `devhub lane live <name> on`: the user waits for this lane (the manager's mark): its
@@ -765,6 +773,7 @@ pub struct Live {
     pub id: String,
     pub app: String,
     pub test: bool,
+    pub offline: bool,
     /// target selection and libtest arguments, including `--`
     pub test_args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -791,8 +800,13 @@ pub struct Live {
     pub tree: String,
     pub rev: String,
     pub needs: String,
-    /// `--node`: the box it runs on, or waits for (empty: any that fits)
+    /// `--node`: the box it runs on, or waits for (empty: any that fits); with `joins`, that
+    /// session's box
     pub pin: String,
+    /// `--joins W<n>`: the session of its lane whose app this one's app joins (a hidden test WM a
+    /// visible app joins through `MAKEPAD_WM_SOCKET`): it runs on that session's box, and that
+    /// session is never parked or ended idle while this one is active
+    pub joins: String,
     pub visible: bool,
     pub lease: String,
     pub node: String,
@@ -801,6 +815,9 @@ pub struct Live {
     /// the run in its lease (a new master follows it from there)
     pub run_n: u64,
     pub run_log_start: u64,
+    /// A live test session on an outdated JIT must keep its old key and why across a master's
+    /// restart, until the replacement's verdict (11-15).
+    pub jit_restart: Option<(String, String)>,
     /// the name of the run it asked for last: a new master that finds no run of it asks again
     /// under it (`Held::run_asked` in orch::leg)
     pub ask: String,
@@ -811,6 +828,10 @@ pub struct Live {
     pub started_ms: u64,
     /// the last edit or action (the idle timeout counts from it)
     pub touched_ms: u64,
+    /// when the client of its last call went before that call's answer (0: its last call's client
+    /// stayed): its starter has gone, and the session ends after [`crate::orch::live::LEFT_MS`]
+    /// with no call or save
+    pub left_ms: u64,
     pub ended_ms: u64,
     /// the last edit: files, when saved, shipped, patched (or refused), the first frame after
     pub patch: Option<LivePatch>,
@@ -844,15 +865,24 @@ impl Live {
         let x = &loaded;
         let Some(p) = &x.patch else { return format!("devhub test: {} {}: {}\n", x.app, x.state, x.note) };
         if p.outcome == "jit_error" { return jit_error_verdict(p); }
-        let Some(t) = &p.tests else { return format!("{}\n{}", if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
+        let Some(t) = &p.tests else { return format!("{}{}\n{}", p.jit_notice, if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
         if x.state != "running" { return format!("devhub test: {} {}: {}; no verdict on this source state\n", x.app, x.state, x.note); }
         let queued = if p.queued_ms > 0 { format!("queued {} ms behind {}, ", p.queued_ms, p.behind) } else { String::new() };
-        let mut out = format!("devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s ({queued}ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", x.app, t.passed, t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms.max(p.called_ms) + p.queued_ms), t.compile_ms, t.ms, x.node, x.id);
+        let mut out = format!("{}devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s ({queued}ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", p.jit_notice, x.app, t.fresh_passed(), t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms.max(p.called_ms) + p.queued_ms), t.compile_ms, t.ms, x.node, x.id);
         // an edit that reached no compiled code: a pass says little about it
         if let Some((items, 0)) = t.patch.filter(|p| p.0 > 0) {
             out.push_str(&format!("the JIT took {items} changed item(s) and replaced no code: nothing compiled so far used them\n"));
         }
-        for name in &t.failures { out.push_str(&format!("  {name}\n")); }
+        for name in t.fresh_failures() { out.push_str(&format!("  {name}\n")); }
+        if !t.stale.is_empty() { out.push_str(&format!("  {} earlier failure(s), not rerun for this edit (its changes reach none of them): {}\n", t.stale.len(), t.stale.join(", "))); }
+        if !t.warnings.is_empty() {
+            let mine = t.warnings.iter().filter(|(_, mine)| *mine).count();
+            out.push_str(&format!("relax: {} warning(s), {mine} in files this lane changed\n", t.warnings.len()));
+            for (line, _) in t.warnings.iter().filter(|(_, mine)| *mine) { out.push_str(&format!("  [this lane] {line}\n")); }
+            let others: Vec<&String> = t.warnings.iter().filter(|(_, mine)| !*mine).map(|(line, _)| line).collect();
+            for line in others.iter().take(OTHER_WARNINGS_SHOWN) { out.push_str(&format!("  {line}\n")); }
+            if others.len() > OTHER_WARNINGS_SHOWN { out.push_str(&format!("  and {} more in the session's log {}\n", others.len() - OTHER_WARNINGS_SHOWN, x.log)); }
+        }
         if t.ran == 0 && t.skipped == 0 {
             out.push_str("no test ran");
             if let Some(hint) = crate::testlog::bin_hint(&x.app, &x.test_args) { out.push_str(&format!(": {hint}")); }
@@ -868,10 +898,14 @@ impl Live {
     }
 }
 
+/// How many of a live round's warnings in files the lane did not change its verdict lists (each
+/// of the lane's own it lists all); the session's log has the rest.
+const OTHER_WARNINGS_SHOWN: usize = 10;
+
 /// A live patch that ended in a JIT error: the typed verdict line, else the raw error.
 pub fn jit_error_verdict(p: &LivePatch) -> String {
-    if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &p.reason) { return format!("{}\n", verdict.line()); }
-    format!("JIT error, not your change: {}\n", p.jit_error)
+    if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &p.reason) { return format!("{}{}\n", p.jit_notice, verdict.line()); }
+    format!("{}JIT error, not your change: {}\n", p.jit_notice, p.jit_error)
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -908,6 +942,9 @@ pub struct LivePatch {
     pub reason_ref: TextRef,
     pub retried: bool,
     pub jit_error: u64,
+    /// The first verdict after a live test session on an outdated JIT says what replaced it,
+    /// even after the pending restart is cleared; includes its newline (11-15).
+    pub jit_notice: String,
     /// why a restart or a refusal
     pub reason: String,
 }
@@ -1101,11 +1138,26 @@ pub struct LiveTests {
     pub skipped: u64,
     pub selected: String,
     pub failures: Vec<String>,
+    /// the failures carried from an earlier round, not rerun for this edit
+    pub stale: Vec<String>,
     pub ms: f64,
     pub compile_ms: f64,
     pub restarted: bool,
     /// the patch these tests ran on: the items it changed and the fns it installed
     pub patch: Option<(u64, u64)>,
+    /// the round's relax warnings as its log said them (the file as the tree names it), once
+    /// each, and whether the lane changed that file
+    pub warnings: Vec<(String, bool)>,
+}
+
+impl LiveTests {
+    pub fn fresh_failures(&self) -> Vec<&String> {
+        self.failures.iter().filter(|name| !self.stale.contains(name)).collect()
+    }
+
+    pub fn fresh_passed(&self) -> u64 {
+        self.ran.saturating_sub(self.fresh_failures().len() as u64)
+    }
 }
 
 // ---- job ----
@@ -1130,6 +1182,8 @@ pub struct Job {
     pub cores: Option<f64>,
     pub ram_gb: Option<f64>,
     pub whole: bool,
+    /// a hand-in's gate run ([`crate::lease::sched::Req::hand_in`])
+    pub hand_in: bool,
     pub class: String,
     pub priority: String,
     pub loader: String,
@@ -1255,12 +1309,18 @@ pub struct Doc {
     pub land: Vec<Value>,
     /// why the landing train is paused (empty: it runs)
     pub land_paused: String,
+    /// why the land rule is switched off (empty: it runs; `devhub land rule on|off`): off, no
+    /// landing runs it and the master neither builds nor ticks its binary ([`crate::gate`])
+    pub land_rule_off: String,
     /// the merge bot's last result per lane half (`sync/lanes.rs`'s lanes, as their JSON)
     pub merges: Vec<Value>,
     /// the branches the merge bot keeps off (`devhub hold`): (branch, why)
     pub held: Vec<(String, String)>,
     /// the last pre-warm record per node (`sync/prewarm.rs`)
     pub prewarm: Vec<Value>,
+    /// the JIT warm plan, spares and running legs (`orch/warm.rs`'s, as its JSON): a master
+    /// restart takes each leg back on its lease
+    pub warm: Option<Value>,
 }
 
 impl Doc {
@@ -1308,9 +1368,11 @@ impl Doc {
             ("snaps_next", int(self.snaps_next)),
             ("land", Value::Arr(self.land.clone())),
             ("land_paused", s(&self.land_paused)),
+            ("land_rule_off", s(&self.land_rule_off)),
             ("merges", Value::Arr(self.merges.clone())),
             ("held", Value::Arr(self.held.iter().map(|(b, w)| obj(vec![("branch", s(b)), ("why", s(w))])).collect())),
             ("prewarm", Value::Arr(self.prewarm.clone())),
+            ("warm", self.warm.clone().unwrap_or(Value::Null)),
         ])
     }
 
@@ -1341,7 +1403,7 @@ impl Doc {
             ci: ci_from(v.get("ci")),
             lanes: arr(Some(v), "lanes").iter().map(|l| {
                 let o = Some(l);
-                LaneRec { name: text(o, "name"), path: text(o, "path"), branch: text(o, "branch"), cbranch: text(o, "cbranch"), created_ms: uint(o, "created_ms"), adopted: flag(o, "adopted", false), state: text(o, "state"), landed_ms: uint(o, "landed_ms"), keep: flag(o, "keep", false), waited: flag(o, "waited", false), first: flag(o, "first", false), parked: text(o, "parked"), ended_ms: uint(o, "ended_ms"), note: text(o, "note") }
+                LaneRec { name: text(o, "name"), path: text(o, "path"), branch: text(o, "branch"), cbranch: text(o, "cbranch"), created_ms: uint(o, "created_ms"), adopted: flag(o, "adopted", false), state: text(o, "state"), landed_ms: uint(o, "landed_ms"), active_ms: uint(o, "active_ms"), dirs_ms: uint(o, "dirs_ms"), agent_ms: uint(o, "agent_ms"), keep: flag(o, "keep", false), waited: flag(o, "waited", false), first: flag(o, "first", false), parked: text(o, "parked"), ended_ms: uint(o, "ended_ms"), note: text(o, "note") }
             }).collect(),
             shows: arr(Some(v), "shows").iter().map(show_from).collect(),
             shows_next: uint(Some(v), "shows_next"),
@@ -1355,9 +1417,11 @@ impl Doc {
             snaps_next: uint(Some(v), "snaps_next"),
             land: arr(Some(v), "land").to_vec(),
             land_paused: text(Some(v), "land_paused"),
+            land_rule_off: text(Some(v), "land_rule_off"),
             merges: arr(Some(v), "merges").to_vec(),
             held: arr(Some(v), "held").iter().map(|h| (text(Some(h), "branch"), text(Some(h), "why"))).filter(|(b, _)| !b.is_empty()).collect(),
             prewarm: arr(Some(v), "prewarm").to_vec(),
+            warm: v.get("warm").filter(|w| !matches!(w, Value::Null)).cloned(),
         }
     }
 
@@ -1631,6 +1695,9 @@ pub fn lane_value(l: &LaneRec) -> Value {
         ("adopted", Value::Bool(l.adopted)),
         ("state", s(&l.state)),
         ("landed_ms", int(l.landed_ms)),
+        ("active_ms", int(l.active_ms)),
+        ("dirs_ms", int(l.dirs_ms)),
+        ("agent_ms", int(l.agent_ms)),
         ("keep", Value::Bool(l.keep)),
         ("waited", Value::Bool(l.waited)),
         ("first", Value::Bool(l.first)),
@@ -1650,14 +1717,14 @@ fn panic_from(v: Option<&Value>) -> Option<JobPanic> {
 }
 
 fn live_tests_value(t: &LiveTests) -> Value {
-    obj(vec![("edit", s(&t.edit)), ("group", int(t.group)), ("ran", int(t.ran)), ("passed", int(t.passed)), ("failed", int(t.failed)), ("ignored", int(t.ignored)), ("skipped", int(t.skipped)), ("selected", s(&t.selected)), ("failures", strs(&t.failures)), ("ms", Value::F64(t.ms)), ("compile_ms", Value::F64(t.compile_ms)), ("restarted", Value::Bool(t.restarted)), ("items_changed", t.patch.map_or(Value::Null, |p| int(p.0))), ("fns_installed", t.patch.map_or(Value::Null, |p| int(p.1)))])
+    obj(vec![("edit", s(&t.edit)), ("group", int(t.group)), ("ran", int(t.ran)), ("passed", int(t.passed)), ("failed", int(t.failed)), ("ignored", int(t.ignored)), ("skipped", int(t.skipped)), ("selected", s(&t.selected)), ("failures", strs(&t.failures)), ("stale", strs(&t.stale)), ("ms", Value::F64(t.ms)), ("compile_ms", Value::F64(t.compile_ms)), ("restarted", Value::Bool(t.restarted)), ("items_changed", t.patch.map_or(Value::Null, |p| int(p.0))), ("fns_installed", t.patch.map_or(Value::Null, |p| int(p.1))), ("warnings", Value::Arr(t.warnings.iter().map(|(line, mine)| Value::Arr(vec![s(line), Value::Bool(*mine)])).collect()))])
 }
 
 pub fn live_tests_from(v: &Value) -> Option<LiveTests> {
     let edit = v.get("edit").map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_json())).unwrap_or_default();
     // Initial runs and some restarts have no patch compile time.
     let compile_ms = match v.get("compile_ms") { None | Some(Value::Null) => 0.0, Some(v) => f64_of(v)? };
-    Some(LiveTests { edit, group: v.get("group")?.as_u64()?, ran: v.get("ran")?.as_u64()?, passed: v.get("passed")?.as_u64()?, failed: v.get("failed")?.as_u64()?, ignored: uint(Some(v), "ignored"), skipped: uint(Some(v), "skipped"), selected: text(Some(v), "selected"), failures: strs_from(Some(v), "failures"), ms: v.get("ms").and_then(f64_of)?, compile_ms, restarted: flag(Some(v), "restarted", false), patch: v.get("items_changed").and_then(Value::as_u64).zip(v.get("fns_installed").and_then(Value::as_u64)) })
+    Some(LiveTests { edit, group: v.get("group")?.as_u64()?, ran: v.get("ran")?.as_u64()?, passed: v.get("passed")?.as_u64()?, failed: v.get("failed")?.as_u64()?, ignored: uint(Some(v), "ignored"), skipped: uint(Some(v), "skipped"), selected: text(Some(v), "selected"), failures: strs_from(Some(v), "failures"), stale: strs_from(Some(v), "stale"), ms: v.get("ms").and_then(f64_of)?, compile_ms, restarted: flag(Some(v), "restarted", false), patch: v.get("items_changed").and_then(Value::as_u64).zip(v.get("fns_installed").and_then(Value::as_u64)), warnings: v.get("warnings").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(|w| match w.as_arr()? { [line, mine] => Some((line.as_str()?.to_string(), mine.as_bool()?)), _ => None }).collect() })
 }
 
 pub fn live_value(x: &Live) -> Value {
@@ -1675,16 +1742,18 @@ pub fn live_value(x: &Live) -> Value {
 
 fn live_state_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice))])
     });
     obj(vec![
         ("id", s(&x.id)),
         ("run_n", int(x.run_n)),
         ("run_log_start", int(x.run_log_start)),
+        ("jit_restart", x.jit_restart.as_ref().map_or(Value::Null, |(key, why)| obj(vec![("key", s(key)), ("why", s(why))]))),
         ("ask", s(&x.ask)),
         ("sources", Value::Obj(x.sources.iter().map(|(k, v)| (k.clone(), s(v))).collect())),
         ("app", s(&x.app)),
         ("test", Value::Bool(x.test)),
+        ("offline", Value::Bool(x.offline)),
         ("test_args", strs(&x.test_args)),
         ("env", Value::Arr(x.env.iter().map(|(k, v)| Value::Arr(vec![s(k), s(v)])).collect())),
         ("also", strs(&x.also)),
@@ -1704,6 +1773,7 @@ fn live_state_value(x: &Live) -> Value {
         ("rev", s(&x.rev)),
         ("needs", s(&x.needs)),
         ("pin", s(&x.pin)),
+        ("joins", s(&x.joins)),
         ("visible", Value::Bool(x.visible)),
         ("lease", s(&x.lease)),
         ("node", s(&x.node)),
@@ -1711,6 +1781,7 @@ fn live_state_value(x: &Live) -> Value {
         ("state", s(&x.state)),
         ("started_ms", int(x.started_ms)),
         ("touched_ms", int(x.touched_ms)),
+        ("left_ms", int(x.left_ms)),
         ("ended_ms", int(x.ended_ms)),
         ("patch", patch),
         ("restart_since_ms", int(x.restart_since_ms)),
@@ -1738,10 +1809,12 @@ fn live_state_from(v: &Value) -> Live {
         id: text(o, "id"),
         run_n: uint(o, "run_n"),
         run_log_start: uint(o, "run_log_start"),
+        jit_restart: v.get("jit_restart").filter(|r| !r.is_null()).map(|r| (text(Some(r), "key"), text(Some(r), "why"))),
         ask: text(o, "ask"),
         sources: match v.get("sources") { Some(Value::Obj(fields)) => fields.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(), _ => Default::default() },
         app: text(o, "app"),
         test: flag(o, "test", false),
+        offline: flag(o, "offline", false),
         test_args: strs_from(o, "test_args"),
         env: arr(o, "env").iter().filter_map(|pair| {
             let [k, v] = pair.as_arr()? else { return None };
@@ -1764,6 +1837,7 @@ fn live_state_from(v: &Value) -> Live {
         rev: text(o, "rev"),
         needs: text(o, "needs"),
         pin: text(o, "pin"),
+        joins: text(o, "joins"),
         visible: flag(o, "visible", false),
         lease: text(o, "lease"),
         node: text(o, "node"),
@@ -1771,8 +1845,9 @@ fn live_state_from(v: &Value) -> Live {
         state: text(o, "state"),
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
+        left_ms: uint(o, "left_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: String::new() }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), reason: String::new() }),
         restart_since_ms: uint(o, "restart_since_ms"),
         restart_saves: uint(o, "restart_saves"),
         restart_why: text(o, "restart_why"),
@@ -1859,6 +1934,7 @@ pub fn job_value(j: &Job) -> Value {
         ("cores", j.cores.map_or(Value::Null, Value::F64)),
         ("ram_gb", j.ram_gb.map_or(Value::Null, Value::F64)),
         ("whole", Value::Bool(j.whole)),
+        ("hand_in", Value::Bool(j.hand_in)),
         ("class", s(&j.class)),
         ("priority", s(&j.priority)),
         ("loader", s(&j.loader)),
@@ -1923,6 +1999,7 @@ pub fn job_from(v: &Value) -> Job {
         cores: v.get("cores").and_then(crate::lease::num),
         ram_gb: v.get("ram_gb").and_then(crate::lease::num),
         whole: flag(o, "whole", false),
+        hand_in: flag(o, "hand_in", false),
         class: text(o, "class"),
         priority: text(o, "priority"),
         loader: text(o, "loader"),
@@ -2391,6 +2468,32 @@ mod tests {
         x.state = "ended".into();
         assert_eq!(x.test_code(), 1);
         assert_eq!(x.test_result(1.0), "devhub test: a ended: released; no verdict on this source state\n");
+        x.state = "running".into();
+        let failures = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let tests = LiveTests { ran: 4, passed: 196, failed: 4, failures: failures.clone(), stale: failures, ..Default::default() };
+        assert_eq!(live_tests_from(&live_tests_value(&tests)), Some(tests.clone()), "carried failures survive persistence");
+        x.patch.as_mut().unwrap().tests = Some(tests);
+        let out = x.test_result(1.0);
+        assert!(out.starts_with("devhub test: a 4/4 ran"), "{out}");
+        assert!(out.contains("  4 earlier failure(s), not rerun for this edit (its changes reach none of them): a, b, c, d\n"), "{out}");
+        for name in ["a", "b", "c", "d"] { assert!(!out.contains(&format!("\n  {name}\n")), "an earlier failure is not fresh: {out}"); }
+        assert_eq!(x.test_code(), 1, "earlier failures still keep the target red");
+        x.patch.as_mut().unwrap().tests = Some(LiveTests { ran: 200, passed: 199, failed: 1, failures: vec!["a".into()], ..Default::default() });
+        let out = x.test_result(1.0);
+        assert!(out.starts_with("devhub test: a 199/200 ran") && out.contains("\n  a\n"), "{out}");
+        assert!(!out.contains("earlier failure(s)"), "{out}");
+        // its round's relax warnings: the lane's own all, marked, then up to 10 of the rest
+        let warn = |n: usize| format!("libs/p/src/f{n}.rs:7:38: warning: unused import: `X` [unused_imports]");
+        let mut warnings = vec![(warn(0), true)];
+        warnings.extend((1..=12).map(|n| (warn(n), false)));
+        let tests = LiveTests { ran: 2, passed: 2, warnings, ..Default::default() };
+        assert_eq!(live_tests_from(&live_tests_value(&tests)), Some(tests.clone()), "warnings survive persistence");
+        x.log = "/h/live-logs/W1.log".into();
+        x.patch.as_mut().unwrap().tests = Some(tests);
+        let out = x.test_result(1.0);
+        assert!(out.contains(&format!("relax: 13 warning(s), 1 in files this lane changed\n  [this lane] {}\n  {}\n", warn(0), warn(1))), "{out}");
+        assert!(out.contains(&format!("  {}\n  and 2 more in the session's log /h/live-logs/W1.log\n", warn(10))) && !out.contains(&warn(11)), "{out}");
+        assert_eq!(x.test_code(), 0, "a warning is no failure");
     }
 
     #[test]
@@ -2544,7 +2647,7 @@ mod tests {
                 Job { id: "J1".into(), batch: "B1".into(), lane: "l".into(), kind: "test".into(), prio: 5, cmd: vec!["cargo".into(), "test".into()], after: vec!["J0".into()], state: "paused".into(), snap: "S2".into(), snap_files: 3, attempts: 1, granted_ms: 5, shipped_ms: 6, first_out_ms: 7, exit: None, panic: Some(JobPanic { id: "P1".into(), pid: 9, message: "index".into(), thread: "main".into(), location: "a.rs:1".into(), at_ms: 3 }), ..Default::default() },
                 Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, ..Default::default() },
             ],
-            lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, keep: true, waited: true, first: true, parked: "waits".into(), ended_ms: 0, note: "n".into() }],
+            lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, active_ms: 6, dirs_ms: 7, agent_ms: 8, keep: true, waited: true, first: true, parked: "waits".into(), ended_ms: 0, note: "n".into() }],
             shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), main: "m".into(), held: "held at s: tip t waits".into(), restart: "restart pending since s: 1 landed edit not running".into(), restart_since: "s".into(), took_red: vec!["check a".into()], exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
             shows_next: 1,
             lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, ask: "18a-7-1".into(), patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
@@ -2556,9 +2659,11 @@ mod tests {
             snaps_next: 3,
             land: vec![makepad_strict_json::parse(br#"{"id":4,"branch":"rc-x","state":"queued"}"#).unwrap()],
             land_paused: "user review".into(),
+            land_rule_off: "user review".into(),
             merges: vec![makepad_strict_json::parse(br#"{"branch":"rc-x","repo":"makepad","result":"merged"}"#).unwrap()],
             held: vec![("rc-h".into(), "a viewer rebuild".into())],
             prewarm: vec![makepad_strict_json::parse(br#"{"node":"node-a","sev":"info","line":"prewarm: done","at_ms":5}"#).unwrap()],
+            warm: Some(makepad_strict_json::parse(br#"{"plan":null,"spares":{"generation":2},"legs":[]}"#).unwrap()),
         };
         let text = doc.to_value().to_json();
         assert_eq!(Doc::parse(&text), Some(doc.clone()));
@@ -2581,11 +2686,13 @@ mod tests {
     }
 
     /// A session keeps what it asked through a master's restart, and `live again` reads it there:
-    /// its cores and RAM, and its home (the archive, and where its box holds the app's copy).
+    /// its cores and RAM, and its home (the archive, and where its box holds the app's copy); and
+    /// when its starter left, which ends it after a restart too.
     #[test]
     fn a_live_session_keeps_its_asks_and_its_home() {
-        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), ..Default::default() };
+        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), left_ms: 1_794_836_017_627, ..Default::default() };
         let back = live_from(&live_value(&x));
+        assert_eq!(back.left_ms, 1_794_836_017_627, "when its starter left");
         assert_eq!((back.cores, back.ram_gb), (Some(4.0), Some(12.5)));
         assert_eq!((back.home.as_str(), back.home_dir.as_str()), ("/a/scan.tar", "/w/tmp/L1/app-home"));
         assert_eq!(live_from(&live_value(&Live::default())).ram_gb, None);

@@ -6,7 +6,11 @@
 #    checkout; no WM to build or restart);
 # 2. writes node-start.cmd next to them: `cargo run --release -p makepad-app-devhub` in the node's one tree
 #    (-Tree; default %USERPROFILE%\devhub\tree when it exists, the tree the leases run in, else the checkout),
-#    in a loop: every exit (a clean one too: a restart for new code) starts the tree's current code again.
+#    in a loop: every exit (a clean one too: a restart for new code) starts the tree's current code again,
+#    5 s after a clean exit and twice as long after each failed one (10 s, 20 s, .. 10 min): a hub that
+#    cannot start does not spin. Once no process starts in its session at all (STATUS_DLL_INIT_FAILED:
+#    the session is ending) the loop ends and says so: one ran on at a logoff, thousands of starts a
+#    minute, each of them failing (11-14);
 #    The hub writes its own log, node.log (--makepad-devhub-log): the loop redirects nothing a process
 #    the hub starts could hold open (cmd's `>>` shares no writing: a run that outlived its hub held
 #    it, and the loop started no hub, 11-04). The loop's own lines (each start, each exit with its
@@ -76,10 +80,11 @@ if (-not (Test-Path $sync)) {
 # 2. the start script
 Set-Content -Path $startCmd -Encoding ascii -Value @(
     "@echo off",
-    "rem devhub node at logon (tools/devhub/windows/install-node.ps1): cargo run in the node's tree, restarted on every exit",
+    "rem devhub node (tools/devhub/windows/install-node.ps1): cargo run in the node's tree, restarted on every exit",
     "cd /d `"$Tree`"",
     "set CARGO_TARGET_DIR=$target",
     "set CARGO_NET_OFFLINE=true",
+    "set fails=0",
     ":again",
     "echo %DATE% %TIME% devhub node start in $Tree >> `"$startLog`"",
     "rem a tree a lease left at a commit the hub does not build at (from before its package) would loop for",
@@ -95,10 +100,24 @@ Set-Content -Path $startCmd -Encoding ascii -Value @(
     "  )",
     ")",
     "cargo run --release -p makepad-app-devhub -- --makepad-devhub-log `"$log`"",
-    "echo %DATE% %TIME% the hub exited with %ERRORLEVEL% >> `"$startLog`"",
-    "rem 5 s between restarts (timeout needs a console input; the task's console is headless)",
-    "ping -n 6 127.0.0.1 > nul",
+    "set code=%ERRORLEVEL%",
+    "echo %DATE% %TIME% the hub exited with %code% >> `"$startLog`"",
+    "rem STATUS_DLL_INIT_FAILED: no process starts in this session any more (it is ending)",
+    "if `"%code%`"==`"-1073741502`" goto gone",
+    "if `"%code%`"==`"0`" (set fails=0) else (set /a fails+=1)",
+    "rem 5 s after a clean exit (a restart for new code), 10 s, 20 s, .. 10 min after failed ones",
+    "if %fails% gtr 7 set fails=7",
+    "set /a `"wait=5<<fails`"",
+    "if %wait% gtr 600 set wait=600",
+    "if %fails% gtr 0 echo %DATE% %TIME% %fails% failed start(s) in a row: the next in %wait% s >> `"$startLog`"",
+    "rem (timeout needs a console input; the task's console is headless)",
+    "set /a pings=wait+1",
+    "ping -n %pings% 127.0.0.1 > nul",
+    "if not `"%ERRORLEVEL%`"==`"0`" goto gone",
     "goto again",
+    ":gone",
+    "echo %DATE% %TIME% no process starts in this session (it is ending): the loop ends, the task starts it again >> `"$startLog`"",
+    "exit /b 1",
     ":to_synced",
     "for /f %%s in ('git rev-parse -q --verify refs/devhub/synced') do (",
     "  echo the hub does not build here: back at the shared %%s >> `"$startLog`"",

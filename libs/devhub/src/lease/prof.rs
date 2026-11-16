@@ -18,9 +18,34 @@ pub struct Span {
     pub phase: String,
     pub blocker: String,
     pub boxes: Vec<String>,
+    /// A queued span's other boxes, each with what kept it off there, until its grant files the
+    /// span under the box it got ([`Phases::ran_on`]).
+    pub on: Vec<(String, String)>,
     pub start: u64,
     /// Zero means this phase is still open.
     pub end: u64,
+    pub build: Option<Build>,
+}
+
+/// Cargo's build inside a run, not an exclusive phase: the cold build of a native test
+/// must not become that test's measure (835 s before the test, 11-15).
+#[derive(Clone, Debug)]
+pub struct Build {
+    pub ms: u64,
+    pub pkg: Option<String>,
+    pub warm: Option<bool>,
+}
+
+impl Build {
+    pub fn parse(v: &Value) -> Option<Self> {
+        Some(Self { ms: v.get("build_ms")?.as_u64()?, pkg: v.get("build_pkg").and_then(Value::as_str).map(str::to_string), warm: v.get("build_warm").and_then(Value::as_bool) })
+    }
+
+    /// Its fields after a comma, or nothing for a run that built nothing measured: every phase of
+    /// every lease is written in the cost log, and few of them are native builds.
+    pub fn fields(build: Option<&Self>) -> String {
+        build.map_or_else(String::new, |b| format!(",\"build_ms\":{},\"build_pkg\":{},\"build_warm\":{}", b.ms, b.pkg.as_deref().map_or("null".into(), json_str), b.warm.map_or("null".into(), |w| w.to_string())))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -32,12 +57,41 @@ impl Phases {
     }
 
     pub fn sample(&mut self, phase: &str, blocker: &str, boxes: &[String], start: u64, end: u64) {
+        self.sample_on(phase, blocker, boxes, &[], start, end);
+    }
+
+    /// [`Self::sample`], with what kept it off each of its `on` boxes (theirs differs from `blocker`).
+    pub fn sample_on(&mut self, phase: &str, blocker: &str, boxes: &[String], on: &[(String, String)], start: u64, end: u64) {
         if end != 0 && end <= start { return; }
-        if let Some(last) = self.0.last_mut().filter(|s| s.phase == phase && s.blocker == blocker && s.boxes == boxes && s.end >= start && s.start <= start && s.end != 0) {
+        if let Some(last) = self.0.last_mut().filter(|s| s.build.is_none() && s.phase == phase && s.blocker == blocker && s.boxes == boxes && s.on == on && s.end >= start && s.start <= start && s.end != 0) {
             last.end = if end == 0 { 0 } else { last.end.max(end) };
         } else {
-            self.0.push(Span { phase: phase.into(), blocker: blocker.into(), boxes: boxes.to_vec(), start, end });
+            self.0.push(Span { phase: phase.into(), blocker: blocker.into(), boxes: boxes.to_vec(), on: on.to_vec(), start, end, build: None });
         }
+    }
+
+    /// Granted on `node`: each queued span's wait goes under what kept it off `node` then, not off
+    /// the box its queue line named (its hold, its sticky box or the first); a span `node` was no
+    /// box of keeps its line's. A queue line names one box, "(+3 nodes)" the rest: filed under
+    /// that box's reason, tests that ran on one pool box read "held for landing gate" 12-19 min
+    /// while the gate held another, and the blocker ranking pointed at the gate (11-16).
+    pub fn ran_on(&mut self, node: &str) {
+        for s in self.0.iter_mut().filter(|s| s.phase == "queued") {
+            if let Some(key) = s.on.iter().find(|(b, _)| b == node).map(|(_, k)| k.clone()) {
+                s.boxes = s.on.iter().filter(|(_, k)| *k == key).map(|(b, _)| b.clone()).collect();
+                s.blocker = key;
+            }
+            s.on.clear();
+        }
+        // spans that now read alike, end to start, are one
+        let mut merged: Vec<Span> = Vec::with_capacity(self.0.len());
+        for s in self.0.drain(..) {
+            match merged.last_mut() {
+                Some(last) if last.phase == "queued" && s.phase == "queued" && last.blocker == s.blocker && last.boxes == s.boxes && last.end != 0 && last.end == s.start => last.end = s.end,
+                _ => merged.push(s),
+            }
+        }
+        self.0 = merged;
     }
 
     pub fn begin(&mut self, phase: &str, now: u64) {
@@ -52,12 +106,28 @@ impl Phases {
         Self(v.and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(|v| {
             let phase = s(v, "phase");
             if phase.is_empty() { return None; }
-            Some(Span { phase: phase.into(), blocker: s(v, "blocker").into(), boxes: v.get("boxes").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect(), start: n(v, "start_ms"), end: n(v, "end_ms") })
+            let on = v.get("on").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(|p| {
+                let p = p.as_arr()?;
+                Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))
+            }).collect();
+            Some(Span { phase: phase.into(), blocker: s(v, "blocker").into(), boxes: v.get("boxes").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect(), on, start: n(v, "start_ms"), end: n(v, "end_ms"), build: Build::parse(v) })
         }).collect())
     }
 
     pub fn json(&self) -> String {
-        format!("[{}]", self.0.iter().map(|s| format!("{{\"phase\":{},\"blocker\":{},\"boxes\":[{}],\"start_ms\":{},\"end_ms\":{}}}", json_str(&s.phase), json_str(&s.blocker), s.boxes.iter().map(|b| json_str(b)).collect::<Vec<_>>().join(","), s.start, s.end)).collect::<Vec<_>>().join(","))
+        let on = |s: &Span| if s.on.is_empty() { String::new() } else { format!(",\"on\":[{}]", s.on.iter().map(|(b, k)| format!("[{},{}]", json_str(b), json_str(k))).collect::<Vec<_>>().join(",")) };
+        format!("[{}]", self.0.iter().map(|s| format!("{{\"phase\":{},\"blocker\":{},\"boxes\":[{}]{},\"start_ms\":{},\"end_ms\":{}{}}}", json_str(&s.phase), json_str(&s.blocker), s.boxes.iter().map(|b| json_str(b)).collect::<Vec<_>>().join(","), on(s), s.start, s.end, Build::fields(s.build.as_ref()))).collect::<Vec<_>>().join(","))
+    }
+
+    pub fn build(&self) -> Option<Build> {
+        let mut builds = self.0.iter().filter(|s| s.phase == "run").filter_map(|s| s.build.as_ref());
+        let mut total = builds.next()?.clone();
+        for b in builds {
+            total.ms = total.ms.saturating_add(b.ms);
+            if total.pkg != b.pkg { total.pkg = None; }
+            if total.warm != b.warm { total.warm = None; }
+        }
+        Some(total)
     }
 
     /// Exclusive wall time, like a CPU profile: resolution/transfer wins over a concurrent
@@ -94,7 +164,7 @@ impl Phases {
             *blocked.entry(&s.blocker).or_default() += (if s.end == 0 { now } else { s.end.min(now) }).saturating_sub(s.start);
         }
         let phases = ["queued", "sync", "jit", "run", "report"].map(|p| format!("\"{p}_ms\":{}", totals.get(p).copied().unwrap_or(0))).join(",");
-        format!("{phases},\"blocked\":{{{}}},\"phases\":{}", blocked.iter().map(|(k, v)| format!("{}:{v}", json_str(k))).collect::<Vec<_>>().join(","), self.json())
+        format!("{phases}{},\"blocked\":{{{}}},\"phases\":{}", Build::fields(self.build().as_ref()), blocked.iter().map(|(k, v)| format!("{}:{v}", json_str(k))).collect::<Vec<_>>().join(","), self.json())
     }
 }
 

@@ -686,6 +686,8 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
             ("cancelled", _) => "cancelled".into(),
             (_, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) => "jit-error".into(),
             ("paused", Err(_)) => "panicked".into(),
+            // devhub ended its lease for a panic its app held parked with nobody to decide it
+            (_, Err(e)) if e.contains(" ended (panicked)") => "panicked".into(),
             (_, Ok(0)) if none.is_some() => "failed".into(),
             (_, Ok(0)) => "ok".into(),
             (_, Ok(_)) => "failed".into(),
@@ -707,7 +709,7 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     let secs = j.ended_ms.saturating_sub(if j.started_ms > 0 { j.started_ms } else { j.submitted_ms }) / 1000;
     let what = match j.state.as_str() {
         "ok" => format!("job {id} ok in {secs} s on {}", j.node),
-        "panicked" => format!("job {id} panicked: {}", j.panic.as_ref().map_or(String::new(), |p| format!("{} at {}", p.message, p.location))),
+        "panicked" => format!("job {id} panicked: {}", j.panic.as_ref().map_or(j.note.clone(), |p| format!("{} at {}", p.message, p.location))),
         "cancelled" => format!("job {id} cancelled{}", r.as_ref().err().map_or(String::new(), |e| format!(": {}", crate::proto::clean(e, 160)))),
         "jit-error" => j.note.clone(),
         _ => format!("job {id} failed{} in {secs} s on {}: {}", j.exit.map_or(String::new(), |e| format!(" exit={e}")), j.node, fail_reason(&j, ended_by_exit)),
@@ -1108,7 +1110,13 @@ pub(crate) fn whole_pair(ctx: &Ctx, rev: &str) -> Result<(), String> {
     let Some(pair) = crate::lease::Pin::of_rev(rev).map(|p| p.pair()) else { return Ok(()) };
     if pair.main.is_empty() { return Ok(()); }
     match crate::land::half_landed(&live_landings(ctx), &ctx.repo, &pair.work, &pair.main) {
-        Some((e, makepad)) => Err(crate::land::half_landed_said(e, makepad)),
+        Some((e, makepad)) => Err(match crate::lease::parse_pinned(rev) {
+            Ok((mk, nested)) => match nested.iter().find(|(name, _)| name == "commercial") {
+                Some((_, c)) => crate::land::torn_pair_said(e, makepad, &ctx.repo, (&mk.branch, &mk.sha), (&c.branch, &c.sha)),
+                None => crate::land::half_landed_said(e, makepad, &mk.branch),
+            },
+            Err(_) => crate::land::half_landed_said(e, makepad, ""),
+        }),
         None => Ok(()),
     }
 }
@@ -1228,7 +1236,7 @@ fn nested_devhub(cmd: &[String]) -> Option<String> {
 
 /// The fields of a submitted job this master reads ([`submit`]): one it does not know is refused,
 /// never dropped (a job's `--jit` was dropped on its way and the job ran without its JIT, 11-07).
-const JOB_FIELDS: &[&str] = &["after", "agent", "class", "cmd", "cores", "cost", "cwd", "est_min", "holder", "kind", "lane", "lane_from", "loader", "native", "needs", "node", "prio", "priority", "ram_gb", "series", "shadow", "tree", "whole"];
+const JOB_FIELDS: &[&str] = &["after", "agent", "class", "cmd", "cores", "cost", "cwd", "est_min", "hand_in", "holder", "kind", "lane", "lane_from", "loader", "native", "needs", "node", "prio", "priority", "ram_gb", "series", "shadow", "tree", "whole"];
 
 /// Why a job that asks for no JIT (`--jit`) is refused: its command, or a file it names (the
 /// script it runs, in its tree), names a binary of a box's JIT store
@@ -1262,6 +1270,7 @@ fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
     r.cores = j.cores;
     r.ram_gb = j.ram_gb;
     r.whole |= j.whole;
+    r.hand_in = j.hand_in;
     r.holder = j.holder;
     r.series = (!j.series.is_empty()).then(|| j.series.clone());
 }
@@ -1312,6 +1321,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             notes.push(format!("job {}: --native: `{}` in the lane's tree", i + 1, native.join(" ")));
             cmd = native;
         }
+        if let Some(why) = crate::proto::joined_flags(&cmd) { return Err(format!("job {}: {why}", i + 1)); }
         if let Some(direct) = nested_devhub(&cmd) {
             return Err(format!("job {}: its command is itself a devhub command, which asks the master for its own box and has no makepad checkout to run from on the job's box: run it directly instead: `{direct}`", i + 1));
         }
@@ -1350,13 +1360,14 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let cores = r.get("cores").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("cores is a positive number")).transpose()?;
         let ram_gb = r.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
         let whole = r.get("whole").and_then(|v| v.as_bool()).unwrap_or(false);
+        let hand_in = r.get("hand_in").and_then(|v| v.as_bool()).unwrap_or(false);
         let priority = match s(r, "priority").as_str() { "" => Priority::Background, p => Priority::parse(p).ok_or("priority is interactive or background")? };
         let (agent, rev, reason) = (s(r, "agent"), s(&v, "rev"), s(r, "native"));
         let (os, arch) = crate::lease::native::platform(&crate::lease::sched::parse_needs(&s(r, "needs")), &s(r, "node"), &ctx.leases.nodes());
         let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
         let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
         if !note.is_empty() { notes.push(note); }
-        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), series: s(r, "series"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
+        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, hand_in, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), series: s(r, "series"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
     }
     for (i, j) in jobs.iter().enumerate() {
         let mut req = crate::lease::sched::Req::new(&j.lane, Kind::parse(&j.kind).unwrap());
@@ -1465,7 +1476,7 @@ fn rerun(ctx: &Ctx, id: &str) -> Result<String, String> {
     }
     let n = ctx.store.update(|d| {
         d.jobs_next += 1;
-        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), series: j.series.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
+        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, hand_in: j.hand_in, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), series: j.series.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
         d.jobs.push(n.clone());
         n
     })?;
@@ -1594,6 +1605,22 @@ mod tests {
 
     #[test]
     fn submit_refuses_impossible_argv_before_writing_any_job() {
+        for (words, joined) in [
+            (&["cargo", "-p a -p b"][..], true),
+            (&["cargo", "-p\ta\n-p b"][..], true),
+            (&["cargo", "--features=a b"][..], false),
+            (&["cargo", "--features a b"][..], false),
+            (&["git", "log", "--format=%h -x"][..], false),
+            (&["cargo", "a -p b"][..], false),
+            (&["cargo", "-p"][..], false),
+            (&["cargo", "-p", "a", "-p", "b"][..], false),
+            (&["-p a -p b"][..], false),
+            (&["env", "A=1 B=2", "cargo", "-p a -p b"][..], true),
+            (&["env", "A=1 B=2", "cargo", "--features=a b"][..], false),
+            (&[][..], false),
+        ] {
+            assert_eq!(crate::proto::joined_flags(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>()).is_some(), joined, "{words:?}");
+        }
         let mut c = ctx("exec-size");
         c.leases = Arc::new(LeaseMaster::new("node-a", c.home.clone(), Arc::new(|_: &str, service: &str, _: &str| {
             if service != "caps" { return Ok(vec!["{}".into()]); }
@@ -1612,6 +1639,15 @@ mod tests {
         assert_eq!(c.store.read(|d| (d.jobs.len(), d.jobs_next, d.batches_next)), (0, 0, 0), "the whole batch is refused before any row or id is written");
         assert!(c.leases.view().is_empty(), "no lease queued, even for an --after job");
         assert!(!c.home.join("jobs").exists(), "no job output created");
+        let bad = req("cargo", &[]).replace("\"cmd\":[\"cargo\"]", "\"cmd\":[\"cargo\",\"check\",\"--tests\",\"-p app-a -p app-b\"]");
+        for (jobs, job) in [(vec![bad.clone(), req("true", &[])], 1), (vec![req("true", &[]), bad], 2)] {
+            let error = submit_line(&c, "", true, &jobs).unwrap_err();
+            assert!(error.starts_with(&format!("job {job}: its argument `-p app-a -p app-b` holds several flags")), "{error}");
+            assert!(error.contains("pass each -p separately"), "{error}");
+            assert_eq!(c.store.read(|d| (d.jobs.len(), d.jobs_next, d.batches_next)), (0, 0, 0), "joined flags refuse the whole batch before any row or id is written");
+            assert!(c.leases.view().is_empty(), "no lease queued for joined flags");
+            assert!(!c.home.join("jobs").exists(), "no job output created for joined flags");
+        }
         std::fs::remove_dir_all(&c.home).unwrap();
     }
 
@@ -1938,11 +1974,12 @@ mod tests {
         let r = submit_line(&c, "", false, &[
             job(&["env", "CARGO_INCREMENTAL=0", "makepad", "test", "-p", "pkg-a", "--release", "--", "one"]),
             job(&["makepad", "test", "pkg-b", "--lib"]),
-            native(&["env", "CARGO_INCREMENTAL=0", "makepad", "test", "pkg-b", "--release", "--test", "t", "--", "one"]),
+            native(&["env", "CARGO_INCREMENTAL=0", "makepad", "test", "pkg-b", "--profile", "release-checks", "--test", "t", "--", "one"]),
         ]).unwrap();
         assert!(r.contains("job 1: pkg-a runs in the lane's tree: its tests run cargo on the checkout (its Cargo.toml's test-tree)"), "{r}");
         assert!(!r.contains("job 2:"), "{r}");
-        // --native: the JIT test as the cargo test it stands for, in the tree
+        // --native: the JIT test as the cargo test it stands for, in the tree: release, whatever
+        // profile the JIT run named (a checked cargo build would be a second copy of target/)
         assert!(r.contains("job 3: --native: `env CARGO_INCREMENTAL=0 cargo test --release -p pkg-b --test t -- one` in the lane's tree"), "{r}");
         assert_eq!(c.store.read(|d| d.jobs.iter().map(|j| j.src.clone()).collect::<Vec<_>>()), ["tree", "overlay", "tree"]);
         let refused = submit_line(&c, "", false, &[native(&["makepad", "run", "app"])]).unwrap_err();
@@ -2016,7 +2053,7 @@ mod tests {
     }
 
     /// A pause lasts while the panic stays parked, and the job's verdict is its own exit: a released
-    /// box is the only end that reads `panicked`.
+    /// box, or a lease devhub ended for its app's parked panic, is the only end that reads `panicked`.
     #[test]
     fn a_pause_lasts_while_the_panic_is_parked_and_the_exit_decides() {
         let c = Arc::new(ctx("parks"));
@@ -2060,5 +2097,12 @@ mod tests {
         let refused = serve(&c, "job release J5").unwrap_err();
         assert!(refused.contains("J5 is running") && refused.contains("job cancel"), "{refused}");
         assert_eq!(state("J5"), "running");
+        // devhub ended a running job's lease for the panic its app held parked with nobody to
+        // decide it (lease/sched.rs end_panicked): panicked, and its result says the panic
+        let ended = crate::orch::leg::ended_error_for_test("L9", "panicked", "its app panicked (boom at a.rs:3:1 [main]) and every process of it has been idle");
+        super::finish(&c, "J5", Err(ended), &log);
+        let j5 = super::get(&c, "J5").unwrap();
+        assert_eq!(j5.state, "panicked", "{j5:?}");
+        assert!(render(&j5, false).contains("L9 ended (panicked): its app panicked (boom at a.rs:3:1 [main])"), "{}", render(&j5, false));
     }
 }

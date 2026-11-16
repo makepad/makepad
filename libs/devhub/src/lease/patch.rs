@@ -41,9 +41,9 @@ pub fn apply(diff: &str, read: &dyn Fn(&str) -> Result<Option<Vec<u8>>, String>)
             return Err(format!("{path}: twice in one patch"));
         }
         let before = match old {
-            None if read(path)?.is_some() => return Err(format!("adds {path}, which the worktree has")),
+            None if read(path)?.is_some() => return Err(format!("adds {path}, which the tree it ships has")),
             None => Vec::new(),
-            Some(_) => read(path)?.ok_or_else(|| format!("{path}: not in the worktree"))?,
+            Some(_) => read(path)?.ok_or_else(|| format!("{path}: not in the tree it ships"))?,
         };
         let text = String::from_utf8(before).map_err(|_| format!("{path}: not text"))?;
         i += 2;
@@ -86,19 +86,22 @@ pub fn apply(diff: &str, read: &dyn Fn(&str) -> Result<Option<Vec<u8>>, String>)
 /// [`apply`] with each file's content as the worktree at `root` holds it. A path through a symlink
 /// is refused: a ship sends a link as a link, and what it points at may be outside the worktree.
 pub fn apply_in(root: &Path, diff: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    apply(diff, &|p| {
-        let mut at = root.to_path_buf();
-        for part in p.split('/') {
-            at.push(part);
-            match std::fs::symlink_metadata(&at) {
-                Ok(m) if m.file_type().is_symlink() => return Err(format!("{p}: through the symlink {}, which a ship sends as a link", at.strip_prefix(root).unwrap_or(&at).display())),
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(format!("{p}: {e}")),
-            }
+    apply(diff, &|p| read_file(root, p))
+}
+
+/// The worktree reader shared by [`apply_in`] and a run's selected shipping tree (11-15).
+pub fn read_file(root: &Path, p: &str) -> Result<Option<Vec<u8>>, String> {
+    let mut at = root.to_path_buf();
+    for part in p.split('/') {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => return Err(format!("{p}: through the symlink {}, which a ship sends as a link", at.strip_prefix(root).unwrap_or(&at).display())),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{p}: {e}")),
         }
-        std::fs::read(&at).map(Some).map_err(|e| format!("{p}: {e}"))
-    })
+    }
+    std::fs::read(&at).map(Some).map_err(|e| format!("{p}: {e}"))
 }
 
 /// A diff line's path without its `a/` or `b/` (None: /dev/null).
@@ -203,7 +206,7 @@ mod tests {
         let delete = "--- a/src/x.rs\n+++ /dev/null\n@@ -1,7 +0,0 @@\n";
         assert!(run(&[("src/x.rs", SRC)], delete).unwrap_err().starts_with("deletes src/x.rs"));
         let missing = "--- a/src/y.rs\n+++ b/src/y.rs\n@@ -1 +1 @@\n-a\n+b\n";
-        assert_eq!(run(&[("src/x.rs", SRC)], missing).unwrap_err(), "src/y.rs: not in the worktree");
+        assert_eq!(run(&[("src/x.rs", SRC)], missing).unwrap_err(), "src/y.rs: not in the tree it ships");
         assert_eq!(run(&[], "just words\n").unwrap_err(), "no file in it");
     }
 

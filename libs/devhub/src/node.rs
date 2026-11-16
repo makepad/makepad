@@ -78,6 +78,18 @@ pub struct Node {
 /// Where a node listens on the LAN, or why it does not (yet).
 pub type Lan = Arc<Mutex<Result<SocketAddr, String>>>;
 
+/// What a [`Lan`] refused for good says first ([`refused`]).
+const NOT_LISTENING: &str = "not listening on the LAN";
+
+/// Why a node's LAN listener refused for good (its fleet TLS key, its bind), not a wait for its
+/// address: the master can never dial it, so its hub ends ([`Node::start`]).
+pub fn refused(lan: &Lan) -> Option<String> {
+    match &*lan.lock().unwrap() {
+        Err(why) if why.starts_with(NOT_LISTENING) => Some(why.clone()),
+        _ => None,
+    }
+}
+
 /// A [`Lan`] as a status line says it: `LAN <addr>`, or why not.
 pub fn lan_said(lan: &Lan) -> String {
     match &*lan.lock().unwrap() {
@@ -122,7 +134,7 @@ impl LanListener {
                 false
             }
             Err(e) => {
-                *self.lan.lock().unwrap() = Err(format!("not listening on the LAN: {e}"));
+                *self.lan.lock().unwrap() = Err(format!("{NOT_LISTENING}: {e}"));
                 true
             }
         }
@@ -320,9 +332,23 @@ fn keep_over_exec(cmd: &mut std::process::Command, fd: i32) {
 #[cfg(unix)]
 pub fn exec(cmd: &mut std::process::Command) -> std::io::Error {
     crate::logstamp::keep_over_exec(cmd);
+    let hooks = EXEC_HOOKS.get();
+    if let Some((before, _)) = hooks { before(); }
     let e = exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed));
+    if let Some((_, failed)) = hooks { failed(); }
     crate::logstamp::exec_failed();
     e
+}
+
+/// What the app hosting this process lets go before an exec in place, and takes back when it
+/// failed ([`set_exec_hooks`]).
+static EXEC_HOOKS: std::sync::OnceLock<(fn(), fn())> = std::sync::OnceLock::new();
+
+/// The host app's `before` and `failed` around [`exec`]: what its platform holds by the pid,
+/// which the exec keeps (the macOS App Nap activity: each self-update of the master left its
+/// power assertion behind, 11-13). Set once, at start.
+pub fn set_exec_hooks(before: fn(), failed: fn()) {
+    let _ = EXEC_HOOKS.set((before, failed));
 }
 
 #[cfg(unix)]
@@ -462,13 +488,25 @@ impl Node {
                 }
             })),
         };
+        // A node that cannot listen ends, loudly: the master can never dial it, so it serves
+        // nothing. A Windows box's hub could not load its TLS key (NCryptImportKey: NTE_PERM), said so
+        // once in its log and ran on, and the box stayed out of the fleet two days with nothing
+        // reporting it (11-14).
         let lan_ip = || makepad_devhub_conf::lan_ipv4().map(IpAddr::V4);
-        if !listener.tick(&lan_ip) {
+        if listener.tick(&lan_ip) {
+            if let Some(why) = refused(&node.lan) {
+                return Err(format!("{why}: the master cannot dial this node, so its hub ends"));
+            }
+        } else {
             let lan = node.lan.clone();
             node.local.on_scan(Box::new(move || {
                 let done = listener.tick(&lan_ip);
                 if done {
                     log(&format!("devhub: {}", lan_said(&lan)));
+                    if let Some(why) = refused(&lan) {
+                        log(&format!("devhub: {why}: the master cannot dial this node, so its hub ends"));
+                        std::process::exit(2);
+                    }
                 }
                 done
             }));
@@ -510,10 +548,12 @@ mod tests {
         *addr.lock().unwrap() = Some("10.77.0.5".parse().unwrap());
         assert!(!listener.tick(&ip), "its address, not yet bindable");
         assert!(why().starts_with("10.77.0.5 is not on this machine yet"), "{}", why());
+        assert_eq!(super::refused(&lan), None, "a wait for its address is no refusal: the hub stays");
         bindable.store(true, Ordering::Relaxed);
         assert!(listener.tick(&ip), "it listens once the address is there");
         assert_eq!(*lan.lock().unwrap(), Ok("10.77.0.5:8797".parse::<SocketAddr>().unwrap()));
         assert_eq!(super::lan_said(&lan), "LAN 10.77.0.5:8797");
+        assert_eq!(super::refused(&lan), None, "listening: no refusal");
         assert_eq!(beacons.load(Ordering::Relaxed), 1, "the beacon starts once it listens");
         // a conf's own address waits for the box the same; another refusal ends the looks
         let refused: Lan = Arc::new(Mutex::new(Err(String::new())));
@@ -526,6 +566,7 @@ mod tests {
         };
         assert!(listener.tick(&|| None));
         assert!(super::lan_said(&refused).starts_with("not listening on the LAN"), "{}", super::lan_said(&refused));
+        assert!(super::refused(&refused).is_some(), "refused for good: the hub ends");
     }
 
     /// A node show's log is the WM's log of its client: found by the pid its program announced, the

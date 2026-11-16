@@ -16,14 +16,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Recent runs decide the route, and cargo-routed classes keep measuring the JIT: fab-shell's
+/// lib tests went to cargo at 136 s while the JIT ran them in 40 s, its JIT measure frozen at
+/// the decision (11-15).
+const ROUTE_WINDOW: usize = 5;
+const ROUTE_PROBE_EVERY: usize = 5;
+
 /// Cost samples parsed without I/O. Applying a batch preserves the master's learning order.
 #[derive(Default)]
 pub(super) struct CostRecords {
     jit_peaks: Vec<(Option<String>, f64)>,
     calls: Vec<(String, String, bool, f64)>,
     memory: Vec<(String, String, String, Option<String>, Option<f64>)>,
-    records: Vec<(String, String, String, String, Option<String>, u64, Option<f64>, Option<f64>, Option<u64>)>,
+    records: Vec<(String, String, String, String, Option<String>, u64, Option<f64>, Option<f64>, Option<u64>, Option<super::prof::Build>)>,
     jit_builds: Vec<(String, f64)>,
+    /// (class, kind, peak cores) of each released run its box measured ([`Sched::record_peak_cores`])
+    cpu_peaks: Vec<(String, String, f64)>,
+    native_builds: Vec<(String, String, String, super::prof::Build)>,
     /// A work tree's runs: (tree lane, box, rev, class, kind) ([`Sched::note_tree_run`])
     trees: Vec<(String, String, String, String, String)>,
 }
@@ -81,16 +90,39 @@ impl CostRecords {
                 let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let peak = v.get("peak_ram_gb").and_then(super::num);
                 let cores = v.get("cpu_seconds").and_then(super::num).map(|cpu| cpu * 1000.0 / wall);
-                let run = v.get("run_ms").and_then(super::num).filter(|ms| ms.is_finite() && *ms > 0.0).map(|ms| ms as u64);
-                // a lease whose wall was its own JIT build measures that build's cores on its OS family
-                // ([`Sched::record_jit_build_cores`])
+                // An overlay's box builds its JIT in the lease first (its `jit` phase) when it does
+                // not hold it: a cost of that box at that pin, which placement adds where it applies
+                // ([`Sched::build_ms`]), not of the command. In the class's wall it was counted
+                // twice there, and held every run of the class to it: a 4-10 s hand-in check was
+                // measured 2m12s, its JIT builds of 37-180 s in a third of its runs (11-16). Not a
+                // `+jit-build` run's, whose class is that build ([`super::JIT_BUILD_RUN`]).
                 let jit = v.get("jit_ms").and_then(super::num).unwrap_or(0.0);
+                // one whose wall was its JIT build: its CPU is the build's, measured below as such
+                let built = jit >= JIT_BUILD_MIN_MS && jit >= JIT_BUILD_SHARE * wall && cores.is_some_and(|c| c >= JIT_BUILD_MIN_CORES);
+                let own_build = class.ends_with(super::JIT_BUILD_RUN);
+                let wall = if own_build { wall } else { (wall - jit).max(1.0) };
+                let run = v.get("run_ms").and_then(super::num).filter(|ms| ms.is_finite() && *ms > 0.0).map(|ms| ms as u64);
+                let build = class.starts_with("native:").then(|| super::prof::Build::parse(v)).flatten();
+                if build.is_some() {
+                    let phases = super::prof::Phases::parse(v.get("phases"));
+                    let samples: Vec<_> = phases.0.into_iter().filter(|s| s.phase == "run").filter_map(|s| s.build).collect();
+                    // Each run retains its package and start's warmth, even if a lease ran
+                    // several packages or warmed one between runs (11-15).
+                    for b in if samples.is_empty() { build.clone().into_iter().collect() } else { samples } {
+                        self.native_builds.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), b));
+                    }
+                }
+                // a lease whose wall was its own JIT build measures that build's cores on its OS family
+                // ([`Sched::record_jit_build_cores`]), and not its class's: a hand-in check's 2-3
+                // cores asked 4-9, its JIT builds' (11-16)
                 if let (Some(os), Some(cores)) = (os(&v), cores) {
                     // (a build told its jobs, admitted on fewer cores than the measure, is no measure of it)
                     let told = v.get("jit_jobs").and_then(super::num).is_some();
-                    if !told && jit >= JIT_BUILD_MIN_MS && jit >= JIT_BUILD_SHARE * wall && cores >= JIT_BUILD_MIN_CORES { self.jit_builds.push((os, cores)); }
+                    if !told && built { self.jit_builds.push((os, cores)); }
                 }
-                self.records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run));
+                let cores = cores.filter(|_| !built || own_build);
+                if let Some(p) = v.get("peak_cores").and_then(super::num).filter(|p| p.is_finite() && *p >= 0.0 && (!built || own_build)) { self.cpu_peaks.push((class.to_string(), kind.to_string(), p)); }
+                self.records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run, build));
             }
         }
     }
@@ -103,6 +135,9 @@ impl CostRecords {
         for (class, kind, launch, peak) in self.calls {
             sched.record_call(&class, &kind, launch, peak);
         }
+        for (class, kind, peak) in self.cpu_peaks {
+            sched.record_peak_cores(&class, &kind, Some(peak));
+        }
         for (class, kind, lane, os, peak) in self.memory {
             sched.record_resources(&class, &kind, peak, None);
             if let Some(os) = os {
@@ -110,14 +145,18 @@ impl CostRecords {
                 sched.record_lane_peak(&os, &lane, &class, &kind, peak);
             }
         }
-        for (class, kind, node, lane, os, wall, peak, cores, run) in self.records {
-            sched.record_node_cost(&class, &kind, &node, wall);
+        for (class, kind, node, lane, os, wall, peak, cores, run, build) in self.records {
+            let test = run.zip(build.as_ref()).map(|(run, b)| run.saturating_sub(b.ms));
+            sched.record_node_cost(&class, &kind, &node, test.unwrap_or(wall));
             sched.record_resources(&class, &kind, peak, cores);
             if let Some(os) = os {
                 sched.record_family_peak(&os, &class, &kind, peak);
                 sched.record_lane_peak(&os, &lane, &class, &kind, peak);
             }
-            if let Some(run) = run { sched.record_run(&class, &kind, run); }
+            if let Some(run) = run { sched.record_run(&class, &kind, test.unwrap_or(run)); }
+        }
+        for (class, kind, node, build) in self.native_builds {
+            sched.record_native_build(&class, &kind, &node, &build);
         }
         for (os, cores) in self.jit_builds {
             sched.record_jit_build_cores(&os, cores);
@@ -143,7 +182,7 @@ pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 /// The worktree the lane registry holds for a live lane (`devhub lane new|adopt`), by name.
 pub type LaneTrees = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-pub const SERVICES: [&str; 21] = ["lease", "agent-seen", "retarget", "beat", "release", "cancel", "leases", "why-queued", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof", "native", super::panel::SERVICE];
+pub const SERVICES: [&str; 22] = ["lease", "agent-seen", "retarget", "beat", "release", "cancel", "leases", "why-queued", "estimate", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof", "native", super::panel::SERVICE];
 /// How long a commit sent to a node's store counts as there without asking again.
 #[cfg(feature = "checkout")]
 const ENSURED_FOR: std::time::Duration = std::time::Duration::from_secs(600);
@@ -171,7 +210,7 @@ struct Marks {
 }
 
 /// The command sent to a hub after its revisions are available there.
-pub(super) fn lease_start_line(l: &Lease, rev: &str, weighed: f64, peak: Option<f64>) -> String {
+pub(super) fn lease_start_line(l: &Lease, rev: &str, weighed: f64, peak: Option<f64>, threads: Option<u32>) -> String {
     let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
     let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
     let warms = match l.req.cpu_target.as_deref() { Some(t) => format!("{warms},\"cpu_target\":{}", json_str(t)), None => warms };
@@ -180,6 +219,8 @@ pub(super) fn lease_start_line(l: &Lease, rev: &str, weighed: f64, peak: Option<
     let warms = if l.req.gpu { format!("{warms},\"gpu\":true") } else { warms };
     // (only to a hub with `jit-jobs`: [`super::sched::Sched::jit_jobs`])
     let peak = match l.jit_jobs { Some(jobs) => format!("{peak},\"jit_jobs\":{jobs}"), None => peak };
+    // (only to a hub with `live-threads`: [`super::sched::Sched::live_threads`])
+    let peak = match threads { Some(n) => format!("{peak},\"threads\":{n}"), None => peak };
     format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.run_cores(), l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","))
 }
 
@@ -197,6 +238,8 @@ pub struct LeaseMaster {
     /// ([`Self::note_sleep`]). None in tests: their clock is the test's.
     awake: Mutex<Option<(std::time::Instant, u64)>>,
     sched: Mutex<Sched>,
+    /// (class, kind) -> cargo-routed asks since the last probe; gate checks never advance it.
+    route_asks: Mutex<HashMap<(String, String), usize>>,
     ask: Ask,
     publish: Publish,
     clock: Clock,
@@ -298,7 +341,10 @@ pub fn unreachable(e: &str) -> bool {
 /// leaves its host up: the connect is refused, or the call ends "restarting: " (a pool box went with
 /// "Host is down", 11-07).
 pub fn host_gone(e: &str) -> bool {
-    ["Host is down", "No route to host", "Network is unreachable", "Operation timed out", "Connection timed out"].iter().any(|w| e.contains(w))
+    // in any case: std's connect_timeout says its own expiry as "connection timed out", and a box
+    // down 26 min never counted as gone (11-14)
+    let e = e.to_ascii_lowercase();
+    ["host is down", "no route to host", "network is unreachable", "operation timed out", "connection timed out"].iter().any(|w| e.contains(w))
 }
 
 /// Why a node's `caps` call brought no caps: its error, its hub's refusal, or what it said instead.
@@ -381,8 +427,12 @@ fn cleanup_confirmed(v: &makepad_strict_json::Value, id: &str) -> bool {
         && v.get("leak").and_then(|v| v.as_arr()).is_some_and(|v| v.is_empty())
 }
 
+/// An error answer names the build this master runs (`master_rev`): a client of another build
+/// says which side lags instead of only the refusal ([`super::client`]'s `one`). The CLI of a
+/// landing asked a master that had not taken it yet for `stats route` and printed only the old
+/// master's usage line for 8 min (11-15).
 fn err(e: &str) -> String {
-    format!("{{\"err\":{}}}", json_str(e))
+    format!("{{\"err\":{},\"master_rev\":{}}}", json_str(e), json_str(super::caps::hub_rev()))
 }
 
 /// The dev switches in `nodes.conf` (`<node> ... dev=on|off`).
@@ -725,6 +775,7 @@ impl LeaseMaster {
             network: Mutex::new(None),
             awake: Mutex::new(None),
             sched: Mutex::new(sched),
+            route_asks: Mutex::new(HashMap::new()),
             ask,
             publish,
             clock,
@@ -1210,8 +1261,9 @@ impl LeaseMaster {
     }
 
     /// A live session's box weighs its runs as interactive work while a call or its verdict
-    /// runs, as background work between calls (`lease-weight <id> call|idle`,
-    /// [`super::Priority::cpu_weight`]): an idle session that spins then slows no gate beside it.
+    /// runs, as background work between calls, or at the idle CPU class for a test session
+    /// (`lease-weight <id> call|idle|rest`, [`super::Priority::cpu_weight`]). An older node that
+    /// refuses `rest` gets `idle` once instead.
     /// Off the caller's thread, in the session's turn, each send says the session's state as it
     /// is then: the last one says the newest.
     fn weigh_live(self: &Arc<Self>, id: &str) {
@@ -1221,13 +1273,18 @@ impl LeaseMaster {
             let _turn = turn.lock().unwrap();
             let now = {
                 let s = m.sched.lock().unwrap();
-                s.get(&id).filter(|l| l.state == State::Granted).and_then(|l| l.node.clone()).map(|node| (node, s.live_idle.contains(&id)))
+                s.get(&id).filter(|l| l.state == State::Granted).and_then(|l| l.node.clone().map(|node| (node, s.live_idle.contains(&id), s.rests(l))))
             };
-            let Some((node, idle)) = now else {
+            let Some((node, idle, rest)) = now else {
                 m.weighing.lock().unwrap().remove(&id);
                 return;
             };
-            match m.ask1(&node, "lease-weight", &format!("lease-weight {id} {}", if idle { "idle" } else { "call" })) {
+            let answer = m.ask1(&node, "lease-weight", &format!("lease-weight {id} {}", if rest { "rest" } else if idle { "idle" } else { "call" }));
+            let answer = match answer {
+                Err(e) if rest && e.contains("call|idle") => m.ask1(&node, "lease-weight", &format!("lease-weight {id} idle")),
+                answer => answer,
+            };
+            match answer {
                 Ok(v) => if let Some(call) = v.get("call") { m.ledger_call(&id, &node, call); },
                 Err(e) => m.event(Sev::Info, format!("{id}: its box did not take its weight: {e}")),
             }
@@ -1242,12 +1299,17 @@ impl LeaseMaster {
         }
     }
 
-    /// A parked live job has copied its last answer. Teardown runs off the caller's thread.
+    /// A live job's lease ends: by its session's own release or end, or once a parked one copied
+    /// its last answer (a release by its id refuses an active session's lease). Teardown runs off
+    /// the caller's thread. Whether it was still open.
     #[cfg(feature = "checkout")]
-    pub fn release_live(self: &Arc<Self>, id: &str) {
-        self.sched.lock().unwrap().release(id, "released", self.now());
-        self.save_live();
-        self.pump();
+    pub fn release_live(self: &Arc<Self>, id: &str) -> bool {
+        let ended = self.sched.lock().unwrap().release(id, "released", self.now());
+        if ended {
+            self.save_live();
+            self.pump();
+        }
+        ended
     }
 
     /// `lease-start` on the node (after making its revisions present there).
@@ -1321,7 +1383,8 @@ impl LeaseMaster {
             // new look, which holds timed work back until it is over
             // its display went since the last look: placed again, elsewhere if it can (a hot
             // bucket read this box's refusal as "no verdict" and named a landing for it, 11-04)
-            Err(e) if e.contains(" refused: lease-start ") && e.contains(": gui=1: ") => {
+            // (and a screen lease's, its WM down or restarting: [`super::exec::NO_LIVE_WM`])
+            Err(e) if e.contains(" refused: lease-start ") && (e.contains(": gui=1: ") || e.contains(super::exec::NO_LIVE_WM)) => {
                 let mut s = self.sched.lock().unwrap();
                 s.no_display(node);
                 s.tree_busy(id, &e);
@@ -1416,8 +1479,8 @@ impl LeaseMaster {
                 format!("{{{}}}", sides.join(","))
             }
         };
-        let (weighed, peak) = self.sched.lock().unwrap().ram_weighed(l);
-        let line = lease_start_line(l, &rev, weighed, peak);
+        let ((weighed, peak), threads) = { let s = self.sched.lock().unwrap(); (s.ram_weighed(l), s.live_threads(l)) };
+        let line = lease_start_line(l, &rev, weighed, peak, threads);
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -1451,7 +1514,7 @@ impl LeaseMaster {
         let tree = |s: &str| if l.req.src == super::Src::Tree && l.req.rev.is_some() { json_str(s) } else { "null".to_string() };
         let (tree_lane, tree_rev) = (tree(l.req.tree_lane()), tree(l.req.rev.as_deref().unwrap_or("")));
         let jit_jobs = l.jit_jobs.map_or("null".to_string(), |j| j.to_string());
-        let line = format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"node\":{},\"os\":{os},\"lane\":{},\"tree_lane\":{tree_lane},\"tree_rev\":{tree_rev},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"jit_jobs\":{jit_jobs},\"deployment\":{},\"source\":{}, {}}}\n", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), measured("peak_ram_gb"), measured("cpu_seconds"), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended));
+        let line = format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"peak_cores\":{},\"node\":{},\"os\":{os},\"lane\":{},\"tree_lane\":{tree_lane},\"tree_rev\":{tree_rev},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"jit_jobs\":{jit_jobs},\"deployment\":{},\"source\":{}, {}}}\n", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), measured("peak_ram_gb"), measured("cpu_seconds"), l.peak_cores.map_or("null".to_string(), |p| format!("{p:.2}")), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended));
         let _ = std::fs::create_dir_all(&self.home);
         // File appends and the rolling window have the same order, including concurrent ends.
         let offset = self.costs_offset.lock().unwrap();
@@ -2067,6 +2130,11 @@ impl LeaseMaster {
         Ok(held)
     }
 
+    /// When a lane's ask last queued a minute or more ([`Sched::queue_busy_ms`]).
+    pub fn queue_busy_ms(&self) -> u64 {
+        self.sched.lock().unwrap().queue_busy_ms
+    }
+
     pub fn never_places(&self, req: &Req) -> Option<String> {
         self.sched.lock().unwrap().never_places(req)
     }
@@ -2076,20 +2144,56 @@ impl LeaseMaster {
         self.sched.lock().unwrap().user_input_ms(node)
     }
 
+    /// Why `node` takes no screen lease now ([`Sched::screen_refusal`]), if it does not.
+    pub fn screen_refusal(&self, node: &str) -> Option<String> {
+        self.sched.lock().unwrap().screen_refusal(node)
+    }
+
     pub fn nodes(&self) -> Vec<NodeView> {
         let now = self.now();
         self.sched.lock().unwrap().node_view(now)
     }
 
+    /// The master's restore grace runs and a box is not heard yet ([`super::sched::Sched::settling`]).
+    #[cfg(feature = "checkout")]
+    pub(crate) fn settling(&self) -> bool {
+        let now = self.now();
+        self.sched.lock().unwrap().settling(now)
+    }
+
     /// Routing for the master's JIT-first gate: `class` is the JIT class, without `native:`.
     /// Compares run-phase medians (the command's own time, its build included; not the dev JIT build).
-    /// A cargo run of `native:<class>` is routing's own pick when this answers false.
+    /// A cargo run of `native:<class>` is routing's own pick when this answers false. This check
+    /// never probes or counts an ask: checking a cargo run must not turn it into a probe (11-15).
     pub fn test_route(&self, kind: &str, class: &str, own: bool) -> (bool, String) {
-        let (jit, cargo) = {
-            let s = self.sched.lock().unwrap();
-            (s.class_run_median(class, kind), s.class_run_median(&format!("native:{class}"), kind))
-        };
+        let (jit, cargo) = self.test_route_medians(kind, class);
         super::client::test_route(own, jit, cargo)
+    }
+
+    fn test_route_medians(&self, kind: &str, class: &str) -> (Option<u64>, Option<u64>) {
+        let s = self.sched.lock().unwrap();
+        (s.class_run_median_last(class, kind, ROUTE_WINDOW), s.class_run_median_last(&format!("native:{class}"), kind, ROUTE_WINDOW))
+    }
+
+    /// One one-shot ask, counted here once, before the native gate's pure check. A probe keeps
+    /// a cargo-routed class's JIT measure current instead of freezing it at the decision (11-15).
+    fn test_route_for_run(&self, kind: &str, class: &str, own: bool) -> (bool, String) {
+        let (jit, cargo) = self.test_route_medians(kind, class);
+        let route = super::client::test_route(own, jit, cargo);
+        if let (false, Some(jit), Some(cargo)) = (route.0, jit, cargo) {
+            let probe = {
+                let mut asks = self.route_asks.lock().unwrap();
+                let count = asks.entry((class.to_string(), kind.to_string())).or_default();
+                *count = (*count + 1) % ROUTE_PROBE_EVERY;
+                *count == 0
+            };
+            if probe {
+                let jit = super::sched::dur(jit).replace(' ', "");
+                let cargo = super::sched::dur(cargo).replace(' ', "");
+                return (true, format!("the JIT (a probe: every {ROUTE_PROBE_EVERY}th run of a cargo-routed class runs on the JIT to keep its measure current; cargo {cargo}, JIT {jit})"));
+            }
+        }
+        route
     }
 
     pub(crate) fn jit_compilers(&self) -> Vec<String> {
@@ -2259,7 +2363,17 @@ impl LeaseMaster {
                 }
                 agent => out.push(err(&format!("agent-seen: {agent:?} is no agent name"))),
             },
-            "lease" => match Req::parse(line).and_then(|req| self.from_its_worktree(&req).and_then(|_| bind_lane(&self.home, &req)).and_then(|_| whole_pair(&req)).map(|_| req)) {
+            "lease" => match Req::parse(line).and_then(|req| match self.from_its_worktree(&req).and_then(|_| bind_lane(&self.home, &req)).and_then(|_| whole_pair(&req)) {
+                Ok(()) => Ok(req),
+                Err(e) => {
+                    // a refused ask leaves no lease: this line is its one trace (a lane's gate was
+                    // refused a split pair, and the run's own log, which said why, was overwritten
+                    // by its rerun, 11-15)
+                    let agent = req.agent.as_deref().map(|a| format!(", agent {a}")).unwrap_or_default();
+                    self.event(Sev::Warn, format!("lease ask refused (lane {}{agent}, rev {}): {e}", req.lane, req.rev.as_deref().unwrap_or("-")));
+                    Err(e)
+                }
+            }) {
                 Ok(req) => {
                     if let Some(agent) = &req.agent { self.agents_seen.lock().unwrap().insert(agent.clone(), now); }
                     let req = self.with_hint(req);
@@ -2292,9 +2406,16 @@ impl LeaseMaster {
                 if let Some(at_beat) = beaten {
                     match self.durable_state_line(line.trim()) {
                         // its holder hears the idle verdict or its yield too, not the inbox alone (`Beat`);
-                        // `hung`: the idle verdict, on which a run's client hands its run to a job
+                        // `hung`: the idle verdict, on which a run's client hands its run to a job;
+                        // `yield`: told to yield, on which a run in rounds hands its box over after
+                        // its round (`devhub run --rounds`)
                         Ok(Some(state)) => out.push(match self.owner_word(line.trim()) {
-                            Some(word) => format!("{},\"idle\":{}{}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word), if self.sched.lock().unwrap().hung_word(line.trim()).is_some() { ",\"hung\":true" } else { "" }),
+                            Some(word) => {
+                                let s = self.sched.lock().unwrap();
+                                let hung = if s.hung_word(line.trim()).is_some() { ",\"hung\":true" } else { "" };
+                                let told = if s.told_to_yield(line.trim()) { ",\"yield\":true" } else { "" };
+                                format!("{},\"idle\":{}{hung}{told}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word))
+                            }
                             None => state,
                         }),
                         // an empty answer, said with the lease as its beat found it (a live test's
@@ -2307,6 +2428,13 @@ impl LeaseMaster {
             "release" | "cancel" => {
                 let mut w = line.split_whitespace();
                 let id = w.next().unwrap_or("");
+                // a release frees what it names, and an active live session's lease ends with its
+                // session only ([`crate::orch::live::owned_lease`])
+                #[cfg(feature = "checkout")]
+                if let Some(e) = crate::orch::ctx().and_then(|ctx| ctx.store.read(|d| crate::orch::live::owned_lease(&d.lives, id))) {
+                    out.push(err(&e));
+                    return;
+                }
                 // `cancel`: the user's end of one lease, or a lane's or agent's (`by=`): only the
                 // user's keeps the lane off that node for a while. Read as a release's `how`, the
                 // `by=` left every agent's cancel the user's (a coordinator's cancel of a hung
@@ -2329,6 +2457,14 @@ impl LeaseMaster {
                     }));
                 }
             }
+            // `estimate <kind> <class>`: what a run of the class takes by the measures
+            "estimate" => match line.trim().split_once(' ') {
+                Some((kind, class)) => out.push(match self.sched.lock().unwrap().estimate(class.trim(), kind) {
+                    Some(how) => format!("{{\"ms\":{},\"how\":{}}}", how.ms(), json_str(&how.label())),
+                    None => "{\"ms\":null}".to_string(),
+                }),
+                None => out.push(err("estimate <kind> <class>")),
+            },
             "why-queued" => match self.sched.lock().unwrap().why_queued(line.trim(), now) {
                 Ok(lines) => out.extend(lines),
                 Err(e) => out.push(err(&e)),
@@ -2368,6 +2504,16 @@ impl LeaseMaster {
                 Err(e) => out.push(err(&e)),
             },
             "stats" => match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["route", kind, _, ..] => {
+                    // the last word is own; a custom class can hold spaces, as in stats class
+                    match line.splitn(3, ' ').nth(2).and_then(|s| s.rsplit_once(' ')) {
+                        Some((class, own)) if !class.trim().is_empty() && matches!(own, "true" | "false") => {
+                            let (jit, why) = self.test_route_for_run(kind, class, own == "true");
+                            out.push(format!("{{\"jit\":{jit},\"why\":{}}}", json_str(&why)));
+                        }
+                        _ => out.push(err("stats route <kind> <class> <own:true|false>")),
+                    }
+                }
                 ["class", kind, _, ..] => {
                     // tab separated: a class can hold spaces
                     let classes: Vec<&str> = line.splitn(3, ' ').nth(2).unwrap_or("").split('\t').collect();
@@ -2395,7 +2541,7 @@ impl LeaseMaster {
                     Ok(text) => out.push(format!("{{\"text\":{}}}", json_str(&text))),
                     Err(e) => out.push(err(&e)),
                 },
-                _ => out.push(err("stats queue [--hour] | cores | calls | class <kind> <class>...")),
+                _ => out.push(err("stats queue [--hour] | cores | calls | class <kind> <class>... | route <kind> <class> <own:true|false>")),
             },
             "prof" => {
                 let summary = line == "--summary";
@@ -2907,6 +3053,8 @@ mod tests {
             timed: None,
             latency: String::new(),
             live_over: None,
+            whole: None,
+            past_grant: None,
         };
         let nodes = [view("headset", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("node-a", "192.0.2.89", true, None)];
         assert_eq!(desk_links(&nodes), "headset 192.0.2.85:8790\n");
@@ -3048,7 +3196,7 @@ mod tests {
         for d in [&home, &lane_wt, &other] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let (master, ..) = master(&home);
+        let (master, _, _, recs) = master(&home);
         let registered = lane_wt.to_string_lossy().into_owned();
         master.set_lane_trees(Arc::new(move |lane: &str| (lane == "dhf19").then(|| registered.clone())));
         let ask = |lane: &str, from: &Path| {
@@ -3062,6 +3210,7 @@ mod tests {
         assert!(err.is_some_and(|e| e.contains(&format!("worktree is {}", lane_wt.display()))), "{refused}");
         assert!(master.sched.lock().unwrap().view().is_empty(), "nothing queued");
         assert!(!std::fs::read_to_string(home.join("lanes.conf")).unwrap_or_default().contains("dhf19"), "nothing bound");
+        assert!(recs.lock().unwrap().iter().any(|r| r.sev == Sev::Warn && r.line.starts_with("lease ask refused (lane dhf19, rev -): ") && r.line.contains("worktree is")), "the refusal is said on the feed, with its lane, rev and why: {:?}", recs.lock().unwrap().iter().map(|r| &r.line).collect::<Vec<_>>());
         assert!(!ask("dhf19", &lane_wt).contains("\"err\""));
         assert!(!ask("ci-sweep", &other).contains("\"err\""), "a lane the registry does not hold");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3114,6 +3263,62 @@ mod tests {
         assert_eq!(m.sched.lock().unwrap().class_median("test:pkg", "test"), Some(500000), "scheduling still uses the wall");
         assert_eq!(serve(&m, "stats", "class test test:pkg\tnative:test:pkg"), "{\"runs\":{\"test:pkg\":20000,\"native:test:pkg\":null}}", "routing stats expose run medians");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// fab-shell's lib tests went to cargo at 136 s while the JIT ran them in 40 s, its JIT
+    /// measure frozen at the decision: use recent runs and keep probing only on asks (11-15).
+    #[test]
+    fn test_routes_follow_recent_runs_and_probe_without_counting_gate_checks() {
+        let dir = std::env::temp_dir().join(format!("devhub-test-routes-{}", std::process::id()));
+        let (m, ..) = master(&dir);
+        {
+            let mut s = m.sched.lock().unwrap();
+            for _ in 0..4 {
+                s.record_run("test:recent:lib", "test", 400_000);
+                s.record_run("native:test:recent:lib", "test", 5_000);
+            }
+            for ms in [20_000, 30_000, 40_000, 200_000, 200_000] { s.record_run("test:recent:lib", "test", ms); }
+            for ms in [120_000, 130_000, 136_000, 140_000, 150_000] { s.record_run("native:test:recent:lib", "test", ms); }
+            assert!(!super::super::client::test_route(false, s.class_run_median("test:recent:lib", "test"), s.class_run_median("native:test:recent:lib", "test")).0, "the retained old runs would still pick cargo");
+            assert_eq!(s.class_run_median_last("test:recent:lib", "test", 0), None, "an empty window has no measure");
+            assert_eq!(s.class_run_median_last("native:test:recent:lib", "test", 2), Some(145_000), "an even recent window averages its middle pair");
+            for class in ["test:probe:lib", "test another lib"] {
+                s.record_run(class, "test", 200_000);
+                s.record_run(&format!("native:{class}"), "test", 100_000);
+            }
+            s.record_run("test:own:lib", "test", 80_000);
+            s.record_run("native:test:own:lib", "test", 100_000);
+            s.record_run("test:own-unmeasured:lib", "test", 80_000);
+        }
+        let ask = |class: &str, own: bool| {
+            let answer = serve(&m, "stats", &format!("stats route test {class} {own}"));
+            let v = makepad_strict_json::parse_depth(answer.as_bytes(), 8).expect("stats route answers JSON");
+            (v.get("jit").and_then(|v| v.as_bool()).expect("stats route names its choice"), v.get("why").and_then(|v| v.as_str()).expect("stats route explains its choice").to_string())
+        };
+        let (jit, why) = ask("test:recent:lib", false);
+        assert!(jit && why.contains("JIT 40s") && why.contains("cargo 2m16s"), "the last five runs of each side restore the JIT and name both medians: {why}");
+        for asked in 1..=2 * ROUTE_PROBE_EVERY {
+            for class in ["test:probe:lib", "test another lib"] {
+                for _ in 0..=ROUTE_PROBE_EVERY {
+                    let (jit, why) = m.test_route("test", class, false);
+                    assert!(!jit && !why.contains("probe"), "gate checks always allow the measured cargo route, even on a probe's turn: {class}, ask {asked}: {why}");
+                }
+                let (jit, why) = ask(class, false);
+                let probe = asked % ROUTE_PROBE_EVERY == 0;
+                assert_eq!(jit, probe, "only every fifth ask probes; gate checks and other classes never advance its count: {class}, ask {asked}: {why}");
+                assert_eq!(why.contains("a probe: every 5th run"), probe, "a probe explains why it uses the JIT: {class}, ask {asked}: {why}");
+                assert!(why.contains("cargo 1m40s") && why.contains("JIT 3m20s"), "both normal and probe routes name both medians: {why}");
+            }
+        }
+        assert!(ask("test:own:lib", false).0, "a 20% cargo gain leaves an ordinary class on the JIT");
+        assert!(!ask("test:own:lib", true).0, "the master's route honors the own-crate default");
+        for _ in 0..=ROUTE_PROBE_EVERY {
+            let (jit, why) = ask("test:own-unmeasured:lib", true);
+            assert!(!jit && why.contains("no cargo measurement yet"), "an own crate with no cargo measure keeps measuring cargo, without probes: {why}");
+            let (jit, why) = ask("test:no-measure:lib", true);
+            assert!(jit && why.contains("no JIT measurement yet"), "an own crate with no JIT measure still measures the JIT first: {why}");
+        }
+        assert!(!dir.join("native.jsonl").exists(), "asking for a route, including a JIT probe, writes no native verdict");
     }
 
     #[test]
@@ -3775,7 +3980,8 @@ mod tests {
     #[test]
     fn a_host_off_the_network_is_no_hub_restart() {
         let at = "link lost: cannot reach fleet hub `node-a` at 192.0.2.1:8797";
-        for gone in ["Host is down (os error 64)", "No route to host (os error 113)", "Network is unreachable (os error 101)", "Connection timed out (os error 110)", "Operation timed out (os error 60)"] {
+        // (the last: std's connect_timeout's own expiry, a box down 26 min never counted as gone, 11-14)
+        for gone in ["Host is down (os error 64)", "No route to host (os error 113)", "Network is unreachable (os error 101)", "Connection timed out (os error 110)", "Operation timed out (os error 60)", "connection timed out"] {
             let e = format!("{at}: {gone}");
             assert!(host_gone(&e) && unreachable(&e), "{e}");
         }
@@ -3890,7 +4096,8 @@ mod cost_record_tests {
 
     /// A lease whose wall was its own JIT build measures that build's cores on its OS family; a
     /// short build, a lease mostly run, a waiter on another lease's build (under 2 cores), one
-    /// not released or of no OS family do not.
+    /// not released or of no OS family do not. Its class's wall leaves its `jit` phase out, and
+    /// its class's cores the CPU of a build: a `+jit-build` run's class is that build.
     #[test]
     fn a_lease_that_was_its_jit_build_measures_the_build_cores() {
         let mut c = CostRecords::default();
@@ -3910,6 +4117,10 @@ mod cost_record_tests {
             c.push(&makepad_strict_json::parse(other.as_bytes()).unwrap());
         }
         assert_eq!(c.jit_builds, vec![("linux".to_string(), 9.6)]);
+        let built = format!(r#"{{"class":"test makepad-foo{}","kind":"test","how":"released","wall_ms":100000,"os":"linux","jit_ms":90000,"cpu_seconds":960}}"#, super::super::JIT_BUILD_RUN);
+        c.push(&makepad_strict_json::parse(built.as_bytes()).unwrap());
+        let class: Vec<(u64, Option<f64>)> = c.records.iter().map(|r| (r.5, r.7)).collect();
+        assert_eq!(class, vec![(10_000, None), (80_000, Some(9.6)), (50_000, Some(9.6)), (10_000, Some(0.5)), (10_000, None), (100_000, Some(9.6))], "the class's wall and cores (a build's CPU none of its)");
     }
 }
 

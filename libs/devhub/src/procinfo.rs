@@ -106,14 +106,8 @@ pub fn reap_inherited() {
     #[cfg(unix)]
     {
         let me = std::process::id();
-        let Ok(child) = std::process::Command::new("ps").args(["-axo", "pid=,ppid="]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() else { return };
-        let ps = child.id();
-        let Ok(out) = child.wait_with_output() else { return };
-        let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| {
-            let mut w = l.split_whitespace();
-            let (pid, ppid) = (w.next()?.parse::<u32>().ok()?, w.next()?.parse::<u32>().ok()?);
-            (ppid == me && pid != ps).then_some(pid)
-        }).collect();
+        // (the process table read in place, before this image starts a child: every child now is one)
+        let pids: Vec<u32> = makepad_remote::procs::list_processes().map(|all| all.into_iter().filter(|p| p.ppid == me).map(|p| p.pid).collect()).unwrap_or_default();
         if pids.is_empty() {
             return;
         }

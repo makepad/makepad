@@ -33,8 +33,8 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           clear it (the next start is cold; --dir: that one cache); refused
                                           while JITs run on it unless --force (they keep running). `ls` with
                                           no --node adds a line per fleet machine, its dev store named
-  reports [pull] [--dir <dir>]            new change reports from makepad.nl's admin inbox into
-                                          local/agent_state/runner-reports/<id>/ (untrusted: review, never apply or run)
+  reports [pull] [--dir <dir>]            new change reports from makepad.nl's admin inbox, kept as received in
+                                          ~/.intake-quarantine/runner-reports/<id>/ (untrusted: unread until intake takes them)
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)
   master start                            a master in a session of its own, at this shell's priority; its log
                                           is master.log in devhub's home. A niced shell is refused (zsh runs
@@ -53,6 +53,11 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   land [...] --wire-change                a hand-in that changes the hosted wire's files (platform/studio,
                                           key_code: a WM and apps of different builds refuse each other);
                                           without it such a hand-in fails, naming the files
+  land [...] --supersede                  re-pin this branch's hand-in that is still queued to the branch's
+                                          commits now; without it a second hand-in of a queued branch is
+                                          refused (each reviewed change lands on its own)
+  land [...] --revert <N>                 allow undoing landing N (or a commit sha prefix of 7+ hex digits);
+                                          repeat for each landing intentionally undone
   land [...] --show <app> [--on <device>] [-- <devhub words>]
                                           the chain: when it lands, show the app there, then run the words
   land status [all|<branch>] [--json]     per hand-in: queued / failed + error lines /
@@ -62,7 +67,39 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   land hold <branch> [reason] | unhold <branch> | retry <branch> (its pinned commits again) | drop <branch>
   bucket [status]                        the last 10 post-land bucket runs and attributed lanes
   bucket run <fast|tests|hot|ci|full>    that bucket's run now, of the tip then (full: every package's tests)
-  land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)";
+  land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)
+  land rule [on | off <why>]              the land rule (gate.rs): off, no landing runs it (each says
+                                          `land rule off (<why>): nothing checked`) and the master
+                                          neither builds nor ticks its binary; kept across restarts";
+
+/// The control line `land rule <rest>` sends: switching the rule off is the user's, typed at a
+/// terminal (`user`: [`user_at_terminal`]), or any agent could land the paths it protects with one
+/// command; switching it on, or reading it, is anyone's.
+pub(crate) fn rule_line(rest: &[&str], user: impl FnOnce() -> Result<(), String>) -> Result<String, String> {
+    if rest.first() == Some(&"off") {
+        user()?;
+    }
+    Ok(format!("rule {}", rest.join(" ")))
+}
+
+/// The user at a terminal, in no agent's environment: what approves protected files (the
+/// intake's `approve`) and switches the land rule off (`land rule off`). Err: why not.
+pub fn user_at_terminal() -> Result<(), String> {
+    use std::io::IsTerminal;
+    user_at(std::env::vars().map(|(k, _)| k), std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
+}
+
+/// [`user_at_terminal`] over the environment's variable names and whether stdin and stdout are a
+/// terminal: an agent CLI's variable refuses it, and so does a run without a terminal.
+pub fn user_at(mut names: impl Iterator<Item = String>, terminal: bool) -> Result<(), String> {
+    if let Some(var) = names.find(|k| k == "DEVHUB_AGENT" || k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_") || k.starts_with("CODEX_") || k.starts_with("GROK_")) {
+        return Err(format!("refused in an agent's environment ({var} is set): it is the user's, typed at a terminal"));
+    }
+    if !terminal {
+        return Err("refused without a terminal: it is the user's, typed at one".into());
+    }
+    Ok(())
+}
 
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
@@ -569,7 +606,7 @@ fn help_text() -> String {
     let orch = format!("{}\n{}", crate::orch::cli::HELP, crate::orch::ci::HELP);
     #[cfg(not(feature = "checkout"))]
     let orch = String::new();
-    format!("{HELP}\n{}\n{}\n{orch}", crate::lease::client::HELP, crate::sync::help())
+    format!("{HELP}\n{}\n{}\n{orch}\n{}", crate::lease::client::HELP, crate::sync::help(), crate::ask::HELP)
 }
 
 /// The words a help request asks about: `help <words>`, `<words> --help`, `<word> help`; they end
@@ -708,6 +745,12 @@ pub fn main(args: &[String]) -> i32 {
     }
     if a.first() == Some(&"reports") {
         return crate::reports::cli(&a[1..]);
+    }
+    if a.first() == Some(&"ask") {
+        return crate::ask::cli(&a[1..]);
+    }
+    if a.first() == Some(&crate::gate::WORD) {
+        return crate::gate::forward(&a[1..]);
     }
     let c = match control() {
         Ok(c) => c,
@@ -1070,6 +1113,7 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         Ok(lines) => lines,
         Err(e) => { eprintln!("makepad devhub bucket: {e}"); return 2; }
     };
+    let ago = crate::orch::age;
     for line in lines {
         let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
         let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -1087,11 +1131,21 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             let units = match v.get("units") {
                 Some(Value::Obj(units)) => units.iter().map(|(unit, who)| {
                     let log = v.get("logs").and_then(|l| l.get(unit)).and_then(Value::as_str).filter(|l| !l.is_empty()).map_or(String::new(), |l| format!("; log {l}"));
-                    format!("{unit} ({}{log})", crate::bucket::still_since(who.as_str().unwrap_or("?")))
+                    // a later run of another bucket passed it
+                    let stale = v.get("stale").and_then(|l| l.get(unit)).map_or(String::new(), |p| {
+                        format!("; STALE: the {} bucket's run {} ago passed it", text(p, "bucket"), ago(p.get("started_ms").and_then(Value::as_u64).unwrap_or(0)))
+                    });
+                    format!("{unit} ({}{log}{stale})", crate::bucket::still_since(who.as_str().unwrap_or("?")))
                 }).collect::<Vec<_>>().join(", "),
                 _ => String::new(),
             };
             println!("{name} STILL FAILING: {units}");
+            continue;
+        }
+        // when each bucket's last run ended, and how
+        if let Some(Value::Obj(last)) = v.get("last_runs") {
+            let runs = last.iter().map(|(name, r)| format!("{name} {} ago {}", ago(r.get("ended_ms").and_then(Value::as_u64).unwrap_or(0)), if r.get("ok").and_then(Value::as_bool) == Some(true) { "ok" } else { "FAILED" })).collect::<Vec<_>>();
+            println!("last runs: {}", runs.join(", "));
             continue;
         }
         let tip = v.get("tip").map(|p| crate::state::Pair::new(&text(p, "work"), &text(p, "main")).short()).unwrap_or_default();
@@ -1102,26 +1156,11 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             .map(|l| text(l, "label")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
         let still = since(v.get("still"));
         let still = if still.is_empty() { still } else { format!("; not rerun: {still}") };
-        // new warnings (a WARN, the row green) and who brought them
-        let warns = match v.get("warns") {
-            Some(Value::Obj(w)) if !w.is_empty() => format!("; warns: {}", w.iter().map(|(u, who)| format!("{u} ({})", who.as_str().unwrap_or("?"))).collect::<Vec<_>>().join(", ")),
-            _ => String::new(),
-        };
-        println!("{} {tip} {} {failing}{}{still}{warns}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
-        // the warnings themselves, file:line, so the owning lane is plain without a rerun
-        // and the command that shows a unit's own lines alone, for its lane to run
-        let repro = |unit: &str| v.get("repro").and_then(|r| r.get(unit)).and_then(Value::as_str);
-        let warned: &[(String, Value)] = match v.get("warn_lines") { Some(Value::Obj(units)) => units, _ => &[] };
-        for (unit, lines) in warned {
-            for l in lines.as_arr().unwrap_or_default().iter().filter_map(Value::as_str).take(3) {
-                println!("    {unit}: {l}");
-            }
-            if let Some(cmd) = repro(unit) { println!("    {}", crate::bucket::repro_said(unit, cmd)); }
-        }
+        println!("{} {tip} {} {failing}{}{still}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
         // a failing unit's own lines (its errors, the tests a hung one still ran), then its command
         let errors: &[(String, Value)] = match v.get("errors") { Some(Value::Obj(units)) => units, _ => &[] };
         if let Some(Value::Obj(units)) = v.get("repro") {
-            for (unit, cmd) in units.iter().filter(|(u, _)| !warned.iter().any(|(w, _)| w == u)) {
+            for (unit, cmd) in units {
                 for l in errors.iter().filter(|(e, _)| crate::bucket::unit_key(e) == *unit).flat_map(|(_, l)| l.as_arr().unwrap_or_default()).filter_map(Value::as_str).take(3) {
                     println!("    {unit}: {l}");
                 }
@@ -1153,6 +1192,9 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             }
             if !e.held.is_empty() {
                 line += &format!(" HELD: {}", e.held);
+            }
+            if !e.job.is_empty() {
+                line += &format!(" ({})", e.job);
             }
             println!("{line} {age}");
             let n = if full { usize::MAX } else { 12 };
@@ -1223,6 +1265,19 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             }
             Err(code) => code,
         },
+        ["rule", rest @ ..] => match rule_line(rest, user_at_terminal).map(|line| ask_land(&line)) {
+            Err(why) => {
+                eprintln!("land rule off: {why}");
+                1
+            }
+            Ok(Err(code)) => code,
+            Ok(Ok(l)) => {
+                let v = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok());
+                let why = v.as_ref().and_then(|v| v.get("why").and_then(|w| w.as_str()).map(str::to_string)).unwrap_or_default();
+                println!("{}", if why.is_empty() { "land rule on: every landing runs it".to_string() } else { format!("land rule off ({why}): no landing runs it") });
+                0
+            }
+        },
         [verb @ ("hold" | "unhold" | "retry" | "drop" | "import"), rest @ ..] => match ask_land(&format!("{verb} {}", rest.join(" "))) {
             Ok(_) => {
                 println!("{verb} {}: ok", rest.join(" "));
@@ -1240,14 +1295,25 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             let flag = |w: &str| a.iter().position(|x| *x == w).and_then(|i| a.get(i + 1).copied());
             let (chain_app, chain_on) = (flag("--show"), flag("--on").unwrap_or("mac"));
             let wire = a.contains(&"--wire-change");
+            let supersede = a.contains(&"--supersede");
+            let mut reverts = String::new();
             let mut plain: Vec<&str> = Vec::new();
             let mut k = 0;
             while k < a.len() {
+                if a[k] == "--revert" {
+                    let Some(n) = a.get(k + 1).filter(|n| !n.starts_with("--")) else {
+                        eprintln!("makepad devhub land: --revert needs a landing number or a commit sha prefix of 7+ hex digits");
+                        return 2;
+                    };
+                    reverts.push_str(&format!(" revert={n}"));
+                    k += 2;
+                    continue;
+                }
                 if a[k] == "--show" || a[k] == "--on" {
                     k += 2;
                     continue;
                 }
-                if a[k] != "--wire-change" {
+                if a[k] != "--wire-change" && a[k] != "--supersede" {
                     plain.push(a[k]);
                 }
                 k += 1;
@@ -1262,7 +1328,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             // out one with nothing to land)
             let args: Vec<String> = if a.is_empty() {
                 let g = |dir: &str, args: &[&str]| crate::git_exec::command().arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                let Some(top) = g(".", &["rev-parse", "--show-toplevel"]) else {
+                let Some(top) = crate::lease::client::makepad_top() else {
                     eprintln!("makepad devhub land: run it in a lane worktree, or name the branch");
                     return 2;
                 };
@@ -1286,9 +1352,54 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             } else {
                 a.iter().map(|x| x.to_string()).collect()
             };
+            // Both gates check the same hand-in, at its one merge onto the tips.
+            #[cfg(feature = "checkout")]
+            let gate_words = {
+                let g = |dir: &str, args: &[&str]| crate::git_exec::command().arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                let branch = if args[0] == "-" { "work" } else { args[0].as_str() };
+                let com = args.get(1).zip(args.get(2)).filter(|(d, _)| !d.contains('='));
+                let ms = crate::lease::client::makepad_branch_sha(std::path::Path::new("."), branch);
+                let cs = com.map(|(d, b)| g(d, &["rev-parse", "--verify", &format!("refs/heads/{b}^{{commit}}")]));
+                let lane = if args[0] == "-" { com.map_or(branch, |(_, b)| b.as_str()) } else { branch };
+                // a branch that does not resolve here is the master's to refuse, as before
+                if let (Some(ms), Some(cs)) = (ms, cs.unwrap_or(Some(String::new()))) {
+                    let rev = if cs.is_empty() { format!("{branch}@{ms}") } else { format!("{branch}@{ms},{}={}@{cs}", crate::state::PAIRED, com.map_or("", |(_, b)| b.as_str())) };
+                    // how long the hand-in waits on its gates, said to the train (`land status --json`)
+                    let t0 = std::time::Instant::now();
+                    let (features, dependents) = crate::lease::client::hand_in_gates(lane, &rev);
+                    let gate_ms = t0.elapsed().as_millis();
+                    let mut failed = false;
+                    match features {
+                        Ok(notes) => for n in notes { eprintln!("devhub land: {n}"); },
+                        Err(refused) => {
+                            eprintln!("makepad devhub land: refused, nothing queued: a feature set a dependent builds with, or rustc's check of a test target, fails");
+                            for l in refused { eprintln!("  {l}"); }
+                            failed = true;
+                        }
+                    }
+                    let words = match dependents {
+                        Ok(gate) => {
+                            for n in gate.notes { eprintln!("devhub land: {n}"); }
+                            gate.words
+                        }
+                        Err(refused) => {
+                            eprintln!("makepad devhub land: refused, nothing queued: a crate the hand-in reaches fails at its merge onto the tips");
+                            for l in refused { eprintln!("  {l}"); }
+                            failed = true;
+                            Vec::new()
+                        }
+                    };
+                    if failed { return 1; }
+                    words.into_iter().chain([format!("gate_ms={gate_ms}")]).collect()
+                } else {
+                    vec!["unchecked=unresolved".to_string()]
+                }
+            };
+            #[cfg(not(feature = "checkout"))]
+            let gate_words = vec!["unchecked=unresolved".to_string()];
             let agent = std::env::var("DEVHUB_AGENT").ok().filter(|x| makepad_devhub_conf::valid_name(x)).map(|x| format!(" agent={x}")).unwrap_or_default();
-            let mark = if wire { " wire-change" } else { "" };
-            match ask_land(&format!("add {}{mark}{agent}", args.join(" "))) {
+            let mark = format!("{}{}", if wire { " wire-change" } else { "" }, if supersede { " supersede" } else { "" });
+            match ask_land(&format!("add {}{mark}{agent}{reverts} {}", args.join(" "), gate_words.join(" "))) {
                 Ok(l) => {
                     let v = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok());
                     let n = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -1297,8 +1408,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                     let key = if args[0] == "-" { args.iter().rev().find(|a| !a.contains('=')).unwrap() } else { &args[0] };
                     let label = s("label").map(str::to_string).unwrap_or_else(|| args.join(" "));
                     let wait_key = s("label").unwrap_or(key);
-                    let included = s("included").map(|b| format!(" (+ {b} from the lane)")).unwrap_or_default();
-                    println!("queued #{} {label}{included} ({} open; `makepad devhub land wait {wait_key}`)", n("id"), n("pos"));
+                    println!("queued #{} {label} ({} open; `makepad devhub land wait {wait_key}`)", n("id"), n("pos"));
                     for w in v.as_ref().and_then(|v| v.get("warn")).and_then(|w| w.as_arr()).into_iter().flatten().filter_map(|w| w.as_str()) {
                         eprintln!("makepad devhub land: warning: {w}");
                     }

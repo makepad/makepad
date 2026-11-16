@@ -84,7 +84,7 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
             || line.ends_with("restart the app") // A live restart notice, not a build error.
         {
             continue;
-        } else if located_note(line) {
+        } else if located_note(line) || usage_error(line) {
             continue;
         } else if line.starts_with("error:") || line.starts_with("error[")
             || line.contains(": error:") || line.contains(": error[")
@@ -97,6 +97,12 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
         }
     }
     if errors.is_empty() { summary } else { errors }
+}
+
+/// A test harness's refusal of its arguments (libtest's `error: Unrecognized option: 'rev'`):
+/// the run's usage error, never a build's (M98, 11-16: a devhub flag passed after `--`).
+pub(crate) fn usage_error(line: &str) -> bool {
+    line.strip_prefix("error: ").is_some_and(|m| ["Unrecognized option: ", "Argument to option ", "Required option ", "Option '", "argument for --"].iter().any(|p| m.starts_with(p)))
 }
 
 /// A line of the program's own log (`log!`, `error!`: `[I] <file>:<line>:<col> - <message>`, and
@@ -197,15 +203,39 @@ pub(crate) fn notice(v: &Value) -> String {
 
 /// Whether a package is JIT-own; an empty repo uses the local checkout.
 pub(crate) fn jit_own(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<bool, String> {
-    test_package(repo, pair, pkg).map(|(own, _)| own)
+    test_package(repo, pair, pkg).map(|p| p.own)
 }
 
-/// Whether a package is JIT-own, and why its tests run in the lane's tree, never a JIT overlay:
-/// its `[package.metadata.makepad] test-tree` reason. An overlay holds the pinned commit alone,
-/// at a root only the JIT's own process reads: a test that walks the checkout's history or runs
-/// cargo on it failed there for want of them, never of its code (devhub's, 11-07). An empty
-/// repo uses the local checkout.
-pub(crate) fn test_package(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<(bool, Option<String>), String> {
+/// What routing reads of a package's tests ([`test_package`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TestPackage {
+    /// compiled only into the JIT binary ([`jit_own`])
+    pub own: bool,
+    /// why its tests run in the lane's tree, never a JIT overlay: its `[package.metadata.makepad]
+    /// test-tree` reason. An overlay holds the pinned commit alone, at a root only the JIT's own
+    /// process reads: a test that walks the checkout's history or runs cargo on it failed there for
+    /// want of them, never of its code (devhub's, 11-07).
+    pub tree: Option<String>,
+    /// the test targets that run under cargo, never the JIT, each with why: its
+    /// `[package.metadata.makepad.native-tests]` ([`native_selected`])
+    pub native: std::collections::BTreeMap<String, String>,
+}
+
+/// The declared native targets (`native`, as its Cargo.toml names them: `lib`, `bin:<name>`,
+/// `test:<name>`) a test run selecting `select` runs, each with why. `select` is in the same form,
+/// or `bins`, `tests` (cargo's `--tests`: the lib and bins built as tests too) or `all-targets`;
+/// empty: the package's default run, every one of them. makepad-run's confined_macros re-runs its
+/// own binary as each case's runner, and under `makepad test` each runner was a JIT of its own:
+/// six at once took 41 GB, and the tests bucket had it red from the day it came (11-13).
+pub(crate) fn native_selected<'a>(native: &'a std::collections::BTreeMap<String, String>, select: &[String]) -> Vec<(&'a str, &'a str)> {
+    native.iter().filter(|(target, _)| {
+        select.is_empty() || select.iter().any(|s| s == *target || matches!(s.as_str(), "tests" | "all-targets") || (s == "bins" && target.starts_with("bin:")))
+    }).map(|(t, why)| (t.as_str(), why.as_str())).collect()
+}
+
+/// Whether a package is JIT-own, why its tests run in the lane's tree, and which of its targets
+/// run under cargo ([`TestPackage`]). An empty repo uses the local checkout.
+pub(crate) fn test_package(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<TestPackage, String> {
     #[cfg(feature = "checkout")]
     {
         let repo = if repo.as_os_str().is_empty() { crate::orch::repo() } else { repo.to_path_buf() };
@@ -214,7 +244,7 @@ pub(crate) fn test_package(repo: &Path, pair: &crate::state::Pair, pkg: &str) ->
     #[cfg(not(feature = "checkout"))]
     {
         let _ = (repo, pair, pkg);
-        Ok((false, None))
+        Ok(TestPackage::default())
     }
 }
 
@@ -228,7 +258,7 @@ pub(crate) fn tested_package(argv: &[String]) -> Option<&str> {
     while let Some(w) = words.next() {
         match w.as_str() {
             "--" => return None,
-            "--features" | "-F" | "--cfg" | "--report-to" | "--run-dir" | "--workspace-dir" => { words.next(); }
+            "--features" | "-F" | "--profile" | "--cfg" | "--report-to" | "--run-dir" | "--workspace-dir" => { words.next(); }
             w if w.starts_with('-') => {}
             pkg => return Some(pkg),
         }
@@ -253,6 +283,8 @@ pub(crate) fn native_test_argv(argv: &[String]) -> Result<Vec<String>, String> {
                 out.extend(words.by_ref().cloned());
             }
             "--release" | "-p" | "--package" => {}
+            // the JIT's checked profile: cargo's form is release, as every cargo build of the tree
+            "--profile" => { words.next(); }
             "--cfg" | "--report-to" | "--run-dir" | "--workspace-dir" => return Err(format!("`{w}` is makepad test's own option, which cargo test has not")),
             "--features" | "-F" | "--bin" | "--test" | "--example" | "--bench" | "--target" | "-j" | "--jobs" => {
                 out.push(w.clone());
@@ -275,7 +307,7 @@ pub(crate) fn native_test_argv(argv: &[String]) -> Result<Vec<String>, String> {
 /// the command tests no package that says it.
 pub(crate) fn test_tree_of(repo: &Path, pair: &crate::state::Pair, argv: &[String]) -> Result<Option<String>, String> {
     let Some(pkg) = tested_package(argv) else { return Ok(None) };
-    Ok(test_package(repo, pair, pkg)?.1.map(|why| tree_line(pkg, &why)))
+    Ok(test_package(repo, pair, pkg)?.tree.map(|why| tree_line(pkg, &why)))
 }
 
 /// A run that takes the lane's tree for its package's `test-tree` says so in these words.
@@ -284,12 +316,12 @@ pub(crate) fn tree_line(pkg: &str, why: &str) -> String {
 }
 
 #[cfg(feature = "checkout")]
-fn package_of(tree: &crate::orch::ci::Tree, pkg: &str) -> (bool, Option<String>) {
+fn package_of(tree: &crate::orch::ci::Tree, pkg: &str) -> TestPackage {
     use crate::orch::ci::{jit_own_dirs, krate, package_dirs};
-    let Some(dir) = package_dirs(tree).remove(pkg) else { return (false, None) };
+    let Some(dir) = package_dirs(tree).remove(pkg) else { return TestPackage::default() };
     let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
-    let why = krate(tree, &manifest).and_then(|k| k.test_tree);
-    (jit_own_dirs(tree).contains(&dir), why)
+    let (tree_why, native) = krate(tree, &manifest).map_or((None, Default::default()), |k| (k.test_tree, k.native_tests));
+    TestPackage { own: jit_own_dirs(tree).contains(&dir), tree: tree_why, native }
 }
 
 /// The packages the JIT binary is built from.
@@ -308,7 +340,14 @@ pub(crate) fn jit_binary_packages(repo: &Path, pair: &crate::state::Pair) -> Res
 /// package that holds it ([`packages_touched`]).
 #[cfg(feature = "checkout")]
 pub(crate) fn touched_packages(repo: &Path, pin: &crate::lease::Pin, commits_only: bool) -> Result<Vec<String>, String> {
-    use crate::orch::ci::{Tree, COMMERCIAL};
+    let paths = touched_paths(repo, pin, commits_only)?;
+    Ok(packages_touched(&crate::orch::ci::Tree::at(repo, &pin.pair())?, &paths))
+}
+
+/// The paths of [`touched_packages`], for a caller that holds the tree already.
+#[cfg(feature = "checkout")]
+pub(crate) fn touched_paths(repo: &Path, pin: &crate::lease::Pin, commits_only: bool) -> Result<Vec<String>, String> {
+    use crate::orch::ci::COMMERCIAL;
     let pair = pin.pair();
     let mut paths = Vec::new();
     for (dir, sha, branch, prefix) in [(repo.to_path_buf(), &pair.work, "refs/heads/work", ""), (repo.join(COMMERCIAL), &pair.main, "refs/heads/main", "apps/commercial/")] {
@@ -320,28 +359,41 @@ pub(crate) fn touched_packages(repo: &Path, pin: &crate::lease::Pin, commits_onl
         let (files, deleted) = crate::lease::ship::uncommitted(repo, pin)?;
         paths.extend(files.into_iter().chain(deleted));
     }
-    Ok(packages_touched(&Tree::at(repo, &pair)?, &paths))
+    Ok(paths)
 }
 #[cfg(not(feature = "checkout"))]
 pub(crate) fn touched_packages(_: &Path, _: &crate::lease::Pin, _: bool) -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
 
-/// The root workspace's packages that hold `paths`, each path in the package whose directory
-/// holds it most closely. A document, and a file of a package's tests, benches or examples, is in
-/// no build that ships; a package of another workspace is left to the buckets (its check runs from
-/// its own directory).
+/// The root workspace's crates that hold `paths`, each path in the package whose directory holds
+/// it most closely: what cargo builds there, the commercial crates its members reach by path
+/// included (with the members alone, a commercial crate's change had no hand-in check, 11-15). A
+/// document, and a file of a package's tests, benches or examples, is in no build that ships; a
+/// package of another workspace is left to the buckets (its check runs from its own directory).
 #[cfg(feature = "checkout")]
 pub(crate) fn packages_touched(tree: &crate::orch::ci::Tree, paths: &[String]) -> Vec<String> {
-    use crate::orch::ci::{members, package_dirs};
+    touched_in(tree, paths, false)
+}
+
+/// The packages of [`packages_touched`] and those whose test targets (`tests/`) `paths` change:
+/// what rustc's check of the test targets checks ([`tests_run`]).
+#[cfg(feature = "checkout")]
+pub(crate) fn test_targets_touched(tree: &crate::orch::ci::Tree, paths: &[String]) -> Vec<String> {
+    touched_in(tree, paths, true)
+}
+
+#[cfg(feature = "checkout")]
+fn touched_in(tree: &crate::orch::ci::Tree, paths: &[String], tests: bool) -> Vec<String> {
+    use crate::orch::ci::{package_dirs, workspace_names};
     let dirs = package_dirs(tree);
-    let root: std::collections::BTreeSet<String> = members(tree).into_iter().map(|k| k.package).collect();
+    let root = workspace_names(tree);
     let mut out = std::collections::BTreeSet::new();
     for path in paths.iter().filter(|p| !makepad_ci_merge::doc_file(p)) {
         let holds = |d: &&String| d.is_empty() || path.strip_prefix(d.as_str()).is_some_and(|r| r.starts_with('/'));
         let Some((name, dir)) = dirs.iter().filter(|(_, d)| holds(d)).max_by_key(|(_, d)| d.len()) else { continue };
         let inside = if dir.is_empty() { path.as_str() } else { &path[dir.len() + 1..] };
-        if ["tests/", "benches/", "examples/"].iter().any(|t| inside.starts_with(t)) { continue; }
+        if ["tests/", "benches/", "examples/"].iter().any(|t| inside.starts_with(t) && !(tests && *t == "tests/")) { continue; }
         if root.contains(name) { out.insert(name.clone()); }
     }
     out.into_iter().collect()
@@ -357,6 +409,9 @@ pub(crate) struct CheckRun {
     pub class: String,
     pub cmd: Vec<String>,
     pub alone: String,
+    /// rustc's check of the packages' test targets ([`tests_run`]): its errors fail it, its
+    /// warnings do not
+    pub tests: bool,
 }
 
 /// The pre-land check's runs of the packages a lane's diff touches (each with whether the JIT is
@@ -380,8 +435,28 @@ pub(crate) fn check_runs(touched: &[(String, bool)]) -> Vec<CheckRun> {
             cmd: head.iter().map(|w| w.to_string()).chain(flags.iter().cloned()).collect(),
             alone: format!("{alone} {}", flags.join(" ")),
             packages,
+            tests: false,
         })
     }).collect()
+}
+
+/// rustc's check of `packages`' test targets (`cargo check --release --tests`), as the fast
+/// bucket's testcheck runs it after a landing, its errors failing it and its warnings not: the
+/// JIT runs and checks a lane's tests with its own type checker, and one that took a test rustc
+/// rejects (E0277, an untyped closure argument under rustc's integer fallback) landed green and
+/// broke the fast bucket (#5087, 11-15). None for no package.
+#[cfg(feature = "checkout")]
+pub(crate) fn tests_run(packages: &[String]) -> Option<CheckRun> {
+    let (first, rest) = packages.split_first()?;
+    let flags: Vec<String> = packages.iter().flat_map(|p| ["-p".to_string(), p.clone()]).collect();
+    Some(CheckRun {
+        own: true,
+        packages: packages.to_vec(),
+        class: if rest.is_empty() { format!("native:tests:{first}") } else { format!("native:tests:{first} +{}", rest.len()) },
+        cmd: ["cargo", "check", "--release", "--message-format", "short", "--tests"].iter().map(|w| w.to_string()).chain(flags.iter().cloned()).collect(),
+        alone: format!("cargo check --release --tests {}", flags.join(" ")),
+        tests: true,
+    })
 }
 
 /// What fails a check of a package without its tests: its compile errors and each warning at a
@@ -738,28 +813,52 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(compile_errors(&format!("{log}{error}\n")), vec![error.to_string()]);
     }
 
+    /// A test binary that refuses its arguments made a usage error, not a JIT miss (M98, 11-16).
+    #[test]
+    fn a_harness_refusing_its_arguments_is_no_compile_error() {
+        let log = "error: Unrecognized option: 'rev'\nerror: Argument to option 'test-threads' missing\nerror: argument for --format must be pretty, terse, json or junit (was x)\n";
+        assert!(compile_errors(log).is_empty(), "{:?}", compile_errors(log));
+        let error = "error[E0425]: cannot find value `x` in this scope";
+        assert_eq!(compile_errors(&format!("{log}{error}\n")), vec![error.to_string()], "a build error beside it still counts");
+    }
+
     /// A package says why its tests need the lane's tree; one that says nothing runs in an
     /// overlay. devhub's own tests walk this checkout's history and run cargo tree on it, which
-    /// an overlay lacks (11-07). The pre-land check also checks each package a lane's diff touches
+    /// an overlay lacks (11-07). It also names the test targets that run under cargo, and a run
+    /// goes there when its selection runs one of them. The pre-land check also checks each package a lane's diff touches
     /// without its tests: a path's package is the one that holds it most closely, and a document, a
     /// file of its tests, benches or examples, or a package of another workspace touches none.
     #[cfg(feature = "checkout")]
     #[test]
     fn a_package_whose_tests_read_the_checkout_runs_in_the_tree() {
         let t = crate::orch::ci::Tree::mem(vec![
-            ("Cargo.toml", "[workspace]\nmembers = [\"libs/*\", \"libs/a/inner\"]\nexclude = [\"libs/own\"]\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"libs/*\", \"libs/a/inner\", \"apps/*/src/..\"]\nexclude = [\"libs/own\"]\n"),
+            ("apps/commercial/Cargo.toml", "[package]\nname = \"commercial-members\"\n[target.'cfg(any())'.dependencies]\npart = { package = \"nested-part\", path = \"crates/part\" }\n"),
+            ("apps/commercial/src/lib.rs", ""),
+            ("apps/commercial/crates/part/Cargo.toml", "[package]\nname = \"nested-part\"\n[dependencies]\na = { path = \"../../../../libs/a\" }\n"),
+            ("apps/commercial/loose/Cargo.toml", "[package]\nname = \"loose\"\n"),
             ("libs/a/Cargo.toml", "[package]\nname = \"a\"\n[package.metadata.makepad]\ntest-tree = \"its tests read the history\"\n"),
             ("libs/a/inner/Cargo.toml", "[package]\nname = \"a-inner\"\n"),
-            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n"),
+            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n[package.metadata.makepad.native-tests]\n\"test:spawns\" = \"its runner is its own binary\"\n"),
             ("libs/own/Cargo.toml", "[package]\nname = \"own\"\n[workspace]\n"),
         ]);
-        assert_eq!(super::package_of(&t, "a"), (false, Some("its tests read the history".to_string())));
-        assert_eq!(super::package_of(&t, "b"), (false, None));
-        assert_eq!(super::package_of(&t, "c"), (false, None));
+        let (a, b) = (super::package_of(&t, "a"), super::package_of(&t, "b"));
+        assert_eq!((a.own, a.tree.as_deref(), a.native.len()), (false, Some("its tests read the history"), 0));
+        assert_eq!((b.tree, b.native.into_iter().collect::<Vec<_>>()), (None, vec![("test:spawns".to_string(), "its runner is its own binary".to_string())]));
+        assert_eq!(super::package_of(&t, "c"), super::TestPackage::default());
+        // the package's default run, `--tests` and `--test spawns` run the declared target; `--lib`,
+        // `--bins` and another test do not
+        let native = std::collections::BTreeMap::from([("test:spawns".to_string(), "why".to_string())]);
+        let runs = |select: &[&str]| !super::native_selected(&native, &select.iter().map(|w| w.to_string()).collect::<Vec<_>>()).is_empty();
+        let selects: [&[&str]; 6] = [&[], &["tests"], &["test:spawns"], &["lib"], &["bins"], &["test:other"]];
+        assert_eq!(selects.map(runs), [true, true, true, false, false, false]);
         let touched = |paths: &[&str]| super::packages_touched(&t, &paths.iter().map(|p| p.to_string()).collect::<Vec<_>>());
         assert_eq!(touched(&["libs/a/src/lib.rs", "libs/a/inner/src/x.rs", "libs/a/Cargo.toml"]), ["a", "a-inner"], "each path in the package that holds it most closely");
         assert_eq!(touched(&["libs/b/README.md", "libs/b/tests/t.rs", "libs/b/benches/x.rs", "libs/b/examples/e.rs", "libs/own/src/lib.rs", "docs/x.rs", "libs/bb/src/y.rs"]), Vec::<String>::new(),
             "a document, tests, benches, examples, another workspace's package, a path in no package");
+        assert_eq!(touched(&["apps/commercial/crates/part/src/lib.rs", "apps/commercial/crates/part/tests/t.rs"]), ["nested-part"],
+            "a commercial crate the members package reaches by path is checked at the hand-in, its tests left out");
+        assert_eq!(touched(&["apps/commercial/loose/src/lib.rs"]), Vec::<String>::new(), "a commercial package nothing in the workspace reaches is not the workspace's");
         let own = makepad_toml_parser::parse_toml(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap()).unwrap();
         assert!(own.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(makepad_toml_parser::Toml::as_str).is_some(), "devhub's tests read the checkout: its Cargo.toml says so");
         // the packages a diff touches are checked in one run per checker, never a lease each: 36
@@ -790,6 +889,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             ("env CARGO_INCREMENTAL=0 makepad test --package pkg-a", Some("pkg-a")),
             ("makepad test --features x,y --live pkg-b --lib", Some("pkg-b")),
             ("cargo run --profile host -q -p makepad-run --bin makepad -- test pkg-c", Some("pkg-c")),
+            ("makepad test --profile release-checks pkg-g --lib", Some("pkg-g")),
             ("makepad test -- pkg-d", None),
             ("makepad run pkg-e", None),
             ("cargo test -p pkg-f", None),

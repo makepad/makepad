@@ -1,7 +1,8 @@
 //! The control panel's read view (`panel` on the master's control socket, read by
-//! apps/devhub_panel): every node, every lease with absolute times (queued, live, and the ended
-//! ones of the asked window), and each node's pressure samples. One request line,
-//! `panel <since_ms>`, one answer; read-only. The ended leases come from the scheduler's memory,
+//! apps/devhub_panel): every node (its caps with their temperatures and hot sensors), every lease
+//! with absolute times (queued, live, and the ended ones of the asked window), and each node's
+//! pressure samples. One request line, `panel <since_ms>`, one answer; read-only. The ended
+//! leases come from the scheduler's memory,
 //! and from the ledger only for the part of the window the scheduler no longer holds, read
 //! backwards from the ledger's end (a panel that keeps asking from its last answer never reads
 //! it). Pressure samples are what the node's caps said every [`super::master`] caps round, with
@@ -141,7 +142,7 @@ impl Row {
     /// A lease the scheduler holds (queued, live, or ended in its memory).
     pub fn of_lease(l: &Lease) -> Row {
         let info = makepad_strict_json::parse(l.info.as_bytes()).ok();
-        let measured_ms = match l.cost_source { super::sched::CostSource::Measured(ms) => Some(ms), _ => None };
+        let measured_ms = match l.cost_source { super::sched::CostSource::Measured(ms) | super::sched::CostSource::Scaled(ms) => Some(ms), _ => None };
         Row {
             id: l.id.clone(),
             lane: l.req.lane.clone(),
@@ -434,6 +435,21 @@ mod tests {
     use crate::lease::sched::Req;
     use crate::lease::{Caps, Role};
 
+    #[test]
+    fn node_temperatures_and_hot_sensors_reach_the_panel() {
+        let mut s = Sched::new("master", 1);
+        s.add_node("box-a", "192.0.2.1", None);
+        let mut c = caps("box-a");
+        c.temps = vec![crate::lease::Temp { sensor: "gpu0".into(), c: 86.0, limit: Some(85.0) }];
+        c.hot = vec![crate::lease::HotTemp { sensor: "gpu0".into(), c: 86.0, limit: 85.0 }];
+        s.set_caps("box-a", c.clone(), 1);
+        let a = Answer { now_ms: 1, since_ms: 0, nodes: s.node_view(1), ..Default::default() };
+        let read = Answer::parse(&a.lines()).unwrap();
+        let got = read.nodes[0].caps.as_ref().unwrap();
+        assert_eq!((&got.temps, &got.hot), (&c.temps, &c.hot), "the node view carries readings and alerts through the panel wire");
+        assert!(read.nodes[0].caps_line().contains("HOT gpu0 86C (limit 85)"), "the panel's node description names the hot sensor");
+    }
+
     fn caps(name: &str) -> Caps {
         Caps {
             node: name.into(),
@@ -463,9 +479,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("devhub-panel-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = dir.join("leases.jsonl");
-        // an older lease only the ledger still has, twice (its later line wins), and one before the window
+        // an older lease only the ledger still has, twice (its later line wins), and one before the
+        // window (its times 9 s and 8 s before its end: no end before 9 s, where u64 would wrap)
         let line = |id: &str, ended: u64, how: &str| format!("{{\"id\":\"{id}\",\"lane\":\"lane-a\",\"kind\":\"build\",\"node\":\"node-b\",\"asked_ms\":{},\"granted_ms\":{},\"ended_ms\":{ended},\"how\":\"{how}\",\"cost\":\"large\",\"cost_source\":\"kind\",\"measured_ms\":null,\"alloc\":{{\"cores\":6,\"ram_gb\":10,\"gpus\":0}},\"phases\":[{{\"phase\":\"queued\",\"blocker\":\"budget cores\",\"boxes\":[],\"start_ms\":{},\"end_ms\":{}}}],\"req\":{{\"agent\":\"AGENT-A\",\"class\":\"build cargo\"}}}}\n", ended - 9000, ended - 8000, ended - 9000, ended - 8000);
-        std::fs::write(&ledger, [line("L1", 1_000, "released"), line("L2", 50_000, "expired"), line("L2", 51_000, "released")].concat()).unwrap();
+        std::fs::write(&ledger, [line("L1", 10_000, "released"), line("L2", 50_000, "expired"), line("L2", 51_000, "released")].concat()).unwrap();
         let sched = Mutex::new(Sched::new("mac", 1));
         {
             let mut s = sched.lock().unwrap();

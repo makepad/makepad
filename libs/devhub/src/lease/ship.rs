@@ -416,7 +416,7 @@ fn place_input(work: &Path, tmp: &Path, hash: &str, part: &Path, size: u64) -> R
     let unpack = tmp.join(format!("input-{hash}"));
     let _ = std::fs::remove_dir_all(&unpack);
     std::fs::create_dir_all(&unpack).map_err(|e| format!("{}: {e}", unpack.display()))?;
-    let out = std::process::Command::new("tar").arg("-xf").arg(part).arg("-C").arg(&unpack).output().map_err(|e| format!("input {hash}: tar: {e}"))?;
+    let out = std::process::Command::new(crate::os::tool("tar")).arg("-xf").arg(part).arg("-C").arg(&unpack).output().map_err(|e| format!("input {hash}: tar: {e}"))?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(&unpack);
         return Err(format!("input {hash}: `tar -xf` of it failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
@@ -896,6 +896,46 @@ fn pin_blobs(root: &Path, pin: &super::Pin, paths: &[String]) -> Result<std::col
         }
     }
     Ok(blobs)
+}
+
+/// Reads a regular file's entry at the pin; no symlink in the path is followed (11-15).
+fn with_pin_file<T>(root: &Path, pin: &super::Pin, path: &str, read: impl FnOnce(&mut makepad_git::Repository, &makepad_git::TreeEntry) -> Result<T, String>) -> Result<Option<T>, String> {
+    if !inside(path) { return Err(format!("{path}: not a path inside the tree")); }
+    for (dir, rev, prefix) in pinned_repos(root, pin) {
+        if !in_repo(pin, &prefix, path) { continue; }
+        return crate::gitread::with(&dir, |p, repo| {
+            let commit = crate::gitread::resolve(p, repo, &rev).ok_or_else(|| format!("{path}: no commit {rev}"))?;
+            let mut tree = repo.read_commit(&commit).map_err(|e| format!("{path}: {rev}: {e}"))?.tree;
+            let mut parts = path[prefix.len()..].split('/').peekable();
+            let mut part = prefix.trim_end_matches('/').to_string();
+            while let Some(name) = parts.next() {
+                if !part.is_empty() { part.push('/'); }
+                part.push_str(name);
+                let t = repo.read_tree(&tree).map_err(|e| format!("{path}: {rev}: {e}"))?;
+                let Some(e) = t.entries.iter().find(|e| e.name == name) else { return Ok(None) };
+                if e.mode == 0o120000 { return Err(format!("{path}: through the symlink {part} in {rev}, which a ship sends as a link")); }
+                if e.is_gitlink() { return Err(format!("{path}: {part} in {rev} is a gitlink")); }
+                if parts.peek().is_none() {
+                    if !e.is_blob() { return Err(format!("{path}: {part} in {rev} is not a file")); }
+                    return read(repo, e).map(Some);
+                }
+                if !e.is_tree() { return Err(format!("{path}: {part} in {rev} is not a folder")); }
+                tree = e.oid;
+            }
+            Ok(None)
+        }).ok_or_else(|| format!("{}: not a git repository", dir.display()))?;
+    }
+    Ok(None)
+}
+
+/// The pin's file bytes, never the worktree's; a missing entry is None (11-15).
+pub fn pin_file(root: &Path, pin: &super::Pin, path: &str) -> Result<Option<Vec<u8>>, String> {
+    with_pin_file(root, pin, path, |repo, e| repo.read_blob(&e.oid).map_err(|e| format!("{path}: {e}")))
+}
+
+/// The mode from the same tree entry as [`pin_file`], for staging its patched copy.
+pub fn pin_mode(root: &Path, pin: &super::Pin, path: &str) -> Result<Option<u32>, String> {
+    with_pin_file(root, pin, path, |_, e| Ok(e.mode))
 }
 
 /// The base blob of each shipped path at the pin, as `ship-done` sends them: `new` where the pin

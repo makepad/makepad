@@ -5,9 +5,10 @@
 //! - after it lands, the master removes it: both halves in work and main (the branch tips are in
 //!   them and are not work's own first-parent commits, so a fresh lane never counts), nothing
 //!   uncommitted, no process inside, no lease, job or land entry of the lane open, and no file
-//!   activity and no job or lease ending for [`GRACE_MS`]. Then the worktree pair, the branches
-//!   (local, and origin's when pushed) and the lane's dirs on every node go. An agent that only
-//!   reads or thinks that long is not seen: `devhub lane keep <name>` exempts a lane.
+//!   activity and no job or lease ending for [`GRACE_MS`]. Then the lane's dirs on every node go;
+//!   the worktree pair and the branches (local, and origin's when pushed) only once its agents
+//!   also made no devhub call for [`AGENT_IDLE_MS`]: an agent that reads or thinks between steps
+//!   writes no file and runs nothing. `devhub lane keep <name>` exempts a lane.
 //!   A lane whose branch and worktree went some other way has its record cleared.
 //! - `devhub lane drop <name>`: abandons a lane: uncommitted work is committed on its branch,
 //!   every commit not in work / main is bundled into `~/.makepad/devhub/dropped/`, then
@@ -30,7 +31,7 @@ use crate::proto::{wall_ms, Sev};
 use crate::state::LaneRec;
 use makepad_git::{ObjectId, Reach, Repository};
 use makepad_remote::json_str;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,11 @@ use std::time::Duration;
 /// A landed lane is removed only after this long with no file activity, no new commit and no job
 /// or lease of it ending.
 pub const GRACE_MS: u64 = 30 * 60 * 1000;
+/// A landed lane's worktree and branches go only after this long with no devhub call of its agents
+/// either (its node dirs went at [`GRACE_MS`]): a worktree is cheap to keep, an agent that comes
+/// back to its removed lane is not (11-16).
+pub const AGENT_IDLE_MS: u64 = 60 * 60 * 1000;
+const LANDED_NOTE: &str = "landed: its node dirs go after 30 min with no activity, its worktree and branches once its agents are idle for 1 h";
 const TICK: Duration = Duration::from_secs(60);
 
 pub fn valid_name(s: &str) -> bool {
@@ -350,8 +356,8 @@ fn removable(ctx: &Ctx, l: &LaneRec, views: &mut Views, cwds: &[(u32, PathBuf)],
     if !live.is_empty() {
         return Err(format!("process(es) {live:?} run inside"));
     }
-    if let Some(why) = open_run(ctx, l) {
-        return Err(why.into());
+    if let Some((_, why)) = open_run(ctx, l) {
+        return Err(why);
     }
     if handed_in(l, land) {
         return Err("its hand-in is still in the land queue".into());
@@ -416,7 +422,7 @@ fn run_refusal(ctx: &Ctx, l: &LaneRec, cwds: &[(u32, PathBuf)], land: &[String])
         return Some(("a process runs inside", format!("process(es) {live:?} run inside {}: stop them first", path.display())));
     }
     if let Some(why) = open_run(ctx, l) {
-        return Some((why, why.into()));
+        return Some(why);
     }
     handed_in(l, land).then(|| ("its hand-in is in the land queue", "its hand-in is still in the land queue".to_string()))
 }
@@ -463,6 +469,7 @@ fn unpark(ctx: &Ctx, name: &str) -> Result<String, String> {
 /// in it (named), no process may run inside, and no lease, job or hand-in of it may be open.
 fn retire(ctx: &Ctx, name: &str) -> Result<String, String> {
     let l = rec(ctx, name).ok_or_else(|| format!("no live lane {name}"))?;
+    super::slot::check_clean(ctx, &l)?;
     if let Some((_, why)) = dirty_refusal(Path::new(&l.path)).or_else(|| run_refusal(ctx, &l, &wt::live_cwds(), &land_entries(ctx))) {
         return Err(why);
     }
@@ -547,16 +554,60 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// A lease or job of the lane in flight, under its name or its branch (a lane's asks carry either).
-fn open_run(ctx: &Ctx, l: &LaneRec) -> Option<&'static str> {
-    let ours = |lane: &str| lane == l.name || lane == l.branch;
-    if ctx.leases.view().iter().any(|x| ours(&x.req.lane) && !matches!(x.state, crate::lease::sched::State::Ended(_))) {
-        return Some("a lease of the lane is open");
+/// A lane's runs include live sessions and synthetic leases rooted in either half (11-15).
+struct LaneRuns<'a> {
+    lane: &'a LaneRec,
+    lives: Vec<&'a crate::state::Live>,
+}
+
+impl<'a> LaneRuns<'a> {
+    fn new(lane: &'a LaneRec, lives: &'a [crate::state::Live]) -> Self {
+        let mut runs = Self { lane, lives: Vec::new() };
+        runs.lives = lives.iter().filter(|x| x.lane == lane.name || runs.tree(&x.tree)).collect();
+        runs
     }
-    if ctx.store.read(|d| d.jobs.iter().any(|j| ours(&j.lane) && !j.done())) {
-        return Some("a job of the lane is open");
+
+    fn named(&self, name: &str) -> bool { !name.is_empty() && (name == self.lane.name || name == self.lane.branch) }
+    fn tree(&self, tree: &str) -> bool { !self.lane.path.is_empty() && !tree.is_empty() && Path::new(tree).starts_with(&self.lane.path) }
+    fn lease(&self, id: &str, name: &str, tree: &str) -> bool {
+        self.named(name) || self.tree(tree) || (!id.is_empty() && self.lives.iter().any(|x| x.lease == id))
     }
-    None
+    fn live(&self) -> Option<String> { self.lives.iter().find(|x| x.active()).map(|x| format!("live job {} runs from this worktree", x.id)) }
+}
+
+/// A live session, lease or job of the lane in flight, as (class, refusal).
+fn open_run(ctx: &Ctx, l: &LaneRec) -> Option<(&'static str, String)> {
+    let leases = ctx.leases.view();
+    ctx.store.read(|d| {
+        let runs = LaneRuns::new(l, &d.lives);
+        if let Some(why) = runs.live() { return Some(("a live job runs from this worktree", why)); }
+        if let Some(x) = leases.iter().find(|x| !matches!(x.state, crate::lease::sched::State::Ended(_)) && runs.lease(&x.id, &x.req.lane, x.req.repo_dir.as_deref().unwrap_or(""))) {
+            return Some(("a lease of the lane is open", format!("a lease of the lane is open ({})", x.id)));
+        }
+        d.jobs.iter().any(|j| runs.named(&j.lane) && !j.done()).then(|| ("a job of the lane is open", "a job of the lane is open".to_string()))
+    })
+}
+
+/// Prune reads the master's durable runs even without a running master (11-15).
+pub(crate) fn saved_open_run(home: &Path, l: &LaneRec) -> Result<Option<String>, String> {
+    let doc = crate::state::committed(home)?.map(|v| crate::state::Doc::from_value(&v)).unwrap_or_default();
+    let runs = LaneRuns::new(l, &doc.lives);
+    if let Some(why) = runs.live() { return Ok(Some(why)); }
+    let text = match std::fs::read_to_string(home.join("leases.live")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("leases.live: {e}")),
+    };
+    for line in text.lines() {
+        let v = makepad_strict_json::parse(line.as_bytes()).map_err(|e| format!("leases.live: {e:?}"))?;
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+        let Some(req) = v.get("req") else { continue };
+        let r = |k: &str| req.get(k).and_then(|x| x.as_str()).unwrap_or("");
+        if s("state") != "ended" && runs.lease(s("id"), r("lane"), r("repo_dir")) {
+            return Ok(Some(format!("a lease of the lane is open ({})", s("id"))));
+        }
+    }
+    Ok(doc.jobs.iter().any(|j| runs.named(&j.lane) && !j.done()).then(|| "a job of the lane is open".to_string()))
 }
 
 /// Its branch and worktree went some other way: only the record is left, and `lane remove` could
@@ -571,9 +622,36 @@ fn land_entries(ctx: &Ctx) -> Vec<String> {
     ctx.store.read(|d| d.land.iter().map(|v| v.to_json()).collect())
 }
 
+/// The train moves changed_ms at landing; later landings restart the grace (11-15).
+fn last_landing(l: &LaneRec, land: &[String]) -> u64 {
+    land.iter().filter_map(|x| makepad_strict_json::parse(x.as_bytes()).ok()).filter(|v| {
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+        s("state") == "landed" && (s("branch") == l.branch || (!l.cbranch.is_empty() && s("cbranch") == l.cbranch))
+    }).filter_map(|v| v.get("changed_ms").and_then(|x| x.as_u64())).max().unwrap_or(0).max(l.landed_ms)
+}
+
 /// The automatic cleanup pass: removes the lanes that landed, after the grace period.
 pub fn cleanup(ctx: &Ctx) {
-    let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.state == "live" && !l.keep).cloned().collect());
+    cleanup_pass(ctx, wt::live_cwds);
+}
+
+fn cleanup_pass(ctx: &Ctx, cwds: impl FnOnce() -> Vec<(u32, PathBuf)>) {
+    let mut lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.state == "live").cloned().collect());
+    // One write for the new activity in either half, including kept lanes (11-15).
+    let mut activity = HashMap::new();
+    for l in &mut lanes {
+        let active = ctx.monitor.last_event_ms(Path::new(&l.path)).max(ctx.monitor.last_event_ms(&Path::new(&l.path).join("apps/commercial")));
+        if active > l.active_ms { l.active_ms = active; activity.insert(l.name.clone(), active); }
+    }
+    if !activity.is_empty() {
+        if let Err(e) = ctx.store.update(|d| for l in d.lanes.iter_mut().filter(|l| l.state == "live") {
+            if let Some(at) = activity.get(&l.name) { l.active_ms = l.active_ms.max(*at); }
+        }) {
+            event(ctx, Sev::Warn, format!("lane activity: {e}"), None);
+            return;
+        }
+    }
+    lanes.retain(|l| !l.keep);
     if lanes.is_empty() {
         return;
     }
@@ -584,10 +662,11 @@ pub fn cleanup(ctx: &Ctx) {
             return;
         }
     };
-    let cwds = wt::live_cwds();
+    let cwds = cwds();
     let land = land_entries(ctx);
     let now = wall_ms();
-    for l in lanes {
+    let mut agents = HashMap::new();
+    for mut l in lanes {
         if only_the_record(ctx, &l, &views) {
             finish(ctx, &l.name, "removed", remove(ctx, &l, false, true));
             continue;
@@ -609,21 +688,52 @@ pub fn cleanup(ctx: &Ctx) {
                 if l.landed_ms == 0 {
                     set(ctx, &l.name, |x| {
                         x.landed_ms = now;
-                        x.note = "landed: removed after 30 min with no activity".into();
+                        x.note = LANDED_NOTE.into();
                     });
-                    event(ctx, Sev::Info, format!("lane {}: landed; its worktree goes after 30 min with no activity (devhub lane keep {} to keep it)", l.name, l.name), Some(&l));
+                    event(ctx, Sev::Info, format!("lane {}: landed; its node dirs go after 30 min with no activity, its worktree and branches once its agents are idle for 1 h (devhub lane keep {} to keep it)", l.name, l.name), Some(&l));
                     continue;
                 }
-                // quiet for the grace: since it landed, since its last file event and since its
-                // last run: an agent between runs on overlays touches no file (a lane's worktree
-                // and 23 GB of its node dirs went the moment its last A/B ended, 40 s before its
-                // next step, 11-04)
-                let active = ctx.monitor.last_event_ms(Path::new(&l.path)).max(ctx.monitor.last_event_ms(&Path::new(&l.path).join("apps/commercial")));
-                if now.saturating_sub(l.landed_ms.max(active)) < GRACE_MS {
+                let landed = last_landing(&l, &land);
+                if landed > l.landed_ms {
+                    set(ctx, &l.name, |x| x.landed_ms = landed);
+                    l.landed_ms = landed;
+                }
+                // its agents' calls, saved for the worktree's wait: a restarted master heard no one
+                let heard = lane_agents(ctx, &l, &land).iter().map(|a| ctx.leases.agent_seen_ms(a)).max().unwrap_or(0);
+                if heard > l.agent_ms {
+                    l.agent_ms = heard;
+                    agents.insert(l.name.clone(), heard);
+                }
+                let last = l.landed_ms.max(l.active_ms);
+                if now.saturating_sub(last) < GRACE_MS {
                     continue;
                 }
-                let ran = ended_runs(ctx, std::slice::from_ref(&l)).into_values().map(|e| e.at).max().unwrap_or(0);
-                if now.saturating_sub(ran) < GRACE_MS {
+                // the node dirs, once per quiet spell: the grace since it landed, since its last
+                // file event and since its last run: an agent between runs on overlays touches no
+                // file (a lane's worktree and 23 GB of its node dirs went the moment its last A/B
+                // ended, 40 s before its next step, 11-04)
+                if l.dirs_ms < last {
+                    let ran = newest_run(ctx, &l);
+                    if now.saturating_sub(ran) < GRACE_MS {
+                        continue;
+                    }
+                    let what = clean_node_dirs(ctx, &l);
+                    let rec = set(ctx, &l.name, |x| {
+                        x.dirs_ms = now;
+                        x.agent_ms = x.agent_ms.max(ran);
+                        x.note = format!("landed: {what} cleaned; its worktree and branches go once its agents are idle for 1 h");
+                    });
+                    event(ctx, Sev::Info, format!("lane {}: {what} cleaned; its worktree and branches go once its agents are idle for 1 h", l.name), rec.as_ref());
+                    continue;
+                }
+                // the worktree and branches: no landing, file event, devhub call of its agents or
+                // run of it for the hour. The ledger is read once per idle hour, not every pass.
+                if now.saturating_sub(last.max(l.agent_ms)) < AGENT_IDLE_MS {
+                    continue;
+                }
+                let ran = newest_run(ctx, &l);
+                if now.saturating_sub(ran) < AGENT_IDLE_MS {
+                    agents.insert(l.name.clone(), l.agent_ms.max(ran));
                     continue;
                 }
                 let what = remove(ctx, &l, false, true);
@@ -631,10 +741,38 @@ pub fn cleanup(ctx: &Ctx) {
             }
         }
     }
+    // one write for the agents' new calls (11-16)
+    if !agents.is_empty() {
+        if let Err(e) = ctx.store.update(|d| for l in d.lanes.iter_mut().filter(|l| l.state == "live") {
+            if let Some(at) = agents.get(&l.name) { l.agent_ms = l.agent_ms.max(*at); }
+        }) {
+            event(ctx, Sev::Warn, format!("lane agents: {e}"), None);
+        }
+    }
     views.makepad.forget_unused();
     if let Some(c) = views.commercial.as_mut() {
         c.forget_unused();
     }
+}
+
+/// The end of the lane's newest job, live session or lease (reads the lease ledger).
+fn newest_run(ctx: &Ctx, l: &LaneRec) -> u64 {
+    ended_runs(ctx, std::slice::from_ref(l)).into_values().map(|e| e.at).max().unwrap_or(0)
+}
+
+/// The agents of the lane since it was made: who handed it in, and who asked for its jobs, live
+/// sessions and the leases the master still holds.
+fn lane_agents(ctx: &Ctx, l: &LaneRec, land: &[String]) -> BTreeSet<String> {
+    let mut agents: BTreeSet<String> = land.iter().filter_map(|x| crate::land::Entry::parse(x)).filter(|e| e.changed_ms >= l.created_ms && ((!l.branch.is_empty() && e.branch == l.branch) || (!l.cbranch.is_empty() && e.cbranch == l.cbranch))).map(|e| e.agent).collect();
+    let leases = ctx.leases.view();
+    ctx.store.read(|d| {
+        let runs = LaneRuns::new(l, &d.lives);
+        agents.extend(runs.lives.iter().map(|x| x.agent.clone()));
+        agents.extend(d.jobs.iter().filter(|j| runs.named(&j.lane)).map(|j| j.agent.clone()));
+        agents.extend(leases.iter().filter(|x| runs.lease(&x.id, &x.req.lane, x.req.repo_dir.as_deref().unwrap_or(""))).filter_map(|x| x.req.agent.clone()));
+    });
+    agents.retain(|a| !a.is_empty());
+    agents
 }
 
 fn finish(ctx: &Ctx, name: &str, state: &str, what: Result<String, String>) {
@@ -678,7 +816,7 @@ fn preserve_head(tree: &Path, target: &str) -> Result<(), String> {
 fn remove(ctx: &Ctx, l: &LaneRec, drop: bool, branches: bool) -> Result<String, String> {
     let path = PathBuf::from(&l.path);
     let nested = path.join("apps/commercial");
-    let mut done = Vec::new();
+    let mut done = super::slot::remove(ctx, l, drop)?;
     let force: &[&str] = if drop { &["--force"] } else { &[] };
     let mut checked = Vec::new();
     for (dir, branch, target) in [(ctx.repo.clone(), &l.branch, "work"), (ctx.commercial(), &l.cbranch, "main")] {
@@ -731,6 +869,12 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool, branches: bool) -> Result<String, 
             }
         }
     }
+    done.push(clean_node_dirs(ctx, l));
+    Ok(done.join(", "))
+}
+
+/// The lane's dirs on every node that is up, as "node dirs (N MB: per node)".
+fn clean_node_dirs(ctx: &Ctx, l: &LaneRec) -> String {
     let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-lanes");
     let mut freed: Vec<(String, f64)> = Vec::new();
     for n in ctx.leases.nodes().into_iter().filter(|n| n.up) {
@@ -744,8 +888,7 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool, branches: bool) -> Result<String, 
     // (from +0: an empty f64 sum is -0, which printed as "-0 MB")
     let total = freed.iter().fold(0.0, |a, f| a + f.1);
     let each = if freed.is_empty() { String::new() } else { format!(": {}", freed.iter().map(|(n, mb)| format!("{n} {mb:.0}")).collect::<Vec<_>>().join(", ")) };
-    done.push(format!("node dirs ({total:.0} MB{each})"));
-    Ok(done.join(", "))
+    format!("node dirs ({total:.0} MB{each})")
 }
 
 /// `lane new`: the worktree pair on `rc-<name>`.
@@ -797,6 +940,8 @@ fn drop_lane(ctx: &Ctx, name: &str) -> Result<String, String> {
     if !live.is_empty() {
         return Err(format!("process(es) {live:?} run inside {}: stop them first", path.display()));
     }
+    // Remove slots under SLOTS before committing or bundling: a take cannot empty one after its lane was saved (11-15).
+    let mut removed = super::slot::remove(ctx, &l, true)?;
     let dir = ctx.home.join("dropped");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stamp = super::stamp(wall_ms());
@@ -830,7 +975,8 @@ fn drop_lane(ctx: &Ctx, name: &str) -> Result<String, String> {
             kept.push(format!("{n} {half} commit(s) in {}", file.display()));
         }
     }
-    let what = remove(ctx, &l, true, true)?;
+    removed.push(remove(ctx, &l, true, true)?);
+    let what = removed.join(", ");
     let note = if kept.is_empty() { format!("{what}; nothing unlanded to bundle") } else { format!("{what}; bundled {}", kept.join(", ")) };
     finish(ctx, name, "dropped", Ok(note.clone()));
     Ok(note)
@@ -1250,6 +1396,10 @@ fn kept_refs(git_dir: &Path) -> Vec<String> {
 
 fn classify(ctx: &Ctx, path: &Path) -> Item {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // A registered lane's sibling slots are never sweep archives (11-15).
+    if name.strip_suffix(".slots").is_some_and(|name| ctx.store.read(|d| d.lanes.iter().any(|l| l.name == name))) {
+        return Item { name, path: path.to_path_buf(), kind: "lane slots".into(), git: None, clone: false };
+    }
     let dotgit = path.join(".git");
     if dotgit.is_dir() {
         return Item { name, path: path.to_path_buf(), kind: "clone".into(), git: Some(dotgit), clone: true };
@@ -1271,6 +1421,10 @@ fn classify(ctx: &Ctx, path: &Path) -> Item {
 
 fn plan_of(item: &Item, cwds: &[(u32, PathBuf)], live: &HashSet<PathBuf>) -> Plan {
     let mut p = Plan::default();
+    if item.kind == "lane slots" {
+        p.keep = "a recorded lane's slots".into();
+        return p;
+    }
     let canon = std::fs::canonicalize(&item.path).unwrap_or_else(|_| item.path.clone());
     if live.iter().any(|l| l.starts_with(&canon) || canon.starts_with(l)) {
         p.keep = "a live lane".into();
@@ -1369,7 +1523,7 @@ fn sweep(ctx: &Arc<Ctx>, dry: bool) -> Result<String, String> {
 fn free_bytes(p: &Path) -> u64 {
     #[cfg(unix)]
     {
-        let o = std::process::Command::new("df").arg("-k").arg(p).output();
+        let o = std::process::Command::new(crate::os::tool("df")).arg("-k").arg(p).output();
         if let Ok(o) = o {
             let t = String::from_utf8_lossy(&o.stdout);
             if let Some(l) = t.lines().nth(1) {
@@ -1480,7 +1634,7 @@ fn sweep_run(ctx: &Ctx, dir: &Path, dry: bool) -> Result<String, String> {
             text.push(0);
         }
         std::fs::write(&list, &text).map_err(|e| e.to_string())?;
-        let mut cmd = std::process::Command::new("nice");
+        let mut cmd = std::process::Command::new(crate::os::tool("nice"));
         cmd.args(["tar", "-c", "-J", "--options", "xz:threads=0,xz:compression-level=3", "-f"]).arg(&archive).arg("--no-recursion");
         // one `-C` only (a second one would move the list's directory too): the bundles by their
         // full paths
@@ -1492,7 +1646,7 @@ fn sweep_run(ctx: &Ctx, dir: &Path, dry: bool) -> Result<String, String> {
             return Err(format!("tar failed (nothing deleted): {}", crate::proto::clean(&String::from_utf8_lossy(&o.stderr), 400)));
         }
         // the archive reads back before anything goes
-        let t = std::process::Command::new("tar").arg("-t").arg("-f").arg(&archive).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output().map_err(|e| e.to_string())?;
+        let t = std::process::Command::new(crate::os::tool("tar")).arg("-t").arg("-f").arg(&archive).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output().map_err(|e| e.to_string())?;
         if !t.status.success() {
             return Err(format!("the archive does not read back (nothing deleted): {}", crate::proto::clean(&String::from_utf8_lossy(&t.stderr), 300)));
         }
@@ -1568,6 +1722,22 @@ pub(crate) fn slow_now(ctx: &Ctx, now: u64) -> Vec<String> {
     crate::bucket::slow_units(&ctx.home, now, &shard_box)
 }
 
+/// How long a node goes unheard before the check-in lists it ([`down_nodes`]).
+const NODE_DOWN_LISTED_MS: u64 = 3_600_000;
+
+/// For the manager's check-in (`lane quiet`): the nodes unheard past [`NODE_DOWN_LISTED_MS`], how
+/// long and why. A Windows box's hub ended at a logoff and its box stayed out of the fleet two
+/// days; `devhub nodes` said "not heard" to whoever looked, and no check-in listed it (11-14).
+pub(crate) fn down_nodes(nodes: &[crate::lease::sched::NodeView]) -> Vec<String> {
+    let down: Vec<String> = nodes.iter().filter_map(|n| n.unheard.as_ref().filter(|(ms, _)| *ms >= NODE_DOWN_LISTED_MS).map(|(ms, why)| {
+        format!("  {}: {:.1} h: {}", n.name, *ms as f64 / 3_600_000.0, crate::proto::clean(why, 200))
+    })).collect();
+    if down.is_empty() { return down; }
+    let mut rows = vec![format!("nodes down over {} h (their hub not heard; `devhub nodes` says why):", NODE_DOWN_LISTED_MS / 3_600_000)];
+    rows.extend(down);
+    rows
+}
+
 fn quiet(ctx: &Ctx) -> Result<String, String> {
     let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.ended_ms == 0).cloned().collect());
     let ended = ended_runs(ctx, &lanes);
@@ -1587,6 +1757,7 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
     }
     rows.extend(super::live::restarts_pending(ctx, now));
     rows.extend(slow_now(ctx, now));
+    rows.extend(down_nodes(&ctx.leases.nodes()));
     let offers = offered(ctx, &lanes, &ended, &busy, now);
     let waiting: Vec<LaneRec> = lanes.iter().filter(|l| l.parked.is_empty() && !offers.iter().any(|o| o.name == l.name)).cloned().collect();
     rows.extend(quiet_lanes(&waiting, &ended, &busy, &landed, now));
@@ -1622,24 +1793,49 @@ fn offered(ctx: &Ctx, lanes: &[LaneRec], ended: &HashMap<String, Ended>, busy: &
     for l in lanes {
         let wrote = ctx.monitor.last_event_ms(Path::new(&l.path)).max(ctx.monitor.last_event_ms(&Path::new(&l.path).join("apps/commercial")));
         let e = active.entry(l.branch.clone()).or_default();
-        *e = (*e).max(wrote);
+        *e = (*e).max(wrote).max(l.active_ms);
     }
     retire_offers(lanes, ended, busy, &active, &|a| ctx.leases.agent_seen_ms(a), now)
 }
 
-/// `lane offers`: each lane offered for retirement, with what of its runs would refuse it (a
-/// process inside, a lease, job or hand-in open). Its worktree's status and size, and its node
-/// dirs, are read by the asking CLI (`--check`), never on the master's control thread.
+/// `lane offers`: each lane offered for retirement, its branches' hold and what of its runs would
+/// refuse it (a process inside, a lease, job or hand-in open). Status, size and merged content are
+/// read by the asking CLI, never on the master's control thread.
 fn offers(ctx: &Ctx) -> String {
     let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.ended_ms == 0).cloned().collect());
+    let held = ctx.store.read(|d| d.held.clone());
     let offers = offered(ctx, &lanes, &ended_runs(ctx, &lanes), &in_flight(ctx), wall_ms());
     let (cwds, land) = (wt::live_cwds(), land_entries(ctx));
     let rows: Vec<String> = offers.iter().filter_map(|o| {
         let l = lanes.iter().find(|l| l.name == o.name)?;
         let (class, why) = run_refusal(ctx, l, &cwds, &land).map_or(("", String::new()), |(c, w)| (c, w));
-        Some(format!("{{\"name\":{},\"path\":{},\"idle_ms\":{},\"row\":{},\"refused_class\":{},\"refused\":{}}}", json_str(&l.name), json_str(&l.path), o.idle_ms, json_str(&o.row), json_str(class), json_str(&why)))
+        let b = branches(l);
+        let held = held.iter().find(|(branch, _)| b.contains(branch)).map_or("", |(_, why)| why.as_str());
+        Some(format!("{{\"name\":{},\"path\":{},\"branch\":{},\"cbranch\":{},\"idle_ms\":{},\"row\":{},\"refused_class\":{},\"refused\":{},\"held\":{}}}", json_str(&l.name), json_str(&l.path), json_str(&l.branch), json_str(&l.cbranch), o.idle_ms, json_str(&o.row), json_str(class), json_str(&why), json_str(held)))
     }).collect();
     format!("{{\"lanes\":[{}]}}", rows.join(","))
+}
+
+/// `retire --clean-offers` checks content here, in the CLI, with land's retired-chain merge (11-14).
+pub(crate) fn clean_offer_refusal(offer: &makepad_strict_json::Value) -> Option<String> {
+    let s = |k: &str| offer.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    if !s("refused").is_empty() { return Some(s("refused").to_string()); }
+    if !s("held").is_empty() { return Some(format!("its branch is held: {}", s("held"))); }
+    let path = Path::new(s("path"));
+    if let Some((_, why)) = dirty_refusal(path) { return Some(why); }
+    // An older master's offer has no branch names: never guess what may be removed.
+    if s("branch").is_empty() || offer.get("cbranch").and_then(|v| v.as_str()).is_none() {
+        return Some("its branches are not known (lane offers needs a newer master)".into());
+    }
+    for (dir, target, branch) in [(path.to_path_buf(), "work", s("branch")), (path.join("apps/commercial"), "main", s("cbranch"))] {
+        if branch.is_empty() { continue; }
+        match crate::land::changes_nothing(&dir, &format!("refs/heads/{target}"), &format!("refs/heads/{branch}")) {
+            Ok(true) => {}
+            Ok(false) => return Some(format!("{branch} has changes {target} lacks")),
+            Err(why) => return Some(format!("its branch {branch} does not merge cleanly into {target}: {why}")),
+        }
+    }
+    None
 }
 
 /// One lane [`retire_offers`] offers: its name, how long nothing came of it, and its row.
@@ -1713,10 +1909,19 @@ struct Ended {
     agent: String,
 }
 
-/// The newest job or lease of these lanes that ended, by lane name or branch.
+/// The newest job, live session or lease of these lanes that ended (11-15).
 fn ended_runs(ctx: &Ctx, lanes: &[LaneRec]) -> HashMap<String, Ended> {
     use std::io::BufRead;
-    let names: HashSet<&str> = lanes.iter().flat_map(|l| [l.name.as_str(), l.branch.as_str()]).collect();
+    // Only identity and activity cross the lock; live source maps and output stay in the store.
+    let lives: Vec<_> = ctx.store.read(|d| d.lives.iter().map(|x| crate::state::Live { id: x.id.clone(), lane: x.lane.clone(), tree: x.tree.clone(), lease: x.lease.clone(), state: x.state.clone(), ended_ms: x.ended_ms, touched_ms: x.touched_ms, agent: x.agent.clone(), ..Default::default() }).collect());
+    let runs: Vec<_> = lanes.iter().map(|l| LaneRuns::new(l, &lives)).collect();
+    // JSON-escaped prefixes also match a nested repo_dir (and paths with backslashes).
+    let hints: Vec<String> = runs.iter().flat_map(|r| {
+        let mut hints = vec![format!("\"lane\":{}", json_str(&r.lane.name)), format!("\"lane\":{}", json_str(&r.lane.branch))];
+        if !r.lane.path.is_empty() { hints.push(format!("\"repo_dir\":{}", json_str(&r.lane.path).trim_end_matches('"'))); }
+        hints.extend(r.lives.iter().filter(|x| !x.lease.is_empty()).map(|x| format!("\"id\":{}", json_str(&x.lease))));
+        hints
+    }).collect();
     let mut ended: HashMap<String, Ended> = HashMap::new();
     let mut note = |lane: &str, at: u64, what: String, agent: &str| {
         let last = ended.entry(lane.to_string()).or_default();
@@ -1725,15 +1930,26 @@ fn ended_runs(ctx: &Ctx, lanes: &[LaneRec]) -> HashMap<String, Ended> {
     if let Ok(file) = std::fs::File::open(ctx.home.join("leases.jsonl")) {
         for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
             // the cheap look first: the ledger holds every lease there was
-            if !line.split("\"lane\":\"").nth(1).and_then(|r| r.split('"').next()).is_some_and(|l| names.contains(l)) { continue; }
+            if !hints.iter().any(|hint| line.contains(hint)) { continue; }
             let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
             let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
-            let agent = v.get("req").and_then(|r| r.get("agent")).and_then(|x| x.as_str()).unwrap_or("");
-            note(text("lane"), v.get("ended_ms").and_then(|x| x.as_u64()).unwrap_or(0), format!("{} {}@{} {}", text("id"), text("kind"), text("node"), text("how")), agent);
+            let req = |k: &str| v.get("req").and_then(|r| r.get(k)).and_then(|x| x.as_str()).unwrap_or("");
+            for r in &runs {
+                if r.lease(text("id"), if req("lane").is_empty() { text("lane") } else { req("lane") }, req("repo_dir")) {
+                    note(&r.lane.name, v.get("ended_ms").and_then(|x| x.as_u64()).unwrap_or(0), format!("{} {}@{} {}", text("id"), text("kind"), text("node"), text("how")), req("agent"));
+                }
+            }
         }
     }
-    ctx.store.read(|d| for j in d.jobs.iter().filter(|j| j.done() && names.contains(j.lane.as_str())) {
-        note(&j.lane, j.ended_ms, format!("{} {}", j.id, j.state), &j.agent);
+    for r in &runs {
+        for x in r.lives.iter().filter(|x| !x.active()) {
+            note(&r.lane.name, x.ended_ms.max(x.touched_ms), format!("{} {}", x.id, x.state), &x.agent);
+        }
+    }
+    ctx.store.read(|d| for r in &runs {
+        for j in d.jobs.iter().filter(|j| j.done() && r.named(&j.lane)) {
+            note(&r.lane.name, j.ended_ms, format!("{} {}", j.id, j.state), &j.agent);
+        }
     });
     ended
 }
@@ -1860,6 +2076,8 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let verb = w.next().unwrap_or("list");
     let rest = w.next().unwrap_or("").trim();
     match verb {
+        "slot" => super::slot::serve(ctx, rest),
+        "slots" => super::slot::serve(ctx, &super::slot::request(&["slots", rest])?),
         "new" => {
             let v = makepad_strict_json::parse(rest.as_bytes()).map_err(|_| "lane new: bad request")?;
             let name = &makepad_devhub_conf::lane_name(v.get("name").and_then(|x| x.as_str()).unwrap_or(""));
@@ -1953,6 +2171,18 @@ mod tests {
     use super::*;
     use crate::lease::master::LeaseMaster;
     use crate::state::Store;
+
+    /// A node unheard past an hour is listed with how long and why; one heard, or unheard for
+    /// less, is not, and with none down there is no row at all.
+    #[test]
+    fn the_check_in_lists_a_node_down_over_an_hour() {
+        use crate::lease::sched::NodeView;
+        let node = |name: &str, unheard: Option<(u64, &str)>| NodeView { name: name.into(), up: unheard.is_none(), unheard: unheard.map(|(ms, why)| (ms, why.to_string())), ..Default::default() };
+        let why = "link lost: cannot reach fleet hub `w` at 192.0.2.5:8797: connection timed out";
+        let rows = down_nodes(&[node("w", Some((49 * 3_600_000, why))), node("a", None), node("b", Some((20 * 60_000, "its caps call has not answered")))]);
+        assert_eq!(rows, vec!["nodes down over 1 h (their hub not heard; `devhub nodes` says why):".to_string(), format!("  w: 49.0 h: {why}")]);
+        assert!(down_nodes(&[node("a", None), node("b", Some((20 * 60_000, "x")))]).is_empty());
+    }
 
     /// A lane is listed when its last run is over and nothing newer came from it: not while
     /// something runs, not after it acted on the result by landing, and not for ever.
@@ -2104,6 +2334,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Synthetic live leases, later landings and file activity survive cleanup/restart (11-15).
+    #[test]
+    fn landed_lane_waits_for_live_runs_landings_and_durable_activity() {
+        use crate::lease::{sched::Req, Kind};
+        use crate::state::{Doc, Live};
+        let base = std::env::temp_dir().join(format!("devhub-lane-live-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mk = base.join("makepad");
+        repo(&mk, "work");
+        let home = base.join("state");
+        std::fs::create_dir_all(&home).unwrap();
+        let leases = Arc::new(LeaseMaster::new("", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        let mut ctx = Ctx { store: Store::open(&home, "", Arc::new(|_| 0)).unwrap(), leases, machine: String::new(), monitor: crate::monitor::Monitor::start(&[]), repo: mk.clone(), home: home.clone() };
+        serve(&ctx, "lane new {\"name\":\"x\",\"commercial\":false}").unwrap();
+        let lane = base.join("wt.noindex/x");
+        let nested = lane.join("apps/commercial");
+        std::fs::create_dir_all(&nested).unwrap();
+        g(&lane, &["commit", "-q", "--allow-empty", "-m", "lane work"]);
+        g(&mk, &["merge", "-q", "--no-ff", "-m", "land", "rc-x"]);
+        let (now, old) = (wall_ms(), wall_ms() - 2 * GRACE_MS);
+        set(&ctx, "x", |l| l.landed_ms = old);
+        let kept = |ctx: &Ctx, why: &str| {
+            // No process scan or watcher timing: this fixture owns every file and run.
+            cleanup_pass(ctx, Vec::new);
+            let l = ctx.store.read(|d| d.lanes[0].clone());
+            assert!(l.state == "live" && lane.exists(), "{why}: {} ({})", l.state, l.note);
+            l
+        };
+        ctx.store.update(|d| d.lives.push(Live { id: "W1".into(), lane: "other".into(), tree: lane.to_string_lossy().into_owned(), state: "running".into(), ..Default::default() })).unwrap();
+        let l = kept(&ctx, "an active session keeps its worktree despite a different lane name");
+        assert!(l.note.contains("live job W1 runs from this worktree"), "the refusal names the live job: {}", l.note);
+        assert_eq!(saved_open_run(&home, &l).unwrap().as_deref(), Some("live job W1 runs from this worktree"), "prune sees the durable active session");
+        let mut views = Views::open(&ctx).unwrap();
+        assert!(removable(&ctx, &l, &mut views, &[], &[], true).unwrap_err().contains("live job W1"), "explicit removal keeps the active session too");
+        ctx.store.update(|d| d.lives[0].tree = nested.to_string_lossy().into_owned()).unwrap();
+        assert!(kept(&ctx, "a live session inside commercial keeps the outer worktree").note.contains("W1"), "nested session is named");
+        ctx.store.update(|d| d.lives.clear()).unwrap();
+
+        // Each lease is matched once by its root, its nested repo_dir, or the live session's id.
+        for tree in [lane.to_string_lossy().into_owned(), nested.to_string_lossy().into_owned(), String::new()] {
+            let mut req = Req::new("live-w1", Kind::Test);
+            req.repo_dir = (!tree.is_empty()).then(|| tree.clone());
+            let mut id = String::new();
+            ctx.leases.test_sched(|s| {
+                id = s.request(req.clone(), now);
+                std::fs::write(home.join("leases.live"), s.live_lines().join("\n")).unwrap();
+            });
+            if tree.is_empty() {
+                ctx.store.update(|d| d.lives.push(Live { id: "W1".into(), lane: "x".into(), lease: id.clone(), state: "ended".into(), ended_ms: old, touched_ms: old, ..Default::default() })).unwrap();
+            }
+            let l = kept(&ctx, "a synthetic open lease keeps the lane by path or session linkage");
+            let why = format!("a lease of the lane is open ({id})");
+            assert!(l.note.contains(&why), "the refusal names the lease: {}", l.note);
+            assert!(removable(&ctx, &l, &mut views, &[], &[], true).unwrap_err().contains(&why), "explicit removal keeps the synthetic lease");
+            if !tree.is_empty() { assert_eq!(saved_open_run(&home, &l).unwrap(), Some(why), "prune sees the durable lease's repo_dir"); }
+            ctx.leases.test_sched(|s| { assert!(s.release(&id, "released", old), "the fixture lease ends"); });
+            let ledger = |at| std::fs::write(home.join("leases.jsonl"), format!("{{\"id\":{},\"lane\":\"live-w1\",\"ended_ms\":{at},\"req\":{}}}\n", json_str(&id), req.to_json())).unwrap();
+            ledger(now);
+            kept(&ctx, "a recently ended synthetic lease keeps the lane by path or session linkage");
+            ledger(old);
+            ctx.store.update(|d| d.lives.clear()).unwrap();
+        }
+        std::fs::write(home.join("leases.live"), "").unwrap();
+        ctx.store.update(|d| d.lives.push(Live { id: "W2".into(), lane: "x".into(), state: "ended".into(), ended_ms: now, touched_ms: old, ..Default::default() })).unwrap();
+        kept(&ctx, "a recently ended live session keeps the lane by name");
+        ctx.store.update(|d| { d.lives[0].ended_ms = old; d.lives[0].touched_ms = now; }).unwrap();
+        kept(&ctx, "a live session's last touch also starts the grace");
+        ctx.store.update(|d| d.lives[0].touched_ms = old).unwrap();
+
+        for (branch, cbranch) in [("rc-x", ""), ("other", "rc-commercial")] {
+            set(&ctx, "x", |l| { l.landed_ms = old; l.cbranch = "rc-commercial".into(); });
+            let entry = |at| makepad_strict_json::parse(format!(r#"{{"branch":"{branch}","cbranch":"{cbranch}","state":"landed","changed_ms":{at}}}"#).as_bytes()).unwrap();
+            ctx.store.update(|d| d.land = vec![entry(now), entry(old)]).unwrap();
+            assert_eq!(kept(&ctx, "the newest landing of either branch restarts the grace").landed_ms, now, "the later landing advances the saved clock regardless of queue order");
+            ctx.store.update(|d| d.land.clear()).unwrap();
+            set(&ctx, "x", |l| { l.landed_ms = old; l.cbranch.clear(); });
+        }
+
+        for tree in [&lane, &nested] {
+            ctx.monitor.set_last_event_ms(tree, now);
+            assert_eq!(kept(&ctx, "activity in either half keeps the lane").active_ms, now, "file activity is saved");
+            ctx.monitor = crate::monitor::Monitor::start(&[]);
+            let saved = crate::state::committed(&home).unwrap().unwrap();
+            assert_eq!(Doc::from_value(&saved).lanes[0].active_ms, now, "the activity reached durable state");
+            assert_eq!(ctx.monitor.last_event_ms(tree), 0, "the new monitor has heard nothing");
+            kept(&ctx, "persisted activity protects the lane after a master restart");
+            set(&ctx, "x", |l| l.active_ms = old);
+        }
+        let legacy = Doc::parse(r#"{"lanes":[{"name":"x","state":"live"}]}"#).unwrap();
+        assert_eq!(legacy.lanes[0].active_ms, 0, "old lane records load without activity");
+        let other = format!("{}-other", lane.to_string_lossy());
+        ctx.store.update(|d| d.lives.push(Live { id: "W3".into(), lane: "other".into(), tree: other.clone(), state: "running".into(), ..Default::default() })).unwrap();
+        std::fs::write(home.join("leases.jsonl"), format!("{{\"id\":\"L9\",\"lane\":\"live-w3\",\"ended_ms\":{now},\"req\":{{\"repo_dir\":{}}}}}\n", json_str(&other))).unwrap();
+        drop(views);
+        // The node dirs go first; the worktree and branches once the lane's agents are idle too (11-16).
+        set(&ctx, "x", |l| l.created_ms = old - GRACE_MS);
+        let entry = makepad_strict_json::parse(format!(r#"{{"branch":"rc-x","agent":"AGENT-X","state":"landed","changed_ms":{old}}}"#).as_bytes()).unwrap();
+        ctx.store.update(|d| d.land = vec![entry]).unwrap();
+        let restart = |ctx: &mut Ctx| ctx.leases = Arc::new(LeaseMaster::new("", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".into())), Arc::new(|_| {}), Arc::new(wall_ms), None, true));
+        restart(&mut ctx);
+        ctx.leases.agent_heard("AGENT-X");
+        let heard = ctx.leases.agent_seen_ms("AGENT-X");
+        let l = kept(&ctx, "all lane activity is old and a sibling with the same path prefix is unrelated, but its agent called");
+        assert!(l.dirs_ms >= now && l.note.contains("node dirs (0 MB) cleaned"), "its node dirs went: {l:?}");
+        assert_eq!(l.agent_ms, heard, "the hand-in's agent's call is saved");
+        kept(&ctx, "a devhub call of the lane's agent within the hour keeps its worktree");
+        restart(&mut ctx);
+        assert_eq!(ctx.leases.agent_seen_ms("AGENT-X"), 0, "the restarted master heard no one");
+        assert_eq!(kept(&ctx, "the saved call keeps it after a master restart").dirs_ms, l.dirs_ms, "the node dirs are cleaned once per quiet spell");
+        set(&ctx, "x", |l| l.agent_ms = old);
+        cleanup_pass(&ctx, Vec::new);
+        let l = ctx.store.read(|d| d.lanes[0].clone());
+        assert_eq!(l.state, "removed", "its agent idle for the hour too: {}", l.note);
+        assert!(!lane.exists() && g(&mk, &["branch", "--list", "rc-x"]).is_empty(), "the idle landed worktree and branch are removed");
+        drop(ctx);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// new, a landing, the cleanup (after its grace) and a drop, on throwaway repos.
     #[test]
     fn lanes_are_made_cleaned_after_landing_and_dropped() {
@@ -2200,6 +2548,15 @@ mod tests {
         assert_eq!(state("r"), "live");
         ledger(wall_ms() - GRACE_MS - 1);
         cleanup(&ctx);
+        // its node dirs go at the grace; its worktree waits an hour since that run too (11-16)
+        assert_eq!(state("r"), "live");
+        assert!(ctx.store.read(|d| d.lanes.iter().rev().find(|l| l.name == "r").unwrap().dirs_ms) > 0, "its node dirs went");
+        set(&ctx, "r", |x| x.agent_ms = 1);
+        cleanup(&ctx);
+        assert_eq!(state("r"), "live", "a run that ended within the hour keeps the worktree with no agent call saved");
+        ledger(wall_ms() - AGENT_IDLE_MS - 1);
+        set(&ctx, "r", |x| x.agent_ms = 1);
+        cleanup(&ctx);
         assert_eq!(state("r"), "removed");
         assert!(!ran.exists());
         // branch and worktree gone some other way: the pass clears the record, and so does asking
@@ -2230,16 +2587,18 @@ mod tests {
 
     /// `lane offers --check` reads each offered worktree here: a clean one retires (its bytes and
     /// its nodes' dirs counted), one with an untracked file or a run the master named refuses, by
-    /// reason; a node that did not answer is named.
+    /// reason; a node that did not answer is named. `retire --clean-offers` also keeps held lanes
+    /// and changes absent from either target, using land's merge through retired chains (11-14).
     #[test]
     fn offers_are_checked_by_what_would_refuse_them() {
         let base = std::env::temp_dir().join(format!("devhub-lane-offers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         for name in ["clean", "untracked", "leased"] {
             repo(&base.join(name), "rc-x");
+            g(&base.join(name), &["branch", "work"]);
         }
         std::fs::write(base.join("untracked/notes.txt"), "n").unwrap();
-        let lane = |name: &str, class: &str| format!("{{\"name\":\"{name}\",\"path\":{},\"refused_class\":\"{class}\",\"refused\":\"{class}\"}}", json_str(&base.join(name).to_string_lossy()));
+        let lane = |name: &str, class: &str| format!("{{\"name\":\"{name}\",\"path\":{},\"branch\":\"rc-x\",\"cbranch\":\"\",\"held\":\"\",\"refused_class\":\"{class}\",\"refused\":\"{class}\"}}", json_str(&base.join(name).to_string_lossy()));
         let offers = makepad_strict_json::parse(format!("{{\"lanes\":[{},{},{}]}}", lane("clean", ""), lane("untracked", ""), lane("leased", "a lease of the lane is open")).as_bytes()).unwrap();
         let nodes = vec![("box-a".to_string(), Ok(makepad_strict_json::parse(br#"{"lanes":{"clean":1073741824,"other":5}}"#).unwrap())), ("box-b".to_string(), Err("link lost".to_string()))];
         let out = check_offers(&offers, &nodes);
@@ -2248,6 +2607,61 @@ mod tests {
         assert!(clean.split_whitespace().nth(2) == Some("1") && clean.ends_with("1.0 GB"), "{out}");
         assert!(out.contains("uncommitted or untracked files: untracked\n") && out.contains("a lease of the lane is open: leased\n"), "{out}");
         assert!(out.contains("node dirs not read: box-b (link lost)"), "{out}");
+        let list = offers.get("lanes").unwrap().as_arr().unwrap();
+        assert_eq!(clean_offer_refusal(&list[0]), None, "a fresh clean branch changes nothing");
+        assert!(clean_offer_refusal(&list[1]).unwrap().contains("notes.txt"), "untracked work keeps the lane");
+        assert_eq!(clean_offer_refusal(&list[2]).as_deref(), Some("a lease of the lane is open"));
+        let held = makepad_strict_json::parse(br#"{"held":"timed work"}"#).unwrap();
+        assert_eq!(clean_offer_refusal(&held).as_deref(), Some("its branch is held: timed work"));
+
+        // Land by content, then merge work back into the lane: its tip is not in work (11-14).
+        let clean = base.join("clean");
+        std::fs::write(clean.join("landed.txt"), "landed").unwrap();
+        g(&clean, &["add", "."]);
+        g(&clean, &["commit", "-q", "-m", "lane change"]);
+        g(&clean, &["checkout", "-q", "work"]);
+        g(&clean, &["merge", "--squash", "rc-x"]);
+        g(&clean, &["commit", "-q", "-m", "land lane change"]);
+        std::fs::write(clean.join("other.txt"), "another landing").unwrap();
+        g(&clean, &["add", "."]);
+        g(&clean, &["commit", "-q", "-m", "another landing"]);
+        g(&clean, &["checkout", "-q", "rc-x"]);
+        g(&clean, &["merge", "-q", "--no-ff", "-m", "merge work", "work"]);
+        assert!(!crate::gitread::is_ancestor(&clean, "rc-x", "work"), "the merge bot's tip need not be an ancestor");
+        assert_eq!(clean_offer_refusal(&list[0]), None, "landed content retires after merging work");
+
+        std::fs::write(clean.join("a.txt"), "lane change").unwrap();
+        g(&clean, &["add", "."]);
+        g(&clean, &["commit", "-q", "-m", "unlanded change"]);
+        assert_eq!(clean_offer_refusal(&list[0]).as_deref(), Some("rc-x has changes work lacks"));
+        let before = g(&clean, &["rev-parse", "work"]);
+        g(&clean, &["checkout", "-q", "work"]);
+        std::fs::write(clean.join("a.txt"), "conflicting change").unwrap();
+        g(&clean, &["add", "."]);
+        g(&clean, &["commit", "-q", "-m", "conflicting change"]);
+        assert_eq!(clean_offer_refusal(&list[0]).as_deref(), Some("its branch rc-x does not merge cleanly into work: a.txt"));
+        g(&clean, &["reset", "--hard", &before]);
+
+        // Its changes landed on the retired chain; newer work has changed the same file again.
+        g(&clean, &["merge", "-q", "--no-ff", "-m", "land remaining change", "rc-x"]);
+        g(&clean, &["branch", "work-old-2026-11-14", "work"]);
+        let tree = g(&clean, &["rev-parse", "work^{tree}"]);
+        let squashed = g(&clean, &["commit-tree", &tree, "-m", "squashed work"]);
+        g(&clean, &["reset", "--hard", &squashed]);
+        std::fs::write(clean.join("a.txt"), "after promotion").unwrap();
+        g(&clean, &["add", "."]);
+        g(&clean, &["commit", "-q", "-m", "after promotion"]);
+        g(&clean, &["checkout", "-q", "rc-x"]);
+        assert_eq!(clean_offer_refusal(&list[0]), None, "retired-chain content must not be counted again");
+
+        repo(&clean.join("apps/commercial"), "rc-commercial");
+        g(&clean.join("apps/commercial"), &["branch", "main"]);
+        let pair = makepad_strict_json::parse(lane("clean", "").replace("\"cbranch\":\"\"", "\"cbranch\":\"rc-commercial\"").as_bytes()).unwrap();
+        assert_eq!(clean_offer_refusal(&pair), None, "both halves have landed");
+        std::fs::write(clean.join("apps/commercial/a.txt"), "commercial change").unwrap();
+        g(&clean.join("apps/commercial"), &["add", "."]);
+        g(&clean.join("apps/commercial"), &["commit", "-q", "-m", "commercial change"]);
+        assert_eq!(clean_offer_refusal(&pair).as_deref(), Some("rc-commercial has changes main lacks"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2324,6 +2738,19 @@ mod tests {
         assert_eq!(g(&mk.join("apps/commercial"), &["branch", "--list", "rc-p"]), "rc-p");
         assert!(ctx.store.read(|d| d.held.is_empty()));
         assert_eq!(ctx.store.read(|d| d.lanes[0].state.clone()), "retired");
+        ctx.store.update(|d| d.lanes.push(LaneRec { name: "offered".into(), path: base.join("offered").to_string_lossy().into_owned(), branch: "rc-offered".into(), cbranch: "rc-offered-commercial".into(), state: "live".into(), created_ms: 1, ..LaneRec::default() })).unwrap();
+        let offered = || {
+            let v = makepad_strict_json::parse(offers(&ctx).as_bytes()).unwrap();
+            v.get("lanes").unwrap().as_arr().unwrap()[0].clone()
+        };
+        assert_eq!(offered().get("held").and_then(|v| v.as_str()), Some(""));
+        for branch in ["rc-offered", "rc-offered-commercial"] {
+            crate::sync::lanes::hold_in(&ctx.store, branch, "timed work").unwrap();
+            let offer = offered();
+            assert_eq!(offer.get("held").and_then(|v| v.as_str()), Some("timed work"), "a hold on either half is reported");
+            assert_eq!(clean_offer_refusal(&offer).as_deref(), Some("its branch is held: timed work"));
+            crate::sync::lanes::unhold_in(&ctx.store, branch).unwrap();
+        }
         drop(ctx);
         let _ = std::fs::remove_dir_all(&base);
     }
