@@ -28,7 +28,7 @@
 //! (degrees, counter-clockwise; it joins the pen with a line, or starts a
 //! stroke when the pen is up), and `;` lifts the pen.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "shaping"))]
 use makepad_script_compute_sched::kernel::KernelExt;
 use super::karaoke::SungWord;
 use std::collections::HashMap;
@@ -663,6 +663,7 @@ mod tests {
     /// AK9: a kernel writes the strokes as line segments with a birth, in
     /// the order and at the pace `write_on` writes them.
     #[test]
+    #[cfg(feature = "shaping")]
     fn a_kernel_writes_strokes_on_with_births() {
         use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
         use makepad_script_compute::kernel::{compile_with, FieldTy};

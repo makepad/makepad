@@ -9,8 +9,12 @@
 //! row or picture breaks (a heading goes with the text under it), then has
 //! each page rendered off screen (`PageRender`), compressed on a worker of
 //! its own (pages in parallel) and added to the PDF in order on another.
+//! Pages carry PDF text over a picture without that text; blank paper is
+//! left out of the pictures.
 
 use crate::editor::{follows_block, heading_anchor, slug, RowCache};
+use crate::pdf_structure::{PageStructure, StructureBuilder};
+use crate::pdf_text::{PdfText, TextStats};
 use crate::rowmap::flat_of;
 use makepad_markdown_edit::{
     parse_options,
@@ -19,9 +23,10 @@ use makepad_markdown_edit::{
 };
 use makepad_pdf_write::{
     DocInfo, Link as PdfLink, LinkTarget, OutlineEntry, Page, PageImage, PdfWriter, Rect as PdfRect, RgbImage,
-    RgbImageEncoder,
+    RgbImageEncoder, StructId, Tagging, WritingMode,
 };
 use makepad_widgets_core::image_cache::{decode_image_from_data, looks_like_svg, ImageBuffer};
+use makepad_widgets_core::makepad_draw::glyph_capture::CapturedText;
 use makepad_widgets_core::makepad_platform::thread::{Class, SignalToUI, TaskHandle};
 use makepad_widgets_core::*;
 use makepad_widgets_rich_text::markdown::{picture_bytes, resolve_source, Markdown, MarkdownHost};
@@ -51,11 +56,26 @@ pub enum PrintUpdate {
 }
 
 enum Writer {
-    Idle(PdfWriter),
+    Idle(Document),
     /// A step on a worker hands back what it made and how long it took.
-    Adding(TaskHandle<(PdfWriter, f64)>),
-    Finishing(TaskHandle<(Arc<[u8]>, f64)>),
+    Adding(TaskHandle<(Document, f64)>),
+    Finishing(TaskHandle<Result<(Arc<[u8]>, TextStats, f64), String>>),
     Done,
+}
+
+/// The writer, the shared font bytes its pages have used and the writer's ids of the structure
+/// elements so far, moving together between workers.
+struct Document {
+    writer: PdfWriter,
+    text: PdfText,
+    ids: Vec<StructId>,
+}
+
+/// A page's compressed pictures and the text that belongs above them.
+struct CompressedPage {
+    segments: Vec<(RgbImage, Range<usize>)>,
+    text: Option<CapturedText>,
+    left_out: usize,
 }
 
 /// A picture read and decoded on a worker.
@@ -90,6 +110,8 @@ struct Times {
     band_total: f64,
     band_max: f64,
     bands: usize,
+    /// Bands read back; the others were paper.
+    read_bands: usize,
     /// The pages' compression on workers (pixels to RGB, Flate), summed
     /// and the longest, and the times rendering waited for it.
     compress: f64,
@@ -99,6 +121,8 @@ struct Times {
     writer: f64,
     /// The link areas the pages hold.
     links: usize,
+    segments: usize,
+    blank_rows: usize,
 }
 
 /// A heading as the PDF finds it: a bookmark, and where `#anchor` links go.
@@ -128,16 +152,19 @@ pub(crate) struct PrintJob {
     headings: Vec<Heading>,
     /// Each page's links, found in the first draw of its page.
     links: Vec<Option<Vec<PdfLink>>>,
+    /// The document's structure elements, made as pages are first drawn, and each page's part.
+    structure: StructureBuilder,
+    page_structures: Vec<Option<PageStructure>>,
     /// Pages handed to the renderer, rendered, and added to the PDF.
     started: usize,
     rendered: usize,
     added: usize,
     /// Pages compressing, in page order, how many may at once, and the
     /// compressed ones waiting for the writer.
-    compressing: VecDeque<TaskHandle<(RgbImage, f64)>>,
+    compressing: VecDeque<TaskHandle<(CompressedPage, f64)>>,
     ahead: usize,
     held: bool,
-    compressed: Vec<RgbImage>,
+    compressed: Vec<CompressedPage>,
     writer: Writer,
     times: Times,
 }
@@ -145,7 +172,11 @@ pub(crate) struct PrintJob {
 impl PrintJob {
     /// A job over `lines`, whose relative pictures are read from `base_dir`.
     pub(crate) fn new(cx: &mut Cx, title: &str, index: Index, lines: Vec<String>, base_dir: Option<PathBuf>) -> Self {
-        let writer = PdfWriter::new(DocInfo { title: title.to_string(), producer: "Makepad".to_string() });
+        let mut writer = PdfWriter::new(DocInfo { title: title.to_string(), producer: "Makepad".to_string() });
+        // The view lays every paragraph out left to right.
+        writer.set_tagged(Tagging { lang: front_matter_lang(&lines), direction: WritingMode::LrTb });
+        let mut render = PageRender::new(cx, PageFormat::a4());
+        render.set_text_capture(true);
         let lines = Arc::new(lines);
         let copy = lines.clone();
         let find = move || {
@@ -168,12 +199,14 @@ impl PrintJob {
             lines,
             pictures,
             loaded: HashMap::new(),
-            render: PageRender::new(cx, PageFormat::a4()),
+            render,
             items: Vec::new(),
             tops: Vec::new(),
             pages: Vec::new(),
             headings: Vec::new(),
             links: Vec::new(),
+            structure: StructureBuilder::default(),
+            page_structures: Vec::new(),
             started: 0,
             rendered: 0,
             added: 0,
@@ -181,7 +214,7 @@ impl PrintJob {
             ahead: PAGES_AHEAD.min(cx.task_pool().worker_count()).max(1),
             held: false,
             compressed: Vec::new(),
-            writer: Writer::Idle(writer),
+            writer: Writer::Idle(Document { writer, text: PdfText::new(), ids: Vec::new() }),
             times: Times { started: Cx::time_now(), ..Times::default() },
         }
     }
@@ -203,25 +236,37 @@ impl PrintJob {
             self.measure(cx, md, rows);
             return;
         }
-        let Some(page) = self.render.begin_page(cx) else { return };
-        let start = Cx::time_now();
-        let record = self.links.get(page).is_some_and(Option::is_none);
-        if let (Some(found), Some(slot)) = (self.draw_page(cx, md, page, record), self.links.get_mut(page)) {
-            *slot = Some(found);
+        // A few bands of the page each draw, each into a target of its own.
+        while let Some(page) = self.render.begin_page(cx) {
+            let start = Cx::time_now();
+            // The page's first draw finds its links and its part of the structure.
+            let mut builder = self.links.get(page).is_some_and(Option::is_none).then(|| std::mem::take(&mut self.structure));
+            let found = self.draw_page(cx, md, page, builder.as_mut());
+            if let Some(builder) = builder {
+                self.structure = builder;
+            }
+            if let Some((links, structure)) = found {
+                if let Some(slot) = self.links.get_mut(page) {
+                    *slot = Some(links);
+                }
+                if let Some(slot) = self.page_structures.get_mut(page) {
+                    *slot = Some(structure);
+                }
+            }
+            // The page's number, centred in the margin under the text.
+            let format = *self.render.format();
+            let content = format.content();
+            let foot = Walk::abs_rect(Rect {
+                pos: dvec2(content.pos.x, content.pos.y + content.size.y),
+                size: dvec2(content.size.x, format.margin.bottom),
+            });
+            number.draw_walk(cx, foot, Align { x: 0.5, y: 0.5 }, &format!("{} / {}", page + 1, self.pages.len()));
+            self.render.end_page(cx);
+            let took = Cx::time_now() - start;
+            self.times.band_total += took;
+            self.times.band_max = self.times.band_max.max(took);
+            self.times.bands += 1;
         }
-        // The page's number, centred in the margin under the text.
-        let format = *self.render.format();
-        let content = format.content();
-        let foot = Walk::abs_rect(Rect {
-            pos: dvec2(content.pos.x, content.pos.y + content.size.y),
-            size: dvec2(content.size.x, format.margin.bottom),
-        });
-        number.draw_walk(cx, foot, Align { x: 0.5, y: 0.5 }, &format!("{} / {}", page + 1, self.pages.len()));
-        self.render.end_page(cx);
-        let took = Cx::time_now() - start;
-        self.times.band_total += took;
-        self.times.band_max = self.times.band_max.max(took);
-        self.times.bands += 1;
     }
 
     fn measure(&mut self, cx: &mut Cx2d, md: &mut Markdown, rows: usize) {
@@ -233,7 +278,7 @@ impl PrintJob {
         let until = start + MEASURE_SLICE;
         while self.items.len() < rows {
             let row = self.items.len();
-            let (height, bands) = self.draw_row(cx, md, row, dvec2(0.0, 0.0), content.size.x, None);
+            let (height, bands) = self.draw_row(cx, md, row, dvec2(0.0, 0.0), content.size.x, None, None);
             let keep_with_next = matches!(self.index.blocks()[self.index.row(row).block].kind, BlockKind::Heading(_));
             self.items.push(PageItem { height, bands, keep_with_next });
             if Cx::time_now() > until {
@@ -260,6 +305,7 @@ impl PrintJob {
         self.pages = paginate(&self.items, content.size.y);
         self.headings = self.find_headings(content.pos.y);
         self.links = (0..self.pages.len()).map(|_| None).collect();
+        self.page_structures = (0..self.pages.len()).map(|_| None).collect();
         self.times.paginated = Cx::time_now();
         self.next_page(cx);
     }
@@ -316,7 +362,9 @@ impl PrintJob {
 
     /// Draws row `row` of the copy at `pos`, `width` across: its height and
     /// the bands a page break must not cut. With `links`, adds where each
-    /// of its links drew (a rect per line) and its destination.
+    /// of its links drew (a rect per line) and its destination; with `tree`,
+    /// its elements and where their lines drew on page `tree.2`.
+    #[allow(clippy::too_many_arguments)]
     fn draw_row(
         &self,
         cx: &mut Cx2d,
@@ -325,6 +373,7 @@ impl PrintJob {
         pos: DVec2,
         width: f64,
         links: Option<&mut Vec<(String, Rect)>>,
+        tree: Option<(&mut StructureBuilder, &mut PageStructure, usize)>,
     ) -> (f64, Vec<Range<f64>>) {
         let index = &self.index;
         let row = index.row(row_id);
@@ -350,18 +399,37 @@ impl PrintJob {
                 }
             }
         }
+        if let Some((builder, structure, page)) = tree {
+            let shift = md.text_flow.drawn_shift(cx);
+            let (flow, pieces) = (&md.text_flow, &host.pieces);
+            let rects = |start: usize, end: usize| -> Vec<Rect> {
+                flow.selection_rects(flat_of(pieces, start), flat_of(pieces, end))
+                    .into_iter()
+                    .map(|rect| Rect { pos: rect.pos + shift, size: rect.size })
+                    .collect()
+            };
+            builder.walk_row(structure, page, row_id, row.block, pos.x, &cache.events, &rects);
+        }
         (md.text_flow.area().rect(cx).size.y, md.text_flow.break_hints(cx))
     }
 
-    /// Draws page `page`; with `record`, answers the links it holds.
-    fn draw_page(&self, cx: &mut Cx2d, md: &mut Markdown, page: usize, record: bool) -> Option<Vec<PdfLink>> {
+    /// Draws page `page`; with `builder` (its first draw), answers the links it holds and its
+    /// part of the document's structure.
+    fn draw_page(
+        &self,
+        cx: &mut Cx2d,
+        md: &mut Markdown,
+        page: usize,
+        mut builder: Option<&mut StructureBuilder>,
+    ) -> Option<(Vec<PdfLink>, PageStructure)> {
         let content = self.render.format().content();
         let window = self.pages[page].clone();
         // The page shows its share of the stack, clipped below where its
         // last line ends (the next page starts there).
         let clip = Rect { pos: content.pos, size: dvec2(content.size.x, window.end - window.start) };
         cx.begin_turtle(Walk::abs_rect(clip), Layout::flow_overlay());
-        let mut found = record.then(Vec::new);
+        let mut found = builder.is_some().then(Vec::new);
+        let mut structure = builder.as_deref().map(StructureBuilder::begin_page);
         let first = self
             .tops
             .iter()
@@ -375,11 +443,20 @@ impl PrintJob {
             }
             if self.items[row].height > 0.0 {
                 let pos = content.pos + dvec2(0.0, top - window.start);
-                self.draw_row(cx, md, row, pos, content.size.x, found.as_mut());
+                if let Some(structure) = &mut structure {
+                    let (top, bottom) = (pos.y.max(clip.pos.y), (pos.y + self.items[row].height).min(clip.pos.y + clip.size.y));
+                    structure.add_row(top, bottom);
+                }
+                let tree = match (&mut builder, &mut structure) {
+                    (Some(builder), Some(structure)) => Some((&mut **builder, structure, page)),
+                    _ => None,
+                };
+                self.draw_row(cx, md, row, pos, content.size.x, found.as_mut(), tree);
             }
         }
         cx.end_turtle();
-        found.map(|found| found.into_iter().filter_map(|(url, rect)| self.pdf_link(&url, rect, clip)).collect())
+        let links = found?.into_iter().filter_map(|(url, rect)| self.pdf_link(&url, rect, clip)).collect();
+        Some((links, structure.unwrap_or_default()))
     }
 
     /// Renders the next page while few rendered ones are compressing.
@@ -398,14 +475,12 @@ impl PrintJob {
     }
 
     /// Compresses a rendered page on a worker, a band at a time.
-    fn compress(&mut self, cx: &mut Cx, page: RenderedPage) -> Result<(), String> {
+    fn compress(&mut self, cx: &mut Cx, page: RenderedPage, text: Option<CapturedText>) -> Result<(), String> {
         let job = move || {
             let start = Cx::time_now();
-            let mut encoder = RgbImageEncoder::new(page.width as u32, page.height as u32);
-            page.rgb_bands(|rgb| encoder.write(rgb));
-            let image = encoder.finish();
+            let (segments, left_out) = compress_segments(&page);
             SignalToUI::set_ui_signal();
-            (image, Cx::time_now() - start)
+            (CompressedPage { segments, text, left_out }, Cx::time_now() - start)
         };
         let task = cx.task_pool().submit(Class::Visible, job).map_err(|error| format!("no worker to compress a page on: {error}"))?;
         self.compressing.push_back(task);
@@ -489,8 +564,10 @@ impl PrintJob {
         }
         let mut update = None;
         match self.render.handle_event(cx, event) {
-            Some(Ok(page)) => {
-                if let Err(error) = self.compress(cx, page) {
+            Some(Ok(mut page)) => {
+                self.times.read_bands += page.read_bands();
+                let text = page.text.take();
+                if let Err(error) = self.compress(cx, page, text) {
                     return Some(PrintUpdate::Failed(error));
                 }
                 self.rendered += 1;
@@ -514,10 +591,12 @@ impl PrintJob {
             let Some(result) = task.try_take() else { break };
             self.compressing.pop_front();
             match result {
-                Ok((image, took)) => {
+                Ok((page, took)) => {
                     self.times.compress += took;
                     self.times.compress_max = self.times.compress_max.max(took);
-                    self.compressed.push(image);
+                    self.times.segments += page.segments.len();
+                    self.times.blank_rows += page.left_out;
+                    self.compressed.push(page);
                 }
                 Err(error) => return Some(PrintUpdate::Failed(format!("a page could not be compressed: {error:?}"))),
             }
@@ -531,21 +610,24 @@ impl PrintJob {
                 Err(error) => return Some(PrintUpdate::Failed(format!("the PDF writer stopped: {error:?}"))),
             },
             Writer::Finishing(task) => {
-                let pdf = match task.try_take()? {
-                    Ok((pdf, took)) => {
+                let (pdf, text) = match task.try_take()? {
+                    Ok(Ok((pdf, text, took))) => {
                         self.times.writer += took;
-                        pdf
+                        (pdf, text)
                     }
+                    Ok(Err(error)) => return Some(PrintUpdate::Failed(error)),
                     Err(error) => return Some(PrintUpdate::Failed(format!("the PDF writer stopped: {error:?}"))),
                 };
                 self.writer = Writer::Done;
                 let now = Cx::time_now();
                 let t = &self.times;
                 log!(
-                    "print: {} pages, {} rows, {} bytes in {:.0} ms: pictures {} ({} not loaded) {:.0} ms, measure {:.0} ms (frame max {:.1} ms), paginate {:.2} ms, pages {:.0} ms ({} band draws, mean {:.1} ms, max {:.1} ms), compress {:.0} ms on up to {} workers (page max {:.0} ms, rendering held {} times), writer {:.0} ms; {} links, {} bookmarks",
+                    "print: {} pages, {} rows, {} bytes ({} per page, {:.0} ms per page) in {:.0} ms: pictures {} ({} not loaded) {:.0} ms, measure {:.0} ms (frame max {:.1} ms), paginate {:.2} ms, pages {:.0} ms ({} band draws, mean {:.1} ms, max {:.1} ms, {} of {} bands read back), compress {:.0} ms on up to {} workers (page max {:.0} ms, rendering held {} times), writer {:.0} ms, text {} runs, {} glyphs ({} invisible, {} clipped), fonts {} + {} Type 3 built in {:.0} ms ({:.1} KB), images {} ({} blank rows left out); {} links, {} bookmarks, structure {} elements, lines {} tagged, {} artifacts, {} unmarked, {} right-to-left stretches, {} formula rows ({} glyphs as shapes)",
                     self.pages.len(),
                     self.items.len(),
                     pdf.len(),
+                    pdf.len() / self.pages.len().max(1),
+                    (now - t.started) * 1e3 / self.pages.len().max(1) as f64,
                     (now - t.started) * 1e3,
                     t.picture_count,
                     t.pictures_failed,
@@ -557,13 +639,32 @@ impl PrintJob {
                     t.bands,
                     t.band_total * 1e3 / t.bands.max(1) as f64,
                     t.band_max * 1e3,
+                    t.read_bands,
+                    self.pages.len() * self.render.bands_per_page(),
                     t.compress * 1e3,
                     self.ahead,
                     t.compress_max * 1e3,
                     t.held,
                     t.writer * 1e3,
+                    text.runs,
+                    text.glyphs,
+                    text.invisible,
+                    text.clipped,
+                    text.sfnt_fonts,
+                    text.type3_fonts,
+                    text.font_time * 1e3,
+                    text.font_bytes as f64 / 1024.0,
+                    t.segments,
+                    t.blank_rows,
                     t.links,
                     self.headings.len(),
+                    self.structure.element_count(),
+                    text.tagged_lines,
+                    text.artifact_lines,
+                    text.untagged_lines,
+                    text.rtl_stretches,
+                    text.pictured_rows,
+                    text.shape_glyphs,
                 );
                 return Some(PrintUpdate::Done(pdf));
             }
@@ -571,37 +672,52 @@ impl PrintJob {
         }
         let Writer::Idle(_) = &self.writer else { return None };
         if !self.compressed.is_empty() {
-            let Writer::Idle(mut writer) = std::mem::replace(&mut self.writer, Writer::Done) else { return None };
+            let Writer::Idle(mut document) = std::mem::replace(&mut self.writer, Writer::Done) else { return None };
             let pages = std::mem::take(&mut self.compressed);
             let first = self.added;
             self.added += pages.len();
             let links: Vec<Vec<PdfLink>> =
                 (first..self.added).map(|page| self.links.get_mut(page).and_then(Option::take).unwrap_or_default()).collect();
             self.times.links += links.iter().map(Vec::len).sum::<usize>();
+            let structures: Vec<Option<PageStructure>> =
+                (first..self.added).map(|page| self.page_structures.get_mut(page).and_then(Option::take)).collect();
             let format = *self.render.format();
             let job = move || {
                 let start = Cx::time_now();
-                for (image, links) in pages.into_iter().zip(links) {
-                    writer.add_page(Page {
+                let (_, rows) = format.pixels();
+                let page_w = format.size.x as f32;
+                let page_h = format.size.y as f32;
+                for ((page, links), structure) in pages.into_iter().zip(links).zip(structures) {
+                    let tags = structure.map(|structure| structure.resolve(&mut document.writer, &mut document.ids));
+                    let text = page
+                        .text
+                        .as_ref()
+                        .map(|captured| document.text.page_runs(&mut document.writer, captured, tags.as_ref()))
+                        .unwrap_or_default();
+                    let images = page.segments.into_iter().map(|(image, range)| PageImage {
+                        image,
+                        rect: PdfRect {
+                            x: 0.0, y: range.start as f32 * page_h / rows as f32, w: page_w,
+                            h: (range.end - range.start) as f32 * page_h / rows as f32,
+                        },
+                    }).collect();
+                    document.writer.add_page(Page {
                         width: format.size.x as f32,
                         height: format.size.y as f32,
-                        images: vec![PageImage {
-                            image,
-                            rect: PdfRect { x: 0.0, y: 0.0, w: format.size.x as f32, h: format.size.y as f32 },
-                        }],
-                        text: Vec::new(),
+                        images,
+                        text,
                         links,
                     });
                 }
                 SignalToUI::set_ui_signal();
-                (writer, Cx::time_now() - start)
+                (document, Cx::time_now() - start)
             };
             match cx.task_pool().submit(Class::Visible, job) {
                 Ok(task) => self.writer = Writer::Adding(task),
                 Err(error) => return Some(PrintUpdate::Failed(format!("no worker to write the PDF on: {error}"))),
             }
         } else if self.added == self.pages.len() && !self.pages.is_empty() {
-            let Writer::Idle(mut writer) = std::mem::replace(&mut self.writer, Writer::Done) else { return None };
+            let Writer::Idle(Document { mut writer, text, .. }) = std::mem::replace(&mut self.writer, Writer::Done) else { return None };
             let outline: Vec<OutlineEntry> = self
                 .headings
                 .iter()
@@ -610,10 +726,13 @@ impl PrintJob {
                 .collect();
             let job = move || {
                 let start = Cx::time_now();
-                writer.set_outline(outline);
-                let pdf: Arc<[u8]> = writer.finish().into();
+                let result = text.finish(&mut writer).map(|stats| {
+                    writer.set_outline(outline);
+                    let pdf: Arc<[u8]> = writer.finish().into();
+                    (pdf, stats, Cx::time_now() - start)
+                });
                 SignalToUI::set_ui_signal();
-                (pdf, Cx::time_now() - start)
+                result
             };
             match cx.task_pool().submit(Class::Visible, job) {
                 Ok(task) => self.writer = Writer::Finishing(task),
@@ -622,6 +741,83 @@ impl PrintJob {
         }
         None
     }
+}
+
+/// The document's language from its front matter's `lang:` line, if it says one.
+fn front_matter_lang(lines: &[String]) -> Option<String> {
+    if lines.first().map(|line| line.trim_end()) != Some("---") {
+        return None;
+    }
+    lines[1..]
+        .iter()
+        .take_while(|line| !matches!(line.trim_end(), "---" | "..."))
+        .find_map(|line| line.strip_prefix("lang:"))
+        .map(|value| value.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Compresses only spans with ink, keeping short blank gaps inside each image.
+fn compress_segments(page: &RenderedPage) -> (Vec<(RgbImage, Range<usize>)>, usize) {
+    if page.is_paper() {
+        return (Vec::new(), page.height);
+    }
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let mut row_index = 0;
+    let mut start = None;
+    let mut end = 0;
+    // An encoder needs its final height up front. Scan band by band for the
+    // ranges, then feed those ranges in a second pass without keeping RGB pages.
+    page.rgb_bands(|rgb| {
+        for row in rgb.chunks_exact(page.width * 3) {
+            let mut chunks = row.chunks_exact(8);
+            let blank = chunks.by_ref().all(|chunk| u64::from_ne_bytes(chunk.try_into().unwrap()) == u64::MAX)
+                && chunks.remainder().iter().all(|&byte| byte == 255);
+            if !blank {
+                start.get_or_insert(row_index);
+                end = row_index + 1;
+            } else if start.is_some() && row_index + 1 - end >= 64 {
+                ranges.push(start.take().unwrap()..end);
+            }
+            row_index += 1;
+        }
+    });
+    if let Some(start) = start {
+        ranges.push(start..end);
+    }
+    // Each image keeps a few blank rows around its ink, so its edges lie on paper: a viewer
+    // filtering an edge row with what lies past it (or repeating it) then mixes white with white,
+    // as it does inside the full page. Gaps are at least 64 rows, so margins never meet.
+    const MARGIN: usize = 8;
+    for range in &mut ranges {
+        range.start = range.start.saturating_sub(MARGIN);
+        range.end = (range.end + MARGIN).min(page.height);
+    }
+    let left_out = page.height - ranges.iter().map(|range| range.end - range.start).sum::<usize>();
+    let mut segments = Vec::with_capacity(ranges.len());
+    if ranges.is_empty() {
+        return (segments, left_out);
+    }
+    let mut current = 0;
+    let mut encoder: Option<RgbImageEncoder> = None;
+    row_index = 0;
+    page.rgb_bands(|rgb| {
+        for row in rgb.chunks_exact(page.width * 3) {
+            if let Some(range) = ranges.get(current) {
+                if row_index == range.start {
+                    encoder = Some(RgbImageEncoder::new(page.width as u32, (range.end - range.start) as u32));
+                }
+                if let Some(encoder) = &mut encoder {
+                    encoder.write(row);
+                }
+                if row_index + 1 == range.end {
+                    segments.push((encoder.take().unwrap().finish(), range.clone()));
+                    current += 1;
+                }
+            }
+            row_index += 1;
+        }
+    });
+    (segments, left_out)
 }
 
 /// The URL names its scheme (`https:`, `mailto:`), so a reader can follow

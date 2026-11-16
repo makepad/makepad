@@ -1296,6 +1296,7 @@ impl TextInput {
         if is_read_only && !area.is_empty() && cx.has_key_focus(area) {
             cx.hide_text_ime();
         }
+        cx.set_key_focus_takes_text(area, !is_read_only);
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
     }
@@ -3404,6 +3405,7 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {
+                cx.set_key_focus_takes_text(self.draw_bg.area(), !self.is_read_only);
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
                 // Only `draw_walk` shows the IME (it knows where the caret is), so we redraw on focus.
@@ -5416,6 +5418,99 @@ mod placeholder_tests {
                 text.pos.y >= long.pos.y - 0.5 && text.pos.y + text.size.y <= long.pos.y + long.size.y + 0.5,
                 "the placeholder's line {text:?} sits inside the field {long:?}"
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod takes_text_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use crate::makepad_script::script;
+    use crate::nav_control::NavControl;
+
+    const SIZE: Vec2d = Vec2d { x: 320.0, y: 200.0 };
+
+    fn draw(cx: &mut Cx, pass: &DrawPass, list: &mut DrawList2d, root: &WidgetRef) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// Lets the focus asked for change hands the way the platform does once actions drain, and
+    /// hands the change to the tree, as the window does.
+    fn settle(cx: &mut Cx, root: &WidgetRef, prev: Area) {
+        cx.action(());
+        cx.handle_actions();
+        let focus = cx.key_focus();
+        if focus != prev {
+            root.handle_event(cx, &Event::KeyFocus(KeyFocusEvent { prev, focus }), &mut Scope::empty());
+        }
+    }
+
+    /// Tab (or Shift+Tab) as the window hands it to its nav control, which knows nothing of what
+    /// it focuses.
+    fn tab(cx: &mut Cx, nav: &mut NavControl, root: &WidgetRef, list: DrawListId, shift: bool) {
+        let prev = cx.key_focus();
+        let key = KeyEvent { key_code: KeyCode::Tab, modifiers: KeyModifiers { shift, ..Default::default() }, ..Default::default() };
+        nav.handle_event(cx, &Event::KeyDown(key), list);
+        settle(cx, root, prev);
+    }
+
+    /// A field reached with Tab reads as taking typed text: the nav control focuses it with the
+    /// plain setter, and the field says so itself from its key focus. Moving on clears it, and a
+    /// field turned read-only while focused stops taking text.
+    #[test]
+    fn a_field_reached_with_tab_takes_typed_text() {
+        crate::on_test_cx(|| {
+            let mut cx_pool = crate::checkout_test_cx();
+            let cx: &mut Cx = &mut cx_pool;
+            let (root, mut nav) = cx.with_vm(|vm| {
+                let root = vm.eval(script! {
+                    use mod.prelude.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        save := Button{text: "Save"}
+                        name := TextInput{width: 120}
+                    }
+                });
+                let nav = vm.eval(script! {
+                    use mod.widgets.*
+                    NavControl{}
+                });
+                (WidgetRef::script_from_value(vm, root), NavControl::script_from_value(vm, nav))
+            });
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut list = DrawList2d::new(cx);
+            draw(cx, &pass, &mut list, &root);
+            let area = |cx: &Cx, id: LiveId| root.widget(cx, &[id]).area();
+            let (save, name) = (area(cx, id!(save)), area(cx, id!(name)));
+            let list = list.id();
+            tab(cx, &mut nav, &root, list, false);
+            assert_eq!(cx.key_focus(), save);
+            assert!(!cx.key_focus_takes_text(), "a button takes no typed text");
+            tab(cx, &mut nav, &root, list, false);
+            assert_eq!(cx.key_focus(), name);
+            assert!(cx.key_focus_takes_text(), "Tab into the field: it takes typed text");
+            tab(cx, &mut nav, &root, list, false);
+            assert_eq!(cx.key_focus(), save);
+            assert!(!cx.key_focus_takes_text(), "Tab on to the button clears it");
+            tab(cx, &mut nav, &root, list, true);
+            assert_eq!(cx.key_focus(), name);
+            assert!(cx.key_focus_takes_text(), "Shift+Tab back into the field: typed text again");
+            let field = root.widget(cx, &[id!(name)]);
+            field.borrow_mut::<TextInput>().unwrap().set_is_read_only(cx, true);
+            assert!(!cx.key_focus_takes_text(), "the focused field turned read-only takes no text");
+            field.borrow_mut::<TextInput>().unwrap().set_is_read_only(cx, false);
+            assert!(cx.key_focus_takes_text(), "and editable again, it does");
         });
     }
 }

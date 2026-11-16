@@ -2431,8 +2431,7 @@ pub fn window_intercept(
                     return true;
                 }
                 if tw.tree_drag {
-                    // The row rides the pointer wherever it goes; the tree
-                    // itself still gets the event for its drop zones.
+                    // Finish the tree drag; the tree still gets the event for its drop zones.
                     tw.follow_tree_drag(cx, event);
                 }
             }
@@ -34206,35 +34205,9 @@ impl Tweaker {
         self.redraw_overlay(cx);
     }
 
-    /// The chip for a tree row drag: the row's name at the pointer, and
-    /// gone with the drop or the end.
+    /// Clears the tree drag state on the drop or the end.
     fn follow_tree_drag(&mut self, cx: &mut Cx, event: &Event) {
         match event {
-            Event::Drag(e) => {
-                let dragged = e.items.iter().find_map(|item| match item {
-                    DragItem::String { value, internal_id: Some(id) } if value == "design-node" => {
-                        Some(id.0)
-                    }
-                    _ => None,
-                });
-                let Some(uid) = dragged else {
-                    return;
-                };
-                let label = self
-                    .tree_rows
-                    .iter()
-                    .find(|row| row.uid == uid)
-                    .map(|row| if row.name.is_empty() { row.ty.clone() } else { row.name.clone() })
-                    .unwrap_or_default();
-                if self.drag_grab.is_none() {
-                    let row = self
-                        .tree_widget()
-                        .and_then(|tree| tree.borrow::<FileTree>().and_then(|t| t.node_rect(cx, LiveId(uid))));
-                    self.drag_grab = Some(grab_of(row, e.abs));
-                }
-                self.drag_chip = Some((label, e.abs));
-                self.redraw_sidebar(cx);
-            }
             Event::Drop(_) | Event::DragEnd => {
                 self.tree_drag = false;
                 self.drag_chip = None;

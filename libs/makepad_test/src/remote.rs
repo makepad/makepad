@@ -131,6 +131,9 @@ impl std::fmt::Debug for RemoteClient {
 /// code it runs for the first time, for an event) spends none. And at a look, what its threads
 /// waited for a core.
 pub(crate) struct AppCpu {
+    /// Its main (UI) thread's but what that ran answering remote peers (`uicounts`'
+    /// `answered_ns`: a test's snapshots and lookups, the frames drawn only to build their tree):
+    /// the app's own work there, which observing it does not add to.
     pub(crate) main: Duration,
     /// The whole process's but what its threads serving remote peers ran (answering a test's
     /// snapshots and log reads among it) and what the runtime's own threads ran (under the JIT,
@@ -215,7 +218,8 @@ impl RemoteClient {
         None
     }
 
-    /// The app's CPU so far (`uicounts`): its main thread's, and its whole process's but what
+    /// The app's CPU so far (`uicounts`): its main thread's but what answering remote peers ran
+    /// on it, and its whole process's but what
     /// serving remote peers ran (its serving threads, and its UI thread answering their asks) and
     /// what the runtime's own threads ran; and its process's major page faults. With `waited`,
     /// what its other threads waited for a core too: a file or two a thread, for a look only.
@@ -229,7 +233,7 @@ impl RemoteClient {
         };
         let faults = json_f64(json.key("faults")).ok_or_else(|| TestError::new(format!("app remote uicounts: no faults: {json:?}")))? as u64;
         let waited = if waited { ns("waited_ns")? } else { Duration::ZERO };
-        Ok(AppCpu { main: ns("cpu_ns")?, own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults, waited })
+        Ok(AppCpu { main: ns("cpu_ns")?.saturating_sub(ns("answered_ns")?), own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults, waited })
     }
 
     /// Under the JIT, the program waits for code it is about to run: a request of it queued on the
@@ -243,7 +247,7 @@ impl RemoteClient {
     }
 
     /// Whether anything would change the app if time moved on (`settled`): a frame, redraw,
-    /// load or queued pool job pending.
+    /// load, or a pool job queued or running, pending.
     pub(crate) fn settled(&self) -> TestResult<AppSettled> {
         let json = self.get_json("settled", &[])?;
         let bad = || TestError::new(format!("app remote settled: no answer: {json:?}"));

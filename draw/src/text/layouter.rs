@@ -18,6 +18,7 @@ use {
         cell::RefCell,
         hash::{Hash, Hasher},
         mem,
+        ops::Range,
         rc::Rc,
     },
     unicode_segmentation::UnicodeSegmentation,
@@ -1936,7 +1937,7 @@ impl LaidoutRow {
         };
         if self.is_left_to_right() {
             return self
-                .find_visual_grapheme(None, |grapheme| {
+                .find_visual_grapheme(|grapheme| {
                     is_before_middle(&grapheme).then_some(grapheme.start)
                 })
                 .unwrap_or(self.text.len());
@@ -1950,7 +1951,7 @@ impl LaidoutRow {
     pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
         if self.is_left_to_right() {
             return self
-                .find_visual_grapheme(None, |grapheme| {
+                .find_visual_grapheme(|grapheme| {
                     (grapheme.start == index).then_some(grapheme.x_in_lpxs)
                 })
                 .unwrap_or(self.width_in_lpxs);
@@ -1983,47 +1984,56 @@ impl LaidoutRow {
 
     /// Returns the row's graphemes from left to right.
     fn get_visual_graphemes(&self) -> Vec<VisualGrapheme> {
-        // Clusters go down from left to right in RTL text.
-        let mut clusters: Vec<usize> = self.glyphs.iter().map(|glyph| glyph.cluster).collect();
-        clusters.sort_unstable();
         let mut graphemes = Vec::with_capacity(self.glyphs.len());
-        self.find_visual_grapheme(Some(&clusters), |grapheme| {
+        self.find_visual_grapheme(|grapheme| {
             graphemes.push(grapheme);
             None::<()>
         });
         graphemes
     }
 
-    /// Returns the first thing `f` finds in the row's graphemes, going from left to right.
-    ///
-    /// A cluster's text ends at the next larger cluster, which we find in `sorted_clusters` unless
-    /// the row is left to right. A ligature's width is split evenly between its graphemes.
-    fn find_visual_grapheme<T>(
+    /// Consecutive glyphs of each cluster, its text range and its right edge.
+    /// Empty ranges are kept so glyphs without their own text can still be captured.
+    pub(crate) fn glyph_clusters(
         &self,
-        sorted_clusters: Option<&[usize]>,
-        mut f: impl FnMut(VisualGrapheme) -> Option<T>,
-    ) -> Option<T> {
-        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
+    ) -> impl Iterator<Item = (&[LaidoutGlyph], Range<usize>, f32)> {
+        use super::slice::SliceExt;
 
-        let mut rtl_graphemes = Vec::new();
-        let mut glyph_groups = self
-            .glyphs
-            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
-            .peekable();
-        while let Some(glyph_group) = glyph_groups.next() {
-            let start = glyph_group[0].cluster;
-            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
-            let next_glyph_group = glyph_groups.peek();
-            let end_x_in_lpxs = next_glyph_group.map_or(self.width_in_lpxs, |next_glyph_group| {
-                next_glyph_group[0].origin_in_lpxs.x
-            });
-            let end = match sorted_clusters {
+        let sorted_clusters = (!self.is_left_to_right()).then(|| {
+            let mut clusters: Vec<usize> = self.glyphs.iter().map(|glyph| glyph.cluster).collect();
+            clusters.sort_unstable();
+            clusters
+        });
+        let mut groups = self.glyphs.group_by(|a, b| a.cluster == b.cluster).peekable();
+        std::iter::from_fn(move || {
+            let group = groups.next()?;
+            let start = group[0].cluster;
+            let next = groups.peek();
+            let end = match &sorted_clusters {
                 Some(clusters) => clusters
                     .get(clusters.partition_point(|&cluster| cluster <= start))
                     .copied(),
-                None => next_glyph_group.map(|next_glyph_group| next_glyph_group[0].cluster),
+                None => next.map(|group| group[0].cluster),
             };
-            let text = &self.text[start..end.unwrap_or(self.text.len())];
+            let end_x = next.map_or(self.width_in_lpxs, |group| group[0].origin_in_lpxs.x);
+            Some((group, start..end.unwrap_or(self.text.len()), end_x))
+        })
+    }
+
+    /// Returns the first thing `f` finds in the row's graphemes, going from left to right.
+    ///
+    /// A ligature's width is split evenly between its graphemes.
+    fn find_visual_grapheme<T>(
+        &self,
+        mut f: impl FnMut(VisualGrapheme) -> Option<T>,
+    ) -> Option<T> {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let mut rtl_graphemes = Vec::new();
+        for (glyph_group, range, end_x_in_lpxs) in self.glyph_clusters() {
+            let start = range.start;
+            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
+            let text = &self.text[range];
             // The ellipsis has no text of its own.
             if text.is_empty() {
                 continue;

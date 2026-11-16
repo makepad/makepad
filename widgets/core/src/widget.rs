@@ -442,6 +442,12 @@ pub trait Widget: WidgetNode {
     /// redraws and reordering; the builder supplies the wire id and routes actions to this widget.
     fn semantics_parts(&self, _cx: &Cx, _out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {}
 
+    /// Content this widget draws without nodes, answered on request: parts matching `lookup`,
+    /// in the same (key, parent key, node) form and with the same stable keys as `semantics_parts`.
+    /// Runs only on a frame built for a lookup. Bounds have a centre that presses the item now;
+    /// an item out of view has no bounds, `States::OFFSCREEN` and `Actions::SCROLL_INTO_VIEW`.
+    fn semantics_lookup(&self, _cx: &Cx, _lookup: &SemanticLookup, _out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {}
+
     /// The area part `key` (of [`Widget::semantics_parts`]) drew as, when it drew as one of its
     /// own (a list's row): the builder then takes its bounds from that area once the frame's
     /// turtles finish, clipped by every clip it drew under, and reports it offscreen when
@@ -675,6 +681,26 @@ pub struct WidgetRefInner {
     pub widget: Box<dyn Widget>,
     // Widgets implemented without a source field still retain their override object.
     a11y_source: Option<ScriptObjectRef>,
+}
+
+impl WidgetRefInner {
+    /// The redraw after an apply. An `Eval` made while the frame draws, on a
+    /// widget that has not drawn in this drawing (its list is recording anew
+    /// and has not reached it, as a draw that tints a row before drawing it),
+    /// asks for nothing: the drawing under way draws it if it is drawn at all,
+    /// and asking would record the list again in the next frame, so a draw that
+    /// does this on every frame would never let the app idle. A widget the
+    /// apply shows or hides, one already drawn in this drawing and one without
+    /// an area are redrawn as before.
+    fn redraw_after_apply(&mut self, cx: &mut Cx, apply: &Apply, was_visible: bool) {
+        if apply.is_eval() && cx.in_draw_event() && self.widget.visible() == was_visible {
+            let area = self.widget.area();
+            if !area.is_empty() && !area.is_valid(cx) {
+                return;
+            }
+        }
+        self.widget.redraw(cx);
+    }
 }
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
@@ -1743,22 +1769,22 @@ impl WidgetRef {
                     *inner = None;
                 } else {
                     // Type matches, apply to existing widget and redraw
+                    let was_visible = component.widget.visible();
                     component.widget.script_apply(vm, apply, scope, value);
                     if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
                         component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
                     }
-                    let cx = vm.cx_mut();
-                    component.widget.redraw(cx);
+                    component.redraw_after_apply(vm.cx_mut(), apply, was_visible);
                     return;
                 }
             } else {
                 // No type_id in value, apply to existing widget anyway
+                let was_visible = component.widget.visible();
                 component.widget.script_apply(vm, apply, scope, value);
-                    if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
-                        component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
-                    }
-                let cx = vm.cx_mut();
-                component.widget.redraw(cx);
+                if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
+                    component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
+                }
+                component.redraw_after_apply(vm.cx_mut(), apply, was_visible);
                 return;
             }
         }
@@ -2503,6 +2529,14 @@ fn semantic_action(widget: &mut dyn Widget, cx: &mut Cx, event: &Event, scope: &
     }
 }
 
+/// What a semantic lookup asks a widget ([`Widget::semantics_lookup`]).
+pub enum SemanticLookup<'a> {
+    /// A query naming items (`Query::is_lookup`); narrow candidates, then check `Query::matches`.
+    Terms(&'a a11y_tree::query::Query),
+    /// One part this widget answered before, resolved from its node id to its stable key.
+    Key(u64),
+}
+
 enum SemanticDraw { Walk(Walk), WalkAll(Walk), Draw, All }
 
 fn semantic_draw(widget: &mut (dyn Widget + 'static), source: Option<&ScriptObjectRef>, cx: &mut Cx2d, scope: &mut Scope, draw: SemanticDraw) -> DrawStep {
@@ -2561,6 +2595,19 @@ fn semantic_draw(widget: &mut (dyn Widget + 'static), source: Option<&ScriptObje
     widget.semantics_parts(cx, &mut parts);
     for (key, parent, part) in parts {
         cx.a11y.set_part(token, key, parent, part, widget.semantics_part_area(key), || WidgetUid::new().0);
+    }
+    let mut looked = Vec::new();
+    for (query, key) in cx.a11y.lookups_for(token) {
+        let lookup = match key { Some(key) => SemanticLookup::Key(key), None => SemanticLookup::Terms(query) };
+        widget.semantics_lookup(cx, &lookup, &mut looked);
+    }
+    if !looked.is_empty() {
+        // Lookups of one frame (the app's own and a host's) can answer the same part: the first wins.
+        let mut keys = std::collections::HashSet::new();
+        looked.retain(|(key, _, _)| keys.insert(*key));
+        for (key, parent, part) in looked {
+            cx.a11y.set_lookup_part(token, key, parent, part, widget.semantics_part_area(key), || WidgetUid::new().0);
+        }
     }
     cx.a11y.end_node(token, node, widget.area());
     step

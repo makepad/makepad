@@ -1,6 +1,6 @@
 use {
     crate::{
-        animator::*, makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars,
+        animator::*, drag_visual::CxDragVisualExt, label::LabelWidgetRefExt, makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars,
         scroll_shadow::DrawScrollShadow, widget::*, widget_tree::CxWidgetExt,
     },
     std::collections::HashSet,
@@ -251,6 +251,7 @@ script_mod! {
         flow: Down
 
         scroll_bars: mod.widgets.ScrollBars{}
+        drag_chip: mod.widgets.DragChip{}
         node_height: theme.data_item_height
         clip_x: true
         clip_y: true
@@ -412,6 +413,8 @@ pub struct FileTreeNode {
     #[rust]
     pub pending_draw: Option<FileTreeNodeDraw>,
     #[rust]
+    name: String,
+    #[rust]
     semantic_name: String,
     #[rust]
     semantic_level: u32,
@@ -467,6 +470,8 @@ pub struct FileTree {
     file_node: ScriptObjectRef,
     #[live]
     folder_node: ScriptObjectRef,
+    #[live]
+    drag_chip: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]
@@ -489,6 +494,8 @@ pub struct FileTree {
 
     #[rust]
     dragging_node_id: Option<LiveId>,
+    #[rust]
+    chip: Option<WidgetRef>,
     #[rust]
     selected_node_id: Option<LiveId>,
     /// A programmatic selection wants this node scrolled into view on its
@@ -525,6 +532,7 @@ impl ScriptHook for FileTree {
     ) {
         // Apply updates to existing nodes
         if apply.is_reload() {
+            self.chip = None;
             for tree_node in self.tree_nodes.values_mut() {
                 let Some(mut tree_node) = tree_node.borrow_mut::<FileTreeNode>() else {
                     continue;
@@ -590,6 +598,10 @@ impl FileTreeNode {
         depth: usize,
         scale: f64,
     ) {
+        if self.name != name {
+            self.name.clear();
+            self.name.push_str(name);
+        }
         if cx.a11y.on {
             makepad_platform::a11y::set_string(&mut self.semantic_name, name);
             self.semantic_level = depth as u32 + 1;
@@ -626,6 +638,10 @@ impl FileTreeNode {
         depth: usize,
         scale: f64,
     ) {
+        if self.name != name {
+            self.name.clear();
+            self.name.push_str(name);
+        }
         if cx.a11y.on {
             makepad_platform::a11y::set_string(&mut self.semantic_name, name);
             self.semantic_level = depth as u32 + 1;
@@ -1134,8 +1150,20 @@ impl FileTree {
 
     pub fn start_dragging_file_node(&mut self, cx: &mut Cx, node_id: LiveId, items: Vec<DragItem>) {
         self.dragging_node_id = Some(node_id);
-        log!("makepad: start_dragging_file_node");
-        cx.start_dragging(items);
+        let chip = self
+            .chip
+            .get_or_insert_with(|| cx.with_vm(|vm| WidgetRef::script_from_value(vm, self.drag_chip.as_object().into())))
+            .clone();
+        let name = if items.len() > 1 {
+            format!("{} items", items.len())
+        } else {
+            self.tree_nodes
+                .get(&node_id)
+                .and_then(|node| node.borrow::<FileTreeNode>().map(|node| node.name.clone()))
+                .unwrap_or_default()
+        };
+        chip.label(cx, ids!(label)).set_text(cx, &name);
+        cx.start_dragging_with(items, chip, dvec2(14.0, 10.0));
     }
 }
 
@@ -1300,7 +1328,9 @@ impl FileTreeRef {
         }
     }
 
-    pub fn file_start_drag(&self, cx: &mut Cx, _file_id: LiveId, item: DragItem) {
-        cx.start_dragging(vec![item]);
+    pub fn file_start_drag(&self, cx: &mut Cx, file_id: LiveId, item: DragItem) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.start_dragging_file_node(cx, file_id, vec![item]);
+        }
     }
 }

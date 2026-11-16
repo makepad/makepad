@@ -57,6 +57,7 @@ pub mod animated_image_gif;
 pub mod badge;
 pub mod button_group;
 pub mod chip;
+pub mod drag_visual;
 pub mod menu;
 pub mod select;
 pub mod dialog;
@@ -181,6 +182,7 @@ pub use crate::{
     badge::*,
     button_group::*,
     chip::*,
+    drag_visual::*,
     menu::*,
     select::*,
     dialog::*,
@@ -268,7 +270,7 @@ pub use crate::{
 
     view::*,
     widget::{
-        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
+        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, SemanticLookup, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
         WidgetActionsApi, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister, WidgetRegistry,
         WidgetSet, WidgetSetIterator, WidgetUid,
@@ -564,7 +566,13 @@ pub(crate) fn theme_mod_units(units: &mut Vec<UiUnit>) {
         // (a restyle, an appearance) is the second registration it is today, not the first of two.
         vm.expand_all_lazy();
         register_widgets_resource_crate(vm);
-        makepad_draw::script_mod(vm);
+    }));
+    // The draw layer's modules one unit each: an isolate whose host steps its registration over
+    // frames spends at most one module's registration in a step (about 1 ms each, 5-6 ms in all).
+    for (name, step) in makepad_draw::SCRIPT_MOD_STEPS {
+        units.push(UiUnit::new(name, *step));
+    }
+    units.push(UiUnit::new("theme: ime and modules", |vm| {
         if !vm.is_reload() {
             makepad_platform::ime::script_mod(vm);
         }
@@ -1002,6 +1010,7 @@ fn register_library_widgets_units(
     units.push(UiUnit::new("widgets: screen_view", crate::screen_view::script_mod));
     units.push(UiUnit::new("widgets: nav_list", crate::nav_list::script_mod));
     units.push(UiUnit::new("widgets: chip", crate::chip::script_mod));
+    units.push(UiUnit::new("widgets: drag_visual", crate::drag_visual::script_mod));
     // The menu first: the group's split and menu buttons carry a
     // `MenuPlace`, and a block's `use` only sees what already exists.
     units.push(UiUnit::new("widgets: menu", crate::menu::script_mod));

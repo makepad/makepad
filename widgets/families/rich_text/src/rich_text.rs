@@ -2200,6 +2200,7 @@ impl Widget for RichTextEditor {
                 }
             }
             Hit::KeyFocus(_) => {
+                cx.set_key_focus_takes_text(area, self.editable);
                 self.redraw(cx);
             }
             Hit::KeyFocusLost(_) => {

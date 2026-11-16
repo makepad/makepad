@@ -8,6 +8,7 @@ pub mod cx_3d;
 pub mod cx_draw;
 pub mod draw_list_2d;
 pub mod geometry;
+pub mod glyph_capture;
 pub mod image_cache;
 pub mod match_event;
 pub mod nav;
@@ -29,6 +30,10 @@ pub use crate::{
     cx_3d::Cx3d,
     cx_draw::CxDraw,
     draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
+    glyph_capture::{
+        CapturedFace, CapturedGlyph, CapturedPictured, CapturedRow, CapturedText, GlyphCapture, OutlineGlyph,
+        PicturedText,
+    },
     image_cache::{
         decode_image_from_data, evict_image_from_cache, handle_image_cache_network_responses,
         has_enough_pixels, image_size_by_data, is_animated_image, is_decoding_image,
@@ -54,7 +59,7 @@ pub use crate::{
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive, draw_pbr::DrawPbrTextureSet,
         draw_nv12::DrawNv12, draw_quad::DrawAffineQuad, draw_quad::DrawCachedQuad, draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
         draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
-        draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::PreparedTextRun,
+        draw_svg_glyph::DrawSvgGlyph, draw_text::stock_text_shader, draw_text::DrawText, draw_text::PreparedTextRun,
         draw_text::TextStyle, draw_text_3d::DrawText3d,
         draw_vector::{DrawVector, FeatherSide},
     },
@@ -72,29 +77,38 @@ pub use crate::{
 
 pub use crate::shader::draw_svg::DrawSvg;
 
+/// The draw layer's script registration in its order, one named step per module: `script_mod`
+/// runs them all at once, and a host that spreads a VM's registration over frames (a Splash
+/// isolate's UI) runs one step at a time.
+pub const SCRIPT_MOD_STEPS: &[(&str, fn(&mut ScriptVm) -> ScriptValue)] = &[
+    ("turtle", crate::turtle::script_mod),
+    ("sdf", crate::shader::sdf::script_mod),
+    ("surface", crate::shader::surface::script_mod),
+    ("finish", crate::shader::finish::script_mod),
+    ("geometry", crate::geometry::script_mod),
+    ("draw_quad", crate::shader::draw_quad::script_mod),
+    ("paint_lookup", crate::shader::paint_lookup::script_mod),
+    ("video_color", crate::shader::video_color::script_mod),
+    ("draw_nv12", crate::shader::draw_nv12::script_mod),
+    ("draw_nv12_pack", crate::shader::draw_nv12_pack::script_mod),
+    ("draw_fxaa", crate::shader::draw_fxaa::script_mod),
+    ("draw_cube", crate::shader::draw_cube::script_mod),
+    ("glyph_coverage", makepad_script::glyph_coverage::script_mod),
+    ("draw_glyph", crate::shader::draw_glyph::script_mod),
+    ("draw_text", crate::shader::draw_text::script_mod),
+    ("draw_rotated_text", crate::shader::draw_rotated_text::script_mod),
+    ("draw_sploded_hairline", crate::shader::draw_sploded_hairline::script_mod),
+    ("draw_text_3d", crate::shader::draw_text_3d::script_mod),
+    ("draw_vector", crate::shader::draw_vector::script_mod),
+    ("draw_pbr", crate::shader::draw_pbr::script_mod),
+    ("draw_svg", crate::shader::draw_svg::script_mod),
+    ("draw_svg_glyph", crate::shader::draw_svg_glyph::script_mod),
+];
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    crate::turtle::script_mod(vm);
-    crate::shader::sdf::script_mod(vm);
-    crate::shader::surface::script_mod(vm);
-    crate::shader::finish::script_mod(vm);
-    crate::geometry::script_mod(vm);
-    crate::shader::draw_quad::script_mod(vm);
-    crate::shader::paint_lookup::script_mod(vm);
-    crate::shader::video_color::script_mod(vm);
-    crate::shader::draw_nv12::script_mod(vm);
-    crate::shader::draw_nv12_pack::script_mod(vm);
-    crate::shader::draw_fxaa::script_mod(vm);
-    crate::shader::draw_cube::script_mod(vm);
-    makepad_script::glyph_coverage::script_mod(vm);
-    crate::shader::draw_glyph::script_mod(vm);
-    crate::shader::draw_text::script_mod(vm);
-    crate::shader::draw_rotated_text::script_mod(vm);
-    crate::shader::draw_sploded_hairline::script_mod(vm);
-    crate::shader::draw_text_3d::script_mod(vm);
-    crate::shader::draw_vector::script_mod(vm);
-    crate::shader::draw_pbr::script_mod(vm);
-    crate::shader::draw_svg::script_mod(vm);
-    crate::shader::draw_svg_glyph::script_mod(vm);
+    for (_, step) in SCRIPT_MOD_STEPS {
+        step(vm);
+    }
     NIL
 }
 /*

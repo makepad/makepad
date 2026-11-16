@@ -431,6 +431,7 @@ fn assert_mutation_events_refused(document: CodeDocument, explicit_read_only: bo
     }));
     events.push(Event::TextCut(TextClipboardEvent::default()));
     events.push(Event::Drop(DropEvent {
+        window_id: WindowId(0, 0),
         modifiers: KeyModifiers::default(),
         handled: Arc::new(Mutex::new(false)),
         abs: dvec2(0.0, 0.0),

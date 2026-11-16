@@ -112,7 +112,7 @@ impl AppLaunch {
             BuildPolicy::IfMissing => built_binary(&target, root.as_deref()).is_none(),
             BuildPolicy::Rebuild => true,
         };
-        let launch = Self {
+        let mut launch = Self {
             app, runner, root, extra, building, run, ran: false,
             status: if run { format!("starting {}…", app.label) } else if building { format!("building {}…", app.label) } else { format!("starting {}…", app.label) },
             progress: String::new(),
@@ -121,6 +121,11 @@ impl AppLaunch {
             closed_streams: 0,
         };
         let kind = if run { LaunchKind::Run } else if building { LaunchKind::Build } else { LaunchKind::App };
+        // the loader runs the app at once, compiling as it runs: started, no build to wait for
+        if launch.mount_loader().is_some() {
+            (launch.building, launch.ran) = (false, true);
+            launch.status = format!("starting {}…", app.label);
+        }
         let child = spawn(launch.command()?, kind)?;
         Ok((launch, child))
     }
@@ -201,24 +206,30 @@ impl AppLaunch {
     /// The arguments of the started process: the app's (`--stdin-loop`, registry, host), or the
     /// tool's `run <package> --bin <bin>` with the app's after `--`.
     fn process_args(&self) -> Vec<String> {
-        let app_args = self.app.args.iter().map(|arg| arg.to_string()).chain(self.extra.iter().cloned());
         match self.runner {
-            Runner::Native => std::iter::once("--stdin-loop".to_string()).chain(app_args).collect(),
-            Runner::Jit => {
-                // only Linux's HAL finds the window manager by its socket: elsewhere the app is hosted
-                // the way a native child is, over the host's wire
-                let hosted = (!cfg!(target_os = "linux")).then(|| "--stdin-loop".to_string());
-                let app_args: Vec<String> = hosted.into_iter().chain(app_args).collect();
-                // the app's own binary, as a native launch's `cargo run --bin` names it (a
-                // package may hold several)
-                let mut args = vec!["run".to_string(), self.app.package.to_string(), "--bin".to_string(), self.app.bin.to_string()];
-                if !app_args.is_empty() {
-                    args.push("--".to_string());
-                    args.extend(app_args);
-                }
-                args
-            }
+            Runner::Native => std::iter::once("--stdin-loop".to_string()).chain(self.app_args()).collect(),
+            // only Linux's HAL finds the window manager by its socket: elsewhere the app is hosted
+            // the way a native child is, over the host's wire
+            Runner::Jit => self.run_args(!cfg!(target_os = "linux")),
         }
+    }
+
+    fn app_args(&self) -> impl Iterator<Item = String> + '_ {
+        self.app.args.iter().map(|arg| arg.to_string()).chain(self.extra.iter().cloned())
+    }
+
+    /// The tool's `run <package> --bin <bin>`, the app's arguments after `--` (`--stdin-loop` first
+    /// when `hosted`).
+    fn run_args(&self, hosted: bool) -> Vec<String> {
+        let app_args: Vec<String> = hosted.then(|| "--stdin-loop".to_string()).into_iter().chain(self.app_args()).collect();
+        // the app's own binary, as a native launch's `cargo run --bin` names it (a package may
+        // hold several)
+        let mut args = vec!["run".to_string(), self.app.package.to_string(), "--bin".to_string(), self.app.bin.to_string()];
+        if !app_args.is_empty() {
+            args.push("--".to_string());
+            args.extend(app_args);
+        }
+        args
     }
 
     /// The cargo features its build adds: the app's own (`AppEntry::build_features`); the JIT
@@ -227,17 +238,33 @@ impl AppLaunch {
         if self.runner == Runner::Native { self.app.build_features() } else { String::new() }
     }
 
+    /// The JIT loader this host runs under (`RELAX_LOADER`).
+    fn host_loader() -> Option<PathBuf> {
+        std::env::var_os("RELAX_LOADER").map(PathBuf::from).filter(|l| l.is_file())
+    }
+
+    /// The loader that runs a native run from the JIT's virtual source tree ([`crate::on_disk`]:
+    /// a devhub overlay): cargo, a process of its own, finds no checkout there ("manifest path
+    /// `<work>/dev/src/Cargo.toml` does not exist": a live session's browser host, 11-16), and the
+    /// loader serves the tree to a run it starts in it. The app stays this host's `--stdin-loop`
+    /// child, its code built as it runs (without its native build features).
+    fn mount_loader(&self) -> Option<PathBuf> {
+        (self.run && self.runner == Runner::Native && self.root.as_deref().is_some_and(|root| crate::on_disk(root).is_err())).then(Self::host_loader).flatten()
+    }
+
     fn command(&self) -> Result<Command, String> {
         let target = Self::target_of(self.app, self.runner);
         // a host that runs under the JIT loader starts JIT apps with that loader (`$RELAX_LOADER
         // run ...`, the runner's convention), never a cargo build of another one: a CI tree's cargo
         // (no CARGO_TARGET_DIR once scrubbed) built a whole host makepad on every launch
-        let loader = (self.run && self.runner == Runner::Jit).then(|| std::env::var_os("RELAX_LOADER").map(PathBuf::from)).flatten().filter(|l| l.is_file());
+        let in_mount = self.mount_loader().is_some();
+        let loader = (self.run && self.runner == Runner::Jit).then(Self::host_loader).flatten().or_else(|| self.mount_loader());
         let (program, args) = if let Some(loader) = &loader {
             self.root.as_deref().ok_or("no checkout to run from")?;
-            (loader.clone(), self.process_args())
+            (loader.clone(), if in_mount { self.run_args(true) } else { self.process_args() })
         } else if self.run {
             let root = self.root.as_deref().ok_or("no checkout to run from")?;
+            crate::on_disk(root)?;
             run_argv_features(&target, root, &self.features(), &self.process_args())
         } else if self.building {
             let root = self.root.as_deref().ok_or("no checkout to build from")?;
@@ -261,10 +288,15 @@ impl AppLaunch {
         // and test switches reach neither the app nor a checkout's cargo (which builds into the
         // checkout's own target/, as the prebuild did).
         crate::child_env::scrub_lane(&mut command);
+        // (the run in the mount keeps the edits over it: the JIT hands its child the mount, and the
+        // edits only when the launcher does not clear them)
+        if in_mount {
+            if let Some(edits) = std::env::var_os("RELAX_EDITS") { command.env("RELAX_EDITS", edits); }
+        }
         // The app itself gets this machine's settings for it (`machine::launch_env`); a host
         // adds its own after this.
         if !self.building || self.run {
-            command.envs(crate::machine::launch_env(self.app.id, self.runner == Runner::Jit));
+            command.envs(crate::machine::launch_env(self.app.id, self.runner == Runner::Jit || in_mount));
             // A checkout devhub syncs (its `FLEET-REVISION.txt`): the JIT applies changes to it
             // only after a sync of landed work, never what a lane or an edit writes there
             // (relax's `DockGate`).
@@ -462,6 +494,10 @@ mod tests {
         let (native, _) = started("terminal", Runner::Native, &root);
         assert!(native.iter().any(|a| a == "--stdin-loop"), "{native:?}");
         assert!(native.iter().any(|a| a == "makepad-app-terminal"));
+        // from the JIT's virtual tree (a devhub overlay) a native run is its loader's, still hosted
+        if crate::on_disk(&root).is_err() && std::env::var_os("RELAX_LOADER").is_some_and(|l| Path::new(&l).is_file()) {
+            assert_eq!(native, ["run", "makepad-app-terminal", "--bin", "makepad-app-terminal", "--", "--stdin-loop", "--x"]);
+        }
     }
 
     /// A JIT launch from a checkout devhub syncs (it holds `FLEET-REVISION.txt`) carries the dock
@@ -491,7 +527,8 @@ mod tests {
     /// A deploy's prebuild is the launch's own cargo command with `build` for `run` and the same
     /// environment, so the launch finds every artifact fresh (a different CARGO_INCREMENTAL or
     /// MAKEPAD is another profile/fingerprint: a node recompiled 97 crates at a JIT launch).
-    /// A host already under a JIT loader launches it directly, without cargo's build environment.
+    /// A host already under a JIT loader launches it directly, without cargo's build environment,
+    /// and from the JIT's virtual tree a native launch too.
     #[test]
     fn the_prebuild_is_the_launch_with_build_for_run() {
         let root = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
@@ -516,7 +553,7 @@ mod tests {
             };
             let (run_args, build_args) = (args(&run), args(&build));
             let loader = std::env::var_os("RELAX_LOADER").map(PathBuf::from).filter(|p| p.is_file());
-            if let Some(loader) = loader.filter(|_| runner == Runner::Jit) {
+            if let Some(loader) = loader.as_ref().filter(|_| runner == Runner::Jit) {
                 assert_eq!(run.get_program(), loader.as_os_str());
                 let mut expected_args = vec!["run".to_string(), entry.package.to_string(), "--bin".to_string(), entry.bin.to_string()];
                 let mut app_args = Vec::new();
@@ -536,6 +573,9 @@ mod tests {
                 assert_eq!(envs(&run), envs(&expected), "{id}");
                 crate::cargo_env(&mut expected);
                 assert_eq!(envs(&build), envs(&expected), "{id}");
+            } else if let Some(loader) = loader.as_ref().filter(|_| crate::on_disk(&root).is_err()) {
+                // the loader builds as it runs: no cargo build to match
+                assert_eq!(run.get_program(), loader.as_os_str(), "{id}");
             } else {
                 let cut = run_args.iter().position(|a| a == "--").unwrap();
                 assert_eq!(run.get_program(), build.get_program());

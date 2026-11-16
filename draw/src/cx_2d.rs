@@ -2,6 +2,7 @@ use {
     crate::{
         cx_draw::CxDraw,
         draw_list_2d::DrawList2d,
+        glyph_capture::GlyphCapture,
         makepad_math::{Rect, Vec2d},
         makepad_platform::{DrawListId, DrawPassId, LiveId},
         makepad_script::ScriptNew,
@@ -29,6 +30,9 @@ pub struct Cx2d<'a, 'b> {
     pub(crate) finished_walks: Vec<FinishedWalk>,
     pub(crate) turtle_clips: Vec<(Vec2d, Vec2d)>,
     pub(crate) align_list: Vec<AlignEntry>,
+    /// The open `push_clip_rect` clips, innermost last: each one's align-list index and the
+    /// clip open inside it (see `Cx2d::open_clip`).
+    pub(crate) clip_rects: Vec<(usize, (Vec2d, Vec2d))>,
     pub(crate) draw_call_parent_stack: Vec<u64>,
     pub(crate) draw_call_parent_next: u64,
     /// The wireframe used by the exploded z-layer view to give every turtle
@@ -47,6 +51,9 @@ pub struct Cx2d<'a, 'b> {
     /// Every text run drawn while a check is collecting them; `None` (and
     /// free) otherwise. See [`TextRunSink`].
     pub text_runs: Option<TextRunSink>,
+    /// Text drawn as glyphs for a document writer; `None` when no capture is on.
+    /// See [`GlyphCapture`].
+    pub glyph_capture: Option<GlyphCapture>,
 }
 
 /// What a UI check reads back after a draw: where each text run was laid out
@@ -94,6 +101,7 @@ struct Cx2dScratch {
     finished_walks: Vec<FinishedWalk>,
     turtle_clips: Vec<(Vec2d, Vec2d)>,
     align_list: Vec<AlignEntry>,
+    clip_rects: Vec<(usize, (Vec2d, Vec2d))>,
     draw_call_parent_stack: Vec<u64>,
     sploded_hairline_seen: Vec<Rect>,
 }
@@ -108,6 +116,7 @@ impl Drop for Cx2d<'_, '_> {
         self.finished_walks.clear();
         self.turtle_clips.clear();
         self.align_list.clear();
+        self.clip_rects.clear();
         self.draw_call_parent_stack.clear();
         self.sploded_hairline_seen.clear();
         self.cx.global::<Cx2dScratchPool>().0.push(Cx2dScratch {
@@ -117,6 +126,7 @@ impl Drop for Cx2d<'_, '_> {
             finished_walks: std::mem::take(&mut self.finished_walks),
             turtle_clips: std::mem::take(&mut self.turtle_clips),
             align_list: std::mem::take(&mut self.align_list),
+            clip_rects: std::mem::take(&mut self.clip_rects),
             draw_call_parent_stack: std::mem::take(&mut self.draw_call_parent_stack),
             sploded_hairline_seen: std::mem::take(&mut self.sploded_hairline_seen),
         });
@@ -138,6 +148,7 @@ pub struct DrawUnwindMark {
     finished_walks: usize,
     turtle_clips: usize,
     align_list: usize,
+    clip_rects: usize,
     draw_call_parent_stack: usize,
     pass_stack: usize,
     draw_list_stack: usize,
@@ -158,6 +169,7 @@ impl DrawUnwindMark {
     pub fn is_balanced_with(&self, other: &DrawUnwindMark) -> bool {
         self.turtles == other.turtles
             && self.turtle_clips == other.turtle_clips
+            && self.clip_rects == other.clip_rects
             && self.draw_call_parent_stack == other.draw_call_parent_stack
             && self.pass_stack == other.pass_stack
             && self.draw_list_stack == other.draw_list_stack
@@ -177,6 +189,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             finished_walks: self.finished_walks.len(),
             turtle_clips: self.turtle_clips.len(),
             align_list: self.align_list.len(),
+            clip_rects: self.clip_rects.len(),
             draw_call_parent_stack: self.draw_call_parent_stack.len(),
             pass_stack: self.cx.pass_stack.len(),
             draw_list_stack: self.cx.draw_list_stack.len(),
@@ -198,6 +211,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.finished_walks.truncate(mark.finished_walks);
         self.turtle_clips.truncate(mark.turtle_clips);
         self.align_list.truncate(mark.align_list);
+        self.clip_rects.truncate(mark.clip_rects);
         self.draw_call_parent_stack.truncate(mark.draw_call_parent_stack);
         self.cx.pass_stack.truncate(mark.pass_stack);
         self.cx.draw_list_stack.truncate(mark.draw_list_stack);
@@ -247,12 +261,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             turtles: scratch.turtles,
             fill_pool: scratch.fill_pool,
             align_list: scratch.align_list,
+            clip_rects: scratch.clip_rects,
             draw_call_parent_stack,
             draw_call_parent_next: 2,
             sploded_hairline: None,
             sploded_hairline_seen: scratch.sploded_hairline_seen,
             sploded_scene: None,
             text_runs: None,
+            glyph_capture: None,
         }
     }
 

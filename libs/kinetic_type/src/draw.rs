@@ -337,12 +337,15 @@ script_mod! {
         }
     }
 
-    // The backdrop: a full-frame quad behind everything (drawn first, at
-    // the far plane, no depth write). `backdrop()` reads `self.pos` (0,0
-    // top left) and the same signals as the look. A kit with a `picture`
-    // draws its glyphs flat into that picture instead of the frame, and
-    // the backdrop is the whole frame (a screen): `self.picture(uv)`,
-    // `self.ink(uv)`.
+    // Default BGRA8, alpha_blend true: source-over into the host's single-sample RGBA16F frame.
+    // The frame clears to (col_bg.rgb,1); overlay clears zero but skips this draw. The separate picture input clears zero.
+    // backdrop() reads self.pos (0,0 top left), signals and content/picture/ink; return straight RGB and coverage alpha.
+    // pixel() clamps alpha and premultiplies RGB for coverage over prior colour; alpha 0 adds no light (stock alpha is 1).
+    // This full-frame quad runs before glyphs at depth 0.99999, tested against depth cleared to 1, without depth writes.
+    // Overlapping draws combine in submission order; earlier colour enters only through blending, never target reads.
+    // A picture kit draws glyphs into a separate texture first; the backdrop samples it as the whole frame.
+    // Disabling alpha_blend replaces output (the pixel wrapper still premultiplies); data-format declarations write raw.
+    // Linear-light decoding uses the draw's premultiplied flag; these host passes do not use MSAA coverage.
     mod.draw.DrawKineticBackdrop = mod.std.set_type_default() do #(DrawKineticBackdrop::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.AudioInput,

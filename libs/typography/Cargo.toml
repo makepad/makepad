@@ -7,14 +7,21 @@ description = "Typography as engine primitives: fonts at any variable-axis value
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/makepad/makepad/"
 
+[features]
+default = ["shaping"]
+# Fonts, shaped layout, outlines, fitting, recording, text on paths and the
+# kernel host components. Without it the crate is the single-stroke fonts and
+# karaoke states alone, on std only, for engines that letter text as strokes.
+shaping = ["dep:rustybuzz", "dep:makepad-script-compute", "dep:ttf-parser"]
+
 [dependencies]
 # Shaping and font tables (thread-safe, parsed on use).
-rustybuzz = { version = "0.18.0", path = "../rustybuzz" }
+rustybuzz = { version = "0.18.0", path = "../rustybuzz", optional = true }
 # Kernel host components (`text.outline`, `text.layout`).
-makepad-script-compute = { path = "../../platform/script/compute" }
+makepad-script-compute = { path = "../../platform/script/compute", optional = true }
 # Outlines of variable glyphs at non-default axis values need gvar's
 # allocating path (the same feature the draw crate enables).
-ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-alloc"] }
+ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-alloc"], optional = true }
 
 [dev-dependencies]
 makepad-script-compute-sched = { path = "../../platform/script/compute_sched" }

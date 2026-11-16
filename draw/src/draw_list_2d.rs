@@ -735,12 +735,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
     pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect) {
         let draw_list_id = *self.draw_list_stack.last().unwrap();
+        let draw_clip = self.open_clip();
         let draw_list = &mut self.cx.draw_lists[draw_list_id];
-        // ok so we have to add
-        let rect_id = draw_list.push_rect_area(CxRectArea {
-            rect,
-            draw_clip: Default::default(),
-        });
+        let rect_id = draw_list.push_rect_area(CxRectArea { rect, draw_clip });
 
         let new_area = Area::Rect(RectArea {
             draw_list_id,

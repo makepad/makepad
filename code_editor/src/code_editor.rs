@@ -461,8 +461,17 @@ impl CodeEditor {
 
     fn is_read_only(&self) -> bool { self.read_only || self.document_read_only }
 
+    /// Follows the document's read-only state: the key focus takes text only while it can be edited.
+    fn sync_document_read_only(&mut self, cx: &mut Cx, read_only: bool) {
+        if read_only != self.document_read_only {
+            self.document_read_only = read_only;
+            cx.set_key_focus_takes_text(self.scroll_bars.area(), !self.is_read_only());
+        }
+    }
+
     pub fn set_read_only(&mut self, cx: &mut Cx, read_only: bool) {
         self.read_only = read_only;
+        cx.set_key_focus_takes_text(self.scroll_bars.area(), !self.is_read_only());
         if read_only {
             self.stop_input_timers(cx);
             cx.hide_text_ime();
@@ -698,7 +707,7 @@ impl CodeEditor {
     }
 
     pub fn draw_walk_editor(&mut self, cx: &mut Cx2d, session: &mut CodeSession, walk: Walk) {
-        self.document_read_only = session.document().is_read_only();
+        self.sync_document_read_only(cx, session.document().is_read_only());
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
         // A fold animation steps before this frame is laid out, so what is
@@ -1311,7 +1320,7 @@ impl CodeEditor {
         session: &mut CodeSession,
     ) -> Vec<CodeEditorAction> {
         let mut actions = Vec::new();
-        self.document_read_only = session.document().is_read_only();
+        self.sync_document_read_only(cx, session.document().is_read_only());
 
         if self.is_read_only() || self.caret_policy == CaretPolicy::Steady {
             self.stop_blink_timers(cx);
@@ -1355,6 +1364,7 @@ impl CodeEditor {
                 }
             }
             Hit::KeyFocus(_) => {
+                cx.set_key_focus_takes_text(self.scroll_bars.area(), !self.is_read_only());
                 self.animator_play(cx, ids!(focus.on));
             }
             Hit::KeyDown(KeyEvent {

@@ -8,7 +8,7 @@ mod remote;
 mod runtime;
 mod selector;
 
-pub use app_process::ShutdownOutcome;
+pub use app_process::{build_release_binary, ShutdownOutcome};
 pub use error::{IntoTestResult, TestError, TestResult};
 pub use makepad_studio_protocol::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, RemoteKeyModifiers, RemoteMouseDown,

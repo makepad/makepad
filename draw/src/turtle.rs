@@ -3046,6 +3046,9 @@ pub struct Turtle {
     origin: Vec2d,
     guard: Area,
     root: bool,
+    /// The clip open inside this turtle when it began: its own clip and every clip open around
+    /// it in its pass, intersected (see `Cx2d::open_clip`).
+    open_clip: (Vec2d, Vec2d),
 }
 
 impl Turtle {
@@ -4624,6 +4627,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             current_row_metrics: Metrics::default(),
             guard: Area::Empty,
             root: true,
+            open_clip: (dvec2(0.0, 0.0), size),
         };
 
         self.turtles.push(turtle);
@@ -4633,6 +4637,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn begin_unclipped_root_turtle(&mut self, size: Vec2d, layout: Layout) {
         self.begin_root_turtle(size, layout);
         *self.align_list.last_mut().unwrap() = AlignEntry::Unset;
+        self.turtles.last_mut().unwrap().open_clip = UNCLIPPED;
     }
 
     /// Starts a root turtle for the current pass.
@@ -4701,6 +4706,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         );
 
         let origin = origin - layout.scroll;
+        let open_clip = meet_clip(self.open_clip(), (clip_min, clip_max));
 
         self.align_list
             .push(AlignEntry::BeginClip(clip_min, clip_max));
@@ -4730,6 +4736,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             current_row_metrics: Metrics::default(),
             guard,
             root: false,
+            open_clip,
         };
 
         self.turtles.push(turtle);
@@ -5012,6 +5019,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.finished_walks.truncate(turtle_walks_start);
         let mut turtle = self.turtles.pop().unwrap();
         self.recycle_fills(&mut turtle);
+        self.close_clip_rects_in(&turtle);
 
         if self.turtles.is_empty() {
             Rect {
@@ -5154,6 +5162,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// The clip can later be modified via [`update_clip_rect_at`].
     pub fn push_clip_rect_tracked(&mut self, rect: Rect) -> usize {
         let index = self.align_list.len();
+        self.open_clip_rect(index, rect);
         self.align_list
             .push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
         index
@@ -5171,6 +5180,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn remove_clip_rect_at(&mut self, index: usize) {
         debug_assert!(matches!(self.align_list[index], AlignEntry::BeginClip(..)));
         self.align_list[index] = AlignEntry::Unset;
+        if let Some(open) = self.clip_rects.iter().rposition(|&(open, _)| open == index) {
+            self.clip_rects.remove(open);
+        }
     }
 
     // Returns the end of the align list of the finished walk with the given index.
@@ -5466,6 +5478,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn end_pass_sized_turtle_no_clip(&mut self) {
         let mut turtle = self.turtles.pop().unwrap();
         self.recycle_fills(&mut turtle);
+        self.close_clip_rects_in(&turtle);
 
         self.clip_and_shift_align_list(turtle.align_start, self.align_list.len());
         //log!("{:?}", self.align_list[turtle.align_start]);
@@ -5478,6 +5491,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn end_pass_sized_turtle(&mut self) {
         let mut turtle = self.turtles.pop().unwrap();
         self.recycle_fills(&mut turtle);
+        self.close_clip_rects_in(&turtle);
         // lets perform clipping on our alignlist.
         self.align_list.push(AlignEntry::EndClip);
 
@@ -5492,6 +5506,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn end_pass_sized_turtle_with_shift(&mut self, area: Area, shift: Vec2d) {
         let mut turtle = self.turtles.pop().unwrap();
         self.recycle_fills(&mut turtle);
+        self.close_clip_rects_in(&turtle);
         // lets perform clipping on our alignlist.
         self.align_list.push(AlignEntry::EndClip);
 
@@ -6336,14 +6351,56 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// matching `pop_clip_rect` will have their GPU `draw_clip` intersected
     /// with this rect. Must be balanced with `pop_clip_rect`.
     pub fn push_clip_rect(&mut self, rect: Rect) {
+        self.open_clip_rect(self.align_list.len(), rect);
         self.align_list
             .push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
     }
 
     /// Pop a clip rectangle previously pushed by `push_clip_rect`.
     pub fn pop_clip_rect(&mut self) {
+        self.clip_rects.pop();
         self.align_list.push(AlignEntry::EndClip);
     }
+
+    /// The clip a rect area recorded now is drawn under, as far as it is known yet: the open
+    /// turtle clips and clip rects of this pass, intersected, unbounded outside all of them (a
+    /// side a turtle sizes to its content stays open until it ends). The pass's clip pass sets
+    /// the final clip when the pass ends; until then a read during the draw (a widget's
+    /// semantics) sees this one. Kept as the turtles and clip rects open, so it costs nothing to read.
+    pub(crate) fn open_clip(&self) -> (Vec2d, Vec2d) {
+        let turtle = self.turtles.last();
+        match self.clip_rects.last() {
+            Some(&(index, clip)) if turtle.is_none_or(|turtle| index > turtle.align_start) => clip,
+            _ => turtle.map_or(UNCLIPPED, |turtle| turtle.open_clip),
+        }
+    }
+
+    fn open_clip_rect(&mut self, index: usize, rect: Rect) {
+        let clip = meet_clip(self.open_clip(), (rect.pos, rect.pos + rect.size));
+        self.clip_rects.push((index, clip));
+    }
+
+    /// Clip rects pushed inside a turtle and never popped close with it.
+    fn close_clip_rects_in(&mut self, turtle: &Turtle) {
+        while self.clip_rects.last().is_some_and(|&(index, _)| index > turtle.align_start) {
+            self.clip_rects.pop();
+        }
+    }
+}
+
+/// No clip: what a rect area recorded outside every clip is drawn under.
+const UNCLIPPED: (Vec2d, Vec2d) = (
+    Vec2d { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY },
+    Vec2d { x: f64::INFINITY, y: f64::INFINITY },
+);
+
+/// Two clips intersected; a NaN side (a turtle that does not clip that axis, or sizes to its
+/// content and has not ended) leaves the other's side.
+fn meet_clip(outer: (Vec2d, Vec2d), inner: (Vec2d, Vec2d)) -> (Vec2d, Vec2d) {
+    (
+        dvec2(outer.0.x.max(inner.0.x), outer.0.y.max(inner.0.y)),
+        dvec2(outer.1.x.min(inner.1.x), outer.1.y.min(inner.1.y)),
+    )
 }
 
 pub struct TurtleAlignRange {

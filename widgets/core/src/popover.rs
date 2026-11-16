@@ -602,6 +602,9 @@ pub struct Popover {
     /// press, or it stays drawn as held. The lock is taken on the release.
     #[rust]
     lock_pending: bool,
+    /// The area used to take our lock, even if the view has since drawn.
+    #[rust]
+    locked: Option<Area>,
     #[rust]
     focus_trap: FocusTrap,
 }
@@ -713,6 +716,20 @@ impl Popover {
         !matches!(self.trigger, PopoverTrigger::Hover)
     }
 
+    fn take_sweep_lock(&mut self, cx: &mut Cx, area: Area) {
+        if self.locked != Some(area) {
+            self.release_sweep_lock(cx);
+        }
+        cx.sweep_lock(area);
+        self.locked = Some(area);
+    }
+
+    fn release_sweep_lock(&mut self, cx: &mut Cx) {
+        if let Some(area) = self.locked.take() {
+            cx.sweep_unlock(area);
+        }
+    }
+
     /// The rect the content hangs off: the pointer rect while an `open_at`
     /// lasts, else the anchor's final rect.
     fn anchor(&self) -> Rect {
@@ -773,7 +790,7 @@ impl Popover {
             if from_press {
                 self.lock_pending = true;
             } else {
-                cx.sweep_lock(self.view.area());
+                self.take_sweep_lock(cx, self.view.area());
             }
         }
         if self.trap_focus {
@@ -810,7 +827,7 @@ impl Popover {
         self.focus_pending = false;
         if self.owns_pointer() {
             if !self.lock_pending {
-                cx.sweep_unlock(self.view.area());
+                self.release_sweep_lock(cx);
             }
             self.lock_pending = false;
             // Key focus goes back where it came from, or to the anchor when
@@ -1101,7 +1118,7 @@ impl Widget for Popover {
             // inner overlay gets Escape and the outside press first.
             let held = self.owns_pointer() && !self.lock_pending;
             if held {
-                cx.sweep_unlock(area);
+                self.release_sweep_lock(cx);
             }
             inner_held = cx.sweep_lock_area().is_some();
             if self.trap_focus {
@@ -1109,7 +1126,7 @@ impl Widget for Popover {
             }
             self.content.handle_event(cx, event, scope);
             if held {
-                cx.sweep_lock(area);
+                self.take_sweep_lock(cx, area);
             }
         } else if !event.requires_visibility() && !self.content.is_empty() {
             self.content.handle_event(cx, event, scope);
@@ -1160,7 +1177,7 @@ impl Widget for Popover {
                     && te.touches.iter().any(|t| t.state == TouchState::Stop)
                 {
                     self.lock_pending = false;
-                    cx.sweep_lock(area);
+                    self.take_sweep_lock(cx, area);
                 }
                 if let Some(touch) = te.touches.iter().find(|t| t.state == TouchState::Start) {
                     if !self.open {
@@ -1184,13 +1201,13 @@ impl Widget for Popover {
             Event::MouseUp(_) => {
                 if self.open && self.lock_pending {
                     self.lock_pending = false;
-                    cx.sweep_lock(area);
+                    self.take_sweep_lock(cx, area);
                 }
             }
             Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
                 if self.open && self.lock_pending {
                     self.lock_pending = false;
-                    cx.sweep_lock(area);
+                    self.take_sweep_lock(cx, area);
                 }
             }
             Event::MouseMove(me) => {
@@ -1562,6 +1579,69 @@ impl FocusTrap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn popover_opened_before_its_first_draw_releases_its_sweep_lock() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut popover = cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                Popover::script_new_with_default(vm)
+            });
+            assert_eq!(popover.view.area(), Area::Empty, "the view has never drawn");
+            popover.open_at(&mut cx, r(100.0, 100.0, 80.0, 30.0));
+            assert_eq!(
+                cx.sweep_lock_area(),
+                Some(Area::Empty),
+                "opening before the first draw locks the empty area"
+            );
+
+            // A window-less draw gives the view its first real area.
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, PASS);
+            let mut draw_list = DrawList2d::new(&mut cx);
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            {
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(&mut cx, &event);
+                let mut cx2d = Cx2d::new(&mut draw);
+                cx2d.begin_pass(&pass, None);
+                draw_list.begin_always(&mut cx2d);
+                overlay.begin(&mut cx2d);
+                cx2d.begin_root_turtle(PASS, Layout::flow_down());
+                popover.draw_walk_all(&mut cx2d, &mut Scope::empty(), Walk::fixed(80.0, 30.0));
+                cx2d.end_pass_sized_turtle();
+                overlay.end(&mut cx2d);
+                draw_list.end(&mut cx2d);
+                cx2d.end_pass(&pass);
+            }
+            assert!(
+                matches!(popover.view.area(), Area::Rect(_)) && popover.view.area().is_valid(&cx),
+                "the first draw gives the view a live rect area"
+            );
+
+            popover.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+            assert_eq!(
+                cx.sweep_lock_area(),
+                Some(popover.view.area()),
+                "content dispatch retakes the lock with the current view area"
+            );
+            let escape = Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..Default::default()
+            });
+            popover.handle_event(&mut cx, &escape, &mut Scope::empty());
+            assert!(
+                !popover.is_open(),
+                "Escape closes the popover after its first draw"
+            );
+            assert_eq!(
+                cx.sweep_lock_area(),
+                None,
+                "closing leaves no stale sweep lock behind"
+            );
+        });
+    }
 
     /// The pending sweep lock belongs to the press that opened the popover:
     /// only that mouse press taken away discharges it. Another finger's

@@ -2,6 +2,7 @@ use crate::gauss_stack::GaussStack;
 use crate::{
     button::ButtonWidgetExt,
     desktop_button::{DesktopButtonWidgetExt, DesktopButtonWidgetRefExt},
+    drag_visual::DragVisualState,
     widget_hooks::WidgetHooks,
     gauss_view::{
         begin_window_gauss_frame, finish_window_gauss_frame, window_wants_gauss_capture,
@@ -564,6 +565,10 @@ pub struct Window {
     draw_synthetic_ripple: DrawQuad,
     #[new]
     synthetic_cursor_list: DrawList2d,
+    #[new]
+    drag_visual_list: DrawList2d,
+    #[rust]
+    drag_visual_drawn: bool,
     /// The cursor state last drawn (its generation), 0 when none was.
     #[rust]
     synthetic_cursor_drawn: u64,
@@ -1970,6 +1975,8 @@ impl Window {
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
         //self.debug_view.draw(cx);
 
+        self.draw_drag_visual(cx);
+
         // Only the direct display owner draws a cursor, above every child.
         if let OsType::LinuxDirect = cx.os_type() {
             let shape = cx.mouse_cursor();
@@ -2089,6 +2096,69 @@ impl Window {
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass.handle);
     }
+    fn handle_drag_visual(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::Drag(e) => {
+                let state = cx.global::<DragVisualState>();
+                if state.visual.is_some() {
+                    if e.window_id == self.window.window_id() {
+                        state.pointer = Some((e.window_id, e.abs));
+                        self.drag_visual_list.redraw(cx);
+                        if !self.drag_visual_drawn {
+                            // The overlay has no parent list until its first draw.
+                            self.main_draw_list.redraw(cx);
+                        }
+                    } else if self.drag_visual_drawn {
+                        self.drag_visual_list.redraw(cx);
+                    }
+                }
+            }
+            Event::Drop(_) | Event::DragEnd => {
+                let state = cx.global::<DragVisualState>();
+                state.visual = None;
+                state.pointer = None;
+                if self.drag_visual_drawn {
+                    self.drag_visual_list.redraw(cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_drag_visual(&mut self, cx: &mut Cx2d) {
+        let visual = {
+            let state = cx.global::<DragVisualState>();
+            state.pointer.and_then(|(window_id, pos)| {
+                if window_id == self.window.window_id() {
+                    state.visual.clone().map(|visual| (visual, pos + state.offset))
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some((visual, pos)) = visual {
+            self.drag_visual_list.begin_overlay_last(cx);
+            cx.begin_root_turtle(cx.current_pass_size(), Layout::default());
+            visual.draw_walk_all(
+                cx,
+                &mut Scope::empty(),
+                Walk {
+                    abs_pos: Some(pos),
+                    width: Size::fit(),
+                    height: Size::fit(),
+                    ..Walk::default()
+                },
+            );
+            cx.end_pass_sized_turtle();
+            self.drag_visual_list.end(cx);
+            self.drag_visual_drawn = true;
+        } else if self.drag_visual_drawn {
+            self.drag_visual_list.begin_always(cx);
+            self.drag_visual_list.end(cx);
+            self.drag_visual_drawn = false;
+        }
+    }
+
     /// The synthetic cursor, when the remote bridge shows one in this window.
     /// Costs nothing while it is off.
     fn draw_synthetic_cursor(&mut self, cx: &mut Cx2d) {
@@ -3086,6 +3156,7 @@ impl Widget for Window {
         }
         self.handle_direct_mouse_cursor(cx, event);
         self.handle_synthetic_cursor(cx, event);
+        self.handle_drag_visual(cx, event);
         crate::desktop_style::handle_event(cx, event);
         if let Event::Custom(json) = event {
             if let Some(keyboard) = makepad_platform::ime::HostedKeyboard::parse(json) {

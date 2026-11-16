@@ -381,7 +381,11 @@ impl Widget for WebView {
             (p - corner).length() <= radius
         });
         match &hit {
-            Hit::KeyFocus(_) => self.set_focus(cx, true),
+            Hit::KeyFocus(_) => {
+                // a focused page takes its own keys
+                cx.set_key_focus_takes_text(area, true);
+                self.set_focus(cx, true);
+            }
             Hit::KeyFocusLost(_) => self.set_focus(cx, false),
             Hit::KeyDown(key) if key.key_code == KeyCode::Escape && self.textured.is_open() => {
                 self.set_focus(cx, false);
