@@ -5,6 +5,9 @@ use crate::opcode::*;
 use std::fmt;
 
 #[relax_api(plain, run)]
+// Equality, order and hash stay on the raw bits (hot paths). A reported error differs in bits
+// from its unreported copy; that loses nothing: two reports differ by ip anyway, and sentinels
+// (`NOT_FOUND`) are never reported.
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 #[repr(transparent)]
 pub struct ScriptValue(u64);
@@ -843,6 +846,14 @@ macro_rules! err_fn {
 impl ScriptValue {
     pub const TYPE_MASK: u64 = 0xFFFF_FF00_0000_0000;
 
+    // Parallel error tags in the unused range 0x30..=0x43, below handles
+    // (0x50). The upper 16 tag bits belong to the NaN box and bit 7 of the
+    // low tag byte belongs to ids, so neither is a spare reported flag.
+    // Include ERR_LAST to preserve the existing inclusive is_err range.
+    const REPORTED_ERR_OFFSET: u64 = (0x30 - ScriptValueType::ERR_FIRST.0 as u64) << 40;
+    const TYPE_REPORTED_ERR_FIRST: u64 = ScriptValueType::ERR_FIRST.to_u64() + Self::REPORTED_ERR_OFFSET;
+    const TYPE_REPORTED_ERR_LAST: u64 = ScriptValueType::ERR_LAST.to_u64() + Self::REPORTED_ERR_OFFSET;
+
     pub const TYPE_TRACED_NAN_MAX: u64 = ScriptValueType::NAN.to_u64() | 0xFF_FFFF_FFFF;
     pub const NAN: ScriptValue = ScriptValue(Self::TYPE_NAN);
 
@@ -890,7 +901,7 @@ impl ScriptValue {
         if self.is_non_nan_number() {
             return ScriptValueType::F64;
         }
-        ScriptValueType::from_u64(self.0 & Self::TYPE_MASK)
+        ScriptValueType::from_u64(self.unreported_bits() & Self::TYPE_MASK)
     }
 
     // Errors
@@ -927,8 +938,36 @@ impl ScriptValue {
 
     #[inline]
     pub const fn is_err(&self) -> bool {
-        (self.0 & Self::TYPE_MASK) >= ScriptValueType::ERR_FIRST.to_u64()
-            && (self.0 & Self::TYPE_MASK) <= ScriptValueType::ERR_LAST.to_u64()
+        // One range: the tags between ERR_LAST and the reported range are unused, so this costs
+        // what the unreported check alone did.
+        let ty = self.0 & Self::TYPE_MASK;
+        ty >= ScriptValueType::ERR_FIRST.to_u64() && ty <= Self::TYPE_REPORTED_ERR_LAST
+    }
+
+    /// Whether this error has already been queued by a real trap.
+    #[inline]
+    pub const fn is_reported_err(&self) -> bool {
+        let ty = self.0 & Self::TYPE_MASK;
+        ty >= Self::TYPE_REPORTED_ERR_FIRST && ty <= Self::TYPE_REPORTED_ERR_LAST
+    }
+
+    #[inline]
+    const fn unreported_bits(&self) -> u64 {
+        if self.is_reported_err() {
+            self.0 - Self::REPORTED_ERR_OFFSET
+        } else {
+            self.0
+        }
+    }
+
+    /// Only ScriptTrapInner::push_err may mark an error, when queuing its report.
+    #[inline]
+    pub(crate) const fn reported_err(self) -> Self {
+        if self.is_err() && !self.is_reported_err() {
+            Self(self.0 + Self::REPORTED_ERR_OFFSET)
+        } else {
+            self
+        }
     }
 
     #[inline]

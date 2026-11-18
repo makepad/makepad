@@ -35,7 +35,7 @@ fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64, lanes: u32) -> Option<[(
             .enumerate()
             .map(|(k, w)| {
                 let len = w.len() - 2 * G;
-                ir::RawBuf { ptr: w[G..].as_mut_ptr(), len, writable: k >= 2 }
+                ir::RawBuf { elem: ir::Elem::Word, ptr: w[G..].as_mut_ptr(), len, writable: k >= 2 }
             })
             .collect();
         let mut state = [0u32; 1];
@@ -184,7 +184,7 @@ fn vector_code_of_both_widths_equals_scalar_and_interpreter_on_random_kernels() 
                 .enumerate()
                 .map(|(k, w)| {
                     let len = w.len() - 2 * G;
-                    ir::RawBuf { ptr: w[G..].as_mut_ptr(), len, writable: k >= 2 }
+                    ir::RawBuf { elem: ir::Elem::Word, ptr: w[G..].as_mut_ptr(), len, writable: k >= 2 }
                 })
                 .collect();
             let mut state = [0u32; 1];

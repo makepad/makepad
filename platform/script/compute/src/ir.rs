@@ -32,6 +32,26 @@ pub enum Ty {
     F64,
 }
 
+/// A host buffer's element representation; indices count elements.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
+pub enum Elem {
+    Word,
+    U8,
+    U16,
+    I16,
+}
+
+impl Elem {
+    pub fn bytes(self) -> usize {
+        match self {
+            Elem::Word => 4,
+            Elem::U8 => 1,
+            Elem::U16 | Elem::I16 => 2,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(transparent)]
 pub struct Val(pub u32);
@@ -226,15 +246,17 @@ pub enum Stmt {
     /// An impure call of port `port` of the front end's port table
     /// ([`PortSig`]), bound per run to its host's [`Ports`]: 32-bit
     /// arguments, results defined here (like `Def`s). `site` names the
-    /// source place of the call in the front end's site table. Ports touch
-    /// no region of the program. Only a front end that gives a port table
-    /// to [`validate_ports`] has them; the native and wasm back ends decline
-    /// a program with ports ([`has_ports`]): it runs in the interpreter.
+    /// source place of the call in the front end's site table. Ports may
+    /// read or write any host buffer, but no other region. Only a front end
+    /// that gives a port table to [`validate_ports`] has them; the native and
+    /// wasm back ends decline a program with ports ([`has_ports`]): it runs
+    /// in the interpreter.
     Port { port: u16, args: Vec<Val>, rets: Vec<Val>, site: u32 },
     /// A source mark: statements after it, up to the next mark in program
-    /// order, come from source statement `n` in the lowering's mark table.
-    /// It reads and writes nothing, costs nothing, is valid anywhere, and
-    /// every back end emits nothing for it.
+    /// order, come from source statement `n` in the lowering's mark table
+    /// (or, for a condition's mark, the `If` right after it tests that
+    /// condition). It reads and writes nothing, costs nothing, is valid
+    /// anywhere, and every back end emits nothing for it.
     Mark(u32),
 }
 
@@ -245,6 +267,21 @@ pub struct PortSig {
     pub name: &'static str,
     pub params: &'static [Ty],
     pub rets: &'static [Ty],
+    pub bufs: &'static [PortBuf],
+}
+
+/// A buffer parameter, represented by its constant buffer number (`Ty::I32`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortBuf {
+    pub param: u8,
+    /// None accepts any element representation.
+    pub elem: Option<Elem>,
+    pub writes: bool,
+}
+
+/// Whether the entry program declares any narrow host buffers.
+pub fn has_narrow(p: &Program) -> bool {
+    p.bufs.iter().any(|e| *e != Elem::Word)
 }
 
 /// Any port statement in `p` or its functions.
@@ -347,6 +384,9 @@ pub struct Program {
     /// The functions [`Stmt::Call`] names (an entry program's; a function's
     /// own list is empty: calls in it name the entry program's functions).
     pub funcs: Vec<Program>,
+    /// Host buffer k's element representation at index k; missing entries are Word.
+    /// Only the entry program's list counts; its functions leave their lists empty.
+    pub bufs: Vec<Elem>,
 }
 
 impl Program {
@@ -369,8 +409,8 @@ impl Program {
             for s in b {
                 sum = sum.saturating_add(match s {
                     Stmt::Mark(_) => 0,
-                    Stmt::If(_, t, e) => 1 + walk(t, c, funcs).max(walk(e, c, funcs)),
-                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body, c, funcs) + 2),
+                    Stmt::If(_, t, e) => walk(t, c, funcs).max(walk(e, c, funcs)).saturating_add(1),
+                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body, c, funcs).saturating_add(2)),
                     Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
                     Stmt::Call { f, args, .. } => funcs.get(*f as usize).map_or(u64::MAX / 4, |g| walk(&g.body, &const_ints(g), funcs).saturating_add(4 + args.len() as u64)),
                     _ => 1,
@@ -385,7 +425,7 @@ impl Program {
     /// only: the generated code's own work (what the per-element cap
     /// bounds; host components are bounded per call at run time).
     pub fn air_cost(&self) -> u64 {
-        let mut p = Program { funcs: self.funcs.clone(), ..Default::default() };
+        let mut p = Program { funcs: self.funcs.clone(), bufs: self.bufs.clone(), ..Default::default() };
         std::mem::swap(&mut p.body, &mut strip_calls(&self.body));
         p.cost()
     }
@@ -788,50 +828,73 @@ pub struct Io<'a> {
 
 /// A host buffer as a run sees it. Several workers may use one buffer at
 /// once (each writing only its own elements), so the interpreter never makes
-/// a Rust reference over this memory: it reads and writes single words
+/// a Rust reference over this memory: it reads and writes single elements
 /// through relaxed atomics.
 #[relax_api(plain)]
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct RawBuf {
+    /// Points at the first element in an allocation of a whole number of words.
+    /// Element i starts at byte `i * elem.bytes()`, in native byte order.
     pub ptr: *mut u32,
-    /// Length in words.
+    /// Length in elements.
     pub len: usize,
     pub writable: bool,
+    pub elem: Elem,
 }
 
-// SAFETY: a RawBuf is only dereferenced word by word through atomics, at
+// SAFETY: a RawBuf is only dereferenced element by element through atomics, at
 // clamped indices below `len`, by the runs its owner hands it to.
 unsafe impl Send for RawBuf {}
 unsafe impl Sync for RawBuf {}
 
 impl RawBuf {
-    /// Word `at` (0 past the end).
+    /// Element `at`, zero-extended (U8/U16) or sign-extended (I16) to a word
+    /// (0 past the end).
     pub fn load_word(&self, at: usize) -> u32 {
         self.load(at)
     }
 
-    /// Writes word `at` (ignored past the end or when read-only).
+    /// Writes element `at`, keeping its low 8 or 16 bits for narrow elements
+    /// (ignored past the end or when read-only).
     pub fn store_word(&self, at: usize, x: u32) {
         self.store(at, x)
     }
 
     #[inline(always)]
     fn load(&self, at: usize) -> u32 {
+        use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering};
         if at >= self.len {
             return 0;
         }
-        // SAFETY: at < len, and the owner keeps ptr..ptr+len alive for the run.
-        unsafe { (*(self.ptr.add(at) as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Relaxed) }
+        // SAFETY: at < len; the owner keeps the word-aligned allocation alive.
+        // Only an atomic element access borrows the memory, never a word slice.
+        unsafe {
+            let ptr = self.ptr.cast::<u8>().add(at * self.elem.bytes());
+            match self.elem {
+                Elem::Word => (*ptr.cast::<AtomicU32>()).load(Ordering::Relaxed),
+                Elem::U8 => (*ptr.cast::<AtomicU8>()).load(Ordering::Relaxed) as u32,
+                Elem::U16 => (*ptr.cast::<AtomicU16>()).load(Ordering::Relaxed) as u32,
+                Elem::I16 => (*ptr.cast::<AtomicU16>()).load(Ordering::Relaxed) as i16 as i32 as u32,
+            }
+        }
     }
 
     #[inline(always)]
     fn store(&self, at: usize, x: u32) {
+        use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering};
         if at >= self.len || !self.writable {
             return;
         }
         // SAFETY: as in `load`; the buffer was bound writable.
-        unsafe { (*(self.ptr.add(at) as *const std::sync::atomic::AtomicU32)).store(x, std::sync::atomic::Ordering::Relaxed) }
+        unsafe {
+            let ptr = self.ptr.cast::<u8>().add(at * self.elem.bytes());
+            match self.elem {
+                Elem::Word => (*ptr.cast::<AtomicU32>()).store(x, Ordering::Relaxed),
+                Elem::U8 => (*ptr.cast::<AtomicU8>()).store(x as u8, Ordering::Relaxed),
+                Elem::U16 | Elem::I16 => (*ptr.cast::<AtomicU16>()).store(x as u16, Ordering::Relaxed),
+            }
+        }
     }
 }
 
@@ -855,12 +918,12 @@ pub struct Mem<'a> {
     pub ctx: &'a mut [u32],
     pub state: &'a mut [u32],
     pub shared: Shared<'a>,
-    /// Host buffers (each at least one word long).
+    /// Host buffers (word allocations, with lengths in elements).
     pub bufs: &'a [RawBuf],
 }
 
 /// A buffer access: `base + off` computed without wrapping (64-bit), then
-/// clamped to the last word. The same in every backend.
+/// clamped to the last element. The same in every backend.
 #[inline(always)]
 pub fn buf_index(base: u32, off: Option<u32>, len: usize) -> usize {
     ((base as u64 + off.unwrap_or(0) as u64) as usize).min(len.saturating_sub(1))
@@ -1200,10 +1263,19 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
 /// [`validate`] for a front end whose programs may call `ports` (by index):
 /// every port statement names one, with its arity and 32-bit types.
 pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Result<(), String> {
+    if p.bufs.len() > regions.bufs.len() {
+        return Err("element table names more host buffers than the regions have".into());
+    }
     for sig in ports {
         let wide = |t: &Ty| *t == Ty::F64;
         if sig.params.len() > PORT_MAX_ARGS || sig.rets.len() > PORT_MAX_RETS || sig.params.iter().any(wide) || sig.rets.iter().any(wide) {
             return Err(format!("port `{}`: at most {} 32-bit arguments and {} results", sig.name, PORT_MAX_ARGS, PORT_MAX_RETS));
+        }
+        let mut marked = std::collections::HashSet::new();
+        for b in sig.bufs {
+            if sig.params.get(b.param as usize) != Some(&Ty::I32) || !marked.insert(b.param) {
+                return Err(format!("port `{}`: buffer parameters must name distinct I32 parameters", sig.name));
+            }
         }
     }
     struct V<'a> {
@@ -1214,8 +1286,16 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
         ever: Vec<bool>,
         scope: Vec<u32>,
         funcs: &'a [Program],
+        bufs: &'a [Elem],
+        consts: Vec<Option<i32>>,
     }
     impl<'a> V<'a> {
+        fn elem(&self, k: u8) -> Elem {
+            self.bufs.get(k as usize).copied().unwrap_or(Elem::Word)
+        }
+        fn narrow(&self, region: Region) -> bool {
+            matches!(region, Region::Buf(k) if self.elem(k) != Elem::Word)
+        }
         fn ty(&self, v: Val) -> Result<Ty, String> {
             self.p.vals.get(v.0 as usize).copied().ok_or_else(|| format!("{:?} out of range", v))
         }
@@ -1320,6 +1400,9 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                 }
                 Op::Load { region, base, extent, off } => {
                     self.access(region, base, extent, off, false)?;
+                    if self.narrow(region) && t != I32 {
+                        return Err("a narrow buffer load must define an I32 value".into());
+                    }
                     if t == F64 {
                         return Err("memory words are 32-bit: an f64 is loaded as two words".into());
                     }
@@ -1356,6 +1439,9 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                             return Err(format!("{:?} defined twice", v));
                         }
                         self.op(*v, op)?;
+                        if let Op::ConstI(k) = op {
+                            self.consts[v.0 as usize] = Some(*k);
+                        }
                         self.ever[v.0 as usize] = true;
                         self.visible[v.0 as usize] = true;
                         self.scope.push(v.0);
@@ -1365,6 +1451,9 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                         self.used(*v, Some(want))?;
                     }
                     Stmt::Store { region, base, extent, off, val } => {
+                        if self.narrow(*region) && self.used(*val, None)? != Ty::I32 {
+                            return Err("a narrow buffer store must use an I32 value".into());
+                        }
                         if self.used(*val, None)? == Ty::F64 {
                             return Err("memory words are 32-bit: an f64 is stored as two words".into());
                         }
@@ -1402,6 +1491,9 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                             let Some(w) = self.r.bufs.get(x.buf as usize) else {
                                 return Err(format!("host call `{}`: no host buffer {}", h.name, x.buf));
                             };
+                            if self.elem(x.buf) != Elem::Word {
+                                return Err(format!("host call `{}`: narrow buffer {} is not word memory", h.name, x.buf));
+                            }
                             if sig.writable && !*w {
                                 return Err(format!("host call `{}` writes read-only buffer {}", h.name, x.buf));
                             }
@@ -1432,6 +1524,18 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                         }
                         for (v, t) in args.iter().zip(sig.params) {
                             self.used(*v, Some(*t))?;
+                        }
+                        for b in sig.bufs {
+                            let v = args[b.param as usize];
+                            let Some(k) = self.consts[v.0 as usize].filter(|k| *k >= 0 && (*k as usize) < self.r.bufs.len() && *k <= u8::MAX as i32) else {
+                                return Err(format!("port `{}`: buffer argument must be a ConstI naming an existing host buffer", sig.name));
+                            };
+                            if b.writes && !self.r.bufs[k as usize] {
+                                return Err(format!("port `{}` writes read-only buffer {}", sig.name, k));
+                            }
+                            if b.elem.is_some_and(|e| e != self.elem(k as u8)) {
+                                return Err(format!("port `{}`: buffer {} has the wrong element kind", sig.name, k));
+                            }
                         }
                         for (v, t) in rets.iter().zip(sig.rets) {
                             if self.ty(*v)? != *t {
@@ -1522,10 +1626,13 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
         return Err("functions call each other in a cycle".into());
     }
     for (k, g) in p.funcs.iter().enumerate() {
+        if !g.bufs.is_empty() {
+            return Err(format!("function {} has its own buffer element table", k));
+        }
         if !g.funcs.is_empty() {
             return Err(format!("function {} has functions of its own", k));
         }
-        let mut v = V { p: g, r: regions, ports, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), funcs: &p.funcs };
+        let mut v = V { p: g, r: regions, ports, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), funcs: &p.funcs, bufs: &p.bufs, consts: vec![None; g.vals.len()] };
         for pv in &g.params {
             if pv.0 as usize >= g.vals.len() || v.ever[pv.0 as usize] {
                 return Err(format!("function {}: bad parameter {:?}", k, pv));
@@ -1549,7 +1656,7 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
             return Err(format!("function {}: result {:?} is not defined at its top level", k, r));
         }
     }
-    let mut v = V { p, r: regions, ports, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), funcs: &p.funcs };
+    let mut v = V { p, r: regions, ports, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), funcs: &p.funcs, bufs: &p.bufs, consts: vec![None; p.vals.len()] };
     // The top block's values stay visible to the end; nothing follows it.
     v.block(&p.body, 0)
 }
@@ -1665,7 +1772,7 @@ pub fn inline_calls(p: &Program) -> Program {
     if p.funcs.is_empty() {
         return p.clone();
     }
-    let mut out = Program { vals: p.vals.clone(), vars: p.vars.clone(), frame_words: p.frame_words, ..Default::default() };
+    let mut out = Program { vals: p.vals.clone(), vars: p.vars.clone(), frame_words: p.frame_words, bufs: p.bufs.clone(), ..Default::default() };
     let mut vmap: Vec<Val> = (0..p.vals.len() as u32).map(Val).collect();
     let rmap: Vec<Var> = (0..p.vars.len() as u32).map(Var).collect();
     out.body = inline_block(&p.body, &mut out, &p.funcs, &mut vmap, &rmap);
@@ -1765,6 +1872,11 @@ pub fn map_op(op: &Op, vmap: &[Val], rmap: &[Var]) -> Op {
 pub fn to_words(p: &Program) -> Vec<u32> {
     let mut w = Vec::new();
     put_program(&mut w, p);
+    // Only the entry owns this optional extension; old encodings stay identical.
+    if !p.bufs.is_empty() {
+        w.push(p.bufs.len() as u32);
+        w.extend(p.bufs.iter().map(|e| *e as u32));
+    }
     w
 }
 
@@ -1886,7 +1998,19 @@ fn put_op(w: &mut Vec<u32>, op: &Op) {
 /// The program [`to_words`] wrote; None when the words are not one.
 pub fn from_words(words: &[u32]) -> Option<Program> {
     let mut r = Words { w: words, at: 0 };
-    let p = r.program(0)?;
+    let mut p = r.program(0)?;
+    if r.at < words.len() {
+        let n = r.len()?;
+        for _ in 0..n {
+            p.bufs.push(match r.next()? {
+                0 => Elem::Word,
+                1 => Elem::U8,
+                2 => Elem::U16,
+                3 => Elem::I16,
+                _ => return None,
+            });
+        }
+    }
     (r.at == words.len()).then_some(p)
 }
 
@@ -1971,7 +2095,7 @@ impl Words<'_> {
         let n = self.len()?;
         let funcs = (0..n).map(|_| self.program(depth + 1)).collect::<Option<Vec<_>>>()?;
         let body = self.block(0)?;
-        Some(Program { vals, vars, body, frame_words, params, results, funcs })
+        Some(Program { vals, vars, body, frame_words, params, results, funcs, bufs: Vec::new() })
     }
     fn block(&mut self, depth: u32) -> Option<Block> {
         if depth > 256 {

@@ -74,7 +74,7 @@ pub struct HostSlice {
 }
 
 impl HostSlice {
-    const EMPTY: HostSlice = HostSlice { buf: RawBuf { ptr: std::ptr::null_mut(), len: 0, writable: false }, start: 0, len: 0 };
+    const EMPTY: HostSlice = HostSlice { buf: RawBuf { elem: crate::ir::Elem::Word, ptr: std::ptr::null_mut(), len: 0, writable: false }, start: 0, len: 0 };
 
     pub fn len(&self) -> usize {
         self.len
@@ -310,7 +310,10 @@ pub fn get(index: u16) -> Option<HostFn> {
     registry().get(index as usize).copied()
 }
 
-/// The index of a host function by name.
+/// The index of a host function by name. An op of the crate, as every reader of the registry is
+/// ([`register`], [`get`]): under the JIT one registry, the loader's, takes every registration and
+/// answers every look.
+#[relax_api]
 pub fn find(name: &str) -> Option<u16> {
     registry().iter().position(|h| h.name == name).map(|k| k as u16)
 }
@@ -360,6 +363,9 @@ pub fn invoke_counted(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32
     let mut views = [HostSlice::EMPTY; 8];
     for (k, (s, sig)) in slices.iter().zip(h.slices).enumerate() {
         let Some(b) = bufs.get(s.buf as usize) else { return (false, 0) };
+        if b.elem != crate::ir::Elem::Word {
+            return (false, 0);
+        }
         let start = (s.off as usize).min(b.len);
         let mut len = (s.len as usize).min(b.len - start);
         if len > sig.max_words as usize {
@@ -370,7 +376,7 @@ pub fn invoke_counted(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32
             // Clamped: the function runs on what fits, and it is reported.
             ok = false;
         }
-        let buf = RawBuf { ptr: b.ptr, len: b.len, writable: b.writable && sig.writable };
+        let buf = RawBuf { elem: b.elem, ptr: b.ptr, len: b.len, writable: b.writable && sig.writable };
         views[k] = HostSlice { buf, start, len };
     }
     let views = &views[..slices.len()];
@@ -412,7 +418,8 @@ pub const REC_HEADER: usize = 4;
 ///
 /// # Safety
 /// `rec` points at a record of the size its header states, `table` at
-/// `nbufs` live (ptr, len) pairs, `ctx` at a kernel ctx.
+/// `nbufs` live (ptr, len) pairs of Word buffers, `ctx` at a kernel ctx.
+/// Native compilation refuses narrow-buffer programs before making this table ABI usable.
 #[cfg(target_arch = "x86_64")]
 pub unsafe extern "sysv64" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
     trampoline_body(rec, table, ctx, writable)
@@ -438,14 +445,14 @@ unsafe fn trampoline_body(rec: *mut u32, table: *const u64, ctx: *mut u32, writa
         let sl = std::slice::from_raw_parts(rec.add(REC_HEADER + na), 3 * ns);
         let rets = std::slice::from_raw_parts_mut(rec.add(REC_HEADER + na + 3 * ns), nr);
         let mut slices = [SliceRaw { buf: 0, off: 0, len: 0 }; 8];
-        let mut bufs = [RawBuf { ptr: std::ptr::null_mut(), len: 0, writable: false }; 64];
+        let mut bufs = [RawBuf { elem: crate::ir::Elem::Word, ptr: std::ptr::null_mut(), len: 0, writable: false }; 64];
         let mut nb = 0;
         for k in 0..ns {
             slices[k] = SliceRaw { buf: sl[3 * k], off: sl[3 * k + 1], len: sl[3 * k + 2] };
             nb = nb.max(sl[3 * k] as usize + 1);
         }
         for (k, b) in bufs.iter_mut().enumerate().take(nb.min(64)) {
-            *b = RawBuf { ptr: *table.add(2 * k) as *mut u32, len: *table.add(2 * k + 1) as usize, writable: writable >> k & 1 != 0 };
+            *b = RawBuf { elem: crate::ir::Elem::Word, ptr: *table.add(2 * k) as *mut u32, len: *table.add(2 * k + 1) as usize, writable: writable >> k & 1 != 0 };
         }
         let limit = *ctx.add(crate::lower::kernel::K_HOST_LIMIT as usize) as u64;
         let (ok, cost) = invoke_counted(f as u16, args, &slices[..ns], rets, &bufs[..nb.min(64)], limit);

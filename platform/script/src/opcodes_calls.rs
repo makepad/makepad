@@ -68,6 +68,16 @@ impl<'a> ScriptVm<'a> {
             }
         };
 
+        // Argument expressions have run normally. A reported call target carries
+        // its original result through CALL_EXEC, including the usual stack cleanup.
+        let target = self.bx.heap.proto(args);
+        if target.is_reported_err() {
+            self.bx.threads.cur().push_stack_unchecked(target);
+            self.bx.heap.free_object_if_unreffed(args);
+            self.bx.threads.cur().trap.goto_next();
+            return true;
+        }
+
         if let Some(sself) = sself {
             self.bx
                 .heap
@@ -224,7 +234,9 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_method_call_args(&mut self) -> bool {
         let method = self.bx.threads.cur().pop_stack_value();
         let sself = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let fnobj = if let Some(obj) = sself.as_object() {
+        let fnobj = if sself.is_reported_err() {
+            sself
+        } else if let Some(obj) = sself.as_object() {
             self.bx.heap.object_method(obj, method, NoTrap)
         } else if let Some(pod) = sself.as_pod() {
             self.bx.heap.pod_method(pod, method, NoTrap)
@@ -232,7 +244,9 @@ impl<'a> ScriptVm<'a> {
             NIL
         };
 
-        let args = if fnobj.is_err() || fnobj == NIL {
+        let args = if fnobj.is_reported_err() {
+            self.bx.heap.new_with_proto(fnobj)
+        } else if fnobj.is_err() || fnobj == NIL {
             let method = method.as_id().unwrap_or(id!());
             let type_index = sself.value_type().to_redux();
             let (found_method, has_call) = {
@@ -264,13 +278,13 @@ impl<'a> ScriptVm<'a> {
                 self.bx.threads.cur().trap.goto_next();
                 return false;
             } else {
-                script_err_not_found!(
+                let error = script_err_not_found!(
                     self.bx.threads.cur_ref().trap,
                     "method {:?} not found on {}",
                     method,
                     type_index
                 );
-                self.bx.heap.new_with_proto(id!(undefined_function).into())
+                self.bx.heap.new_with_proto(error)
             }
         } else {
             if let Some(ty) = self.bx.heap.pod_type(fnobj) {

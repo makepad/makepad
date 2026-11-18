@@ -106,7 +106,7 @@ pub fn layout(name: String, p: Program, parallel_safe: bool, ctx: &[u32], shared
             .enumerate()
             // SAFETY: each buffer lies inside `out`, which outlives the run
             // and is not otherwise touched during it.
-            .map(|(k, (words, w))| ir::RawBuf { ptr: unsafe { base.add(buf_at[k] as usize / 4) }, len: words.len(), writable: *w })
+            .map(|(k, (words, w))| ir::RawBuf { elem: ir::Elem::Word, ptr: unsafe { base.add(buf_at[k] as usize / 4) }, len: words.len(), writable: *w })
             .collect();
         let mut state = [0u32; 1];
         let mut scratch = vec![0u32; p.scratch_words()];

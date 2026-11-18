@@ -62,8 +62,11 @@ pub(crate) struct Tr<'a> {
 
 impl<'a> Tr<'a> {
     /// The translation of `program` into `f`; `control` is its control word buffer.
-    pub fn new(program: &'a air::Program, control: Option<u8>, f: IrFunction) -> Tr<'a> {
-        Tr { program, control, f, vals: Vec::new(), vars: Vec::new(), frame: None, jump: None }
+    pub fn new(program: &'a air::Program, control: Option<u8>, f: IrFunction) -> Result<Tr<'a>, String> {
+        if air::has_narrow(program) {
+            return Err("narrow host buffers have no shader representation".into());
+        }
+        Ok(Tr { program, control, f, vals: Vec::new(), vars: Vec::new(), frame: None, jump: None })
     }
     pub fn e(&mut self, kind: ExprKind, ty: TyId) -> ExprId {
         self.f.expr(kind, ty)

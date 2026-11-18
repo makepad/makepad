@@ -7,19 +7,19 @@ use makepad_script_compute::lower::event::{lower_events, DeclArg, DeclForm, Decl
 use makepad_script_compute::{lower, parse, parse_prelude, wasm, with_prelude, ShaderError};
 
 const PORTS: &[PortSig] = &[
-    PortSig { name: "send", params: &[Ty::I32, Ty::I32], rets: &[] },
-    PortSig { name: "sample", params: &[Ty::I32], rets: &[Ty::I32] },
-    PortSig { name: "clock", params: &[], rets: &[Ty::I32] },
-    PortSig { name: "cap", params: &[], rets: &[] },
+    PortSig { bufs: &[], name: "send", params: &[Ty::I32, Ty::I32], rets: &[] },
+    PortSig { bufs: &[], name: "sample", params: &[Ty::I32], rets: &[Ty::I32] },
+    PortSig { bufs: &[], name: "clock", params: &[], rets: &[Ty::I32] },
+    PortSig { bufs: &[], name: "cap", params: &[], rets: &[] },
 ];
 
 const FORMS: &[DeclForm] = &[
-    DeclForm { name: "channel", handle: DeclHandle::Arg(0), class: 0 },
-    DeclForm { name: "periodic", handle: DeclHandle::Ordinal, class: 1 },
-    DeclForm { name: "once", handle: DeclHandle::Ordinal, class: 1 },
+    DeclForm { buffer: None, name: "channel", handle: DeclHandle::Arg(0), class: 0 },
+    DeclForm { buffer: None, name: "periodic", handle: DeclHandle::Ordinal, class: 1 },
+    DeclForm { buffer: None, name: "once", handle: DeclHandle::Ordinal, class: 1 },
 ];
 
-const SPEC: EventSpec<'static> = EventSpec { ports: PORTS, forms: FORMS, entry_fns: &["init"], max_entry_cost: 100_000, cap_port: Some(3), marks: false };
+const SPEC: EventSpec<'static> = EventSpec { ports: PORTS, forms: FORMS, entry_fns: &["init"], floats: true, max_entry_cost: 100_000, cap_port: Some(3), marks: false, call_ops: None };
 const PRELUDE: &str = "fn pulse(c: i32) { send(c, 1) send(c, 0) }";
 
 // Put init after the declarations: named entries still precede their handlers.
@@ -359,6 +359,62 @@ fn source_marks_are_optional_and_transparent() {
     assert_eq!(effect_marks(&selected, "if_convert computed branches"), std::collections::HashMap::from([("body/set0".into(), Some(0))]), "if_convert: effect boundary: the merged Set belongs to the If's mark");
 }
 
+/// A front end with marks on learns where its program branches on a source condition: each
+/// `if`, `while` and short-circuit `&&` condition has its own mark, placed right before the `If`
+/// that tests it (or its negation, a `while`'s exit), in the same rising order as statements.
+/// A condition that takes no branch (a select) has a mark in no program.
+#[test]
+fn condition_marks_name_each_branching_condition() {
+    use ir::Stmt;
+    const SOURCE: &str = "\
+var x: i32 = 0
+fn init() {
+    if sample(1) > 2 { send(1, 1) }
+    var i: i32 = 0
+    while i < 3 { i = i + 1 }
+    if sample(2) > 0 && sample(3) > 0 { send(2, 2) }
+    x = if sample(4) > 1 { x + 5 } else { x + 6 }
+}
+";
+    let off = lower_source(SOURCE, &SPEC).expect("unmarked source must lower");
+    let on = lower_source(SOURCE, &EventSpec { marks: true, ..SPEC }).expect("marked source must lower");
+    assert!(off.conds.is_empty() && off.marks.is_empty(), "disabled marks record no conditions");
+    let conds: Vec<(&str, bool)> = on.conds.iter().map(|&(id, tests)| (&SOURCE[on.marks[id as usize].start..on.marks[id as usize].end], tests)).collect();
+    assert_eq!(conds, [
+        ("sample(1) > 2", true),
+        ("i < 3", false),
+        ("sample(2) > 0", true),
+        ("sample(2) > 0 && sample(3) > 0", true),
+        ("sample(4) > 1", true),
+    ], "each condition's span in source order, and whether its `If` tests it or its negation");
+    // Every mark in program order, each with what follows it in its block.
+    fn walk(b: &[Stmt], out: &mut Vec<(u32, bool)>) {
+        for (k, s) in b.iter().enumerate() {
+            match s {
+                Stmt::Mark(n) => out.push((*n, matches!(b.get(k + 1), Some(Stmt::If(..))))),
+                Stmt::If(_, t, e) => { walk(t, out); walk(e, out); }
+                Stmt::Loop { body, .. } => walk(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut marks = Vec::new();
+    walk(&on.entries[0].program.body, &mut marks);
+    assert!(marks.windows(2).all(|pair| pair[0].0 < pair[1].0), "condition marks rise in program order with the statements': {marks:?}");
+    let placed: Vec<u32> = marks.iter().filter(|m| on.conds.iter().any(|c| c.0 == m.0)).map(|m| m.0).collect();
+    assert_eq!(placed, on.conds[..4].iter().map(|c| c.0).collect::<Vec<_>>(), "every branching condition is in the program; the select's is not");
+    assert!(marks.iter().filter(|m| placed.contains(&m.0)).all(|m| m.1), "each condition's mark comes right before its `If`");
+    assert_eq!(ir::to_words(&on.entries[0].program), ir::to_words(&off.entries[0].program), "the program's words are the same without its marks: a back end emits the same code");
+    let mut outputs = Vec::new();
+    for lowered in [&off, &on] {
+        let mut state = lowered.state_init.clone();
+        let mut ports = Recording { calls: Vec::new(), answers: [(1, 3), (1, 1), (1, 1), (1, 2)].into_iter().collect() };
+        run(lowered, 0, &mut state, &mut ports);
+        outputs.push((state, ports.calls.into_iter().map(|c| (c.port, c.site, c.args)).collect::<Vec<_>>()));
+    }
+    assert_eq!(outputs[0], outputs[1], "condition marks change neither state nor port calls");
+}
+
 fn check_calls(lowered: &EventLowered, calls: &[Call], expected: &[(u16, &[u32], &str)], context: &str) {
     assert_eq!(calls.len(), expected.len(), "{context}: missing or extra port calls: {calls:?}");
     for (k, (call, &(port, args, source))) in calls.iter().zip(expected).enumerate() {
@@ -472,4 +528,386 @@ fn typed_top_level_lets_keep_their_type() {
     assert_eq!(calls, [(0, vec![7, 6])], "a typed constant indexes a table");
     let error = lower_source("let k: i32 = 1.5\nfn init() { send(3, k) }\n", &SPEC).err().expect("a fraction is not an i32");
     assert!(error.message.contains("declared i32"), "unexpected refusal: {error}");
+}
+
+#[test]
+fn literal_defaults_follow_the_programs_float_type() {
+    const SOURCE: &str = "\
+let module_number = 17
+var from_constant = module_number
+var quotient = 7 / 2
+var negative_quotient = -7 / 2
+var minimum = -2147483648
+var maximum = 2147483647
+var smallest = min(7, 2)
+var largest = max(7, 2)
+var clamped = clamp(7, 0, 2)
+
+fn helper() { return 0 }
+fn tail() { 9 }
+
+fn init() {
+    let bare = 23
+    send(3, int(bare))
+    send(3, int(helper()))
+    send(3, int(helper()))
+    send(3, int(tail()))
+    send(3, int(tail()))
+}
+";
+    let spec = EventSpec { floats: false, call_ops: Some(0), ..SPEC };
+    for floats in [false, true] {
+        let lowered = lower_source(SOURCE, &EventSpec { floats, ..spec })
+            .unwrap_or_else(|e| panic!("floats={floats}: literal defaults must lower: {e}"));
+        let ty = if floats { Ty::F32 } else { Ty::I32 };
+        let sig = if floats { "f32" } else { "i32" };
+        let program = &lowered.entries[0].program;
+        assert!(program.vars.len() > lowered.state_vars.len(), "floats={floats}: the bare let has a local variable");
+        assert!(program.vars.iter().all(|t| *t == ty), "floats={floats}: the bare let and inferred result variables default to {ty:?}: {:?}", program.vars);
+        for (name, integer, float) in [
+            ("from_constant", 17, 17.0f32),
+            ("quotient", 3, 3.5),
+            ("negative_quotient", -3, -3.5),
+            ("minimum", i32::MIN, i32::MIN as f32),
+            ("maximum", i32::MAX, i32::MAX as f32),
+            ("smallest", 2, 2.0),
+            ("largest", 7, 7.0),
+            ("clamped", 2, 2.0),
+        ] {
+            let var = lowered.state_vars.iter().find(|v| v.name == name).expect("initialized state exists");
+            assert_eq!(var.sig, sig, "floats={floats}: {name} takes the program's default literal type");
+            let expected = if floats { float.to_bits() } else { integer as u32 };
+            assert_eq!(lowered.state_init[var.offset as usize], expected, "floats={floats}: {name} keeps its constant value, division rule and i32 boundaries");
+        }
+        for name in ["helper", "tail"] {
+            let index = lowered.funcs.iter().position(|f| f.name == name).unwrap_or_else(|| panic!("{name} must be kept as a function"));
+            let function = &program.funcs[index];
+            let results: Vec<_> = function.results.iter().map(|v| function.vals[v.0 as usize]).collect();
+            assert_eq!(results, [ty], "floats={floats}: {name}'s bare literal result defaults to {ty:?}");
+        }
+    }
+    for (expression, message) in [
+        ("1.5", "this program has no float type: write an integer literal"),
+        ("2.0", "this program has no float type: write an integer literal"),
+        ("1e3", "this program has no float type: write an integer literal"),
+        ("PI", "PI needs a float type; this program has none"),
+        ("TAU", "TAU needs a float type; this program has none"),
+        ("E", "E needs a float type; this program has none"),
+        ("1 / 0", "division by zero in a constant"),
+        ("1 % 0", "division by zero in a constant"),
+        ("2147483647 + 1", "constant 2147483648 does not fit an i32"),
+        ("-2147483648 / -1", "constant 2147483648 does not fit an i32"),
+        ("-0x80000000", "constant 2147483648 does not fit an i32"),
+    ] {
+        let source = format!("fn init() {{ let value = {expression} }}");
+        let error = lower_source(&source, &spec).err().unwrap_or_else(|| panic!("must refuse {expression}"));
+        assert_eq!(error.message, message, "{expression}: refusal names the no-float rule");
+        assert_eq!(parse::Span { start: error.start, end: error.end }, span_of(&source, expression), "{expression}: refusal names its own source span");
+    }
+    for source in [
+        "fn init() { let value = 2147483648 }",
+        "var value = 2147483648\nfn init() {}",
+        "fn init() { send(3, int(2147483648)) }",
+        "let value = periodic(2147483648, fn() {})",
+    ] {
+        let error = lower_source(source, &spec).err().unwrap_or_else(|| panic!("must refuse {source}"));
+        assert_eq!(error.message, "constant 2147483648 does not fit an i32", "{source}: literal conversion must not saturate or fall back to float");
+    }
+    let source = "let table = [{value: 7}]\nlet tick = periodic(1, fn() { send(0, table[1.5].value) })";
+    let error = lower_source(source, &spec).err().expect("a constant object lookup must reject a float-written index");
+    assert_eq!(error.message, "this program has no float type: write an integer literal", "object lookup folding cannot bypass literal validation");
+    assert_eq!(parse::Span { start: error.start, end: error.end }, span_of(source, "1.5"), "the folded object lookup names its index literal");
+}
+
+#[test]
+fn big_helpers_become_shared_functions_with_the_inlined_behaviour() {
+    use ir::{Program, Region, Stmt};
+
+    // `scale` (a local array, a loop, a port, state read and written) is called from three
+    // places and from `twice`, itself called twice; the entries have arrays of their own.
+    const SOURCE: &str = "\
+let a = channel(3)
+let b = channel(7)
+var total: i32 = 1
+var last: i32 = 0
+var hits: i32 = 0
+
+fn scale(x: i32) -> i32 {
+    let t = [0; 4]
+    var i: i32 = 0
+    while i < 4 {
+        t[i] = float(x * i + total)
+        i = i + 1
+    }
+    send(a, int(t[3]))
+    hits = hits + 1
+    return int(t[1] + t[2])
+}
+
+fn twice(x: i32) -> i32 {
+    last = scale(x) + scale(x + 1)
+    return last
+}
+
+let tick = periodic(10, fn() {
+    let keep = [5, 6]
+    total = total + twice(int(keep[0]) + sample(b))
+    send(b, int(keep[1]) + total)
+})
+
+let later = once(20, fn() {
+    total = total - scale(hits)
+    send(b, last + hits)
+})
+
+fn init() {
+    send(a, twice(2))
+}
+";
+    let inlined = lower_source(SOURCE, &SPEC).expect("inlined source must lower");
+    // Marked (as firmware front ends lower), so marks inside functions are checked to be transparent too.
+    let called = lower_source(SOURCE, &EventSpec { call_ops: Some(0), marks: true, ..SPEC }).expect("source with functions must lower");
+    assert!(inlined.funcs.is_empty() && inlined.entries.iter().all(|e| e.program.funcs.is_empty()), "None inlines every call");
+    let names: Vec<&str> = called.funcs.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"scale") && names.contains(&"twice"), "both helpers are functions: {names:?}");
+    for f in &called.funcs {
+        assert_eq!(&SOURCE[f.span.start..f.span.start + 3 + f.name.len()], format!("fn {}", f.name), "a function's span is its declaration");
+        // Its own statements' marks are in its range (the innermost range that holds them).
+        let own = f.marks.clone().filter(|&m| !called.funcs.iter().any(|g| g.name != f.name && g.marks.contains(&m) && f.marks.start <= g.marks.start && g.marks.end <= f.marks.end));
+        let spans: Vec<_> = own.map(|m| called.marks[m as usize]).collect();
+        assert!(!spans.is_empty() && spans.iter().all(|s| f.span.start <= s.start && s.end <= f.span.end), "`{}` owns the marks of its own statements: {spans:?}", f.name);
+    }
+    let funcs = &called.entries[0].program.funcs;
+    assert_eq!(funcs.len(), called.funcs.len(), "every entry holds every function");
+    fn calls(b: &ir::Block) -> usize {
+        b.iter().map(|s| match s {
+            Stmt::Call { .. } => 1,
+            Stmt::If(_, t, e) => calls(t) + calls(e),
+            Stmt::Loop { body, .. } => calls(body),
+            _ => 0,
+        }).sum()
+    }
+    for e in &called.entries {
+        assert_eq!(format!("{:?}", e.program.funcs), format!("{funcs:?}"), "`{}` holds the same functions", e.name);
+        assert!(calls(&e.program.body) > 0, "`{}` calls a function instead of inlining it", e.name);
+        assert!(e.cost > 0 && e.cost <= SPEC.max_entry_cost, "`{}` has a cost through its calls", e.name);
+    }
+    // The functions' locals are above every entry's own frame words.
+    fn frame_words(b: &ir::Block, out: &mut Vec<u32>) {
+        for s in b {
+            match s {
+                Stmt::Def(_, ir::Op::Load { region: Region::Frame, base, .. }) | Stmt::Store { region: Region::Frame, base, .. } => out.push(*base),
+                Stmt::If(_, t, e) => {
+                    frame_words(t, out);
+                    frame_words(e, out);
+                }
+                Stmt::Loop { body, .. } => frame_words(body, out),
+                _ => {}
+            }
+        }
+    }
+    let entry_top = called.entries.iter().map(|e| {
+        let mut w = Vec::new();
+        frame_words(&e.program.body, &mut w);
+        w.into_iter().max().map_or(0, |x| x + 1)
+    }).max().unwrap();
+    let mut words = Vec::new();
+    funcs.iter().for_each(|g: &Program| frame_words(&g.body, &mut words));
+    assert!(!words.is_empty() && words.iter().all(|w| *w >= entry_top), "function frame words {words:?} sit above the entries' ({entry_top})");
+    assert!(called.entries.iter().all(|e| e.program.frame_words > *words.iter().max().unwrap()), "each entry's frame covers the functions'");
+
+    // Same ports, sites and state, entry by entry, whichever way the helpers are lowered.
+    let mut runs = Vec::new();
+    for lowered in [&inlined, &called] {
+        let mut state = lowered.state_init.clone();
+        let mut ports = Recording { calls: Vec::new(), answers: VecDeque::from([(1, 4), (1, -3)]) };
+        let order = [lowered.entries.iter().position(|e| e.name == "init").unwrap(), 1, 2, 0, 1];
+        let mut log = Vec::new();
+        for k in order {
+            let entry = if k == 0 { "init" } else { ["", "tick", "later"][k] };
+            let at = lowered.entries.iter().position(|e| e.name == entry).unwrap();
+            for c in run(lowered, at, &mut state, &mut ports) {
+                log.push((entry, c.port, lowered.sites[c.site as usize], c.args.clone()));
+            }
+            log.push((entry, u16::MAX, span_of(SOURCE, "fn init"), ["total", "last", "hits"].iter().map(|n| state_word(lowered, &state, n) as u32).collect()));
+        }
+        runs.push(log);
+    }
+    assert_eq!(runs[0], runs[1], "functions behave as the inlined helpers");
+    let inner = span_of(SOURCE, "send(a, int(t[3]))");
+    assert!(runs[1].iter().any(|(_, port, site, _)| *port == 0 && *site == inner), "a port inside a function names its own site");
+}
+
+#[test]
+fn library_helpers_stay_inlined_so_ports_name_the_users_call() {
+    use ir::{Block, Stmt};
+
+    // `pulse` is the prelude's two-port wrapper, called from three places; `helper` is the user's,
+    // called from two. Shared, `pulse` would give its ports one site, in the prelude.
+    const SOURCE: &str = "\
+var n: i32 = 1
+
+fn helper(x: i32) {
+    pulse(x)
+    n = n * 3 + x
+}
+
+let tick = periodic(10, fn() {
+    helper(n)
+    pulse(n)
+})
+
+fn init() {
+    helper(n + 1)
+    pulse(n + 2)
+}
+";
+    let lowered = lower_source(SOURCE, &EventSpec { call_ops: Some(0), ..SPEC }).expect("source with functions must lower");
+    let names: Vec<&str> = lowered.funcs.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["helper"], "the user's helper is shared, the library's wrapper is not");
+    fn sites(b: &Block, out: &mut Vec<u32>) {
+        for s in b {
+            match s {
+                Stmt::Port { site, .. } => out.push(*site),
+                Stmt::If(_, t, e) => {
+                    sites(t, out);
+                    sites(e, out);
+                }
+                Stmt::Loop { body, .. } => sites(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut used = Vec::new();
+    for e in &lowered.entries {
+        sites(&e.program.body, &mut used);
+    }
+    for f in &lowered.entries[0].program.funcs {
+        sites(&f.body, &mut used);
+    }
+    let mut spans: Vec<_> = used.iter().map(|&k| lowered.sites[k as usize]).collect();
+    spans.sort_by_key(|s| s.start);
+    spans.dedup();
+    assert_eq!(spans, [span_of(SOURCE, "pulse(x)"), span_of(SOURCE, "pulse(n)"), span_of(SOURCE, "pulse(n + 2)")],
+        "a wrapper inside a shared helper names the helper's call, and each bare call names itself");
+}
+
+#[test]
+fn literal_arguments_share_a_function_only_where_they_compute_as_the_literal() {
+    use ir::Stmt;
+
+    // `pulse` takes its channel handle (a literal) to ports and a comparison: both calls share
+    // one function. `half` folds its literal in f64 when inlined (3 / 2 * 2 is 3); as an i32
+    // value it would compute 2, so its calls keep copies.
+    const SOURCE: &str = "\
+let a = channel(3)
+let b = channel(7)
+var hits: i32 = 0
+
+fn pulse(p) {
+    send(p, 1)
+    if p == 3 { hits = hits + 1 }
+    send(p, 0)
+}
+
+fn half(x) {
+    send(a, x / 2 * 2)
+    hits = hits + 1
+}
+
+let tick = periodic(10, fn() {
+    pulse(a)
+    pulse(b)
+    half(3)
+    half(7)
+    send(b, hits)
+})
+";
+    let inlined = lower_source(SOURCE, &SPEC).expect("inlined source must lower");
+    let called = lower_source(SOURCE, &EventSpec { call_ops: Some(0), ..SPEC }).expect("source with functions must lower");
+    let names: Vec<&str> = called.funcs.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["pulse"], "calls with different literals share one function where the literal reaches only ports and comparisons");
+    fn calls(b: &ir::Block) -> usize {
+        b.iter().map(|s| match s {
+            Stmt::Call { .. } => 1,
+            Stmt::If(_, t, e) => calls(t) + calls(e),
+            Stmt::Loop { body, .. } => calls(body),
+            _ => 0,
+        }).sum()
+    }
+    let tick = called.entries.iter().find(|e| e.name == "tick").unwrap();
+    assert_eq!(calls(&tick.program.body), 2, "both `pulse` calls call the shared function");
+    assert_eq!(called.copies, [("half".to_string(), 2)], "the calls that kept a copy are counted per helper");
+    assert!(inlined.copies.is_empty(), "without functions nothing is counted");
+    let mut runs = Vec::new();
+    for lowered in [&inlined, &called] {
+        let mut state = lowered.state_init.clone();
+        let mut ports = Recording { calls: Vec::new(), answers: VecDeque::new() };
+        let at = lowered.entries.iter().position(|e| e.name == "tick").unwrap();
+        let log: Vec<_> = run(lowered, at, &mut state, &mut ports).into_iter().map(|c| (c.port, lowered.sites[c.site as usize], c.args.clone())).collect();
+        runs.push(log);
+    }
+    assert_eq!(runs[0], runs[1], "shared and inlined builds make the same port calls");
+    let halves: Vec<_> = runs[1].iter().filter(|(_, site, _)| *site == span_of(SOURCE, "send(a, x / 2 * 2)")).map(|(_, _, args)| args[1]).collect();
+    assert_eq!(halves, [3, 7], "a literal argument computes as the literal (half(3) is 3), shared or inlined");
+}
+
+#[test]
+fn hoisted_products_stay_out_of_their_loop_and_inner_products_still_fuse() {
+    // `y * k` is invariant in the inner loop: licm hoists it, and fuse_mla must not
+    // fuse it back into the inner add. `x * m + y` lives in the inner loop and fuses there.
+    // The multipliers are state so no pass folds or strength-reduces the products, and the
+    // trip counts are large enough that no pass unrolls the loops.
+    let source = "\
+var total: i32 = 0
+var k: i32 = 46
+var m: i32 = 3
+let tick = periodic(10, fn() {
+    for y in 0..56 {
+        for x in 0..46 {
+            total = total + y * k + x * m + y
+        }
+    }
+})
+";
+    let lowered = lower_source(source, &SPEC).expect("nested product fixture lowers");
+    let entry = lowered.entries.iter().position(|e| e.name == "tick").expect("tick is an entry");
+    fn products(b: &ir::Block, depth: u32, out: &mut Vec<(u32, &'static str)>) {
+        for s in b {
+            match s {
+                ir::Stmt::Def(_, ir::Op::Bin(ir::Bin::MulI, ..)) => out.push((depth, "mul")),
+                ir::Stmt::Def(_, ir::Op::Fma(ir::Fma::MulAddI, ..)) => out.push((depth, "mla")),
+                ir::Stmt::If(_, t, e) => {
+                    products(t, depth, out);
+                    products(e, depth, out);
+                }
+                ir::Stmt::Loop { body, .. } => products(body, depth + 1, out),
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    products(&lowered.entries[entry].program.body, 0, &mut found);
+    assert!(found.contains(&(1, "mul")) || found.contains(&(1, "mla")), "y * 46 is computed in the outer loop: {found:?}");
+    assert_eq!(found.iter().filter(|&&(depth, _)| depth == 2).count(), 1, "the inner loop holds only x * 3's product: {found:?}");
+    assert!(found.contains(&(2, "mla")), "x * 3 + y still fuses inside the inner loop: {found:?}");
+    let mut state = lowered.state_init.clone();
+    let mut ports = Recording { calls: Vec::new(), answers: VecDeque::new() };
+    run(&lowered, entry, &mut state, &mut ports);
+    let expected: i32 = (0..56).flat_map(|y| (0..46).map(move |x| y * 46 + x * 3 + y)).sum();
+    assert_eq!(state_word(&lowered, &state, "total"), expected, "the hoisted form computes the same total");
+}
+
+/// An event's cost is the bound its handler is checked and timed against: a bound past u64 stays
+/// at u64::MAX through every enclosing loop and branch, never wrapping to a small cost.
+#[test]
+fn total_cost_saturates_through_loops_and_branches() {
+    use makepad_script_compute::ir::{Program, Stmt, Val};
+    let wide = |body| vec![Stmt::Loop { cap: u32::MAX, body }];
+    let program = Program {
+        vals: vec![Ty::Bool],
+        body: vec![Stmt::If(Val(0), wide(wide(wide(Vec::new()))), Vec::new())],
+        ..Default::default()
+    };
+    assert_eq!(program.total_cost(), u64::MAX, "three nested u32::MAX loops under a branch saturate");
 }

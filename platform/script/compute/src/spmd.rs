@@ -323,7 +323,7 @@ pub(crate) fn bool_masks(p: &Program) -> (Vec<bool>, Vec<bool>) {
 
 /// What the vector code cannot express (the scalar code runs instead).
 pub(crate) fn supported(p: &Program, body: &Block) -> bool {
-    if p.uses_f64() || p.funcs.iter().any(|g| g.uses_f64()) || p.frame_words > MAX_FRAME_WORDS {
+    if crate::ir::has_narrow(p) || p.uses_f64() || p.funcs.iter().any(|g| g.uses_f64()) || p.frame_words > MAX_FRAME_WORDS {
         return false;
     }
     // Ctx words written per element must not be read per element (a

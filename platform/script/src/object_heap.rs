@@ -1764,6 +1764,9 @@ impl ScriptHeap {
     pub fn value_path(&self, ptr: ScriptObject, keys: &[LiveId], trap: ScriptTrap) -> ScriptValue {
         let mut value: ScriptValue = ptr.into();
         for key in keys {
+            if value.is_reported_err() {
+                return value;
+            }
             if let Some(obj) = value.as_object() {
                 value = self.value(obj, (*key).into(), trap);
             } else {

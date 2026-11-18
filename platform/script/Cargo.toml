@@ -12,6 +12,9 @@ metadata.makepad-auto-version = "yK9xdn_D0D3EdqleI-WHLtjk4rk="
 # the Splash VM: a web export ships its own code at opt-level 3, as rustc's web build compiles it
 export-opt-level = 3
 
+[package.metadata.makepad.platform-gaps]
+windows = {}
+
 [features]
 host-shims = []
 

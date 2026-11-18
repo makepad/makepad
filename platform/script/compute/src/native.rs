@@ -158,7 +158,7 @@ pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
     let flat = crate::ir::flat(p);
     let p = &*flat;
     // A program with ports runs in the interpreter (`ir::run_ports`).
-    if !cpu_ok(p) || crate::ir::has_ports(p) {
+    if !cpu_ok(p) || crate::ir::has_ports(p) || crate::ir::has_narrow(p) {
         return None;
     }
     let key = crate::kcache::key("scalar", p, writable);
@@ -302,6 +302,7 @@ pub(crate) fn pair_halves(f: &mut Func) {
 
 /// The lowered and optimised RIR of a program (tests, dumps).
 pub fn rir_of(p: &Program, writable: u64) -> Func {
+    assert!(!crate::ir::has_narrow(p), "native RIR requires Word buffers");
     let flat = crate::ir::flat(p);
     let mut f = lower(&flat, writable);
     optimise_for_codegen(&mut f);

@@ -279,6 +279,10 @@ fn err<X>(span: Span, msg: impl Into<String>) -> LResult<X> {
     Err(ShaderError::new(span.start, span.end.max(span.start + 1), msg.into()))
 }
 
+fn float_literal(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Num(_, false)) || matches!(&e.kind, ExprKind::Neg(x) if matches!(x.kind, ExprKind::Num(_, false)))
+}
+
 // =========================================================================
 // The builder: emits AIR with constant folding
 // =========================================================================
@@ -413,6 +417,12 @@ impl Builder {
                 let bufs: Vec<u8> = slices.iter().map(|x| x.buf).collect();
                 for (map, _) in &mut self.cse {
                     map.retain(|k, _| !matches!(k, Key::Load(Region::Buf(b), ..) if bufs.contains(b)) && !matches!(k, Key::Load(Region::Ctx, ..)));
+                }
+            }
+            // A port may read or write any host buffer, including unlisted ones.
+            IS::Port { .. } => {
+                for (map, _) in &mut self.cse {
+                    map.retain(|k, _| !matches!(k, Key::Load(Region::Buf(_), ..)));
                 }
             }
             _ => {}
@@ -945,9 +955,11 @@ struct Lowerer {
     in_init: bool,
     /// Spans at or past this lie in the prelude.
     prelude_base: usize,
-    // cost: off creates no marks; on adds one Stmt per user statement.
+    // cost: off creates no marks; on adds one Stmt per user statement and condition.
     marks: bool,
     marks_spans: Vec<Span>,
+    /// The marks of `marks_spans` that name a source condition ([`Lowerer::cond_site`]).
+    cond_marks: Vec<(u32, bool)>,
     domain: Domain,
     /// Kernel front end: buffers, emit counters, the element value.
     kernel: kernel::KernelCtx,
@@ -980,6 +992,21 @@ struct Lowerer {
     event: event::EventCtx,
     /// The spans of the calls being inlined, innermost last.
     call_spans: Vec<Span>,
+    /// Per helper name: whether each parameter may take an untyped literal as an i32 value
+    /// ([`Lowerer::lit_safe`]).
+    lit_safe: HashMap<String, Vec<bool>>,
+    /// Lowering an event function: its i32 parameters that may stand for a literal, and the
+    /// ones whose uses showed they may not ([`Taint`]).
+    taint: Option<Taint>,
+}
+
+/// An event function's i32 parameters that a call may fill with an untyped literal,
+/// by value, and a bit per parameter whose uses would compute differently from the literal's
+/// (an f64 fold): those calls keep a copy.
+#[derive(Default)]
+struct Taint {
+    vals: HashMap<Val, u32>,
+    bad: u64,
 }
 
 /// Edit mode's live literals in a kernel: the source offsets of the number
@@ -1010,6 +1037,10 @@ pub struct LiveParam {
 }
 
 /// How a call of a lowered function passes and returns values.
+/// A state scalar an event function takes by value: its name, type, variable types, and whether
+/// the function assigns it (then it is also returned).
+type StateArg = (String, T, Vec<Ty>, bool);
+
 #[derive(Clone)]
 struct FnMeta {
     /// Its params end with the element index and the emit counters'
@@ -1017,6 +1048,47 @@ struct FnMeta {
     emits: bool,
     /// The value it returns (its leading results; None: nothing).
     ret: Option<T>,
+    /// Event programs: the state scalars it reads or assigns, passed by value after the other
+    /// params (one per variable of each), the assigned ones (true) returned after the other
+    /// results; the call site carries them in and out of the caller's promoted variables.
+    state: Vec<(String, bool)>,
+    /// Event programs: the frame words its own locals take, from word 0 until
+    /// `event::lower_events` moves them above every entry's.
+    frame: u32,
+    name: String,
+    span: Span,
+    /// The source marks allocated while lowering it (those of functions first lowered inside it
+    /// included: the ranges nest).
+    marks: std::ops::Range<u32>,
+    /// Event programs: a bit per parameter that may not take an untyped literal as a value.
+    lit_bad: u64,
+}
+
+/// A helper's function key: its name, its arguments' kinds and its literal arguments' bits (a
+/// literal stays a constant of the function); None for an argument a function cannot take.
+fn func_key(f: &FnDecl, vals: &[V]) -> Option<(String, Vec<u8>, Vec<u64>)> {
+    let mut kinds = Vec::new();
+    let mut lits = Vec::new();
+    for v in vals {
+        kinds.push(match v {
+            V::Lit(x) => {
+                lits.push(x.to_bits());
+                3u8
+            }
+            V::F(_) => 0u8,
+            V::I(_) => 1,
+            V::B(_) => 2,
+            V::Vec(n, _) => 10 + *n,
+            _ => return None,
+        });
+    }
+    Some((f.name.clone(), kinds, lits))
+}
+
+/// A literal that an i32 holds and an f32 holds exactly, so each conversion of it (to i32, to
+/// f32, to a truth value) gives the same as the literal's own; not -0, whose f32 is not +0's.
+fn exact_i32_lit(x: f64) -> bool {
+    x.fract() == 0.0 && x.abs() <= (1u32 << 24) as f64 && !(x == 0.0 && x.is_sign_negative())
 }
 
 fn ty_of(t: &T) -> Ty {
@@ -1120,6 +1192,7 @@ impl Lowerer {
 
     fn vname(&self, v: &V) -> String {
         match v {
+            V::Lit(_) if self.event.integer_literals => "i32".into(),
             V::Lit(_) | V::F(_) => "f32".into(),
             V::I(_) => "i32".into(),
             V::B(_) => "bool".into(),
@@ -1188,13 +1261,21 @@ impl Lowerer {
         })
     }
 
+    fn literal_i32(&self, x: f64, span: Span) -> LResult<i32> {
+        if self.event.integer_literals && !(i32::MIN as f64..=i32::MAX as f64).contains(&x) {
+            return err(span, format!("constant {x} does not fit an i32"));
+        }
+        if x.fract() != 0.0 {
+            return err(span, format!("{} is not an integer", x));
+        }
+        Ok(x as i32)
+    }
+
     fn to_i(&mut self, v: &V, span: Span) -> LResult<Val> {
         Ok(match v {
             V::Lit(x) => {
-                if x.fract() != 0.0 {
-                    return err(span, format!("{} is not an integer", x));
-                }
-                self.b.ci(*x as i32)
+                let x = self.literal_i32(*x, span)?;
+                self.b.ci(x)
             }
             V::I(x) => *x,
             V::F(x) => self.b.floor_to_i(*x),
@@ -1292,10 +1373,17 @@ impl Lowerer {
             return err(span, "tables (top-level `let` arrays) are read-only; fill them in `fn init()`");
         }
         if let Region::Buf(k) = p.region {
-            if !self.kernel.writable(k) {
-                return err(span, "input buffers are read-only; declare an output(...) to write");
+            if self.domain == Domain::Event {
+                let b = &self.event.buffers[k as usize];
+                if !b.writable {
+                    return err(span, format!("buffer `{}` is read-only", self.event.decls[b.decl as usize].name));
+                }
+            } else {
+                if !self.kernel.writable(k) {
+                    return err(span, "input buffers are read-only; declare an output(...) to write");
+                }
+                self.kernel.access(k, p.off);
             }
-            self.kernel.access(k, p.off);
         }
         match (&p.ty, v) {
             (T::F, _) => {
@@ -1548,12 +1636,13 @@ impl Lowerer {
                         if x.fract() != 0.0 {
                             return err(e.span, "not an integer");
                         }
-                        CInit::W(*x as i32 as u32, T::I)
+                        CInit::W(self.literal_i32(*x, e.span)? as u32, T::I)
                     }
                     (V::Lit(x), Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4))) => {
                         let b = (*x as f32).to_bits();
                         CInit::Vec(ann_width(ann), [b; 16])
                     }
+                    (V::Lit(x), None) if self.event.integer_literals => CInit::W(self.literal_i32(*x, e.span)? as u32, T::I),
                     (V::Lit(x), _) => CInit::W((*x as f32).to_bits(), T::F),
                     (V::F(_), _) => CInit::W(scratch_const(&v2, &scratch).map_or_else(bad, Ok)?, T::F),
                     (V::I(_), _) => CInit::W(scratch_const(&v2, &scratch).map_or_else(bad, Ok)?, T::I),
@@ -1681,6 +1770,8 @@ impl Lowerer {
                 },
                 ExprKind::Index(b, i) => {
                     let k = match &i.kind {
+                        // Let ordinary expression lowering report a forbidden float literal.
+                        ExprKind::Num(_, false) if l.event.integer_literals => return None,
                         ExprKind::Num(x, _) => *x,
                         ExprKind::Ident(n) => match l.lookup(n) {
                             Some(Bind::Const(V::Lit(x))) => x,
@@ -2227,6 +2318,7 @@ impl Lowerer {
                             V::Vec(n, self.to_vec(&v, n, span)?)
                         }
                         _ => match v {
+                            V::Lit(_) if self.event.integer_literals => V::I(self.to_i(&v, span)?),
                             V::Lit(x) => V::F(self.b.cf(x as f32)),
                             v => v,
                         },
@@ -2257,7 +2349,7 @@ impl Lowerer {
             Some((Stmt::Return(Some(e), _), rest)) if self.trace.is_some() && !trace::has_return(rest) && !trace::returns_in(e) => {
                 self.stmts(rest).and_then(|_| {
                     let v = self.expr(e)?;
-                    if !matches!(v, V::Unit) && Self::value_t(&v).is_none() {
+                    if !matches!(v, V::Unit) && self.value_t(&v).is_none() {
                         return err(e.span, "functions return f32, i32, bool, vec2/3/4 or mat4 (structs and arrays are passed by reference instead)");
                     }
                     Ok(v)
@@ -2367,12 +2459,189 @@ impl Lowerer {
                 }
             }
             let mut out = HashMap::new();
-            for f in self.fns.values() {
+            // An event declaration's function is a handler, not a named `fn` (unless it names one).
+            let handlers = self.event.handlers.iter().filter(|h| self.fns.get(&h.name).is_none_or(|g| g.span != h.span));
+            for f in self.fns.values().chain(handlers) {
                 stmts(&f.body, &mut out);
             }
             self.call_sites = Some(out);
         }
         self.call_sites.as_ref().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    /// Per parameter of `f`: whether an untyped literal argument may go in as an i32 value.
+    /// Its name may appear only as a port's argument (converted as the literal would be) or as
+    /// an operand of a comparison (an int compare of whole numbers is the literal's f64 one; a
+    /// fractional other side is the `Taint`'s to catch). Anything else (arithmetic that would
+    /// fold in f64, a helper or a builtin, an index, a bound, an assignment, a `let` copy, a
+    /// condition, a method on it) keeps the literal.
+    fn lit_safe(&mut self, f: &FnDecl) -> Vec<bool> {
+        if let Some(x) = self.lit_safe.get(&f.name) {
+            return x.clone();
+        }
+        struct Cx<'a> {
+            name: &'a str,
+            l: &'a Lowerer,
+        }
+        fn is(e: &Expr, name: &str) -> bool {
+            matches!(&e.kind, ExprKind::Ident(n) if n == name)
+        }
+        fn expr(e: &Expr, cx: &Cx) -> bool {
+            use BinOp::*;
+            match &e.kind {
+                ExprKind::Ident(n) => n != cx.name,
+                ExprKind::Call(n, args) => {
+                    let port = !cx.l.fns.contains_key(n) && cx.l.event.ports.iter().any(|p| p.name == n);
+                    n.split('.').next() != Some(cx.name) && args.iter().all(|a| (port && is(a, cx.name)) || expr(a, cx))
+                }
+                ExprKind::Bin(Lt | Le | Gt | Ge | Eq | Ne, a, b) => (is(a, cx.name) || expr(a, cx)) && (is(b, cx.name) || expr(b, cx)),
+                ExprKind::Bin(_, a, b) | ExprKind::Index(a, b) | ExprKind::ArrayRepeat(a, b) => expr(a, cx) && expr(b, cx),
+                ExprKind::Field(a, _) | ExprKind::Neg(a) | ExprKind::Not(a) => expr(a, cx),
+                ExprKind::ArrayList(xs) => xs.iter().all(|x| expr(x, cx)),
+                ExprKind::StructLit(_, fs) => fs.iter().all(|(_, x)| expr(x, cx)),
+                ExprKind::Block(b) => stmts(b, cx),
+                ExprKind::Lambda(g) => g.params.iter().all(|(n, _)| n != cx.name) && stmts(&g.body, cx),
+                ExprKind::If(arms, else_) => arms.iter().all(|(c, b)| expr(c, cx) && stmts(b, cx)) && else_.as_ref().is_none_or(|b| stmts(b, cx)),
+                ExprKind::Match(x, arms) => expr(x, cx) && arms.iter().all(|(ps, b)| ps.as_ref().is_none_or(|ps| ps.iter().all(|p| expr(p, cx))) && stmts(b, cx)),
+                ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => true,
+            }
+        }
+        fn stmts(b: &[Stmt], cx: &Cx) -> bool {
+            b.iter().all(|s| match s {
+                Stmt::Let { name, value, .. } => name != cx.name && expr(value, cx),
+                Stmt::Assign { target, value, .. } => expr(target, cx) && expr(value, cx),
+                Stmt::Expr(e) | Stmt::Return(Some(e), _) => expr(e, cx),
+                Stmt::For { var, from, to, body, .. } => var != cx.name && expr(from, cx) && expr(to, cx) && stmts(body, cx),
+                Stmt::While { cond, body, .. } => expr(cond, cx) && stmts(body, cx),
+                Stmt::Loop { body, .. } => stmts(body, cx),
+                Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(None, _) => true,
+            })
+        }
+        let safe: Vec<bool> = f.params.iter().map(|(name, ann)| ann.is_none() && stmts(&f.body, &Cx { name, l: self })).collect();
+        self.lit_safe.insert(f.name.clone(), safe.clone());
+        safe
+    }
+
+    /// Marks the tainted values among `a` and `b` (i32 parameters that may stand for a literal)
+    /// whose use by `op` (None: not an operator) would compute differently from the literal's.
+    fn taint_use(&mut self, op: Option<BinOp>, a: &V, b: &V) {
+        use BinOp::*;
+        let Some(t) = &mut self.taint else { return };
+        let bit = |v: &V| match v {
+            V::I(x) => t.vals.get(x).map_or(0, |&k| 1u64 << k),
+            _ => 0,
+        };
+        let bits = bit(a) | bit(b);
+        if bits == 0 {
+            return;
+        }
+        let fractional = |v: &V| matches!(v, V::Lit(y) if y.fract() != 0.0);
+        if !matches!(op, Some(Lt | Le | Gt | Ge | Eq | Ne)) || fractional(a) || fractional(b) {
+            t.bad |= bits;
+        }
+    }
+
+    /// The state scalars (`Bind::Local` globals) that `f` or a helper it calls (transitively, by
+    /// name, global closures included) names, in name order; a local of the same name counts too,
+    /// which only passes one value more.
+    fn state_in(&self, f: &FnDecl) -> Vec<StateArg> {
+        use std::collections::{BTreeSet, HashSet};
+        struct W<'a> {
+            l: &'a Lowerer,
+            seen: HashSet<String>,
+            named: BTreeSet<String>,
+            set: HashSet<String>,
+        }
+        impl W<'_> {
+            fn call(&mut self, n: &str) {
+                let body = match (self.l.fns.get(n), self.l.globals.get(n)) {
+                    (Some(g), _) => &g.body,
+                    (None, Some(Bind::Closure(g, _))) => &g.body,
+                    _ => return,
+                };
+                if self.seen.insert(n.to_string()) {
+                    self.stmts(body);
+                }
+            }
+            fn expr(&mut self, e: &Expr) {
+                match &e.kind {
+                    ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
+                    ExprKind::Ident(n) => {
+                        self.named.insert(n.clone());
+                    }
+                    ExprKind::Call(n, args) => {
+                        self.named.insert(n.clone());
+                        args.iter().for_each(|a| self.expr(a));
+                        self.call(n);
+                    }
+                    ExprKind::Field(a, _) | ExprKind::Neg(a) | ExprKind::Not(a) => self.expr(a),
+                    ExprKind::Index(a, b) | ExprKind::Bin(_, a, b) | ExprKind::ArrayRepeat(a, b) => {
+                        self.expr(a);
+                        self.expr(b);
+                    }
+                    ExprKind::ArrayList(xs) => xs.iter().for_each(|x| self.expr(x)),
+                    ExprKind::StructLit(_, fs) => fs.iter().for_each(|(_, x)| self.expr(x)),
+                    ExprKind::Block(b) => self.stmts(b),
+                    ExprKind::Lambda(g) => self.stmts(&g.body),
+                    ExprKind::If(arms, else_) => {
+                        for (c, b) in arms {
+                            self.expr(c);
+                            self.stmts(b);
+                        }
+                        if let Some(b) = else_ {
+                            self.stmts(b);
+                        }
+                    }
+                    ExprKind::Match(x, arms) => {
+                        self.expr(x);
+                        for (pats, b) in arms {
+                            pats.iter().flatten().for_each(|p| self.expr(p));
+                            self.stmts(b);
+                        }
+                    }
+                }
+            }
+            fn stmts(&mut self, b: &[Stmt]) {
+                for s in b {
+                    match s {
+                        Stmt::Let { value, .. } | Stmt::Expr(value) => self.expr(value),
+                        Stmt::Assign { target, value, .. } => {
+                            let mut root = target;
+                            while let ExprKind::Index(a, _) | ExprKind::Field(a, _) = &root.kind {
+                                root = a;
+                            }
+                            if let ExprKind::Ident(n) = &root.kind {
+                                self.set.insert(n.clone());
+                            }
+                            self.expr(target);
+                            self.expr(value);
+                        }
+                        Stmt::Return(e, _) => e.iter().for_each(|e| self.expr(e)),
+                        Stmt::For { from, to, body, .. } => {
+                            self.expr(from);
+                            self.expr(to);
+                            self.stmts(body);
+                        }
+                        Stmt::While { cond, body, .. } => {
+                            self.expr(cond);
+                            self.stmts(body);
+                        }
+                        Stmt::Loop { body, .. } => self.stmts(body),
+                        Stmt::Break(_) | Stmt::Continue(_) => {}
+                    }
+                }
+            }
+        }
+        let mut w = W { l: self, seen: HashSet::from([f.name.clone()]), named: BTreeSet::new(), set: HashSet::new() };
+        w.stmts(&f.body);
+        let mut out = Vec::new();
+        for n in &w.named {
+            if let Some(Bind::Local(t, vars)) = self.globals.get(n) {
+                let tys = vars.iter().map(|v| self.b.prog.vars[v.0 as usize]).collect();
+                out.push((n.clone(), t.clone(), tys, w.set.contains(n)));
+            }
+        }
+        out
     }
 
     /// Whether `f` (or a helper it calls) emits.
@@ -2418,12 +2687,24 @@ impl Lowerer {
     /// A call of a helper lowered as a function (once per argument kinds),
     /// when it is big and called from several places; None: inline it.
     fn try_outline(&mut self, f: &FnDecl, args: &[V], span: Span) -> LResult<Option<V>> {
-        // Only helpers of kernel element code (not the entry itself); a traced lowering
-        // inlines every helper (`trace.rs`).
-        if self.domain != Domain::Kernel || self.kernel.element.is_none() || self.in_init || self.call_stack.is_empty() || self.trace.is_some() {
+        // Only helpers of kernel element code, or of event programs whose spec asks for
+        // functions (`EventSpec::call_ops`), never the entry itself; a traced lowering inlines
+        // every helper (`trace.rs`).
+        let event = self.domain == Domain::Event;
+        if self.in_init || self.call_stack.is_empty() || self.trace.is_some() {
             return Ok(None);
         }
-        if self.globals.values().any(|b| matches!(b, Bind::Value(_) | Bind::Local(..))) {
+        if event {
+            // Buffer parameters name static regions; a run-time function parameter
+            // cannot carry that binding, so these helpers always inline.
+            if args.iter().any(|a| matches!(a, V::Place(Place { ty: T::Buf(..), .. }))) {
+                return Ok(None);
+            }
+            // State scalars (`Bind::Local`) go in and out by value; nothing else may be a value.
+            if self.event.call_ops.is_none() || self.globals.values().any(|b| matches!(b, Bind::Value(_))) {
+                return Ok(None);
+            }
+        } else if self.domain != Domain::Kernel || self.kernel.element.is_none() || self.globals.values().any(|b| matches!(b, Bind::Value(_) | Bind::Local(..))) {
             return Ok(None);
         }
         // Parameter annotations convert at the call, as when inlined.
@@ -2440,41 +2721,115 @@ impl Lowerer {
                 (None, a) => a.clone(),
             });
         }
-        // A literal argument stays a constant in the function (it folds
-        // there as when inlined): one function per literal values.
-        let mut kinds = Vec::new();
-        let mut lits = Vec::new();
-        for v in &vals {
-            kinds.push(match v {
-                V::Lit(x) => {
-                    lits.push(x.to_bits());
-                    3u8
+        // Event programs: an untyped literal argument goes in as an i32 value where
+        // nothing can compute differently from the inlined literal (`lit_safe`, then the uses'
+        // `Taint`), so calls with different constants share one function.
+        let mut typed = 0u64;
+        if event {
+            let safe = self.lit_safe(f);
+            for (k, v) in vals.iter().enumerate() {
+                if let (V::Lit(x), true) = (v, k < 64 && f.params[k].1.is_none() && safe[k]) {
+                    if exact_i32_lit(*x) {
+                        typed |= 1 << k;
+                    }
                 }
-                V::F(_) => 0u8,
-                V::I(_) => 1,
-                V::B(_) => 2,
-                V::Vec(n, _) => 10 + *n,
-                _ => return Ok(None),
-            });
+            }
+        }
+        if typed != 0 {
+            let tvals: Vec<V> = vals.iter().enumerate().map(|(k, v)| if typed >> k & 1 != 0 { V::I(Val(0)) } else { v.clone() }).collect();
+            if let Some(idx) = self.typed_function(f, &tvals, typed, span)? {
+                for (k, v) in vals.iter_mut().enumerate() {
+                    if let (V::Lit(x), true) = (&*v, typed >> k & 1 != 0) {
+                        *v = V::I(self.b.ci(*x as i32));
+                    }
+                }
+                if vals.iter().any(|v| matches!(v, V::Lit(_))) {
+                    self.count_copy(f);
+                }
+                return Ok(Some(self.outlined_call(idx, &vals)));
+            }
+        }
+        // Otherwise a literal argument stays a constant in the function (it folds there as when
+        // inlined): one function per literal values, or the call inlined.
+        if event && vals.iter().zip(&f.params).any(|(v, (_, ann))| ann.is_none() && matches!(v, V::Lit(_))) {
+            self.count_copy(f);
         }
         if !vals.is_empty() && vals.iter().all(|v| matches!(v, V::Lit(_))) {
             return Ok(None);
         }
-        let key = (f.name.clone(), kinds.clone(), lits);
+        let Some(key) = func_key(f, &vals) else { return Ok(None) };
         let idx = match self.func_cache.get(&key) {
             Some(x) => *x,
             None => {
-                let big = self.sites(&f.name) >= 2 && self.ast_cost(&f.body) > INLINE_OPS;
-                let x = if big { self.lower_function(f, &vals, span)? } else { None };
+                let x = if self.big(f) { self.lower_function(f, &vals, span)? } else { None };
                 self.func_cache.insert(key, x);
                 x
             }
         };
         let Some(idx) = idx else { return Ok(None) };
+        Ok(Some(self.outlined_call(idx, &vals)))
+    }
+
+    /// Whether `f` is kept as a function: called from two places or more, and bigger than the
+    /// inlining limit. An event program never shares a library (prelude) helper: a port in a shared
+    /// function has one site, which would name the prelude instead of the user's call, and the
+    /// library's port wrappers are one-liners that cost no more inlined.
+    fn big(&mut self, f: &FnDecl) -> bool {
+        if self.domain == Domain::Event && f.span.start >= self.prelude_base {
+            return false;
+        }
+        let limit = if self.domain == Domain::Event { self.event.call_ops.unwrap_or(u64::MAX) } else { INLINE_OPS };
+        self.sites(&f.name) >= 2 && self.ast_cost(&f.body) > limit
+    }
+
+    /// A call that keeps a copy for its literal arguments, when `f` would be shared.
+    fn count_copy(&mut self, f: &FnDecl) {
+        if self.big(f) {
+            *self.event.copies.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    /// The function of `f` for arguments `vals` whose `typed` ones stand for literals; None when
+    /// those may not (its uses compute differently, or it does not lower as a function with
+    /// them): nothing of the attempt stays, the caller keeps a copy.
+    fn typed_function(&mut self, f: &FnDecl, vals: &[V], typed: u64, span: Span) -> LResult<Option<u16>> {
+        let Some(key) = func_key(f, vals) else { return Ok(None) };
+        if let Some(x) = self.func_cache.get(&key) {
+            return Ok(x.filter(|&i| self.funcs_out[i as usize].1.lit_bad & typed == 0));
+        }
+        if !self.big(f) {
+            self.func_cache.insert(key, None);
+            return Ok(None);
+        }
+        let at = (self.marks_spans.len(), self.cond_marks.len(), self.event.sites.len(), self.funcs_out.len());
+        let depth = (self.frames.len(), self.rets.len(), self.call_stack.len());
+        match self.lower_function(f, vals, span) {
+            Ok(x) if x.is_none_or(|i| self.funcs_out[i as usize].1.lit_bad & typed == 0) => {
+                self.func_cache.insert(key, x);
+                Ok(x)
+            }
+            // A literal it may not take, or an error the inlined literal might not reach (a
+            // branch it folds away): undo it all, the copy decides.
+            _ => {
+                self.marks_spans.truncate(at.0);
+                self.cond_marks.truncate(at.1);
+                self.event.sites.truncate(at.2);
+                self.funcs_out.truncate(at.3);
+                self.func_cache.retain(|_, x| x.is_none_or(|i| (i as usize) < at.3));
+                self.frames.truncate(depth.0);
+                self.rets.truncate(depth.1);
+                self.call_stack.truncate(depth.2);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Emits a call of function `idx` (`vals`: the call's arguments, literals bound in it).
+    fn outlined_call(&mut self, idx: u16, vals: &[V]) -> V {
         let meta = self.funcs_out[idx as usize].1.clone();
         // The arguments (constants as f32 values), the emit context.
         let mut argv = Vec::new();
-        for v in &vals {
+        for v in vals {
             match v {
                 V::Vec(n, l) => argv.extend_from_slice(&l[..*n as usize]),
                 V::B(x) | V::I(x) | V::F(x) => argv.push(*x),
@@ -2487,6 +2842,16 @@ impl Lowerer {
             argv.push(self.kernel.element.unwrap());
             for c in &counters {
                 let x = self.b.get(*c);
+                argv.push(x);
+            }
+        }
+        let state: Vec<(Vec<Var>, bool)> = meta.state.iter().map(|(name, set)| match self.globals.get(name) {
+            Some(Bind::Local(_, vars)) => (vars.clone(), *set),
+            _ => unreachable!("a function's state names are state scalars"),
+        }).collect();
+        for (vars, _) in &state {
+            for v in vars {
+                let x = self.b.get(*v);
                 argv.push(x);
             }
         }
@@ -2513,7 +2878,16 @@ impl Lowerer {
                 self.b.set(*c, *r);
             }
         }
-        Ok(Some(match meta.ret {
+        let mut at = words + if meta.emits { counters.len() } else { 0 };
+        for (vars, set) in &state {
+            if *set {
+                for v in vars {
+                    self.b.set(*v, rets[at]);
+                    at += 1;
+                }
+            }
+        }
+        match meta.ret {
             Some(T::F) => V::F(rets[0]),
             Some(T::I) => V::I(rets[0]),
             Some(T::B) => V::B(rets[0]),
@@ -2523,7 +2897,7 @@ impl Lowerer {
                 V::Vec(n, l)
             }
             _ => V::Unit,
-        }))
+        }
     }
 
     /// Lowers helper `f` with arguments of `kinds` as a function of the
@@ -2532,14 +2906,38 @@ impl Lowerer {
     /// inlined.
     fn lower_function(&mut self, f: &FnDecl, args: &[V], span: Span) -> LResult<Option<u16>> {
         let emits = self.emits_in(f);
+        let event = self.domain == Domain::Event;
+        // Event programs: the state scalars it touches, with their types and whether it assigns
+        // them; a port inside names its own site (no caller's call span); its locals take frame
+        // words of their own (moved above the entries' when every entry is lowered).
+        let state = if event { self.state_in(f) } else { Vec::new() };
+        let saved_globals: Vec<(String, Option<Bind>)> = state.iter().map(|(n, ..)| (n.clone(), self.globals.get(n).cloned())).collect();
+        let saved_spans = if event { std::mem::take(&mut self.call_spans) } else { Vec::new() };
+        let saved_frame = if event { std::mem::replace(&mut self.frame_words, 0) } else { 0 };
+        let first_mark = self.marks_spans.len() as u32;
         let saved_b = std::mem::replace(&mut self.b, Builder::new());
         let saved_elem = self.kernel.element;
         let saved_counters = self.kernel.counters.clone();
         let saved_offsets = std::mem::take(&mut self.kernel.local_offsets);
         let saved_nonlocal = self.kernel.nonlocal;
         let saved_loops = std::mem::take(&mut self.loops);
-        let r = self.function_body(f, args, emits, span);
+        // Its i32 parameters that a literal may fill (their values' taint is this builder's).
+        let saved_taint = std::mem::replace(&mut self.taint, event.then(Taint::default));
+        let r = self.function_body(f, args, emits, &state, span);
+        let taint = std::mem::replace(&mut self.taint, saved_taint);
         let fb = std::mem::replace(&mut self.b, saved_b);
+        for (name, bind) in saved_globals {
+            match bind {
+                Some(b) => self.globals.insert(name, b),
+                None => self.globals.remove(&name),
+            };
+        }
+        let frame = if event {
+            self.call_spans = saved_spans;
+            std::mem::replace(&mut self.frame_words, saved_frame)
+        } else {
+            0
+        };
         let nonlocal = self.kernel.nonlocal && !saved_nonlocal;
         self.kernel.element = saved_elem;
         self.kernel.counters = saved_counters;
@@ -2554,14 +2952,23 @@ impl Lowerer {
         g.body = fb.blocks.into_iter().next().unwrap();
         g.params = params;
         g.results = results;
-        self.funcs_out.push((g, FnMeta { emits, ret }));
+        let state = state.into_iter().map(|(name, _, _, set)| (name, set)).collect();
+        let marks = first_mark..self.marks_spans.len() as u32;
+        let lit_bad = match taint {
+            Some(t) => {
+                let safe = self.lit_safe(f);
+                (0..f.params.len().min(64)).filter(|&k| !safe[k]).fold(t.bad, |m, k| m | 1 << k)
+            }
+            None => 0,
+        };
+        self.funcs_out.push((g, FnMeta { emits, ret, state, frame, name: f.name.clone(), span: f.span, marks, lit_bad }));
         Ok(Some(self.funcs_out.len() as u16 - 1))
     }
 
     /// The body of function `f` in the (fresh) builder: (params, results,
     /// returned type), or None when it returns what a function cannot.
     #[allow(clippy::type_complexity)]
-    fn function_body(&mut self, f: &FnDecl, args: &[V], emits: bool, span: Span) -> LResult<Option<(Vec<Val>, Vec<Val>, Option<T>)>> {
+    fn function_body(&mut self, f: &FnDecl, args: &[V], emits: bool, state: &[StateArg], span: Span) -> LResult<Option<(Vec<Val>, Vec<Val>, Option<T>)>> {
         let mut params = Vec::new();
         let mut param = |l: &mut Lowerer, t: Ty| {
             l.b.prog.vals.push(t);
@@ -2571,7 +2978,7 @@ impl Lowerer {
             v
         };
         let mut scope = HashMap::new();
-        for ((name, _), a) in f.params.iter().zip(args) {
+        for (k, ((name, _), a)) in f.params.iter().zip(args).enumerate() {
             let v = match a {
                 V::Lit(x) => {
                     // As when inlined: a constant.
@@ -2579,7 +2986,13 @@ impl Lowerer {
                     continue;
                 }
                 V::F(_) => V::F(param(self, Ty::F32)),
-                V::I(_) => V::I(param(self, Ty::I32)),
+                V::I(_) => {
+                    let x = param(self, Ty::I32);
+                    if let Some(t) = &mut self.taint {
+                        t.vals.insert(x, k as u32);
+                    }
+                    V::I(x)
+                }
                 V::B(_) => V::B(param(self, Ty::Bool)),
                 V::Vec(n, _) => {
                     let mut l = [Val(0); 16];
@@ -2608,6 +3021,21 @@ impl Lowerer {
                 self.kernel.counters.push((kd, c));
                 counters.push(c);
             }
+        }
+        // State scalars: the function's own variables, their values in and (assigned) out.
+        let mut state_out = Vec::new();
+        for (name, t, tys, set) in state {
+            let mut vars = Vec::new();
+            for ty in tys {
+                let c = self.b.var(*ty);
+                let x = param(self, *ty);
+                self.b.set(c, x);
+                vars.push(c);
+            }
+            if *set {
+                state_out.extend(vars.iter().copied());
+            }
+            self.globals.insert(name.clone(), Bind::Local(t.clone(), vars));
         }
         self.call_stack.push(f.name.clone());
         self.frames.push(vec![scope]);
@@ -2659,6 +3087,7 @@ impl Lowerer {
         };
         let (t, words): (Option<T>, Vec<Val>) = match v {
             V::Unit => (None, vec![]),
+            V::Lit(_) if self.event.integer_literals => (Some(T::I), vec![self.to_i(&v, span)?]),
             V::Lit(_) | V::F(_) => (Some(T::F), vec![self.to_f(&v, span)?]),
             V::I(x) => (Some(T::I), vec![x]),
             V::B(x) => (Some(T::B), vec![x]),
@@ -2678,6 +3107,9 @@ impl Lowerer {
         for c in counters {
             results.push(self.b.get(c));
         }
+        for c in state_out {
+            results.push(self.b.get(c));
+        }
         Ok(Some((params, results, t)))
     }
 
@@ -2691,6 +3123,7 @@ impl Lowerer {
 
     fn new_local(&mut self, v: &V, span: Span) -> LResult<Bind> {
         let (t, vars) = match v {
+            V::Lit(_) if self.event.integer_literals => (T::I, vec![self.b.var(Ty::I32)]),
             V::Lit(_) | V::F(_) => (T::F, vec![self.b.var(Ty::F32)]),
             V::I(_) => (T::I, vec![self.b.var(Ty::I32)]),
             V::B(_) => (T::B, vec![self.b.var(Ty::Bool)]),
@@ -2752,8 +3185,9 @@ impl Lowerer {
     }
 
     /// The type a value would take in a fresh variable.
-    fn value_t(v: &V) -> Option<T> {
+    fn value_t(&self, v: &V) -> Option<T> {
         Some(match v {
+            V::Lit(_) if self.event.integer_literals => T::I,
             V::Lit(_) | V::F(_) => T::F,
             V::I(_) => T::I,
             V::B(_) => T::B,
@@ -2807,7 +3241,7 @@ impl Lowerer {
                     // only in line names each value in turn, as a chain of lets would.
                     in_line.retain(|n| *n != name.as_str());
                     let rest = &stmts[k + 1..];
-                    let bind = match Self::value_t(&v) {
+                    let bind = match self.value_t(&v) {
                         Some(_) if self.trace.is_some() && !assigns(rest, name) => Bind::Value(v),
                         Some(t) if self.trace.is_some() && assigned_in_line(rest, name) => {
                             in_line.push(name.as_str());
@@ -2820,7 +3254,7 @@ impl Lowerer {
                 Stmt::Assign { target: Expr { kind: ExprKind::Ident(name), .. }, op, value, span } if in_line.contains(&name.as_str()) => {
                     let rhs = self.expr(value)?;
                     let Some(Bind::Value(old)) = self.lookup(name) else { unreachable!("a name assigned in line is bound to its value") };
-                    let t = Self::value_t(&old).expect("a value a variable could hold");
+                    let t = self.value_t(&old).expect("a value a variable could hold");
                     let v = self.combined(*op, old, rhs, *span)?;
                     let v = self.held(&t, &v, *span)?;
                     self.bind(name, Bind::Value(v));
@@ -2840,6 +3274,10 @@ impl Lowerer {
                         let c = self.expr(cond)?;
                         let c = self.truth(&c, cond.span)?;
                         let nc = self.b.un(Ty::Bool, Un::NotB, c);
+                        // The exit tests the condition's negation.
+                        if let Some(id) = self.cond_site(cond.span, false) {
+                            self.b.push(IS::Mark(id));
+                        }
                         self.b.push(IS::If(nc, vec![IS::Break(0)], vec![]));
                         self.scoped(|l| l.stmts(body))
                     })();
@@ -2892,7 +3330,7 @@ impl Lowerer {
                     let ret_i = self.rets.len() - 1;
                     if !matches!(v, V::Unit) {
                         if self.rets[ret_i].vars.is_none() {
-                            let Some(t) = Self::value_t(&v) else {
+                            let Some(t) = self.value_t(&v) else {
                                 return err(*span, "functions return f32, i32, bool, vec2/3/4 or mat4 (structs and arrays are passed by reference instead)");
                             };
                             let vars = match &t {
@@ -3203,7 +3641,23 @@ impl Lowerer {
 
     fn for_loop(&mut self, var: &str, from: &Expr, to: &Expr, body: &[Stmt], span: Span) -> LResult<()> {
         let a = self.expr(from)?;
-        let z = self.expr(to)?;
+        let mut min_bound = None;
+        let z = match &to.kind {
+            ExprKind::Call(name, args) if self.domain == Domain::Event && name == "min" => self.call_expr_bound(name, args, to.span, &mut min_bound)?,
+            _ => self.expr(to)?,
+        };
+        let start = match &a {
+            _ if float_literal(from) => None,
+            V::Lit(x) if x.fract() == 0.0 && *x >= i32::MIN as f64 && *x <= i32::MAX as f64 => Some(*x as i32),
+            V::I(v) => self.b.cst(*v).map(|x| x as i32),
+            _ => None,
+        };
+        // Only integer min supplies this bound: a floating min can yield NaN,
+        // whose conversion to an integer would invalidate the bound.
+        let bounded_cap = match (start, min_bound) {
+            (Some(a), Some(k)) => Some(u32::try_from((k as i64 - a as i64).max(0) + 1).map_err(|_| ShaderError::new(span.start, span.end, "loop too long".into()))?),
+            _ => None,
+        };
         if let (V::Lit(a), V::Lit(z)) = (&a, &z) {
             let (a, z) = (a.floor() as i64, z.floor() as i64);
             let count = (z - a).max(0) as u64;
@@ -3241,14 +3695,15 @@ impl Lowerer {
                 return err(span, "loop too long");
             }
         }
-        let cap = match (&a, &z) {
-            (V::Lit(a), V::Lit(z)) => ((z.floor() - a.floor()).max(0.0) as u32).saturating_add(1),
+        let cap = match (&a, &z, bounded_cap) {
+            (V::Lit(a), V::Lit(z), _) => ((z.floor() - a.floor()).max(0.0) as u32).saturating_add(1),
+            (_, _, Some(cap)) => cap,
             _ if self.whole_ranges => u32::MAX,
             _ => LOOP_CAP,
         };
         let av = self.to_i(&a, from.span)?;
         let zv = self.to_i(&z, to.span)?;
-        if cap == LOOP_CAP && self.reports_caps() {
+        if cap == LOOP_CAP && bounded_cap.is_none() && self.reports_caps() {
             // A run-time range longer than the cap is reported, not
             // silently cut.
             let len = self.b.ib(Bin::SubI, zv, av);
@@ -3283,13 +3738,23 @@ impl Lowerer {
     fn expr(&mut self, e: &Expr) -> LResult<V> {
         let span = e.span;
         match &e.kind {
-            ExprKind::Num(x, int) => Ok(self.num(*x, *int, span)),
+            ExprKind::Num(x, int) => {
+                if self.event.integer_literals && !*int {
+                    return err(span, "this program has no float type: write an integer literal");
+                }
+                Ok(self.num(*x, *int, span))
+            }
             ExprKind::Bool(x) => Ok(V::B(self.b.cb(*x))),
             ExprKind::Ident(name) => self.ident(name, span),
             ExprKind::Neg(a) => {
                 let v = self.expr(a)?;
                 match v {
-                    V::Lit(x) => Ok(V::Lit(-x)),
+                    V::Lit(x) => {
+                        if self.event.integer_literals {
+                            self.literal_i32(-x, span)?;
+                        }
+                        Ok(V::Lit(-x))
+                    }
                     V::F(x) => Ok(V::F(self.b.fneg(x))),
                     V::D(x) => Ok(V::D(self.b.un(Ty::F64, Un::NegD, x))),
                     V::I(x) => Ok(V::I(self.b.un(Ty::I32, Un::NegI, x))),
@@ -3312,6 +3777,8 @@ impl Lowerer {
                 let is_and = matches!(e.kind, ExprKind::Bin(BinOp::And, ..));
                 let av = self.expr(a)?;
                 let ac = self.truth(&av, a.span)?;
+                // `a` decides whether `b` runs, when that takes a branch (below).
+                let site = self.cond_site(a.span, true);
                 self.b.open();
                 let bv = self.expr(b);
                 let bc = match bv {
@@ -3329,6 +3796,9 @@ impl Lowerer {
                 self.b.set(t, ac);
                 let mut blk = blk;
                 blk.push(IS::Set(t, bc));
+                if let Some(id) = site {
+                    self.b.push(IS::Mark(id));
+                }
                 if is_and {
                     self.b.push(IS::If(ac, blk, vec![]));
                 } else {
@@ -3344,14 +3814,13 @@ impl Lowerer {
                 // the documents (an integer-valued literal `4` still takes
                 // the other side's type).
                 if self.domain != Domain::Audio {
-                    let float_lit = |e: &Expr| matches!(&e.kind, ExprKind::Num(_, false)) || matches!(&e.kind, ExprKind::Neg(x) if matches!(x.kind, ExprKind::Num(_, false)));
                     if let (V::I(_), V::Lit(y)) = (&av, &bv) {
-                        if float_lit(b) {
+                        if float_literal(b) {
                             bv = V::F(self.b.cf(*y as f32));
                         }
                     }
                     if let (V::Lit(x), V::I(_)) = (&av, &bv) {
-                        if float_lit(a) {
+                        if float_literal(a) {
                             av = V::F(self.b.cf(*x as f32));
                         }
                     }
@@ -3451,8 +3920,7 @@ impl Lowerer {
                     let v = self.expr(fe)?;
                     let t = match &v {
                         V::Place(p) => p.ty.clone(),
-                        V::Lit(_) => T::F,
-                        v => Self::value_t(v).ok_or_else(|| ShaderError::new(fe.span.start, fe.span.end, format!("an object field holds a value, found {}", self.vname(v))))?,
+                        v => self.value_t(v).ok_or_else(|| ShaderError::new(fe.span.start, fe.span.end, format!("an object field holds a value, found {}", self.vname(v))))?,
                     };
                     if types.iter().any(|(n, _)| n == fname) {
                         return err(fe.span, format!("field `{}` is given twice", fname));
@@ -3490,7 +3958,7 @@ impl Lowerer {
                 let first = self.expr(&list[0])?;
                 let et = match &first {
                     V::Place(p) => p.ty.clone(),
-                    v => Self::value_t(v).ok_or_else(|| ShaderError::new(e.span.start, e.span.end, "bad array element".into()))?,
+                    v => self.value_t(v).ok_or_else(|| ShaderError::new(e.span.start, e.span.end, "bad array element".into()))?,
                 };
                 let ew = self.words(&et);
                 let n = list.len() as u32;
@@ -3508,7 +3976,7 @@ impl Lowerer {
                 let v = self.expr(el)?;
                 let et = match &v {
                     V::Place(p) => p.ty.clone(),
-                    v => Self::value_t(v).unwrap(),
+                    v => self.value_t(v).unwrap(),
                 };
                 let ew = self.words(&et);
                 let root = self.alloc_frame(ew * n, e.span)?;
@@ -3641,6 +4109,9 @@ impl Lowerer {
                 return Ok(v);
             }
         }
+        if self.event.integer_literals && matches!(name, "PI" | "TAU" | "E") {
+            return err(span, format!("{name} needs a float type; this program has none"));
+        }
         match name {
             "PI" => return Ok(V::Lit(std::f64::consts::PI)),
             "TAU" => return Ok(V::Lit(std::f64::consts::TAU)),
@@ -3698,14 +4169,30 @@ impl Lowerer {
         }
     }
 
+    /// A mark for the source condition at `span`, taken now, before its branches lower, so its id
+    /// comes before theirs as marks' ids follow program order; the caller places it right before
+    /// the condition's `If`, when it makes one. `tests` is whether that `If` tests the condition
+    /// itself (false: its negation, as a `while`'s exit does). None while marks are off, in
+    /// scratch lowering, or for the prelude's conditions.
+    fn cond_site(&mut self, span: Span, tests: bool) -> Option<u32> {
+        if !self.marks || self.b.scratch || span.start >= self.prelude_base {
+            return None;
+        }
+        let id = self.marks_spans.len() as u32;
+        self.marks_spans.push(span);
+        self.cond_marks.push((id, tests));
+        Some(id)
+    }
+
     fn if_expr(&mut self, arms: &[(Expr, Vec<crate::parse::Stmt>)], else_: Option<&Vec<crate::parse::Stmt>>, span: Span) -> LResult<V> {
         // Conditions after the first are evaluated only when reached, so
         // build nested ifs.
         let (c0, b0) = &arms[0];
         let cv = self.expr(c0)?;
         let c = self.truth(&cv, c0.span)?;
+        let site = self.cond_site(c0.span, true);
         let rest = &arms[1..];
-        self.if2(c, &|l: &mut Self| l.scoped(|l| l.stmts(b0)), &|l: &mut Self| {
+        self.if2(c, site, &|l: &mut Self| l.scoped(|l| l.stmts(b0)), &|l: &mut Self| {
             if !rest.is_empty() {
                 l.if_expr(rest, else_, span)
             } else if let Some(e) = else_ {
@@ -3725,14 +4212,16 @@ impl Lowerer {
         }
         let (c, body) = chain[0];
         let rest = &chain[1..];
-        self.if2(c, &|l: &mut Self| l.scoped(|l| l.stmts(body)), &|l: &mut Self| l.if_chain(rest, default, span), span)
+        self.if2(c, None, &|l: &mut Self| l.scoped(|l| l.stmts(body)), &|l: &mut Self| l.if_chain(rest, default, span), span)
     }
 
     /// Two-way conditional; merges values through a select (both sides
-    /// pure) or result variables.
+    /// pure) or result variables. `site` is the source condition's mark
+    /// ([`Lowerer::cond_site`]), placed before the `If` when there is one.
     fn if2(
         &mut self,
         c: Val,
+        site: Option<u32>,
         then_: &dyn Fn(&mut Self) -> LResult<V>,
         else_: &dyn Fn(&mut Self) -> LResult<V>,
         span: Span,
@@ -3750,8 +4239,8 @@ impl Lowerer {
         let ev = ev?;
         let t_diverges = matches!(ir::unmarked(&tb).next_back(), Some(IS::Break(_)) | Some(IS::Continue(_)));
         let e_diverges = matches!(ir::unmarked(&eb).next_back(), Some(IS::Break(_)) | Some(IS::Continue(_)));
-        let tt = Self::value_t(&tv);
-        let et = Self::value_t(&ev);
+        let tt = self.value_t(&tv);
+        let et = self.value_t(&ev);
         let rt = match (&tt, &et) {
             (Some(a), Some(b)) => {
                 if a == b || (matches!(tv, V::Lit(_)) && *b != T::B) {
@@ -3773,6 +4262,9 @@ impl Lowerer {
             _ => None,
         };
         let Some(rt) = rt else {
+            if let Some(id) = site {
+                self.b.push(IS::Mark(id));
+            }
             self.b.push(IS::If(c, tb, eb));
             return Ok(V::Unit);
         };
@@ -3802,6 +4294,9 @@ impl Lowerer {
             self.b.open();
             self.assign_vars(&rt, &vars, &ev, span)?;
             eb.extend(self.b.close());
+        }
+        if let Some(id) = site {
+            self.b.push(IS::Mark(id));
         }
         self.b.push(IS::If(c, tb, eb));
         Ok(self.read_vars(&rt, &vars))
@@ -3843,14 +4338,19 @@ impl Lowerer {
 
     fn binary(&mut self, op: BinOp, a: V, b: V, span: Span) -> LResult<V> {
         use BinOp::*;
+        self.taint_use(Some(op), &a, &b);
         // Literal folding (f64, deterministic).
         if let (V::Lit(x), V::Lit(y)) = (&a, &b) {
             let (x, y) = (*x, *y);
             let bits = |v: f64| v as i64;
-            return Ok(match op {
+            if self.event.integer_literals && matches!(op, Div | Rem) && y == 0.0 {
+                return err(span, "division by zero in a constant");
+            }
+            let v = match op {
                 Add => V::Lit(x + y),
                 Sub => V::Lit(x - y),
                 Mul => V::Lit(x * y),
+                Div if self.event.integer_literals => V::Lit((x / y).trunc()),
                 Div => V::Lit(x / y),
                 Rem => V::Lit(x - y * (x / y).trunc()),
                 Lt | Le | Gt | Ge | Eq | Ne => {
@@ -3871,7 +4371,13 @@ impl Lowerer {
                 Shr => V::Lit(((bits(x) as i32).wrapping_shr(bits(y) as u32)) as f64),
                 ShrU => V::Lit(((bits(x) as i32 as u32).wrapping_shr(bits(y) as u32)) as i32 as f64),
                 And | Or => unreachable!(),
-            });
+            };
+            if let V::Lit(x) = &v {
+                if self.event.integer_literals {
+                    self.literal_i32(*x, span)?;
+                }
+            }
+            return Ok(v);
         }
         // Matrix products.
         if let (V::Vec(16, m), Mul) = (&a, op) {
@@ -4122,10 +4628,20 @@ impl Lowerer {
     }
 
     fn call_expr(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<V> {
+        self.call_expr_bound(name, args, span, &mut None)
+    }
+
+    /// Optionally records an integer min's constant upper bound for an event range.
+    /// Ordinary call resolution and argument evaluation still happen exactly once.
+    fn call_expr_bound(&mut self, name: &str, args: &[Expr], span: Span, min_bound: &mut Option<i32>) -> LResult<V> {
         if let Some(Bind::Closure(f, scopes)) = self.frames.last().and_then(|fr| fr.iter().rev().find_map(|s| s.get(name))).cloned() {
             let mut vals = Vec::new();
             for a in args {
                 vals.push(self.expr(a)?);
+            }
+            // A local function named as a port: a value standing for a literal is no port's.
+            for v in &vals {
+                self.taint_use(None, v, &V::Unit);
             }
             // Its own name is in its scope: a call of itself is recursion
             // (an error), not an unknown name.
@@ -4283,9 +4799,14 @@ impl Lowerer {
         match name {
             "min" | "max" => {
                 want(2)?;
-                if let (V::I(_), V::I(_) | V::Lit(_)) | (V::Lit(_), V::I(_)) = (&vals[0], &vals[1]) {
+                if matches!((&vals[0], &vals[1]), (V::I(_), V::I(_) | V::Lit(_)) | (V::Lit(_), V::I(_)))
+                    || (self.event.integer_literals && vals.iter().all(|v| matches!(v, V::Lit(_))))
+                {
                     let x = self.to_i(&vals[0], args[0].span)?;
                     let y = self.to_i(&vals[1], args[1].span)?;
+                    if name == "min" && !args.iter().any(float_literal) {
+                        *min_bound = [self.b.cst(x), self.b.cst(y)].into_iter().flatten().map(|k| k as i32).min();
+                    }
                     let c = self.b.cmpi(if name == "min" { Cmp::Lt } else { Cmp::Gt }, x, y);
                     return Ok(V::I(self.b.sel(c, x, y)));
                 }
@@ -4315,7 +4836,7 @@ impl Lowerer {
                     }
                     return Ok(V::Vec(n, o));
                 }
-                if let V::I(_) = vals[0] {
+                if matches!(vals[0], V::I(_)) || (self.event.integer_literals && matches!(vals[0], V::Lit(_))) {
                     let x = self.to_i(&vals[0], span)?;
                     let lo = self.to_i(&vals[1], span)?;
                     let hi = self.to_i(&vals[2], span)?;
@@ -4499,6 +5020,7 @@ impl Lowerer {
                 want(1)?;
                 Ok(match &vals[0] {
                     // A typed integer: `var w = int(0)` declares i32 state.
+                    v @ V::Lit(_) if self.event.integer_literals => V::I(self.to_i(v, args[0].span)?),
                     V::Lit(x) => V::I(self.b.ci(x.trunc() as i32)),
                     V::I(x) => V::I(*x),
                     V::F(x) => V::I(self.b.un(Ty::I32, Un::F2I, *x)),
@@ -4526,6 +5048,9 @@ impl Lowerer {
                 match &vals[0] {
                     V::Place(Place { ty: T::Array(_, n), .. }) => Ok(V::Lit(*n as f64)),
                     V::Place(Place { ty: T::Buf(_, stride, offset, _), region: Region::Buf(k), .. }) => {
+                        if self.domain == Domain::Event {
+                            return Ok(V::Lit(self.event.buffers[*k as usize].len as f64));
+                        }
                         // Whole elements in the host buffer.
                         let (stride, offset, k) = (*stride, *offset, *k);
                         let words = self.b.raw(Ty::I32, Op::BufLen(k), None);
@@ -4806,6 +5331,7 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         prelude_base,
         marks: false,
         marks_spans: Vec::new(),
+        cond_marks: Vec::new(),
         domain,
         kernel: Default::default(),
         portable: false,
@@ -4819,6 +5345,8 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         trace: None,
         event: Default::default(),
         call_spans: Vec::new(),
+        lit_safe: HashMap::new(),
+        taint: None,
     }
 }
 

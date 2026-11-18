@@ -340,6 +340,11 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_field(&mut self, opargs: OpcodeArgs) {
         let field = self.bx.threads.cur().pop_stack_value();
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        if object.is_reported_err() {
+            self.bx.threads.cur().push_stack_unchecked(object);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
         if opargs.without_flags() == OpcodeArgs::OPTIONAL_FIELD {
             // `a.b ?? d`: absent reads as nil, quietly.
             let value = if let Some(obj) = object.as_object() {
@@ -409,7 +414,9 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_field_nil(&mut self) {
         let field = self.bx.threads.cur().pop_stack_value();
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        if let Some(obj) = object.as_object() {
+        if object.is_reported_err() {
+            self.bx.threads.cur().push_stack_unchecked(object);
+        } else if let Some(obj) = object.as_object() {
             let mut value = self
                 .bx
                 .heap
@@ -467,7 +474,9 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_proto_field(&mut self) {
         let field = self.bx.threads.cur().pop_stack_value();
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        if let Some(obj) = object.as_object() {
+        if object.is_reported_err() {
+            self.bx.threads.cur().push_stack_unchecked(object);
+        } else if let Some(obj) = object.as_object() {
             let value =
                 self.bx
                     .heap
@@ -625,6 +634,11 @@ impl<'a> ScriptVm<'a> {
     pub(crate) fn handle_array_index(&mut self, opargs: OpcodeArgs) {
         let index = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        if object.is_reported_err() {
+            self.bx.threads.cur().push_stack_unchecked(object);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
         if opargs.without_flags() == OpcodeArgs::OPTIONAL_FIELD {
             // `a[i] ?? d`: out of range, not an index, or nothing to index
             // reads as nil, quietly.
@@ -930,7 +944,9 @@ impl<'a> ScriptVm<'a> {
         let index = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
 
-        let value = if let Some(arr) = source.as_array() {
+        let value = if source.is_reported_err() {
+            source
+        } else if let Some(arr) = source.as_array() {
             let Some(idx) = self.checked_array_index(index) else {
                 return;
             };
@@ -973,7 +989,9 @@ impl<'a> ScriptVm<'a> {
         let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
 
         // Extract value from source array at index (nil-safe)
-        let value = if let Some(arr) = source.as_array() {
+        let value = if source.is_reported_err() {
+            source
+        } else if let Some(arr) = source.as_array() {
             let result = self
                 .bx
                 .heap
@@ -1021,7 +1039,9 @@ impl<'a> ScriptVm<'a> {
         let source = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
 
         // Extract value from source object using id as key (nil-safe)
-        let value = if let Some(obj) = source.as_object() {
+        let value = if source.is_reported_err() {
+            source
+        } else if let Some(obj) = source.as_object() {
             let result = self.bx.heap.value(obj, id, NoTrap);
             if result.is_err() {
                 self.bx.threads.cur().trap.err_take();

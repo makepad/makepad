@@ -128,7 +128,7 @@ pub fn compile(p: &Program) -> Option<(Code, u32)> {
 
 /// [`compile`] at `lanes` (4 or 8).
 pub fn compile_at(p: &Program, lanes: u32) -> Option<(Code, u32)> {
-    if !cpu_ok() {
+    if !cpu_ok() || crate::ir::has_narrow(p) {
         return None;
     }
     let mut lanes = lanes;

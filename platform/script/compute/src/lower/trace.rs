@@ -329,8 +329,8 @@ impl KernelTrace {
         }
         let mut spare: Vec<Vec<u32>> = t.buffers.iter().map(|b| vec![0u32; b.stride.max(1) as usize]).collect();
         let bufs: Vec<ir::RawBuf> = t.buffers.iter().zip(&mut spare).map(|(b, own)| match b.name == buffer && !words.is_empty() {
-            true => ir::RawBuf { ptr: words.as_ptr() as *mut u32, len: words.len(), writable: false },
-            false => ir::RawBuf { ptr: own.as_mut_ptr(), len: own.len(), writable: b.access != Access::Read },
+            true => ir::RawBuf { elem: ir::Elem::Word, ptr: words.as_ptr() as *mut u32, len: words.len(), writable: false },
+            false => ir::RawBuf { elem: ir::Elem::Word, ptr: own.as_mut_ptr(), len: own.len(), writable: b.access != Access::Read },
         }).collect();
         let mut state = [0u32; 1];
         let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Read(&t.shared), bufs: &bufs };

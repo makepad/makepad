@@ -265,8 +265,8 @@ fn validator_fuzz_never_panics_and_valid_programs_run() {
             let mut b0 = [0u32; 2];
             let mut b1 = [0u32; 3];
             let bufs = [
-                ir::RawBuf { ptr: b0.as_mut_ptr(), len: 2, writable: false },
-                ir::RawBuf { ptr: b1.as_mut_ptr(), len: 3, writable: true },
+                ir::RawBuf { elem: ir::Elem::Word, ptr: b0.as_mut_ptr(), len: 2, writable: false },
+                ir::RawBuf { elem: ir::Elem::Word, ptr: b1.as_mut_ptr(), len: 3, writable: true },
             ];
             let mut scratch = vec![0u32; p.scratch_words()];
             let zeros = [0f32; 1];

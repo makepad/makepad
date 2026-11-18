@@ -92,7 +92,7 @@ fn run_time_slices_never_leave_their_buffer() {
     for (off, len) in [(0u32, 8u32), (6, 100), (u32::MAX, 4), (3, u32::MAX), (7, 1), (8, 1)] {
         let mut mem = vec![0xAAAA_AAAAu32; 10];
         let inner = mem[1..9].as_mut_ptr();
-        let bufs = [RawBuf { ptr: std::ptr::null_mut(), len: 0, writable: false }, RawBuf { ptr: inner, len: 8, writable: true }];
+        let bufs = [RawBuf { elem: makepad_script_compute::ir::Elem::Word, ptr: std::ptr::null_mut(), len: 0, writable: false }, RawBuf { elem: makepad_script_compute::ir::Elem::Word, ptr: inner, len: 8, writable: true }];
         let mut rets = [0u32];
         let ok = host::invoke(f, &[7], &[SliceRaw { buf: 1, off, len }], &mut rets, &bufs);
         assert!(mem[0] == 0xAAAA_AAAA && mem[9] == 0xAAAA_AAAA, "({off}, {len}) wrote outside");
@@ -215,8 +215,8 @@ fn an_untrusted_call_on_a_run_time_size_gets_a_per_call_limit() {
         }).collect();
         let mut tris = vec![0u32; words[1] as usize];
         let bufs = [
-            RawBuf { ptr: pts.as_mut_ptr() as *mut u32, len: pts.len(), writable: false },
-            RawBuf { ptr: tris.as_mut_ptr(), len: tris.len(), writable: true },
+            RawBuf { elem: makepad_script_compute::ir::Elem::Word, ptr: pts.as_mut_ptr() as *mut u32, len: pts.len(), writable: false },
+            RawBuf { elem: makepad_script_compute::ir::Elem::Word, ptr: tris.as_mut_ptr(), len: tris.len(), writable: true },
         ];
         let mut rets = [0u32];
         let ok = host::invoke_limited(f, &[], &[SliceRaw { buf: 0, off: 0, len: words[0] }, SliceRaw { buf: 1, off: 0, len: words[1] }], &mut rets, &bufs, limit);

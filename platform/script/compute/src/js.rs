@@ -18,6 +18,9 @@ use std::fmt::Write;
 
 /// The function's source (None: audio I/O or host calls).
 pub fn function(p: &Program) -> Option<String> {
+    if ir::has_narrow(p) {
+        return None;
+    }
     // Functions are inlined: the JS is one body.
     let flat = ir::flat(p);
     let p = &*flat;

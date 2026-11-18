@@ -962,6 +962,8 @@ impl Writes {
                         self.bufs.insert(x.buf);
                     }
                 }
+                // A port may touch every host buffer, regardless of its arguments.
+                Stmt::Port { .. } => self.bufs.extend(0..=u8::MAX),
                 // What the functions write (not the caller's variables).
                 Stmt::Call { .. } => CALLEE_WRITES.with(|w| {
                     let w = w.borrow();
@@ -1443,7 +1445,9 @@ fn negate_constant_addends(p: &mut Program) {
 }
 
 /// i32 `a * b + c` whose product has no other use becomes one multiply-add
-/// (`Fma::MulAddI`): exact, so every kernel gets it.
+/// (`Fma::MulAddI`): exact, so every kernel gets it. Only within one loop
+/// body: a product `licm` hoisted out of a loop stays out of it, instead of
+/// being fused back into the loop's add and recomputed every iteration.
 pub fn fuse_mla(p: &mut Program) {
     fuse(p, false);
 }
@@ -1451,14 +1455,16 @@ pub fn fuse_mla(p: &mut Program) {
 fn fuse(p: &mut Program, float: bool) {
     let mul = if float { ir::Bin::MulF } else { ir::Bin::MulI };
     let mut uses = vec![0u32; p.vals.len()];
-    let mut muls: HashMap<u32, (Val, Val)> = HashMap::new();
-    fn count(b: &Block, uses: &mut [u32], muls: &mut HashMap<u32, (Val, Val)>, mul: ir::Bin) {
+    // Each product with the loop body that defines it: loops are numbered in
+    // walk order, 0 is the program's own body.
+    let mut muls: HashMap<u32, (Val, Val, u32)> = HashMap::new();
+    fn count(b: &Block, uses: &mut [u32], muls: &mut HashMap<u32, (Val, Val, u32)>, mul: ir::Bin, body: u32, next: &mut u32) {
         for s in b {
             let us: Vec<Val> = match s {
                 Stmt::Def(v, op) => {
                     if let Op::Bin(m, a, b) = op {
                         if *m == mul {
-                            muls.insert(v.0, (*a, *b));
+                            muls.insert(v.0, (*a, *b, body));
                         }
                     }
                     ir::op_uses(op)
@@ -1467,12 +1473,14 @@ fn fuse(p: &mut Program, float: bool) {
                 Stmt::Store { off, val, .. } => off.iter().copied().chain([*val]).collect(),
                 Stmt::Out { idx, val, .. } => vec![*idx, *val],
                 Stmt::If(c, t, e) => {
-                    count(t, uses, muls, mul);
-                    count(e, uses, muls, mul);
+                    count(t, uses, muls, mul, body, next);
+                    count(e, uses, muls, mul, body, next);
                     vec![*c]
                 }
-                Stmt::Loop { body, .. } => {
-                    count(body, uses, muls, mul);
+                Stmt::Loop { body: inner, .. } => {
+                    *next += 1;
+                    let id = *next;
+                    count(inner, uses, muls, mul, id, next);
                     vec![]
                 }
                 Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
@@ -1484,12 +1492,16 @@ fn fuse(p: &mut Program, float: bool) {
             }
         }
     }
-    count(&p.body, &mut uses, &mut muls, mul);
+    count(&p.body, &mut uses, &mut muls, mul, 0, &mut 0);
     for r in &p.results {
         uses[r.0 as usize] += 1;
     }
     let single = |v: Val| if uses[v.0 as usize] == 1 { muls.get(&v.0).copied() } else { None };
-    fn walk(b: &mut Block, f: &dyn Fn(Val) -> Option<(Val, Val)>, float: bool) {
+    // Integer fusion stays within the product's own loop body. Float fusion
+    // (`fuse_fma`) keeps its earlier reach: it changes rounding, so moving it
+    // would change which results a fast kernel produces.
+    fn walk(b: &mut Block, single: &dyn Fn(Val) -> Option<(Val, Val, u32)>, float: bool, body: u32, next: &mut u32) {
+        let f = |v: Val| single(v).filter(|&(_, _, at)| float || at == body).map(|(a, b, _)| (a, b));
         for s in b {
             match s {
                 Stmt::Def(_, op) => {
@@ -1505,15 +1517,19 @@ fn fuse(p: &mut Program, float: bool) {
                     }
                 }
                 Stmt::If(_, t, e) => {
-                    walk(t, f, float);
-                    walk(e, f, float);
+                    walk(t, single, float, body, next);
+                    walk(e, single, float, body, next);
                 }
-                Stmt::Loop { body, .. } => walk(body, f, float),
+                Stmt::Loop { body: inner, .. } => {
+                    *next += 1;
+                    let id = *next;
+                    walk(inner, single, float, id, next);
+                }
                 _ => {}
             }
         }
     }
-    walk(&mut p.body, &single, float);
+    walk(&mut p.body, &single, float, 0, &mut 0);
     dce(p);
 }
 

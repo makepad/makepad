@@ -119,7 +119,7 @@ impl ElementAir {
         let mut f = IrFunction::new("element_main".into(), TY_VOID);
         f.cost = self.cost;
         let index = f.local(id!(i), 0, TY_U32, true, LocalKind::Temp);
-        let mut t = Tr::new(&self.program, self.control, f);
+        let mut t = Tr::new(&self.program, self.control, f)?;
         let mut body = Vec::new();
         let gid = t.e(ExprKind::Builtin(Builtin::GlobalId, Vec::new()), v3u);
         let gx = t.e(ExprKind::Swizzle(gid, [0, 0, 0, 0], 1), TY_U32);

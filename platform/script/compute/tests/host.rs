@@ -214,8 +214,8 @@ fn triangulate_cost_is_honest_and_budgets_refuse_large_inputs() {
             let n = pts.len() / 2;
             let mut tris = vec![0u32; 3 * n];
             let bufs = [
-                ir::RawBuf { ptr: pts.as_mut_ptr() as *mut u32, len: pts.len(), writable: false },
-                ir::RawBuf { ptr: tris.as_mut_ptr(), len: tris.len(), writable: true },
+                ir::RawBuf { elem: ir::Elem::Word, ptr: pts.as_mut_ptr() as *mut u32, len: pts.len(), writable: false },
+                ir::RawBuf { elem: ir::Elem::Word, ptr: tris.as_mut_ptr(), len: tris.len(), writable: true },
             ];
             let sl = [host::SliceRaw { buf: 0, off: 0, len: pts.len() as u32 }, host::SliceRaw { buf: 1, off: 0, len: tris.len() as u32 }];
             let mut rets = [0u32];

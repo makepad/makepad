@@ -220,7 +220,7 @@ impl KernelAir {
             None => None,
         };
         let v4u = ir.vec_ty(4, IrScalar::U32);
-        let mut t = Tr::new(&self.program, self.control, f);
+        let mut t = Tr::new(&self.program, self.control, f)?;
         let mut body = Vec::new();
         let mut grid = None;
         if let (Some(g), Some((_, at))) = (program, self.grid) {

@@ -182,6 +182,9 @@ impl ScriptHeap {
         self.escape_value(value);
         let object = &self.objects[top_ptr];
 
+        if object.proto.is_reported_err() {
+            return object.proto;
+        }
         if let Some(ptr) = object.proto.as_object() {
             let object = &self.objects[ptr];
             for kv in object.vec.iter() {

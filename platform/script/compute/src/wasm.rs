@@ -110,6 +110,9 @@ pub struct Entry<'a> {
 /// for a program without the element loop's shape: audio programs are
 /// scalar).
 pub fn module(entries: &[Entry], target: Target) -> Option<Vec<u8>> {
+    if entries.iter().any(|e| ir::has_narrow(e.program)) {
+        return None;
+    }
     // Function indices: the entries; the four-wide exact multiply-add's
     // rare fix-up (when some four-wide code has a fused multiply-add);
     // then each entry's functions, in the entry's form.
@@ -685,6 +688,9 @@ pub(crate) fn scalar(p: &Program, target: Target, calls: &[u32]) -> Option<Body>
 /// program that also uses host buffers (both would take the `table`
 /// parameter; validation keeps them apart: audio programs have no buffers).
 fn scalar_ok(p: &Program) -> bool {
+    if ir::has_narrow(p) {
+        return false;
+    }
     fn ok(b: &Block) -> bool {
         b.iter().all(|s| match s {
             Stmt::CallHost { .. } | Stmt::Port { .. } => false,

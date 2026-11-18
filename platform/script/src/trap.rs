@@ -149,6 +149,7 @@ impl ScriptTrapInner {
     /// app code built by another compiler than the VM, loader-core.md section 8).
     #[relax_api(run)]
     pub fn push_err(&self, value: ScriptValue, message: &str, origin_file: &str, origin_line: u32) -> ScriptValue {
+        let value = value.reported_err();
         self.pending.set(self.pending.get() | TRAP_PENDING_ERR);
         self.err.borrow_mut().push_back(ScriptError {
             value,

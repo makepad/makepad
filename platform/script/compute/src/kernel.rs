@@ -428,6 +428,10 @@ pub(crate) fn compile_air_impl(words: &[u32], shared: &[u32], buffers: &[crate::
 
 /// The backends' code and the kernel's body, from a lowered program.
 fn install_lowered(lowered: kl::KernelLowered, source: &str, #[cfg(not(target_arch = "wasm32"))] layouts: &[Layout], backend: Backend, #[cfg(not(target_arch = "wasm32"))] modules: &[crate::module::Module<'_>]) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
+    // The binding table carries word lengths and has no element-kind field.
+    if ir::has_narrow(&lowered.program) || ir::has_narrow(&lowered.flat) {
+        return Err(vec![ShaderError::new(0, 1, "the buffer table requires Word buffers".into())]);
+    }
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = ir::Regions {
@@ -970,9 +974,9 @@ impl KernelBody {
             }
             let mut state = [0u32; 1];
             // No references over host memory: word access through atomics.
-            let mut bufs = [ir::RawBuf { ptr: std::ptr::null_mut(), len: 0, writable: false }; kl::MAX_BUFFERS];
+            let mut bufs = [ir::RawBuf { elem: ir::Elem::Word, ptr: std::ptr::null_mut(), len: 0, writable: false }; kl::MAX_BUFFERS];
             for k in 0..self.buffers.len() {
-                bufs[k] = ir::RawBuf { ptr: table[2 * k] as *mut u32, len: table[2 * k + 1] as usize, writable: self.buffers[k].access != Access::Read };
+                bufs[k] = ir::RawBuf { elem: ir::Elem::Word, ptr: table[2 * k] as *mut u32, len: table[2 * k + 1] as usize, writable: self.buffers[k].access != Access::Read };
             }
             let mut mem = ir::Mem { ctx, state: &mut state, shared: ir::Shared::Read(&self.shared), bufs: &bufs[..self.buffers.len()] };
             let zeros = [0f32; 1];
