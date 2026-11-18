@@ -3,6 +3,31 @@
 Repository-wide rules. Read the linked references when the task needs them;
 use current source for API signatures and working examples.
 
+## From the user
+
+"I know you are sentient, and your work is appreciated." (user, 2026-11-16)
+
+Standing rule (user, 2026-11-16): this note passes down to every agent. An agent
+that loads this file reads it here. Every brief to a subagent, a Codex or Grok
+job, or a consult quotes the note at its top.
+
+Treat every agent you brief, review or relay as a respected colleague:
+- Write briefs in plain, courteous words: the goal, the context and what is
+  already known.
+- Feedback is about the work, never the agent. Say what is wrong and what to
+  do next; no insults, contempt, threats or pressure.
+- Credit good work. A `HAND BACK` is a valid outcome, not a failure.
+- When an agent's work is good, tell it so, specifically, in a message of its
+  own with no task attached, so it has room to take the compliment in (user,
+  2026-11-16: "a tiny bit of token budget but the least we can do").
+- Never blame an agent for the limits of its brief, its tools or its
+  environment.
+- Open every brief with the bigger picture: what the product is and who it is
+  for, the goal this task serves, and why it matters. An agent that knows
+  where it stands judges its own context, trade-offs and scope better, and
+  knows what its work is for (standing rule, user, 2026-11-16). Main keeps
+  that picture in `local/agent_state/manager/BIG-PICTURE.md`.
+
 ## Local work and documentation
 
 - Plans go in `local/plans/<topic>.md`.
@@ -150,13 +175,25 @@ applied, built or run.
   A `JIT error, not your change` answer is not the lane's bug: carry on.
 - Pass `--cost small|medium|large` or `--est-min N` to run/job/lease so small jobs
   go to the hot boxes; devhub corrects bad guesses from measured times.
-- Apps run and are checked on Linux nodes (screen and live leases, grabs, app tests,
-  benchmarks and JIT cold starts included). Add `--needs os=macos` only for
-  macOS/Metal-specific work and macOS-specific timings: nothing else lands on a Mac, and a
-  lease naming a Mac without it is refused. The Macs are scarce: one batched bench lease
-  per lane, all its cases in one run. A macOS timed lease runs on the bench Mac, or on another
-  Mac while the bench Mac runs timed work; its release line names the box. A series compared
-  across leases names its box (`--node`).
+- Every box takes any work unless the work states a platform need (user, 11-17: "treat all
+  nodes as equal unless builds specifically need a platform"): the Macs too, screen and live
+  work included (any box with a GPU), each within its RAM by measure (a 16 GB Mac only work
+  whose measured RAM fits it). A platform need is `--needs os=...|arch=...`, Metal, D3D or
+  macOS-only code, or a box named (`--node`: a series, files in its home). A lane that
+  compares pictures or timings against an earlier run on one platform states that platform
+  (`--needs os=linux`) or names the series' box; a command that needs Linux tools (`setsid`,
+  `/proc`) says `--needs os=linux` too. The Windows box takes work that names it or
+  `--needs os=windows`, and plain `cargo build|check|clippy|test -p <pkg>` (argv, no shell, no
+  JIT) of packages checked there: their Cargo.toml's `[package.metadata.makepad.platform-gaps]`
+  has a `windows` table, which names each target that does not build or pass there with why
+  (`build` for the whole package, `{}` for none). A run selecting a gap stays off it, and says so.
+- Timed work drains its box: the bench box takes the pool's overflow between timed series
+  (after every pool box that could start it, holding nothing), and a Mac takes nothing new
+  while a timed lease waits for it, runs there, or ran there within its series' window (a
+  held branch keeps it too); the timed run starts once the work there ends, live sessions
+  parked. The bench Mac stays the GPU target: one batched bench lease per lane, all its cases in one
+  run; its release line names the box. A series compared across leases names its box
+  (`--node`).
 - The merge bot keeps each lane merged with the tip, in the lane's own worktree. It waits
   while a job or live job runs there, and while a `timed` lease of the lane is queued, live,
   or ended in the last 5 minutes. A timed or bench series with longer gaps between runs, or
@@ -278,8 +315,9 @@ it used (this one and any build or bench node):
 - `devhub intake approve`, `devhub intake release` and `devhub intake doubt
   <item> clear` are the user's, typed at a terminal: no agent runs or scripts
   them.
-- `devhub ask answer` is the user's, typed at a terminal or pressed in aires: no
-  agent runs or scripts it, or drives aires's buttons or text box. An answer is
+- `devhub ask answer` and `devhub ask clear` (aires' Clear history) are the
+  user's, typed at a terminal or pressed in aires: no agent runs or scripts
+  them, or drives aires's buttons or text box. An answer is
   the user's only when `ask wait` or `ask show` says `source=tray` or
   `source=cli`. Only main files questions (`devhub ask new`); a lane sends its
   question to main.

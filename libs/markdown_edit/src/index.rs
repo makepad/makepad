@@ -645,8 +645,9 @@ impl Index {
         parser.collect()
     }
 
-    /// Resolves a reference link through the document's definitions.
-    fn resolve<'s>(&self) -> impl FnMut(BrokenLink<'s>) -> Option<(CowStr<'s>, CowStr<'s>)> + '_ {
+    /// Resolves a reference link through the document's definitions. The text the links
+    /// come from outlives the borrow of the index: the closure's signature names `'s`.
+    fn resolve<'a, 's: 'a>(&'a self) -> impl FnMut(BrokenLink<'s>) -> Option<(CowStr<'s>, CowStr<'s>)> + 'a {
         let links = &self.links;
         move |link: BrokenLink<'s>| {
             links

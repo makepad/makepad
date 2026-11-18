@@ -48,6 +48,15 @@ P=9931   # the pid from your own launch's startup line
 <command>` speaks the same commands. The exit status is 1 when the answer has an
 error line and 2 when the app is unreachable.
 
+An app run under the JIT (`makepad run`) announces itself as `makepad-remote:
+pid <app pid> app <package> run <run pid> socket <path>`. On Windows and macOS
+the run pid is a thin parent process (the one your `$!` or launcher holds), and
+the app pid is its child. A restart as a new process (into a rebuilt runner)
+gives the app a new pid and a new announce line, while the run pid stays and
+still reaches the app (`makepad inspect <run pid> ...`). Sample, kill or check
+liveness by the app pid from the newest announce line. Elsewhere the two pids
+are the same.
+
 Do not discover an instance by taking over another running one. Retain your
 own launch's PID and socket. On code changes, close that instance, rebuild,
 and relaunch before inspecting again.

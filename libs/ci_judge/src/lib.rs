@@ -3,7 +3,9 @@
 //! acceptance text is numbered questions, each ending in the answer that passes it ([`Acceptance`]);
 //! it passes when the model's answers match them. The model sees the questions, not those answers.
 //! The model stays loaded on that hub between grabs. A hub that fails is left out and the next one
-//! asked. Shared by ci-leg and the devhub master; neither runs a local model.
+//! asked. A miss fails an app, so another hub confirms it ([`confirmed`]): hubs that disagree on
+//! the same grab are no verdict, with both answers. Shared by ci-leg and the devhub master;
+//! neither runs a local model.
 
 use makepad_ai_hub::client::{ContentProvider, LocalService};
 use makepad_ai_hub::fleet::{self, BoxSnapshot};
@@ -45,7 +47,9 @@ impl Verdict {
 }
 
 /// The answer form the judge asks for after the questions of an [`Acceptance`].
-const FORM: &str = "Answer each numbered question on its own line, in exactly this form: the question's number, a colon, YES or NO, a dash, then what you see. Write nothing else.";
+/// What it sees is held to a few words: a reply that listed dozens of a window's labels for one
+/// question ran out of [`MAX_TOKENS`] before the next (11-16).
+const FORM: &str = "Answer each numbered question on its own line, in exactly this form: the question's number, a colon, YES or NO, a dash, then what you see in ten words or fewer. Write nothing else.";
 
 /// Words that turn a question around. A question asks plainly about the thing itself and expects NO
 /// when it must be absent: five smokes failed (11-03) on the model answering "NO - there is no
@@ -211,6 +215,8 @@ fn answer_line(line: &str) -> Option<(usize, bool, String)> {
 /// The fleet router minus the hubs that failed this judge.
 struct Avoiding {
     failed: Arc<Mutex<Vec<String>>>,
+    /// a hub this ask leaves out besides the failed ones (the one whose miss it confirms)
+    besides: Option<String>,
     /// the hub the last route picked
     picked: Arc<Mutex<Option<String>>>,
 }
@@ -223,6 +229,7 @@ impl GenRouter for Avoiding {
     fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
         let mut all = excluded.to_vec();
         all.extend(self.failed.lock().unwrap().iter().cloned());
+        all.extend(self.besides.iter().cloned());
         let pick = FleetRouter { installed_only: false }.route_snapshots(judges(fleet_snapshots(&all)), domain, request)?;
         *self.picked.lock().unwrap() = Some(pick.base_url.clone());
         Ok(pick)
@@ -299,11 +306,23 @@ impl Judge {
             return Err(format!("vision judge: no AI fleet ({why})"));
         }
         let ask = Acceptance::parse(prompt).map_err(|e| format!("acceptance text: {e}"))?;
-        let prompt = ask.prompt();
         let bytes = std::fs::read(image).map_err(|e| format!("{}: {e}", image.display()))?;
         if self.wait_for_hubs(6.0) == 0 {
             return Err("vision judge: no AI fleet hub heard in 6 s".into());
         }
+        let first = self.ask(&ask, &bytes, None)?;
+        if first.yes || first.parse_error {
+            return Ok(first);
+        }
+        let second = self.ask(&ask, &bytes, Some(first.hub.clone())).ok();
+        confirmed(first, second)
+    }
+
+    /// One answer to `ask` from the fastest hub that has the model (leaving out the failed hubs
+    /// and `besides`). With `besides`, a confirming ask: no hub to take it is said at once.
+    fn ask(&self, ask: &Acceptance, bytes: &[u8], besides: Option<String>) -> Result<Verdict, String> {
+        let prompt = ask.prompt();
+        let confirming = besides.is_some();
         let mut last = String::new();
         let asked = Instant::now();
         let mut hubs_failed = 0;
@@ -311,14 +330,14 @@ impl Judge {
             let request = GenerateRequestJson {
                 model: MODEL.into(),
                 prompt: Some(prompt.clone()),
-                input_b64: Some(makepad_network::digest::base64_encode(&bytes)),
+                input_b64: Some(makepad_network::digest::base64_encode(bytes)),
                 input_content_type: Some("image/png".into()),
                 max_tokens: Some(MAX_TOKENS),
                 ..Default::default()
             };
             let t = Instant::now();
             let picked = Arc::new(Mutex::new(None));
-            let router: Arc<dyn GenRouter> = Arc::new(Avoiding { failed: self.failed.clone(), picked: picked.clone() });
+            let router: Arc<dyn GenRouter> = Arc::new(Avoiding { failed: self.failed.clone(), besides: besides.clone(), picked: picked.clone() });
             match generate(router, process_origin("ci-judge"), Domain::Vision, request, makepad_ai_hub::job::Want::Outputs { media: 0, text: 1 }, &|| false, &mut |_, _| {}, Duration::from_millis(200)) {
                 Ok(out) => {
                     let raw = out.text.unwrap_or_default();
@@ -338,13 +357,26 @@ impl Judge {
                             self.failed.lock().unwrap().push(hub);
                             hubs_failed += 1;
                         }
-                        None if asked.elapsed() >= NO_HUB_WAIT => return Err(format!("vision judge: {last}{}", health_errors())),
+                        None if confirming || asked.elapsed() >= NO_HUB_WAIT => return Err(format!("vision judge: {last}{}", health_errors())),
                         None => std::thread::sleep(Duration::from_secs(10)),
                     }
                 }
             }
         }
         Err(format!("vision judge: {last}"))
+    }
+}
+
+/// A miss (`first`) as another hub's answer to the same grab (`second`) leaves it: it stands when
+/// that hub misses too, or when no other hub answered or its reply cannot be read (one hub's
+/// verdict, said so); hubs that disagree are no verdict, with both answers. The same 4B model
+/// answered one grab NO on a hub that fed it a 256 px sheet and YES on one that fed it 512 px
+/// (11-17): which hub answered decided whether an app failed.
+pub fn confirmed(first: Verdict, second: Option<Verdict>) -> Result<Verdict, String> {
+    match second {
+        Some(v) if v.yes => Err(format!("vision judge: the hubs disagree on the grab: {} answers\n{}\n{} answers\n{}", first.hub, first.raw.trim_end(), v.hub, v.raw.trim_end())),
+        Some(v) if !v.parse_error => Ok(Verdict { why: format!("{}\n(confirmed on {})", first.why, v.hub), ..first }),
+        _ => Ok(Verdict { why: format!("{}\n(one hub's verdict: no other hub answered)", first.why), ..first }),
     }
 }
 
@@ -361,6 +393,19 @@ fn health_errors() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_miss_stands_only_when_another_hub_misses_too_or_none_answers() {
+        let v = |hub: &str, yes: bool, parse_error: bool| Verdict { yes, raw: format!("2: {} - from {hub}", if yes { "YES" } else { "NO" }), secs: 1.0, hub: hub.into(), parse_error, why: if yes { String::new() } else { "2. answered NO".into() } };
+        let same = confirmed(v("a", false, false), Some(v("b", false, false))).unwrap();
+        assert!(!same.yes && same.hub == "a" && same.why.ends_with("(confirmed on b)"), "a second miss confirms it: {same:?}");
+        let split = confirmed(v("a", false, false), Some(v("b", true, false))).unwrap_err();
+        assert!(split.contains("disagree") && split.contains("2: NO - from a") && split.contains("2: YES - from b"), "a split is no verdict, with both answers: {split}");
+        for second in [None, Some(v("b", false, true))] {
+            let one = confirmed(v("a", false, false), second).unwrap();
+            assert!(!one.yes && one.why.ends_with("(one hub's verdict: no other hub answered)"), "no readable second answer: the miss stands, said so: {one:?}");
+        }
+    }
 
     #[test]
     fn each_answer_is_compared_with_the_one_its_question_expects() {

@@ -35,7 +35,10 @@ JIT. The numbers are one day of all lanes (medians / p90):
 - **Box roles** (`devhub node <box> role ...`):
   - pool: builds, tests, screens, live sessions;
   - hot: small jobs on a warm JIT with a fast handoff;
-  - bench: timed work. It refuses work any pool box can take;
+  - bench: timed work. Between timed series it takes the pool's overflow, any kind, after
+    every pool box that could start it; a queued timed lease drains it;
+  - the Macs: pool boxes like the others (any work with no platform need, within the Mac's
+    RAM by measure); a timed lease drains them;
   - the user's app box: a person's display. Lanes show apps there and never take it;
   - device: phones and headsets, through their own commands.
 - **Self-update**:
@@ -44,6 +47,9 @@ JIT. The numbers are one day of all lanes (medians / p90):
     on 11-08: a fix waited 10 min for it); leases, queued requests and launches survive it;
   - each hub rolls to the same build as it ends (`devhub rolls`), a median 5.8 min after a
     landing (p90 10.3); its runs and leases survive the restart, holders re-attach;
+  - a devhub call exits 75 when a restart cut it and left it unknown whether it applied. A
+    script stops on that exit (look, then ask again), and never pipes a devhub call
+    (`| tail -2`) without `set -o pipefail`, which hides it;
   - after a landing each box prebuilds its JIT and warms the smoke apps' caches
     (`devhub prewarm`); a lease preempts it.
 
@@ -152,8 +158,9 @@ buckets ask for one, and the queue decides where and when.
     `local/screencap/<lane>/` (a look, not a playtest);
   - `live wait <id> patched|verdict|settled|frame` waits for one of those;
     `live act <id> <inspect cmd>` drives the app. A call goes on through a restart of the master or its
-    box's hub when asking again does nothing twice (it reads, or only waited for room); any other call that is
-    cut says so and isn't sent twice, and the session still runs;
+    box's hub when asking again does nothing twice (it reads, or only waited for room). A cut
+    `session relaunch` is sent again only when devhub sees it did not apply; any other cut
+    call says so, isn't sent twice and exits 75, and the session still runs;
   - `live release <id>` ends it. Idle sessions end on their own (apps 10 min, tests 30 min);
     `live again <id>` restarts one as it was.
 - **Tests**: `devhub test <lane> <pkg> [--lib|--test T] --live [-- filter]` keeps one warm
@@ -207,6 +214,10 @@ buckets ask for one, and the queue decides where and when.
   - fast and hot run as landing gates, first in the queue (§3);
   - tests: the affected packages' tests after a quiet minute (at most 10 min), sharded over
     the pool;
+  - mac: the test targets only a Mac can fail, after a quiet minute (at most 10 min), on a
+    Mac's small background lease under its JIT. A package declares them in its Cargo.toml:
+    `[package.metadata.makepad.macos-tests]`, `"test:<name>" = "<why>"` (or `lib`). The Linux
+    buckets build such a target empty, or never reach what it guards;
   - ci: nightly. full: every package's tests, no proofs reused, daily before the push
     review.
 - **Reds**:
@@ -263,7 +274,9 @@ buckets ask for one, and the queue decides where and when.
   - machines and nodes: up or down, role, hub version, and the median handoff, setup, job
     and teardown times. A slow teardown points at a box's cleanup;
   - leases: running and queued now, and the timed queue per box;
-  - queued over 10 min: each long wait with its reason (§3);
+  - queued over 10 min (`devhub queue --long`): each long wait on another lane, cores, RAM or
+    a hold with its reason (§3); a lane's leases queued behind its own lease in its tree (its
+    serial plan, not starvation) as one line per lane with its next expected start;
   - queue waits, last hour: the agents' wait median, p90 and max (`devhub stats queue
     --hour`);
   - top blockers: the wait reasons ranked by minutes (`devhub prof`);

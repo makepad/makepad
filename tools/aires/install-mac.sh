@@ -107,14 +107,15 @@ PLIST="$AGENTS_DIR/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
 # stop the installed copy: its launchd job, then a copy opened from Spotlight by its recorded pid
-# (only if that pid runs the installed executable)
+# (only if that pid runs the installed executable). The copy launchd stops removes its pid file as
+# it exits, any time from here on: a file or process gone meanwhile is a copy already stopped.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 PIDFILE="${MAKEPAD_HOME:-$HOME/.makepad}/aires/app.pid"
 if [ -f "$PIDFILE" ]; then
-    PID=$(tr -dc '0-9' < "$PIDFILE")
+    PID=$(tr -dc '0-9' 2>/dev/null < "$PIDFILE" || true)
     if [ -n "$PID" ] && [ "$(ps -p "$PID" -o comm= 2>/dev/null || true)" = "$DEST/Contents/MacOS/$EXE" ]; then
         echo "stopping the running aires (pid $PID)"
-        kill "$PID"
+        kill "$PID" 2>/dev/null || true
         for _ in $(seq 1 40); do
             kill -0 "$PID" 2>/dev/null || break
             sleep 0.5

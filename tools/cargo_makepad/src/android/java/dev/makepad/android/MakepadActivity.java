@@ -1403,6 +1403,8 @@ public class MakepadActivity
     private Bitmap mLatestSurfaceSnapshot;
     private int mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     private boolean mSurfaceSnapshotCopyInFlight = false;
+    // False when the manifest sets dev.makepad.surface_snapshots to false; no snapshot bitmap is captured or kept.
+    private boolean mSurfaceSnapshotsEnabled = true;
     private boolean mSurfaceRecoveryOverlayVisible = false;
     private boolean mIsCoverWaitingForFirstFrame = false;
     private MakepadShaderCompileScreen mShaderCompileScreen;
@@ -1567,7 +1569,7 @@ public class MakepadActivity
     }
 
     private void restoreWarmResumeSurfaceSnapshotIfAvailable() {
-        if (!canRestoreWarmResumeSurfaceSnapshot()) {
+        if (!mSurfaceSnapshotsEnabled || !canRestoreWarmResumeSurfaceSnapshot()) {
             return;
         }
         mLatestSurfaceSnapshot = sWarmResumeSurfaceSnapshot;
@@ -1712,21 +1714,26 @@ public class MakepadActivity
         // fullscreen can request CxOsOp::FullscreenWindow which calls
         // applyFullScreen(true) to hide the bars.
         applyEdgeToEdge();
-        restoreWarmResumeSurfaceSnapshotIfAvailable();
-        applyAppBackgroundColor();
-        applySystemBarAppearance();
-        // An IME animation from a previous activity never ends in this one.
-        MakepadImeInsets.imeAnimationInProgress = false;
 
         // The backend the app picked in its Cargo.toml, which the HAL reads when the app starts.
         // Only an app that picked one calls the native, so apps on a makepad without it still start.
         String halBackend = "";
         try {
             Bundle meta = getPackageManager().getApplicationInfo(getPackageName(), PackageManager.GET_META_DATA).metaData;
-            if (meta != null) halBackend = meta.getString("dev.makepad.hal_backend", "");
+            if (meta != null) {
+                halBackend = meta.getString("dev.makepad.hal_backend", "");
+                // Read the snapshot opt-out before restoring the warm-resume cache.
+                mSurfaceSnapshotsEnabled = meta.getBoolean("dev.makepad.surface_snapshots", true);
+            }
         } catch (PackageManager.NameNotFoundException e) {
             Log.e(LOG_TAG, "No application info for its meta-data: " + e);
         }
+        restoreWarmResumeSurfaceSnapshotIfAvailable();
+        applyAppBackgroundColor();
+        applySystemBarAppearance();
+        // An IME animation from a previous activity never ends in this one.
+        MakepadImeInsets.imeAnimationInProgress = false;
+
         if (!halBackend.isEmpty()) MakepadNative.onAppHalBackend(halBackend);
 
         // Set up before attaching, since a running app calls into this activity right away.
@@ -2409,7 +2416,7 @@ public class MakepadActivity
     }
 
     private void refreshSurfaceSnapshotCache() {
-        if (!canCaptureSurfaceSnapshot() || mSurfaceSnapshotCopyInFlight) {
+        if (!mSurfaceSnapshotsEnabled || !canCaptureSurfaceSnapshot() || mSurfaceSnapshotCopyInFlight) {
             return;
         }
         mSurfaceSnapshotCopyInFlight = true;

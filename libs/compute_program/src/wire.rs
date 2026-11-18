@@ -10,6 +10,8 @@
 //!               CANCEL  session id   -
 //! node -> app   OPENED  request id   status: u16, session id: u64, then the node's device or the error
 //!               UPDATE  session id   outputs, values, progress, end
+//!               QUEUED  request id   why the open waits (the node runs as many sessions as it
+//!                                    may: it opens as one ends; its OPENED follows then)
 //! ```
 //!
 //! Numbers are little-endian; text is `u32 bytes` + UTF-8; a value is a tag byte (nil, false,
@@ -34,6 +36,7 @@ pub const ACK: u8 = 18;
 pub const CANCEL: u8 = 19;
 pub const OPENED: u8 = 16;
 pub const UPDATE: u8 = 17;
+pub const QUEUED: u8 = 18;
 
 /// `OPENED`'s status when an input the open named by its hash is no longer kept.
 pub const NOT_KEPT: u16 = 409;
@@ -236,6 +239,19 @@ pub fn decode_opened(bytes: &[u8]) -> Result<Result<(u64, Value), (u16, String)>
             _ => String::new(),
         }))
     })
+}
+
+pub fn encode_queued(why: &str) -> Vec<u8> {
+    let mut w = Vec::new();
+    put_str(&mut w, why);
+    w
+}
+
+pub fn decode_queued(bytes: &[u8]) -> Result<String, String> {
+    let mut r = Reader { bytes, at: 0 };
+    let why = r.str()?.to_string();
+    end(&r)?;
+    Ok(why)
 }
 
 pub fn encode_msg(key: &str, value: &Value, interrupt: bool) -> Vec<u8> {

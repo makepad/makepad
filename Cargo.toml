@@ -238,6 +238,7 @@ workspace.members = [
     "libs/midi_file",
     "libs/soundfont",
     "libs/piano_model",
+    "libs/piano_waveguide",
     "libs/drumkit",
     "libs/drumkit_phys",
     "libs/audio_synth",
@@ -262,6 +263,8 @@ workspace.members = [
     "libs/editor_panel",
     "libs/flow",
     "libs/lock_free",
+    # === host a macOS Audio Unit instrument (offline renders and live) ===
+    "libs/audio_unit_host",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
@@ -545,6 +548,7 @@ makepad-widgets-core = { path = "widgets/core", version = "2.0.0" }
 makepad-widgets-sheets = { path = "widgets/sheets", version = "0.1.0" }
 makepad-mbtile-reader = { path = "libs/mbtile_reader", version = "1.0.0" }
 makepad-piano-model = { path = "libs/piano_model", version = "0.1.0" }
+makepad-piano-waveguide = { path = "libs/piano_waveguide", version = "0.1.0" }
 makepad-audio-decode = { path = "libs/audio_decode", version = "0.1.0" }
 makepad-audio-synth = { path = "libs/audio_synth", version = "0.1.0" }
 makepad-script = { path = "platform/script", version = "1.0.0" }

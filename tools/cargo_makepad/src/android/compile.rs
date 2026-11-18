@@ -971,6 +971,8 @@ struct ResolvedPackagingInputs {
     min_sdk_version_override: Option<usize>,
     /// `<meta-data android:name="dev.makepad.hal_backend">`: the backend the app picked.
     hal_backend: Option<String>,
+    /// `<meta-data android:name="dev.makepad.surface_snapshots">`: whether the app keeps surface snapshots.
+    surface_snapshots: Option<bool>,
 }
 
 /// Resolve packaging inputs with priority: CLI flag > Cargo.toml metadata > built-in default.
@@ -982,6 +984,7 @@ struct ResolvedPackagingInputs {
 ///   `[package.metadata.makepad.android].version_code`    -> default `version_code`
 ///   `[package.metadata.makepad.android].version_name`    -> overrides `[package].version`
 ///   `[package.metadata.makepad.android].hal_backend`     -> the manifest's `dev.makepad.hal_backend`
+///   `[package.metadata.makepad.android].surface_snapshots` -> the manifest's `dev.makepad.surface_snapshots`
 fn resolve_packaging_inputs(
     build_crate: &str,
     binary_name: &str,
@@ -1036,6 +1039,7 @@ fn resolve_packaging_inputs(
         version_name,
         min_sdk_version_override,
         hal_backend: metadata.hal_backend,
+        surface_snapshots: metadata.surface_snapshots,
     })
 }
 
@@ -1093,6 +1097,28 @@ pub struct PrepareBuildOpts<'a> {
     pub extra_activities: &'a str,
     /// The app's `[package.metadata.makepad.android] hal_backend`.
     pub hal_backend: Option<&'a str>,
+    /// The app's `[package.metadata.makepad.android] surface_snapshots`.
+    pub surface_snapshots: Option<bool>,
+}
+
+/// The app's `[package.metadata.makepad.android]` keys that the Activity or the HAL read as
+/// application meta-data, put before the manifest's first `</application>`. Without any, the
+/// manifest is unchanged.
+fn with_app_meta_data(manifest_xml: String, hal_backend: Option<&str>, surface_snapshots: Option<bool>) -> Result<String, String> {
+    let mut meta = Vec::new();
+    if let Some(backend) = hal_backend {
+        meta.push(format!("<meta-data android:name=\"dev.makepad.hal_backend\" android:value=\"{backend}\" />"));
+    }
+    if surface_snapshots == Some(false) {
+        meta.push("<meta-data android:name=\"dev.makepad.surface_snapshots\" android:value=\"false\" />".to_string());
+    }
+    if meta.is_empty() {
+        return Ok(manifest_xml);
+    }
+    if !manifest_xml.contains("</application>") {
+        return Err("[package.metadata.makepad.android]: the manifest has no </application> to put meta-data in".into());
+    }
+    Ok(manifest_xml.replacen("</application>", &format!("{}\n    </application>", meta.join("\n    ")), 1))
 }
 
 /// Replace `{key}` placeholders in a custom AndroidManifest template with the
@@ -1198,15 +1224,8 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
     } else {
         opts.variant.manifest_xml(&manifest_args)
     };
-    // a custom template gets it too, so the Cargo.toml line is all an app needs
-    let manifest_xml = match opts.hal_backend {
-        Some(backend) => {
-            let meta = format!("<meta-data android:name=\"dev.makepad.hal_backend\" android:value=\"{backend}\" />\n    </application>");
-            if !manifest_xml.contains("</application>") { return Err("[package.metadata.makepad.android] hal_backend: the manifest has no </application> to put it in".into()); }
-            manifest_xml.replacen("</application>", &meta, 1)
-        }
-        None => manifest_xml,
-    };
+    // a custom template gets them too, so the Cargo.toml lines are all an app needs
+    let manifest_xml = with_app_meta_data(manifest_xml, opts.hal_backend, opts.surface_snapshots)?;
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
 
@@ -2799,6 +2818,7 @@ pub fn build_aab(
         launcher_class: "MakepadApp",
         extra_activities: "",
         hal_backend: resolved.hal_backend.as_deref(),
+        surface_snapshots: resolved.surface_snapshots,
     };
     let build_paths = prepare_build(&prep_opts)?;
     let aab_paths = prepare_aab_paths(build_crate, &resolved.app_label)?;
@@ -2966,6 +2986,7 @@ pub fn build(
         launcher_class: "MakepadApp",
         extra_activities: "",
         hal_backend: resolved.hal_backend.as_deref(),
+        surface_snapshots: resolved.surface_snapshots,
     };
     let build_paths = prepare_build(&prep_opts)?;
 
@@ -3266,6 +3287,7 @@ pub fn build_host(
         launcher_class: "RunActivity",
         extra_activities,
         hal_backend: resolved.hal_backend.as_deref(),
+        surface_snapshots: resolved.surface_snapshots,
     };
     let build_paths = prepare_build(&prep_opts)?;
     println!(
@@ -3695,7 +3717,7 @@ pub fn adb_tcp(
 mod tests {
     use super::{
         compose_android_rustflags, parse_adb_devices, parse_ip_addr_show, parse_ip_route,
-        stage_makepad_assets_subdir,
+        stage_makepad_assets_subdir, with_app_meta_data,
     };
     use crate::font_assets::{FontAssetManifest, FontPackage};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
@@ -3711,6 +3733,22 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn app_meta_data_goes_before_the_first_application_end() {
+        let manifest = "<manifest><application><activity /></application></manifest>".to_string();
+        assert_eq!(with_app_meta_data(manifest.clone(), None, None).unwrap(), manifest, "no key: unchanged");
+        assert_eq!(with_app_meta_data(manifest.clone(), None, Some(true)).unwrap(), manifest, "snapshots kept: unchanged");
+        let both = with_app_meta_data(manifest.clone(), Some("gl"), Some(false)).unwrap();
+        let backend = both.find("android:name=\"dev.makepad.hal_backend\" android:value=\"gl\"").expect("hal_backend meta-data");
+        let snapshots = both.find("android:name=\"dev.makepad.surface_snapshots\" android:value=\"false\"").expect("surface_snapshots meta-data");
+        let end = both.find("</application>").unwrap();
+        assert!(backend < end && snapshots < end, "meta-data inside <application>: {both}");
+        assert_eq!(both.matches("</application>").count(), 1, "one insertion: {both}");
+        let only = with_app_meta_data(manifest.clone(), None, Some(false)).unwrap();
+        assert!(!only.contains("hal_backend") && only.contains("dev.makepad.surface_snapshots"), "only the key set: {only}");
+        assert!(with_app_meta_data("<manifest />".into(), None, Some(false)).is_err(), "no </application> to put it in");
     }
 
     #[test]

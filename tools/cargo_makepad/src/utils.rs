@@ -343,6 +343,9 @@ pub struct AndroidPackageMetadata {
     /// `[package.metadata.makepad.android].hal_backend`, `"gl"` or `"vulkan"`: the backend
     /// the app draws with on Android, written into the manifest for the HAL.
     pub hal_backend: Option<String>,
+    /// `[package.metadata.makepad.android].surface_snapshots`: `false` stops the Activity
+    /// from keeping snapshot bitmaps of the app's surface; unset or `true` keeps them (the default).
+    pub surface_snapshots: Option<bool>,
 }
 
 pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadata {
@@ -394,6 +397,11 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
     match toml.get_path(&["package", "metadata", "makepad", "android", "hal_backend"]) {
         Some(Toml::Str(v, _)) if v == "gl" || v == "vulkan" => out.hal_backend = Some(v.clone()),
         Some(v) => eprintln!("warning: ignoring [package.metadata.makepad.android].hal_backend = {v:?}; expected \"gl\" or \"vulkan\""),
+        None => {}
+    }
+    match toml.get_path(&["package", "metadata", "makepad", "android", "surface_snapshots"]) {
+        Some(Toml::Bool(v, _)) => out.surface_snapshots = Some(*v),
+        Some(v) => eprintln!("warning: ignoring [package.metadata.makepad.android].surface_snapshots = {v:?}; expected true or false"),
         None => {}
     }
     out
