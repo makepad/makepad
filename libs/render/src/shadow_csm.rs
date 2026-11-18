@@ -108,6 +108,20 @@ fn quantize_radius(r: f32) -> f32 {
     (steps / RADIUS_STEPS_PER_OCTAVE).exp2()
 }
 
+/// The direction the cascades' light basis takes for a key toward `centre`: `centre` snapped
+/// to the basis's angular grid (`SUN_STEP_RAD`), so a moving sun re-rasterizes once a step,
+/// not every frame. With `disc` (a still recording's point of the key's disc and the cosine of
+/// its angular radius, [`crate::sun::sun_disc_direction`]) it is that point of a disc centred
+/// on the snapped direction, exactly: the grid holds the centre still, and the host's points
+/// stay where it put them around the centre its other recordings use.
+pub fn cascade_light_dir(centre: Vec3f, disc: Option<([f32; 2], f32)>) -> Vec3f {
+    let snapped = quantize_sun(centre);
+    match disc {
+        Some((point, cos_radius)) => crate::sun::sun_disc_direction(snapped, cos_radius, point),
+        None => snapped,
+    }
+}
+
 /// Snap the sun direction to the angular grid the cascades use.
 fn quantize_sun(d: Vec3f) -> Vec3f {
     let d = d.normalize();
@@ -479,6 +493,8 @@ pub fn cascade_shadow_in_view(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
 /// matrices belong to the runtime): view-independent rings around `eye`,
 /// radii proportional to the same split ladder, so a headset still gets
 /// nested cascades that follow the player.
+///
+/// `sun_dir` points toward the sun; this snaps it ([`cascade_light_dir`]).
 pub fn fit_cascades(
     view: Option<&CsmView>,
     eye: Vec3f,
@@ -488,14 +504,15 @@ pub fn fit_cascades(
     range: f32,
     res: f32,
 ) -> CsmFrame {
-    fit_cascades_reach(view, eye, sun_dir, scene_min, scene_max, range, 0.0, res)
+    fit_cascades_reach(view, eye, quantize_sun(sun_dir), scene_min, scene_max, range, 0.0, res)
 }
 
 /// [`fit_cascades`] with the FAR cascade stretched to `far_reach` metres
 /// (0 or anything shorter than `range * FAR_REACH` = the default). The three
 /// detail cascades keep their ladder; only the last tile reaches further —
 /// what a city skyline needs, where towers kilometres away should still
-/// stand in their own shadows.
+/// stand in their own shadows. `sun_dir` is the light basis's direction as
+/// given: a key's comes from [`cascade_light_dir`].
 #[allow(clippy::too_many_arguments)]
 pub fn fit_cascades_reach(
     view: Option<&CsmView>,
@@ -508,7 +525,6 @@ pub fn fit_cascades_reach(
     res: f32,
 ) -> CsmFrame {
     let mut frame = CsmFrame::default();
-    let sun_dir = quantize_sun(sun_dir);
     let scale = range_scale(range);
     let base = range * FAR_REACH;
     let reach = if far_reach.is_finite() { far_reach.max(base) } else { base };
@@ -577,6 +593,7 @@ pub fn fit_cascades_reach(
 /// ring it had, so its texels shrink with it. Receivers outside it read the next cascade, as they
 /// would past cascade 0's edge anyway. Its constant depth bias shrinks with its texel (it is 2 mm
 /// at outdoor ranges): millimetre parts lying on the surface keep their contact shadows.
+/// `sun_dir` is the light basis's direction as given, the one the other cascades took.
 #[allow(clippy::too_many_arguments)]
 pub fn fit_near(frame: &mut CsmFrame, view: Option<&CsmView>, near_min: Vec3f, near_max: Vec3f, sun_dir: Vec3f, scene_min: Vec3f, scene_max: Vec3f, range: f32, res: f32) {
     let center = (near_min + near_max) * 0.5;
@@ -587,7 +604,7 @@ pub fn fit_near(frame: &mut CsmFrame, view: Option<&CsmView>, near_min: Vec3f, n
         return;
     }
     let scale = range_scale(range);
-    let mut c = fit_cascade(center, radius, quantize_sun(sun_dir), scene_min, scene_max, scale, res);
+    let mut c = fit_cascade(center, radius, sun_dir, scene_min, scene_max, scale, res);
     let bias_world = c.texel_world * 0.75 + (c.texel_world * 4.0).min(0.002 * scale);
     c.bias01 = bias_world * c.z_per_world;
     if let Some(view) = view {

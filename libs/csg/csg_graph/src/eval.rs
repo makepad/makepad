@@ -11,6 +11,16 @@ use std::collections::{HashMap, HashSet};
 const SANS: &[u8] = include_bytes!("../../../../widgets/resources/IBMPlexSans-SemiBold.ttf");
 const MONO: &[u8] = include_bytes!("../../../../widgets/resources/LiberationMono-Regular.ttf");
 
+/// The width of a [`Op::Text`]'s widest line, `size` its capitals' height: a layout places text
+/// by it without building the text.
+pub fn text_width(text: &str, size: f64, spacing: f64, font: Font) -> Result<f64, String> {
+    let font = match font {
+        Font::Sans => SANS,
+        Font::Mono => MONO,
+    };
+    cad::text_width(font, text, &cad::TextStyle { cap_height: size, spacing, ..Default::default() })
+}
+
 /// A node that could not be built.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Failure {

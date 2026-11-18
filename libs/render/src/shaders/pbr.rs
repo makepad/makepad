@@ -39,7 +39,7 @@ script_mod! {
         // Opt-in copies of the stock finish and coat below, with captures at
         // their existing environment additions. Kept out of the base shader
         // so off means exactly its previous program and pipeline.
-        clear_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float, spec_occ: float) -> vec3 {
+        clear_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float, spec_occ: float, sun_vis: float) -> vec3 {
             let ndv = max(dot(n, v), 0.0001)
             let r = n * (2.0 * ndv) - v
             let packed_all = floor(self.tex_mag.y + 0.5)
@@ -48,7 +48,7 @@ script_mod! {
             let coat = floor(packed / 256.0) / 255.0
             let flake = (packed - floor(packed / 256.0) * 256.0) / 255.0
             let fc = (0.04 + 0.96 * self.pow5(1.0 - ndv)) * coat
-            var env = self.sky_env(normalize(r), 0.03)
+            var env = self.sky_env_lit(normalize(r), 0.03, sun_vis)
             // The treeline is car paint's; a toy (rim set) reflects a plain
             // studio sky, and skips the two noise taps.
             if rim < 0.5 { env = self.coat_treeline(env, r) }
@@ -174,7 +174,7 @@ script_mod! {
             // the reflection slides as the camera orbits; a rough one
             // collapses back to the flat ambient.
             let refl = n * (2.0 * ndv) - v
-            let env = self.sky_env(normalize(refl), rough)
+            let env = self.sky_env_lit(normalize(refl), rough, sun_lit)
             let smooth3 = 1.0 - rough
             let fr = max(vec3(smooth3, smooth3, smooth3), f0)
             let f_env = f0 + (fr - f0) * self.pow5(1.0 - ndv)
@@ -204,7 +204,7 @@ script_mod! {
             self.ssr_surface(n, rough, self.fur_shade(added_env, n, te), f_env)
             var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, spec_sun, added_env, spec_local, n, l, v, sun_rad, f, lobe), n, te) + emission
             if self.tex_mag.y > 0.5 {
-                lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ)
+                lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ, sun_lit)
             }
             lit = max(lit, least)
             let fin = self.finish_lit(lit, spec_sun + added_env + spec_local, surf_w, f_env)
@@ -352,6 +352,13 @@ script_mod! {
             let avg = mix(self.sun_ground, self.sun_sky, clamp(r.y * 0.5 + 0.5, 0.0, 1.0))
             return mix(env, avg, rough)
         }
+        // The reflection beside the key's lobe, with the visibility that lobe
+        // uses: the analytic sky holds no key, so it is the plain lookup. The
+        // IBL lane's override (render-material's mat_ibl_lane_sky_env_lit)
+        // takes the key's share out in its cast shadow.
+        sky_env_lit: fn(r: vec3, rough: float, vis: float) -> vec3 {
+            return self.sky_env(r, rough)
+        }
 
         // The treeline car paint's lacquer reflects: `env`, the coat's
         // reflection along `r`, with a silhouette painted along the horizon
@@ -374,7 +381,7 @@ script_mod! {
         // the reflection reads as a place and slides over the
         // body as the car turns. Flakes are hashed facets ~1 mm across that
         // catch the sun a little off the mirror direction.
-        clear_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float, spec_occ: float) -> vec3 {
+        clear_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float, spec_occ: float, sun_vis: float) -> vec3 {
             let ndv = max(dot(n, v), 0.0001)
             let r = n * (2.0 * ndv) - v
             let packed_all = floor(self.tex_mag.y + 0.5)
@@ -383,7 +390,7 @@ script_mod! {
             let coat = floor(packed / 256.0) / 255.0
             let flake = (packed - floor(packed / 256.0) * 256.0) / 255.0
             let fc = (0.04 + 0.96 * self.pow5(1.0 - ndv)) * coat
-            var env = self.sky_env(normalize(r), 0.03)
+            var env = self.sky_env_lit(normalize(r), 0.03, sun_vis)
             // The treeline is car paint's; a toy (rim set) reflects a plain
             // studio sky, and skips the two noise taps.
             if rim < 0.5 { env = self.coat_treeline(env, r) }
@@ -696,7 +703,7 @@ script_mod! {
             // the reflection slides as the camera orbits; a rough one
             // collapses back to the flat ambient.
             let refl = n * (2.0 * ndv) - v
-            let env = self.sky_env(normalize(refl), rough)
+            let env = self.sky_env_lit(normalize(refl), rough, sun_lit)
             let smooth3 = 1.0 - rough
             let fr = max(vec3(smooth3, smooth3, smooth3), f0)
             let f_env = f0 + (fr - f0) * self.pow5(1.0 - ndv)
@@ -725,7 +732,7 @@ script_mod! {
             let spec_local = local_pbr * ao_direct
             var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, spec_sun, added_env, spec_local, n, l, v, sun_rad, f, lobe), n, te) + emission
             if self.tex_mag.y > 0.5 {
-                lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ)
+                lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ, sun_lit)
             }
             lit = max(lit, least)
             let fin = self.finish_lit(lit, spec_sun + added_env + spec_local, surf_w, f_env)

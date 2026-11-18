@@ -16,8 +16,9 @@
 //! dir = (sin θ sin φ, cos θ, -sin θ cos φ)   φ = (u - 0.5)·2π, θ = v·π
 //! ```
 //!
-//! Pixels are linear RGB radiance (alpha 1). Everything here is a pure
-//! function of its inputs: the same map prefilters to the same bits.
+//! Pixels are linear RGB radiance (alpha 1 unless carrying keyless luminance).
+//! Everything here is a pure function of its inputs: the same map prefilters
+//! to the same bits.
 
 use makepad_draw::makepad_platform::resource_resolver::DecodeBudget;
 use std::f32::consts::{PI, TAU};
@@ -74,6 +75,24 @@ pub struct EnvMap {
     pub data: Vec<[f32; 4]>,
 }
 
+/// The key's colour at unit luminance and how well that colour fits its light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyTint {
+    /// The colour of full minus keyless, summed over the sphere, at unit luminance.
+    pub k: [f32; 3],
+    /// The mean chroma error of taking the key out in colour `k`, as a share of the keyless light under it.
+    pub eps: f64,
+    /// 1 while eps is at most 1%, 0 from 4% (smoothstep between): the shader's weight on `k`.
+    pub fit: f32,
+}
+
+impl KeyTint {
+    /// `(k, fit)`, the shader's `key_tint`.
+    pub fn uniform(&self) -> [f32; 4] {
+        [self.k[0], self.k[1], self.k[2], self.fit]
+    }
+}
+
 /// Direction (need not be unit) to equirect uv (see the module docs).
 pub fn dir_to_equirect_uv(dir: [f32; 3]) -> [f32; 2] {
     let d = normalize_or_up(dir);
@@ -108,9 +127,12 @@ pub fn equirect_uv_to_dir(uv: [f32; 2]) -> [f32; 3] {
     [st * phi.sin(), ct, -st * phi.cos()]
 }
 
+/// Rec. 709 luminance weights used by the keyed atlas alpha and the shader's keyless share.
+pub const LUMINANCE: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
 #[inline]
 fn luminance(c: [f32; 4]) -> f32 {
-    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    LUMINANCE[0] * c[0] + LUMINANCE[1] * c[1] + LUMINANCE[2] * c[2]
 }
 
 impl EnvMap {
@@ -197,6 +219,83 @@ impl EnvMap {
     /// shrinking, bilinear when growing).
     pub fn resized(&self, width: usize) -> EnvMap {
         self.resized_spread(width, &|n, f| (0..n).for_each(f))
+    }
+
+    /// Writes `src`'s luminance into alpha (rgb untouched): the keyed atlas's Lk.
+    /// Matching texels are read directly; other sizes are sampled at texel centres.
+    pub fn set_alpha_luminance_of_spread(&mut self, src: &EnvMap, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) {
+        let (width, height) = (self.width, self.height);
+        let same_size = width == src.width && height == src.height;
+        spread_rows(&mut self.data, width, run, &|y, row| {
+            for (x, c) in row.iter_mut().enumerate() {
+                c[3] = luminance(if same_size {
+                    src.data[y * width + x]
+                } else {
+                    src.sample_uv([(x as f32 + 0.5) / width as f32, (y as f32 + 0.5) / height as f32])
+                });
+            }
+        });
+    }
+
+    /// Fits the full-minus-keyless light: removing it gives exact keyless colour
+    /// for a key that is one colour (`D = s(texel) * k` everywhere), luminance
+    /// only otherwise, by the measured fit. Per-row f64 sums run in parallel
+    /// and reduce serially in row order, so scheduling cannot change the bits.
+    pub fn key_tint_spread(&self, keyless: &EnvMap, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> KeyTint {
+        let (width, height) = (self.width, self.height);
+        let same_size = width == keyless.width && height == keyless.height;
+        let base = |x: usize, y: usize| {
+            if same_size {
+                keyless.data[y * width + x]
+            } else {
+                keyless.sample_uv([(x as f32 + 0.5) / width as f32, (y as f32 + 0.5) / height as f32])
+            }
+        };
+        let lum = |c: [f64; 3]| LUMINANCE[0] as f64 * c[0] + LUMINANCE[1] as f64 * c[1] + LUMINANCE[2] as f64 * c[2];
+        let mut rows = vec![[0.0f64; 3]; height];
+        spread_rows(&mut rows, 1, run, &|y, row| {
+            let w = self.texel_solid_angle(y) as f64;
+            for x in 0..width {
+                let full = self.data[y * width + x];
+                let base = base(x, y);
+                for c in 0..3 {
+                    row[0][c] += w * (full[c] as f64 - base[c] as f64);
+                }
+            }
+        });
+        let mut sum = [0.0f64; 3];
+        for row in rows {
+            for c in 0..3 {
+                sum[c] += row[c];
+            }
+        }
+        let l = lum(sum);
+        if l <= 0.0 || !l.is_finite() {
+            return KeyTint { k: [0.0; 3], eps: f64::INFINITY, fit: 0.0 };
+        }
+        let k = sum.map(|c| c / l);
+        let mut rows = vec![[0.0f64; 2]; height];
+        spread_rows(&mut rows, 1, run, &|y, row| {
+            let w = self.texel_solid_angle(y) as f64;
+            for x in 0..width {
+                let full = self.data[y * width + x];
+                let base = base(x, y);
+                let d = std::array::from_fn(|c| full[c] as f64 - base[c] as f64);
+                let l = lum(d);
+                row[0][0] += w * ((d[0] - l * k[0]).abs() + (d[1] - l * k[1]).abs() + (d[2] - l * k[2]).abs());
+                if d.iter().any(|&c| c != 0.0) {
+                    row[0][1] += w * lum([base[0] as f64, base[1] as f64, base[2] as f64]);
+                }
+            }
+        });
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for row in rows {
+            num += row[0];
+            den += row[1];
+        }
+        let eps = if num == 0.0 { 0.0 } else if den > 0.0 { num / den } else { f64::INFINITY };
+        let t = ((eps - 0.01) / (0.04 - 0.01)).clamp(0.0, 1.0);
+        KeyTint { k: k.map(|c| c as f32), eps, fit: (1.0 - t * t * (3.0 - 2.0 * t)) as f32 }
     }
 
     /// [`Self::resized`] with independent output rows assigned by `run`.
@@ -663,12 +762,17 @@ pub fn float_to_rgbe(c: [f32; 3]) -> [u8; 4] {
 /// `lf = r * (levels - 1)`, sample levels `floor(lf)` and `ceil(lf)` at
 /// `v_atlas = (k + clamp(v, 0.5/h, 1 - 0.5/h)) / levels` (the clamp keeps the
 /// bilinear filter from bleeding across levels) and blend by `fract(lf)`.
+/// Levels `0..key_levels` read the full source. When `key_levels > 0`, alpha
+/// is keyless luminance: the first source's alpha prefiltered alongside RGB
+/// in keyed levels, and the texel's own RGB luminance in the remaining levels.
+/// With `key_levels == 0`, alpha carries no information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnvAtlas {
     pub width: usize,
     /// `levels * level_height`.
     pub height: usize,
     pub levels: usize,
+    pub key_levels: usize,
     pub level_height: usize,
     pub data: Vec<[f32; 4]>,
 }
@@ -792,8 +896,10 @@ pub fn prefilter_spread(
 
 /// [`prefilter_spread`] with two sources: levels below `split` read `first`,
 /// the rest read `second`. Each level is built once, through the same row
-/// path as the single-source prefilter, and is bit-identical to that source's
-/// level. The extra cost is one source pyramid (at most 512 wide).
+/// path as the single-source prefilter, with bit-identical RGB to that source's
+/// level. `first`'s alpha must hold keyless luminance, written with
+/// [`EnvMap::set_alpha_luminance_of_spread`]; keyed levels then carry Lk in alpha.
+/// The extra cost is one source pyramid (at most 512 wide) and an alpha accumulator.
 pub fn prefilter_split_spread(
     first: &EnvMap,
     second: &EnvMap,
@@ -857,7 +963,7 @@ fn prefilter_pyramids_spread(
                     *out = pyr.sample(*uv, base_lod);
                     continue;
                 }
-                let mut acc = [0.0f32; 3];
+                let mut acc = [0.0f32; 4];
                 let mut wsum = 0.0f32;
                 for (l, w, lod) in &samples {
                     let d = [
@@ -869,17 +975,23 @@ fn prefilter_pyramids_spread(
                     acc[0] += c[0] * w;
                     acc[1] += c[1] * w;
                     acc[2] += c[2] * w;
+                    if k < split {
+                        acc[3] += c[3] * w;
+                    }
                     wsum += w;
                 }
                 let inv = 1.0 / wsum.max(1e-8);
                 *out = [acc[0] * inv, acc[1] * inv, acc[2] * inv, 1.0];
+                if split > 0 {
+                    out[3] = if k < split { acc[3] * inv } else { luminance(*out) };
+                }
             }
         });
         if cancelled.load(Ordering::Relaxed) {
             return None;
         }
     }
-    Some(EnvAtlas { width, height: level_height * levels, levels, level_height, data })
+    Some(EnvAtlas { width, height: level_height * levels, levels, key_levels: split.min(levels), level_height, data })
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1127,7 @@ pub fn pack_ibl(atlas: &EnvAtlas, sh: &[[f32; 3]; 9], intensity: f32, rotation_d
         for x in 0..atlas.width {
             let c = atlas.data[y * atlas.width + x];
             let o = ((y + 1) * width + x) * 4;
-            data[o..o + 4].copy_from_slice(&[c[0], c[1], c[2], 1.0]);
+            data[o..o + 4].copy_from_slice(&[c[0], c[1], c[2], if atlas.key_levels > 0 { c[3] } else { 1.0 }]);
         }
     }
     IblTexture { width, height, data }
@@ -1276,9 +1388,22 @@ mod tests {
         let bits = |level: EnvMap| level.data.into_iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
         for split in [0, 2, levels] {
             let got = prefilter_split_spread(&first, &second, split, 16, levels, &|| false, &reverse).unwrap();
+            assert_eq!(got.key_levels, split, "split {split}: the atlas reports its keyed levels");
             for k in 0..levels {
                 let source = if k < split { &a } else { &b };
-                assert_eq!(bits(got.level(k)), bits(source.level(k)), "split {split}, level {k}: row order and source switching preserve every bit");
+                let level = got.level(k);
+                let mut expected = source.level(k);
+                if split > 0 && k > 0 {
+                    for (c, out) in expected.data.iter_mut().zip(&level.data) {
+                        if k < split {
+                            assert!((out[3] - c[3]).abs() <= 1e-6, "split {split}, level {k}: prefiltering constant source alpha preserves its value");
+                            c[3] = out[3];
+                        } else {
+                            c[3] = luminance(*c);
+                        }
+                    }
+                }
+                assert_eq!(bits(level), bits(expected), "split {split}, level {k}: row order and source switching preserve RGB bits and the expected alpha");
             }
         }
         // Stop partway through a keyed level and partway through a keyless level.

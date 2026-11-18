@@ -81,10 +81,26 @@ impl Renderer {
     /// The sun the frame's rig starts from: `resolve_sun`, aimed by a
     /// world's own Sun, which steers every sun-driven system, else by the
     /// environment's key (renderer/env_sun.rs), else the rig's own.
-    fn frame_start_sun(&self, world: &World) -> SunLight {
+    pub(super) fn frame_start_sun(&self, world: &World) -> SunLight {
         let mut sun = crate::sun::resolve_sun(&world.sun);
-        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
+        sun.dir = self.sun_disc_centre(world, sun.dir).0;
         sun
+    }
+
+    /// The direction toward the key light's centre that the cascades and
+    /// the bake take, and the cosine of the key's angular radius: a world's
+    /// own Sun, else the environment's key (its radius is that bound key's,
+    /// the one `env_sun_dir` turned), else `analytic_dir`, the caller's
+    /// `resolve_sun` direction. A Sun and `resolve_sun` carry no radius of
+    /// their own: they get the real sun's.
+    pub(super) fn sun_disc_centre(&self, world: &World, analytic_dir: Vec3f) -> (Vec3f, f32) {
+        if let Some(dir) = crate::world_lights::world_sun_dir(world) {
+            (dir, crate::sun::SUN_COS_RADIUS)
+        } else if let Some(dir) = self.env_sun_dir(world) {
+            (dir, self.ibl_sun().map_or(crate::sun::SUN_COS_RADIUS, |key| key.cos_radius))
+        } else {
+            (analytic_dir, crate::sun::SUN_COS_RADIUS)
+        }
     }
 
     /// The direction toward the light the frame draws `world` with (M7):
@@ -99,6 +115,24 @@ impl Renderer {
     /// `resolve_sun`'s, aimed by a world's own Sun.
     pub fn frame_sun_dir(&self, world: &World) -> Vec3f {
         self.frame_sun(world).dir
+    }
+
+    /// The direction the next recording's shadow cascades are drawn
+    /// toward. With a disc sample ([`Self::set_sun_disc_sample`]) it is the
+    /// one they are fitted toward, that point of the key's disc around their
+    /// snapped centre ([`crate::shadow_csm::cascade_light_dir`]); with none
+    /// it is the key's centre itself, bit for bit, which the cascades snap
+    /// to their 0.1 degree grid as they always have. Every other use of the
+    /// sun keeps the centre. A host pass that tests its own receivers or
+    /// casters against the cascades' light (a traced field's shadow, a
+    /// receiver's slope bias) takes this one; one that shades takes
+    /// [`Self::frame_sun_dir`].
+    pub fn frame_shadow_dir(&self, world: &World) -> Vec3f {
+        let (centre, cos_radius) = self.sun_disc_centre(world, crate::sun::resolve_sun(&world.sun).dir);
+        match self.sun_disc_sample {
+            Some(point) => crate::shadow_csm::cascade_light_dir(centre, Some((point, cos_radius))),
+            None => centre,
+        }
     }
 
     /// The whole final rig of [`Self::frame_sun_dir`] (direction, colour,
@@ -402,6 +436,7 @@ impl Renderer {
         self.prepare_ssr_camera(cx.current_pass_id(), camera_pos);
         self.clustered.lin_ctl = self.lin_ctl();
         self.clustered.key_spec = self.key_spec(world, sun.dir);
+        self.clustered.key_tint = self.ibl_key_tint();
         let local_shadows = self.clustered_enabled && self.frame_lights.iter().any(|l| l.shadows);
         // Character palettes pack BEFORE the cascades encode: the skinned
         // depth passes bind the same texture the visible draw does.

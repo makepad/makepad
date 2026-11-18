@@ -193,7 +193,8 @@ impl SdfGrid {
     /// across the axis, so where it is at most 0 takes in a corner. So a piece shrinks to its edges'
     /// ends in one step, which is exact along an axis of the grid, and any other `dn` splits only
     /// where it still reaches past the best point found. The walk spends at most `budget` pieces; past
-    /// them `top` is what it had proven.
+    /// them, or at the worker's cancel ([`makepad_csg_math::thread_pool::cancelled`]), `top` is what it
+    /// had proven.
     ///
     /// `clear` says a ball holds nothing of what surrounds the read's solid (another operand's cut):
     /// a piece in such a ball is empty for the caller. `witness` is the highest point `accept` took
@@ -258,8 +259,9 @@ impl SdfGrid {
         let mut open = f64::NEG_INFINITY;
         let mut spent = 0usize;
         while let Some(mut piece) = heap.pop() {
-            if piece.top <= goal(&best) || spent >= budget {
-                // the highest piece is down, or the walk is out of pieces: the heap holds no higher one
+            if piece.top <= goal(&best) || spent >= budget || makepad_csg_math::thread_pool::cancelled() {
+                // the highest piece is down, or the walk is out of pieces (or cancelled): the heap holds
+                // no higher one it showed empty
                 open = open.max(piece.top);
                 break;
             }

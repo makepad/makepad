@@ -141,6 +141,8 @@ pub struct ClusteredLights {
     pub(crate) lin_ctl: [f32; 4],
     /// This frame's keyed atlas levels and last level (zero without a Map key).
     pub(crate) key_spec: [f32; 2],
+    /// The bound atlas's key colour and fit (`Renderer::ibl_key_tint`).
+    pub(crate) key_tint: [f32; 4],
     /// HDR height fog (`fog_ctl`, `fog_eye`), bound with the cluster uniforms.
     pub(crate) fog_ctl: [f32; 4],
     pub(crate) fog_eye: [f32; 4],
@@ -178,6 +180,7 @@ impl Default for ClusteredLights {
             uploaded_empty: false,
             lin_ctl: [0.0, 1.0, 1.0, 1.0],
             key_spec: [0.0; 2],
+            key_tint: [0.0; 4],
             fog_ctl: [0.0; 4],
             fog_eye: [0.0; 4],
             fog_sun: [0.0; 4],
@@ -650,6 +653,7 @@ impl ClusteredLights {
         let on = enabled && self.texture.is_some();
         vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);
         vars.set_uniform(cx, live_id!(key_spec), &self.key_spec);
+        vars.set_uniform(cx, live_id!(key_tint), &self.key_tint);
         vars.set_uniform(cx, live_id!(fog_ctl), &self.fog_ctl);
         vars.set_uniform(cx, live_id!(fog_eye), &self.fog_eye);
         vars.set_uniform(cx, live_id!(fog_sun), &self.fog_sun);
@@ -716,6 +720,7 @@ script_mod! {
     // the complementary gain at its own environment lookup roughness.
     mod.draw.KeyLobe = {
         key_spec: uniform(vec2(0.0, 0.0))
+        key_tint: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         key_lobe_gain: fn(rough: f32) -> f32 {
             return 1.0 - clamp(self.key_spec.x - rough * self.key_spec.y, 0.0, 1.0)
         }

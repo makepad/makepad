@@ -49,8 +49,9 @@ script_mod! {
         // The environment a glossy city surface reflects: the sky, and
         // below a hashed skyline elevation the towers across the street
         // (lit windows after dark), then the street below the horizon.
-        c_reflect: fn(r: vec3, rough: float, night: float, grid: float) -> vec3 {
-            let sky = self.sky_env(r, rough)
+        // `vis`: the key's visibility its lobe uses here; only the sky share takes it.
+        c_reflect: fn(r: vec3, rough: float, night: float, grid: float, vis: float) -> vec3 {
+            let sky = self.sky_env_lit(r, rough, vis)
             let az = atan2(r.z, r.x) * 9.0
             let col = floor(az)
             let hb = self.c_hash(vec2(col, 3.7))
@@ -196,18 +197,18 @@ script_mod! {
                 // Rough dielectrics keep little of the grazing sheen (the
                 // split-sum's scale term falls with roughness).
                 let f_env = (f0 + (fr - f0) * self.pow5(1.0 - ndv)) * (1.0 - 0.9 * rough * (1.0 - fm))
-                var env = self.sky_env(normalize(refl), rough)
+                var env = self.sky_env_lit(normalize(refl), rough, sun_lit)
                 // Streets and pavements (plain) mirror the real sky only: a
                 // hashed skyline of lit windows pasted on the road read as a
                 // printed picture. Glass and paint keep the skyline.
-                if rough < 0.6 && kind > 0.5 { env = self.c_reflect(normalize(refl), rough, night, 1.0 - step(2.5, kind)) }
+                if rough < 0.6 && kind > 0.5 { env = self.c_reflect(normalize(refl), rough, night, 1.0 - step(2.5, kind), sun_lit) }
                 let local_pbr = self.cluster_pbr(pos, n, self.eye.xyz, albedo, rough, fm)
                 lit = albedo * ((1.0 - fm) * (ambient + direct + local * ao_direct))
                     + direct * spec * fv + env * f_env * (ao * sao * spec_occ) + local_pbr * ao_direct
                 if kind > 2.5 {
                     // Clear coat: a second, near-mirror interface on top.
                     let cf = 0.04 + 0.96 * self.pow5(1.0 - ndv)
-                    let cenv = self.c_reflect(normalize(refl), 0.12, night, 0.0)
+                    let cenv = self.c_reflect(normalize(refl), 0.12, night, 0.0, sun_lit)
                     let cspec = self.c_ggx(n, v, l, 0.06) * pi_hdr * self.key_lobe_gain(0.12)
                     lit = lit * (1.0 - cf) + (cenv * (ao * sao * spec_occ) + direct * cspec) * cf
                 }
@@ -235,7 +236,7 @@ script_mod! {
                     let grough = clamp(orm.y, 0.03, 1.0)
                     let gf0 = mix(0.04, 0.5, orm.z)
                     let gf = gf0 + (1.0 - gf0) * self.pow5(1.0 - gdv)
-                    let genv = self.c_reflect(normalize(grefl), grough, night, is_facade * (1.0 - step(1.5, kind)))
+                    let genv = self.c_reflect(normalize(grefl), grough, night, is_facade * (1.0 - step(1.5, kind)), sun_lit)
                     let gspec = self.c_ggx(gn, v, l, grough) * pi_hdr * self.key_lobe_gain(grough)
                     // What is behind the glass.
                     var room = albedo * (ambient * 0.6)

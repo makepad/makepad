@@ -390,7 +390,8 @@ impl Renderer {
         // A world's own Sun steers the cascades and the bake too; else the
         // environment's sun (renderer/env_sun.rs). Only the direction: this
         // site never took the rig's colours, and the bake reads `sun.dir`.
-        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
+        let (centre, cos_radius) = self.sun_disc_centre(world, sun.dir);
+        sun.dir = centre;
         if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
             log!("bake: sun dir {:?}", sun.dir);
         }
@@ -465,9 +466,12 @@ impl Renderer {
         // Streamed casters ride along with the placed ones, in that order
         // (the two lists as they are: a city's 20k placed casters were
         // copied into a scratch list every frame).
+        // Only the cascades take the disc sample: `sun` stays at the centre,
+        // so moving the sample never re-bakes the lightmap atlas.
         if let Some(d) = self.gpu_baker.run_frame(
             cx,
             sun.dir,
+            self.sun_disc_sample.map(|point| (point, cos_radius)),
             &[
                 crate::gpu_lightmap::CasterSlice { casters: &self.csm_static_casters, blocks: &self.csm_static_blocks },
                 crate::gpu_lightmap::CasterSlice { casters: &self.stream_casters, blocks: &[] },

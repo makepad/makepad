@@ -1823,6 +1823,10 @@ fn chol_insert(
 
 // Use the platform C formatter to retain snprintf's %g spelling, width, truncation,
 // NUL termination and return count. No numerical work is delegated to C.
+// MSVC's CRT has snprintf only as an inline in its headers: legacy_stdio_definitions.lib, which
+// ships with MSVC, is its linkable definition (without it every binary that links this fails
+// with LNK2019 on Windows).
+#[cfg_attr(all(windows, target_env = "msvc"), link(name = "legacy_stdio_definitions"))]
 unsafe extern "C" {
     fn snprintf(
         s: *mut std::ffi::c_char,

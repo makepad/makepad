@@ -55,6 +55,14 @@ pub fn scene_from_gltf(loaded: &LoadedGltf) -> Result<SceneInput, String> {
         if m.alpha_mode.as_deref() == Some("BLEND") && base[3] < 0.99 {
             mat.transmission = 1.0 - base[3];
             mat.two_sided = true;
+            // Alpha-blend glazing is a window; explicit transmission keeps its surface roughness.
+            if m.extensions
+                .as_ref()
+                .and_then(|ext| ext.key("KHR_materials_transmission"))
+                .is_none()
+            {
+                mat.roughness = 0.0;
+            }
         }
         let extension_number = |extension: &str, field: &str| {
             let value = m.extensions.as_ref()?.key(extension)?.key(field)?;

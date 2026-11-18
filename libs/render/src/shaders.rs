@@ -1813,7 +1813,7 @@ mod skin_ibl_tests {
             ] {
                 let source = test_source(&vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap());
                 assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
-                assert!(source.contains("mat_ibl_sky_env") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
+                assert!(source.contains("mat_ibl_lookup") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
                 assert!(source.contains("detail_map"), "{name}: the atlas is sampled");
                 assert!(source.contains("cluster_lights"), "{name}: the clustered lights stay");
                 // The lane takes both lookups through render-material's
@@ -1821,8 +1821,11 @@ mod skin_ibl_tests {
                 // lane's scale on the reflection and on the fill (y), and
                 // the fill from the map only while the switch is set (z),
                 // else the fill the lane had (an authored ambient).
-                let reflection = lowered_fn_body(&source, "mat_ibl_lane_sky_env").unwrap_or_else(|| panic!("{name}: no lane reflection lookup"));
-                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "{name}: the reflection lookup carries the lane's scale: {reflection}");
+                let reflection = lowered_fn_body(&source, "mat_ibl_lane_sky_env_lit").unwrap_or_else(|| panic!("{name}: no lane reflection lookup"));
+                assert!(reflection.contains("mat_ibl_lookup(p_r, p_rough)") && reflection.contains("ibl_ctl.y"), "{name}: the reflection lookup carries the lane's scale: {reflection}");
+                assert!(reflection.contains("key_spec.y") && reflection.contains("p_vis"), "{name}: the reflection takes the key's share out by the lobe's visibility, only with a Map key: {reflection}");
+                assert!(reflection.contains("key_tint"), "{name}: the reflection uses the key's colour and measured fit: {reflection}");
+                assert!(reflection.contains("l_e.xyz - ((l_d * l_lum) * l_kk)"), "{name}: the removal is the exact-at-zero form e - (d L) kk: {reflection}");
                 let fill = lowered_fn_body(&source, "mat_ibl_lane_ambient").unwrap_or_else(|| panic!("{name}: no lane fill lookup"));
                 assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "{name}: the fill lookup carries the lane's scale: {fill}");
                 assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "{name}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
@@ -1841,9 +1844,9 @@ mod skin_ibl_tests {
                 // (`uni_<name>`, `io_<name>`).
                 let (switch, f) = ("if ((uni_ibl_ctl.x > 0.5)) {", "io_");
                 assert_eq!(source.matches("ibl_ctl.x > 0.5").count(), 2, "{name}: the switch set turns the lookups on, once in the surface path and once in the coat");
-                assert!(pixel.contains(&format!("{switch}\nl_environment = {f}mat_ibl_lane_sky_env(normalize(l_reflection), l_rough);\n")), "{name}: under the switch the surface reflects the map along its reflection, at its roughness: {pixel}");
+                assert!(pixel.contains(&format!("{switch}\nl_environment = {f}mat_ibl_lane_sky_env_lit(normalize(l_reflection), l_rough, l_sun_vis);\n")), "{name}: under the switch the surface reflects the map along its reflection, at its roughness, with its lobe's visibility: {pixel}");
                 assert!(pixel.contains(&format!("\nl_fill = {f}mat_ibl_lane_ambient(l_n, l_fill);\n}}\n")), "{name}: under the switch the surface fills from the map along its normal, over the fill it had, and the block ends: {pixel}");
-                assert!(coat.contains(&format!("{switch}\nl_env = {f}mat_ibl_lane_sky_env(normalize(l_r), 0.03);\n}}\n")), "{name}: under the switch the coat reflects the map along its own reflection, as a lacquer: {coat}");
+                assert!(coat.contains(&format!("{switch}\nl_env = {f}mat_ibl_lane_sky_env_lit(normalize(l_r), 0.03, p_sun_vis);\n}}\n")), "{name}: under the switch the coat reflects the map along its own reflection, as a lacquer, with its glint's visibility: {coat}");
                 // Nothing in the lane's pixel stage takes a raw lookup.
                 for (stage, body) in [("pixel", &pixel), ("toy_coat", &coat)] {
                     assert!(!body.contains("io_mat_ibl_sky_env(") && !body.contains("io_mat_ibl_ambient("), "{name}: {stage} takes a lookup at the map's raw scale");

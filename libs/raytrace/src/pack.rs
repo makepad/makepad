@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! tri   (3/tri):  (v0.xyz, material) (v1.xyz, original id)
-//!                 (v2.xyz, emissive-selection pdf)
+//!                 (v2.xyz, light group; 0 = none)
 //! attr  (4/tri):  (n0.xyz, u0) (n1.xyz, v0) (n2.xyz, u1)
 //!                 (v1, u2, v2, coplanar-group/priority code)
 //! bvh   (2/node): see bvh.rs (threaded skip-link layout)
@@ -16,18 +16,20 @@
 //!                 (ior, transmission, texture, two_sided)
 //!                 (atlas rect x, y, w, h) (absorption.rgb, solid)
 //!                 Booleans are 0/1; absorption is clamped to [0,1].
-//! light (1/emissive tri, then 6 normal-conditioned sky CDFs/cell):
+//! light (1/emissive or grouped tri): (triangle, area, selection pdf, cdf)
+//!       (then 6 normal-conditioned sky CDFs/cell):
 //!                 (direction bin, solid angle, selection pdf, cdf)
 //! ```
 //!
 //! Triangles are in BVH order; `tri_material`/attributes follow.
 
 use crate::bvh::{Bvh, Tri};
-use crate::scene::{Image, SceneInput};
+use crate::scene::{thin_glass_haze, Image, SceneInput};
 use makepad_draw::*;
 
 pub const DATA_W: usize = 2048;
 pub const DATA_SHIFT: u32 = 11;
+pub(crate) const MATERIAL_ROWS: usize = 5;
 pub const ATLAS_MAX: usize = 4096;
 const ATLAS_GUTTER: usize = 1;
 pub const ENV_THETA_BINS: usize = 8;
@@ -45,7 +47,7 @@ pub struct DataTex {
 }
 
 impl DataTex {
-    fn from_texels(mut data: Vec<f32>) -> Self {
+    pub(crate) fn from_texels(mut data: Vec<f32>) -> Self {
         let texels = (data.len() + 3) / 4;
         let height = ((texels + DATA_W - 1) / DATA_W).max(1);
         data.resize(height * DATA_W * 4, 0.0);
@@ -63,7 +65,12 @@ pub struct PackedScene {
     pub bvh: DataTex,
     pub mat: DataTex,
     pub light: DataTex,
+    /// Emissive and reserved grouped triangles, including dark ones.
     pub n_lights: usize,
+    /// Scene ids in material-table order. Triangle group k names entry k - 1.
+    pub light_groups: Vec<u32>,
+    /// At least one thin-glass material has a rough-sheet lobe.
+    pub rough_thin_glass: bool,
     /// Number of decoded transmissive triangles (environment-guide evidence,
     /// not a light-record count).
     pub n_portals: usize,
@@ -90,6 +97,8 @@ pub struct PackedScene {
     /// traversal near zero preserves f32 precision in georeferenced models.
     pub origin: Vec3f,
     pub light_power: f32,
+    /// Zero when every light is dark; shared by light selection and hit MIS.
+    pub inv_light_power: f32,
 }
 
 impl PackedScene {
@@ -137,6 +146,17 @@ impl PackedScene {
         let has_n = scene.normals.len() == scene.positions.len();
         let has_uv = scene.uvs.len() == scene.positions.len();
 
+        // First occurrence determines the dense id, independent of BVH reordering.
+        let mut light_groups = Vec::new();
+        let mut dense_ids = std::collections::HashMap::new();
+        let material_groups: Vec<u32> = scene.materials.iter().map(|material| {
+            let id = material.light_group;
+            if id == 0 { return 0; }
+            *dense_ids.entry(id).or_insert_with(|| {
+                light_groups.push(id);
+                light_groups.len() as u32
+            })
+        }).collect();
         let light_weights: Vec<f32> = accel
             .tri_order
             .iter()
@@ -144,13 +164,13 @@ impl PackedScene {
             .map(|(new_i, &old_i)| {
                 let mat_id = scene.tri_material.get(old_i as usize).copied().unwrap_or(0) as usize;
                 let e = scene.materials.get(mat_id).map(|m| m.emission).unwrap_or([0.0; 3]);
-                let lum = 0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2];
                 let t = &accel.tris[new_i];
                 let area = Vec3f::cross(t.v1 - t.v0, t.v2 - t.v0).length() * 0.5;
-                (lum * area).max(0.0)
+                emission_pdf(e, area, 1.0)
             })
             .collect();
         let light_power: f32 = light_weights.iter().sum();
+        let inv_light_power = if light_power > 0.0 { light_power.recip() } else { 0.0 };
         let portal_weights: Vec<f32> = accel
             .tri_order
             .iter()
@@ -187,10 +207,11 @@ impl PackedScene {
             tri_priority.push(priority);
             tri_coplanar_group.push(coplanar_group);
             let t = &accel.tris[new_i];
-            let select_pdf = if light_power > 0.0 { light_weights[new_i] / light_power } else { 0.0 };
+            let select_pdf = light_weights[new_i] * inv_light_power;
             tri.extend([t.v0.x, t.v0.y, t.v0.z, m as f32]);
             tri.extend([t.v1.x, t.v1.y, t.v1.z, old_i as f32]);
-            tri.extend([t.v2.x, t.v2.y, t.v2.z, select_pdf]);
+            let light_group = material_groups.get(m as usize).copied().unwrap_or(0);
+            tri.extend([t.v2.x, t.v2.y, t.v2.z, light_group as f32]);
             let ng = Vec3f::cross(t.v1 - t.v0, t.v2 - t.v0);
             let ngl = ng.length();
             let ng = if ngl > 0.0 { ng / ngl } else { vec3f(0.0, 1.0, 0.0) };
@@ -215,7 +236,7 @@ impl PackedScene {
             let coplanar_code = ((coplanar_group.min(4095) << 12)
                 | u32::from(priority.min(4095))) as f32;
             attr.extend([u1[1], u2[0], u2[1], coplanar_code]);
-            if select_pdf > 0.0 && scene.materials.get(m as usize).map_or(false, |mm| mm.is_emissive()) {
+            if scene.materials.get(m as usize).is_some_and(|mm| light_group != 0 || (select_pdf > 0.0 && mm.is_emissive())) {
                 light_cdf += select_pdf;
                 light.extend([new_i as f32, ngl * 0.5, select_pdf, light_cdf]);
             }
@@ -349,26 +370,37 @@ impl PackedScene {
 
         // Atlas + materials.
         let (atlas, rects) = build_atlas(&scene.images);
-        let mut mat = Vec::with_capacity(scene.materials.len() * 20);
+        let mut mat = Vec::with_capacity(scene.materials.len() * MATERIAL_ROWS * 4);
+        let mut rough_thin_glass = false;
         for m in &scene.materials {
-            mat.extend([m.albedo[0], m.albedo[1], m.albedo[2], m.roughness.clamp(0.0, 1.0)]);
-            mat.extend([m.emission[0], m.emission[1], m.emission[2], m.metal.clamp(0.0, 1.0)]);
+            rough_thin_glass |= m.transmission > 0.0 && !m.solid && thin_glass_haze(m.roughness) > 0.0;
             let (tex, rect) = match m.texture.and_then(|t| rects.get(t).copied().flatten()) {
                 Some(r) => (1.0, r),
                 None => (-1.0, [0.0; 4]),
             };
-            mat.extend([m.ior.max(1.0), m.transmission.clamp(0.0, 1.0), tex, if m.two_sided { 1.0 } else { 0.0 }]);
-            mat.extend(rect);
-            mat.extend([
-                m.absorption[0].clamp(0.0, 1.0),
-                m.absorption[1].clamp(0.0, 1.0),
-                m.absorption[2].clamp(0.0, 1.0),
-                if m.solid { 1.0 } else { 0.0 },
-            ]);
+            let rows: [[f32; 4]; MATERIAL_ROWS] = [
+                [m.albedo[0], m.albedo[1], m.albedo[2], m.roughness.clamp(0.0, 1.0)],
+                [m.emission[0], m.emission[1], m.emission[2], m.metal.clamp(0.0, 1.0)],
+                [m.ior.max(1.0), m.transmission.clamp(0.0, 1.0), tex, if m.two_sided { 1.0 } else { 0.0 }],
+                rect,
+                [
+                    m.absorption[0].clamp(0.0, 1.0),
+                    m.absorption[1].clamp(0.0, 1.0),
+                    m.absorption[2].clamp(0.0, 1.0),
+                    if m.solid { 1.0 } else { 0.0 },
+                ],
+            ];
+            mat.extend(rows.into_iter().flatten());
         }
         if mat.is_empty() {
-            mat.extend([0.8, 0.8, 0.8, 1.0, 0.0, 0.0, 0.0, 0.0, 1.5, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-            mat.extend([1.0, 1.0, 1.0, 0.0]);
+            let rows: [[f32; 4]; MATERIAL_ROWS] = [
+                [0.8, 0.8, 0.8, 1.0],
+                [0.0; 4],
+                [1.5, 0.0, -1.0, 0.0],
+                [0.0; 4],
+                [1.0, 1.0, 1.0, 0.0],
+            ];
+            mat.extend(rows.into_iter().flatten());
         }
 
         PackedScene {
@@ -378,6 +410,8 @@ impl PackedScene {
             mat: DataTex::from_texels(mat),
             light: DataTex::from_texels(if light.is_empty() { vec![0.0; 4] } else { light }),
             n_lights,
+            light_groups,
+            rough_thin_glass,
             n_portals,
             env_grid_dim,
             env_min,
@@ -395,8 +429,16 @@ impl PackedScene {
             scene_area,
             origin,
             light_power,
+            inv_light_power,
         }
     }
+}
+
+/// Hit-time selection density, mirrored literally in the GPU shader. A
+/// reciprocal multiply can differ by one rounding from the former division.
+pub(crate) fn emission_pdf(emission: [f32; 3], area: f32, inv_light_power: f32) -> f32 {
+    let lum = 0.2126 * emission[0] + 0.7152 * emission[1] + 0.0722 * emission[2];
+    (lum * area).max(0.0) * inv_light_power
 }
 
 fn environment_bin_direction(up: Vec3f, bin: usize, theta_u: f32, phi_u: f32) -> Vec3f {
@@ -575,6 +617,35 @@ fn downscale2(im: &Image) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hit_pdf_matches_the_former_triangle_lane() {
+        use crate::scene::Material;
+        let mut scene = SceneInput::default();
+        scene.materials = vec![Material::emissive([1.0; 3], 1.0), Material::emissive([0.2, 0.7, 0.4], 3.0)];
+        scene.push_quad([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], 0);
+        scene.push_quad([[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [2.0, 1.0, 1.0], [0.0, 1.0, 1.0]], 1);
+        for mixed in [false, true] {
+            scene.materials[1].emission = if mixed { [0.6, 2.1, 1.2] } else { [0.5; 3] };
+            let packed = PackedScene::pack(&scene);
+            for row in packed.light.data[..packed.n_lights * 4].chunks_exact(4) {
+                let ti = row[0] as usize;
+                let tri = &packed.accel.tris[ti];
+                let area = Vec3f::cross(tri.v1 - tri.v0, tri.v2 - tri.v0).length() * 0.5;
+                let e = scene.materials[packed.tri_material[ti] as usize].emission;
+                let weight = ((0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2]) * area).max(0.0);
+                let old_lane = weight / packed.light_power;
+                let hit_pdf = emission_pdf(e, area, packed.inv_light_power);
+                assert_eq!(hit_pdf, row[2], "triangle {ti}: hit MIS agrees with light selection");
+                assert!(hit_pdf.to_bits().abs_diff(old_lane.to_bits()) <= 1,
+                    "triangle {ti}: reciprocal multiplication is within one rounding of old t2.w");
+                if !mixed {
+                    assert_eq!(hit_pdf.to_bits(), old_lane.to_bits(),
+                        "triangle {ti}: exact reciprocal preserves old t2.w bit for bit");
+                }
+            }
+        }
+    }
 
     #[test]
     fn cornell_packs_with_one_light_and_contiguous_leaves() {

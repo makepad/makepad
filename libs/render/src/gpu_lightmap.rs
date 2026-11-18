@@ -1912,11 +1912,15 @@ impl GpuLightmapBaker {
     /// Realtime — the cascade depth pass every frame with every caster.
     /// The chain renders before the scene pass that samples it, so nothing
     /// is ever sampled half-written. Returns a new atlas and its matching
-    /// remaps only after every region has completed.
+    /// remaps only after every region has completed. `sun_disc`: a still
+    /// recording's point of the key's disc and the cosine of its radius; the
+    /// cascades are fitted toward it ([`crate::shadow_csm::cascade_light_dir`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn run_frame(
         &mut self,
         cx: &mut CxDraw,
         sun_dir: Vec3f,
+        sun_disc: Option<([f32; 2], f32)>,
         static_casters: &[CasterSlice],
         movers: &[GpuLmMover],
         csm_view: Option<&CsmView>,
@@ -1998,10 +2002,11 @@ impl GpuLightmapBaker {
                     v3(eye.x + range, eye.y + range, eye.z + range),
                 ),
             };
+            let light_dir = crate::shadow_csm::cascade_light_dir(sun_dir, sun_disc);
             let mut frame = crate::shadow_csm::fit_cascades_reach(
                 csm_view,
                 eye,
-                sun_dir,
+                light_dir,
                 scene_min,
                 scene_max,
                 range,
@@ -2009,7 +2014,7 @@ impl GpuLightmapBaker {
                 self.csm_res as f32,
             );
             if let Some((lo, hi)) = self.csm_near {
-                crate::shadow_csm::fit_near(&mut frame, csm_view, lo, hi, sun_dir, scene_min, scene_max, range, self.csm_res as f32);
+                crate::shadow_csm::fit_near(&mut frame, csm_view, lo, hi, light_dir, scene_min, scene_max, range, self.csm_res as f32);
             }
             frame
         });

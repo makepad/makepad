@@ -227,10 +227,11 @@ fn parts(vm: &mut ScriptVm) -> Result<(ScriptObject, ScriptObject), String> {
         return Ok((p, f));
     }
     crate::pass_stdlib(vm);
-    vm.capture_errors();
+    vm.capture_errors_nested();
     let p = vm.eval(ScriptMod::new("", "", PASS_SCOPE_FILE, 0, 0, PASS_SCOPE, &[]));
     let f = vm.eval(ScriptMod::new("", "", FUSE_FILE, 0, 0, FUSE, &[]));
     let errors = vm.take_errors();
+    vm.capture_errors_restore();
     let (Some(p), Some(f)) = (p.as_object(), f.as_object()) else { return Err(format!("the pass parts did not evaluate: {}", errors.join("; "))) };
     if !errors.is_empty() {
         return Err(format!("the pass parts did not evaluate: {}", errors.join("; ")));
@@ -252,7 +253,7 @@ pub fn pass_object(vm: &mut ScriptVm, decl: &PassDecl) -> Result<ScriptObject, S
     if proto.as_object().is_none() {
         return Err("mod.draw.DrawGraphPass is not registered".into());
     }
-    vm.capture_errors();
+    vm.capture_errors_nested();
     let obj = vm.new_with_proto(proto);
     let part = |vm: &mut ScriptVm, name: &str, args: &[ScriptValue]| {
         let f = vm.value(parts, lut_id(name));
@@ -292,6 +293,7 @@ pub fn pass_object(vm: &mut ScriptVm, decl: &PassDecl) -> Result<ScriptObject, S
         None => failed.push("pixel".into()),
     }
     let errors = vm.take_errors();
+    vm.capture_errors_restore();
     if !errors.is_empty() || !failed.is_empty() {
         let mut out: Vec<String> = errors.iter().map(|e| located(e, decl)).collect();
         if errors.is_empty() {

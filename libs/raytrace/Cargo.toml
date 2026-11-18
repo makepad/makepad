@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Reusable progressive GPU ray tracer on makepad's shader stack"
 
+[package.metadata.makepad.platform-gaps]
+windows = {}
+
 [dependencies]
 makepad-draw = { path = "../../draw", version = "2.0.0" }
 makepad-gltf = { path = "../gltf", version = "1.0.0" }

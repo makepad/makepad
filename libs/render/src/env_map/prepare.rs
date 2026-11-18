@@ -57,6 +57,8 @@ pub struct PreparedIbl {
     pub texture: ibl::IblTexture,
     /// Levels `0..key_levels` retain the declared key; zero for Light/no key.
     pub key_levels: u32,
+    /// The key's colour at unit luminance and the measured fit (`ibl::KeyTint::uniform`); zero without keyed levels.
+    pub key_tint: [f32; 4],
     /// The atlas level count, shared with the directional lobe's gain.
     pub levels: u32,
     /// The dome, `dome_width` x `dome_height` RGBA f32 (alpha 1), the
@@ -144,8 +146,11 @@ pub struct PrepareSizes {
 /// read the full source narrowed to `sizes.lighting`; the remaining levels,
 /// SH, meter and band read the keyless copy. The dome is unchanged.
 /// Each level is prefiltered once. Cost: one extra lighting copy (about
-/// 8 MB at 1024 x 512) and one extra 512-wide pyramid. Without a key removal,
-/// both modes share the same copy and do no extra work.
+/// 8 MB at 1024 x 512), one pass over it writing keyless luminance in alpha,
+/// two passes measuring the key's colour and fit,
+/// one extra 512-wide pyramid and one more accumulator per keyed prefilter
+/// sample; no second prefilter. Without a key removal, both modes share the
+/// same copy and do no extra work.
 pub fn prepare_ibl_until(
     env: &EnvMap,
     removal: KeyRemoval,
@@ -172,14 +177,21 @@ pub fn prepare_ibl_until(
         return None;
     }
     let key_levels = keep_key.filter(|_| !matches!(removal, KeyRemoval::Nothing)).map_or(0, |sun| key_cut_level(sun, ATLAS_LEVELS));
-    let full = if key_levels > 0 {
+    let (full, key_tint) = if key_levels > 0 {
         let full = lighting_copy_spread(&env, KeyRemoval::Nothing, sizes.lighting, run);
         if stop() {
             return None;
         }
-        Some(full)
+        let mut full = full.into_owned();
+        full.set_alpha_luminance_of_spread(&lit, run);
+        let tint = full.key_tint_spread(&lit, run);
+        log!("ibl: key tint k=({:.4}, {:.4}, {:.4}) eps={:.3e} fit={:.3}", tint.k[0], tint.k[1], tint.k[2], tint.eps, tint.fit);
+        if stop() {
+            return None;
+        }
+        (Some(full), tint.uniform())
     } else {
-        None
+        (None, [0.0; 4])
     };
     let atlas = if let Some(full) = full {
         ibl::prefilter_split_spread(&full, &lit, key_levels, sizes.atlas, ATLAS_LEVELS, stop, run)?
@@ -194,6 +206,7 @@ pub fn prepare_ibl_until(
     Some(PreparedIbl {
         texture,
         key_levels: key_levels as u32,
+        key_tint,
         levels: atlas.levels as u32,
         dome_width,
         dome_height,
@@ -355,7 +368,18 @@ mod tests {
                 let start = row + level * level_size;
                 let end = start + level_size;
                 let source = if level < k { &want } else { &light.texture };
-                assert_eq!(bits(&kept.texture.data[start..end]), bits(&source.data[start..end]), "{name}: level {level} is bit-identical to its selected source (cut {k})");
+                for texel in (start..end).step_by(4) {
+                    let c = &kept.texture.data[texel..texel + 4];
+                    assert_eq!(bits(&c[..3]), bits(&source.data[texel..texel + 3]), "{name}: level {level}, texel {texel}: RGB is bit-identical to its selected source (cut {k})");
+                    let lum = |c: &[f32]| ibl::LUMINANCE[0] * c[0] + ibl::LUMINANCE[1] * c[1] + ibl::LUMINANCE[2] * c[2];
+                    if level < k {
+                        let a = c[3];
+                        let b = lum(&light.texture.data[texel..texel + 3]);
+                        assert!((a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1e-6), "{name}: keyed level {level}, texel {texel}: alpha is Light's luminance (got {a}, expected {b})");
+                    } else {
+                        assert_eq!(c[3].to_bits(), lum(c).to_bits(), "{name}: keyless level {level}, texel {texel}: alpha is exactly its own RGB luminance");
+                    }
+                }
             }
             assert_ne!(bits(&kept.texture.data), bits(&light.texture.data), "{name}: the broad key contributes to Map reflections");
             assert_eq!(kept.sh.map(|c| c.map(f32::to_bits)), light.sh.map(|c| c.map(f32::to_bits)), "{name}: SH is bit-identical across reflection modes");
@@ -424,6 +448,107 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn keyless_share_of_a_keyed_lookup_is_the_keyless_lookup() {
+        let half_w = 22.5f32.to_radians().tan();
+        let half_h = 17.5f32.to_radians().tan();
+        let cos_radius = 1.0 / (1.0 + half_w * half_w + half_h * half_h).sqrt();
+        let sun = EnvSun { dir: dir_from_az_el(250.0, 52.0), radiance: vec3f(24.0, 18.0, 12.0), cos_radius, facing: 1.0, cos_cover: cos_radius };
+        let right = dir_from_az_el(340.0, 0.0);
+        let up = Vec3f::cross(right, sun.dir);
+        let fill = |d: Vec3f| vec3f(0.08 + 0.25 * d.y.max(0.0), 0.16 + 0.1 * (d.x + 1.0), 0.28 + 0.15 * (d.z + 1.0));
+        let keyless = map(64, fill);
+        // A hard-edged gnomonic rectangle, offset from the source texel grid.
+        let env = map(64, |d| {
+            let c = d.dot(sun.dir);
+            let inside = c > 0.0 && (d.dot(right) / c).abs() <= half_w && (d.dot(up) / c).abs() <= half_h;
+            fill(d) + if inside { sun.radiance } else { grey(0.0) }
+        });
+        let sizes = PrepareSizes { dome: 64, atlas: 16, lighting: 32 };
+        let prepare = |keep| prepare_ibl_until(&env, KeyRemoval::Exact(&keyless), keep, 1.0, 0.0, sizes, &|| false, &|n, f| (0..n).for_each(f)).expect("the small softbox preparation completes");
+        let kept = prepare(Some(&sun));
+        let light = prepare(None);
+        assert_eq!(kept.key_tint[3], 1.0, "a one-colour key fits");
+        assert_eq!(light.key_tint, [0.0; 4], "Light has no key tint");
+
+        // builtin.rs mat_ibl_level and mat_ibl_sky_env, rotation 0, in f64.
+        fn lookup(texture: &ibl::IblTexture, dir: Vec3f, rough: f64) -> [f64; 4] {
+            let d = arr(dir).map(f64::from);
+            let u = 0.5 + d[0].atan2(-d[2]) / 6.2831853;
+            let uv = [u - u.floor(), d[1].clamp(-1.0, 1.0).acos() / 3.14159265];
+            let levels = texture.data[36] as usize;
+            let h = texture.data[37] as usize;
+            let w = texture.width;
+            let mix = |a: [f64; 4], b: [f64; 4], t: f64| -> [f64; 4] { std::array::from_fn(|i| a[i] * (1.0 - t) + b[i] * t) };
+            let level = |k: usize| {
+                let px = uv[0] * w as f64 - 0.5;
+                let py = (uv[1] * h as f64 - 0.5).clamp(0.0, (h - 1) as f64);
+                let x0 = px.floor() as i64;
+                let y0 = py.floor() as usize;
+                let fx = px - x0 as f64;
+                let fy = py - y0 as f64;
+                let texel = |x: i64, y: usize| -> [f64; 4] {
+                    let x = x.rem_euclid(w as i64) as usize;
+                    let offset = ((1 + k * h + y) * w + x) * 4;
+                    std::array::from_fn(|i| texture.data[offset + i] as f64)
+                };
+                let y1 = (y0 + 1).min(h - 1);
+                let a = mix(texel(x0, y0), texel(x0 + 1, y0), fx);
+                let b = mix(texel(x0, y1), texel(x0 + 1, y1), fx);
+                mix(a, b, fy)
+            };
+            let lf = rough.clamp(0.0, 1.0) * (levels - 1) as f64;
+            let k0 = lf.floor() as usize;
+            let k1 = (k0 + 1).min(levels - 1);
+            mix(level(k0), level(k1), lf - k0 as f64)
+        }
+
+        let mut directions = Vec::with_capacity(64);
+        let projected = |x: f32, y: f32| (sun.dir + right * x + up * y).normalize();
+        for y in [-0.6, -0.2, 0.2, 0.6] {
+            for x in [-0.6, -0.2, 0.2, 0.6] {
+                directions.push(("interior", projected(x * half_w, y * half_h)));
+            }
+        }
+        // Both sides of all four edges, less than one source texel away.
+        for t in [-0.75, -0.25, 0.25, 0.75] {
+            for (class, offset) in [("edge inside", -1.0f32.to_radians()), ("edge outside", 1.0f32.to_radians())] {
+                directions.push((class, projected(-half_w - offset, t * half_h)));
+                directions.push((class, projected(half_w + offset, t * half_h)));
+                directions.push((class, projected(t * half_w, -half_h - offset)));
+                directions.push((class, projected(t * half_w, half_h + offset)));
+            }
+        }
+        for (az, el) in [(-180.0, -89.0), (180.0, -89.0), (-179.9, 0.0), (179.9, 0.0), (0.0, 89.0), (0.0, -89.0), (0.0, -60.0), (90.0, -60.0), (180.0, -60.0), (270.0, -60.0), (0.0, 0.0), (90.0, 0.0), (180.0, 0.0), (270.0, 0.0), (45.0, 60.0), (135.0, 60.0)] {
+            directions.push(("away", dir_from_az_el(az, el)));
+        }
+        let lum = |c: [f64; 4]| ibl::LUMINANCE[0] as f64 * c[0] + ibl::LUMINANCE[1] as f64 * c[1] + ibl::LUMINANCE[2] as f64 * c[2];
+        let k = kept.key_tint.map(f64::from);
+        for (index, (class, dir)) in directions.into_iter().enumerate() {
+            for step in 0..=20 {
+                let rough = step as f64 / 20.0;
+                let e = lookup(&kept.texture, dir, rough);
+                let e_light = lookup(&light.texture, dir, rough);
+                let q = (e[3] / lum(e).max(1e-8)).clamp(0.0, 1.0);
+                let a = lum(e) * q;
+                let b = lum(e_light);
+                assert!((a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1e-6), "{class} direction {index}, roughness {rough}: the keyed lookup's keyless share equals Light's lookup luminance (got {a}, expected {b})");
+                for c in 0..3 {
+                    let got = e[c] - (lum(e) - e[3]) * k[c];
+                    let want = e_light[c];
+                    assert!((got - want).abs() <= 1e-3 * lum(e_light).max(1e-6), "{class} direction {index}, roughness {rough}, channel {c}: the keyed lookup minus the key in its colour is Light's lookup (got {got}, want {want})");
+                }
+            }
+        }
+        let env = map(64, |d| {
+            let c = d.dot(sun.dir);
+            let inside = c > 0.0 && (d.dot(right) / c).abs() <= half_w && (d.dot(up) / c).abs() <= half_h;
+            fill(d) + if inside { if d.dot(right) / c > 0.0 { vec3f(12.0, 18.0, 24.0) } else { sun.radiance } } else { grey(0.0) }
+        });
+        let two_colours = prepare_ibl_until(&env, KeyRemoval::Exact(&keyless), Some(&sun), 1.0, 0.0, sizes, &|| false, &|n, f| (0..n).for_each(f)).expect("the small two-colour preparation completes");
+        assert_eq!(two_colours.key_tint[3], 0.0, "a key of two colours falls back to the luminance share");
     }
 
     /// prepare_ibl is ibl_texture plus the dome, SH, meter and band: at the

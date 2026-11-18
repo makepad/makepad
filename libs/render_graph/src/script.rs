@@ -273,9 +273,10 @@ pub fn install_post(vm: &mut ScriptVm) -> Vec<String> {
     types.extend(crate::kits::KITS.iter().map(|kit| (kit.name, kit.kind)));
     register_post_types(vm, post, &types);
     let mut errors = install_kits(vm, "mod.post", None);
-    vm.capture_errors();
+    vm.capture_errors_nested();
     vm.eval(ScriptMod::new("", "", "mod.post", 0, 0, "mod.post.MotionBlur = mod.post.MotionBlur{shutter: 180 samples: @auto tol: 3}\ntrue\n", &[]));
     errors.extend(vm.take_errors());
+    vm.capture_errors_restore();
     errors
 }
 
@@ -311,9 +312,10 @@ pub fn read_post_entry(vm: &mut ScriptVm, module: ScriptObject, kind: &str, item
     if template.is_nil() {
         return Ok(PostEntry::Host(o));
     }
-    vm.capture_errors();
+    vm.capture_errors_nested();
     let built = vm.call(template, &[item]);
     let errors = vm.take_errors();
+    vm.capture_errors_restore();
     if !errors.is_empty() || built.is_err() {
         return Err(format!("{label}: the {kind} kit did not build: {}", if errors.is_empty() { "it did not evaluate".to_string() } else { errors.join("; ") }));
     }
@@ -337,12 +339,13 @@ pub fn read_post_entry(vm: &mut ScriptVm, module: ScriptObject, kind: &str, item
 /// registered, see [`crate::kits::KITS`]): all, or the kinds in `only`.
 /// Returns the evaluation errors.
 pub fn install_kits(vm: &mut ScriptVm, module: &str, only: Option<&[&str]>) -> Vec<String> {
-    vm.capture_errors();
+    vm.capture_errors_nested();
     // A file of its own per module and selection: the kits' functions keep
     // pointing into their own code when another module installs them too.
     let file = format!("graph://kits/{module}/{}", only.map_or("all".to_string(), |o| o.join(",")));
     let v = vm.eval(ScriptMod::new("", "", &file, 0, 0, &(crate::kits::kit_source(module, only)), &[]));
     let mut errors = vm.take_errors();
+    vm.capture_errors_restore();
     if v.is_err() && errors.is_empty() {
         errors.push("the graph kits did not evaluate".into());
     }

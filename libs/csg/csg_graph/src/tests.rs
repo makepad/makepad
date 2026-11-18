@@ -130,6 +130,30 @@ fn hull_of_sphere_points_is_closed_and_approximates_its_volume() {
     assert!(volume > 0.97 * sphere, "sphere hull retains over 97 percent of volume: {volume}");
 }
 
+/// A grid turned off the axes puts many points almost on each face's plane and edges: a point
+/// almost in line with a horizon edge once left a sliver of no area, its normal rounding to
+/// nothing. The hull is closed, with no flat face, and holds the grid's cube.
+#[test]
+fn hull_of_a_turned_grid_has_no_flat_faces() {
+    use makepad_csg_mesh::validate::validate_mesh;
+
+    let (s, c) = 0.5f64.sin_cos();
+    let (s2, c2) = 0.2f64.sin_cos();
+    let points = (0..1331).map(|i| {
+        let p = [(i % 11) as f64, (i / 11 % 11) as f64, (i / 121) as f64];
+        let q = [c * p[0] - s * p[1], s * p[0] + c * p[1], p[2]];
+        [q[0], c2 * q[1] - s2 * q[2], s2 * q[1] + c2 * q[2]]
+    }).collect();
+    let mut g = Graph::new();
+    let id = g.push(Op::Hull { points }).unwrap();
+    let mesh = Evaluator::new().mesh(&g, id, None).expect("a turned grid has a hull");
+    let report = validate_mesh(&mesh);
+    assert!(report.is_closed && report.is_manifold && report.is_consistently_oriented, "turned grid hull: closed, manifold, one winding: {report:?}");
+    assert_eq!(report.degenerate_triangles, 0, "turned grid hull has no flat faces");
+    let volume = makepad_csg_cad::signed_volume(&mesh);
+    assert!((volume - 1000.0).abs() < 1e-9, "turned grid hull holds the grid's cube: {volume}");
+}
+
 #[test]
 fn hull_requires_non_coplanar_points_and_uses_outward_predicates() {
     use makepad_csg_math::{robust::orient3d, Vec3d};

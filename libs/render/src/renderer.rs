@@ -378,6 +378,9 @@ pub struct Renderer {
     /// even though both cost one instance, because the projection math runs
     /// per caster per frame on the CPU.
     shadow_budget: usize,
+    /// A host's still-recording sample on the key light's disc; see
+    /// [`Self::set_sun_disc_sample`]. Only the shadow cascades use it.
+    sun_disc_sample: Option<[f32; 2]>,
     /// Device-local particles and decals for this frame (particles.rs,
     /// vfx/). Set by the host before drawing; never simulation state,
     /// never replicated.
@@ -797,6 +800,7 @@ impl Default for Renderer {
             lod_bias: 1.0,
             clip_box: None,
             shadow_budget: DEFAULT_SHADOW_BUDGET,
+            sun_disc_sample: None,
             vfx: Default::default(),
             ao_textures: Vec::new(),
             model_pack: Vec::new(),

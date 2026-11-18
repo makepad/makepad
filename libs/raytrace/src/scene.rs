@@ -11,23 +11,36 @@
 
 use makepad_draw::*;
 
+/// Thin sheets are fully hazy at this perceptual roughness.
+pub const THIN_GLASS_FULL_HAZE_ROUGHNESS: f32 = 0.5;
+
+/// Smooth window-to-rough-sheet mixture weight; zero roughness is an exact window.
+pub fn thin_glass_haze(roughness: f32) -> f32 {
+    let s = (roughness / THIN_GLASS_FULL_HAZE_ROUGHNESS).clamp(0.0, 1.0);
+    s * s * (3.0 - 2.0 * s)
+}
+
 /// One physically based material. Roughness/metal follow glTF. With
-/// `transmission > 0`, the default is thin glass: Fresnel reflection, otherwise
-/// straight through with an `albedo` tint. `solid` instead describes a closed,
-/// outward-wound dielectric boundary, with air outside and this material
-/// inside. Solids must not overlap. Solid interfaces are smooth: roughness,
+/// `transmission > 0`, the default is thin glass: roughness mixes a Fresnel
+/// window with a rough sheet; `albedo` tints transmission and diffuse scattering.
+/// `solid` describes a closed, outward-wound dielectric boundary, with air
+/// outside and this material inside. Solids must not overlap. Solid interfaces are smooth: roughness,
 /// metal and the albedo/texture tint are ignored for their transport.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     /// Linear-space base colour (the tint for thin glass).
     pub albedo: [f32; 3],
-    /// Perceptual roughness 0..1 (GGX alpha = r*r).
+    /// Perceptual roughness 0..1 (GGX alpha = r*r); also drives thin-sheet haze.
     pub roughness: f32,
     /// 0 dielectric, 1 metal.
     pub metal: f32,
     /// Emitted radiance (linear RGB). Non-zero makes every triangle of the
     /// material a light the integrator samples explicitly.
     pub emission: [f32; 3],
+    /// One run-time level shared by all materials in the group; 0 means none.
+    /// `emission` is the reference emission at gain 1 and is never rewritten.
+    /// Grouped materials reserve light records even while dark.
+    pub light_group: u32,
     /// Index of refraction for the Fresnel term (1.5 = glass).
     pub ior: f32,
     /// 0 opaque .. 1 dielectric; scales each transmitted interface's weight.
@@ -52,6 +65,7 @@ impl Default for Material {
             roughness: 0.6,
             metal: 0.0,
             emission: [0.0; 3],
+            light_group: 0,
             ior: 1.5,
             transmission: 0.0,
             solid: false,

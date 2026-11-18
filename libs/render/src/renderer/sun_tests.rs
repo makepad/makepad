@@ -358,6 +358,38 @@ fn lamp_renderer(hdr: bool, clustered: bool, level: f32, key: Option<makepad_sce
     r
 }
 
+#[test]
+fn frame_shadow_dir_moves_on_the_keys_cone() {
+    let (key, daylight) = preset_keys("Three-point");
+    let mut renderer = lamp_renderer(true, true, 0.5, key, daylight);
+    let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), key);
+    let bits = |v: Vec3f| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+    let centre = renderer.frame_start_sun(&world).dir;
+    let previous = crate::world_lights::world_sun_dir(&world).or_else(|| renderer.env_sun_dir(&world)).unwrap_or_else(|| crate::sun::resolve_sun(&world.sun).dir);
+    assert_eq!(bits(centre), bits(previous), "the shared centre selection preserves the previous cascade selection bit for bit");
+    assert_eq!(renderer.sun_disc_sample(), None, "disc sampling defaults to off");
+    assert_eq!(bits(renderer.frame_shadow_dir(&world)), bits(centre), "no sample preserves the previous cascade direction bit for bit");
+    renderer.set_sun_disc_sample(Some([0.5, 1.0]));
+    assert_eq!(renderer.sun_disc_sample(), Some([0.5, 1.0]), "the host's disc point is retained");
+    // the disc is centred where the cascades snap the key's centre
+    let snapped = crate::shadow_csm::cascade_light_dir(centre, None);
+    let angle = renderer.frame_shadow_dir(&world).dot(snapped).clamp(-1.0, 1.0).acos();
+    assert!((angle - key.expect("the studio has a key").cos_radius.acos()).abs() < 1e-4, "the studio key's rim uses its 20 degree cone: {angle}");
+    assert_eq!(bits(renderer.frame_start_sun(&world).dir), bits(centre), "disc sampling leaves the bake and shading centre unchanged");
+
+    let own = vec3f(-1.0, 1.0, 0.0).normalize();
+    world.lights.push(makepad_scene::Light::Sun { dir: own, color: vec3f(1.0, 1.0, 1.0), lux: 1.0, shadow: Default::default() });
+    let centre = crate::world_lights::world_sun_dir(&world).expect("the world has its own sun");
+    let snapped = crate::shadow_csm::cascade_light_dir(centre, None);
+    let angle = (renderer.frame_shadow_dir(&world) - snapped).length();
+    // the chord, not acos of a dot that rounds 1e-5 away from 1: 2 sin(r / 2) is r to 1e-9 here
+    assert!((angle - crate::sun::SUN_COS_RADIUS.acos()).abs() < 2e-6, "the world's sun uses the analytic solar radius: {angle}");
+    renderer.set_sun_disc_sample(None);
+    assert_eq!(bits(renderer.frame_shadow_dir(&world)), bits(centre), "disabling disc sampling restores the world's centre bit for bit");
+    world.lights.clear();
+    assert_eq!(bits(renderer.frame_shadow_dir(&world)), bits(renderer.frame_start_sun(&world).dir), "disabling disc sampling restores the environment centre bit for bit");
+}
+
 /// N1: a moon key lights the scene and steers its light (and the cascades),
 /// but the "is it day?" switches follow the real sun, which the moonlit
 /// preset reports 30 degrees under the horizon: in the clustered HDR lane

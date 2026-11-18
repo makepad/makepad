@@ -32,4 +32,4 @@ pub use mech::{hole_tool, iso_coarse_pitch, metric_names, metric_size, Gear, Hol
 pub use region::{regions_from_loops, Loop, Region, P2};
 pub use sketch::{Seg, Shape, Sketch, Tolerance};
 pub use solids::{extrude, helix, loft, revolve, signed_volume, sweep, Section};
-pub use text::{text_regions, TextStyle};
+pub use text::{text_regions, text_width, TextStyle};

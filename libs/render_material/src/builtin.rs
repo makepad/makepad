@@ -17,6 +17,7 @@
 //! horizon of its reflection `env` along `r`.
 use makepad_draw::*;
 use makepad_draw::makepad_platform::makepad_script::script_eval;
+use crate::ibl::LUMINANCE;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -66,8 +67,9 @@ script_mod! {
         let s = sin(r)
         return vec3(d.x * c - d.z * s, d.y, d.x * s + d.z * c)
     }
-    // One atlas level, bilinear by hand (float textures are unfiltered).
-    mod.draw.mat_ibl_level = fn(uv: vec2, k: float) -> vec3 {
+    // One atlas level, bilinear by hand (float textures are unfiltered): rgb, and in alpha the keyless
+    // luminance where the atlas keeps a key (ibl.rs `EnvAtlas::key_levels`).
+    mod.draw.mat_ibl_level = fn(uv: vec2, k: float) -> vec4 {
         let size = self.detail_map.size()
         let meta = self.mat_ibl_meta(9.0)
         let w = size.x
@@ -82,13 +84,13 @@ script_mod! {
         let xb = (x0 + 1.0 - floor((x0 + 1.0) / w) * w + 0.5) / w
         let ya = (1.0 + k * h + y0 + 0.5) / size.y
         let yb = (1.0 + k * h + min(y0 + 1.0, h - 1.0) + 0.5) / size.y
-        let a = mix(self.detail_map.sample_nearest(vec2(xa, ya)).xyz, self.detail_map.sample_nearest(vec2(xb, ya)).xyz, fx)
-        let b = mix(self.detail_map.sample_nearest(vec2(xa, yb)).xyz, self.detail_map.sample_nearest(vec2(xb, yb)).xyz, fx)
+        let a = mix(self.detail_map.sample_nearest(vec2(xa, ya)), self.detail_map.sample_nearest(vec2(xb, ya)), fx)
+        let b = mix(self.detail_map.sample_nearest(vec2(xa, yb)), self.detail_map.sample_nearest(vec2(xb, yb)), fx)
         return mix(a, b, fy)
     }
-    // Prefiltered specular radiance along r at this roughness: replaces the
-    // analytic sky reflection.
-    mod.draw.mat_ibl_sky_env = fn(r: vec3, rough: float) -> vec3 {
+    // The prefiltered lookup along r at this roughness, all four channels
+    // through the same weights: rgb radiance and the keyless luminance.
+    mod.draw.mat_ibl_lookup = fn(r: vec3, rough: float) -> vec4 {
         let meta = self.mat_ibl_meta(9.0)
         let d = self.mat_ibl_dir(r)
         let uv = vec2(fract(0.5 + atan2(d.x, 0.0 - d.z) / 6.2831853), acos(clamp(d.y, -1.0, 1.0)) / 3.14159265)
@@ -96,6 +98,11 @@ script_mod! {
         let k0 = floor(lf)
         let k1 = min(k0 + 1.0, meta.x - 1.0)
         return mix(self.mat_ibl_level(uv, k0), self.mat_ibl_level(uv, k1), lf - k0) * meta.z
+    }
+    // Prefiltered specular radiance along r at this roughness: replaces the
+    // analytic sky reflection.
+    mod.draw.mat_ibl_sky_env = fn(r: vec3, rough: float) -> vec3 {
+        return self.mat_ibl_lookup(r, rough).xyz
     }
     // SH9 irradiance for the ambient diffuse term (in the lane's
     // irradiance/pi units).
@@ -126,6 +133,21 @@ script_mod! {
     // and takes the reflection alone from the map.
     mod.draw.mat_ibl_lane_sky_env = fn(r: vec3, rough: float) -> vec3 {
         return self.mat_ibl_sky_env(r, rough) * self.ibl_ctl.y
+    }
+    // The lane's reflection beside a shadowed key lobe (`sky_env_lit`): the
+    // removal takes the key's light out in its colour (key_tint.xyz, unit
+    // luminance, from the preparation's full-minus-keyless sum), exact in all
+    // three channels for a key that is one colour. A key that is not falls
+    // back, by the measured fit key_tint.w, to taking out its luminance share
+    // only (the lookup's own chroma). Exactly the plain lookup when lit
+    // (vis 1) or without a Map key (key_spec.y 0), luminance identical at any fit.
+    mod.draw.mat_ibl_lane_sky_env_lit = fn(r: vec3, rough: float, vis: float) -> vec3 {
+        let e = self.mat_ibl_lookup(r, rough)
+        let lum = max(dot(e.xyz, vec3(#(LUMINANCE[0]), #(LUMINANCE[1]), #(LUMINANCE[2]))), 0.00000001)
+        let q = clamp(e.w / lum, 0.0, 1.0)
+        let d = (1.0 - q) * (1.0 - vis) * step(0.5, self.key_spec.y)
+        let kk = mix(e.xyz / lum, self.key_tint.xyz, self.key_tint.w)
+        return max(e.xyz - (d * lum) * kk, vec3(0.0, 0.0, 0.0)) * self.ibl_ctl.y
     }
     mod.draw.mat_ibl_lane_ambient = fn(n: vec3, a: vec3) -> vec3 {
         if self.ibl_ctl.z > 0.5 { return self.mat_ibl_ambient(n, a) * self.ibl_ctl.y }
@@ -188,10 +210,13 @@ pub fn overrides(vm: &mut ScriptVm, builtin: Builtin) -> Vec<(LiveId, ScriptObje
             (id!(mat_ibl_meta), f(script_eval!(vm, { mod.draw.mat_ibl_meta }))),
             (id!(mat_ibl_dir), f(script_eval!(vm, { mod.draw.mat_ibl_dir }))),
             (id!(mat_ibl_level), f(script_eval!(vm, { mod.draw.mat_ibl_level }))),
+            (id!(mat_ibl_lookup), f(script_eval!(vm, { mod.draw.mat_ibl_lookup }))),
             (id!(mat_ibl_sky_env), f(script_eval!(vm, { mod.draw.mat_ibl_sky_env }))),
             (id!(mat_ibl_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_ambient }))),
             // The lane's reflection and fill: the two lookups under ibl_ctl.
             (id!(sky_env), f(script_eval!(vm, { mod.draw.mat_ibl_lane_sky_env }))),
+            // ... and the reflection beside a shadowed key lobe.
+            (id!(sky_env_lit), f(script_eval!(vm, { mod.draw.mat_ibl_lane_sky_env_lit }))),
             (id!(mat_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_lane_ambient }))),
             // No analytic treeline over the map's reflection in the clear coat.
             (id!(coat_treeline), f(script_eval!(vm, { mod.draw.mat_ibl_coat_treeline }))),

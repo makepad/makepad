@@ -75,6 +75,7 @@ script_mod! {
         mat_ibl_meta: mod.draw.mat_ibl_meta
         mat_ibl_dir: mod.draw.mat_ibl_dir
         mat_ibl_level: mod.draw.mat_ibl_level
+        mat_ibl_lookup: mod.draw.mat_ibl_lookup
         mat_ibl_sky_env: mod.draw.mat_ibl_sky_env
         // The dome, bilinear by hand (float textures are unfiltered): u
         // wraps, v clamps, texel centres. The texel coordinates are in the
@@ -298,6 +299,8 @@ pub(super) struct IblState {
     filled_sun: Option<EnvSun>,
     /// The bound atlas's keyed level count and total level count, if Map retains a key.
     key_levels: Option<(u32, u32)>,
+    /// The bound Map preparation's key tint (`PreparedIbl::key_tint`); zero without keyed levels.
+    key_tint: [f32; 4],
     /// The bound map's own sun for the daylight switches: the one the world
     /// reported.
     daylight_sun: Option<Vec3f>,
@@ -334,6 +337,7 @@ impl IblState {
             horizon_rgb,
             filled_sun,
             key_levels,
+            key_tint,
             daylight_sun,
             registrations: _,
             wanted: _,
@@ -355,6 +359,7 @@ impl IblState {
         self.horizon_rgb = *horizon_rgb;
         self.filled_sun = *filled_sun;
         self.key_levels = *key_levels;
+        self.key_tint = *key_tint;
         self.daylight_sun = *daylight_sun;
         self.mirror = true;
     }
@@ -725,6 +730,12 @@ impl Renderer {
         self.ibl.key_levels
     }
 
+    /// The bound Map preparation's key tint: (colour at unit luminance, fit).
+    /// Flips with the textures, like `ibl_key_levels`.
+    pub fn ibl_key_tint(&self) -> [f32; 4] {
+        self.ibl.key_tint
+    }
+
     /// The bound map's own sun for the daylight switches, in the map's frame:
     /// the `Environment.daylight_sun` the job saw. `None` when the map knows no sun of its own (a
     /// studio, a loaded file, an engine look) or nothing is bound: the
@@ -813,6 +824,7 @@ impl Renderer {
         s.horizon_rgb = Vec3f::default();
         s.filled_sun = None;
         s.key_levels = None;
+        s.key_tint = [0.0; 4];
         s.daylight_sun = None;
     }
 
@@ -949,6 +961,7 @@ impl Renderer {
         s.horizon_rgb = p.horizon_rgb;
         s.filled_sun = r.key.sun;
         s.key_levels = (p.key_levels > 0).then_some((p.key_levels, p.levels));
+        s.key_tint = if p.key_levels > 0 { p.key_tint } else { [0.0; 4] };
         s.daylight_sun = r.key.daylight_sun;
     }
 

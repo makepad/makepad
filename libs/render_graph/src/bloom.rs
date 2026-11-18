@@ -36,10 +36,11 @@ script_mod! {
     mod.draw.DrawBloomDown = mod.std.set_type_default() do #(DrawBloomDown::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.BloomDown13,
+        ..mod.draw.BloomKnee,
         color_format: @Rgba16F
         src: texture_2d(float)
-        // xy = one SOURCE texel in uv, z = 1 on the first level (Karis
-        // weighting against fireflies), w = the first level's threshold
+        // xy = one SOURCE texel in uv, z = 1 enables first-level Karis
+        // weighting against fireflies, w = the first level's threshold
         // (0 = none): a soft knee on the largest channel, so only what is
         // brighter than it spills.
         u_src: uniform(vec4(0.001, 0.001, 0.0, 0.0))
@@ -52,14 +53,7 @@ script_mod! {
         }
 
         bloom_tap: fn(uv: vec2) -> vec3 {
-            var c = max(self.src.sample(uv).xyz, vec3(0.0, 0.0, 0.0))
-            if self.u_src.z > 0.5 && self.u_src.w > 0.0 {
-                let knee = self.u_src.w * 0.5
-                let b = max(c.x, max(c.y, c.z))
-                let rq = clamp(b - self.u_src.w + knee, 0.0, 2.0 * knee)
-                let soft = rq * rq / (4.0 * knee + 0.00001)
-                c = c * (max(soft, b - self.u_src.w) / max(b, 0.00001))
-            }
+            let c = self.bloom_knee(max(self.src.sample(uv).xyz, vec3(0.0, 0.0, 0.0)), self.u_src.w)
             if self.u_src.z > 0.5 {
                 return c / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722)))
             }
@@ -215,6 +209,10 @@ pub struct BloomPass {
     /// The first level's brightness threshold (0 = none: the whole image
     /// feeds the pyramid): a soft knee on the largest channel.
     pub threshold: f32,
+    /// Average the first level's light as it is, without the Karis weight, so
+    /// the chain conserves energy and a host's glow share stays the share it
+    /// asks for. A lone hot texel can flicker on a moving view. Default: false.
+    pub flat_weights: bool,
     /// The weight of each smaller level in the upsample, 0..1 (`None` = 1,
     /// the energy-conserving pyramid; less keeps the glow tight). The
     /// composite normalises by [`BloomPass::levels`].
@@ -280,6 +278,12 @@ impl BloomPass {
     /// it so the scene renders first. None until the first `run`.
     pub fn first_pass_id(&self) -> Option<DrawPassId> {
         self.down.first().map(|s| s.pass.draw_pass_id())
+    }
+
+    /// The chain's top (the adapt pass): attach it under the pass that
+    /// composites the chain on every draw that uses it. None until the first run.
+    pub fn last_pass_id(&self) -> Option<DrawPassId> {
+        self.adapt.as_ref().map(|s| s.pass.draw_pass_id())
     }
 
     /// Bloom levels in the chain (the composite normalises by it).
@@ -363,7 +367,7 @@ impl BloomPass {
             let draw = self.draw_down.as_mut().unwrap();
             let dv = &mut draw.draw_super.draw_vars;
             dv.set_texture(0, &src);
-            dv.set_uniform(cx.cx, live_id!(u_src), &[1.0 / src_px.x as f32, 1.0 / src_px.y as f32, if i == 0 { 1.0 } else { 0.0 }, if i == 0 { self.threshold.max(0.0) } else { 0.0 }]);
+            dv.set_uniform(cx.cx, live_id!(u_src), &[1.0 / src_px.x as f32, 1.0 / src_px.y as f32, if i == 0 && !self.flat_weights { 1.0 } else { 0.0 }, if i == 0 { self.threshold.max(0.0) } else { 0.0 }]);
             record(cx, &mut self.down[i], level_size(i), &dst, &mut |cx, r| draw.draw_abs(cx, r));
         }
         // ---- up --------------------------------------------------------------

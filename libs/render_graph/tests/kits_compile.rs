@@ -56,6 +56,22 @@ fn code(vm: &mut ScriptVm, src: &str) -> pass::PassCode {
     pass::PassCode::Fn(pass::PassFn::new(vm.fn_image(v.as_object().unwrap()).unwrap()))
 }
 
+/// Registering the passes preserves earlier errors and keeps the caller's capture active.
+#[test]
+fn registering_the_passes_keeps_the_callers_error_capture() {
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    cx.with_vm(|vm| {
+        makepad_draw::script_mod(vm);
+        vm.capture_errors();
+        vm.eval(ScriptMod::new("", "", "capture_before", 0, 0, "capture_probe_undefined()\ntrue\n", &[]));
+        makepad_render_graph::script_mod_passes(vm);
+        vm.eval(ScriptMod::new("", "", "capture_after", 0, 0, "capture_probe_undefined()\ntrue\n", &[]));
+        let errors = vm.take_errors();
+        assert!(errors.iter().any(|error| error.contains("capture_before")), "registering the passes dropped the caller's earlier errors: {errors:?}");
+        assert!(errors.iter().any(|error| error.contains("capture_after")), "registering the passes disabled the caller's error capture: {errors:?}");
+    });
+}
+
 #[test]
 fn every_kit_builds_passes_that_compile_everywhere() {
     let mut cx = Cx::new(Box::new(|_, _| {}));

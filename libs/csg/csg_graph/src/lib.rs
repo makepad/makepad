@@ -15,7 +15,7 @@ pub mod edges;
 pub mod eval;
 mod hash;
 
-pub use eval::{Evaluator, Failure, PRINT_CHORD};
+pub use eval::{text_width, Evaluator, Failure, PRINT_CHORD};
 pub use makepad_csg_cad::{Seg, Shape, Sketch, Tolerance};
 pub use makepad_csg_cad::bool3::disjoint_tool_bounds;
 pub use makepad_csg_mesh::mesh::TriMesh;

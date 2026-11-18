@@ -347,16 +347,17 @@ script_mod! {
         mat_ibl_meta: mod.draw.mat_ibl_meta
         mat_ibl_dir: mod.draw.mat_ibl_dir
         mat_ibl_level: mod.draw.mat_ibl_level
+        mat_ibl_lookup: mod.draw.mat_ibl_lookup
         mat_ibl_sky_env: mod.draw.mat_ibl_sky_env
         mat_ibl_ambient: mod.draw.mat_ibl_ambient
-        mat_ibl_lane_sky_env: mod.draw.mat_ibl_lane_sky_env
+        mat_ibl_lane_sky_env_lit: mod.draw.mat_ibl_lane_sky_env_lit
         mat_ibl_lane_ambient: mod.draw.mat_ibl_lane_ambient
 
         // Toy gloss on a character (fur_layer.y packs rim * 255 * 65536 +
         // clearcoat * 255 * 256 + flake * 255, the PBR lane's layout): a
         // clear lacquer that reflects the sky gradient with a tight sun
         // glint, and the soft studio rim that separates a silhouette.
-        toy_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, sun: vec3, amb_occ: float, spec_occ: float) -> vec3 {
+        toy_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, sun: vec3, amb_occ: float, spec_occ: float, sun_vis: float) -> vec3 {
             let packed = floor(self.fur_layer.y + 0.5)
             let rim = floor(packed / 65536.0)
             let coat = floor((packed - rim * 65536.0) / 256.0) / 255.0
@@ -365,7 +366,7 @@ script_mod! {
             let fc = (0.04 + 0.96 * pow(1.0 - ndv, 5.0)) * coat
             var env = mix(self.sun_ground, self.sun_sky * 1.6, smoothstep(-0.2, 0.4, r.y))
             // Under an environment the lacquer reflects it, as the PBR lane's coat does through sky_env.
-            if self.ibl_ctl.x > 0.5 { env = self.mat_ibl_lane_sky_env(normalize(r), 0.03) }
+            if self.ibl_ctl.x > 0.5 { env = self.mat_ibl_lane_sky_env_lit(normalize(r), 0.03, sun_vis) }
             let h = normalize(l + v)
             let ndh = max(dot(n, h), 0.0)
             let den = ndh * ndh * (0.0016 - 1.0) + 1.0
@@ -494,7 +495,7 @@ script_mod! {
                 // authors it (ibl_ctl.z 0). Off, the two values above are the
                 // lane's old expressions, unchanged.
                 if self.ibl_ctl.x>0.5 {
-                    environment=self.mat_ibl_lane_sky_env(normalize(reflection),rough)
+                    environment=self.mat_ibl_lane_sky_env_lit(normalize(reflection),rough,sun_vis)
                     fill=self.mat_ibl_lane_ambient(n,fill)
                 }
                 // GI occludes that fill and adds its bounce.
@@ -506,7 +507,7 @@ script_mod! {
                 let emission=srgb_to_linear(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive
                 let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
-                if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao,spec_occ)}
+                if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao,spec_occ,sun_vis)}
                 let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode)) * text_coverage
                 var colour_coverage = coverage
                 if self.msdf_ctl.y > 0.0 && self.alpha_mode < 1.5 { colour_coverage = 1.0 }

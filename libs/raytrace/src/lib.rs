@@ -5,10 +5,12 @@
 //! * [`gpu::RayTracer`] — the renderer: `set_scene`, then `draw` every frame
 //!   from a widget; `view_texture` is the tonemapped image.
 //! * [`cpu_ref::CpuTracer`] — the CPU twin that gates the GPU.
+//! * [`env_map`] — environment-map radiance and importance sampling.
 
 pub mod building;
 pub mod bvh;
 pub mod cpu_ref;
+pub mod env_map;
 pub mod glb;
 pub mod gpu;
 pub mod pack;
@@ -17,6 +19,7 @@ pub mod rng;
 pub mod scene;
 pub mod sky;
 
+pub use env_map::{EnvironmentFrame, EnvironmentLight, EnvironmentMap};
 pub use gpu::{RayTracer, RenderSettings, RenderStats};
 pub use scene::{Camera, Image, Material, SceneInput, Sun};
 

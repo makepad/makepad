@@ -5,9 +5,10 @@
 //! rays, which the GPU cannot, so rays/s can be reported honestly.
 
 use crate::bvh::Hit;
-use crate::pack::{PackedScene, ENV_DIR_BINS, ENV_PHI_BINS, ENV_THETA_BINS, MAX_SHADOW_GLASS_HITS};
+use crate::env_map::{EnvironmentFrame, EnvironmentLight};
+use crate::pack::{emission_pdf, PackedScene, ENV_DIR_BINS, ENV_PHI_BINS, ENV_THETA_BINS, MAX_SHADOW_GLASS_HITS};
 use crate::rng::{bounce_pairs, hash2, pixel_seed, sobol_2d, u32_to_unit};
-use crate::scene::{Camera, Material, SceneInput};
+use crate::scene::{thin_glass_haze, Camera, Material, SceneInput};
 use crate::sky::SkyUniforms;
 use makepad_draw::*;
 
@@ -34,10 +35,49 @@ impl CpuStats {
     }
 }
 
+/// One sample's base light and reference light per group. Same-id terms are summed.
+#[derive(Clone, Debug, Default)]
+pub struct Split {
+    pub base: Vec3f,
+    pub groups: Vec<(u32, Vec3f)>,
+}
+
+#[derive(Clone, Copy)]
+enum EmissionRouting {
+    Combined,
+    Groups,
+}
+
+impl EmissionRouting {
+    fn add(self, base: &mut Vec3f, groups: &mut Vec<(u32, Vec3f)>, id: u32, mut term: Vec3f, preview_clamp: Option<f32>) {
+        if id == 0 || matches!(self, Self::Combined) {
+            *base = *base + term;
+            return;
+        }
+        // The GPU clamps reference terms before reservoir weighting. Invalid
+        // terms stay invalid so rejecting a path drops all of its streams.
+        if let Some(limit) = preview_clamp {
+            let peak = term.x.max(term.y).max(term.z);
+            if term.x.is_finite() && term.y.is_finite() && term.z.is_finite()
+                && term.x.abs() < 1.0e30 && term.y.abs() < 1.0e30 && term.z.abs() < 1.0e30
+                && peak > limit
+            {
+                term = term * (limit / peak);
+            }
+        }
+        if let Some((_, sum)) = groups.iter_mut().find(|(group, _)| *group == id) {
+            *sum = *sum + term;
+        } else {
+            groups.push((id, term));
+        }
+    }
+}
+
 pub struct CpuTracer<'a> {
     pub packed: &'a PackedScene,
     pub materials: &'a [Material],
     pub sky: SkyUniforms,
+    pub environment: Option<(std::sync::Arc<EnvironmentLight>, EnvironmentFrame)>,
     pub camera: Camera,
     pub max_bounces: u32,
     pub max_diffuse: u32,
@@ -420,7 +460,7 @@ impl<'a> CpuTracer<'a> {
     }
 
     fn sun_is_on(&self) -> bool {
-        self.sky.up.w > 0.5 && self.sky.sun_radiance.x > 0.0
+        self.environment.is_none() && self.sky.up.w > 0.5 && self.sky.sun_radiance.x > 0.0
     }
 
     fn sun_dir(&self) -> Vec3f {
@@ -448,10 +488,16 @@ impl<'a> CpuTracer<'a> {
     }
 
     fn environment_radiance(&self, rd: Vec3f, include_sun: bool) -> Vec3f {
+        if let Some((light, frame)) = &self.environment {
+            return light.radiance(frame.to_map(rd)) * frame.strength;
+        }
         self.sky.environment_radiance(rd, include_sun)
     }
 
     fn sky_pdf(&self, rd: Vec3f) -> f32 {
+        if let Some((light, frame)) = &self.environment {
+            return light.pdf(frame.to_map(rd));
+        }
         let up = vec3f(self.sky.up.x, self.sky.up.y, self.sky.up.z);
         let z = rd.dot(up);
         if z <= 0.0 {
@@ -464,8 +510,12 @@ impl<'a> CpuTracer<'a> {
         }
     }
 
+    fn env_grid_dim(&self) -> u32 {
+        if self.environment.is_some() { 0 } else { self.packed.env_grid_dim }
+    }
+
     fn environment_distribution(&self, p: Vec3f, normal: Vec3f) -> usize {
-        let d = self.packed.env_grid_dim as usize;
+        let d = self.env_grid_dim() as usize;
         let rel = vec3f(
             (p.x - self.packed.env_min.x) * self.packed.env_inv_extent.x,
             (p.y - self.packed.env_min.y) * self.packed.env_inv_extent.y,
@@ -523,7 +573,15 @@ impl<'a> CpuTracer<'a> {
     }
 
     fn sample_environment(&self, p: Vec3f, normal: Vec3f, r: (f32, f32)) -> EnvironmentSample {
-        if self.packed.env_grid_dim > 0 {
+        if let Some((light, frame)) = &self.environment {
+            let (direction, pdf) = light.sample(r);
+            return EnvironmentSample {
+                direction: frame.to_world(direction),
+                radiance: light.radiance(direction) * frame.strength,
+                pdf,
+            };
+        }
+        if self.env_grid_dim() > 0 {
             return self.sample_guided_environment(p, normal, r);
         }
         let up = vec3f(self.sky.up.x, self.sky.up.y, self.sky.up.z);
@@ -556,7 +614,7 @@ impl<'a> CpuTracer<'a> {
             return l;
         }
         // The visibility guide owns upper-hemisphere environment paths.
-        if self.packed.env_grid_dim > 0 {
+        if self.env_grid_dim() > 0 {
             let up = vec3f(self.sky.up.x, self.sky.up.y, self.sky.up.z);
             // Preserve BSDF escape below it, where the analytic environment
             // models ground haze and the guide has no support.
@@ -570,11 +628,21 @@ impl<'a> CpuTracer<'a> {
     /// Straight NEE through thin/solid glass: ignore bending, multiply each
     /// interface's (1-F) and transmission, and attenuate back-side solid
     /// arrivals by their segment length. Exceeding the budget is opaque.
-    fn shadow(&self, mut p: Vec3f, mut ng: Vec3f, rd: Vec3f, mut tmax: f32, mut skip: i32) -> Option<ShadowVisibility> {
+    fn shadow(&self, p: Vec3f, ng: Vec3f, rd: Vec3f, tmax: f32, skip: i32) -> Option<ShadowVisibility> {
+        self.shadow_from_sheet(p, ng, rd, tmax, skip, false, -1)
+    }
+
+    /// `shadow` from the far side of a rough sheet (`far_sheet`), toward a point on triangle
+    /// `target` (a sampled light, never a blocker; -1 for none).
+    fn shadow_from_sheet(&self, mut p: Vec3f, mut ng: Vec3f, rd: Vec3f, mut tmax: f32, mut skip: i32, far_sheet: bool, target: i32) -> Option<ShadowVisibility> {
         self.bump_stats(|stats| stats.shadow_rays += 1);
         let mut tr = vec3f(1.0, 1.0, 1.0);
         let mut travelled = 0.0f32;
         let mut previous_glass: Option<(u32, Vec3f)> = None;
+        if far_sheet && skip >= 0 {
+            let ti = skip as usize;
+            previous_glass = Some((self.packed.tri_material[ti], geom_ng(&self.packed.accel.tris[ti])));
+        }
         // The extra trace proves that the ray escaped after the last allowed hit.
         for layer in 0..=MAX_SHADOW_GLASS_HITS {
             let h = self.secondary_trace(p, ng, rd, tmax, skip);
@@ -582,6 +650,10 @@ impl<'a> CpuTracer<'a> {
                 return None;
             }
             if !h.is_hit() {
+                return Some(ShadowVisibility { transmittance: tr });
+            }
+            // The sampled light's own triangle is the target, never a blocker.
+            if h.tri == target {
                 return Some(ShadowVisibility { transmittance: tr });
             }
             if layer == MAX_SHADOW_GLASS_HITS {
@@ -648,7 +720,10 @@ impl<'a> CpuTracer<'a> {
             } else {
                 let tint = self.atlas_albedo(ti, w0, h.u, h.v, v3(m.albedo), 0.0);
                 let fr = fresnel_dielectric(ng.dot(-rd).abs(), m.ior.max(1.0));
-                tr = tr * tint * (trans * (1.0 - fr));
+                tr = tr * tint * (trans * (1.0 - thin_glass_haze(m.roughness)) * (1.0 - fr));
+                if tr == Vec3f::default() {
+                    return Some(ShadowVisibility::default());
+                }
                 previous_glass = Some((material_id, ng));
             }
             skip = h.tri;
@@ -665,6 +740,13 @@ impl<'a> CpuTracer<'a> {
     /// One path for pixel (px, py) with sample index `sidx` (the shader's
     /// non-G-buffer branch: jittered pinhole / thin lens).
     fn radiance_checked(&self, px: u32, py: u32, w: u32, h: u32, seed: u32, sidx: u32) -> Option<Vec3f> {
+        self.radiance_routed(px, py, w, h, seed, sidx, EmissionRouting::Combined).map(|split| split.base)
+    }
+
+    fn radiance_routed(
+        &self, px: u32, py: u32, w: u32, h: u32, seed: u32, sidx: u32,
+        routing: EmissionRouting,
+    ) -> Option<Split> {
         let pseed = pixel_seed(px, py, seed);
         let p = self.packed;
         let (right, up, fwd) = self.camera.basis();
@@ -736,15 +818,19 @@ impl<'a> CpuTracer<'a> {
         }
         let mut tp = vec3f(1.0, 1.0, 1.0);
         let mut lsum = vec3f(0.0, 0.0, 0.0);
+        let mut groups = Vec::new();
         let mut prev_pdf = 0.0f32;
         let mut delta = true;
+        // Distance from the last scattering vertex to the ray origin through windows,
+        // so an emitter hit weighs its MIS from that vertex, as its NEE did.
+        let mut carry = 0.0f32;
         let mut ndiff = 0.0f32;
         for b in 0..self.max_bounces.min(16) {
             if hit.truncated {
                 return None;
             }
             if self.probe_bounce >= 0 && b == self.probe_bounce as u32 {
-                return Some(vec3f(hit.tri as f32 + 1000.0, hit.t, tp.x));
+                return Some(Split { base: vec3f(hit.tri as f32 + 1000.0, hit.t, tp.x), ..Default::default() });
             }
             if !hit.is_hit() {
                 self.bump_stats(|stats| stats.escaped_to_sky += 1);
@@ -797,8 +883,9 @@ impl<'a> CpuTracer<'a> {
             } / ng.dot(rd).abs().max(0.1);
             let albedo = self.atlas_albedo(ti, w0, hit.u, hit.v, v3(m.albedo), footprint_m);
             let rough = m.roughness.clamp(0.0, 1.0).max(0.03);
-            let emission = v3(m.emission);
-            let metal = m.metal.clamp(0.0, 1.0);
+            let mi = p.tri_material[ti] as usize * 20 + 4;
+            let emission = v3(p.mat.data[mi..mi + 3].try_into().unwrap());
+            let mut metal = m.metal.clamp(0.0, 1.0);
             let ior = m.ior.max(1.0);
             let trans = m.transmission.clamp(0.0, 1.0);
             if emission.x + emission.y + emission.z > 0.0 && (front || m.two_sided) {
@@ -807,11 +894,13 @@ impl<'a> CpuTracer<'a> {
                     let area = gn.length() * 0.5;
                     let raw_n = gn / gn.length().max(p.scene_area * 2.5e-25);
                     let cosl = if m.two_sided { raw_n.dot(-rd).abs() } else { raw_n.dot(-rd).max(0.0) };
-                    let select_pdf = p.tri.data[ti * 12 + 11];
-                    let pl = hit.t * hit.t * select_pdf / (cosl * area).max(p.scene_area * 2.5e-11);
+                    let select_pdf = emission_pdf([emission.x, emission.y, emission.z], area, p.inv_light_power);
+                    let d = carry + hit.t;
+                    let pl = d * d * select_pdf / (cosl * area).max(p.scene_area * 2.5e-11);
                     wgt = prev_pdf * prev_pdf / (prev_pdf * prev_pdf + pl * pl);
                 }
-                lsum = lsum + tp * emission * wgt;
+                routing.add(&mut lsum, &mut groups, m.light_group,
+                    tp * emission * wgt, self.preview_clamp);
             }
             let dims = bounce_pairs(b);
             let r_lobe = self.sample2(pseed, sidx, dims[0]);
@@ -819,7 +908,7 @@ impl<'a> CpuTracer<'a> {
             let r_env = self.sample2(pseed, sidx, dims[2]);
             let r_light = self.sample2(pseed, sidx, dims[3]);
             let r_misc = self.sample2(pseed, sidx, dims[4]);
-            let v = -rd;
+            let mut v = -rd;
             if m.solid && trans > 0.0 {
                 let (direction, reflected) = solid_interface(rd, unit(gn), ior, r_lobe.0);
                 rd = direction;
@@ -831,30 +920,52 @@ impl<'a> CpuTracer<'a> {
                     // under the straight-shadow approximation.
                 }
                 ro = pt;
+                carry = 0.0;
                 hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
                 continue;
             }
-            // Classified glazing is a thin dielectric, not an alpha blend
-            // between glass and an opaque diffuse sheet. Alpha supplies
-            // absorption on transmission; Fresnel is the only lobe choice.
+            let mut rx = r_lobe.0;
+            let mut f0 = vec3f(0.0, 0.0, 0.0);
+            let mut kd = albedo;
+            let mut far_sheet = false;
             if trans > 0.0 {
-                ro = pt;
+                let haze = thin_glass_haze(m.roughness);
                 let fr = fresnel_dielectric(ng.dot(v).abs(), ior);
-                if r_lobe.0 < fr {
-                    rd = rd - ng * (2.0 * rd.dot(ng));
-                    delta = true;
-                    hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
-                } else {
-                    tp = tp * albedo * trans;
-                    // Keep the previous event's delta state: after a diffuse
-                    // arrival, environment NEE already owns this light path.
-                    hit = self.thin_transmission_trace(pt, ng, rd, ti);
+                if r_lobe.1 >= haze {
+                    ro = pt;
+                    if r_lobe.0 < fr {
+                        rd = rd - ng * (2.0 * rd.dot(ng));
+                        delta = true;
+                        carry = 0.0;
+                        hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
+                    } else {
+                        tp = tp * albedo * trans;
+                        carry += hit.t;
+                        // Keep the previous event's delta state: after a diffuse
+                        // arrival, environment NEE already owns this light path.
+                        hit = self.thin_transmission_trace(pt, ng, rd, ti);
+                    }
+                    continue;
                 }
-                continue;
+                // Select a rough-sheet part, then reuse the opaque estimator.
+                metal = 0.0;
+                if r_lobe.0 < fr {
+                    kd = vec3f(0.0, 0.0, 0.0);
+                    f0 = vec3f(1.0, 1.0, 1.0);
+                } else if (r_lobe.0 - fr) / (1.0 - fr) < trans {
+                    v = v - ng * (2.0 * v.dot(ng));
+                    ng = -ng;
+                    ns = -ns;
+                    if ns.dot(v) <= 0.0 {
+                        ns = ng;
+                    }
+                    far_sheet = true;
+                }
+                rx = r_lobe.1 / haze;
+            } else {
+                f0 = mix3(vec3f(0.04, 0.04, 0.04), albedo, metal);
             }
-            let rx = r_lobe.0;
-            let f0 = mix3(vec3f(0.04, 0.04, 0.04), albedo, metal);
-            let kd = albedo * (1.0 - metal);
+            kd = kd * (1.0 - metal);
             let alpha = rough * rough;
             let nv = ns.dot(v).max(0.0001);
             let mut ps = spec_prob(f0, kd, nv);
@@ -866,7 +977,7 @@ impl<'a> CpuTracer<'a> {
                     let n_nee = if ng.dot(ld) > 0.0 && ns.dot(ld) <= 0.0 { ng } else { ns };
                     let nl = n_nee.dot(ld);
                     if nl > 0.0 && ng.dot(ld) > 0.0 {
-                        let Some(vis) = self.shadow(pt, ng, ld, p.ray_tmax(), ti as i32) else { return None };
+                        let Some(vis) = self.shadow_from_sheet(pt, ng, ld, p.ray_tmax(), ti as i32, far_sheet, -1) else { return None };
                         let vis = vis.transmittance;
                         if vis.x + vis.y + vis.z > 0.0 {
                             self.bump_stats(|stats| stats.sun_nee_successes += 1);
@@ -882,14 +993,14 @@ impl<'a> CpuTracer<'a> {
                 let n_nee = if ng.dot(ld) > 0.0 && ns.dot(ld) <= 0.0 { ng } else { ns };
                 let nl = n_nee.dot(ld);
                 if nl > 0.0 && ng.dot(ld) > 0.0 {
-                    let Some(vis) = self.shadow(pt, ng, ld, p.ray_tmax(), ti as i32) else { return None };
+                    let Some(vis) = self.shadow_from_sheet(pt, ng, ld, p.ray_tmax(), ti as i32, far_sheet, -1) else { return None };
                     let vis = vis.transmittance;
                     if env.pdf > 0.0 && vis.x + vis.y + vis.z > 0.0 {
                         self.bump_stats(|stats| stats.sky_nee_successes += 1);
                         let ps_nee = spec_prob(f0, kd, n_nee.dot(v).max(0.0001));
                         let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha);
                         let pb = bsdf_pdf(n_nee, v, ld, alpha, ps_nee);
-                        let wgt = if p.env_grid_dim > 0 {
+                        let wgt = if self.env_grid_dim() > 0 {
                             1.0
                         } else {
                             env.pdf * env.pdf / (env.pdf * env.pdf + pb * pb)
@@ -899,7 +1010,7 @@ impl<'a> CpuTracer<'a> {
                     }
                 }
             }
-            if p.n_lights > 0 && !self.brute {
+            if p.n_lights > 0 && p.inv_light_power > 0.0 && !self.brute {
                 let mut lo = 0usize;
                 let mut hi = p.n_lights;
                 for _ in 0..24 {
@@ -930,19 +1041,21 @@ impl<'a> CpuTracer<'a> {
                 let nl = n_nee.dot(ld);
                 let lm_ref = &self.materials[p.tri_material[lrec[0] as usize] as usize];
                 let cosl = if lm_ref.two_sided { lnrm.dot(-ld).abs() } else { lnrm.dot(-ld).max(0.0) };
-                if nl > 0.0 && ng.dot(ld) > 0.0 && cosl > 0.0001 && dist > ray_error(pt, p.scene_scale) + ray_error(lp, p.scene_scale) {
-                    let Some(vis) = self.shadow(pt, ng, ld, dist - ray_error(lp, p.scene_scale), ti as i32) else { return None };
+                if lrec[2] > 0.0 && nl > 0.0 && ng.dot(ld) > 0.0 && cosl > 0.0001 && dist > ray_error(pt, p.scene_scale) + ray_error(lp, p.scene_scale) {
+                    let Some(vis) = self.shadow_from_sheet(pt, ng, ld, dist - ray_error(lp, p.scene_scale), ti as i32, far_sheet, lrec[0] as i32) else { return None };
                     let vis = vis.transmittance;
                     if vis.x + vis.y + vis.z > 0.0 {
                         self.bump_stats(|stats| stats.emissive_nee_successes += 1);
-                        let lm = v3(lm_ref.emission);
+                        let mi = p.tri_material[lrec[0] as usize] as usize * 20 + 4;
+                        let lm = v3(p.mat.data[mi..mi + 3].try_into().unwrap());
                         let pl = dist * dist * lrec[2] / (cosl * lrec[1]).max(p.scene_area * 2.5e-13);
                         let ps_nee = spec_prob(f0, kd, n_nee.dot(v).max(0.0001));
                         let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha);
                         let pb = bsdf_pdf(n_nee, v, ld, alpha, ps_nee);
                         let wgt = pl * pl / (pl * pl + pb * pb);
                         let corr = shading_normal_correction(ng, n_nee, v, ld);
-                        lsum = lsum + tp * f * lm * vis * (nl * corr / pl * wgt);
+                        routing.add(&mut lsum, &mut groups, lm_ref.light_group,
+                            tp * f * lm * vis * (nl * corr / pl * wgt), self.preview_clamp);
                     }
                 }
             }
@@ -979,7 +1092,8 @@ impl<'a> CpuTracer<'a> {
                     to_world(sample_n, vec3f(rr * phi.cos(), rr * phi.sin(), (1.0 - r_bsdf.0).max(0.0).sqrt()))
                 };
             }
-            if sampled_diffuse {
+            // Every rough-sheet event consumes one diffuse depth.
+            if sampled_diffuse || trans > 0.0 {
                 ndiff += 1.0;
             }
             let nl = sample_n.dot(ld);
@@ -1007,7 +1121,12 @@ impl<'a> CpuTracer<'a> {
             }
             rd = ld;
             ro = pt;
-            hit = self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32);
+            carry = 0.0;
+            hit = if far_sheet {
+                self.thin_transmission_trace(pt, ng, rd, ti)
+            } else {
+                self.secondary_trace(pt, ng, rd, p.ray_tmax(), ti as i32)
+            };
         }
         if let Some(limit) = self.preview_clamp {
             let peak = lsum.x.max(lsum.y).max(lsum.z);
@@ -1024,13 +1143,31 @@ impl<'a> CpuTracer<'a> {
         {
             return None;
         }
-        Some(lsum)
+        for (_, light) in &groups {
+            if !light.x.is_finite() || !light.y.is_finite() || !light.z.is_finite()
+                || light.x.abs() >= 1.0e30 || light.y.abs() >= 1.0e30 || light.z.abs() >= 1.0e30
+            {
+                return None;
+            }
+        }
+        Some(Split { base: lsum, groups })
     }
 
     pub fn radiance(&self, px: u32, py: u32, w: u32, h: u32, seed: u32, sidx: u32) -> Vec3f {
         self.radiance_checked(px, py, w, h, seed, sidx).unwrap_or_else(|| {
             self.invalid_samples.set(self.invalid_samples.get() + 1);
             Vec3f::default()
+        })
+    }
+
+    /// The same path and random numbers as `radiance`, with grouped emission
+    /// routed at reference level. Without the preview clamp, summing the
+    /// streams recovers `radiance`; preview clamps the base and each reference
+    /// emission term independently, before the GPU's reservoir weighting.
+    pub fn radiance_split(&self, px: u32, py: u32, w: u32, h: u32, seed: u32, sidx: u32) -> Split {
+        self.radiance_routed(px, py, w, h, seed, sidx, EmissionRouting::Groups).unwrap_or_else(|| {
+            self.invalid_samples.set(self.invalid_samples.get() + 1);
+            Split::default()
         })
     }
 
@@ -1185,6 +1322,7 @@ pub fn cpu_tracer<'a>(scene: &'a SceneInput, packed: &'a PackedScene) -> CpuTrac
         packed,
         materials: &scene.materials,
         sky: crate::sky::sky_uniforms(&scene.sun, scene.up),
+        environment: None,
         camera: scene.camera.clone(),
         max_bounces: 8,
         max_diffuse: 4,
@@ -1202,6 +1340,67 @@ pub fn cpu_tracer<'a>(scene: &'a SceneInput, packed: &'a PackedScene) -> CpuTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_group_routing_conserves_radiance_per_sample() {
+        let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        scene.materials = vec![
+            Material::diffuse([0.65, 0.65, 0.65]),
+            Material {
+                albedo: [0.7, 0.6, 0.5], roughness: 0.2, metal: 0.7,
+                emission: [0.4, 0.1, 0.05], light_group: 1,
+                ..Default::default()
+            },
+            Material { light_group: 2, ..Material::emissive([0.1, 0.4, 1.0], 3.0) },
+            Material::emissive([1.0, 0.8, 0.3], 2.0),
+        ];
+        scene.push_quad([[-2.0, -0.8, -1.0], [-2.0, -0.8, 2.0], [2.0, -0.8, 2.0], [2.0, -0.8, -1.0]], 0);
+        // The glossy first emitter partly hides the second; both also light
+        // the floor. The side emitter and open sky must remain in the base.
+        scene.push_quad([[-0.9, -0.4, 0.5], [0.2, -0.4, 0.5], [0.2, 0.7, 0.5], [-0.9, 0.7, 0.5]], 1);
+        scene.push_quad([[-0.2, -0.2, 0.0], [0.9, -0.2, 0.0], [0.9, 0.9, 0.0], [-0.2, 0.9, 0.0]], 2);
+        scene.push_quad([[1.1, -0.4, 0.3], [1.8, -0.4, 0.3], [1.8, 0.5, 0.3], [1.1, 0.5, 0.3]], 3);
+        scene.ensure_normals();
+        scene.camera = Camera {
+            pos: vec3f(0.0, 0.4, 4.0), target: vec3f(0.0, 0.4, 0.0),
+            ortho_height: Some(3.0), f_stop: 0.0, ..Default::default()
+        };
+        scene.sun.sky_strength = 0.3;
+        scene.sun.sun_strength = 0.0;
+        for frosted_lid in [false, true] {
+            let mut scene = scene.clone();
+            if frosted_lid {
+                scene.materials.push(Material { roughness: 0.6, transmission: 0.55, ..Material::glass([1.0; 3]) });
+                scene.push_quad([[-1.0, -0.5, 1.0], [1.0, -0.5, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]], 4);
+                scene.ensure_normals();
+            }
+            let packed = PackedScene::pack(&scene);
+            let tracer = cpu_tracer(&scene, &packed);
+            let mut seen = [false; 3];
+            for py in 0..6 {
+                for px in 0..8 {
+                    for sample in 0..8 {
+                        let whole = tracer.radiance(px, py, 8, 6, 17, sample);
+                        let split = tracer.radiance_split(px, py, 8, 6, 17, sample);
+                        let mut sum = split.base;
+                        seen[0] |= split.base.length() > 0.0;
+                        for (id, light) in split.groups {
+                            seen[id as usize] |= light.length() > 0.0;
+                            sum = sum + light;
+                        }
+                        let error = sum - whole;
+                        let scale = whole.x.abs().max(whole.y.abs()).max(whole.z.abs()).max(1.0);
+                        assert!(error.x.abs().max(error.y.abs()).max(error.z.abs()) <= 2.0e-6 * scale,
+                            "routing lost or doubled light at pixel ({px}, {py}), sample {sample}: split {sum:?}, whole {whole:?}");
+                        assert_eq!(tracer.invalid_samples.get(), 0,
+                            "invalid path at pixel ({px}, {py}), sample {sample}");
+                    }
+                }
+            }
+            assert!(seen.into_iter().all(|present| present), "base and both groups must contribute");
+            assert!(tracer.stats.get().emissive_nee_successes > 0, "exercise emissive NEE as well as hits");
+        }
+    }
 
     fn scaled_scene(scene: &SceneInput, scale: f32) -> SceneInput {
         let mut scene = scene.clone();
@@ -1990,6 +2189,41 @@ mod tests {
     }
 
     #[test]
+    fn thin_glass_furnace_conserves_energy() {
+        let mut scene = SceneInput::default();
+        scene.materials = vec![Material::glass([1.0; 3])];
+        scene.push_quad([[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]], 0);
+        scene.ensure_normals();
+        scene.camera = Camera {
+            pos: vec3f(0.0, 0.0, 3.0), target: Vec3f::default(),
+            ortho_height: Some(1.0), f_stop: 0.0, ..Default::default()
+        };
+        for (roughness, transmission) in [(0.0, 1.0), (0.6, 1.0), (0.6, 0.55)] {
+            scene.materials[0].roughness = roughness;
+            scene.materials[0].transmission = transmission;
+            let packed = PackedScene::pack(&scene);
+            let mut tracer = cpu_tracer(&scene, &packed);
+            tracer.sky = SkyUniforms::uniform_white(1.0);
+            tracer.brute = true;
+            let samples = if roughness == 0.0 { 64 } else { 4096 };
+            let mut sum = Vec3f::default();
+            for sample in 0..samples {
+                let radiance = tracer.radiance(0, 0, 1, 1, 3, sample);
+                if roughness == 0.0 {
+                    assert_eq!(radiance, vec3f(1.0, 1.0, 1.0), "clear unit sheet keeps the window furnace value, sample {sample}");
+                }
+                sum = sum + radiance;
+            }
+            let mean = sum / samples as f32;
+            assert!(mean.x <= 1.0 && mean.y <= 1.0 && mean.z <= 1.0,
+                "thin-sheet furnace does not create energy, roughness {roughness}, transmission {transmission}: {mean:?}");
+            assert!(mean.x >= 0.9 && mean.y >= 0.9 && mean.z >= 0.9,
+                "thin-sheet furnace retains energy, roughness {roughness}, transmission {transmission}: {mean:?}");
+            assert_eq!(tracer.invalid_samples.get(), 0, "thin-sheet furnace has no invalid paths");
+        }
+    }
+
+    #[test]
     fn thin_glass_transmits_shadow_rays() {
         let mut s = SceneInput::default();
         s.materials = vec![Material::glass([0.8, 0.9, 1.0])];
@@ -2013,13 +2247,32 @@ mod tests {
             .transmittance;
         // Normal-incidence dielectric Fresnel is 4%; tint is applied once.
         assert!((tr.x - 0.768).abs() < 0.002 && (tr.y - 0.864).abs() < 0.002 && (tr.z - 0.96).abs() < 0.002, "{tr:?}");
+        for (roughness, window_share) in [(0.2, 0.648), (0.6, 0.0)] {
+            s.materials[0].roughness = roughness;
+            let packed = PackedScene::pack(&s);
+            let mut tracer = cpu_tracer(&s, &packed);
+            tracer.shadow_skin = 0.0;
+            let origin = vec3f(0.2, 0.1, 1.0) - packed.origin;
+            let up = vec3f(0.0, 0.0, 1.0);
+            let actual = tracer.shadow(origin, up, -up, 10.0, -1).unwrap().transmittance;
+            assert!((actual - tr * window_share).length() < 1.0e-6,
+                "shadow carries only the window share once per boxed pane, roughness {roughness}: {actual:?}");
+            let hit = tracer.trace(origin, -up, 10.0, false, 0.0, -1);
+            assert!(hit.is_hit(), "far-sheet pairing starts on the pane");
+            let tri = &packed.accel.tris[hit.tri as usize];
+            let point = tri.v0 * (1.0 - hit.u - hit.v) + tri.v1 * hit.u + tri.v2 * hit.v;
+            let vis = tracer.shadow_from_sheet(point, -up, -up, 10.0, hit.tri, true, -1).unwrap();
+            assert_eq!(vis.transmittance, vec3f(1.0, 1.0, 1.0), "far-sheet NEE skips the paired back face");
+            let next = tracer.thin_transmission_trace(point, -up, -up, hit.tri as usize);
+            assert!(!next.is_hit() && !next.truncated, "far-sheet continuation skips the paired back face");
+        }
     }
 
     #[test]
     fn textured_glass_tints_shadow_rays() {
         let mut s = SceneInput::default();
         s.images.push(crate::scene::Image { width: 1, height: 1, data: vec![0xffff_0000] });
-        s.materials = vec![Material { albedo: [1.0; 3], transmission: 1.0, texture: Some(0), ..Default::default() }];
+        s.materials = vec![Material { albedo: [1.0; 3], roughness: 0.0, transmission: 1.0, texture: Some(0), ..Default::default() }];
         let positions = [[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]];
         let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         s.push_mesh(&positions, None, Some(&uvs), &[0, 1, 2, 0, 2, 3], 0);
@@ -2079,7 +2332,7 @@ mod tests {
             Material::diffuse([0.75, 0.75, 0.75]),
             Material {
                 albedo: [0.92, 0.97, 1.0],
-                roughness: 0.02,
+                roughness: 0.0,
                 ior: 1.52,
                 transmission: 0.69,
                 two_sided: true,

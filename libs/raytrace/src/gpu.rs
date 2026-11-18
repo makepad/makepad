@@ -8,29 +8,34 @@
 //! trace   one low-discrepancy sample per pixel in the active row set,
 //!         starting from the G-buffer hit (pinhole) or a lens-sampled
 //!         primary ray (bokeh); accumulates linear sum + count (ping-pong)
+//! gather  grouped scenes fold this dispatch's far entries into the tile atlas
 //! resolve converts a transient invalid-sample sentinel back to clean sum/N
 //! reject  increments a persistent per-pixel NaN/Inf/traversal diagnostic
 //! moments running mean/mean² of luminance for variance (ping-pong)
 //! guide   (denoise) G-buffer + straight dielectric continuation → (normal, depth)
 //! atrous  (denoise) 4 edge-avoiding wavelet passes guided by normal,
 //!         depth and the accumulated variance
-//! tonemap exposure + ACES + sRGB → BGRA8 view target (captured for PNG)
+//! far     sum the reference tiles at the current RGB gains
+//! carry   retain traced base light between resolution rungs
+//! tonemap add guided far light, then exposure + ACES + sRGB → BGRA8 view
 //! window  the widget draws the view target
 //! ```
 //!
-//! No CPU→GPU traffic after the scene upload except the draw-call uniforms;
-//! the only readback is the PNG capture.
+//! Between scene and group-gain uploads the CPU sends draw uniforms and
+//! tile rectangles. Rendering needs no image readback.
 //!
 //! SHADER LAW (bit us for a day): the script shader parser gives unary
 //! minus the LOWEST precedence — `-a - b` emits `-(a - b)`. Never write a
 //! unary minus followed by more terms; write `(0.0 - a) - b`. A bare `-x`
 //! as a whole expression or argument is fine.
 
+use crate::env_map::{EnvironmentFrame, EnvironmentLight};
 use crate::pack::{PackedScene, DATA_SHIFT, DATA_W};
 use crate::scene::SceneInput;
 use crate::sky::{sky_uniforms, SkyUniforms};
 use makepad_draw::*;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 script_mod! {
     use mod.pod.*
@@ -64,6 +69,16 @@ script_mod! {
         }
     }
 
+    mod.draw.PtLightSample = struct {
+        base: vec3
+        far: vec4
+
+        new: fn(base: vec3) -> Self {
+            return self(base: base far: vec4(0.0, 0.0, 0.0, 0.0))
+        }
+    }
+    let PtLightSample = mod.draw.PtLightSample
+
     mod.draw.PtTrace = mod.std.set_type_default() do #(DrawTrace::script_shader(vm)){
         ..mod.draw.DrawQuad
         draw_call_always: true
@@ -82,6 +97,7 @@ script_mod! {
         gbuf_tex: texture_2d(float)
         moment_tex: texture_2d(float)
         rejected_tex: texture_2d(float)
+        env_tex: texture_2d(float)
 
         res: uniform(vec2f)
         inv_res: uniform(vec2f)
@@ -102,9 +118,17 @@ script_mod! {
         spp: uniform(1.0)
         use_gbuffer: uniform(1.0)
         n_lights: uniform(0.0)
+        inv_light_power: uniform(0.0)
         env_grid_dim: uniform(0.0)
         env_min: uniform(vec3f)
         env_inv_extent: uniform(vec3f)
+        env_on: uniform(0.0)
+        env_inv: uniform(vec2f)
+        env_size: uniform(vec2f)
+        env_row0: uniform(vec4f)
+        env_row1: uniform(vec4f)
+        env_row2: uniform(vec4f)
+        env_strength: uniform(1.0)
         n_nodes: uniform(0.0)
         max_bounces: uniform(8.0)
         max_diffuse: uniform(4.0)
@@ -199,7 +223,11 @@ script_mod! {
             return r
         }
         sobol2: fn(index: u32, pseed: u32, pair: u32) -> vec2 {
-            let idx = self.owen(index, self.hash2(pseed, 1374496523u))
+            // Each dimension pair shuffles the index with its own seed (Burley's padding): one
+            // shared shuffle makes every pair a function of the same point, so the cross-pair
+            // projections collapse onto curves and part of a pixel's error stays frozen for its
+            // whole run, unseen by its moments (a flat env-lit board kept 4.4x the noise at 256).
+            let idx = self.owen(index, self.hash2(pseed, 1374496523u + pair))
             let sx = self.hash2(pseed, pair * 2u)
             let sy = self.hash2(pseed, pair * 2u + 1u)
             let x = self.owen(self.reverse_bits(idx), sx)
@@ -436,7 +464,7 @@ script_mod! {
         }
 
         visible_sun: fn(v_in: vec3) -> vec3 {
-            if self.uniform_sky > 0.0 || self.sky_strength <= 0.0 {
+            if self.env_on > 0.5 || self.uniform_sky > 0.0 || self.sky_strength <= 0.0 {
                 return vec3(0.0, 0.0, 0.0)
             }
             let v = normalize(v_in)
@@ -506,6 +534,11 @@ script_mod! {
             let lf = max(max(fr.x, fr.y), fr.z)
             let lk = max(max(kd.x, kd.y), kd.z)
             return clamp(lf / (lf + lk + 0.0001), 0.05, 0.95)
+        }
+        // Shader twin of scene::thin_glass_haze.
+        thin_glass_haze: fn(roughness: f32) -> f32 {
+            let s = clamp(roughness / #(crate::scene::THIN_GLASS_FULL_HAZE_ROUGHNESS), 0.0, 1.0)
+            return s * s * (3.0 - 2.0 * s)
         }
         fresnel_dielectric: fn(cosi_in: f32, ior: f32) -> f32 {
             let cosi = clamp(cosi_in, 0.0, 1.0)
@@ -660,10 +693,87 @@ script_mod! {
             let su = sqrt(r.y)
             return p0 * (su * (1.0 - fu)) + p1 * (su * fu)
         }
+        fetch_env: fn(index: u32) -> vec4 {
+            return self.env_tex.sample_nearest(self.tx(index, self.env_inv))
+        }
+        env_to_map: fn(d: vec3) -> vec3 {
+            return vec3(dot(self.env_row0.xyz, d), dot(self.env_row1.xyz, d), dot(self.env_row2.xyz, d))
+        }
+        env_texel: fn(d: vec3) -> vec2 {
+            let u = 0.5 + atan2(d.x, -d.z) / 6.28318530718
+            let v = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265359
+            return clamp(floor(vec2(u, v) * self.env_size), vec2(0.0, 0.0), self.env_size - vec2(1.0, 1.0))
+        }
+        env_radiance: fn(d_world: vec3) -> vec3 {
+            let ij = self.env_texel(self.env_to_map(d_world))
+            let index = u32(ij.y) * u32(self.env_size.x) + u32(ij.x)
+            return self.fetch_env(index).xyz * self.env_strength
+        }
+        env_solid_angle_pdf: fn(probability: f32, sin_theta: f32) -> f32 {
+            if sin_theta <= 0.0 { return 0.0 }
+            return probability * self.env_size.x * self.env_size.y / (2.0 * 3.14159265359 * 3.14159265359 * sin_theta)
+        }
+        env_pdf: fn(d_world: vec3) -> f32 {
+            let d = self.env_to_map(d_world)
+            let ij = self.env_texel(d)
+            let i = u32(ij.x)
+            let j = u32(ij.y)
+            let width = u32(self.env_size.x)
+            let marginal = width * u32(self.env_size.y)
+            let index = j * width + i
+            var row_prev = 0.0
+            var col_prev = 0.0
+            if j > 0u { row_prev = self.fetch_env(marginal + j - 1u).x }
+            if i > 0u { col_prev = self.fetch_env(index - 1u).w }
+            let probability = (self.fetch_env(marginal + j).x - row_prev) * (self.fetch_env(index).w - col_prev)
+            return self.env_solid_angle_pdf(probability, sqrt(max(0.0, 1.0 - d.y * d.y)))
+        }
+        env_sample: fn(r: vec2) -> vec4 {
+            let width = u32(self.env_size.x)
+            let height = u32(self.env_size.y)
+            let marginal = width * height
+            var lo = 0u
+            var hi = height
+            for search in 0..24 {
+                if lo >= hi { break }
+                let mid = (lo + hi) >> 1u
+                if r.x < self.fetch_env(marginal + mid).x { hi = mid } else { lo = mid + 1u }
+            }
+            let j = min(lo, height - 1u)
+            var row_prev = 0.0
+            if j > 0u { row_prev = self.fetch_env(marginal + j - 1u).x }
+            let row_pdf = self.fetch_env(marginal + j).x - row_prev
+            var v_off = 0.0
+            if row_pdf > 0.0 { v_off = clamp((r.x - row_prev) / row_pdf, 0.0, 0.99999994) }
+            lo = 0u
+            hi = width
+            for search in 0..24 {
+                if lo >= hi { break }
+                let mid = (lo + hi) >> 1u
+                if r.y < self.fetch_env(j * width + mid).w { hi = mid } else { lo = mid + 1u }
+            }
+            let i = min(lo, width - 1u)
+            let index = j * width + i
+            var col_prev = 0.0
+            if i > 0u { col_prev = self.fetch_env(index - 1u).w }
+            let col_pdf = self.fetch_env(index).w - col_prev
+            var u_off = 0.0
+            if col_pdf > 0.0 { u_off = clamp((r.y - col_prev) / col_pdf, 0.0, 0.99999994) }
+            let u = (f32(i) + u_off) / self.env_size.x
+            let v = (f32(j) + v_off) / self.env_size.y
+            let theta = 3.14159265359 * v
+            let phi = 6.28318530718 * (u - 0.5)
+            let sin_theta = sin(theta)
+            let d = vec3(sin_theta * sin(phi), cos(theta), (0.0 - sin_theta) * cos(phi))
+            let world = self.env_row0.xyz * d.x + self.env_row1.xyz * d.y + self.env_row2.xyz * d.z
+            return vec4(world, self.env_solid_angle_pdf(row_pdf * col_pdf, sin_theta))
+        }
         environment: fn(rd: vec3) -> vec3 {
+            if self.env_on > 0.5 { return self.env_radiance(rd) }
             return self.sky(rd)
         }
         sky_pdf: fn(rd: vec3) -> f32 {
+            if self.env_on > 0.5 { return self.env_pdf(rd) }
             let z = dot(rd, self.world_up.xyz)
             if z <= 0.0 { return 0.0 }
             return 0.07957747155 + 0.03978873577 / sqrt(max(z, 0.000001))
@@ -710,6 +820,7 @@ script_mod! {
             return vec4(ld, rec.z / max(rec.y, 0.000000000001))
         }
         environment_sample: fn(p: vec3, normal: vec3, r: vec2) -> vec4 {
+            if self.env_on > 0.5 { return self.env_sample(r) }
             if self.env_grid_dim > 0.5 {
                 return self.guided_environment_sample(p, normal, r)
             }
@@ -723,11 +834,11 @@ script_mod! {
         escape: fn(rd: vec3, prev_pdf: f32, delta: f32) -> vec3 {
             // Brute mode is the BSDF-only oracle: no NEE runs, so nothing
             // may be suppressed here (CPU twin agrees).
-            if self.brute > 0.5 { return self.sky(rd) + self.visible_sun(rd) }
-            var l = self.sky(rd)
+            if self.brute > 0.5 { return self.environment(rd) + self.visible_sun(rd) }
+            var l = self.environment(rd)
             if delta > 0.5 { l = l + self.visible_sun(rd) }
             if delta > 0.5 { return l }
-            if self.env_grid_dim > 0.5 {
+            if self.env_on < 0.5 && self.env_grid_dim > 0.5 {
                 if dot(rd, self.world_up.xyz) < 0.0 { return l }
                 return vec3(0.0, 0.0, 0.0)
             }
@@ -736,7 +847,7 @@ script_mod! {
         }
         // Straight NEE ignores bending, counts every solid interface, and
         // applies absorption only on back-side arrivals (CPU shadow twin).
-        shadow: fn(p_in: vec3, ng_in: vec3, rd: vec3, tmax_in: f32, skip_in: f32) -> vec4 {
+        shadow: fn(p_in: vec3, ng_in: vec3, rd: vec3, tmax_in: f32, skip_in: f32, far_sheet: bool, target: f32) -> vec4 {
             var p = p_in
             var ng = ng_in
             var skip = skip_in
@@ -745,11 +856,21 @@ script_mod! {
             var travelled = 0.0
             var previous_glass_material = -1.0
             var previous_glass_normal = vec3(0.0, 0.0, 0.0)
+            if self.frost_lobe() > 0.5 && far_sheet && skip_in >= 0.0 {
+                let ti = u32(skip_in)
+                let t0 = self.fetch_tri(ti * 3u)
+                let t1 = self.fetch_tri(ti * 3u + 1u)
+                let t2 = self.fetch_tri(ti * 3u + 2u)
+                previous_glass_material = t0.w
+                previous_glass_normal = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
+            }
             // One final fixed iteration verifies escape after eight glass hits.
             for layer in 0..9 {
                 let h = self.spawn_trace(p, ng, rd, tmax, skip)
                 if h.y < -1.5 { return vec4(0.0, 0.0, 0.0, -1.0) }
                 if h.y < 0.0 { return vec4(tr, 0.0) }
+                // The sampled light's own triangle is the target, never a blocker.
+                if h.y == target { return vec4(tr, 0.0) }
                 if layer == 8u { return vec4(0.0, 0.0, 0.0, 0.0) }
                 let ti = u32(h.y)
                 let t0 = self.fetch_tri(ti * 3u)
@@ -812,7 +933,12 @@ script_mod! {
                         tint = tint * pow(tc, vec3(2.2, 2.2, 2.2))
                     }
                     let fr = self.fresnel_dielectric(abs(dot(ng, -rd)), m2.x)
-                    tr = tr * tint * (m2.y * (1.0 - fr))
+                    var transmission = m2.y
+                    if self.frost_lobe() > 0.5 {
+                        transmission = transmission * (1.0 - self.thin_glass_haze(m0.w))
+                    }
+                    tr = tr * tint * (transmission * (1.0 - fr))
+                    if self.frost_lobe() > 0.5 && tr.x == 0.0 && tr.y == 0.0 && tr.z == 0.0 { return vec4(0.0, 0.0, 0.0, 0.0) }
                     previous_glass_material = t0.w
                     previous_glass_normal = ng
                 }
@@ -824,8 +950,17 @@ script_mod! {
             return vec4(0.0, 0.0, 0.0, 0.0)
         }
 
+        // The variant overrides these hooks. In an ordinary trace the constant
+        // removes the reservoir and leaves only the base radiance and count.
+        route_groups: fn() -> f32 { return 0.0 }
+        // Only frost variants retain rough-sheet transport.
+        frost_lobe: fn() -> f32 { return 0.0 }
+        write_group: fn(entry: vec4) {}
+        group_term: fn(term: vec3, id: f32) -> vec4 { return vec4(term, id) }
+        merge_group: fn(a: vec4, b: vec4, r: f32) -> vec4 { return a }
+
         // ---- one path ----
-        radiance: fn(px: u32, py: u32, pseed: u32, sidx: u32) -> vec3 {
+        radiance: fn(px: u32, py: u32, pseed: u32, sidx: u32) -> PtLightSample {
             let j = self.sobol2(sidx, pseed, 0u)
             var ro = self.cam_pos
             var rd = vec3(0.0, 0.0, 1.0)
@@ -859,16 +994,16 @@ script_mod! {
             }
             if self.debug_mode > 2.5 && self.debug_mode < 3.5 {
                 let r = self.sobol2(sidx, pseed, 3u)
-                return vec3(r.x, r.y, self.rand(pseed, sidx, 7u))
+                return PtLightSample.new(vec3(r.x, r.y, self.rand(pseed, sidx, 7u)))
             }
             if self.debug_mode > 6.5 && self.debug_mode < 7.5 {
-                return vec3(hit.y, hit.z, hit.w)
+                return PtLightSample.new(vec3(hit.y, hit.z, hit.w))
             }
             if self.debug_mode > 8.5 && self.debug_mode < 9.5 {
-                return self.escape(rd, 0.0, 1.0)
+                return PtLightSample.new(self.escape(rd, 0.0, 1.0))
             }
             if self.debug_mode > 0.5 && self.debug_mode < 2.5 {
-                if hit.y < 0.0 { return vec3(0.0, 0.0, 0.0) }
+                if hit.y < 0.0 { return PtLightSample.new(vec3(0.0, 0.0, 0.0)) }
                 if self.debug_mode < 1.5 {
                     let tii = u32(hit.y)
                     let a0 = self.fetch_attr(tii * 4u)
@@ -876,10 +1011,10 @@ script_mod! {
                     let a2 = self.fetch_attr(tii * 4u + 2u)
                     let w0 = 1.0 - hit.z - hit.w
                     let nn = normalize(a0.xyz * w0 + a1.xyz * hit.z + a2.xyz * hit.w)
-                    return nn * 0.5 + vec3(0.5, 0.5, 0.5)
+                    return PtLightSample.new(nn * 0.5 + vec3(0.5, 0.5, 0.5))
                 }
                 let mid = u32(self.fetch_tri(u32(hit.y) * 3u).w)
-                return self.fetch_mat(mid * 5u).xyz
+                return PtLightSample.new(self.fetch_mat(mid * 5u).xyz)
             }
             // Primary parity with the raster pane (CPU twin agrees): the
             // camera ray passes through one-sided backfaces exactly as
@@ -907,16 +1042,20 @@ script_mod! {
             }
             var tp = vec3(1.0, 1.0, 1.0)
             var lsum = vec3(0.0, 0.0, 0.0)
+            var far = vec4(0.0, 0.0, 0.0, 0.0)
             var prev_pdf = 0.0
             var delta = 1.0
+            // Distance from the last scattering vertex to the ray origin through windows,
+            // so an emitter hit weighs its MIS from that vertex, as its NEE did.
+            var carry = 0.0
             var ndiff = 0.0
             var nb = u32(self.max_bounces)
             if self.debug_mode > 7.5 && self.debug_mode < 8.5 { nb = 1u }
             for b in 0..16 {
                 if b >= nb { break }
-                if hit.y < -1.5 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
+                if hit.y < -1.5 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
                 if self.debug_mode > 5.5 && f32(b) == self.dbg_b {
-                    return vec3(hit.y + 1000.0, hit.x, tp.x)
+                    return PtLightSample.new(vec3(hit.y + 1000.0, hit.x, tp.x))
                 }
                 if hit.y < 0.0 {
                     lsum = lsum + tp * self.escape(rd, prev_pdf, delta)
@@ -996,7 +1135,7 @@ script_mod! {
                 }
                 let rough = max(m0.w, 0.03)
                 let emission = m1.xyz
-                let metal = m1.w
+                var metal = m1.w
                 let ior = m2.x
                 let trans = m2.y
                 let material_class = self.material_class(m2)
@@ -1006,10 +1145,19 @@ script_mod! {
                         let area = length(gn) * 0.5
                         let raw_n = gn / max(length(gn), self.scene_scale.y * 0.00000000000000000000000025)
                         let cosl = if m2.w > 0.5 { abs(dot(raw_n, -rd)) } else { max(dot(raw_n, -rd), 0.0) }
-                        let pl = hit.x * hit.x * t2.w / max(cosl * area, self.scene_scale.y * 0.000000000025)
+                        let lum = 0.2126 * emission.x + 0.7152 * emission.y + 0.0722 * emission.z
+                        let select_pdf = max(lum * area, 0.0) * self.inv_light_power
+                        let d = carry + hit.x
+                        let pl = d * d * select_pdf / max(cosl * area, self.scene_scale.y * 0.000000000025)
                         w = prev_pdf * prev_pdf / (prev_pdf * prev_pdf + pl * pl)
                     }
-                    lsum = lsum + tp * emission * w
+                    let term = tp * emission * w
+                    if self.route_groups() > 0.5 && t2.w > 0.0 {
+                        far = self.merge_group(far, self.group_term(term, t2.w), self.rand(pseed, sidx, 128u + b * 2u))
+                        if self.finite3(far.xyz) < 0.5 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
+                    } else {
+                        lsum = lsum + term
+                    }
                 }
                 let dim = 2u + b * 5u
                 let r_lobe = self.sobol2(sidx, pseed, dim)
@@ -1017,7 +1165,7 @@ script_mod! {
                 let r_env = self.sobol2(sidx, pseed, dim + 2u)
                 let r_light = self.sobol2(sidx, pseed, dim + 3u)
                 let r_misc = self.sobol2(sidx, pseed, dim + 4u)
-                let v = -rd
+                var v = -rd
                 if m4.w > 0.5 && trans > 0.0 {
                     let event = self.solid_interface(rd, normalize(gn), ior, r_lobe.x)
                     rd = event.xyz
@@ -1028,30 +1176,52 @@ script_mod! {
                         // Retain diffuse NEE ownership, as for thin sheets.
                     }
                     ro = p
+                    carry = 0.0
                     hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
                     continue
                 }
-                // Thin dielectric: alpha is straight-through absorption, not
-                // a diffuse/opaque lobe probability. Fresnel alone selects
-                // reflection versus transmission.
+                var rx = r_lobe.x
+                var f0 = vec3(0.0, 0.0, 0.0)
+                var kd = albedo
+                var far_sheet = false
                 if material_class > 0.5 {
-                    ro = p
+                    let haze = if self.frost_lobe() > 0.5 { self.thin_glass_haze(m0.w) } else { 0.0 }
                     let fr = self.fresnel_dielectric(abs(dot(ng, v)), ior)
-                    if r_lobe.x < fr {
-                        rd = rd - ng * (2.0 * dot(rd, ng))
-                        delta = 1.0
-                        hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
-                    } else {
-                        tp = tp * albedo * trans
-                        // Preserve a preceding diffuse event so its direct
-                        // environment contribution remains owned by NEE.
-                        hit = self.thin_transmission_trace(p, ng, rd, ti)
+                    if self.frost_lobe() < 0.5 || r_lobe.y >= haze {
+                        ro = p
+                        if r_lobe.x < fr {
+                            rd = rd - ng * (2.0 * dot(rd, ng))
+                            delta = 1.0
+                            carry = 0.0
+                            hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                        } else {
+                            tp = tp * albedo * trans
+                            carry = carry + hit.x
+                            // Preserve a preceding diffuse event so its direct
+                            // environment contribution remains owned by NEE.
+                            hit = self.thin_transmission_trace(p, ng, rd, ti)
+                        }
+                        continue
                     }
-                    continue
+                    if self.frost_lobe() > 0.5 {
+                        // Select a rough-sheet part, then reuse the opaque estimator.
+                        metal = 0.0
+                        if r_lobe.x < fr {
+                            kd = vec3(0.0, 0.0, 0.0)
+                            f0 = vec3(1.0, 1.0, 1.0)
+                        } else if (r_lobe.x - fr) / (1.0 - fr) < trans {
+                            v = v - ng * (2.0 * dot(v, ng))
+                            ng = -ng
+                            ns = -ns
+                            if dot(ns, v) <= 0.0 { ns = ng }
+                            far_sheet = true
+                        }
+                        rx = r_lobe.y / haze
+                    }
+                } else {
+                    f0 = mix(vec3(0.04, 0.04, 0.04), albedo, metal)
                 }
-                let rx = r_lobe.x
-                let f0 = mix(vec3(0.04, 0.04, 0.04), albedo, metal)
-                let kd = albedo * (1.0 - metal)
+                kd = kd * (1.0 - metal)
                 let alpha = rough * rough
                 let nv = max(dot(ns, v), 0.0001)
                 var ps = self.spec_prob(f0, kd, nv)
@@ -1063,8 +1233,8 @@ script_mod! {
                         if dot(ng, ld) > 0.0 && dot(ns, ld) <= 0.0 { n_nee = ng }
                         let nl = dot(n_nee, ld)
                         if nl > 0.0 && dot(ng, ld) > 0.0 {
-                            let sh = self.shadow(p, ng, ld, self.scene_scale.x * 5000000.0, f32(ti))
-                            if sh.w < 0.0 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
+                            let sh = self.shadow(p, ng, ld, self.scene_scale.x * 5000000.0, f32(ti), far_sheet, -1.0)
+                            if sh.w < 0.0 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
                             if sh.x + sh.y + sh.z > 0.0 {
                                 let omega = 6.28318530718 * (1.0 - self.sun_dir.w)
                                 let e = self.sun_radiance.xyz * omega
@@ -1081,21 +1251,21 @@ script_mod! {
                     if dot(ng, ld) > 0.0 && dot(ns, ld) <= 0.0 { n_nee = ng }
                     let nl = dot(n_nee, ld)
                     if nl > 0.0 && dot(ng, ld) > 0.0 {
-                        let sh = self.shadow(p, ng, ld, self.scene_scale.x * 5000000.0, f32(ti))
-                        if sh.w < 0.0 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
+                        let sh = self.shadow(p, ng, ld, self.scene_scale.x * 5000000.0, f32(ti), far_sheet, -1.0)
+                        if sh.w < 0.0 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
                         if pe > 0.0 && sh.x + sh.y + sh.z > 0.0 {
                             let ps_nee = self.spec_prob(f0, kd, max(dot(n_nee, v), 0.0001))
                             let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha)
                             let pb = self.bsdf_pdf(n_nee, v, ld, alpha, ps_nee)
                             var w = 1.0
-                            if self.env_grid_dim < 0.5 { w = pe * pe / (pe * pe + pb * pb) }
+                            if self.env_on > 0.5 || self.env_grid_dim < 0.5 { w = pe * pe / (pe * pe + pb * pb) }
                             let corr = self.shading_correction(ng, n_nee, v, ld)
                             lsum = lsum + tp * f * self.environment(ld) * sh.xyz * (nl * corr / pe * w)
                         }
                     }
                 }
                 // next event: an emissive triangle
-                if self.n_lights > 0.5 && self.brute < 0.5 {
+                if self.n_lights > 0.5 && self.inv_light_power > 0.0 && self.brute < 0.5 {
                     var lo = 0u
                     var hi = u32(self.n_lights)
                     for search in 0..24 {
@@ -1124,9 +1294,9 @@ script_mod! {
                     let nl = dot(n_nee, ld)
                     let lm2 = self.fetch_mat(u32(l0.w) * 5u + 2u)
                     let cosl = if lm2.w > 0.5 { abs(dot(lnrm, -ld)) } else { max(dot(lnrm, -ld), 0.0) }
-                    if nl > 0.0 && dot(ng, ld) > 0.0 && cosl > 0.0001 && dist > self.ray_error(p) + self.ray_error(lp) {
-                        let sh = self.shadow(p, ng, ld, dist - self.ray_error(lp), f32(ti))
-                        if sh.w < 0.0 { return vec3(1000000000000000000000000000000.0, 0.0, 0.0) }
+                    if lrec.z > 0.0 && nl > 0.0 && dot(ng, ld) > 0.0 && cosl > 0.0001 && dist > self.ray_error(p) + self.ray_error(lp) {
+                        let sh = self.shadow(p, ng, ld, dist - self.ray_error(lp), f32(ti), far_sheet, f32(lt))
+                        if sh.w < 0.0 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
                         if sh.x + sh.y + sh.z > 0.0 {
                             let lm = self.fetch_mat(u32(l0.w) * 5u + 1u).xyz
                             let pl = dist * dist * lrec.z / max(cosl * lrec.y, self.scene_scale.y * 0.00000000000025)
@@ -1135,7 +1305,13 @@ script_mod! {
                             let pb = self.bsdf_pdf(n_nee, v, ld, alpha, ps_nee)
                             let w = pl * pl / (pl * pl + pb * pb)
                             let corr = self.shading_correction(ng, n_nee, v, ld)
-                            lsum = lsum + tp * f * lm * sh.xyz * (nl * corr / pl * w)
+                            let term = tp * f * lm * sh.xyz * (nl * corr / pl * w)
+                            if self.route_groups() > 0.5 && l2.w > 0.0 {
+                                far = self.merge_group(far, self.group_term(term, l2.w), self.rand(pseed, sidx, 129u + b * 2u))
+                                if self.finite3(far.xyz) < 0.5 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
+                            } else {
+                                lsum = lsum + term
+                            }
                         }
                     }
                 }
@@ -1160,7 +1336,12 @@ script_mod! {
                         sampled_diffuse = 1.0
                     }
                 }
-                ndiff = ndiff + sampled_diffuse
+                // Every rough-sheet event consumes one diffuse depth.
+                if self.frost_lobe() > 0.5 && material_class > 0.5 {
+                    ndiff = ndiff + 1.0
+                } else {
+                    ndiff = ndiff + sampled_diffuse
+                }
                 let nl = dot(sample_n, ld)
                 if nl <= 0.0 || dot(ng, ld) <= 0.0 { break }
                 let f = self.bsdf_eval(sample_n, v, ld, kd, f0, alpha)
@@ -1178,11 +1359,18 @@ script_mod! {
                 }
                 rd = ld
                 ro = p
-                hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                carry = 0.0
+                if self.frost_lobe() > 0.5 && far_sheet {
+                    hit = self.thin_transmission_trace(p, ng, rd, ti)
+                } else {
+                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                }
             }
             let peak = max(max(lsum.x, lsum.y), lsum.z)
             if self.preview_clamp > 0.0 && peak > self.preview_clamp { lsum = lsum * (self.preview_clamp / peak) }
-            return lsum
+            var result = PtLightSample.new(lsum)
+            result.far = far
+            return result
         }
 
         pixel: fn() {
@@ -1190,6 +1378,7 @@ script_mod! {
             // traces exactly the pixel it covers, independent of how the
             // tile quads were batched or aligned. `tile` only keeps the
             // draw calls apart (uniforms that differ are never batched).
+            if self.route_groups() > 0.5 { self.write_group(vec4(0.0, 0.0, 0.0, -1.0)) }
             let pix = floor(self.world.xy)
             let px = u32(pix.x)
             let py = u32(pix.y)
@@ -1205,15 +1394,23 @@ script_mod! {
             let pseed = self.hash2(self.hash2(px, py * 40503u), u32(self.seed))
             var acc = prev.xyz
             var cnt = n
+            var samples = 0.0
+            var far = vec4(0.0, 0.0, 0.0, 0.0)
             var rejected = 0.0
             var attempt = n
             if self.reset < 0.5 { attempt = attempt + self.rejected_tex.sample_nearest(auv).x }
             let ns = u32(self.spp)
             for s in 0..8 {
                 if s >= ns { break }
-                var l = self.radiance(px, py, pseed, u32(attempt))
+                let sample_index = u32(attempt)
+                let split = self.radiance(px, py, pseed, sample_index)
+                var l = split.base
+                var next_far = far
+                if self.route_groups() > 0.5 {
+                    next_far = self.merge_group(far, split.far, self.rand(pseed, sample_index, 160u))
+                }
                 attempt = attempt + 1.0
-                if self.finite3(l) > 0.5 {
+                if self.finite3(l) > 0.5 && (self.route_groups() < 0.5 || self.finite3(next_far.xyz) > 0.5) {
                     // Preview-only relative clamp (CPU preview twin agrees):
                     // once a pixel has a mean, no single sample may exceed
                     // five times it. The absolute clamp alone leaves a dark
@@ -1232,17 +1429,22 @@ script_mod! {
                         let pk = max(max(l.x, l.y), l.z)
                         if pk > limit { l = l * (limit / pk) }
                     }
+                    far = next_far
+                    samples = samples + 1.0
                     cnt = cnt + 1.0
                     acc = acc + l
                 } else {
                     rejected = rejected + 1.0
                 }
             }
+            // Each entry belongs to this dispatch, including base-only samples.
+            if self.route_groups() > 0.5 && samples > 0.0 {
+                self.write_group(vec4(far.xyz / samples, far.w))
+            }
             if rejected > 0.0 { return vec4(acc, (0.0 - cnt) - 1.0) }
             return vec4(acc, cnt)
         }
     }
-
     mod.draw.PtCopy = mod.std.set_type_default() do #(DrawCopy::script_shader(vm)){
         ..mod.draw.DrawQuad
         color_format: @Rgba32F
@@ -1259,6 +1461,100 @@ script_mod! {
             if self.reset > 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
             return self.src_tex.sample_nearest(self.pos)
         }
+    }
+
+    // Every draw in the trace pass writes both attachments, including the
+    // full-frame base copy. This layout also works with coupled write masks.
+    mod.draw.PtCopyGroups = mod.draw.PtCopy{
+        fb1: fragment_output(1, vec4f)
+        fragment: fn() {
+            self.fb0 = self.pixel()
+            self.fb1 = vec4(0.0, 0.0, 0.0, -1.0)
+        }
+    }
+
+    mod.draw.PtGroupGather = mod.std.set_type_default() do #(DrawGroupGather::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_format: @Rgba32F
+        alpha_blend: false
+        atlas_tex: texture_2d(float)
+        entry_tex: texture_2d(float)
+        atlas_size: uniform(vec2f)
+        tile_size: uniform(vec2f)
+        native_inv: uniform(vec2f)
+        cols: uniform(1.0)
+        footprint: uniform(1.0)
+        pixel: fn() {
+            let at = floor(self.rect_pos + self.pos * self.rect_size)
+            let cell = self.group_id - 1.0
+            let row = floor(cell / self.cols)
+            let local = at - vec2(cell - row * self.cols, row) * self.tile_size
+            let old = self.atlas_tex.sample_nearest((at + vec2(0.5)) / self.atlas_size)
+            let first = floor(local * self.footprint)
+            let side = u32(max(self.footprint, 1.0))
+            // A complete footprint adds one at every rung. One coarse pixel
+            // can cover it all; native pixels each cover 1 / scale² of it.
+            let weight = 1.0 / max(1.0, self.footprint * self.footprint)
+            var sum = vec3(0.0)
+            var w = 0.0
+            for y in 0..side {
+                for x in 0..side {
+                    let q = first + vec2(f32(x), f32(y))
+                    if q.x >= self.rung_rect.x && q.y >= self.rung_rect.y && q.x < self.rung_rect.z && q.y < self.rung_rect.w {
+                        let e = self.entry_tex.sample_nearest((q + vec2(0.5)) * self.native_inv)
+                        if e.w >= 0.0 {
+                            w += weight
+                            if e.w == self.group_id { sum += e.xyz * weight }
+                        }
+                    }
+                }
+            }
+            if w == 0.0 { return old }
+            return vec4((old.xyz * old.w + sum) / (old.w + w), old.w + w)
+        }
+    }
+    mod.draw.PtGroupAtlasCopy = mod.draw.PtGroupGather{
+        pixel: fn() {
+            let at = floor(self.rect_pos + self.pos * self.rect_size)
+            return self.atlas_tex.sample_nearest((at + vec2(0.5)) / self.atlas_size)
+        }
+    }
+    mod.draw.PtGroupFar = mod.std.set_type_default() do #(DrawGroupFar::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_format: @Rgba16F
+        alpha_blend: false
+        atlas_tex: texture_2d(float)
+        gains_tex: texture_2d(float)
+        grid: uniform(vec2f)
+        gain_size: uniform(vec2f)
+        group_count: uniform(0.0)
+        pixel: fn() {
+            var sum = vec3(0.0)
+            var has_samples = 0.0
+            let count = u32(self.group_count)
+            let cols = u32(self.grid.x)
+            let rows = u32(self.grid.y)
+            for row in 0..rows {
+                for col in 0..cols {
+                    let k = row * cols + col
+                    if k >= count { break }
+                    let tile = self.atlas_tex.sample_nearest((vec2(f32(col), f32(row)) + self.pos) / self.grid)
+                    let g = vec2(f32(k % u32(self.gain_size.x)), f32(k / u32(self.gain_size.x)))
+                    let gain = self.gains_tex.sample_nearest((g + vec2(0.5)) / self.gain_size).xyz
+                    sum += tile.xyz * gain
+                    if tile.w > 0.0 { has_samples = 1.0 }
+                }
+            }
+            return vec4(sum, has_samples)
+        }
+    }
+
+    // A scene-edit hold is a display-space copy, independent of accumulation.
+    mod.draw.PtHold = mod.std.set_type_default() do #(DrawHold::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        alpha_blend: false
+        src_tex: texture_2d(float)
+        pixel: fn() { return self.src_tex.sample_nearest(self.pos) }
     }
 
     // The display's linear memory. Chooses, per native pixel, the current
@@ -1427,6 +1723,45 @@ script_mod! {
     // twin's to the bit. It traces about 11% fewer paths per second, so only
     // `RenderSettings::exact` (the parity selftest, a host's Exact setting) draws it.
     mod.draw.PtTraceExact = mod.draw.PtTrace{precise_math: true}
+    mod.draw.PtTraceFrost = mod.draw.PtTrace{frost_lobe: fn() -> f32 { return 1.0 }}
+    mod.draw.PtTraceFrostExact = mod.draw.PtTraceFrost{precise_math: true}
+
+    mod.draw.PtTraceGroups = mod.draw.PtTrace{
+        fb1: fragment_output(1, vec4f)
+        route_groups: fn() -> f32 { return 1.0 }
+        write_group: fn(entry: vec4) { self.fb1 = entry }
+        // Clamp in reference space before reservoir weighting: clamping the
+        // survivor would discard the energy its inverse probability restores.
+        group_term: fn(term: vec3, id: f32) -> vec4 {
+            if self.finite3(term) < 0.5 { return vec4(1000000000000000000000000000000.0, 0.0, 0.0, id) }
+            let peak = max(max(term.x, term.y), term.z)
+            if self.preview_clamp > 0.0 && peak > self.preview_clamp {
+                return vec4(term * (self.preview_clamp / peak), id)
+            }
+            return vec4(term, id)
+        }
+
+        // One representative group, with every group's expectation preserved.
+        // Separate hash dimensions leave the path's Sobol samples untouched.
+        merge_group: fn(a: vec4, b: vec4, r: f32) -> vec4 {
+            if self.finite3(a.xyz) < 0.5 || self.finite3(b.xyz) < 0.5 {
+                return vec4(1000000000000000000000000000000.0, 0.0, 0.0, 0.0)
+            }
+            if b.w == 0.0 { return a }
+            if a.w == 0.0 { return b }
+            if a.w == b.w { return vec4(a.xyz + b.xyz, a.w) }
+            let wa = max(max(max(a.x, a.y), a.z), 0.00000000000000000001)
+            let wb = max(max(max(b.x, b.y), b.z), 0.00000000000000000001)
+            let pa = wa / (wa + wb)
+            let pb = wb / (wa + wb)
+            if r < pb { return vec4(b.xyz / pb, b.w) }
+            return vec4(a.xyz / pa, a.w)
+        }
+
+    }
+    mod.draw.PtTraceGroupsExact = mod.draw.PtTraceGroups{precise_math: true}
+    mod.draw.PtTraceGroupsFrost = mod.draw.PtTraceGroups{frost_lobe: fn() -> f32 { return 1.0 }}
+    mod.draw.PtTraceGroupsFrostExact = mod.draw.PtTraceGroupsFrost{precise_math: true}
 
     mod.draw.PtGuide = mod.std.set_type_default() do #(DrawGuide::script_shader(vm)){
         // Inherit the exact traversal/offset/material helpers used by transport.
@@ -1560,6 +1895,52 @@ script_mod! {
         tri_tex: texture_2d(float)
         mat_tex: texture_2d(float)
         hold_tex: texture_2d(float)
+        far_tex: texture_2d(float)
+        guide_tex: texture_2d(float)
+        far_size: uniform(vec2f)
+        far_scale: uniform(0.0)
+        guide_on: uniform(0.0)
+        far_light: fn() -> vec3 {
+            let native = self.pos / self.inv_res
+            let grid = native / self.far_scale - vec2(0.5)
+            let f = fract(grid)
+            var guide = vec4(0.0)
+            if self.guide_on > 0.5 { guide = self.guide_tex.sample_nearest(self.pos) }
+            var sum = vec3(0.0)
+            var weights = 0.0
+            // The guide can reject all four taps: a wall seen edge-on, a small
+            // part at another depth, detail seen through a window. Such a pixel
+            // takes the taps' plain bilinear blend; it never drops the light.
+            var plain = vec3(0.0)
+            var plain_weights = 0.0
+            for y in 0..2 {
+                for x in 0..2 {
+                    let cell = clamp(floor(grid) + vec2(f32(x), f32(y)), vec2(0.0), self.far_size - vec2(1.0))
+                    let light = self.far_tex.sample_nearest((cell + vec2(0.5)) / self.far_size)
+                    if light.w > 0.0 {
+                        let bilinear = mix(1.0 - f.x, f.x, f32(x)) * mix(1.0 - f.y, f.y, f32(y))
+                        var w = bilinear
+                        if self.guide_on > 0.5 {
+                            let lo = cell * self.far_scale
+                            let hi = min(lo + vec2(self.far_scale), vec2(1.0) / self.inv_res)
+                            let g = self.guide_tex.sample_nearest((lo + hi) * 0.5 * self.inv_res)
+                            if (g.w < 0.0) != (guide.w < 0.0) { w = 0.0 }
+                            if g.w >= 0.0 && guide.w >= 0.0 {
+                                let wn = max(dot(g.xyz, guide.xyz), 0.0)
+                                w *= wn * wn * exp(-abs(g.w - guide.w) / max(abs(guide.w) * 0.02, 0.000001))
+                            }
+                        }
+                        sum += light.xyz * w
+                        weights += w
+                        plain += light.xyz * bilinear
+                        plain_weights += bilinear
+                    }
+                }
+            }
+            if weights > 0.0 { return sum / weights }
+            if plain_weights > 0.0 { return plain / plain_weights }
+            return vec3(0.0)
+        }
         inv_res: uniform(vec2f)
         exposure: uniform(1.0)
         sky_display: uniform(0.0)
@@ -1597,7 +1978,7 @@ script_mod! {
             let w0 = 1.0 - g.y - g.z
             let n = normalize(a0.xyz * w0 + a1.xyz * g.y + a2.xyz * g.z)
             let mi = u32(self.tri_tex.sample_nearest(self.tx(ti * 3u, self.tri_inv)).w)
-            let albedo = self.mat_tex.sample_nearest(self.tx(mi * 4u, self.mat_inv)).xyz
+            let albedo = self.mat_tex.sample_nearest(self.tx(mi * u32(#(crate::pack::MATERIAL_ROWS as f32)), self.mat_inv)).xyz
             let l = abs(dot(n, self.light_dir))
             return albedo * (0.35 + 0.65 * l)
         }
@@ -1614,6 +1995,18 @@ script_mod! {
             let d = 0.59
             let e = 0.14
             return clamp((x * (x * a + vec3(b, b, b))) / (x * (x * c + vec3(d, d, d)) + vec3(e, e, e)), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+        }
+        // Over-range colour keeps its hue. The curve per channel drives every
+        // channel of a far over-range saturated colour toward 1, so a bright
+        // crimson emitter shows magenta and a bright orange one yellow. Past
+        // the display range the peak channel takes the curve and the others
+        // keep their ratio to it; in range the per-channel curve is unchanged.
+        display: fn(x: vec3) -> vec3 {
+            let per_channel = self.aces(x)
+            let peak = max(max(x.x, x.y), x.z)
+            if peak <= 1.0 { return per_channel }
+            let kept = x * (self.aces(vec3(peak, peak, peak)).x / peak)
+            return mix(per_channel, kept, smoothstep(1.0, 2.0, peak))
         }
         // A fixed 4x4 log-average meter is robust to a bright doorway or a
         // few fireflies and costs no readback. It only lifts dark frames:
@@ -1689,10 +2082,11 @@ script_mod! {
                 // G-buffer fallback (they draw on a flat editor background).
                 if self.untraced_transparent > 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
                 let f = self.fallback()
-                let m = self.aces(f * self.exposure)
+                let m = self.display(f * self.exposure)
                 return vec4(pow(m, vec3(0.4545454, 0.4545454, 0.4545454)), 1.0)
             }
-            let linear = c.xyz
+            var linear = c.xyz
+            if self.far_scale > 0.0 { linear += self.far_light() }
             // The engine sky already owns its display transform. A primary
             // miss therefore passes through unchanged; surfaces retain the
             // tracer's exposure and output curve.
@@ -1702,7 +2096,7 @@ script_mod! {
                     return vec4(clamp(linear, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), 1.0)
                 }
             }
-            let mapped = self.aces(linear * self.metered_exposure())
+            let mapped = self.display(linear * self.metered_exposure())
             let srgb = pow(mapped, vec3(0.4545454, 0.4545454, 0.4545454))
             return vec4(srgb, 1.0)
         }
@@ -1736,6 +2130,27 @@ pub struct DrawTrace {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawCopy {
+    #[deref]
+    pub draw_super: DrawQuad,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGroupGather {
+    #[deref] pub draw_super: DrawQuad,
+    #[live] pub rung_rect: Vec4f,
+    #[live] pub group_id: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGroupFar {
+    #[deref] pub draw_super: DrawQuad,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawHold {
     #[deref]
     pub draw_super: DrawQuad,
 }
@@ -1912,6 +2327,40 @@ pub struct RenderStats {
     pub bvh_nodes: usize,
     pub bvh_depth: u32,
     pub done: bool,
+    pub light_groups: u32,
+    pub tile_scale: u32,
+    pub gain_uploads: u64,
+}
+
+/// The group footprint grows with the square root of the group count.
+fn group_scale(n: usize) -> u32 {
+    if n == 0 { return 0; }
+    ((n as f64).sqrt().ceil() as u32).next_power_of_two().max(4)
+}
+
+struct GroupTargets {
+    tile: (usize, usize),
+    grid: (usize, usize),
+    atlas: [Texture; 2],
+    atlas_ping: usize,
+    /// Previous gather footprints in atlas texels, relative to each group's origin.
+    last_rects: Vec<Rect>,
+    far: Texture,
+}
+
+impl GroupTargets {
+    fn new(cx: &mut Cx, size: (usize, usize), count: usize, scale: usize) -> Self {
+        let tile = (size.0.div_ceil(scale), size.1.div_ceil(scale));
+        let cols = (count as f64).sqrt().ceil() as usize;
+        let grid = (cols, count.div_ceil(cols));
+        let atlas = std::array::from_fn(|_| Texture::new_with_format(cx, TextureFormat::RenderRGBAf32 {
+            size: TextureSize::Fixed { width: tile.0 * grid.0, height: tile.1 * grid.1 }, initial: true,
+        }));
+        let far = Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 {
+            size: TextureSize::Fixed { width: tile.0, height: tile.1 }, initial: true,
+        });
+        Self { tile, grid, atlas, atlas_ping: 0, last_rects: Vec::new(), far }
+    }
 }
 
 struct Stage {
@@ -1926,6 +2375,17 @@ struct GpuBudgetUpdate {
     under_budget: u32,
 }
 
+/// The tile edge within [TILE_MIN, TILE_MAX]. Light groups pass their tile scale (at least 8) so
+/// every traced tile is whole atlas footprints; ungrouped scenes pass 1 and keep the plain clamp.
+fn aligned_edge(edge: u32, alignment: u32) -> u32 {
+    if alignment <= 1 {
+        return edge.clamp(TILE_MIN, TILE_MAX);
+    }
+    let lo = TILE_MIN.next_multiple_of(alignment);
+    let hi = (TILE_MAX / alignment * alignment).max(lo);
+    (edge / alignment * alignment).clamp(lo, hi)
+}
+
 fn adapt_gpu_budget(
     tiles: u32,
     next_edge: u32,
@@ -1934,10 +2394,11 @@ fn adapt_gpu_budget(
     submitted_edge: u32,
     gpu_ms: f64,
     budget_ms: f64,
+    alignment: u32,
 ) -> GpuBudgetUpdate {
     let mut out = GpuBudgetUpdate {
         tiles: tiles.clamp(1, TILES_PER_FRAME_MAX),
-        next_edge: next_edge.clamp(TILE_MIN, TILE_MAX),
+        next_edge: aligned_edge(next_edge, alignment),
         under_budget,
     };
     if submitted_tiles == 0
@@ -1958,7 +2419,7 @@ fn adapt_gpu_budget(
         out.tiles = out.tiles.min(desired_tiles);
         if submitted_tiles == 1 && gpu_ms > budget_ms {
             let scaled = submitted_edge as f64 * ratio.max(0.01).sqrt();
-            out.next_edge = ((scaled.floor() as u32) / 8 * 8).clamp(TILE_MIN, TILE_MAX);
+            out.next_edge = aligned_edge(scaled.floor() as u32 / 8 * 8, alignment);
         }
         out.under_budget = 0;
         return out;
@@ -1973,7 +2434,7 @@ fn adapt_gpu_budget(
                 out.tiles = desired_tiles.min(out.tiles.saturating_add(step));
             } else if ratio > 1.25 {
                 let scaled = submitted_edge as f64 * ratio.sqrt();
-                out.next_edge = ((scaled.floor() as u32) / 8 * 8).clamp(TILE_MIN, TILE_MAX);
+                out.next_edge = aligned_edge(scaled.floor() as u32 / 8 * 8, alignment);
             }
         }
     } else {
@@ -2000,10 +2461,11 @@ fn adapt_without_timing(
     dispatched: bool,
     dt_ms: f64,
     budget_ms: f64,
+    alignment: u32,
 ) -> GpuBudgetUpdate {
     let mut out = GpuBudgetUpdate {
         tiles: tiles.clamp(1, TILES_PER_FRAME_MAX),
-        next_edge: next_edge.clamp(TILE_MIN, TILE_MAX),
+        next_edge: aligned_edge(next_edge, alignment),
         under_budget,
     };
     if timing_ever || !dispatched {
@@ -2014,7 +2476,7 @@ fn adapt_without_timing(
         // reports once or proves it never will. Do not infer headroom from
         // a fast CPU repaint.
         out.tiles = 1;
-        out.next_edge = out.next_edge.min(TILE_START);
+        out.next_edge = aligned_edge(out.next_edge.min(TILE_START), alignment);
         out.under_budget = 0;
         return out;
     }
@@ -2023,7 +2485,7 @@ fn adapt_without_timing(
         // 40 ms floor keeps a host that deliberately ticks its accumulation
         // at ~30 Hz (the interactive pane) from reading its own tick as an
         // overrun.
-        out.next_edge = (out.next_edge / 2).max(TILE_MIN);
+        out.next_edge = aligned_edge(out.next_edge / 2, alignment);
         out.tiles = (out.tiles / 2).max(1);
         out.under_budget = 0;
         return out;
@@ -2032,7 +2494,7 @@ fn adapt_without_timing(
     if out.under_budget >= 2 {
         out.under_budget = 0;
         if out.next_edge < TILE_MAX {
-            out.next_edge = ((out.next_edge * 3 / 2) / 8 * 8).clamp(TILE_MIN, TILE_MAX);
+            out.next_edge = aligned_edge(out.next_edge * 3 / 2 / 8 * 8, alignment);
         } else if out.tiles < TILES_PER_FRAME_MAX {
             out.tiles = (out.tiles * 3 / 2).max(out.tiles + 1).min(TILES_PER_FRAME_MAX);
         }
@@ -2048,10 +2510,50 @@ fn reached_sample_limit(target_spp: u32, spp: f32) -> bool {
     target_spp > 0 && spp >= target_spp as f32
 }
 
+/// The hold decision has no GPU state. A repeated restart keeps the original
+/// picture; a completed startup sweep switches presentation to the new trace.
+#[derive(Default)]
+struct PresentationHold {
+    holding: bool,
+}
+
+impl PresentationHold {
+    fn restart(&mut self, hold: bool, has_picture: bool) -> bool {
+        let capture = hold && has_picture && !self.holding;
+        self.holding = hold && (self.holding || has_picture);
+        capture
+    }
+
+    fn advance(&mut self, samples: f32, threshold: f32) -> bool {
+        if self.holding && samples >= threshold {
+            self.holding = false;
+            return true;
+        }
+        false
+    }
+}
+
+struct HeldPicture {
+    texture: Texture,
+    size: (usize, usize),
+    source: Option<Texture>,
+    stage: Stage,
+    recorded: Option<u64>,
+}
+
 /// Everything the renderer keeps between frames.
 pub struct RayTracer {
-    packed: Option<PackedScene>,
+    packed: Option<Arc<PackedScene>>,
+    group_targets: Option<GroupTargets>,
+    gains_tex: Texture,
+    gain_indices: std::collections::HashMap<u32, usize>,
+    gain_values: Vec<f32>,
+    gains_dirty: bool,
+    // Recording and paint are distinct. Hosts can measure when a gain upload reached a view.
+    recorded_gains: u64,
+    presented_gains: u64,
     sky: SkyUniforms,
+    environment: Option<(Arc<EnvironmentLight>, EnvironmentFrame)>,
     camera: crate::scene::Camera,
     tex_tri: Texture,
     tex_attr: Texture,
@@ -2059,6 +2561,7 @@ pub struct RayTracer {
     tex_mat: Texture,
     tex_light: Texture,
     tex_atlas: Texture,
+    tex_env: Texture,
     raster_geom: Option<Geometry>,
     size: (usize, usize),
     target_size: (usize, usize),
@@ -2069,6 +2572,8 @@ pub struct RayTracer {
     display_ping: usize,
     /// Transient trace output; negative alpha marks one rejected sample.
     trace_scratch: Option<Texture>,
+    /// This dispatch's mean reference light and dense id, or alpha -1 when skipped.
+    far_entry: Option<Texture>,
     /// Per-pixel rejected-sample counters, ping-ponged with accumulation.
     rejected: Vec<Texture>,
     moments: Vec<Texture>,
@@ -2081,19 +2586,23 @@ pub struct RayTracer {
     view: Vec<Texture>,
     /// Index of the view texture written LAST (what `view_texture` returns).
     view_ping: usize,
+    presentation: PresentationHold,
+    held_picture: Option<HeldPicture>,
     stages: Vec<Stage>,
-    /// Repaint id and stage count of the recording awaiting a whole paint.
+    /// Repaint id and stages of the recording awaiting a whole paint.
     /// A draw call is not a paint: the ping-pong buffers must hold its writes
     /// before the next step reads them.
-    recorded: Option<(u64, usize)>,
+    recorded: Option<(u64, [bool; 15])>,
     draw_gbuf: DrawGbuf,
     draw_copy: DrawCopy,
+    draw_hold: DrawHold,
     draw_resolve: DrawResolve,
     draw_carry: DrawCarry,
     draw_reject: DrawReject,
     draw_trace: DrawTrace,
-    /// `mod.draw.PtTraceExact`, compiled the first time `settings.exact` traces.
-    draw_trace_exact: Option<DrawTrace>,
+    /// Lazy variants: bits 2/1/0 select groups/exact/frost; slot 0 uses `draw_trace`.
+    draw_trace_variants: [Option<DrawTrace>; 8],
+    group_draws: Option<(DrawCopy, DrawGroupGather, DrawGroupGather, DrawGroupFar)>,
     draw_moments: DrawMoments,
     draw_guide: DrawGuide,
     draw_atrous: DrawAtrous,
@@ -2128,6 +2637,9 @@ pub struct RayTracer {
     /// A host change the last recording does not show yet (display settings,
     /// pause, framing): a finished or paused render records once more for it.
     display_stale: bool,
+    /// `guide` matches the current view. A restart or a new view-projection
+    /// clears it; the next frame without a restart recomputes the guide.
+    guide_valid: bool,
     /// Skip tracing on this frame only (the host's interactive duty cycle);
     /// the post stages still run so the picture stays on screen.
     skip_trace: bool,
@@ -2177,6 +2689,9 @@ pub enum CaptureKind {
     Denoised,
     /// RGBA32F diagnostic image; R is the rejected-sample count per pixel.
     Diagnostics,
+    /// Gain-weighted linear group light at tile resolution (RGBA16F). Alpha is
+    /// one for a footprint with samples, including when all gains are zero.
+    LightGroups,
 }
 
 #[derive(Clone, Debug)]
@@ -2202,8 +2717,12 @@ pub struct DisplayMetrics {
 }
 
 impl Capture {
-    /// RGBA32F captures as floats.
+    /// Decode the native RGBA32F or RGBA16F capture into linear floats.
     pub fn as_f32(&self) -> Vec<f32> {
+        if self.kind == CaptureKind::LightGroups {
+            return self.bytes.chunks_exact(2).map(|b| makepad_script::pod_heap::f16_to_f32(
+                u16::from_le_bytes([b[0], b[1]]))).collect();
+        }
         self.bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
     }
 
@@ -2307,6 +2826,7 @@ impl RayTracer {
     pub fn new(vm: &mut ScriptVm) -> Self {
         let draw_gbuf = DrawGbuf::script_new_with_default(vm);
         let draw_copy = DrawCopy::script_new_with_default(vm);
+        let draw_hold = DrawHold::script_new_with_default(vm);
         let draw_resolve = DrawResolve::script_new_with_default(vm);
         let draw_carry = DrawCarry::script_new_with_default(vm);
         let draw_reject = DrawReject::script_new_with_default(vm);
@@ -2329,7 +2849,15 @@ impl RayTracer {
         );
         let mut me = Self {
             packed: None,
+            group_targets: None,
+            gains_tex: empty(cx),
+            gain_indices: Default::default(),
+            gain_values: Vec::new(),
+            gains_dirty: false,
+            recorded_gains: 0,
+            presented_gains: 0,
             sky: SkyUniforms::uniform_white(1.0),
+            environment: None,
             camera: Default::default(),
             tex_tri: empty(cx),
             tex_attr: empty(cx),
@@ -2337,6 +2865,7 @@ impl RayTracer {
             tex_mat: empty(cx),
             tex_light: empty(cx),
             tex_atlas: atlas,
+            tex_env: empty(cx),
             raster_geom: None,
             size: (0, 0),
             target_size: (0, 0),
@@ -2344,6 +2873,7 @@ impl RayTracer {
             display_linear: Vec::new(),
             display_ping: 0,
             trace_scratch: None,
+            far_entry: None,
             rejected: Vec::new(),
             moments: Vec::new(),
             atrous: Vec::new(),
@@ -2352,15 +2882,19 @@ impl RayTracer {
             guide: None,
             view: Vec::new(),
             view_ping: 0,
+            presentation: PresentationHold::default(),
+            held_picture: None,
             stages: Vec::new(),
             recorded: None,
             draw_gbuf,
             draw_copy,
+            draw_hold,
             draw_resolve,
             draw_carry,
             draw_reject,
             draw_trace,
-            draw_trace_exact: None,
+            draw_trace_variants: Default::default(),
+            group_draws: None,
             draw_moments,
             draw_guide,
             draw_atrous,
@@ -2381,6 +2915,7 @@ impl RayTracer {
             sweep_wrapped: false,
             paused: false,
             display_stale: false,
+            guide_valid: false,
             skip_trace: false,
             paths_last_frame: 0.0,
             draw_budget_ms: draw_budget_ms_from_env(),
@@ -2407,9 +2942,18 @@ impl RayTracer {
         (self.draw_budget_ms, self.next_edge)
     }
 
-    /// Upload a scene (once; nothing per frame afterwards).
+    /// Convenience for callers without a worker; packing runs on the calling thread.
     pub fn set_scene(&mut self, cx: &mut Cx, scene: &SceneInput) {
-        let packed = PackedScene::pack(scene);
+        self.set_packed(cx, Arc::new(PackedScene::pack(scene)), false);
+        self.set_camera(scene.camera.clone());
+        self.set_sun(&scene.sun, scene.up);
+    }
+
+    /// Upload a worker-produced pack, retaining its immutable geometry by Arc.
+    /// Camera and environment remain the host's. With `hold`, keep the shown
+    /// picture until the first complete sweep of the new accumulation.
+    pub fn set_packed(&mut self, cx: &mut Cx, packed: Arc<PackedScene>, hold: bool) {
+        self.hold_picture(cx, hold);
         self.tile_edge = TILE_START;
         self.next_edge = TILE_START;
         self.tiles_per_frame = 1;
@@ -2442,10 +2986,90 @@ impl RayTracer {
         self.stats.tri_count = packed.tri_count;
         self.stats.bvh_nodes = packed.accel.nodes.len();
         self.stats.bvh_depth = packed.accel.max_depth;
-        self.camera = scene.camera.clone();
-        self.sky = sky_uniforms(&scene.sun, scene.up);
+        let n = packed.light_groups.len();
+        self.stats.light_groups = n as u32;
+        self.stats.tile_scale = group_scale(n);
+        if n != 0 { log!("raytrace light groups={} tile scale={}", n, self.stats.tile_scale); }
+        self.gain_indices = packed.light_groups.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        self.group_targets = None;
+        self.gains_dirty = n != 0;
+        let width = n.clamp(1, DATA_W);
+        let height = n.max(1).div_ceil(width);
+        self.gain_values = vec![0.0; width * height * 4];
+        *self.gains_tex.get_format(cx) = TextureFormat::VecRGBAf32 {
+            width, height, data: Some(self.gain_values.clone()), updated: TextureUpdated::Full,
+        };
         self.packed = Some(packed);
         self.restart = true;
+    }
+
+    /// Change the RGB gains of named groups in this pack. Omitted groups keep
+    /// their gains. A new pack starts with all gains zero.
+    pub fn set_light_group_gains(&mut self, cx: &mut Cx, gains: &[(u32, [f32; 3])]) {
+        let mut changed = false;
+        for &(id, rgb) in gains {
+            if let Some(&index) = self.gain_indices.get(&id) {
+                let row = &mut self.gain_values[index * 4..index * 4 + 3];
+                if row != rgb.as_slice() {
+                    row.copy_from_slice(&rgb);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let TextureFormat::VecRGBAf32 { data: Some(data), updated, .. } = self.gains_tex.get_format(cx)
+                else { unreachable!("the group gain texture always has CPU data") };
+            if *data == self.gain_values { return; }
+            data.copy_from_slice(&self.gain_values);
+            *updated = TextureUpdated::Full;
+            self.stats.gain_uploads += 1;
+            self.gains_dirty = true;
+        }
+    }
+
+    /// Gain upload used by the last recorded far sum.
+    pub fn recorded_gain_upload(&self) -> u64 {
+        self.recorded_gains
+    }
+
+    /// Latest gain upload included in a completed view, including a paint
+    /// completed since the last call to draw.
+    pub fn presented_gain_upload(&self, cx: &Cx) -> u64 {
+        if !self.holding() && self.recorded.is_some_and(|(repaint, active)| self.painted(cx, repaint, &active)) {
+            self.recorded_gains
+        } else { self.presented_gains }
+    }
+
+    fn hold_picture(&mut self, cx: &mut Cx, hold: bool) {
+        // The most recently recorded view may still owe a paint. Its other
+        // ping is the picture the pane actually presented before that draw.
+        let unpainted = self.recorded.is_some_and(|(repaint, active)| !self.painted(cx, repaint, &active));
+        let has_picture = !self.view.is_empty() && self.frame > u32::from(unpainted);
+        if self.presentation.restart(hold, has_picture) {
+            self.view_ping ^= usize::from(unpainted);
+            let source = self.view[self.view_ping].clone();
+            // The next tonemap writes the other ping, keeping this source
+            // intact even if the first recording replays before a new draw.
+            self.held_picture = Some(HeldPicture {
+                texture: Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 {
+                    size: TextureSize::Fixed { width: self.size.0, height: self.size.1 }, initial: true,
+                }),
+                size: self.size,
+                source: Some(source),
+                stage: Stage { pass: DrawPass::new_with_name(cx, "raytrace hold"), draw_list: DrawList::new(cx) },
+                recorded: None,
+            });
+        } else if !self.presentation.holding {
+            self.release_held_picture(cx);
+        }
+    }
+
+    fn release_held_picture(&mut self, cx: &mut Cx) {
+        if let Some(held) = self.held_picture.take() {
+            held.stage.pass.detach(cx);
+            held.stage.pass.clear_color_textures(cx);
+        }
+        self.draw_hold.draw_super.draw_vars.empty_texture(0);
     }
 
     /// Override the environment (the furnace test uses a uniform sky).
@@ -2455,6 +3079,34 @@ impl RayTracer {
             self.sky = sky;
             self.restart = true;
         }
+    }
+
+    /// Set a map that replaces the analytic sky and sun, or clear it.
+    /// Reuses the upload for the same Arc and restarts only on a light or frame change.
+    pub fn set_environment(&mut self, cx: &mut Cx, env: Option<(Arc<EnvironmentLight>, EnvironmentFrame)>) {
+        let same_light = match (&self.environment, &env) {
+            (Some((old, _)), Some((new, _))) => Arc::ptr_eq(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        let same_frame = self.environment.as_ref().map(|(_, frame)| frame)
+            == env.as_ref().map(|(_, frame)| frame);
+        if same_light && same_frame {
+            return;
+        }
+        if !same_light {
+            if let Some((light, _)) = &env {
+                let data = light.data_texture();
+                *self.tex_env.get_format(cx) = TextureFormat::VecRGBAf32 {
+                    width: data.width,
+                    height: data.height,
+                    data: Some(data.data),
+                    updated: TextureUpdated::Full,
+                };
+            }
+        }
+        self.environment = env;
+        self.restart = true;
     }
 
     pub fn set_camera(&mut self, camera: crate::scene::Camera) {
@@ -2529,16 +3181,29 @@ impl RayTracer {
     /// host's own camera math, for pixel-for-pixel framing parity). The ray
     /// generator derives the same frustum from the camera's fov/aspect.
     pub fn set_view_projection(&mut self, vp: Option<Mat4f>) {
-        self.display_stale |= vp != self.view_proj_override;
+        if vp != self.view_proj_override {
+            self.display_stale = true;
+            self.guide_valid = false;
+        }
         self.view_proj_override = vp;
     }
 
+    /// A held restart still presents the picture from before it.
+    pub fn holding(&self) -> bool {
+        self.presentation.holding
+    }
+
+    /// Original uploaded scene, including its reference emission.
     pub fn packed(&self) -> Option<&PackedScene> {
-        self.packed.as_ref()
+        self.packed.as_deref()
     }
 
     /// The tonemapped BGRA8 target (valid after the first draw).
     pub fn view_texture(&self) -> Option<&Texture> {
+        if let Some(held) = &self.held_picture {
+            // Keep sampling the original until the copy has actually painted.
+            return Some(held.source.as_ref().unwrap_or(&held.texture));
+        }
         self.view.get(self.view_ping)
     }
 
@@ -2581,6 +3246,21 @@ impl RayTracer {
     }
 
     fn ensure_targets(&mut self, cx: &mut Cx) {
+        let groups = self.packed.as_ref().is_some_and(|p| !p.light_groups.is_empty());
+        if groups && (self.size != self.target_size || self.group_targets.is_none()) {
+            self.group_targets = Some(GroupTargets::new(cx, self.target_size, self.stats.light_groups as usize, self.stats.tile_scale as usize));
+        } else if !groups {
+            self.group_targets = None;
+        }
+        if groups && (self.size != self.target_size || self.far_entry.is_none()) {
+            let (width, height) = self.target_size;
+            // Each traced pixel replaces its entry; no clear or ping-pong.
+            self.far_entry = Some(Texture::new_with_format(cx, TextureFormat::RenderRGBAf32 {
+                size: TextureSize::Fixed { width, height }, initial: false,
+            }));
+        } else if !groups {
+            self.far_entry = None;
+        }
         if self.size == self.target_size && !self.accum.is_empty() {
             return;
         }
@@ -2618,11 +3298,11 @@ impl RayTracer {
         };
         self.view = vec![bgra(cx), bgra(cx)];
         self.view_ping = 0;
-        // gbuf + trace + resolve + reject-count + moments + guide + 4 atrous
-        // + carry + tonemap
-        const STAGE_NAMES: [&str; 12] = [
+        const STAGE_NAMES: [&str; 15] = [
             "raytrace gbuffer",
             "raytrace trace",
+            "raytrace group atlas 0",
+            "raytrace group atlas 1",
             "raytrace resolve",
             "raytrace reject",
             "raytrace moments",
@@ -2631,10 +3311,11 @@ impl RayTracer {
             "raytrace atrous 1",
             "raytrace atrous 2",
             "raytrace atrous 3",
+            "raytrace group sum",
             "raytrace carry",
             "raytrace tonemap",
         ];
-        while self.stages.len() < 12 {
+        while self.stages.len() < STAGE_NAMES.len() {
             let name = STAGE_NAMES[self.stages.len()];
             self.stages.push(Stage {
                 pass: DrawPass::new_with_name(cx, name),
@@ -2668,9 +3349,13 @@ impl RayTracer {
         Mat4f::mul(&proj, &view)
     }
 
-    fn attach_stage(cx: &mut Cx2d, stages: &[Stage], stage: usize, parent: Option<DrawPassId>) {
+    fn painted(&self, cx: &Cx, repaint: u64, active: &[bool; 15]) -> bool {
+        self.stages.iter().zip(active).all(|(st, &on)| !on || st.pass.painted_whole_since(cx, repaint))
+    }
+
+    fn attach_stage(cx: &mut Cx2d, stages: &[Stage], active: &[bool; 15], stage: usize, parent: Option<DrawPassId>) {
         let pass = &stages[stage].pass;
-        let chain_parent = stages.get(stage + 1).map(|st| st.pass.draw_pass_id());
+        let chain_parent = (stage + 1..active.len()).find(|&i| active[i]).map(|i| stages[i].pass.draw_pass_id());
         match chain_parent.or(parent) {
             Some(parent_id) => pass.set_pass_parent(cx.cx, parent_id),
             None => cx.make_child_pass(pass),
@@ -2682,46 +3367,125 @@ impl RayTracer {
     /// Keep the last recording attached until every stage painted whole:
     /// another draw call must not read ping-pong buffers before those writes.
     pub fn draw(&mut self, cx: &mut Cx2d) {
+        self.draw_frame(cx, false);
+    }
+
+    /// Draw a sample already scheduled by the host and compose the latest
+    /// gains with it. A stream of gain changes must not starve those samples.
+    pub fn draw_scheduled_sample(&mut self, cx: &mut Cx2d) {
+        self.draw_frame(cx, true);
+    }
+
+    fn draw_frame(&mut self, cx: &mut Cx2d, scheduled_sample: bool) {
         if self.packed.is_none() || self.target_size.0 == 0 {
             return;
         }
         self.ensure_targets(cx.cx);
+        if let Some(held) = &mut self.held_picture {
+            if held.recorded.is_some_and(|repaint| held.stage.pass.painted_whole_since(cx.cx, repaint)) {
+                held.stage.pass.detach(cx.cx);
+                held.source = None;
+            }
+            if let Some(source) = &held.source {
+                // Execute before any stage can overwrite the source view ping.
+                held.stage.pass.set_pass_parent(cx.cx, self.stages[0].pass.draw_pass_id());
+                if held.recorded.is_none() {
+                    let size = dvec2(held.size.0 as f64, held.size.1 as f64);
+                    held.stage.pass.set_size(cx, size);
+                    held.stage.pass.set_color_texture(cx, &held.texture, zero_clear());
+                    cx.begin_pass(&held.stage.pass, Some(1.0));
+                    held.stage.draw_list.begin_always(cx);
+                    cx.begin_root_turtle(size, Layout::flow_overlay());
+                    self.draw_hold.draw_super.draw_vars.set_texture(0, source);
+                    self.draw_hold.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size });
+                    cx.end_pass_sized_turtle();
+                    held.stage.draw_list.end(cx);
+                    cx.end_pass(&held.stage.pass);
+                    held.recorded = Some(cx.cx.repaint_id());
+                }
+            }
+        }
         // Replacing targets also sets restart, so their old recording cannot
         // gate the first step at the new size.
         if self.restart {
             self.recorded = None;
-        } else if let Some((repaint, n)) = self.recorded {
-            let painted = self.stages[..n].iter().all(|st| st.pass.painted_whole_since(cx.cx, repaint));
-            if !painted {
-                for i in 0..n {
-                    Self::attach_stage(cx, &self.stages[..n], i, self.parent_pass);
+        } else if let Some((repaint, active)) = self.recorded {
+            if !self.painted(cx.cx, repaint, &active) {
+                for (i, &on) in active.iter().enumerate() {
+                    if on { Self::attach_stage(cx, &self.stages, &active, i, self.parent_pass); }
                 }
                 return;
             }
             self.recorded = None;
+            // A recorded sample count is not a presentable image. Release only
+            // after the threshold recording paints. Before scene holds, tiles
+            // replaced a raster fallback immediately, with no whole-frame gate;
+            // one complete startup sweep is the first fully traced picture.
+            let (w, h) = self.size;
+            let shift = if self.settings.progressive { start_rung_shift(w, h) } else { 0 };
+            let pixels = (((w - 1) >> shift) + 1) * (((h - 1) >> shift) + 1);
+            let threshold = (pixels as f64 / (w * h) as f64) as f32;
+            if active[1] && self.presentation.advance(self.stats.spp, threshold) {
+                self.release_held_picture(cx.cx);
+            }
+            if !self.holding() { self.presented_gains = self.recorded_gains; }
             // Painted: the next step records now. A finished (or paused) render records only
             // for a capture or a change it does not show yet, so an idle pane stops asking for
             // frames after its last paint.
-            if (self.stats.done || self.paused) && self.capture_pending.is_empty() && !self.display_stale {
+            if (self.stats.done || self.paused) && self.capture_pending.is_empty() && !self.display_stale && !self.gains_dirty {
                 return;
+            }
+        }
+        // Until the copy paints, a second restart must also write the other
+        // ping: view_texture still presents this original source. Do this only
+        // when recording a new frame, after examining the previous paint.
+        if let Some(source) = self.held_picture.as_ref().and_then(|held| held.source.as_ref()) {
+            if let Some(ping) = self.view.iter().position(|view| view.texture_id() == source.texture_id()) {
+                self.view_ping = ping;
             }
         }
         let now = cx.time();
         let (w, h) = self.size;
         let s = self.settings.clone();
-        if s.exact && self.draw_trace_exact.is_none() {
-            self.draw_trace_exact = Some(cx.cx.cx.with_vm(|vm| {
-                let v = vm.eval(script! { mod.draw.PtTraceExact });
+        let groups = !self.packed.as_ref().unwrap().light_groups.is_empty();
+        let frost = self.packed.as_ref().unwrap().rough_thin_glass;
+        let trace_variant = ((groups as usize) << 2) | ((s.exact as usize) << 1) | frost as usize;
+        if groups {
+            if self.group_draws.is_none() {
+                self.group_draws = Some(cx.cx.cx.with_vm(|vm| {
+                    let value = vm.eval(script! { mod.draw.PtCopyGroups });
+                    let copy = DrawCopy::script_from_value(vm, value);
+                    let gather = DrawGroupGather::script_new_with_default(vm);
+                    let value = vm.eval(script! { mod.draw.PtGroupAtlasCopy });
+                    let atlas_copy = DrawGroupGather::script_from_value(vm, value);
+                    (copy, gather, atlas_copy, DrawGroupFar::script_new_with_default(vm))
+                }));
+            }
+        }
+        if trace_variant != 0 && self.draw_trace_variants[trace_variant].is_none() {
+            self.draw_trace_variants[trace_variant] = Some(cx.cx.cx.with_vm(|vm| {
+                let v = match (groups, s.exact, frost) {
+                    (false, false, true) => vm.eval(script! { mod.draw.PtTraceFrost }),
+                    (false, true, false) => vm.eval(script! { mod.draw.PtTraceExact }),
+                    (false, true, true) => vm.eval(script! { mod.draw.PtTraceFrostExact }),
+                    (true, false, false) => vm.eval(script! { mod.draw.PtTraceGroups }),
+                    (true, false, true) => vm.eval(script! { mod.draw.PtTraceGroupsFrost }),
+                    (true, true, false) => vm.eval(script! { mod.draw.PtTraceGroupsExact }),
+                    (true, true, true) => vm.eval(script! { mod.draw.PtTraceGroupsFrostExact }),
+                    (false, false, false) => unreachable!(),
+                };
                 DrawTrace::script_from_value(vm, v)
             }));
         }
         let packed = self.packed.as_ref().unwrap();
+        let alignment = if self.stats.tile_scale > 0 { self.stats.tile_scale.max(8) } else { 1 };
         let scene_scale = vec2f(packed.scene_scale, packed.scene_area);
         let lens_radius = self.camera.lens_radius();
         let use_gbuffer = s.hybrid_primary && lens_radius <= 0.0 && (s.debug_mode == 0 || s.debug_mode == 7 || s.debug_mode == 8);
 
         if self.restart {
             self.restart = false;
+            self.guide_valid = false;
             self.frame = 0;
             self.paths_done = 0.0;
             self.paths_last_frame = 0.0;
@@ -2733,7 +3497,7 @@ impl RayTracer {
             self.rung_shift = if s.progressive { start_rung_shift(w, h) } else { 0 };
             // A restart keeps the tile size it had earned, halved; a NEW scene
             // starts at the conservative startup edge (set_scene resets it).
-            self.next_edge = (self.next_edge / 2).max(TILE_MIN);
+            self.next_edge = aligned_edge(self.next_edge / 2, alignment);
             self.tile_edge = self.next_edge;
             self.tiles_per_frame = 1;
             self.gpu_under_budget = 0;
@@ -2741,12 +3505,19 @@ impl RayTracer {
                 tri_count: self.stats.tri_count,
                 bvh_nodes: self.stats.bvh_nodes,
                 bvh_depth: self.stats.bvh_depth,
+                tile_scale: self.stats.tile_scale,
+                light_groups: self.stats.light_groups,
+                gain_uploads: self.stats.gain_uploads,
                 width: w,
                 height: h,
                 ..Default::default()
             };
             // Clear both accumulation/moment buffers by drawing zero rows.
             self.ping = 0;
+            if let Some(targets) = &mut self.group_targets {
+                targets.atlas_ping = 0;
+                targets.last_rects.clear();
+            }
         }
         let first_frame = self.frame == 0;
         let done = reached_sample_limit(s.target_spp, self.stats.spp);
@@ -2807,12 +3578,13 @@ impl RayTracer {
                 submitted_edge,
                 filtered_ms,
                 budget_ms,
+                alignment,
             );
             self.tiles_per_frame = update.tiles;
             self.next_edge = update.next_edge;
             self.gpu_under_budget = update.under_budget;
         }
-        self.next_edge = self.next_edge.clamp(TILE_MIN, TILE_MAX);
+        self.next_edge = aligned_edge(self.next_edge, alignment);
         if self.stats.gpu_samples == 0 {
             let update = adapt_without_timing(
                 self.tiles_per_frame,
@@ -2823,6 +3595,7 @@ impl RayTracer {
                 self.paths_last_frame > 0.0,
                 dt_ms,
                 budget_ms,
+                alignment,
             );
             self.tiles_per_frame = update.tiles;
             self.next_edge = update.next_edge;
@@ -2831,7 +3604,22 @@ impl RayTracer {
         if done {
             self.gpu_under_budget = 0;
         }
-        let dispatching = should_dispatch_trace(done, self.paused, self.skip_trace, true);
+        // The progressive pane is always denoised: at one sample per pixel
+        // the rungs would be salt-and-pepper, and even at 100 spp the raw
+        // estimator still shows clamped NEE spikes as lone white pixels.
+        // The wavelet weights tighten as variance falls (the sigma floor
+        // fades as 1/sqrt N), so a converged pane converges to the raw
+        // mean plus the first-pass firefly rule. F12/track keep the
+        // explicit switch and the unbiased estimator.
+        let denoise = (s.denoise || s.progressive) && s.debug_mode == 0;
+        let gains_only = !first_frame && self.gains_dirty && !scheduled_sample;
+        let dispatching = should_dispatch_trace(done, self.paused, self.skip_trace || gains_only, true);
+        // A gain update on an idle pane reuses the last filtered base and guide.
+        let present_only = groups && !first_frame && !dispatching && self.gains_dirty
+            && !self.capture_pending.iter().any(|k| !matches!(k, CaptureKind::View | CaptureKind::LightGroups));
+        // A settled view records its guide without advancing the trace sweep.
+        let guide_frame = denoise && !self.guide_valid && !first_frame && !present_only;
+        let dispatching = dispatching && !guide_frame;
         // ---- the resolution ladder ---------------------------------------
         // The first pass after a restart covers the WHOLE frame at
         // `native >> rung_shift` and each completed sweep halves the shift:
@@ -2842,7 +3630,7 @@ impl RayTracer {
         // display's hold keeps the previous rung's picture under every pixel
         // the new sweep has not reached yet.
         let mut rung_clear = false;
-        if std::mem::take(&mut self.sweep_wrapped) && dispatching && self.rung_shift > 0 {
+        if dispatching && std::mem::take(&mut self.sweep_wrapped) && self.rung_shift > 0 {
             self.rung_shift -= 1;
             rung_clear = true;
             self.paths_done = 0.0;
@@ -2874,7 +3662,7 @@ impl RayTracer {
             // and grows on real signal, but dispatch never drops below
             // `MIN_PATHS_PER_FRAME` — small dispatches, watchdog-safe, and a
             // guaranteed convergence pace.
-            self.tile_edge = self.next_edge.max(32);
+            self.tile_edge = aligned_edge(self.next_edge.max(32), alignment);
             let key = (self.tile_edge, rw, rh);
             if self.sweep_key != key || self.sweep_order.is_empty() {
                 self.sweep_order = spiral_order(rw as u32, rh as u32, self.tile_edge);
@@ -2889,8 +3677,9 @@ impl RayTracer {
         // hard floor and ceiling: the floor guarantees convergence pace,
         // the ceiling bounds the tracer's GPU appetite per host frame so
         // the machine keeps breathing whatever the readings say.
-        let min_tiles = MIN_PATHS_PER_FRAME.div_ceil(edge * edge);
-        let max_tiles_budget = (MAX_PATHS_PER_FRAME / (edge * edge)).max(1);
+        let tile_area = edge.saturating_mul(edge);
+        let min_tiles = MIN_PATHS_PER_FRAME.div_ceil(tile_area);
+        let max_tiles_budget = (MAX_PATHS_PER_FRAME / tile_area).max(1);
         let tiles_this_frame = self
             .tiles_per_frame
             .max(min_tiles)
@@ -2916,7 +3705,7 @@ impl RayTracer {
 
         let clear_accum = first_frame || rung_clear;
         let prev = self.ping;
-        let cur = prev ^ 1;
+        let cur = if present_only { prev } else { prev ^ 1 };
         let (right, up, fwd) = self.camera.basis();
         let aspect = w as f32 / h as f32;
         let tan_y = (self.camera.fov_y * 0.5).tan();
@@ -2926,9 +3715,16 @@ impl RayTracer {
         };
         // Frame jitter for the raster (a low-discrepancy point of the frame).
         let (jx, jy) = frame_jitter(self.frame);
-        let jitter = if use_gbuffer { vec2f(jx, jy) } else { vec2f(0.0, 0.0) };
+        let jitter = if use_gbuffer && !guide_frame { vec2f(jx, jy) } else { vec2f(0.0, 0.0) };
         let inv_res = vec2f(1.0 / w as f32, 1.0 / h as f32);
         let sky = self.sky;
+        let env_on = self.environment.is_some();
+        let (env_size, env_inv, env_frame) = self.environment.as_ref().map(|(light, frame)| {
+            let map = light.map();
+            let rows = (map.width * map.height + map.height + DATA_W - 1) / DATA_W;
+            (vec2f(map.width as f32, map.height as f32), vec2f(1.0 / DATA_W as f32, 1.0 / rows as f32), *frame)
+        }).unwrap_or((vec2f(1.0, 1.0), vec2f(1.0, 1.0), EnvironmentFrame::default()));
+        let env_rows = env_frame.world_to_map;
         let (packed_inv, n_nodes) = {
             let p = self.packed.as_ref().unwrap();
             (
@@ -2940,7 +3736,7 @@ impl RayTracer {
                     p.light.inv(),
                     p.n_lights as f32,
                     p.origin,
-                    p.env_grid_dim as f32,
+                    if env_on { 0.0 } else { p.env_grid_dim as f32 },
                     p.env_min,
                     p.env_inv_extent,
                 ),
@@ -2948,32 +3744,51 @@ impl RayTracer {
             )
         };
 
-        // The progressive pane is always denoised: at one sample per pixel
-        // the rungs would be salt-and-pepper, and even at 100 spp the raw
-        // estimator still shows clamped NEE spikes as lone white pixels.
-        // The wavelet weights tighten as variance falls (the sigma floor
-        // fades as 1/sqrt N), so a converged pane converges to the raw
-        // mean plus the first-pass firefly rule. F12/track keep the
-        // explicit switch and the unbiased estimator.
-        let denoise = (s.denoise || s.progressive) && s.debug_mode == 0;
         // The raster runs while the frame still has untraced pixels (the
         // fallback), for hybrid primaries, and for the denoiser's guides.
         let gbuf_drawn = use_gbuffer || denoise || (self.stats.spp < 1.0 && s.debug_mode == 0);
         if !denoise {
             self.capture_pending.retain(|k| *k != CaptureKind::Denoised);
         }
-        let total_stages = 1 + 1 + 2 + 1 + if denoise { 5 } else { 0 } + 2;
-        let mut stage = 0usize;
+        let group_count = self.stats.light_groups as usize;
+        let reset_atlas = groups && first_frame;
+        let gather = groups && !tiles.is_empty();
+        // Stage 2 owns atlas 0 and stage 3 owns atlas 1. At restart the
+        // first clears the source and the second clears and seeds its peer.
+        let atlas_cur = self.group_targets.as_ref().map_or(0, |t| t.atlas_ping ^ 1);
+        let sum_far = groups && (reset_atlas || gather || self.gains_dirty || self.capture_pending.contains(&CaptureKind::LightGroups));
+        if !groups { self.capture_pending.retain(|k| *k != CaptureKind::LightGroups); }
+        // Keep each pass attached to its own output even when a gain update
+        // skips the base passes. Capture and repaint both track the producer.
+        let base = !present_only;
+        let filter = base && denoise;
+        let mut active = [base, base, reset_atlas, reset_atlas, base, base, base, guide_frame,
+            filter, filter, filter, filter, sum_far, true, true];
+        if gather { active[2 + atlas_cur] = true; }
+        for (st, &on) in self.stages.iter().zip(&active) {
+            if !on { st.pass.withdraw(cx.cx); }
+        }
+        let mut active_stages = (0..active.len()).filter(|&i| active[i]);
 
         macro_rules! run_stage {
             ($target:expr, $depth:expr, $clear:expr, $draw:expr) => {{
-                let size = dvec2(w as f64, h as f64);
-                Self::attach_stage(cx, &self.stages[..total_stages], stage, self.parent_pass);
+                run_stage!($target, $depth, $clear, None::<&Texture>, $draw);
+            }};
+            ($target:expr, $depth:expr, $clear:expr, $far:expr, $draw:expr) => {{
+                run_stage!($target, $depth, $clear, $far, dvec2(w as f64, h as f64), $draw);
+            }};
+            ($target:expr, $depth:expr, $clear:expr, $far:expr, $size:expr, $draw:expr) => {{
+                let size = $size;
+                let stage = active_stages.next().unwrap();
+                Self::attach_stage(cx, &self.stages, &active, stage, self.parent_pass);
                 {
                     let st = &mut self.stages[stage];
                     st.pass.set_size(cx, size);
                     st.pass.clear_color_textures(cx.cx);
                     st.pass.set_color_texture(cx, $target, $clear);
+                    if let Some(far) = $far {
+                        st.pass.add_color_texture(cx.cx, far, DrawPassClearColor::InitWith(Vec4f::default()));
+                    }
                     if let Some(d) = $depth {
                         st.pass.set_depth_texture(cx, d, DrawPassClearDepth::ClearWith(1.0));
                     } else {
@@ -2993,14 +3808,15 @@ impl RayTracer {
                     st.draw_list.end(cx);
                     cx.end_pass(&st.pass);
                 }
-                stage += 1;
             }};
         }
 
-        let clear_g = DrawPassClearColor::ClearWith(vec4(-1.0, 0.0, 0.0, 0.0));
-
+        let mut tonemap_src = if denoise && present_only {
+            self.atrous[3].clone()
+        } else { self.accum[cur].clone() };
         // 1. G-buffer raster.
-        {
+        if !present_only {
+            let clear_g = DrawPassClearColor::ClearWith(vec4(-1.0, 0.0, 0.0, 0.0));
             let gbuf = self.gbuf.clone().unwrap();
             let depth = self.gbuf_depth.clone().unwrap();
             let vp = match self.view_proj_override {
@@ -3028,15 +3844,17 @@ impl RayTracer {
         }
 
         // 2. Trace.
-        {
+        if !present_only {
             let target = self.trace_scratch.clone().unwrap();
             let src = self.accum[prev].clone();
             let mom = self.moments[prev].clone();
             let rejected = self.rejected[prev].clone();
             let gbuf = self.gbuf.clone().unwrap();
-            let draw_trace = match &mut self.draw_trace_exact {
-                Some(exact) if s.exact => exact,
-                _ => &mut self.draw_trace,
+            let far = self.far_entry.clone();
+            let draw_trace = if trace_variant == 0 {
+                &mut self.draw_trace
+            } else {
+                self.draw_trace_variants[trace_variant].as_mut().unwrap()
             };
             let dv = &mut draw_trace.draw_super.draw_vars;
             dv.set_texture(0, &self.tex_tri);
@@ -3049,7 +3867,15 @@ impl RayTracer {
             dv.set_texture(7, &gbuf);
             dv.set_texture(8, &mom);
             dv.set_texture(9, &rejected);
+            dv.set_texture(10, &self.tex_env);
             let c = &*cx.cx;
+            dv.set_uniform(c, id!(env_on), &[if env_on { 1.0 } else { 0.0 }]);
+            dv.set_uniform(c, id!(env_inv), &[env_inv.x, env_inv.y]);
+            dv.set_uniform(c, id!(env_size), &[env_size.x, env_size.y]);
+            dv.set_uniform(c, id!(env_row0), &[env_rows[0].x, env_rows[0].y, env_rows[0].z, 0.0]);
+            dv.set_uniform(c, id!(env_row1), &[env_rows[1].x, env_rows[1].y, env_rows[1].z, 0.0]);
+            dv.set_uniform(c, id!(env_row2), &[env_rows[2].x, env_rows[2].y, env_rows[2].z, 0.0]);
+            dv.set_uniform(c, id!(env_strength), &[env_frame.strength]);
             dv.set_uniform(c, id!(res), &[w as f32, h as f32]);
             dv.set_uniform(c, id!(inv_res), &[inv_res.x, inv_res.y]);
             dv.set_uniform(c, id!(cam_inv), &[1.0 / rw as f32, 1.0 / rh as f32]);
@@ -3066,6 +3892,7 @@ impl RayTracer {
             dv.set_uniform(c, id!(ortho), &[ortho.x, ortho.y]);
             dv.set_uniform(c, id!(use_gbuffer), &[if use_gbuffer { 1.0 } else { 0.0 }]);
             dv.set_uniform(c, id!(n_lights), &[packed_inv.5]);
+            dv.set_uniform(c, id!(inv_light_power), &[self.packed.as_ref().unwrap().inv_light_power]);
             dv.set_uniform(c, id!(env_grid_dim), &[packed_inv.7]);
             dv.set_uniform(c, id!(env_min), &[packed_inv.8.x, packed_inv.8.y, packed_inv.8.z]);
             dv.set_uniform(c, id!(env_inv_extent), &[packed_inv.9.x, packed_inv.9.y, packed_inv.9.z]);
@@ -3115,7 +3942,7 @@ impl RayTracer {
             dv.set_uniform(c, id!(sun_radiance), &[sky.sun_radiance.x, sky.sun_radiance.y, sky.sun_radiance.z, 0.0]);
             let sun_pdf = 1.0 / (std::f32::consts::TAU * (1.0 - sky.sun_dir.w));
             dv.set_uniform(c, id!(sun_pdf), &[sun_pdf]);
-            dv.set_uniform(c, id!(sun_on), &[if sky.up.w > 0.5 && sky.sun_radiance.x > 0.0 { 1.0 } else { 0.0 }]);
+            dv.set_uniform(c, id!(sun_on), &[if !env_on && sky.up.w > 0.5 && sky.sun_radiance.x > 0.0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(c, id!(env_sun_prob), &[sky.sun_sample_probability()]);
             dv.set_uniform(c, id!(pz_y), &[sky.pz_y.x, sky.pz_y.y, sky.pz_y.z, sky.pz_y.w]);
             dv.set_uniform(c, id!(pz_x), &[sky.pz_x.x, sky.pz_x.y, sky.pz_x.z, sky.pz_x.w]);
@@ -3133,12 +3960,13 @@ impl RayTracer {
             dv.set_uniform(c, id!(debug_mode), &[s.debug_mode as f32]);
             dv.set_uniform(c, id!(brute), &[if s.brute { 1.0 } else { 0.0 }]);
             dv.set_uniform(c, id!(dbg_b), &[s.dbg_b]);
-            let draw_copy = &mut self.draw_copy;
+            let draw_copy = if groups { &mut self.group_draws.as_mut().unwrap().0 } else { &mut self.draw_copy };
             draw_copy.draw_super.draw_vars.set_texture(0, &src);
             draw_copy.draw_super.draw_vars.set_uniform(c, id!(reset), &[if clear_accum { 1.0 } else { 0.0 }]);
             let tiles_ref = &tiles;
-            run_stage!(&target, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| {
+            run_stage!(&target, None::<&Texture>, zero_clear(), far.as_ref(), |cx: &mut Cx2d, r| {
                 // The whole frame carries over (one fetch per pixel)...
+                // The grouped copy marks all far entries empty before the tiles draw.
                 draw_copy.draw_abs(cx, r);
                 // ...and each tile is its OWN draw call (`draw_call_always`)
                 // covering only its rect: the per-draw GPU time is the tile's.
@@ -3154,8 +3982,72 @@ impl RayTracer {
                 .set_gpu_time_tag(cx.cx, ((tiles.len() as u64) << 16) | edge as u64);
         }
 
+        if reset_atlas || gather {
+            let targets = self.group_targets.as_mut().unwrap();
+            let (tw, th) = targets.tile;
+            let (cols, rows) = targets.grid;
+            let atlas_size = dvec2((tw * cols) as f64, (th * rows) as f64);
+            let prev = &targets.atlas[atlas_cur ^ 1];
+            let cur = &targets.atlas[atlas_cur];
+            if reset_atlas {
+                run_stage!(prev, None::<&Texture>, zero_clear(), None::<&Texture>, atlas_size, |_cx: &mut Cx2d, _r| {});
+            }
+            let scale = self.stats.tile_scale;
+            let rung = 1u32 << shift;
+            let draw_groups = |cx: &mut Cx2d, draw: &mut DrawGroupGather, rect: Rect| {
+                for k in 0..group_count {
+                    draw.group_id = (k + 1) as f32;
+                    draw.draw_abs(cx, rect.translate(dvec2(((k % cols) * tw) as f64, ((k / cols) * th) as f64)));
+                }
+            };
+            let (_, draw_gather, draw_copy, _) = self.group_draws.as_mut().unwrap();
+            let dv = &mut draw_copy.draw_super.draw_vars;
+            dv.set_texture(0, prev);
+            dv.set_uniform(cx.cx, id!(atlas_size), &[atlas_size.x as f32, atlas_size.y as f32]);
+            let dv = &mut draw_gather.draw_super.draw_vars;
+            dv.set_texture(0, prev);
+            dv.set_texture(1, self.far_entry.as_ref().unwrap());
+            dv.set_uniform(cx.cx, id!(atlas_size), &[atlas_size.x as f32, atlas_size.y as f32]);
+            dv.set_uniform(cx.cx, id!(tile_size), &[tw as f32, th as f32]);
+            dv.set_uniform(cx.cx, id!(cols), &[cols as f32]);
+            dv.set_uniform(cx.cx, id!(native_inv), &[inv_res.x, inv_res.y]);
+            dv.set_uniform(cx.cx, id!(footprint), &[scale as f32 / rung as f32]);
+            let clear = if reset_atlas { zero_clear() } else { DrawPassClearColor::InitWith(Vec4f::default()) };
+            let last_rects = &mut targets.last_rects;
+            run_stage!(cur, None::<&Texture>, clear, None::<&Texture>, atlas_size, |cx: &mut Cx2d, _r| {
+                // Only the previous dispatch's footprints are missing on this
+                // ping. Copy them first so a current gather wins any overlap.
+                if !last_rects.is_empty() {
+                    draw_copy.begin_many_instances(cx);
+                    for &rect in last_rects.iter() { draw_groups(cx, draw_copy, rect); }
+                    draw_copy.end_many_instances(cx);
+                    last_rects.clear();
+                }
+                if gather {
+                    draw_gather.begin_many_instances(cx);
+                    for &(x, y, width, height) in &tiles {
+                        let x0 = x * rung / scale;
+                        let y0 = y * rung / scale;
+                        let x1 = ((x + width) * rung).div_ceil(scale).min(tw as u32);
+                        let y1 = ((y + height) * rung).div_ceil(scale).min(th as u32);
+                        let rect = Rect {
+                            pos: dvec2(x0 as f64, y0 as f64),
+                            size: dvec2((x1 - x0) as f64, (y1 - y0) as f64),
+                        };
+                        draw_gather.rung_rect = vec4f(x as f32, y as f32, (x + width) as f32, (y + height) as f32);
+                        draw_groups(cx, draw_gather, rect);
+                        last_rects.push(rect);
+                    }
+                    draw_gather.end_many_instances(cx);
+                }
+            });
+            // A replay uses the retained draws. The paint gate above keeps
+            // their source intact until this recording has painted whole.
+            if gather { targets.atlas_ping = atlas_cur; }
+        }
+
         // 3. Resolve the transient rejection sentinel to clean (sum, N).
-        {
+        if !present_only {
             let target = self.accum[cur].clone();
             let scratch = self.trace_scratch.as_ref().unwrap().clone();
             let dv = &mut self.draw_resolve.draw_super.draw_vars;
@@ -3170,7 +4062,7 @@ impl RayTracer {
         }
 
         // 4. Persistent per-pixel rejected-sample diagnostic counter.
-        {
+        if !present_only {
             let target = self.rejected[cur].clone();
             let scratch = self.trace_scratch.as_ref().unwrap().clone();
             let dv = &mut self.draw_reject.draw_super.draw_vars;
@@ -3187,7 +4079,7 @@ impl RayTracer {
         }
 
         // 5. Moments.
-        {
+        if !present_only {
             let target = self.moments[cur].clone();
             let dv = &mut self.draw_moments.draw_super.draw_vars;
             dv.set_texture(0, &self.accum[prev]);
@@ -3199,10 +4091,9 @@ impl RayTracer {
         }
 
         // 4. Denoise: guide + 4 à-trous iterations.
-        let mut tonemap_src = self.accum[cur].clone();
-        if denoise {
+        if denoise && !present_only {
             let guide = self.guide.clone().unwrap();
-            {
+            if guide_frame {
                 let dv = &mut self.draw_guide.draw_super.draw_vars;
                 // PtGuide inherits PtTrace's texture slots and transport helpers.
                 dv.set_texture(0, &self.tex_tri);
@@ -3215,6 +4106,16 @@ impl RayTracer {
                 dv.set_texture(7, self.gbuf.as_ref().unwrap());
                 dv.set_texture(8, &self.moments[cur]);
                 dv.set_texture(9, &self.rejected[cur]);
+                dv.set_texture(10, &self.tex_env);
+                dv.set_uniform(cx.cx, id!(env_on), &[if env_on { 1.0 } else { 0.0 }]);
+                dv.set_uniform(cx.cx, id!(env_inv), &[env_inv.x, env_inv.y]);
+                dv.set_uniform(cx.cx, id!(env_size), &[env_size.x, env_size.y]);
+                dv.set_uniform(cx.cx, id!(env_row0), &[env_rows[0].x, env_rows[0].y, env_rows[0].z, 0.0]);
+                dv.set_uniform(cx.cx, id!(env_row1), &[env_rows[1].x, env_rows[1].y, env_rows[1].z, 0.0]);
+                dv.set_uniform(cx.cx, id!(env_row2), &[env_rows[2].x, env_rows[2].y, env_rows[2].z, 0.0]);
+                dv.set_uniform(cx.cx, id!(env_strength), &[env_frame.strength]);
+                dv.set_uniform(cx.cx, id!(sun_on), &[0.0]);
+                dv.set_uniform(cx.cx, id!(env_grid_dim), &[0.0]);
                 dv.set_uniform(cx.cx, id!(tri_inv), &[packed_inv.0.x, packed_inv.0.y]);
                 dv.set_uniform(cx.cx, id!(attr_inv), &[packed_inv.1.x, packed_inv.1.y]);
                 dv.set_uniform(cx.cx, id!(bvh_inv), &[packed_inv.2.x, packed_inv.2.y]);
@@ -3233,6 +4134,7 @@ impl RayTracer {
                 dv.set_uniform(cx.cx, id!(cam_tan), &[tan_y * aspect, tan_y]);
                 let draw_guide = &mut self.draw_guide;
                 run_stage!(&guide, None::<&Texture>, zero_clear(), |cx: &mut Cx2d, r| draw_guide.draw_abs(cx, r));
+                self.guide_valid = true;
             }
             let mut src = self.accum[cur].clone();
             // At a coarse rung the image lives in the top-left sub-rect;
@@ -3257,7 +4159,7 @@ impl RayTracer {
                 dv.set_uniform(
                     cx.cx,
                     id!(geom_weight),
-                    &[if lens_radius > 0.0 || shift > 0 { 0.0 } else { 1.0 }],
+                    &[if lens_radius > 0.0 || shift > 0 || !self.guide_valid { 0.0 } else { 1.0 }],
                 );
                 dv.set_uniform(
                     cx.cx,
@@ -3276,6 +4178,27 @@ impl RayTracer {
                 self.tag_capture(&src, CaptureKind::Denoised, now);
             }
             tonemap_src = src;
+        }
+
+        if sum_far {
+            let targets = self.group_targets.as_ref().unwrap();
+            let far = targets.far.clone();
+            let draw = &mut self.group_draws.as_mut().unwrap().3;
+            let dv = &mut draw.draw_super.draw_vars;
+            dv.set_texture(0, &targets.atlas[targets.atlas_ping]);
+            dv.set_texture(1, &self.gains_tex);
+            let width = group_count.min(DATA_W);
+            dv.set_uniform(cx.cx, id!(grid), &[targets.grid.0 as f32, targets.grid.1 as f32]);
+            dv.set_uniform(cx.cx, id!(gain_size), &[width as f32, group_count.div_ceil(width) as f32]);
+            dv.set_uniform(cx.cx, id!(group_count), &[group_count as f32]);
+            let size = dvec2(targets.tile.0 as f64, targets.tile.1 as f64);
+            run_stage!(&far, None::<&Texture>, zero_clear(), None::<&Texture>, size,
+                |cx: &mut Cx2d, r| draw.draw_abs(cx, r));
+            if self.capture_pending.contains(&CaptureKind::LightGroups) {
+                self.capture_pending.retain(|kind| *kind != CaptureKind::LightGroups);
+                cx.cx.request_render_texture_capture(&far);
+                self.tag_capture(&far, CaptureKind::LightGroups, now);
+            }
         }
 
         // 5. Carry: fold the current rung's linear means over last frame's
@@ -3320,11 +4243,17 @@ impl RayTracer {
             dv.set_texture(4, &self.tex_tri);
             dv.set_texture(5, &self.tex_mat);
             dv.set_texture(6, &carried);
+            let (far, tile_size) = self.group_targets.as_ref().map_or((&self.gains_tex, (1, 1)), |t| (&t.far, t.tile));
+            dv.set_texture(7, far);
+            dv.set_texture(8, if denoise && groups { self.guide.as_ref().unwrap() } else { &self.gains_tex });
+            dv.set_uniform(cx.cx, id!(far_size), &[tile_size.0 as f32, tile_size.1 as f32]);
+            dv.set_uniform(cx.cx, id!(far_scale), &[self.stats.tile_scale as f32]);
+            dv.set_uniform(cx.cx, id!(guide_on), &[if denoise && self.guide_valid { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(inv_res), &[inv_res.x, inv_res.y]);
             dv.set_uniform(cx.cx, id!(src_res), &[rw as f32, rh as f32]);
             dv.set_uniform(cx.cx, id!(coarse), &[if shift > 0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(exposure), &[s.exposure]);
-            dv.set_uniform(cx.cx, id!(sky_display), &[if sky.uniform_value <= 0.0 && sky.sky_strength > 0.0 { 1.0 } else { 0.0 }]);
+            dv.set_uniform(cx.cx, id!(sky_display), &[if !env_on && sky.uniform_value <= 0.0 && sky.sky_strength > 0.0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(view_mode), &[s.view_mode as f32]);
             dv.set_uniform(cx.cx, id!(attr_inv), &[packed_inv.1.x, packed_inv.1.y]);
             dv.set_uniform(cx.cx, id!(tri_inv), &[packed_inv.0.x, packed_inv.0.y]);
@@ -3343,8 +4272,17 @@ impl RayTracer {
                 self.tag_capture(&view, CaptureKind::View, now);
             }
         }
-        debug_assert_eq!(stage, total_stages);
+        debug_assert!(active_stages.next().is_none());
 
+        self.recorded = Some((cx.cx.repaint_id(), active));
+        self.recorded_gains = self.stats.gain_uploads;
+        self.gains_dirty = false;
+        self.display_stale = false;
+        if present_only {
+            self.stats.tiles = 0;
+            self.paths_last_frame = 0.0;
+            return;
+        }
         // Bookkeeping.
         self.ping = cur;
         let paths_now: f64 = tiles.iter().map(|t| (t.2 * t.3) as f64).sum();
@@ -3364,8 +4302,6 @@ impl RayTracer {
         self.stats.rung_shift = shift;
         self.stats.last_frame_ms = dt_ms;
         self.stats.done = done;
-        self.recorded = Some((cx.cx.repaint_id(), stage));
-        self.display_stale = false;
     }
 
     /// Tag a capture asked of `texture`. The platform folds a request into one still in flight
@@ -3421,6 +4357,7 @@ impl RayTracer {
         if self.recorded.is_some() {
             return true;
         }
+        if self.gains_dirty { return true; }
         if self.paused {
             return false;
         }
@@ -3509,13 +4446,15 @@ fn zero_clear() -> DrawPassClearColor {
     DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0))
 }
 
-/// GL-style orthographic projection (z into [-1,1]), symmetric about the axis.
+/// Orthographic projection, symmetric about the axis, with depth from 0 at `near` to 1 at
+/// `far`: the clip range the GPU backends keep. A GL-style [-1, 1] depth would clip the
+/// nearer half of the view.
 fn ortho_matrix(half_w: f32, half_h: f32, near: f32, far: f32) -> Mat4f {
     let mut m = Mat4f::identity();
     m.v[0] = 1.0 / half_w;
     m.v[5] = 1.0 / half_h;
-    m.v[10] = -2.0 / (far - near);
-    m.v[14] = -(far + near) / (far - near);
+    m.v[10] = 1.0 / (near - far);
+    m.v[14] = near / (near - far);
     m
 }
 
@@ -3526,18 +4465,37 @@ mod sweep_tests {
     };
 
     #[test]
+    fn scene_hold_keeps_the_presented_source_until_the_startup_sweep() {
+        let mut hold = super::PresentationHold::default();
+        assert!(!hold.restart(true, false), "first scene has no picture to capture");
+        assert!(!hold.holding, "first scene presents normally");
+        assert!(hold.restart(true, true), "first held restart captures the shown picture once");
+        assert!(!hold.advance(0.01, 0.0625), "partial startup sweep keeps the old picture");
+        assert!(hold.holding, "presentation still selects the held source");
+        assert!(!hold.restart(true, true), "second restart preserves the original copy");
+        assert!(!hold.advance(0.0, 0.0625), "second restart begins a fresh hidden accumulation");
+        assert!(!hold.advance(0.0624, 0.0625), "old source survives just below the threshold");
+        assert!(hold.advance(0.0625, 0.0625), "threshold releases the held target");
+        assert!(!hold.holding, "presentation selects the new accumulation at the threshold");
+        assert!(!hold.advance(1.0, 0.0625), "release occurs only once");
+        assert!(hold.restart(true, true), "a later edit captures its own shown picture");
+        assert!(!hold.restart(false, true), "an unheld edit requests no copy");
+        assert!(!hold.holding, "without hold the original immediate presentation remains");
+    }
+
+    #[test]
     fn gpu_budget_cuts_tiles_on_an_overrun_and_grows_only_after_stability() {
-        let over = adapt_gpu_budget(8, 64, 2, 8, 64, 8.0, 4.0);
+        let over = adapt_gpu_budget(8, 64, 2, 8, 64, 8.0, 4.0, 1);
         assert_eq!(over.tiles, 3);
         assert_eq!(over.under_budget, 0);
 
-        let one_tile_over = adapt_gpu_budget(1, 32, 0, 1, 32, 8.0, 4.0);
+        let one_tile_over = adapt_gpu_budget(1, 32, 0, 1, 32, 8.0, 4.0, 1);
         assert_eq!(one_tile_over.tiles, 1);
         assert_eq!(one_tile_over.next_edge, 16);
 
         // Growth needs two consecutive under-budget completions.
-        let a = adapt_gpu_budget(1, TILE_MIN, 0, 1, TILE_MIN, 0.5, 4.0);
-        let b = adapt_gpu_budget(a.tiles, a.next_edge, a.under_budget, 1, TILE_MIN, 0.5, 4.0);
+        let a = adapt_gpu_budget(1, TILE_MIN, 0, 1, TILE_MIN, 0.5, 4.0, 1);
+        let b = adapt_gpu_budget(a.tiles, a.next_edge, a.under_budget, 1, TILE_MIN, 0.5, 4.0, 1);
         assert_eq!(a.tiles, 1);
         assert_eq!(a.under_budget, 1);
         assert_eq!(b.tiles, 2);
@@ -3551,7 +4509,7 @@ mod sweep_tests {
         // the earned tile size and count — never restart the spiral with a
         // tiny tile because the pane sat idle for a while.
         for timing_ever in [false, true] {
-            let out = adapt_without_timing(8, 64, 1, timing_ever, 500, false, 200.0, 4.0);
+            let out = adapt_without_timing(8, 64, 1, timing_ever, 500, false, 200.0, 4.0, 1);
             assert_eq!((out.tiles, out.next_edge, out.under_budget), (8, 64, 1), "timing_ever {timing_ever}");
         }
     }
@@ -3561,7 +4519,7 @@ mod sweep_tests {
         // Metal has reported before: a frame without a fresh sample only
         // means the buffer is still in flight. Even a huge host interval on
         // a dispatching frame must not shrink the earned ladder.
-        let out = adapt_without_timing(8, 64, 0, true, 500, true, 200.0, 4.0);
+        let out = adapt_without_timing(8, 64, 0, true, 500, true, 200.0, 4.0, 1);
         assert_eq!((out.tiles, out.next_edge), (8, 64));
     }
 
@@ -3569,19 +4527,19 @@ mod sweep_tests {
     fn no_timing_backend_brings_up_conservatively_then_uses_the_interval() {
         // Bring-up: one startup tile until the backend proves it never
         // reports (30 dispatched frames).
-        let out = adapt_without_timing(8, 128, 2, false, 2, true, 8.0, 4.0);
+        let out = adapt_without_timing(8, 128, 2, false, 2, true, 8.0, 4.0, 1);
         assert_eq!((out.tiles, out.next_edge, out.under_budget), (1, 32, 0));
         // Established no-timing backend: a late host frame halves (the
         // late threshold has a 40 ms floor so a ~30 Hz accumulation tick
         // is not read as an overrun)...
-        let late = adapt_without_timing(8, 64, 0, false, 60, true, 60.0, 4.0);
+        let late = adapt_without_timing(8, 64, 0, false, 60, true, 60.0, 4.0, 1);
         assert_eq!((late.tiles, late.next_edge), (4, 32));
-        let ticked = adapt_without_timing(8, 64, 0, false, 60, true, 33.0, 4.0);
+        let ticked = adapt_without_timing(8, 64, 0, false, 60, true, 33.0, 4.0, 1);
         assert_eq!((ticked.tiles, ticked.next_edge), (8, 64));
         // ...and two consecutive on-time traced frames grow, edge first.
-        let g1 = adapt_without_timing(4, 32, 0, false, 60, true, 4.0, 4.0);
+        let g1 = adapt_without_timing(4, 32, 0, false, 60, true, 4.0, 4.0, 1);
         assert_eq!(g1.under_budget, 1);
-        let g2 = adapt_without_timing(g1.tiles, g1.next_edge, g1.under_budget, false, 60, true, 4.0, 4.0);
+        let g2 = adapt_without_timing(g1.tiles, g1.next_edge, g1.under_budget, false, 60, true, 4.0, 4.0, 1);
         assert_eq!(g2.next_edge, 48);
         assert_eq!(g2.under_budget, 0);
     }

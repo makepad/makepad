@@ -649,7 +649,8 @@ struct Prover<'a> {
     /// bounds there), counted as `SLAB_COST` evaluations.
     empty: Option<&'a dyn Fn(&Bounds) -> bool>,
     tol: f64,
-    /// Field evaluations it may spend.
+    /// Field evaluations it may spend. The worker's cancel ([`makepad_csg_math::thread_pool::cancelled`])
+    /// spends the rest: the side stays open where it got to, a looser bound no caller keeps.
     budget: usize,
 }
 
@@ -724,7 +725,7 @@ impl Prover<'_> {
                 // the highest column is down: every one is
                 break;
             }
-            if evals >= self.budget {
+            if evals >= self.budget || makepad_csg_math::thread_pool::cancelled() {
                 spent = Some(col.top);
                 break;
             }

@@ -4,8 +4,8 @@
 //!
 //! Low discrepancy, not white noise: an Owen-scrambled Sobol (0,2)-sequence
 //! (dimensions 0 and 1 — both closed-form, no direction-number table), padded
-//! across dimensions by a per-dimension-pair hash scramble and decorrelated
-//! across pixels by a per-pixel index shuffle. This is Burley's "practical
+//! across dimensions by a per-pixel, per-dimension-pair index shuffle and
+//! coordinate scramble. This is Burley's "practical
 //! hash-based Owen scrambling" construction; it roughly halves time-to-clean
 //! against independent random numbers because every pixel's samples stay
 //! stratified in every 2D projection the integrator cares about (lens,
@@ -77,7 +77,9 @@ pub fn u32_to_unit(x: u32) -> f32 {
 /// bounce: bsdf, light, lobe/rr).
 #[inline]
 pub fn sobol_2d(index: u32, pixel_seed: u32, pair: u32) -> (f32, f32) {
-    let idx = owen_scramble(index, hash2(pixel_seed, 0x51ed_270b));
+    // Each pair shuffles the index with its own seed: a shared shuffle makes every pair a
+    // function of the same point (cross-pair projections on curves, error frozen per pixel).
+    let idx = owen_scramble(index, hash2(pixel_seed, 0x51ed_270b_u32.wrapping_add(pair)));
     let sx = hash2(pixel_seed, pair.wrapping_mul(2));
     let sy = hash2(pixel_seed, pair.wrapping_mul(2).wrapping_add(1));
     let x = owen_scramble(reverse_bits(idx), sx);
@@ -151,11 +153,23 @@ mod tests {
     }
 
     #[test]
-    fn dims_are_decorrelated_between_pixels() {
+    fn dims_are_decorrelated_between_pixels_and_pairs() {
         let a: Vec<f32> = (0..64).map(|i| sobol_2d(i, pixel_seed(3, 4, 1), 1).0).collect();
         let b: Vec<f32> = (0..64).map(|i| sobol_2d(i, pixel_seed(4, 4, 1), 1).0).collect();
         let corr: f32 = a.iter().zip(&b).map(|(x, y)| (x - 0.5) * (y - 0.5)).sum::<f32>() / 64.0;
-        assert!(corr.abs() < 0.02, "corr {corr}");
+        assert!(corr.abs() < 0.02, "between pixels: corr {corr}");
+        // Within one pixel, two dimension pairs must not be functions of one point: with a shared
+        // index shuffle their first coordinates agree in every top bit up to a flip (|r| near 0.75).
+        let mut worst = 0.0f32;
+        for p in 0..8u32 {
+            let seed = pixel_seed(p, 5, 1);
+            let x = |pair: u32| -> Vec<f32> { (0..64).map(|i| sobol_2d(i, seed, pair).0 - 0.5).collect() };
+            let (u, v) = (x(1), x(2 + p));
+            let r = u.iter().zip(&v).map(|(a, b)| a * b).sum::<f32>()
+                / (u.iter().map(|a| a * a).sum::<f32>() * v.iter().map(|b| b * b).sum::<f32>()).sqrt();
+            worst = worst.max(r.abs());
+        }
+        assert!(worst < 0.45, "between dimension pairs: worst |r| {worst}");
     }
 
     #[test]

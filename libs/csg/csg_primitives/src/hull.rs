@@ -1,9 +1,9 @@
 use makepad_csg_math::{dvec3, robust::orient3d, Vec3d};
-use makepad_csg_mesh::mesh::TriMesh;
+use makepad_csg_mesh::{mesh::TriMesh, validate::is_flat};
 use std::collections::{HashMap, HashSet};
 
-/// The closed convex hull of points, with outward winding and flat faces.
-/// Duplicate and interior points are dropped; coplanar points need not be kept.
+/// The closed convex hull of points, with outward winding and flat faces, none of them flat to
+/// nothing ([`is_flat`]). Duplicate and interior points are dropped; coplanar points need not be kept.
 /// The seed tetrahedron costs O(n); insertion costs about O(n log h) expected with conflict lists,
 /// where h is the largest number of hull triangles during construction.
 pub fn hull(points: &[Vec3d]) -> Result<TriMesh, String> {
@@ -225,7 +225,8 @@ pub fn hull(points: &[Vec3d]) -> Result<TriMesh, String> {
         }
     }
 
-    let faces: Vec<_> = faces.into_iter().filter(|face| face.alive).map(|face| face.vertices).collect();
+    let mut faces: Vec<_> = faces.into_iter().filter(|face| face.alive).map(|face| face.vertices).collect();
+    flip_flat(&points, &mut faces);
     let mut used = vec![false; points.len()];
     for face in &faces {
         for &i in face {
@@ -241,4 +242,66 @@ pub fn hull(points: &[Vec3d]) -> Result<TriMesh, String> {
     }
     mesh.triangles = faces.into_iter().map(|f| f.map(|i| indices[i])).collect();
     Ok(mesh)
+}
+
+/// Flips each flat face ([`is_flat`]) out of a closed triangulation. Exact predicates never make a
+/// face of three points in line, yet a point almost in line with its horizon edge leaves a sliver
+/// whose normal rounds to nothing. Its longest edge, the one its third corner lies (almost) on,
+/// turns into the diagonal across it and the face beyond, when its diagonal is no edge already and:
+/// - neither new face is flat or turned over from the face across: one flat face fewer;
+/// - or the face across is a sliver on the same longest edge (four points almost in one line):
+///   two slivers, each with a shorter longest edge, which a later pass flips with a face beside.
+///
+/// Each flip lowers the summed longest edges of the flat faces, so the passes, which go on while
+/// one is taken, end. The mesh stays closed on the same vertices.
+fn flip_flat(points: &[Vec3d], faces: &mut [[usize; 3]]) {
+    let normal = |[a, b, c]: [usize; 3]| (points[b] - points[a]).cross(points[c] - points[a]);
+    let flat = |[a, b, c]: [usize; 3]| is_flat(points[a], points[b], points[c]);
+    let length = |(u, v, _): &(usize, usize, usize)| (points[*v] - points[*u]).length_sq();
+    // a face's longest edge u→v and its corner w
+    let longest = |[a, b, c]: [usize; 3]| [(a, b, c), (b, c, a), (c, a, b)].into_iter().max_by(|x, y| length(x).total_cmp(&length(y))).unwrap();
+    let mut flats: Vec<usize> = (0..faces.len()).filter(|&f| flat(faces[f])).collect();
+    if flats.is_empty() {
+        return;
+    }
+    let mut edges: HashMap<(usize, usize), usize> = HashMap::with_capacity(3 * faces.len());
+    for (f, &[a, b, c]) in faces.iter().enumerate() {
+        for edge in [(a, b), (b, c), (c, a)] {
+            edges.insert(edge, f);
+        }
+    }
+    let mut flipped = true;
+    while flipped && !flats.is_empty() {
+        flipped = false;
+        for k in 0..flats.len() {
+            let f = flats[k];
+            if !flat(faces[f]) {
+                continue;
+            }
+            let (u, v, w) = longest(faces[f]);
+            // the face across u→v runs v→u→x
+            let Some(&g) = edges.get(&(v, u)) else { continue };
+            let x = faces[g].into_iter().find(|&k| k != u && k != v).unwrap();
+            let (p, q) = ([u, x, w], [x, v, w]);
+            if edges.contains_key(&(x, w)) || edges.contains_key(&(w, x)) {
+                continue;
+            }
+            let across = normal(faces[g]);
+            let clears = !flat(p) && !flat(q) && normal(p).dot(across) > 0.0 && normal(q).dot(across) > 0.0;
+            let pillow = flat(faces[g]) && { let (a, b, _) = longest(faces[g]); (a, b) == (v, u) };
+            if !clears && !pillow {
+                continue;
+            }
+            for edge in [(u, v), (v, u)] {
+                edges.remove(&edge);
+            }
+            for (edge, face) in [((u, x), f), ((x, w), f), ((w, u), f), ((x, v), g), ((v, w), g), ((w, x), g)] {
+                edges.insert(edge, face);
+            }
+            faces[f] = p;
+            faces[g] = q;
+            flipped = true;
+        }
+        flats.retain(|&f| flat(faces[f]));
+    }
 }

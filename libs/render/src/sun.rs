@@ -13,6 +13,43 @@
 
 use makepad_draw::*;
 
+/// Cosine of the sun's mean angular radius (0.2666 degrees): the cone given
+/// to an analytic sun (a world's own Sun or `resolve_sun`'s), which has no radius.
+pub const SUN_COS_RADIUS: f32 = 0.99998915;
+
+/// Direction toward a point of a light's disc, around its unit `centre`
+/// direction. `cos_radius` is the cosine of the cone's angular radius, as
+/// in `EnvSun::cos_radius`. The Shirley-Chiu concentric map takes the unit
+/// square to the disc, then samples the cone uniformly in solid angle.
+/// The disc's top points toward the zenith (toward X near either pole),
+/// and its horizontal axis is `cross(up_the_disc, centre)`.
+/// `[0.5, 0.5]` returns `centre` unchanged, as does a non-finite radius or point.
+pub fn sun_disc_direction(centre: Vec3f, cos_radius: f32, point: [f32; 2]) -> Vec3f {
+    if !cos_radius.is_finite() || !point[0].is_finite() || !point[1].is_finite() {
+        return centre;
+    }
+    let a = 2.0 * point[0] - 1.0;
+    let b = 2.0 * point[1] - 1.0;
+    if a == 0.0 && b == 0.0 {
+        return centre;
+    }
+    let (rho, phi) = if a.abs() > b.abs() {
+        (a, std::f32::consts::FRAC_PI_4 * (b / a))
+    } else {
+        (b, std::f32::consts::FRAC_PI_2 - std::f32::consts::FRAC_PI_4 * (a / b))
+    };
+    // 1 - cos and sin from the cone's own 1 - cos: a sun's 0.27 degree cone is 1.1e-5 wide
+    // there, which `1 - cos_theta^2` in f32 would round to a few hundred steps.
+    let one_minus_cos = rho * rho * (1.0 - cos_radius.clamp(-1.0, 1.0));
+    let cos_theta = 1.0 - one_minus_cos;
+    let sin_theta = (one_minus_cos * (2.0 - one_minus_cos)).max(0.0).sqrt();
+    let up = if centre.y.abs() > 0.9999 { vec3f(1.0, 0.0, 0.0) } else { vec3f(0.0, 1.0, 0.0) };
+    let b_axis = (up - centre * centre.dot(up)).normalize();
+    let t_axis = Vec3f::cross(b_axis, centre);
+    let offset = (t_axis * (rho * phi.cos()) + b_axis * (rho * phi.sin())) * (sin_theta / rho.abs());
+    centre * cos_theta + offset
+}
+
 /// Direct/ambient split of the legacy game shading, kept as the default so
 /// unifying the path did not restyle every existing game: the cube shader
 /// was `color*0.28 + color*dp*0.72`.
@@ -816,6 +853,56 @@ pub fn env_fog_color(horizon_rgb: Vec3f, env: &EnvLighting) -> Vec3f {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sun_disc_directions_fill_the_cone_uniformly() {
+        assert!((SUN_COS_RADIUS - 0.2666_f32.to_radians().cos()).abs() < 1e-7, "the analytic sun has its mean angular radius");
+        let bits = |v: Vec3f| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        // A 32x32 midpoint grid puts 484/1024 samples inside the half-area
+        // disc: the concentric map's square rings. 64x64 rings are fine enough.
+        const SIDE: usize = 64;
+        for centre in [vec3f(0.3, 0.8, -0.5).normalize(), vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.05, 0.0).normalize()] {
+            for cos_radius in [SUN_COS_RADIUS, 22.5_f32.to_radians().cos(), 55.0_f32.to_radians().cos()] {
+                let at = format!("centre {centre:?}, cos radius {cos_radius}");
+                assert_eq!(bits(sun_disc_direction(centre, cos_radius, [0.5, 0.5])), bits(centre), "{at}: the disc centre is bit for bit unchanged");
+                let mut counts = [0usize; 3];
+                let mut sum = Vec3f::default();
+                for i in 0..SIDE {
+                    for j in 0..SIDE {
+                        let point = [(i as f32 + 0.5) / SIDE as f32, (j as f32 + 0.5) / SIDE as f32];
+                        let dir = sun_disc_direction(centre, cos_radius, point);
+                        assert!((dir.length() - 1.0).abs() < 1e-5, "{at}, {point:?}: the sampled direction is unit length");
+                        let dot = dir.dot(centre);
+                        assert!(dot >= cos_radius - 1e-6, "{at}, {point:?}: the sampled direction stays inside the cone");
+                        // 1 - cos from the chord: a dot product of two directions 1e-5 apart
+                        // in f32 cannot tell where in the sun's cone a sample lies
+                        let one_minus_cos = 0.5 * (dir - centre).length_squared();
+                        for (count, q) in counts.iter_mut().zip([0.25, 0.5, 0.75]) {
+                            *count += usize::from(one_minus_cos <= q * (1.0 - cos_radius));
+                        }
+                        sum = sum + dir;
+                    }
+                }
+                for (count, q) in counts.into_iter().zip([0.25, 0.5, 0.75]) {
+                    let share = count as f32 / (SIDE * SIDE) as f32;
+                    assert!((share - q).abs() < 0.02, "{at}: uniform solid-angle share at {q}: got {share}");
+                }
+                let mean = sum / (SIDE * SIDE) as f32;
+                let off_centre = mean - centre * mean.dot(centre);
+                let sin_radius = (1.0 - cos_radius * cos_radius).sqrt();
+                assert!(off_centre.length() < 0.01 * sin_radius, "{at}: the samples balance about the centre");
+                if centre.y.abs() <= 0.9999 {
+                    let top = sun_disc_direction(centre, cos_radius, [0.5, 1.0]);
+                    let side = sun_disc_direction(centre, cos_radius, [1.0, 0.5]);
+                    assert!(top.y > centre.y, "{at}: the top rim points toward the zenith");
+                    assert!((side.y - centre.y * cos_radius).abs() < 1e-6, "{at}: the disc's side axis is horizontal");
+                }
+            }
+            for (cos_radius, point) in [(f32::NAN, [0.5, 1.0]), (f32::INFINITY, [0.5, 1.0]), (SUN_COS_RADIUS, [f32::NAN, 0.5]), (SUN_COS_RADIUS, [0.5, f32::INFINITY])] {
+                assert_eq!(bits(sun_disc_direction(centre, cos_radius, point)), bits(centre), "non-finite disc inputs preserve the centre bit for bit");
+            }
+        }
+    }
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5

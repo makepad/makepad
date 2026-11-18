@@ -128,6 +128,19 @@ $M.BloomDown13 = {
         return e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125
     }
 }
+// The bloom's brightness threshold `t` (0 = none): a soft knee on the largest channel, so only
+// what is brighter than `t` spills, in its own hue. A host that takes from its picture what the
+// bloom spreads (a halo that keeps the light it moves) subtracts the same amount.
+$M.BloomKnee = {
+    bloom_knee: fn(c: vec3, t: float) -> vec3 {
+        if t <= 0.0 { return c }
+        let knee = t * 0.5
+        let b = max(c.x, max(c.y, c.z))
+        let rq = clamp(b - t + knee, 0.0, 2.0 * knee)
+        let soft = rq * rq / (4.0 * knee + 0.00001)
+        return c * (max(soft, b - t) / max(b, 0.00001))
+    }
+}
 // The 3x3 tent upsample of the host's `small` level, `t` its offset.
 $M.BloomTent = {
     bloom_tent: fn(uv: vec2, t: vec2) -> vec3 {
@@ -144,10 +157,11 @@ $M.BloomTent = {
 #[cfg(feature = "gpu")]
 pub fn install_filters(vm: &mut makepad_draw::ScriptVm) -> Vec<String> {
     use makepad_draw::*;
-    vm.capture_errors();
+    vm.capture_errors_nested();
     let code = format!("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n{}true\n", FILTERS.replace("$M", "mod.draw"));
     let v = vm.eval(ScriptMod::new("", "", "graph://filters", 0, 0, &code, &[]));
     let mut errors = vm.take_errors();
+    vm.capture_errors_restore();
     if v.is_err() && errors.is_empty() {
         errors.push("the graph's filters did not evaluate".into());
     }

@@ -660,10 +660,14 @@ mod tests {
             for glsl in [true, false] {
                 let source = lowered(vm, program, glsl);
                 assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}: {source}");
-                // `sky_env` (the reflection of the surface and of the clear
-                // coat) and `mat_ambient` (the fill) are the lane functions.
-                let reflection = lowered_fn_body(&source, "sky_env").unwrap_or_else(|| panic!("glsl {glsl}: no sky_env"));
-                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "glsl {glsl}: the reflection carries the lane's scale: {reflection}");
+                // `sky_env_lit` (the reflection of the surface and of the
+                // clear coat, beside the key's lobe) and `mat_ambient` (the
+                // fill) are the lane functions.
+                let reflection = lowered_fn_body(&source, "sky_env_lit").unwrap_or_else(|| panic!("glsl {glsl}: no sky_env_lit"));
+                assert!(reflection.contains("mat_ibl_lookup(p_r, p_rough)") && reflection.contains("ibl_ctl.y"), "glsl {glsl}: the reflection carries the lane's scale: {reflection}");
+                assert!(reflection.contains("key_spec.y") && reflection.contains("p_vis"), "glsl {glsl}: the reflection takes the key's share out by the lobe's visibility, only with a Map key: {reflection}");
+                assert!(reflection.contains("key_tint"), "glsl {glsl}: the reflection uses the key's colour and measured fit: {reflection}");
+                assert!(reflection.contains("l_e.xyz - ((l_d * l_lum) * l_kk)"), "glsl {glsl}: the removal is the exact-at-zero form e - (d L) kk: {reflection}");
                 let fill = lowered_fn_body(&source, "mat_ambient").unwrap_or_else(|| panic!("glsl {glsl}: no mat_ambient"));
                 assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "glsl {glsl}: the fill carries the lane's scale: {fill}");
                 assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "glsl {glsl}: the fill is the map's only while the switch is set, else the lane's own: {fill}");

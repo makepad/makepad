@@ -323,6 +323,22 @@ impl Renderer {
         if self.clustered_enabled { self.clustered.stats() } else { Default::default() }
     }
 
+    /// A host averaging still recordings draws each toward a different
+    /// point of the key light's disc, so the average has the key's penumbra.
+    /// Only the shadow cascades move: shading, the sky, the lightmap bake
+    /// and every other use of the sun keep its centre. Moving the point
+    /// refits and redraws the cascades once per recording. `None` keeps
+    /// today's centre fit bit for bit; see [`crate::sun_disc_direction`].
+    pub fn set_sun_disc_sample(&mut self, point: Option<[f32; 2]>) {
+        self.sun_disc_sample = point;
+    }
+
+    /// The host's sample for the next recording's shadow cascades, or
+    /// `None` for the centre; see [`Self::set_sun_disc_sample`].
+    pub fn sun_disc_sample(&self) -> Option<[f32; 2]> {
+        self.sun_disc_sample
+    }
+
     pub fn set_local_shadow_config(&mut self, config: crate::local_shadows::LocalShadowConfig) {
         self.clustered.shadows.set_config(config);
     }

@@ -81,8 +81,8 @@ impl ttf_parser::OutlineBuilder for Flatten {
     }
 }
 
-/// The regions of `text` set in `font` (TrueType/OpenType bytes).
-pub fn text_regions(font: &[u8], text: &str, style: &TextStyle, tol: &Tolerance) -> Result<Vec<Region>, String> {
+/// The font's face and the scale from its units to millimetres at `style`'s cap height.
+fn face_at<'a>(font: &'a [u8], text: &str, style: &TextStyle) -> Result<(ttf_parser::Face<'a>, f64), String> {
     let face = ttf_parser::Face::parse(font, 0).map_err(|e| format!("the font does not read: {e:?}"))?;
     if text.trim().is_empty() {
         return Err("the text is empty".into());
@@ -93,20 +93,38 @@ pub fn text_regions(font: &[u8], text: &str, style: &TextStyle, tol: &Tolerance)
     let upem = face.units_per_em() as f64;
     let cap_units = face.capital_height().map(|h| h as f64).filter(|h| *h > 0.0).unwrap_or(upem * 0.7);
     let scale = style.cap_height / cap_units;
-    // Curve flattening: finer for larger letters.
-    let steps = ((style.cap_height / (tol.chord * 20.0).max(0.01)).sqrt().ceil() as usize).clamp(3, 16);
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut widths = Vec::new();
-    for line in &lines {
+    Ok((face, scale))
+}
+
+/// Each line's width: its glyphs' advances, `spacing` between them.
+fn line_widths(face: &ttf_parser::Face, lines: &[&str], scale: f64, spacing: f64) -> Vec<f64> {
+    lines.iter().map(|line| {
         let mut w = 0.0;
         for ch in line.chars() {
             let gid = face.glyph_index(ch).or_else(|| face.glyph_index('?'));
             if let Some(g) = gid {
-                w += face.glyph_hor_advance(g).unwrap_or(0) as f64 * scale + style.spacing;
+                w += face.glyph_hor_advance(g).unwrap_or(0) as f64 * scale + spacing;
             }
         }
-        widths.push((w - style.spacing).max(0.0));
-    }
+        (w - spacing).max(0.0)
+    }).collect()
+}
+
+/// The width of `text`'s widest line as [`text_regions`] lays it out: a layout places text by it
+/// without building the outlines. O(characters).
+pub fn text_width(font: &[u8], text: &str, style: &TextStyle) -> Result<f64, String> {
+    let (face, scale) = face_at(font, text, style)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    Ok(line_widths(&face, &lines, scale, style.spacing).into_iter().fold(0.0, f64::max))
+}
+
+/// The regions of `text` set in `font` (TrueType/OpenType bytes).
+pub fn text_regions(font: &[u8], text: &str, style: &TextStyle, tol: &Tolerance) -> Result<Vec<Region>, String> {
+    let (face, scale) = face_at(font, text, style)?;
+    // Curve flattening: finer for larger letters.
+    let steps = ((style.cap_height / (tol.chord * 20.0).max(0.01)).sqrt().ceil() as usize).clamp(3, 16);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let widths = line_widths(&face, &lines, scale, style.spacing);
     let widest = widths.iter().copied().fold(0.0, f64::max);
     let mut loops = Vec::new();
     let mut missing = Vec::new();
