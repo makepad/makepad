@@ -76,10 +76,11 @@ impl Kit {
 /// its values.
 pub fn load(vm: &mut ScriptVm, source: &str, file: &str) -> Result<Kit, String> {
     script_mod(vm);
-    vm.capture_errors();
+    vm.capture_errors_nested();
     // A body of its own the VM reclaims once nothing holds the kit.
     let v = vm.eval_transient(ScriptMod::new("", "", &file, 0, 0, &format!("{KIT_USES}{source}"), &[]));
     let errors = vm.take_errors();
+    vm.capture_errors_restore();
     if !errors.is_empty() {
         return Err(errors.join("; "));
     }
@@ -204,9 +205,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
     for e in makepad_render_graph::script::install_kits(vm, &format!("mod.{KIT_MODULE}"), None) {
         log!("kinetic: graph kits: {e}");
     }
-    vm.capture_errors();
+    vm.capture_errors_nested();
     vm.eval(ScriptMod::new("", "", "kinetic_type/kit.splash", 0, 0, &KIT_GLUE, &[]));
-    for e in vm.take_errors() {
+    let errors = vm.take_errors();
+    vm.capture_errors_restore();
+    for e in errors {
         log!("kinetic: kit.splash: {e}");
     }
 }

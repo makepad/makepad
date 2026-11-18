@@ -204,9 +204,14 @@ impl<'a> CxDraw<'a> {
     /// recorded again without it orphans the pass, which then stops painting
     /// (`Cx::pass_attachment_is_stale`).
     pub fn make_child_pass(&mut self, pass: &DrawPass) {
+        self.make_child_pass_id(pass.draw_pass_id());
+    }
+
+    /// Attach a pass by id, with the same per-draw ownership as [`Self::make_child_pass`].
+    pub fn make_child_pass_id(&mut self, id: DrawPassId) {
         let parent = self.pass_stack.last().unwrap().pass_id;
         let attached_by = self.draw_list_stack.last().cloned();
-        self.cx.attach_child_pass(pass.draw_pass_id(), parent, attached_by);
+        self.cx.attach_child_pass(id, parent, attached_by);
     }
 
     pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {

@@ -4,13 +4,14 @@ use crate::remote::{KeyKind, MouseInput, MouseKind};
 use crate::selector::Selector;
 use crate::remote::{NodeMatch, UiSnapshot};
 use makepad_studio_protocol::{KeyCode, KeyModifiers, StudioToApp};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,7 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const LOOK: Duration = Duration::from_secs(1);
 /// A process using under this share of one core (1/n) for its own work (not serving remote
 /// peers), with nothing pending, is idle.
-const IDLE_SHARE: u32 = 20;
+pub(crate) const IDLE_SHARE: u32 = 20;
 /// An app whose main thread runs nothing and whose other threads stay under this share of one core
 /// (1/n), with nothing pending, only ticks (a simulation stepping, a poll): idle too. A thread at
 /// work runs more.
@@ -130,6 +131,7 @@ impl TestConfig {
             args: self.app_args.clone(),
             visible: self.visible,
             startup_timeout: self.startup_timeout,
+            startup_idle: self.action_timeout,
             poll_interval: self.poll_interval,
         }
     }
@@ -196,7 +198,8 @@ impl TestApp {
         }
     }
 
-    /// The owned process id, for diagnostics.
+    /// The app's process id, the one its endpoint names (under the JIT on macOS and Windows the
+    /// run behind the process launched), for diagnostics and remote calls by pid.
     pub fn pid(&self) -> u32 {
         self.inner.borrow().app.pid
     }
@@ -427,6 +430,7 @@ impl TestApp {
             self.ensure_running()?;
             let (since, before) = (Instant::now(), self.client().cpu(false)?);
             let Some(what) = pending() else { return Ok(()) };
+            drove();
             budget.asked(since, before, self.client().cpu(false)?);
             if budget.look_due() {
                 if let Some(spent) = budget.spent(self)? {
@@ -1274,6 +1278,8 @@ where
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     });
 
+    // what the test runs is no app's progress for the waits of the tests beside it
+    let _drove = Drove;
     let app = TestApp::start(config)?;
     let result = catch_unwind(AssertUnwindSafe(|| test(app.clone()).into_test_result()));
 
@@ -1547,22 +1553,48 @@ fn memory_pressure() -> Option<f64> {
     some.split_whitespace().find_map(|field| field.strip_prefix("avg10="))?.parse().ok()
 }
 
-/// The CPU the test process has run beside the calling thread (the one driving the test): what a
-/// service the test runs in its own process runs (an AI hub on loopback the app asks, its GPU
-/// device's thread compiling its programs), less what the runtime's own threads ran (under makepad
-/// run, the JIT's checks and tier-ups of the test), what serving remote peers cost it, and what its
-/// connections to the app ran carrying the test's asks. The process's other tests wait for the test
-/// lock meanwhile, running nothing (a suite that runs them side by side counts their drivers too:
-/// an idle app fails its wait once they quiet).
 /// The number of an action the app has not taken yet, from its `action N timed out` answer.
 fn pending_action(message: &str) -> Option<u64> {
     let at = message.find(" timed out")?;
     message[..at].rsplit_once("action ")?.1.parse().ok()
 }
 
+/// What the threads driving tests have run, each to its last [`drove`].
+static DRIVEN_NS: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// The calling thread's CPU at its last [`drove`].
+    static DROVE_AT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Counts what the calling thread has run since it last did (since it started, the first time) as
+/// driving a test: a test's own work, which no app waits for.
+fn drove() {
+    let now = makepad_hal::clock::thread_cpu_ns();
+    DRIVEN_NS.fetch_add(now.saturating_sub(DROVE_AT.with(|at| at.replace(now))), Ordering::Relaxed);
+}
+
+/// Counts the rest of a test's thread as driving it once the test ends.
+struct Drove;
+
+impl Drop for Drove {
+    fn drop(&mut self) {
+        drove();
+    }
+}
+
+/// The CPU the test process has run beside the threads driving its tests: what a service the test
+/// runs in its own process runs (an AI hub on loopback the app asks, its GPU device's thread
+/// compiling its programs), less what the runtime's own threads ran (under makepad run, the JIT's
+/// checks and tier-ups of the test), what serving remote peers cost it, and what its connections to
+/// the app ran carrying the test's asks. Tests run side by side (`concurrent`) drive from threads of
+/// their own, and each counts what it runs as it waits ([`drove`]): one test's looks are no progress
+/// of another's app. (Three Fab tests side by side, their apps idle, each a failure: one test's
+/// looks every millisecond read as its hub at work for the other two, whose 20 looks a second did
+/// the same for it, and the three waited 1h20m, L1249194, 11-17.)
 fn beside_cpu() -> Duration {
-    use makepad_hal::clock;
-    let others = clock::process_cpu_ns().saturating_sub(clock::thread_cpu_ns());
+    drove();
+    let others = makepad_hal::clock::process_cpu_ns().saturating_sub(DRIVEN_NS.load(Ordering::Relaxed));
     Duration::from_nanos(others.saturating_sub(makepad_remote::runtime_cpu_ns()).saturating_sub(makepad_remote::served_cpu_ns()).saturating_sub(makepad_remote::asked_cpu_ns()))
 }
 

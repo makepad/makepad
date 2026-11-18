@@ -1400,3 +1400,33 @@ fn semantics_of_a_long_line_is_linear_in_its_length() {
     assert_eq!(node.text.unwrap().glyph_x.len(), char_count + 1, "every char and the line end have a position");
     assert!(steps <= 2 * char_count, "{steps} grapheme steps for a {char_count}-char line");
 }
+
+/// An outside change put into the text keeps the cursor with the text around it: a line added
+/// above moves it down, a change after it leaves it, a change on its line before it shifts it.
+#[test]
+fn a_replaced_text_keeps_the_cursor_with_the_text_around_it() {
+    let document = doc("let a = 1\nlet b = 2");
+    let mut session = CodeSession::new(document.clone());
+    session.set_selection(pos(1, 5), Affinity::After, SelectionMode::Simple, NewGroup::Yes);
+    let cursor = |session: &CodeSession| session.selections()[0].cursor.position;
+    for (text, at, what) in [
+        ("// note\nlet a = 1\nlet b = 2", pos(2, 5), "a line added above moves the cursor down a line"),
+        ("// note\nlet a = 1\nlet b = 3", pos(2, 5), "a change after the cursor leaves it"),
+        ("// note\nlet a = 1\nlet  b = 3", pos(2, 6), "a change before it on its line shifts it"),
+        ("// note\nlet a = 1\nlet  b = 3", pos(2, 6), "the same text changes nothing"),
+    ] {
+        document.replace_changed(text);
+        session.handle_changes();
+        assert_eq!((document.as_text().to_string(), cursor(&session)), (text.to_string(), at), "{what}");
+    }
+    // é to è shares its first byte, è to ¨ its last: the replaced part widens to whole characters.
+    for (mark, what) in [("\u{e9}", "a new character"), ("\u{e8}", "a shared first byte"), ("\u{a8}", "a shared last byte")] {
+        let text = format!("// note {mark}\nlet a = 1\nlet  b = 3");
+        document.replace_changed(&text);
+        session.handle_changes();
+        assert_eq!((document.as_text().to_string(), cursor(&session)), (text, pos(2, 6)), "{what}");
+    }
+    assert!(session.undo(), "the replacement is one undo step");
+    session.handle_changes();
+    assert_eq!(document.as_text().to_string(), "// note \u{e8}\nlet a = 1\nlet  b = 3", "undo restores the text before it");
+}

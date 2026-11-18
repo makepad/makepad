@@ -645,6 +645,16 @@ impl WidgetNode for Splash {
     fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.view.visit_cancel(visit)
     }
+
+    /// The body is another program: its widgets were made by the isolate, in the isolate's
+    /// heap, and their names are the body's own. A lookup by name from the host's tree stops
+    /// here, so a host name never answers with a body widget -- whose script objects the
+    /// host's VM cannot use -- in place of the host's own or of nothing. The host reaches the
+    /// body by a path through the Splash (`ids!(splash.label)`) or from the Splash itself, and
+    /// the body's `ui.` handles search from the Splash, as before.
+    fn search_scope(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for Splash {

@@ -2531,7 +2531,7 @@ mod isolate_tests {
 "#;
 
     fn item_list_children(cx: &Cx, host: &WidgetRef) -> usize {
-        let w = host.widget(cx, &[live_id!(item_list)]);
+        let w = host.widget(cx, &[live_id!(splash), live_id!(item_list)]);
         w.borrow::<View>()
             .map(|v| v.children.len())
             .unwrap_or(usize::MAX)
@@ -2539,7 +2539,7 @@ mod isolate_tests {
 
     fn render_cycle(cx: &mut Cx, host: &WidgetRef, json: &'static str) -> usize {
         let splash = host.widget(cx, &[live_id!(splash)]);
-        let item_list = host.widget(cx, &[live_id!(item_list)]);
+        let item_list = host.widget(cx, &[live_id!(splash), live_id!(item_list)]);
         render_cycle_no_heal(cx, &splash, &item_list, json)
     }
 
@@ -2605,7 +2605,7 @@ mod isolate_tests {
             .unwrap()
             .isolate_heap_key(&mut cx)
             .unwrap();
-        let _ = host.widget(&cx, &[live_id!(item_list)]);
+        let _ = host.widget(&cx, &[live_id!(splash), live_id!(item_list)]);
         assert!(host
             .widget(&cx, &[live_id!(splash)])
             .borrow_mut::<Splash>()
@@ -2716,11 +2716,11 @@ mod isolate_tests {
         assert_eq!(n, 1);
 
         let splash = host.widget(&cx, &[live_id!(splash)]);
-        let item_list = host.widget(&cx, &[live_id!(item_list)]);
+        let item_list = host.widget(&cx, &[live_id!(splash), live_id!(item_list)]);
 
         let topdown0 = !cx
             .widget_tree()
-            .find_within(pane_uid, &[live_id!(item_list)])
+            .find_within(pane_uid, &[live_id!(splash), live_id!(item_list)])
             .is_empty();
         eprintln!("### before flush: top-down find from pane: {topdown0}");
 
@@ -2731,7 +2731,7 @@ mod isolate_tests {
         let in_graph = !cx.widget_tree().widget(splash.widget_uid()).is_empty();
         let topdown = !cx
             .widget_tree()
-            .find_within(pane_uid, &[live_id!(item_list)])
+            .find_within(pane_uid, &[live_id!(splash), live_id!(item_list)])
             .is_empty();
         eprintln!("### after flush: splash node in graph: {in_graph}, top-down find from pane: {topdown}");
 
@@ -2781,7 +2781,7 @@ mod isolate_tests {
             eprintln!("### run {run}: heap_key {hk:?}");
             // warm the graph so the confined ui getter can resolve while the
             // Splash itself is mut-borrowed below
-            let warm = host.widget(&cx, &[live_id!(item_list)]);
+            let warm = host.widget(&cx, &[live_id!(splash), live_id!(item_list)]);
             assert!(!warm.is_empty(), "run {run}: item_list not found in tree");
             drop(warm);
             let called = host
@@ -2833,6 +2833,48 @@ mod isolate_tests {
             drop(host);
             pump_widget_async(&mut cx);
         }
+    }
+
+    /// A host and the body of its Splash name widgets alike (`label` in both): the host's
+    /// lookup by name answers with the host's own, and an apply to it evaluates in the host's
+    /// VM. It used to walk into the body and answer with the isolate's widget, whose script
+    /// object the host's VM then used ("value from heap N used in heap 1"). A path through the
+    /// Splash still reaches the body's.
+    #[test]
+    fn a_hosts_lookup_by_name_stops_at_a_splash() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let host = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    splash := Splash{}
+                    label := Label{text: "host"}
+                }
+            });
+            WidgetRef::script_from_value(vm, v)
+        });
+        set_ui_root(&mut cx, &host);
+        let host_label = host.child(live_id!(label)).widget_uid();
+        assert_ne!(host_label, WidgetUid(0), "the host has its own label");
+        host.widget(&cx, &[live_id!(splash)]).set_text(&mut cx, "label := Label{text: \"body\"}");
+        let body_label = host.widget(&cx, &[live_id!(splash), live_id!(label)]);
+        assert!(!body_label.is_empty(), "a path through the Splash reaches the body's label");
+        assert_ne!(body_label.widget_uid(), host_label);
+
+        let mut found = host.widget(&cx, &[live_id!(label)]);
+        assert_eq!(
+            found.widget_uid(),
+            host_label,
+            "the host's lookup answers with the host's own label, not the body's ({:?})",
+            body_label.widget_uid()
+        );
+        script_apply_eval!(cx, found, {
+            text: "applied"
+        });
+        assert_eq!(found.text(), "applied");
+        assert_eq!(body_label.text(), "body");
     }
 }
 

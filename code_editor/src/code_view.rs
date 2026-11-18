@@ -383,6 +383,27 @@ impl CodeView {
         self.redraw(cx);
     }
 
+    /// Put `text` in place of the shown text as one replacement of the part
+    /// that differs (`CodeDocument::replace_changed`): the cursor, selections
+    /// and scroll stay with the text around them, as when an outside change
+    /// arrives while someone types. Before the view has a session, the text
+    /// is just kept, under the same path.
+    pub fn replace_text(&mut self, cx: &mut Cx, text: &str) {
+        match &mut self.session {
+            Some(session) => {
+                session.document().replace_changed(text);
+                session.handle_changes();
+                if self.find.open {
+                    self.refresh_find();
+                }
+            }
+            None => {
+                self.text.as_mut_empty().push_str(text);
+            }
+        }
+        self.redraw(cx);
+    }
+
     /// Show a session prepared elsewhere (a document tokenized on a worker,
     /// `CodeDocument::from_prepared` + `CodeSession::from_prepared`). The
     /// session is the truth from then on; scroll stays where it was.

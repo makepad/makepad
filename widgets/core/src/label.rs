@@ -366,6 +366,9 @@ pub struct Label {
     /// The link span under the pointer: underlined.
     #[rust]
     link_hover: Option<usize>,
+    /// Byte ranges of `text` drawn in their own colour, set by a host: (start, end, colour).
+    #[rust]
+    inks: Vec<(usize, usize, Vec4f)>,
 }
 
 impl WidgetNode for Label {
@@ -582,17 +585,17 @@ impl Widget for Label {
             self.draw_selection.new_draw_call(cx);
         }
         let base = self.draw_text.color;
-        let (links, ink) = (&self.links, self.link_color);
+        let (links, ink, inks) = (&self.links, self.link_color, &self.inks);
         let restyle = move |laid: &LaidoutText| {
             // Row alignment is computed before ellipsis truncation, so an
             // overflowing row can retain a negative origin even after it fits.
             // Keep the start visible by left-aligning those rows. Use the same
             // corrected layout for drawing, selection and link hit-testing.
             let clips_start = laid.rows.iter().any(|row| row.origin_in_lpxs.x < 0.0);
-            let mut out = if !links.is_empty() {
+            let mut out = if !links.is_empty() || !inks.is_empty() {
                 // Every glyph gets its colour (a glyph's own colour sticks for
                 // the ones after it), the links' in the link ink.
-                recolor_links(laid, links, base, ink)
+                recolor_links(laid, links, inks, base, ink)
             } else if clips_start {
                 laid.clone()
             } else {
@@ -671,14 +674,14 @@ impl Widget for Label {
 }
 
 /// A copy of `laid` with every glyph coloured: `ink` inside the `links`
-/// byte ranges, `base` elsewhere.
-fn recolor_links(laid: &LaidoutText, links: &[(usize, usize)], base: Vec4f, ink: Vec4f) -> LaidoutText {
+/// byte ranges, an ink range's own colour inside it, `base` elsewhere.
+fn recolor_links(laid: &LaidoutText, links: &[(usize, usize)], inks: &[(usize, usize, Vec4f)], base: Vec4f, ink: Vec4f) -> LaidoutText {
     use makepad_draw::text::color::Color;
     let color = |c: Vec4f| {
         let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         Color::new(b(c.x), b(c.y), b(c.z), b(c.w))
     };
-    let (base, ink) = (color(base), color(ink));
+    let (base_color, ink) = (color(base), color(ink));
     let mut out = laid.clone();
     let text_start = laid.text.start_in_parent();
     for row in out.rows.iter_mut() {
@@ -686,7 +689,12 @@ fn recolor_links(laid: &LaidoutText, links: &[(usize, usize)], base: Vec4f, ink:
         for glyph in row.glyphs.iter_mut() {
             let at = row_start + glyph.cluster;
             let linked = links.iter().any(|&(a, b)| at >= a && at < b);
-            glyph.color = Some(if linked { ink } else { base });
+            let inked = inks.iter().find(|&&(a, b, _)| at >= a && at < b);
+            glyph.color = Some(match inked {
+                _ if linked => ink,
+                Some(&(_, _, c)) => color(c),
+                None => base_color,
+            });
         }
     }
     out
@@ -815,6 +823,16 @@ impl LabelRef {
             if inner.links != links || inner.link_hover != hover {
                 inner.links = links.to_vec();
                 inner.link_hover = hover;
+                inner.redraw(cx);
+            }
+        }
+    }
+
+    /// Draw these byte ranges of the text each in its own colour: (start, end, colour).
+    pub fn set_inks(&self, cx: &mut Cx, inks: &[(usize, usize, Vec4f)]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.inks != inks {
+                inner.inks = inks.to_vec();
                 inner.redraw(cx);
             }
         }

@@ -1091,6 +1091,12 @@ pub struct PortalList {
     #[live(1)]
     keep_visible_lead: usize,
 
+    /// The rows a collect run spawns (`scan: [@Row, @Header]` names templates; an object is one
+    /// itself); without it, every template. The scan hook reads it from the source object
+    /// (`crate::scan::scan_list`).
+    #[live]
+    scan: ScriptValue,
+
     // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
     templates: FastHashMap<LiveId, ScriptObjectRef>,
@@ -5716,6 +5722,33 @@ mod tests {
     // Deltas are positive toward the start: a wheel rolled up.
     const UP: f64 = 60.0;
     const DOWN: f64 = -60.0;
+
+    /// `scan:` is a list's own property: a list that names its collect-run rows loads without a
+    /// script error.
+    #[test]
+    fn a_list_naming_its_scan_rows_loads_without_a_script_error() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        cx.with_vm(|vm| {
+            // Registering the library is every other widget's business too.
+            let _ = vm.take_errors();
+            vm.capture_errors();
+            let _ = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    list := PortalList{
+                        scan: [@Header, @Row]
+                        Header := Label{text: "header"}
+                        Row := Label{text: "row"}
+                    }
+                }
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+        });
+        });
+    }
 
     /// A splice preserves surviving ids and heights, estimates new rows, and clips skipped ranges.
     #[test]

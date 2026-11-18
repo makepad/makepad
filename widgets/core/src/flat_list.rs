@@ -1,5 +1,5 @@
 use crate::widget_tree::CxWidgetExt;
-use crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, scan::ScanSpawned, scroll_bars::ScrollBars, widget::*};
 use std::collections::HashMap;
 
 script_mod! {
@@ -70,6 +70,15 @@ pub struct FlatList {
     scroll_bars: ScrollBars,
     #[live]
     capture_overload: bool,
+    /// The items a collect run spawns (`scan: [@Tile]` names templates; an object is one
+    /// itself); without it, every template. The scan hook reads it from the source object
+    /// (`crate::scan::scan_list`).
+    #[live]
+    scan: ScriptValue,
+    /// A collect run's variants of this list, drawn with it until the run ends (see
+    /// `crate::scan`).
+    #[rust]
+    scan_spawned: ScanSpawned,
     #[rust]
     draw_state: DrawStateWrap<()>,
 
@@ -286,11 +295,20 @@ impl Widget for FlatList {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+    /// Spawns the items it can show: its `scan:` list, else every template.
+    fn scan(&mut self, cx: &mut Cx, scan: &ScanEvent, scope: &mut Scope) {
+        let mut templates: Vec<(LiveId, ScriptObject)> = self.templates.iter().map(|(id, t)| (*id, t.as_object())).collect();
+        templates.sort_by_key(|(id, _)| id.0);
+        let source = self.source.as_object();
+        self.scan_spawned.spawn(cx, scan, scope, source, &templates);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ()) {
             self.begin(cx, walk);
             return DrawStep::make_step();
         }
+        self.scan_spawned.draw(cx, scope);
         self.end(cx);
         self.draw_state.end();
         DrawStep::done()
@@ -339,5 +357,36 @@ impl FlatListSet {
             list.items_with_actions_vec(actions, &mut set)
         }
         set
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `scan:` is a list's own property: a list that names its collect-run items loads without a
+    /// script error.
+    #[test]
+    fn a_list_naming_its_scan_items_loads_without_a_script_error() {
+        crate::on_test_cx(|| {
+        let mut cx = crate::checkout_test_cx();
+        cx.with_vm(|vm| {
+            // Registering the library is every other widget's business too.
+            let _ = vm.take_errors();
+            vm.capture_errors();
+            let _ = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    list := FlatList{
+                        scan: [@Tile]
+                        Tile := Label{text: "tile"}
+                    }
+                }
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+        });
+        });
     }
 }

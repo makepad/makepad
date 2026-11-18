@@ -119,6 +119,8 @@ script_mod! {
         draw_find_current +: {color: theme.color_focus}
         // Lines a host lights for a moment (an outside edit), under the text.
         draw_line_wash +: {color: theme.color_warning}
+        // Spans a host washes, each in the colour it gives.
+        draw_span_wash +: {}
         draw_decoration +: {
         }
         draw_selection +: {
@@ -266,6 +268,22 @@ pub struct CodeEditor {
     /// opacity 0..1); a host fades them by lowering the opacity and redrawing.
     #[rust]
     pub line_washes: Vec<(Range<usize>, f32)>,
+    /// Lines outlined in `draw_line_wash`'s colour, each a 0-based line range boxed as one: a
+    /// host marking lines without filling them (a wash fills).
+    #[rust]
+    pub line_outlines: Vec<Range<usize>>,
+    #[live]
+    draw_span_wash: DrawColor,
+    /// Spans washed under the text, each (start, end, colour) within one line, sorted by start: a
+    /// host colouring parts of lines by what it knows of them.
+    #[rust]
+    pub span_washes: Vec<(Position, Position, Vec4f)>,
+    /// Lines whose text draws at `line_dim_opacity` of its colour: 0-based line ranges, ascending
+    /// and apart. A host fading what matters less (code that did not run, say).
+    #[rust]
+    pub line_dims: Vec<Range<usize>>,
+    #[live(0.4)]
+    line_dim_opacity: f32,
     /// A line to scroll to the middle of the view (caret untouched).
     #[rust]
     center_line: Option<usize>,
@@ -966,6 +984,8 @@ impl CodeEditor {
         self.draw_bg.draw_abs(cx, bg_rect);
         self.draw_diff_backgrounds(cx, session);
         self.draw_line_washes(cx, session);
+        self.draw_line_outlines(cx, session);
+        self.draw_span_washes(cx, session);
         self.draw_find_layer(cx, session);
         for vars in [&mut self.draw_cursor.draw_vars, &mut self.draw_cursor_bg.draw_vars, &mut self.draw_selection.draw_vars] {
             vars.set_dyn_instance(cx, live_id!(content_opacity), &[self.content_opacity]);
@@ -1091,6 +1111,13 @@ impl CodeEditor {
             Affinity::Before,
         );
         Some(y * self.cell_size.y - self.scroll_bars.get_scroll_pos().y)
+    }
+
+    /// Whether `line` (0-based) lies wholly inside the view as last scrolled; false before the
+    /// first draw. `visible_lines` is what was drawn, which reaches past the view's edges.
+    pub fn shows_line(&self, session: &CodeSession, line: usize) -> bool {
+        self.line_view_y(session, line)
+            .is_some_and(|y| y >= 0.0 && y + self.cell_size.y <= self.viewport_rect.size.y)
     }
 
     /// The lines drawn last frame (0-based, half-open); empty before the
@@ -1846,6 +1873,39 @@ impl CodeEditor {
         self.line_washes = washes;
     }
 
+    fn draw_line_outlines(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        if self.line_outlines.is_empty() {
+            return;
+        }
+        let line_count = session.document().as_text().as_lines().len();
+        let outlines = mem::take(&mut self.line_outlines);
+        let color = self.draw_line_wash.color;
+        self.draw_line_wash.color.w = color.w * self.content_opacity;
+        let edge = (self.cell_size.y * 0.08).max(1.0);
+        for range in &outlines {
+            let start = range.start.max(self.line_start);
+            let end = range.end.min(self.line_end).min(line_count);
+            if start >= end {
+                continue;
+            }
+            let (Some(first), Some(last)) = (self.diff_row_rect(session, start), self.diff_row_rect(session, end - 1)) else {
+                continue;
+            };
+            let (left, top) = (first.pos.x, first.pos.y);
+            let (width, height) = (first.size.x, last.pos.y + last.size.y - top);
+            for rect in [
+                Rect { pos: dvec2(left, top), size: dvec2(width, edge) },
+                Rect { pos: dvec2(left, top + height - edge), size: dvec2(width, edge) },
+                Rect { pos: dvec2(left, top), size: dvec2(edge, height) },
+                Rect { pos: dvec2(left + width - edge, top), size: dvec2(edge, height) },
+            ] {
+                self.draw_line_wash.draw_abs(cx, rect);
+            }
+        }
+        self.draw_line_wash.color = color;
+        self.line_outlines = outlines;
+    }
+
     fn draw_diff_backgrounds(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let decorations = session.document().decorations();
         let start = decorations.partition_point(|decoration| decoration.end().line_index < self.line_start);
@@ -1868,36 +1928,62 @@ impl CodeEditor {
         if self.find_matches.is_empty() || self.cell_size.x <= 0.0 {
             return rects;
         }
-        let layout = session.layout();
-        let view = layout.view_line_range();
-        let lines = layout.as_text().as_lines();
         let first = self.find_matches.partition_point(|m| m.0.line_index < self.line_start);
         for (index, &(start, end)) in self.find_matches.iter().enumerate().skip(first) {
             if start.line_index >= self.line_end {
                 break;
             }
-            if !view.contains(&start.line_index) || start.line_index >= lines.len() {
-                continue;
-            }
-            let range = layout.line_byte_range(start.line_index);
-            if start.byte_index < range.start || end.byte_index > range.end || end.byte_index <= start.byte_index {
-                continue;
-            }
-            let line = layout.line(start.line_index);
-            let (first_row, first_column) = line.logical_to_grid_position(start.byte_index, Affinity::After);
-            let (last_row, last_column) = line.logical_to_grid_position(end.byte_index, Affinity::Before);
-            for row in first_row..=last_row {
-                let from = if row == first_row { first_column } else { line.wrap_indent_column_count() };
-                let to = if row == last_row { last_column } else { line.column_count() };
-                if to <= from {
-                    continue;
-                }
-                let mut rect = self.grid_rect(line, row, from, to - from);
-                rect.pos += self.unscrolled_rect.pos;
-                rects.push((rect, Some(index) == self.find_current));
-            }
+            self.span_rects(session, start, end, |rect| rects.push((rect, Some(index) == self.find_current)));
         }
         rects
+    }
+
+    /// The rects in draw space of a span within one visible line, one per row a wrap splits it
+    /// into; nothing for a span off the view or not within one line.
+    fn span_rects(&self, session: &CodeSession, start: Position, end: Position, mut rect: impl FnMut(Rect)) {
+        let layout = session.layout();
+        let lines = layout.as_text().as_lines();
+        if !layout.view_line_range().contains(&start.line_index) || start.line_index >= lines.len() || end.line_index != start.line_index {
+            return;
+        }
+        let range = layout.line_byte_range(start.line_index);
+        if start.byte_index < range.start || end.byte_index > range.end || end.byte_index <= start.byte_index {
+            return;
+        }
+        let line = layout.line(start.line_index);
+        let (first_row, first_column) = line.logical_to_grid_position(start.byte_index, Affinity::After);
+        let (last_row, last_column) = line.logical_to_grid_position(end.byte_index, Affinity::Before);
+        for row in first_row..=last_row {
+            let from = if row == first_row { first_column } else { line.wrap_indent_column_count() };
+            let to = if row == last_row { last_column } else { line.column_count() };
+            if to <= from {
+                continue;
+            }
+            let mut r = self.grid_rect(line, row, from, to - from);
+            r.pos += self.unscrolled_rect.pos;
+            rect(r);
+        }
+    }
+
+    fn draw_span_washes(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        if self.span_washes.is_empty() || self.cell_size.x <= 0.0 {
+            return;
+        }
+        let washes = mem::take(&mut self.span_washes);
+        let first = washes.partition_point(|w| w.0.line_index < self.line_start);
+        for &(start, end, color) in &washes[first..] {
+            if start.line_index >= self.line_end {
+                break;
+            }
+            self.draw_span_wash.color = color;
+            self.draw_span_wash.color.w *= self.content_opacity;
+            let mut rects = Vec::new();
+            self.span_rects(session, start, end, |rect| rects.push(rect));
+            for rect in rects {
+                self.draw_span_wash.draw_abs(cx, rect);
+            }
+        }
+        self.span_washes = washes;
     }
 
     fn draw_find_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
@@ -2021,6 +2107,12 @@ impl CodeEditor {
                 }
                 BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = self.base_font_scale * line.scale() as f32;
+                    let dims = self.line_dims.partition_point(|r| r.end <= line_index);
+                    let opacity = if self.line_dims.get(dims).is_some_and(|r| r.start <= line_index) {
+                        self.content_opacity * self.line_dim_opacity
+                    } else {
+                        self.content_opacity
+                    };
                     let mut token_iter = line.tokens().iter().copied();
                     let mut token_slot = token_iter.next();
                     let mut row_index = 0;
@@ -2068,7 +2160,7 @@ impl CodeEditor {
                                                 self.token_colors.delimiter_highlight
                                         }
                                     }
-                                    self.draw_text.color.w *= self.content_opacity;
+                                    self.draw_text.color.w *= opacity;
                                     let visible_bytes = session.layout().line_byte_range(line_index);
                                     for grapheme in text_0.graphemes() {
                                         if byte_index < visible_bytes.start || byte_index + grapheme.len() > visible_bytes.end {
@@ -2110,7 +2202,7 @@ impl CodeEditor {
                                 let line_len = session.layout().as_text().as_lines()[line_index].len();
                                 if shown.contains(&byte_index) || (byte_index == shown.end && byte_index == line_len) {
                                     self.draw_text.color = self.token_colors.identifier;
-                                    self.draw_text.color.w *= self.content_opacity;
+                                    self.draw_text.color.w *= opacity;
                                     self.draw_text.draw_abs(cx, Vec2d { x, y: origin_y + y } * self.cell_size + self.viewport_rect.pos, text);
                                 }
                                 column_index += text.column_count_at(column_index, line.tab_column_count);

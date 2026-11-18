@@ -28,6 +28,9 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
     pub visible: bool,
     pub startup_timeout: Duration,
+    /// Under the JIT, how long the launched processes may sit idle before their run announces its
+    /// endpoint ([`Startup`]).
+    pub startup_idle: Duration,
     pub poll_interval: Duration,
 }
 
@@ -50,7 +53,10 @@ pub enum ShutdownOutcome {
 }
 
 pub struct OwnedApp {
+    /// The process launched: the app, or under the JIT on macOS and Windows the parent its run
+    /// stands behind (relax restart_parent.rs), which ends its run as it ends.
     child: Child,
+    /// The app's process, the one its endpoint names: the launched one, or the run behind it.
     pub pid: u32,
     pub executable: PathBuf,
     pub client: RemoteClient,
@@ -363,7 +369,14 @@ fn launch_command(
     } else {
         Some(Instant::now() + spec.startup_timeout)
     };
-    let discovery_path = makepad_remote::carrier::unix::paths(pid).1;
+    // where the run announces itself: the registry the child was given, else this process's
+    let registry = spec
+        .env
+        .get("MAKEPAD_REMOTE_REGISTRY")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(makepad_remote::discovery::registry_dir);
+    let mut startup = jit.then(|| Startup::new(pid, spec.startup_idle));
     let listening = loop {
         let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
         if let Some(line) = stdout.lines().find(|line| line.starts_with(LISTENING_PREFIX)) {
@@ -395,18 +408,27 @@ fn launch_command(
             ));
         }
         // A JIT app registers with the loader's endpoint instead of
-        // printing the native listening line. Read only our child's record.
+        // printing the native listening line. Read only our child's record:
+        // its own, or that of the run it stands behind (macOS, Windows).
         if jit {
-            if let Some(app) = fs::read_to_string(&discovery_path)
-                .ok()
-                .and_then(|text| makepad_remote::discovery::parse(&text))
-                .filter(|app| !app.app.is_empty() && !app.socket.is_empty())
-            {
+            if let Some(app) = announced(&registry, pid) {
                 break ListeningLine {
                     pid: app.pid,
                     app: app.app,
                     socket: PathBuf::from(app.socket),
                 };
+            }
+            if let Some(idle) = startup.as_mut().and_then(|startup| startup.idle(Instant::now())) {
+                // (what the registry holds is read while the processes still run: a record of a
+                // process that ended is gone)
+                let held = unannounced(&registry, pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(TestError::new(format!(
+                    "{} never announced its endpoint: {idle}; {held}; stderr tail:\n{}",
+                    executable.display(),
+                    file_tail(&stderr_path)
+                )));
             }
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -420,7 +442,7 @@ fn launch_command(
         }
         thread::sleep(spec.poll_interval);
     };
-    if listening.pid != pid {
+    if !jit && listening.pid != pid {
         let _ = child.kill();
         let _ = child.wait();
         return Err(TestError::new(format!(
@@ -448,19 +470,30 @@ fn launch_command(
                     let _ = child.wait();
                     return Err(err);
                 }
+                if let Some(idle) = startup.as_mut().and_then(|startup| startup.idle(Instant::now())) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TestError::new(format!(
+                        "{}'s endpoint {} never took a connection ({err}): {idle}; stderr tail:\n{}",
+                        executable.display(),
+                        listening.socket.display(),
+                        file_tail(&stderr_path)
+                    )));
+                }
                 thread::sleep(spec.poll_interval);
             }
         }
     };
     client.jit = jit;
+    // the app's own pid names its grab folder (makepad_remote app.rs `grab_dir`)
     let mut app = OwnedApp {
         child,
-        pid,
+        pid: listening.pid,
         executable: executable.to_path_buf(),
         client,
         grab_dir: std::env::temp_dir()
             .join("makepad-remote")
-            .join(format!("{}-{pid}", listening.app)),
+            .join(format!("{}-{}", listening.app, listening.pid)),
         stderr_path,
         exit_status: None,
     };
@@ -470,7 +503,10 @@ fn launch_command(
     // test's first locator. Under the JIT, the window exists before its first
     // frame has been compiled: wait for that frame and for the program not to be
     // waiting on the JIT, without applying the native startup deadline.
+    // Under the JIT this wait has no deadline either: it ends when the app sits idle short of
+    // up ([`Startup`]), saying what it waited for.
     let mut help_seen = false;
+    let mut waits_for = String::from("its endpoint to answer `help`");
     loop {
         if let Some(status) = app.poll_exit() {
             return Err(startup_exit(
@@ -489,6 +525,18 @@ fn launch_command(
             if up && (!jit || !app.client.jit_foreground()?) {
                 return Ok(app);
             }
+            waits_for = match (windows.is_empty(), up) {
+                (true, _) => "a window: it has none".into(),
+                (false, false) => format!("a drawn frame: none of its {} window(s) drew one", windows.len()),
+                (false, true) => "its program to stop waiting on the JIT: it still waits".into(),
+            };
+        }
+        if let Some(idle) = startup.as_mut().and_then(|startup| startup.idle(Instant::now())) {
+            let why = format!("{} never came up on {}: it waited for {waits_for}, and {idle}", app.executable.display(), app.client.socket());
+            // what the JIT says of the app's state, before it goes
+            let capture = app.client.jit_capture(&why).map_or(String::new(), |c| format!("; the JIT's capture: {c}"));
+            let _ = app.shutdown(spec.poll_interval);
+            return Err(TestError::new(format!("{why}{capture}; stderr tail:\n{}", app.stderr_tail())));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let _ = app.shutdown(spec.poll_interval);
@@ -500,6 +548,93 @@ fn launch_command(
         }
         thread::sleep(spec.poll_interval);
     }
+}
+
+/// The endpoint `registry` holds for launched process `pid`: its own, or that of the run it stands
+/// behind ([`makepad_remote::discovery::App::answers_to`]).
+fn announced(registry: &Path, pid: u32) -> Option<makepad_remote::discovery::App> {
+    makepad_remote::discovery::apps_in(registry)
+        .into_iter()
+        .find(|app| app.answers_to(pid) && !app.app.is_empty() && !app.socket.is_empty())
+}
+
+/// What `registry` holds of the processes under launched process `pid`, for a launch that found
+/// no endpoint there.
+fn unannounced(registry: &Path, pid: u32) -> String {
+    unannounced_in(registry, pid, &makepad_remote::procs::tree(pid))
+}
+
+/// [`unannounced`] of the processes `tree` (`pid` first).
+fn unannounced_in(registry: &Path, pid: u32, tree: &[u32]) -> String {
+    let theirs: Vec<String> = makepad_remote::discovery::apps_in(registry)
+        .iter()
+        .filter(|app| tree.contains(&app.pid))
+        .map(|app| match app.restart_parent {
+            Some(parent) => format!("pid {} ({}) says it stands behind {parent}", app.pid, app.app),
+            None => format!("pid {} ({}) names no parent", app.pid, app.app),
+        })
+        .collect();
+    let tree: Vec<String> = tree.iter().map(u32::to_string).collect();
+    if theirs.is_empty() {
+        format!("{} holds no endpoint of {pid} or its processes ({})", registry.display(), tree.join(" "))
+    } else {
+        format!("{} holds none that answers to {pid}, of its processes ({}): {}", registry.display(), tree.join(" "), theirs.join("; "))
+    }
+}
+
+/// Under the JIT a launch has no deadline: its run compiles for as long as it needs. It waits for
+/// the run to announce its endpoint only while the launched process and the processes under it
+/// work: a look, every `idle` (a test's `action_timeout`, the time an app may sit idle in a wait),
+/// that finds them all under 1/[`IDLE_SHARE`](crate::runtime::IDLE_SHARE) of a core over it,
+/// with no process started or ended since the last, is no progress, and the launch fails, saying
+/// what the registry holds. Where the platform cannot say what a process ran, it waits.
+struct Startup {
+    root: u32,
+    idle: Duration,
+    since: Instant,
+    at: Option<(Vec<u32>, u64)>,
+}
+
+impl Startup {
+    fn new(root: u32, idle: Duration) -> Startup {
+        Startup { root, idle, since: Instant::now(), at: Self::look(root) }
+    }
+
+    /// The launched process's tree and the CPU it ran, None where the platform cannot say.
+    fn look(root: u32) -> Option<(Vec<u32>, u64)> {
+        let tree = makepad_remote::procs::tree(root);
+        let own = makepad_remote::procs::cpu_ns(root)?;
+        let rest: u64 = tree[1..].iter().filter_map(|&pid| makepad_remote::procs::cpu_ns(pid)).sum();
+        Some((tree, own + rest))
+    }
+
+    /// Why the launch is idle, once a window ends without progress.
+    fn idle(&mut self, now: Instant) -> Option<String> {
+        let span = now.duration_since(self.since);
+        if span < self.idle {
+            return None;
+        }
+        self.since = now;
+        let next = Self::look(self.root);
+        let before = std::mem::replace(&mut self.at, next.clone());
+        idle_over(span, &before?, &next?)
+    }
+}
+
+/// Whether the tree went from `before` to `now` over `span` without progress, and how it read.
+fn idle_over(span: Duration, before: &(Vec<u32>, u64), now: &(Vec<u32>, u64)) -> Option<String> {
+    if before.0 != now.0 {
+        return None;
+    }
+    let cores = now.1.saturating_sub(before.1) as f64 / span.as_nanos().max(1) as f64;
+    if cores * crate::runtime::IDLE_SHARE as f64 >= 1.0 {
+        return None;
+    }
+    Some(format!(
+        "it and the processes under it ran {:.1}% of a core in the last {:.1} s, with no process started or ended",
+        cores * 100.0,
+        span.as_secs_f64()
+    ))
 }
 
 /// `[makepad-remote] pid=9931 app=NAME socket=/tmp/makepad-remote-9931.sock`
@@ -642,6 +777,9 @@ mod tests {
             args: Vec::new(),
             visible: false,
             startup_timeout: Duration::from_secs(10),
+            // a fake app's shell sits idle while it waits to be asked: the tests that judge
+            // idleness set their own window
+            startup_idle: Duration::from_secs(5),
             poll_interval: Duration::from_millis(20),
         }
     }
@@ -710,6 +848,102 @@ mod tests {
             }
         });
         format!("read _ < '{}'", fifo.display())
+    }
+
+    /// A JIT launch as on macOS and Windows: the process launched is a parent that starts the run
+    /// and waits, and the run announces its endpoint in the registry under its own pid, naming the
+    /// parent when `names_parent` (relax restart_parent.rs). The run lives until the parent ends:
+    /// it reads a FIFO only the parent holds open, as the real run reads its lifeline. The parent
+    /// ends when `parent_tail` returns (`wait`: when it is killed).
+    #[cfg(unix)]
+    fn write_fake_jit_app(dir: &Path, socket: &Path, names_parent: bool, parent_tail: &str) -> PathBuf {
+        // (`%.0s` takes the parent's pid and prints nothing)
+        let parent = if names_parent { r#","restart_parent":%s"# } else { "%.0s" };
+        let run = format!(
+            r#"printf '{{"pid":%s,"app":"fake-app","socket":"%s","caps":[]{parent}}}\n' $$ "$1" "$2" > "$3/.next-$$" && mv "$3/.next-$$" "$3/makepad-remote-$$.json"; read _ < "$4""#
+        );
+        write_script(
+            dir,
+            "fake-jit-app.sh",
+            &format!(
+                "#!/bin/sh\nlife=\"$MAKEPAD_REMOTE_REGISTRY/life-$$\"\nmkfifo \"$life\"\nsh -c '{}' run '{}' \"$$\" \"$MAKEPAD_REMOTE_REGISTRY\" \"$life\" &\nexec 3> \"$life\"\n{parent_tail}\n",
+                run.replace('\'', r#"'\''"#),
+                socket.display()
+            ),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_jit_launch_finds_the_run_behind_its_parent_and_fails_by_name_where_it_sits_idle() {
+        let dir = scratch_dir("jit-parent");
+        let registry = dir.join("registry");
+        fs::create_dir(&registry).unwrap();
+        let server = fixture_with_window();
+        server.route("owner", r#"{"queued":{"foreground":0,"main":0,"demand":0}}"#);
+        let mut spec = fake_app_spec(dir.clone());
+        spec.env.insert("MAKEPAD_REMOTE_REGISTRY".into(), registry.display().to_string());
+        // (the fake spec's 5 s idle window: a shell starting on a loaded box runs a few ms in a
+        // short one, idle by the rule, which a JIT run's start never is)
+
+        // the run's record names the launched process as the parent it stands behind
+        let script = write_fake_jit_app(&dir, server.socket(), true, "wait");
+        let mut app = launch_command(&spec, &script, Command::new(&script), true).unwrap();
+        assert_ne!(app.pid, app.child.id(), "the app's pid is the run's, not the parent's");
+        assert!(registry.join(format!("makepad-remote-{}.json", app.pid)).exists(), "the run announced itself under its own pid");
+        assert_eq!(app.grab_dir.file_name().unwrap().to_string_lossy(), format!("fake-app-{}", app.pid), "grabs are in the run's folder");
+        assert_eq!(app.client.socket(), server.socket().display().to_string());
+        // the parent ends, and with it the run (the fixture answers no quit)
+        app.child.kill().unwrap();
+        app.child.wait().unwrap();
+        let run = app.pid;
+        let ended = (0..250).any(|_| !makepad_remote::procs::is_alive(run) || {
+            thread::sleep(Duration::from_millis(20));
+            false
+        });
+        assert!(ended, "the run {run} ends with its parent");
+
+        // a run whose record answers to no pid the launch knows: the launch fails once its
+        // processes sit idle, naming the registry ([`unannounced_in`] has what it says)
+        spec.startup_idle = Duration::from_millis(200);
+        let script = write_fake_jit_app(&dir, server.socket(), false, "wait");
+        let err = launch_error(launch_command(&spec, &script, Command::new(&script), true)).to_string();
+        assert!(err.contains("never announced its endpoint: it and the processes under it ran") && err.contains(&registry.display().to_string()), "{err}");
+
+        // an app that is up but whose window never draws, sitting idle: the launch fails saying
+        // what it waited for, and the app is asked to quit (it ends when asked)
+        spec.startup_idle = Duration::from_secs(1);
+        let undrawn = crate::fixture::FixtureServer::start();
+        undrawn.route("help", "makepad-remote app=fake-app");
+        undrawn.route("status", r#"{"app":"fake-app","pid":1,"w":[{"i":0,"t":"fake","sz":[10,10],"px":[10,10],"dpi":1,"pass_dpi":0,"pos":[0,0]}]}"#);
+        let script = write_fake_jit_app(&dir, undrawn.socket(), true, &when_asked(&dir, &undrawn, "quit"));
+        let err = launch_error(launch_command(&spec, &script, Command::new(&script), true)).to_string();
+        assert!(err.contains("never came up on") && err.contains("it waited for a drawn frame: none of its 1 window(s) drew one, and it and the processes under it ran"), "{err}");
+        assert!(undrawn.requests().iter().any(|r| r == "quit"), "the app was asked to quit: {:?}", undrawn.requests());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_launch_is_idle_only_when_its_processes_sat_still_and_says_what_the_registry_holds() {
+        let span = Duration::from_secs(10);
+        let tree = |pids: &[u32], cpu_ms: u64| (pids.to_vec(), cpu_ms * 1_000_000);
+        // a twentieth of a core and up is work, a process started or ended is progress
+        assert!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1, 2], 500)).is_none(), "5% of a core works");
+        assert!(idle_over(span, &tree(&[1], 0), &tree(&[1, 2], 0)).is_none(), "a process started");
+        assert!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1], 0)).is_none(), "a process ended");
+        let idle = idle_over(span, &tree(&[1, 2], 100), &tree(&[1, 2], 400)).expect("3% of a core with the same processes is idle");
+        assert!(idle.contains("3.0% of a core in the last 10.0 s"), "{idle}");
+
+        // a record of a process under the launched one that names another parent, or none at all
+        // (the registry keeps only live processes' records: this process stands in for the run)
+        let registry = scratch_dir("unannounced");
+        let run = std::process::id();
+        fs::write(registry.join(format!("makepad-remote-{run}.json")), format!(r#"{{"pid":{run},"app":"fake-app","socket":"/s","caps":[],"restart_parent":1}}"#)).unwrap();
+        let said = unannounced_in(&registry, u32::MAX, &[u32::MAX, run]);
+        assert!(said.contains(&format!("holds none that answers to {}", u32::MAX)) && said.contains(&format!("pid {run} (fake-app) says it stands behind 1")), "{said}");
+        let said = unannounced_in(&registry, u32::MAX, &[u32::MAX]);
+        assert!(said.contains(&format!("holds no endpoint of {} or its processes", u32::MAX)), "{said}");
+        let _ = fs::remove_dir_all(&registry);
     }
 
     #[cfg(unix)]

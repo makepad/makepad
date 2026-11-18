@@ -264,6 +264,32 @@ impl CodeDocument {
         );
     }
 
+    /// Replaces the text by `text` as one replacement of the part that differs (the common
+    /// start and end stay): one undo step, as `replace_range`, so every session's selections,
+    /// anchors and scroll stay with the text around them. For a host putting an outside change
+    /// into a text someone is typing in. Nothing happens when the text is the same.
+    /// Cost: O(text).
+    pub fn replace_changed(&self, text: &str) {
+        let old = self.as_text().to_string();
+        if old == text {
+            return;
+        }
+        let mut start = old.bytes().zip(text.bytes()).take_while(|(a, b)| a == b).count();
+        while !old.is_char_boundary(start) || !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let room = old.len().min(text.len()) - start;
+        let mut tail = old.bytes().rev().zip(text.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
+        while !old.is_char_boundary(old.len() - tail) || !text.is_char_boundary(text.len() - tail) {
+            tail -= 1;
+        }
+        let at = |byte: usize| Position {
+            line_index: old[..byte].matches('\n').count(),
+            byte_index: byte - old[..byte].rfind('\n').map_or(0, |line_end| line_end + 1),
+        };
+        self.replace_range(at(start), at(old.len() - tail), text[start..text.len() - tail].into());
+    }
+
     /// As `replace_range`, but joined to the undo step of the edit before
     /// it: the steps of one gesture (a knob dragged, a number scrubbed)
     /// undo as one.
