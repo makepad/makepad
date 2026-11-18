@@ -72,7 +72,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
 pub struct MpModuleView {
     #[uid]
     uid: WidgetUid,
@@ -82,7 +82,6 @@ pub struct MpModuleView {
     walk: Walk,
     #[layout]
     layout: Layout,
-    #[redraw]
     #[live]
     draw_bg: DrawColor,
     /// The instance's texture, presented by this quad — on a desk that is
@@ -107,7 +106,6 @@ pub struct MpModuleView {
     #[rust]
     vm_id: SplashVmId,
     #[rust]
-    #[area]
     area: Area,
     /// FOCUS RULE (see `MpRunView`): a preview never takes the keyboard.
     #[rust(true)]
@@ -261,6 +259,33 @@ impl TileHost for MpModuleView {
     }
 }
 
+impl WidgetNode for MpModuleView {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn area(&self) -> Area {
+        self.area
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_bg.redraw(cx);
+    }
+
+    /// The tile is the edge of another app: the root under it was minted in the instance's
+    /// isolate, in that isolate's heap, and its widgets' names are the instance's own. A lookup
+    /// by name from the host's tree (`ui.widget(cx, ids!(bar))`) stops here, so it never answers
+    /// with a widget of the instance -- whose script objects the host's VM cannot use -- in
+    /// place of the host's own or of nothing. The host reaches the instance through its root.
+    fn search_scope(&self) -> bool {
+        true
+    }
+}
+
 impl Widget for MpModuleView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let Some(root) = self.root.clone() else {
@@ -355,5 +380,69 @@ impl Widget for MpModuleView {
         }
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_widgets::makepad_script::script;
+    use makepad_widgets::widget_tree::set_ui_root;
+
+    /// The window manager finds its own widgets by name across its whole tree, and an
+    /// in-process app on a tile has widgets of its own with the same names (the weather app
+    /// has a `bar` beside the WM's). A lookup from the host stops at the tile: it answers with
+    /// the host's widget, and an apply to that widget evaluates in the host's VM. The host's
+    /// lookup used to walk into the tile and answer with the app's `bar`, an object of the
+    /// app's isolate heap, and the host's apply to it panicked ("value from heap 4 used in
+    /// heap 1"), once a frame, on a phone home screen with that app's tile.
+    #[test]
+    fn a_hosts_lookup_by_name_stops_at_a_module_tile() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let host = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            vm.eval(script! { mod.wm_theme = { background: #000 } true });
+            crate::module_view::script_mod(vm);
+            let ui = vm.eval(script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    tile := MpModuleView{}
+                    bar := View{height: 10}
+                }
+            });
+            WidgetRef::script_from_value(vm, ui)
+        });
+        set_ui_root(&mut cx, &host);
+        let host_bar = host.child(live_id!(bar)).widget_uid();
+        assert_ne!(host_bar, WidgetUid(0), "the host has its own bar");
+        // The app's root, minted in its own isolate, with a `bar` of its own.
+        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let root = with_isolate(&mut cx, vm_id, |cx| {
+            cx.with_vm(|vm| {
+                let ui = vm.eval(script! {
+                    use mod.prelude.widgets.*
+                    View{ bar := View{height: 20} }
+                });
+                WidgetRef::script_from_value(vm, ui)
+            })
+        });
+        let app_bar = root.child(live_id!(bar)).widget_uid();
+        assert_ne!(app_bar, WidgetUid(0), "the app has a bar");
+        let tile = host.child(live_id!(tile));
+        tile.borrow_mut::<MpModuleView>().unwrap().set_root(&mut cx, 1, vm_id, root.clone());
+
+        let mut found = host.widget(&cx, ids!(bar));
+        assert_eq!(found.widget_uid(), host_bar, "the host's lookup answers with the host's own bar, not the app's ({app_bar:?})");
+        // the app still finds its own, from its root
+        assert_eq!(root.widget(&cx, ids!(bar)).widget_uid(), app_bar);
+        // and the host's apply to what it found evaluates in the host's heap
+        script_apply_eval!(cx, found, {
+            height: 30
+        });
+
+        tile.borrow_mut::<MpModuleView>().unwrap().clear_root(&mut cx);
+        drop(root);
+        cx.free_splash_vm(vm_id);
     }
 }

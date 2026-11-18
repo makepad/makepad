@@ -21,11 +21,23 @@ let app = ci.launch({package: "makepad-app-terminal" binary: "makepad-app-termin
 ci.step("comes up", fn(){
     ci.sleep(3.0)
     app.no_errors()
+    // A prompt alone is one line on a window of one flat colour, and the judge read the same
+    // one-line grab as a blank window one night and as a terminal the next (11-16, 11-17;
+    // Windows' cmd banner 11-18). A listing gives it lines of text to see.
+    let list = if ci.host.target == "windows" "dir" else "ls"
+    app.type_text(list)
+    app.key("ReturnKey")
+    ci.sleep(2.0)
+    app.no_errors()
     let shot = app.grab("start")
     // No "is any user interface visible" point: a terminal's interface is its text, which the
     // terminal point asks about. Asked both of a shell's banner and prompt, the judge answered
     // the generic one NO and the terminal one YES, and failed a terminal that came up (11-08).
-    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The application is a terminal emulator. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO 3. Is a terminal visible: a large area of one flat dark or light colour with monospace text lines starting at the left edge, such as a prompt? expected YES")
+    // No "one flat colour" point either, for the same reason: a terminal is one flat colour but
+    // for its text, and the judge called cmd's banner and prompt one flat dark grey while it
+    // saw the terminal in it (11-18). A blank window has no lines of text: the terminal point
+    // fails it.
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The application is a terminal emulator. 1. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO 2. Is a terminal visible: an area of one flat dark or light colour with several lines of monospace text starting at the left edge, such as a prompt and a listing of files? expected YES")
 })
 
 app.no_errors()

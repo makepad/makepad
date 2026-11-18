@@ -74,7 +74,7 @@
 #![cfg(target_os = "linux")]
 
 use makepad_widgets::makepad_platform::linux_display::display_profiles::{DisplayProfile, DisplayProfiles, OutputKey, ProfileSettings};
-use makepad_widgets::makepad_platform::linux_display::{LinuxDisplayOutput, LinuxDisplaySnapshot, VirtualDisplay, VirtualPanels};
+use makepad_widgets::makepad_platform::linux_display::{LinuxDisplayOutput, LinuxDisplaySnapshot, VirtualDisplay, VirtualPanels, VIRTUAL_OUTPUT};
 
 use super::system_linux::{validate_gpu_choice, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN};
 
@@ -320,6 +320,24 @@ pub fn virtual_restore(layout: &DisplayLayout, snap: &LinuxDisplaySnapshot) -> O
     (!holds).then_some(saved.mode)
 }
 
+/// The virtual desktop a Desk Link viewer's window decides: the saved one while it follows the
+/// viewer; with none saved, the viewer's own while no output shows the desktop (every monitor
+/// off or unplugged: a box seen only over Desk Link) or while that one is already up
+/// (`viewer_up`). Without it such a desktop is 0x0 and the viewer gets no picture at all (a box
+/// whose monitor stayed off after a power cut, 11-17). The viewer's own is never saved: the next
+/// start goes back to the panels.
+pub fn viewer_desktop(saved: Option<SavedVirtual>, viewer_up: bool, snap: &LinuxDisplaySnapshot) -> Option<SavedVirtual> {
+    match saved {
+        Some(saved) => saved.follow.then_some(saved),
+        None => (snap.direct && (viewer_up || snap.screens.is_empty())).then(SavedVirtual::first_pick),
+    }
+}
+
+/// The viewer's own desktop gives way once a monitor shows a picture again.
+pub fn viewer_desktop_gives_way(snap: &LinuxDisplaySnapshot) -> bool {
+    snap.outputs.iter().any(|output| output.name != VIRTUAL_OUTPUT && output.active)
+}
+
 /// Whether the desktop's screens (shown, or on their way: [`is_joining`])
 /// are driven by more than one card. The renderer cannot switch its GPU
 /// live then, so "Render on" only takes effect at the next start.
@@ -514,6 +532,29 @@ mod tests {
         let fixed = DisplayLayout { virtual_display: Some(SavedVirtual { follow: false, ..saved_virtual() }), ..Default::default() };
         assert_eq!(virtual_restore(&fixed, &on(viewer)), Some(saved_virtual().mode));
         assert_eq!(virtual_restore(&DisplayLayout::default(), &on(viewer)), None);
+    }
+
+    #[test]
+    fn a_viewer_gets_a_desktop_where_no_output_shows_one() {
+        let dark = LinuxDisplaySnapshot { direct: true, ..Default::default() };
+        let shown = users();
+        assert_eq!(viewer_desktop(None, false, &dark), Some(SavedVirtual::first_pick()), "no screen: the viewer's window is the desktop");
+        assert!(viewer_desktop(None, false, &dark).is_some_and(|v| v.follow), "it follows the viewer");
+        assert_eq!(viewer_desktop(None, false, &shown), None, "a monitor shows the desktop: the viewer sees it scaled");
+        assert_eq!(viewer_desktop(None, false, &LinuxDisplaySnapshot::default()), None, "not the direct renderer: nothing to set");
+        let up = LinuxDisplaySnapshot { virtual_display: Some(SavedVirtual::first_pick().mode), ..shown.clone() };
+        assert_eq!(viewer_desktop(None, true, &up), Some(SavedVirtual::first_pick()), "its own desktop up: it keeps following");
+        assert_eq!(viewer_desktop(Some(saved_virtual()), false, &dark), Some(saved_virtual()), "the saved one decides");
+        let fixed = SavedVirtual { follow: false, ..saved_virtual() };
+        assert_eq!(viewer_desktop(Some(fixed), false, &dark), None, "a saved fixed size is not the viewer's");
+        // It gives way once a monitor shows a picture, never for the virtual row itself.
+        let virtual_row = LinuxDisplayOutput { name: VIRTUAL_OUTPUT.into(), active: true, ..Default::default() };
+        let with_virtual = LinuxDisplaySnapshot { direct: true, outputs: vec![virtual_row.clone()], ..Default::default() };
+        assert!(!viewer_desktop_gives_way(&with_virtual));
+        let waking = LinuxDisplayOutput { name: "card1-DP-4".into(), active: false, ..Default::default() };
+        assert!(!viewer_desktop_gives_way(&LinuxDisplaySnapshot { outputs: vec![virtual_row.clone(), waking.clone()], ..with_virtual.clone() }), "not before it presents");
+        let showing = LinuxDisplayOutput { active: true, ..waking };
+        assert!(viewer_desktop_gives_way(&LinuxDisplaySnapshot { outputs: vec![virtual_row, showing], ..with_virtual }));
     }
 
     #[test]

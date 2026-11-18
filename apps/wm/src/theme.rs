@@ -382,6 +382,14 @@ pub fn splash_source(theme: &ImportedTheme) -> String {
 // ----------------------------------------------------------------------
 
 pub fn makepad_home() -> PathBuf {
+    // A test instance (an absolute MAKEPAD_TEST_HOME, the test harness's stand-in for the
+    // person's home folder) keeps all of the WM's state below it, ahead of a MAKEPAD_HOME it
+    // inherited: a test WM never reads or writes the machine's. A CI smoke's WM restored the
+    // box's newest layout, a calculator an earlier run had left maximised, and failed maximise in
+    // every run after; nested under the box's own WM, it wrote into that WM's history (11-18).
+    if let Some(home) = std::env::var_os("MAKEPAD_TEST_HOME").map(PathBuf::from).filter(|home| home.is_absolute()) {
+        return home.join(".makepad");
+    }
     // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
     // every path below it relative to the current folder.
     if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {

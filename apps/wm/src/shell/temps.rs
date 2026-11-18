@@ -16,6 +16,11 @@
 //! kind of part ([`limit_for`]). The person can turn the warning off for a machine whose parts
 //! run hot by design ([`Temps::quiet`], kept in `~/.makepad/wm/temps-quiet`): the readings, the
 //! limits and the alarms in the panel stay, only the red badge and the panel opening go.
+//!
+//! The bar's thermometer shows a change once it has held, as an alarm does: the badge warms after
+//! [`SUSTAIN_S`] near a limit, and the column moves after [`SUSTAIN_S`] of readings at least
+//! [`LEVEL_STEP`] to one side of it. A busy machine's readings drift a few degrees each second,
+//! and each turn of the badge or the column redrew an idle bar.
 
 // Only Linux reads sensors yet: elsewhere the history and warning are compiled but never fed.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -34,6 +39,9 @@ pub const SUSTAIN_S: f64 = 5.0;
 pub const HYSTERESIS: f32 = 5.0;
 /// The badge warms this close to a limit.
 pub const WARM_MARGIN: f32 = 8.0;
+/// The bar's column moves for a change of at least this much of its range (about 2 °C under a
+/// 95 °C limit) that held for [`SUSTAIN_S`].
+pub const LEVEL_STEP: f32 = 0.03;
 
 /// Which well of the panel a sensor is drawn in, in panel order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -316,6 +324,14 @@ pub struct Temps {
     /// the latest reading of each sensor
     pub now: Vec<f32>,
     pub last_at: f64,
+    /// the badge is warm (held: near a limit for SUSTAIN_S), and since when a reading has been
+    /// near one while it is not
+    warm: bool,
+    warm_since: Option<f64>,
+    /// the column the badge shows (None before the first reading), and a move away from it under
+    /// way: since when, and how far every reading since went
+    shown_level: Option<f32>,
+    level_move: Option<(f64, f32)>,
 }
 
 impl Temps {
@@ -398,25 +414,69 @@ impl Temps {
         self.episode = any;
         self.now = values;
         self.last_at = at;
+        self.hold(at);
         let badge = self.compute_badge();
         let badge_changed = badge != self.badge;
         self.badge = badge;
         Pushed { episode_started, badge_changed }
     }
 
-    fn compute_badge(&self) -> Badge {
-        let mut heat = if self.warns() { Heat::Alarm } else { Heat::Normal };
-        let mut level = 0.0f32;
+    /// Moves what the badge shows, the readings at `at` in: its warmth and its column, each once a
+    /// change has held. Readings drifting a few degrees each second on a busy machine warmed the
+    /// badge for a moment, or moved the column a pixel and back, and each turn redrew an idle bar
+    /// (live:wm-rest, 11-18).
+    fn hold(&mut self, at: f64) {
+        // a warm badge cools HYSTERESIS under where it warmed, as an alarm clears: a reading on the
+        // edge turned it warm and back every second (11-17)
+        let warm_margin = if self.warm { WARM_MARGIN + HYSTERESIS } else { WARM_MARGIN };
+        let (mut level, mut edge) = (0.0f32, false);
         for (s, v) in self.sensors.iter().zip(&self.now) {
             let (Some(limit), false) = (s.limit, v.is_nan()) else { continue };
             if s.unit != Unit::Celsius {
                 continue;
             }
             level = level.max(((v - 30.0) / (limit - 30.0).max(1.0)).clamp(0.0, 1.0));
-            if !self.quiet && heat == Heat::Normal && *v >= limit - WARM_MARGIN {
-                heat = Heat::Warm;
-            }
+            edge |= *v >= limit - warm_margin;
         }
+        // warm: near a limit for SUSTAIN_S, as an alarm needs over it
+        if !edge {
+            self.warm = false;
+            self.warm_since = None;
+        } else if !self.warm {
+            let since = *self.warm_since.get_or_insert(at);
+            self.warm = at - since >= SUSTAIN_S - 0.25;
+        }
+        // the column: the first reading shows at once; then a move of LEVEL_STEP or more shows
+        // once every reading for SUSTAIN_S kept to its side, as far as all of them went
+        let shown = *self.shown_level.get_or_insert(level);
+        let d = level - shown;
+        self.level_move = if d.abs() < LEVEL_STEP {
+            None
+        } else {
+            match self.level_move {
+                Some((since, went)) if (went > shown) == (d > 0.0) => {
+                    let went = if d > 0.0 { went.min(level) } else { went.max(level) };
+                    if at - since >= SUSTAIN_S - 0.25 {
+                        self.shown_level = Some(went);
+                        None
+                    } else {
+                        Some((since, went))
+                    }
+                }
+                _ => Some((at, level)),
+            }
+        };
+    }
+
+    fn compute_badge(&self) -> Badge {
+        let heat = if self.warns() {
+            Heat::Alarm
+        } else if self.warm && !self.quiet {
+            Heat::Warm
+        } else {
+            Heat::Normal
+        };
+        let level = self.shown_level.unwrap_or(0.0);
         // the tooltip: each group's hottest temperature, alarms named
         let mut parts: Vec<String> = Vec::new();
         for g in [Group::Cpu, Group::Gpu, Group::Storage] {
@@ -1063,9 +1123,63 @@ mod tests {
         let s = Arc::new(vec![sensor("Tctl", Kind::CpuPackage, Some(95.0))]);
         let mut t = Temps::default();
         t.push(frame(0.0, Some(s), &[89.0]));
-        assert_eq!(t.badge.heat, Heat::Warm);
-        assert!(t.badge.level > 0.8 && t.badge.level < 1.0);
+        assert_eq!(t.badge.heat, Heat::Normal, "a moment near the limit is not warm yet");
+        assert!(t.badge.level > 0.8 && t.badge.level < 1.0, "the first reading's column shows at once");
         assert!(t.badge.tooltip.contains("CPU 89"));
+        for k in 1..=4 {
+            t.push(frame(k as f64, None, &[88.0]));
+            assert_eq!(t.badge.heat, Heat::Normal, "{k} s near the limit");
+        }
+        t.push(frame(5.0, None, &[88.0]));
+        assert_eq!(t.badge.heat, Heat::Warm, "five seconds near the limit");
+        // a reading on the edge (warm from 87) keeps it warm: it turned every second (11-17)
+        for (k, v) in [86.0, 87.0, 86.0, 85.0, 86.0, 82.0].into_iter().enumerate() {
+            t.push(frame(6.0 + k as f64, None, &[v]));
+            assert_eq!(t.badge.heat, Heat::Warm, "{v} after warm");
+        }
+        // and cools HYSTERESIS under where it warmed, then warms again only at the margin
+        t.push(frame(12.0, None, &[81.0]));
+        assert_eq!(t.badge.heat, Heat::Normal);
+        t.push(frame(13.0, None, &[86.0]));
+        assert_eq!(t.badge.heat, Heat::Normal, "cool until the margin");
+        // a spike to the margin and back does not warm it: it warmed for a moment at rest (11-18)
+        t.push(frame(14.0, None, &[88.0]));
+        t.push(frame(15.0, None, &[84.0]));
+        assert_eq!(t.badge.heat, Heat::Normal, "a spike");
+        for k in 16..=20 {
+            t.push(frame(k as f64, None, &[87.0]));
+            assert_eq!(t.badge.heat, Heat::Normal, "{k}: under five seconds at the margin");
+        }
+        t.push(frame(21.0, None, &[87.0]));
+        assert_eq!(t.badge.heat, Heat::Warm);
+    }
+
+    #[test]
+    fn the_column_moves_for_a_change_that_holds() {
+        let s = Arc::new(vec![sensor("Tctl", Kind::CpuPackage, Some(95.0))]);
+        let at = |v: f32| (v - 30.0) / 65.0;
+        let mut t = Temps::default();
+        t.push(frame(0.0, Some(s), &[56.0]));
+        assert_eq!(t.badge.level, at(56.0));
+        // a busy machine's drift: a few degrees each second, either way, never five seconds to one
+        // side; the column stepped a pixel and back, and the bar redrew at rest (live:wm-rest)
+        for (k, v) in [60.0, 54.0, 61.0, 62.0, 57.0, 52.0, 59.0, 63.0, 60.0, 61.0, 55.0, 57.0].into_iter().enumerate() {
+            t.push(frame(1.0 + k as f64, None, &[v]));
+            assert_eq!(t.badge.level, at(56.0), "{v} at {} s", 1 + k);
+        }
+        // a rise that holds moves it, as far as every reading of the rise went
+        for (k, v) in [66.0, 70.0, 68.0, 69.0, 67.0].into_iter().enumerate() {
+            t.push(frame(13.0 + k as f64, None, &[v]));
+            assert_eq!(t.badge.level, at(56.0), "{v}: the rise has not held yet");
+        }
+        t.push(frame(18.0, None, &[70.0]));
+        assert_eq!(t.badge.level, at(66.0), "five seconds of the rise");
+        // and so does a fall
+        for k in 19..=24 {
+            t.push(frame(k as f64, None, &[50.0]));
+        }
+        assert_eq!(t.badge.level, at(50.0));
+        assert_eq!(t.badge.heat, Heat::Normal);
     }
 
     #[test]

@@ -32,7 +32,7 @@ use makepad_widgets::makepad_platform::linux_input::{
 };
 use makepad_widgets::makepad_platform::linux_display::display_profiles::ProfileSettings;
 use makepad_widgets::makepad_platform::linux_display::{DisplayPacing, LinuxDisplayCommand, LinuxDisplaySnapshot, VirtualPanels};
-use shell::display_layout::{virtual_env_pinned, virtual_restore, DisplayLayout, SavedVirtual, VirtualSize};
+use shell::display_layout::{viewer_desktop, viewer_desktop_gives_way, virtual_env_pinned, virtual_restore, DisplayLayout, SavedVirtual, VirtualSize};
 use shell::display_menu::{DisplayConfig, DisplayTrials, TrialOut};
 use shell::panels::{PanelKind, ShellPanel};
 use shell::system_linux::{
@@ -145,6 +145,9 @@ pub struct LinuxControls {
     /// The saved virtual desktop has been restored (or deliberately
     /// skipped) once.
     virtual_restore_done: bool,
+    /// The Desk Link viewer's own desktop is up, unsaved: no output showed
+    /// one when its window reported (`display_layout::viewer_desktop`).
+    viewer_desktop: bool,
     /// Newest unsent pointer speed per device (0 mouse, 1 touchpad).
     pointer_save: [Option<u32>; 2],
     /// The person set that device's speed this session; a start-up read
@@ -250,6 +253,7 @@ impl LinuxControls {
     fn virtual_set_by_person(&mut self) {
         self.virtual_user_set = true;
         self.virtual_restore_done = true;
+        self.viewer_desktop = false;
     }
 
     /// The worker's start-up read: the working copy unless this session
@@ -338,16 +342,43 @@ impl App {
             return;
         }
         self.linux_controls.viewer = Some(report);
-        let Some(saved) = self.linux_controls.virtual_saved().filter(|saved| saved.follow) else { return };
-        if let Err(message) = self.send_virtual(cx, &saved) {
-            self.linux_controls.notice = format!("Desktop: {message}");
-            log!("wm: virtual display for the viewer's window refused: {message}");
+        let saved_virtual = self.linux_controls.virtual_saved();
+        let Some(saved) = viewer_desktop(saved_virtual, self.linux_controls.viewer_desktop, &cx.linux_display_snapshot()) else { return };
+        let own = saved_virtual.is_none() && !self.linux_controls.viewer_desktop;
+        if own && self.linux_controls.panel_scale.is_none() {
+            self.linux_controls.panel_scale = self.main_window_dpi(cx).map(|dpi| (dpi * 100.0).round() as u32);
+        }
+        match self.send_virtual(cx, &saved) {
+            Ok(()) if own => {
+                self.linux_controls.viewer_desktop = true;
+                log!("wm: no output shows the desktop: the Desk Link viewer's window is the desktop until a monitor shows one (not saved)");
+            }
+            Ok(()) => {}
+            Err(message) => {
+                self.linux_controls.notice = format!("Desktop: {message}");
+                log!("wm: virtual display for the viewer's window refused: {message}");
+            }
         }
         if scale > 0 {
             let scale = self.linux_controls.virtual_scale(&saved);
             self.apply_dpi_scale(cx, scale);
         }
         self.redraw_all(cx);
+    }
+
+    /// A monitor shows a picture again: the viewer's own desktop gives way
+    /// to the panels' modes and the scale before it.
+    fn viewer_desktop_give_way(&mut self, cx: &mut Cx) {
+        self.linux_controls.viewer_desktop = false;
+        match cx.linux_set_virtual_display(None) {
+            Ok(()) => {
+                log!("wm: a monitor shows the desktop again: the Desk Link viewer's desktop gives way to the panels");
+                if let Some(scale) = self.linux_controls.panel_scale {
+                    self.apply_dpi_scale(cx, scale);
+                }
+            }
+            Err(message) => log!("wm: the Desk Link viewer's desktop could not give way: {message}"),
+        }
     }
 
     /// "Restart desktop now", confirmed. The panel re-checked the saved
@@ -480,7 +511,7 @@ impl App {
             }
             ControlAction::DesktopPanel => {
                 self.linux_controls.notice.clear();
-                if self.linux_controls.virtual_saved().is_some() {
+                if self.linux_controls.virtual_saved().is_some() || self.linux_controls.viewer_desktop {
                     match cx.linux_set_virtual_display(None) {
                         Ok(()) => {
                             self.linux_controls.virtual_set_by_person();
@@ -662,6 +693,9 @@ impl App {
 
     pub(crate) fn poll_linux_controls(&mut self, cx: &mut Cx) {
         if self.gallery { return; }
+        if self.linux_controls.viewer_desktop && self.linux_controls.virtual_saved().is_none() && viewer_desktop_gives_way(&cx.linux_display_snapshot()) {
+            self.viewer_desktop_give_way(cx);
+        }
         let state = &mut self.linux_controls;
         if !state.attempted {
             state.attempted = true;
