@@ -24,6 +24,8 @@ turn on features of it ([`turned_on`]): it is checked with them whatever else th
 the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packages and the gate packages the
 diff reaches, as the fast bucket picks its checks; GATE_FULL=1 (the full bucket, daily) runs every package's,
 whatever the diff. A package's test variants ([`variants`]) run beside it, a `tests` line each.
+`--runs` with GATE_MACOS=1 prints the mac bucket's instead (mac_tests.sh): a `tests <package> <dir> --test <target>`
+line for each test target only a Mac can fail ([`macos_tests`]) whose package's tests the diff reaches.
 """
 import json
 import os
@@ -280,11 +282,28 @@ def run_units(packages, members, touched, workspace, jit, retry):
     return sorted((name, by_name[name]) for name in names)
 
 
+def macos_tests(pkg):
+    """A package's test targets only a Mac can fail, `[package.metadata.makepad.macos-tests]`: `"test:<target>" =
+    "<why>"` (or `"lib"`). The Linux buckets build such a target empty (`#![cfg(target_os = "macos")]`) or never reach
+    what it guards (a menu-bar status item across a JIT restart), so only the mac bucket runs them. Their `makepad
+    test` arguments, sorted."""
+    declared = ((pkg.get("metadata") or {}).get("makepad") or {}).get("macos-tests") or {}
+    return sorted(["--lib"] if key == "lib" else ["--test", key.split(":", 1)[1]] for key in declared if key == "lib" or key.startswith("test:"))
+
+
 def tests_only(root, base, cbase, runs):
     packages = {}
     members = local(root, metadata(root / "Cargo.toml"), packages)
     compiled, touched = owners(root, packages, changed(root, base, cbase))
     workspace, jit = workspace_wide(compiled), bool(touched & built_from(packages, JIT_PACKAGE))
+    if runs and os.environ.get("GATE_MACOS") == "1":
+        # what the diff reaches, as the fast bucket's test check follows it (every one on a JIT or
+        # workspace-wide change, or for the full bucket); a declared target red since too
+        every = workspace or jit or os.environ.get("GATE_FULL") == "1"
+        for name, directory in tested(packages, members, set(members) if every else touched, retried()):
+            for args in macos_tests(packages[directory]):
+                print(f"tests {name} {directory.relative_to(root)} {' '.join(args)}")
+        return
     if os.environ.get("GATE_FULL") == "1":
         units = tested(packages, members, set(members), retried())
     elif runs:
@@ -299,10 +318,31 @@ def tests_only(root, base, cbase, runs):
             print(f"tests {name} {directory.relative_to(root)} --features {features}")
 
 
+def library_checks(root):
+    """land_gate.sh libs: a `check <name> <dir>` line for every package of the root workspace with a library
+    target of any kind, both repos (the commercial apps' crates are members through apps/commercial's cfg(any())
+    dependencies), but for one that says it is built for no desktop (`[package.metadata.makepad] platforms`,
+    every word a platform: devhub ci declared_platforms). `makepad check` borrow-checks only the package it names:
+    a relax change that passed a 317-package corpus broke makepad-csg-sdf, outside it (11-17)."""
+    packages = {}
+    members = local(root, metadata(root / "Cargo.toml"), packages)
+    known = {"desktop", "web", "mobile"}
+    def desktop(pkg):
+        words = ((pkg.get("metadata") or {}).get("makepad") or {}).get("platforms")
+        return not words or "desktop" in words or not set(words) <= known
+    kinds = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+    found = sorted((packages[d]["name"], d) for d in members
+                   if desktop(packages[d]) and any(k in kinds for t in packages[d]["targets"] for k in t["kind"]))
+    for name, directory in found:
+        print(f"check {name} {directory.relative_to(root)}")
+
+
 def main():
     root = Path.cwd().resolve()
     if sys.argv[1] in ("--tests", "--runs"):
         return tests_only(root, *sys.argv[2:4], sys.argv[1] == "--runs")
+    if sys.argv[1] == "--libs":
+        return library_checks(root)
     base, cbase = sys.argv[1:3]
     files = changed(root, base, cbase)
     commercial = root / "apps/commercial"

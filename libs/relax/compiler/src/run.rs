@@ -2716,8 +2716,18 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         jit::start_cpu_budget();
     }
     jit::start_completion(up);
-    // the dependencies' bodies no build asked for are type-checked after the first frame
-    if !harness && !plain_test { crate::typeck_bg::start(up, root, main_def); }
+    // the dependencies' bodies no build asked for are type-checked after the first frame; in a test
+    // run, the registry crates its tests see, from its tests on (never in a test's child process)
+    if !((harness || plain_test) && (self_exec || check)) {
+        let mut registry = vec![None; u.prog.crates.len()];
+        for (ci, c) in g.crates.iter().enumerate() {
+            if c.registry && crate_of[ci] != u32::MAX {
+                registry[crate_of[ci] as usize] = Some(format!("`{}` {}", g.pkg[ci].1, g.pkg[ci].2));
+            }
+        }
+        let test_subjects = if harness || plain_test { test_subjects.clone() } else { Vec::new() };
+        crate::typeck_bg::start(up, crate::typeck_bg::Scope { root, main: main_def, test_subjects, registry });
+    }
     let platform = u.prog.crates.iter().any(|c| unitgraph::presents(&unitgraph::manifest_dir_of(c.root_path())));
     jit::live_needs_present(!live_tests && platform);
     // a test harness never presents, nor does a program without the platform: no startup to wait out
@@ -3969,9 +3979,14 @@ fn try_settle(drops: &mut jit::SettleDrops, trim: bool) -> bool {
     // trimmed, 37 s of trims): a writer waits from here on, so the readers stop at their next preemption
     // point, and the wait for the front to come free runs here, off the owner, which goes on
     // serving meanwhile (the main thread's requests, the questions the readers wait on).
+    // Not while the collected program is captured: the capture holds its front read for seconds
+    // and starts over for a waiting writer, and the monitor asks this again next round (settles
+    // every 330 ms under RELAX_SETTLE_STRESS had a 2.6 s capture start over 183 times, and the
+    // run's collected image, so its settle rebuild, waited for the whole run).
+    if capture_running() { return false; }
     let _waiting = crate::preempt::WriterWaiting::new();
     while jit::front_try_write().is_none() {
-        if jit::QUIT_SEEN.load(Ordering::Relaxed) || crate::preempt::is_stopped() { return false; }
+        if jit::QUIT_SEEN.load(Ordering::Relaxed) || crate::preempt::is_stopped() || capture_running() { return false; }
         crate::lifeline::beat();
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -4171,11 +4186,10 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 mid_flushed = n;
                 mid_last = main_ms;
                 let busy = mid_busy.clone();
-                let quiet = record || mid_still;
                 let _ = crate::run_threads::spawn("run-cache-write", move || { let _z = crate::zone_alloc::compiler_thread();
                     let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
                     let t = Instant::now();
-                    let r = mid_flush(quiet, record);
+                    let r = mid_flush(record);
                     if crate::memstat::enabled() || crate::cache::trace_on() {
                         verbose!("relax cache: mid-run write at t={:.0} ms: {:?} (entries, front images) in {:.1} ms", crate::clock::ms_since_start(), r, t.elapsed().as_secs_f64() * 1e3);
                     }
@@ -4709,6 +4723,32 @@ fn mid_yielded() {
 /// The install order's length when a mid-run write last recorded the manifest (or its tail): the
 /// quit write records the session's later installs as its tail
 static MID_MANIFEST_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The install order's length when the startup manifest's window closed, as the first write past
+/// it found it (MAX: not yet): the startup manifest is that much of it, whichever try records it.
+/// A cold run installs for minutes after its window; a manifest of the whole order so far was
+/// another record each try, and a try that gave way left the next one more to do.
+static MANIFEST_WINDOW_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// A test's startup manifest gives way this many times more, as to a waiting request.
+#[cfg(test)]
+pub(crate) static MANIFEST_GIVES_WAY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(test)]
+fn manifest_test_gives_way() -> bool {
+    let mut n = MANIFEST_GIVES_WAY.load(Ordering::SeqCst);
+    while n > 0 {
+        match MANIFEST_GIVES_WAY.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
+}
+
+#[cfg(not(test))]
+fn manifest_test_gives_way() -> bool {
+    false
+}
 /// The last mid-run write found an in-session rebuild of the startup image due (cache
 /// image_refresh_due): the next one opens the stores spills wrote first, as the image takes their
 /// entries
@@ -4806,8 +4846,6 @@ fn quit_mark() {
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
     // nothing parked waits for a decision now, and a paused program goes on to its quit
     crate::inspect::events::quit_releases();
-    // the quit write and the exit's commit without waiting on the disk (store.rs Slot::tail)
-    crate::store::set_exiting();
     if ONCE.swap(true, Ordering::SeqCst) || unsafe { RUN_UNIT }.is_null() { return; }
     if jit::started() {
         jit::ORDER_UNTIL_NS.fetch_min(jit::wall_ns(), Ordering::Relaxed);
@@ -4830,7 +4868,7 @@ fn quit_mark() {
             // (the exit's write does the rest)
             if EXIT_STAGE.load(Ordering::SeqCst) != 0 { break; }
             let yields = MID_YIELDS.load(Ordering::Relaxed);
-            let pass = mid_flush(true, true);
+            let pass = mid_flush(true);
             r = pass.or(r);
             let whole = MID_YIELDS.load(Ordering::Relaxed) == yields;
             if whole && (QUIT_WRITE_FINISHING.load(Ordering::SeqCst)
@@ -4856,12 +4894,21 @@ fn quit_mark() {
     }
 }
 
+/// (tests) One settle of unit `up`, as the run monitor tries it: whether it settled.
+#[cfg(test)]
+pub(crate) unsafe fn settle_pass(up: *mut Unit) -> bool {
+    RUN_UNIT = up;
+    let r = try_settle(&mut jit::SettleDrops::default(), false);
+    RUN_UNIT = std::ptr::null_mut();
+    r
+}
+
 /// (tests) One pass of the quit write over unit `up`, as quit_mark's thread runs it: the entries
 /// and front images it wrote.
 #[cfg(test)]
 pub(crate) unsafe fn quit_write_pass(up: *mut Unit) -> Option<(usize, usize)> {
     RUN_UNIT = up;
-    let r = mid_flush(true, true);
+    let r = mid_flush(true);
     RUN_UNIT = std::ptr::null_mut();
     r
 }
@@ -4885,7 +4932,7 @@ pub(crate) extern "C" fn relax_self_spawn() {
     }
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let t = Instant::now();
-    let r = mid_flush(true, true);
+    let r = mid_flush(true);
     verbose!("relax cache: written before a run of this program again: {:?} (entries, front images) in {:.1} ms", r, t.elapsed().as_secs_f64() * 1e3);
 }
 
@@ -5009,6 +5056,8 @@ fn drop_later_now() {
 /// timeline (`pf`, `timeline`) shows each section as a span inside the owner's service, so a
 /// frame that waited for the owner names the section that held it.
 pub(crate) fn yield_section(s: &'static str) {
+    // (a capture off the owner thread holds no owner section: the settle rebuild's, record_collected)
+    if !crate::owner::is_owner() { return; }
     let prev = std::mem::replace(&mut *YIELD_SECTION.lock().unwrap_or_else(|e| e.into_inner()), s);
     // (on the owner thread, inside its service span: every section is set and cleared there)
     if crate::owner::is_owner() && crate::inspect::timeline::recording() {
@@ -5058,13 +5107,174 @@ fn set_mid_cache_dir(dir: &std::path::Path) {
 // never prints the exit summary): files mapped, images not matching, arrays copied back
 static FRONT_REPORTED: AtomicBool = AtomicBool::new(false);
 
+thread_local! {
+    /// this thread captures the collected program under a front read (record_collected): it
+    /// makes no request the owner thread must serve (owner.rs request_dyn)
+    static CAPTURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// This thread captures the collected program under a front read now.
+pub(crate) fn capturing() -> bool {
+    CAPTURING.try_with(|c| c.get()).unwrap_or(false)
+}
+
+/// What stops the collected capture under its front read: a front writer waits (a load, a live
+/// edit: it then waits for one stop interval), or the run ends. A settle does not wait while one
+/// runs (try_settle).
+pub(crate) fn capture_stop() -> bool {
+    crate::preempt::writer_waiting() || crate::preempt::is_stopped()
+}
+
+/// Captures of the collected program under way on any thread, from just before their front read.
+static CAPTURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A capture of the collected program is under way (a settle gives way to it).
+pub(crate) fn capture_running() -> bool {
+    CAPTURES.load(Ordering::Acquire) != 0
+}
+
+/// A capture under way for as long as it lives.
+pub(crate) struct CaptureLive(());
+impl CaptureLive {
+    pub(crate) fn enter() -> Self {
+        CAPTURES.fetch_add(1, Ordering::AcqRel);
+        CaptureLive(())
+    }
+}
+impl Drop for CaptureLive {
+    fn drop(&mut self) {
+        // (never below zero: a run that ends in place resets the count)
+        let mut n = CAPTURES.load(Ordering::Acquire);
+        while n > 0 {
+            match CAPTURES.compare_exchange_weak(n, n - 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(now) => n = now,
+            }
+        }
+    }
+}
+
+/// The collected program, recorded off the owner thread. One owner step takes the front images
+/// of files loaded since this write took them (`imaged_files`: the program's file count they
+/// cover), the encoder's inputs, and the front-write count all of it describes. On this thread a
+/// front read then holds that program while it is encoded: the owner goes on compiling, and a
+/// front writer (a load, a live edit) waits for at most one stop interval, which drops the
+/// encode for a later write. The store write and the commit run with no lock. A front write
+/// between the two steps, or a table changed under the read (the shape guard: a change made
+/// without the front write), leaves the record to a later write.
+fn record_collected(up: *mut Unit, wait: bool, imaged_files: usize, crates_left: bool) {
+    let t = Instant::now();
+    // the cache files' pages the run has resident go first (a settle's trim drops them too):
+    // the record's copy of the program comes on top of what the process holds
+    crate::pack::release_resident();
+    // files the post-boot loader loaded since this write took its front images (a run that did
+    // not restore loads for seconds after present): their images are taken in the owner step
+    // (the front-write count read there says the program is still the one they are of)
+    let late = wait && front_recordable() && crate::owner::publish(|| unsafe { (*up).prog.files.len() } != imaged_files);
+    let step = || {
+        let u = unsafe { &mut *up };
+        let (mut imaged, mut left, mut late_spill) = (imaged_files, crates_left, None);
+        if late {
+            let stop = || crate::owner::request_waiting();
+            if let Some(c) = u.cache.as_mut() {
+                let (_, all_taken) = push_front_images(&u.prog, c, &stop);
+                left = !(all_taken && c.record_front_crates_until(&u.prog, &stop));
+                late_spill = c.spill_take();
+                if !left { imaged = u.prog.files.len(); }
+            }
+        }
+        (u.cache.as_ref().map(|c| c.collected_record_inputs()), late_spill, imaged, left, jit::front_epoch())
+    };
+    // (no late files: one bounded publish copies the encoder's inputs)
+    let (inputs, late_spill, imaged, left, epoch) = if late { crate::owner::call(crate::owner::Class::Program, step) } else { crate::owner::publish(step) };
+    let owner_ms = t.elapsed().as_secs_f64() * 1e3;
+    let Some(inputs) = inputs else { return };
+    if left { mid_yielded(); }
+    // the late files' images are in the store before the record that maps them
+    if late_spill.is_some_and(|s| s.write().is_err()) {
+        collected_skip("the late files' front images were not written");
+        return;
+    }
+    let t_capture = Instant::now();
+    let record = {
+        let _c = crate::zone_alloc::compiler();
+        let _live = CaptureLive::enter();
+        let read = jit::front_read("cache collected");
+        // the program the front images were taken of, and it stays so while the read is held
+        if jit::front_epoch() != epoch {
+            collected_skip("a front write came after the front images were taken");
+            return;
+        }
+        let (prog, tcx) = read.unit(up);
+        if prog.files.len() != imaged {
+            collected_skip(if left { "the crate records stopped for a waiting request" } else { "files were loaded since the front images were taken" });
+            return;
+        }
+        if !front_recordable() || prog.has_edit_versions() {
+            collected_skip("the session was edited live");
+            return;
+        }
+        let _capturing = CapturingNow::enter();
+        match inputs.capture(prog, tcx, &capture_stop) {
+            Ok(record) => (record, inputs.crates(prog)),
+            Err(why) => {
+                crate::inspect::flightrec::event("cache.collected", &why, 0, 0);
+                eprintln!("relax collected: not recorded: {why}");
+                return;
+            }
+        }
+    };
+    let capture_ms = t_capture.elapsed().as_secs_f64() * 1e3;
+    let (record, crates) = record;
+    let retired = match record {
+        crate::cache::CollectedRecord::Ready(dest, payload) => {
+            MID_COLLECTED_TRIED.store(true, Ordering::Relaxed);
+            let report = VERBOSE.load(Ordering::Relaxed).then_some(crates);
+            let Some(written) = crate::cache::Cache::commit_collected(report, dest, payload, &|| false) else { return };
+            COLLECTED_CURRENT.store(true, Ordering::Relaxed);
+            crate::zone_alloc::kept_with(|| *COLLECTED_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(written.clone())));
+            true
+        }
+        crate::cache::CollectedRecord::Current => {
+            MID_COLLECTED_TRIED.store(true, Ordering::Relaxed);
+            COLLECTED_CURRENT.store(true, Ordering::Relaxed);
+            true
+        }
+        crate::cache::CollectedRecord::Yielded => {
+            mid_yielded();
+            verbose!("relax collected: record yielded to a front writer after {:.1} ms; retried later", capture_ms);
+            false
+        }
+        crate::cache::CollectedRecord::Failed => {
+            MID_COLLECTED_TRIED.store(true, Ordering::Relaxed);
+            false
+        }
+    };
+    // (one bounded publish marks it; the retired boot snapshot is dropped here)
+    if retired {
+        let retired_boot = crate::owner::publish(|| unsafe { &mut *up }.cache.as_mut().map(|c| c.finish_collected()));
+        drop(retired_boot);
+    }
+    verbose!("relax cache: collected record off the owner: the owner step {:.1} ms, the capture under a front read {:.1} ms, in all {:.1} ms", owner_ms, capture_ms, t.elapsed().as_secs_f64() * 1e3);
+}
+
+/// CAPTURING for as long as it lives.
+struct CapturingNow;
+impl CapturingNow {
+    fn enter() -> Self { CAPTURING.with(|c| c.set(true)); CapturingNow }
+}
+impl Drop for CapturingNow {
+    fn drop(&mut self) { let _ = CAPTURING.try_with(|c| c.set(false)); }
+}
+
 /// `wait`: the warm record's writes (after first present, at a quit) wait for the owner thread to
 /// complete its work (which a cold run's compiles fill nearly all the time); other writes skip a busy unit.
-fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
+fn mid_flush(wait: bool) -> Option<(usize, usize)> {
     // the compiled kernels offered so far
     crate::kernel_store::flush();
-    // the first write comes after the start: the mapped front images are checksummed now
-    crate::cache::verify_front_images();
+    // the first write comes after the start: what the opened stores hold of an earlier boot's is
+    // sealed now (the background pass)
+    crate::cache::background_seal();
     let up = unsafe { RUN_UNIT };
     // one unit call: waits for the unit when `wait`, else only if it is free now
     fn unit_call<R>(wait: bool, f: impl FnOnce() -> R) -> Option<R> {
@@ -5078,7 +5288,9 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     }
     // the deferred cache records in bounded publishes (a program thread waits for one batch);
     // the request below holds only what installs add meanwhile
+    let t_drain = Instant::now();
     jit::drain_records_bounded();
+    let drain_ms = t_drain.elapsed().as_secs_f64() * 1e3;
     // the stores earlier spills wrote, opened here when the startup manifest may be recorded below
     // (cache.rs open_written): its image takes their entries, and the request only indexes them
     if jit::started() && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed)
@@ -5094,8 +5306,12 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     // the crate records stopped for a waiting request (record_front_crates_until)
     let mut crates_left = false;
     let probe = YieldProbe::new();
+    let asked = Instant::now();
+    let behind = (crate::owner::queued_in(crate::owner::Class::Program), crate::owner::SERVED.load(Ordering::Relaxed), crate::owner::MAIN_AHEAD.load(Ordering::Relaxed));
+    let mut passed = (0, 0);
     let Some(Some((held, spill))) = unit_call(wait, || {
     let held = Instant::now();
+    passed = (crate::owner::SERVED.load(Ordering::Relaxed).saturating_sub(behind.1 + 1), crate::owner::MAIN_AHEAD.load(Ordering::Relaxed).saturating_sub(behind.2));
     probe.start();
     yield_section("mid write");
     let spill = {
@@ -5117,16 +5333,26 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         let refresh = !quit && done && u.cache.as_ref().is_some_and(|c| c.image_refresh_due());
         if u.cache.is_some() && jit::started() && jit::wall_ns() >= jit::ORDER_UNTIL_NS.load(Ordering::Relaxed) && (!done || tail || refresh) {
             MID_MANIFEST_DONE.store(true, Ordering::Relaxed);
-            let len = u.start_order.len();
+            // the startup manifest: the install order as the first write past its window found it,
+            // whichever try records it (a refresh and a manifest the quit records first included);
+            // the session's later installs are its tail, which the quit records after it
+            // (record_tail). A cold run installs for minutes after its window: a manifest of the
+            // whole order so far was more to record, and to build an image of, at every try.
+            if MANIFEST_WINDOW_LEN.load(Ordering::Relaxed) == usize::MAX {
+                MANIFEST_WINDOW_LEN.store(u.start_order.len(), Ordering::Relaxed);
+            }
+            let len = if tail { u.start_order.len() } else { MANIFEST_WINDOW_LEN.load(Ordering::Relaxed).min(u.start_order.len()) };
             yield_section("manifest order");
-            let (order, present) = jit::manifest_order(&*u, u.start_order.clone(), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
+            let (order, present) = jit::manifest_order(&*u, u.start_order[..len].to_vec(), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
             let mut cache = u.cache.take();
             if let Some(c) = cache.as_mut() {
                 // a waiting request (a frame's lazy compile, a live patch, a back end's Job) goes
                 // first: the manifest is made again by a later write
-                let stop = || { probe.tick("manifest"); quit_write_gives_way() };
+                let stop = || { probe.tick("manifest"); quit_write_gives_way() || manifest_test_gives_way() };
                 let root = crate::layout::root_crate();
+                let t_made = Instant::now();
                 let made = if tail { c.record_tail(u, root, &order, &stop) } else { c.record_manifest(u, root, &order, present, &stop) };
+                verbose!("relax cache: {} of {} slots ({} after the recorded manifest's) {} in {:.1} ms", if tail { "manifest tail" } else { "startup manifest" }, order.len(), len.saturating_sub(MID_MANIFEST_LEN.load(Ordering::Relaxed)), if made { "recorded" } else { "yielded" }, t_made.elapsed().as_secs_f64() * 1e3);
                 if made {
                     MID_MANIFEST_LEN.store(len, Ordering::Relaxed);
                 } else {
@@ -5177,10 +5403,13 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     drop_later_now();
     probe.report("mid write");
     let held1 = held.elapsed().as_secs_f64() * 1e3;
+    let owner_wait_ms = held.saturating_duration_since(asked).as_secs_f64() * 1e3;
+    let t_spill = Instant::now();
     let n = match spill {
         Some(s) => s.write().ok()?,
         None => 0,
     };
+    let spill_ms = t_spill.elapsed().as_secs_f64() * 1e3;
     if jit::FIRST_PRESENT.load(Ordering::Acquire) && !FRONT_REPORTED.swap(true, Ordering::Relaxed) {
         if let Some(s) = crate::front::summary() { verbose!("{} (after the first present)", s); }
     }
@@ -5192,89 +5421,13 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     }
     let graph_ready = jit::live_startup_done()
         && crate::cache::Cache::flush_front_graphs().is_ok();
-    // the collected program, once per run and only when the program is quiet (it is encoded
-    // under the unit and front-end locks): not at the exit
-    if graph_ready && quiet && !COLLECTED_CURRENT.load(Ordering::Relaxed) && !MID_COLLECTED_TRIED.load(Ordering::Relaxed) {
-        // not when a file was loaded since this write took its front images (its restore maps
-        // every file from them); a later quiet flush or the exit tries again. Files the lazy
-        // selection still skips travel in the image (skipped_files, deferred imports).
-        // Encoded on the owner thread, but never in the main thread's way: the encode stops when
-        // the main thread waits for the owner thread (a frame's lazy compile) and a later pass
-        // tries again; the store write runs after the owner thread releases it.
-        let cprobe = YieldProbe::new();
-        // the cache files' pages the run has resident go first (a settle's trim drops them too):
-        // the record's copy of the program comes on top of what the process holds
-        crate::pack::release_resident();
-        if let Some((ready, retired_boot, late_spill, t)) = unit_call(wait, || {
-            cprobe.start();
-            yield_section("collected");
-            let mut ready = None;
-            let mut retired_boot = None;
-            let mut late_spill = None;
-            let t = Instant::now();
-            // asked at each step and through the encode: a waiting request (a frame's lazy
-            // compile, a live patch, a back end's Job) goes first, and a later pass tries again
-            let stop = || { cprobe.tick("collected"); crate::owner::request_waiting() };
-            // the front-end lock: for at most 50 ms, and not while a request waits for the owner
-            // thread this holds
-            let front = {
-                let t = Instant::now();
-                loop {
-                    if let Some(g) = jit::front_write_within(1) { break Some(g); }
-                    if stop() || t.elapsed() >= std::time::Duration::from_millis(50) { break None; }
-                }
-            };
-            if front.is_none() { collected_skip("the front-end lock is busy"); }
-            if let Some(_front) = front {
-                let u = unsafe { &mut *up };
-                // files the post-boot loader loaded since this write took its front images (a
-                // run that did not restore loads for seconds after present): their images are
-                // taken now, under the locks, so the record can be made in this pass (their store
-                // write runs after the owner thread is released, before the record's commit)
-                if wait && u.prog.files.len() != imaged_files && front_recordable() {
-                    if stop() { crates_left = true; mid_yielded(); } else if let Some(c) = u.cache.as_mut() {
-                        let (_, all_taken) = push_front_images(&u.prog, c, &stop);
-                        crates_left = !(all_taken && c.record_front_crates_until(&u.prog, &stop));
-                        late_spill = c.spill_take();
-                        if !crates_left { imaged_files = u.prog.files.len(); }
-                    }
-                }
-                if u.prog.files.len() != imaged_files {
-                    collected_skip(if crates_left { "the crate records stopped for a waiting request" } else { "files were loaded since the front images were taken" });
-                }
-                if let Some(c) = u.cache.as_mut().filter(|_| u.prog.files.len() == imaged_files) {
-                    match c.encode_collected(&u.prog, &u.tcx, &stop) {
-                        crate::cache::CollectedRecord::Ready(dest, payload) => { MID_COLLECTED_TRIED.store(true, Ordering::Relaxed); ready = Some((u.prog.session.options.verbose.then_some(c.collected_crates(&u.prog)), dest, payload)); }
-                        crate::cache::CollectedRecord::Current => { MID_COLLECTED_TRIED.store(true, Ordering::Relaxed); COLLECTED_CURRENT.store(true, Ordering::Relaxed); retired_boot = Some(c.finish_collected()); }
-                        crate::cache::CollectedRecord::Yielded => { mid_yielded(); verbose!("relax collected: record yielded to a waiting request after {:.1} ms; retried later", t.elapsed().as_secs_f64() * 1e3); }
-                        crate::cache::CollectedRecord::Failed => MID_COLLECTED_TRIED.store(true, Ordering::Relaxed),
-                    }
-                }
-            }
-            cprobe.tick("collected end");
-            yield_section("");
-            (ready, retired_boot, late_spill, t)
-        }) {
-            cprobe.report("collected record");
-            verbose!("relax cache: collected record held the owner {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
-            drop(retired_boot);
-            // the late files' images are in the store before the record that maps them
-            let late_written = late_spill.map_or(true, |s| s.write().is_ok());
-            if !late_written && ready.is_some() {
-                MID_COLLECTED_TRIED.store(false, Ordering::Relaxed);
-                collected_skip("the late files' front images were not written");
-            }
-            if let Some((report, dest, payload)) = ready.filter(|_| late_written) {
-                if let Some(written) = crate::cache::Cache::commit_collected(report, dest, payload, &|| false) {
-                    COLLECTED_CURRENT.store(true, Ordering::Relaxed);
-                    crate::zone_alloc::kept_with(|| *COLLECTED_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(written.clone())));
-                    let retired_boot = crate::owner::call(crate::owner::Class::Program, || unsafe { &mut *up }.cache.as_mut().map(|c| c.finish_collected()));
-                    drop(retired_boot);
-                }
-            }
-        }
+    // the collected program, once per run, as soon as its pieces are in the stores: recorded off
+    // the owner thread (record_collected), so it does not wait for the program to go quiet (a
+    // cold run compiles for minutes after its present, and its quit recorded it, seconds long)
+    if graph_ready && !COLLECTED_CURRENT.load(Ordering::Relaxed) && !MID_COLLECTED_TRIED.load(Ordering::Relaxed) {
+        record_collected(up, wait, imaged_files, crates_left);
     }
-    verbose!("relax cache: mid write held the owner {:.1} ms (records to {:.1}, manifest to {:.1}, front images to {:.1}, crate records to {:.1}, then spill)", held1, parts[3], parts[0], parts[1], parts[2]);
+    verbose!("relax cache: mid write held the owner {:.1} ms (records to {:.1}, manifest to {:.1}, front images to {:.1}, crate records to {:.1}, then spill); before it the record drain took {:.1} ms and the wait for the owner {:.1} ms (behind {} queued program requests; meanwhile it served {} requests, {} of them the main thread's ahead of the queue), the spill's write {:.1} ms; front writes so far {}", held1, parts[3], parts[0], parts[1], parts[2], drain_ms, owner_wait_ms, behind.0, passed.0, passed.1, spill_ms, jit::front_epoch());
     crate::inspect::flightrec::event("cache.write", &format!("mid write: {} records, {} images; held the owner {:.1} ms (manifest {:.1}, front images {:.1}, crate records {:.1})", n, n_imgs, held1, parts[0], parts[1], parts[2]), (held1 * 1e6) as u64, 0);
     // All temporary encoders and retired boot arrays are now outside compiler locks.
     crate::memstat::trim();
@@ -5291,8 +5444,7 @@ fn summary_inner(why: &str) {
     // Independent of owner thread state: still emit when exit quiescence times out.
     if why != "stats" { crate::exec_profile::report(false); }
     if why != "stats" {
-        // the exit's writes commit without waiting on the disk (store.rs Slot::tail)
-        crate::store::set_exiting();
+        crate::store::note_checks("by the exit");
         // the run is ending: background borrow checks stop at their next preemption point
         // (nothing waits for them; finished verdicts are stored below)
         crate::borrowck::lazy::stop();
@@ -5914,11 +6066,13 @@ pub(crate) unsafe fn reset_statics() {
     reset(&DONE, AtomicBool::new(false));
     reset(&EXIT_MARKS, relax_session::sync::Mutex::new(Vec::new()));
     reset(&COLLECTED_CURRENT, AtomicBool::new(false));
+    reset(&CAPTURES, std::sync::atomic::AtomicUsize::new(0));
     reset(&COLLECTED_RESTORED, AtomicBool::new(false));
     reset(&COLLECTED_WRITTEN, relax_session::sync::Mutex::new(None));
     reset(&MID_COLLECTED_TRIED, AtomicBool::new(false));
     reset(&MID_MANIFEST_DONE, AtomicBool::new(false));
     reset(&MID_MANIFEST_LEN, std::sync::atomic::AtomicUsize::new(0));
+    reset(&MANIFEST_WINDOW_LEN, std::sync::atomic::AtomicUsize::new(usize::MAX));
     reset(&IMAGE_REFRESH_WANTED, AtomicBool::new(false));
     reset(&MID_CACHE_DIR, relax_session::sync::Mutex::new(None));
     reset(&MAIN_START_WALL, AtomicU64::new(0));

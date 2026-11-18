@@ -21,7 +21,7 @@ fn constraints(edges: &[(usize, usize)]) -> OutlivesConstraintSet {
 fn solve(definitions: Vec<RegionDefinition>, edges: OutlivesConstraintSet, universals: &[(usize,Class)], known: &[(usize,usize)], live: LivenessValues, points: usize) -> RegionInferenceContext {
     let relations = UniversalRegionRelations::create(UniversalRegions::new(0,None,universals.to_vec()), definitions.len(),known);
     let lowered = compute_sccs_applying_placeholder_outlives_constraints(definitions,edges,0);
-    RegionInferenceContext::solve(&crate::tcx::Tcx::new(),&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,live,points,&[],false)
+    RegionInferenceContext::solve(&crate::tcx::Tcx::new(),&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,live,points,&[],&[],false)
 }
 #[test]
 fn annotated_sccs_and_values_match_reachability() {
@@ -140,7 +140,7 @@ fn conditional_type_tests_match_binders_and_scc_representatives() {
     let defs = vec![definition(NllRegionVariableOrigin::FreeRegion,0);3];
     let relations = UniversalRegionRelations::create(UniversalRegions::new(0,None,vec![(0,Class::Global),(1,Class::Local),(2,Class::Local)]),3,&[(1,2),(2,1)]);
     let lowered = compute_sccs_applying_placeholder_outlives_constraints(defs,constraints(&[(1,2),(2,1)]),0);
-    let cx = RegionInferenceContext::solve(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,LivenessValues::new(3,0),0,&tests,false);
+    let cx = RegionInferenceContext::solve(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,LivenessValues::new(3,0),0,&tests,&[],false);
     assert!(matches!(cx.errors.as_slice(),[RegionErrorKind::TypeTest { test:2 }]));
 }
 
@@ -155,7 +155,7 @@ fn closure_type_tests_promote_external_subjects_and_requirements() {
     let tests = vec![TypeTest { generic_kind:subject,lower_bound:1,span:Span::default(),verify_bound:VerifyBound::IsEmpty },
         TypeTest { generic_kind:subject,lower_bound:2,span:Span::default(),verify_bound:VerifyBound::IsEmpty }];
     let lowered = compute_sccs_applying_placeholder_outlives_constraints(defs,constraints(&[(2,3)]),0);
-    let cx = RegionInferenceContext::solve(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,LivenessValues::new(4,0),0,&tests,true);
+    let cx = RegionInferenceContext::solve(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,LivenessValues::new(4,0),0,&tests,&[],true);
     assert!(cx.errors.is_empty());
     assert_eq!(cx.propagated_type_requirements.iter().map(|r| (r.subject,r.outlived_free_region)).collect::<Vec<_>>(),vec![(subject,1),(subject,0)]);
 }
@@ -168,7 +168,7 @@ fn failed_type_tests_deduplicate_and_prefer_static_at_the_same_span() {
     let defs = vec![definition(NllRegionVariableOrigin::FreeRegion,0);2];
     let relations = UniversalRegionRelations::create(UniversalRegions::new(0,None,vec![(0,Class::Global),(1,Class::Local)]),2,&[]);
     let lowered = compute_sccs_applying_placeholder_outlives_constraints(defs,constraints(&[]),0);
-    let cx = RegionInferenceContext::solve(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,LivenessValues::new(2,0),0,&tests,false);
+    let cx = RegionInferenceContext::solve(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),lowered,relations,LivenessValues::new(2,0),0,&tests,&[],false);
     assert!(matches!(cx.errors.as_slice(),[RegionErrorKind::TypeTest { test:1 }]));
 }
 
@@ -209,7 +209,7 @@ fn v1_if_eq_ignores_bivariant_opaque_arguments() {
             verify_bound:VerifyBound::IfEq { ty:pattern,bound:tcx.tys.intern_region(RegionKind::ReStatic) } }];
         let defs = vec![definition(NllRegionVariableOrigin::FreeRegion,0);3];
         let relations = UniversalRegionRelations::create(UniversalRegions::new(0,None,vec![(0,Class::Global),(1,Class::Local),(2,Class::Local)]),3,&[]);
-        RegionInferenceContext::solve(&tcx,&prog,compute_sccs_applying_placeholder_outlives_constraints(defs,constraints(&[]),0),relations,LivenessValues::new(3,1),1,&tests,false)
+        RegionInferenceContext::solve(&tcx,&prog,compute_sccs_applying_placeholder_outlives_constraints(defs,constraints(&[]),0),relations,LivenessValues::new(3,1),1,&tests,&[],false)
     };
     assert!(run(opaque(2, 0), opaque(1, 0)).errors.is_empty());
     assert!(matches!(run(opaque(0, 2), opaque(0, 1)).errors.as_slice(),[RegionErrorKind::TypeTest { test:0 }]));

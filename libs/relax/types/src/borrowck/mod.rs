@@ -43,8 +43,13 @@ use crate::typeck::Body;
 pub struct Verdict {
     /// Structured diagnostics shared by checker consumers.
     pub errors: Vec<event::BorrowError>,
-    /// bodies (fn + closures) the builder could not express, with why
+    /// bodies (fn + closures) a failure inside the borrow check left unchecked, with why: a MIR bug, an
+    /// internal error, a type op that failed with no error to explain it (the check reports each as an
+    /// internal error: rustc's delayed bug)
     pub unchecked: Vec<String>,
+    /// bodies holding a construct the MIR builder does not express (inline asm, custom MIR, C-variadic, ..),
+    /// with which: not borrow-checked, a known gap the check names
+    pub unsupported: Vec<String>,
     /// relaxed crates: conflicts accepted only with field views (rustc would reject them)
     pub fv_only: Vec<event::BorrowError>,
     /// the field borrows (MIR spans and places) the export to rustc rewrites (field_views::edit)
@@ -157,7 +162,7 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
         note_verdict(&v);
         bck_ns += relax_session::clock::cpu_ns() - c0;
         n_bodies += v.bodies;
-        for u in &v.unchecked {
+        for u in v.unchecked.iter().chain(&v.unsupported) {
             let why = u.rsplit(": ").next().unwrap_or("").to_string();
             *unchecked.entry(why.clone()).or_insert(0) += 1;
             unchecked_ex.entry(why).or_insert_with(|| u.clone());
@@ -277,7 +282,7 @@ mod type_check_tests;
 #[cfg(test)]
 mod root_cx_tests;
 #[cfg(test)]
-mod mir_source_tests;
+pub(crate) mod mir_source_tests;
 #[cfg(test)]
 mod lint_scope_tests;
 

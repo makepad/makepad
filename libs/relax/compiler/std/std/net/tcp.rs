@@ -130,6 +130,10 @@ impl Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.sock.write(buf)
     }
+    #[cfg(unix)]
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.sock.write_vectored(bufs)
+    }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -137,6 +141,10 @@ impl Write for TcpStream {
 impl Write for &TcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.sock.write(buf)
+    }
+    #[cfg(unix)]
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.sock.write_vectored(bufs)
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())

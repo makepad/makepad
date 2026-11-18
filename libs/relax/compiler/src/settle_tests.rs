@@ -838,6 +838,98 @@ fn main() {}
     std::mem::forget(u);
 }
 
+/// The startup manifest is the install order as its window's close left it, whichever try
+/// records it, and the quit write adds what the session installed later as its tail: a first try
+/// that gives way while installs go on does not take them into the manifest (and its image), the
+/// quit write records the tail and leaves the manifest as it was, and the next launch links both
+/// from the cache.
+#[test]
+fn the_startup_manifest_keeps_its_windows_order_and_the_quit_adds_the_tail() {
+    const CHILD: &str = "RELAX_MANIFEST_WINDOW_TEST";
+    const DIR: &str = "RELAX_MANIFEST_WINDOW_TEST_DIR";
+    let Ok(phase) = std::env::var(CHILD) else {
+        let dir = std::env::temp_dir().join(format!("relax-manifest-window-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("input.rs"), r#"
+pub fn first(out: &mut u32) { *out = 11; }
+pub fn later(out: &mut u32) { *out = 22; }
+fn main() {}
+"#).unwrap();
+        for phase in ["cold", "warm"] {
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "jit::settle_tests::the_startup_manifest_keeps_its_windows_order_and_the_quit_adds_the_tail", "--nocapture", "--test-threads=1"])
+                .env(CHILD, phase).env(DIR, &dir).env("RELAX_SPEC", "0"));
+            assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "manifest_window", false).unwrap();
+    let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (first_def, later_def) = (def("first"), def("later"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    let (first, later) = crate::owner::call(crate::owner::Class::Program, || {
+        let ids = (u.fn_id(FnKey::Inst(first_def, Vec::new())), u.fn_id(FnKey::Inst(later_def, Vec::new())));
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        ids
+    });
+    let compile = |id: u32| match crate::owner::call(crate::owner::Class::Program, || unsafe { compile_slot_locked(up, id, false) }) {
+        Compiled::Code(c) => c,
+        Compiled::Back(_) => panic!("a nested compile builds here"),
+    };
+    let run = |entry: u64| {
+        let mut out = 0u32;
+        unsafe { call_jit(up, entry, &mut out as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        out
+    };
+    if phase == "cold" {
+        assert_eq!(run(compile(first)), 11);
+        // the start ends, and the manifest's window with it (ORDER_UNTIL_NS stays 0)
+        QUIET_START_NS.store(wall_ns().max(1), Ordering::Release);
+        // the first write past the window: its manifest gives way, as to a waiting request
+        crate::run::MANIFEST_GIVES_WAY.store(1, Ordering::SeqCst);
+        let gave_way = unsafe { crate::run::quit_write_pass(up) };
+        assert_eq!(crate::run::MANIFEST_GIVES_WAY.load(Ordering::SeqCst), 0, "the first write past the window tried the manifest: {gave_way:?}");
+        // the session installs on, then the next write records the manifest
+        assert_eq!(run(compile(later)), 22);
+        let recorded = unsafe { crate::run::quit_write_pass(up) };
+        assert!(recorded.is_some(), "the write after it ran");
+        // the quit write: the session's tail
+        QUIT_SEEN.store(true, Ordering::Relaxed);
+        let quit = unsafe { crate::run::quit_write_pass(up) };
+        assert!(quit.is_some(), "the quit write ran");
+    } else {
+        let held = crate::owner::call(crate::owner::Class::Program, || {
+            let mut cache = u.cache.take().unwrap();
+            cache.load_manifest(crate::layout::root_crate());
+            let held = (cache.manifest_holds(&u, first), cache.manifest_holds(&u, later));
+            u.cache = Some(cache);
+            held
+        });
+        assert_eq!(held, (Some(true), Some(false)), "the manifest holds the slot its window installed, the tail the one installed after it (manifest, tail)");
+        let entries = crate::owner::call(crate::owner::Class::Program, || unsafe { (ready_code_locked(up, first), ready_code_locked(up, later)) });
+        let (Some(a), Some(b)) = entries else { panic!("the next launch links both from the cache: {entries:?}") };
+        assert_eq!((run(a), run(b)), (11, 22));
+        assert!(u.cache.as_ref().unwrap().stats.hits >= 2, "both came from the cache, not a build");
+    }
+    // As in the settling fixture, process exit owns the runtime's teardown.
+    std::mem::forget(u);
+}
+
 #[test]
 fn prebuild_link_needing_initializer_bails() {
     // Rule I-PUB (a remote-XR app on a node: "O3 build of slot N panicked: initializer inside a
@@ -1729,6 +1821,56 @@ fn preempted_check_under_a_front_read_gives_way() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A type check ahead that a waiting front writer preempts gives its work up once a pause of the
+/// compile jobs waits for its job (a program's fork: `relax_fork` pauses them). It retried behind
+/// the writer, every 5 ms, while the writer waited for a thread the pause held: the fork waited for
+/// the job for good (a test's spawn, about 1 run in 8 under a full suite's load, 11-17).
+#[test]
+fn a_preempted_check_gives_way_to_a_pause() {
+    isolated_test!(a_preempted_check_gives_way_to_a_pause);
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax_preempted_pause_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, "pub fn checked(x: u32) -> u32 { x + 1 }\nfn main() { let _ = checked(1); }\n").unwrap();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, path.to_str().unwrap(), "preempted_pause", false).unwrap();
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == "checked").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let u = Unit::new(prog, tcx, core);
+    let front = u.front.clone();
+    // a writer waits from the start, and never takes the front: the check is preempted at its
+    // first point, every time it is done again
+    let writer = crate::preempt::WriterWaiting::new();
+    let (running_tx, running_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _job = compile_job();
+        running_tx.send(()).unwrap();
+        let _preemptible = crate::preempt::Preemptible::on();
+        typeck_ahead(&front, def, Vec::new(), 0, false, false);
+        done_tx.send(()).unwrap();
+    });
+    // the job runs: a fork pauses the jobs and waits for it
+    running_rx.recv().unwrap();
+    let pause = std::thread::spawn(|| {
+        pause_compile_jobs("test: a fork", false);
+        resume_compile_jobs(false);
+    });
+    let gave_way = done_rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok();
+    drop(writer);
+    pause.join().unwrap();
+    assert!(gave_way, "a preempted check waited for the writer while a pause waited for its job");
+    drop(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The run monitor's settle sweep runs in steps, one owner request each (JITOWNER: one request
 /// over every slot held the owner 10-50 ms while a large app's UI dragged on a cold start): a main-thread
 /// request that comes during a step is served when that step ends, while the sweep still has steps to go,
@@ -1817,6 +1959,90 @@ fn a_settle_sweep_lets_main_through_between_steps() {
     drop(u);
 }
 
+/// SPEC-V: an O3 build of verified code that meets a twin among its candidates keeps the call and
+/// waits for nothing. The twin comes in with a callee whose body was lowered before its verdict and
+/// still names it. A twin's flag never clears, so the wait the build took for it never ended:
+/// `makepad live`'s settle (o3_settled) never came, and why-tier said the root waited for an
+/// "unverifiable" callee (an app's live simulation, 11-18: its stepper waited for 3 all session).
+#[test]
+fn a_twin_left_out_of_a_verified_build_holds_no_settle() {
+    const CHILD: &str = "RELAX_TWIN_SETTLE_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "jit::settle_tests::a_twin_left_out_of_a_verified_build_holds_no_settle", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    CHECK_FIRST.store(false, Ordering::Relaxed);
+    SPECV_HOLD.store(1, Ordering::Relaxed);
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-twin-settle-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dir.join("app/src/lib.rs"), "#[inline(never)] pub fn leaf(a: &mut u32, b: &u32) -> u32 { *a += *b; *a }\n\
+        pub fn inner(out: &mut u32) { let mut x = 1u32; let y = 2u32; *out = leaf(&mut x, &y); }\n\
+        pub fn outer(out: &mut u32) { inner(out); *out += 1; }\n").unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "twin_settle", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display().to_string().replace('\\', "\\\\"), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (leaf_def, inner_def, outer_def) = (find("leaf"), find("inner"), find("outer"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    crate::syms::set_unit(up);
+    let (leaf, inner, outer, inner_entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let (l, i, o) = (u.fn_id(FnKey::Inst(leaf_def, vec![])), u.fn_id(FnKey::Inst(inner_def, vec![])), u.fn_id(FnKey::Inst(outer_def, vec![])));
+        (l, i, o, u.entry(i))
+    });
+    let call = |entry: u64, want: u32, label: &str| {
+        let mut result = 0u32;
+        unsafe { call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, want, "{label}");
+    };
+    // held verdicts: `inner` is lowered as unverified code, its call going to leaf's twin
+    call(inner_entry, 3, "inner, unverified");
+    let twin = u.plain_twin_of(leaf).expect("inner's call made leaf's twin");
+    assert!(u.fns[inner as usize].rir.as_ref().is_some_and(|r| r.plain_calls), "inner's lowering calls the twin");
+    // every verdict comes clean (outer never ran: its check is asked for); inner's flag clears, its
+    // lowering still names the twin
+    specv_release();
+    crate::owner::call(crate::owner::Class::Program, || unsafe { prioritize_verdicts(up, &[outer]) });
+    let t0 = std::time::Instant::now();
+    while ![leaf, inner, outer].iter().all(|&i| u.verdict_clean(i)) {
+        crate::borrowck::settle().recv().unwrap();
+        assert!(t0.elapsed().as_secs() < 20, "no clean verdicts");
+    }
+    assert!(u.refresh_verified(inner));
+    assert!(u.fns[inner as usize].rir.as_ref().is_some_and(|r| r.plain_calls), "the test needs inner's lowering from before its verdict");
+    assert!(u.fns[twin as usize].unverified.load(Ordering::Relaxed), "a twin stays flagged");
+    // outer runs as verified code. Its O3 snapshot meets the twin among its candidates (in an app, a
+    // callee whose body was lowered before its verdict still names it): the twin stays a call, and
+    // the build waits for no verdict
+    let outer_entry = crate::owner::call(crate::owner::Class::Program, || u.entry(outer));
+    call(outer_entry, 4, "outer, verified");
+    assert!(!u.fns[outer as usize].unverified.load(Ordering::Relaxed), "outer is verified code");
+    let rir = u.fns[outer as usize].rir.clone().expect("outer's RIR");
+    let views: std::collections::HashMap<u32, O3View> = [(twin, o3_view(&u, twin))].into_iter().collect();
+    let mut a = crate::owner::call(crate::owner::Class::Program, || unsafe { o3_assemble(up, owner_front(up), outer, &rir, &[twin], &views, false) });
+    assert!(!a.snap.iter().any(|x| x.0 == twin), "verified code never inlines a twin");
+    crate::owner::call(crate::owner::Class::Program, || unsafe { o3_assemble_owner(up, &unit_session(up).options, &mut a) });
+    assert!(a.unverified_left.is_empty(), "the build waits for no verdict: {:?}", a.unverified_left);
+    let left: Vec<u32> = UNVERIFIED_LEFT.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|x| x.0 == up as usize && x.2 == outer).map(|x| x.1).collect();
+    assert!(left.is_empty(), "outer waits for no verdict (o3_settled reads this): {left:?}, twin #{twin}");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// SPEC-V: a twin that turns hot asks for its base's verdict then: the base's check is the next one
 /// the background checker runs (RANK_HOT, no check ahead of it), from the pool worker's pick after
 /// its inbox drain (prioritize_hot_verdicts). A twin has no owner of its own, so it asked for
@@ -1847,7 +2073,7 @@ fn hot_twin_asks_for_its_base_verdict() {
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
     let session = std::sync::Arc::new(crate::Session::default());
     let (prog, core, app_crate) = crate::load_with_std(&session, &app, "hot_twin_verdict", false).unwrap();
-    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display().to_string().replace('\\', "\\\\"), crate::diag::quote(&app));
     let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
     let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = DefId(i as u32);
@@ -1886,6 +2112,38 @@ fn hot_twin_asks_for_its_base_verdict() {
     drain_tier_inbox();
     prioritize_hot_verdicts();
     assert_eq!(place(), Some((crate::borrowck::lazy::RANK_HOT, 0)), "mid's check is the checker's next");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A settle that comes while the collected program is captured gives way and takes no front
+/// write: the capture holds its front read for seconds and starts over for a waiting writer, and
+/// the monitor asks the settle again next round. Settles every 330 ms (RELAX_SETTLE_STRESS) had a
+/// 2.6 s capture start over 183 times, and the settle rebuild, which waits for the run's
+/// collected image, never ran.
+#[test]
+fn a_settle_gives_way_to_the_collected_capture() {
+    isolated_test!(a_settle_gives_way_to_the_collected_capture);
+    crate::borrowck::lazy::disable_gandalf();
+    let dir = std::env::temp_dir().join(format!("relax-settle-capture-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lib.rs");
+    std::fs::write(&path, "#![no_std]\npub fn one() -> u32 { 1 }").unwrap();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let mut prog = Program::new(&session);
+    prog.load_crate("settle_capture", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    let epoch = front_epoch();
+    {
+        let _capture = crate::run::CaptureLive::enter();
+        assert!(!unsafe { crate::run::settle_pass(up) }, "a settle during the capture gives way");
+        assert_eq!(front_epoch(), epoch, "a settle during the capture took no front write");
+    }
+    unsafe { crate::run::settle_pass(up) };
+    assert!(front_epoch() > epoch, "with no capture under way the settle takes the front write");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }

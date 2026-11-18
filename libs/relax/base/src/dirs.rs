@@ -354,8 +354,124 @@ pub fn registry_dirs() -> [PathBuf; 2] {
     [crate::git::cargo::home().join("registry"), relax_dir().join("registry")]
 }
 
+/// The volume holding `path`: (bytes this user may still write there, the volume's size). None
+/// where the system does not say. (The calls as platform/src/storage.rs makes them.)
+pub fn volume_space(path: &Path) -> Option<(u64, u64)> {
+    volume::space(path)
+}
+
+#[cfg(all(unix, target_pointer_width = "64", not(target_vendor = "apple")))]
+mod volume {
+    use std::os::unix::ffi::OsStrExt;
+    /// `struct statvfs` (64-bit Linux and the BSDs' layout), with room to spare.
+    #[repr(C)]
+    struct StatVfs {
+        block_size: usize,
+        fragment_size: usize,
+        blocks: u64,
+        blocks_free: u64,
+        blocks_available: u64,
+        files: u64,
+        files_free: u64,
+        files_available: u64,
+        filesystem_id: usize,
+        flags: usize,
+        name_max: usize,
+        spare: [u64; 32],
+    }
+    unsafe extern "C" {
+        fn statvfs(path: *const std::ffi::c_char, out: *mut StatVfs) -> std::ffi::c_int;
+    }
+    pub(super) fn space(path: &std::path::Path) -> Option<(u64, u64)> {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: plain data, filled by the call
+        let mut s: StatVfs = unsafe { std::mem::zeroed() };
+        if unsafe { statvfs(path.as_ptr(), &mut s) } != 0 {
+            return None;
+        }
+        // the counts are in fragments (f_frsize); a system that leaves it 0 counts in blocks
+        let unit = if s.fragment_size > 0 { s.fragment_size } else { s.block_size } as u64;
+        Some((unit.saturating_mul(s.blocks_available), unit.saturating_mul(s.blocks)))
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+mod volume {
+    use std::os::unix::ffi::OsStrExt;
+    /// `struct statfs`, the 64-bit inode layout.
+    #[repr(C)]
+    struct StatFs {
+        block_size: u32,
+        io_size: i32,
+        blocks: u64,
+        blocks_free: u64,
+        blocks_available: u64,
+        files: u64,
+        files_free: u64,
+        filesystem_id: [i32; 2],
+        owner: u32,
+        filesystem_type: u32,
+        flags: u32,
+        filesystem_subtype: u32,
+        filesystem_type_name: [u8; 16],
+        mount_on_name: [u8; 1024],
+        mount_from_name: [u8; 1024],
+        flags_ext: u32,
+        reserved: [u32; 7],
+    }
+    unsafe extern "C" {
+        // on x86_64 the plain name is the 32-bit inode layout's
+        #[cfg_attr(target_arch = "x86_64", link_name = "statfs$INODE64")]
+        fn statfs(path: *const std::ffi::c_char, out: *mut StatFs) -> std::ffi::c_int;
+    }
+    pub(super) fn space(path: &std::path::Path) -> Option<(u64, u64)> {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: plain data, filled by the call
+        let mut s: StatFs = unsafe { std::mem::zeroed() };
+        if unsafe { statfs(path.as_ptr(), &mut s) } != 0 {
+            return None;
+        }
+        let unit = s.block_size as u64;
+        Some((unit.saturating_mul(s.blocks_available), unit.saturating_mul(s.blocks)))
+    }
+}
+
+#[cfg(windows)]
+mod volume {
+    use std::os::windows::ffi::OsStrExt;
+    unsafe extern "system" {
+        fn GetDiskFreeSpaceExW(directory: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+    }
+    pub(super) fn space(path: &std::path::Path) -> Option<(u64, u64)> {
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
+        if unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut available, &mut total, &mut free) } == 0 {
+            return None;
+        }
+        Some((available, total))
+    }
+}
+
+#[cfg(not(any(windows, target_vendor = "apple", all(unix, target_pointer_width = "64"))))]
+mod volume {
+    pub(super) fn space(_path: &std::path::Path) -> Option<(u64, u64)> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The volume query reads the system's struct right: a folder's volume has a size, at most
+    /// all of it free, and a missing path has none.
+    #[test]
+    fn a_folders_volume_has_a_size_and_at_most_all_of_it_free() {
+        if cfg!(any(windows, all(unix, target_pointer_width = "64"))) {
+            let (free, size) = super::volume_space(&std::env::temp_dir()).expect("the temp folder's volume");
+            assert!(size > 0 && free <= size, "free {free} of {size} bytes");
+            assert_eq!(super::volume_space(std::path::Path::new("/no/such/folder/here")), None);
+        }
+    }
+
     /// Anchors use normalized components, prefer nested roots and recognize Windows drives.
     #[test]
     fn paths_choose_the_longest_anchor() {

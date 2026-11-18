@@ -10,6 +10,9 @@ publish = false
 [package.metadata.commercial]
 include = ["../self_stamp.rs", "../base/src/sha256.rs"]
 
+[package.metadata.makepad.platform-gaps]
+windows = { "lib" = "6 of 838 fail there: pattern_analysis" }
+
 [dependencies]
 relax-codegen = { workspace = true }
 relax-backend = { workspace = true }

@@ -100,6 +100,19 @@ pub const SCRIPT_ENV: &[u8] = b"RELAX_SCRIPT_ENV";
 /// not started with), which then had none.
 const HANDOVER: [&[u8]; 7] = [PROGRAM_ENV, BUILD_ENV, SCRIPT_ENV, b"RELAX_ARG0", b"RELAX_BIN_NATIVE_RECEIPT", b"RELAX_NATIVE_RECEIPT", b"RELAX_LOADER"];
 
+/// The restart parent's (relax-compiler restart_parent.rs): its file, its pid and its run's
+/// lifeline, which a parent gives the run it starts, and that run alone. They are never part of a
+/// build environment, and no child takes them from this process's environment: a child has them
+/// when the program or the spawn sets them (a parent's spawn of its run). A runner takes them out
+/// at its start, after `init` took its build environment, and a self-exec child's host builds with
+/// that: carried in it, they made every child of a run another run of the same parent (a test's
+/// process that started a parent of its own took itself for the outer one's run).
+pub const RESTART: [&[u8]; 3] = [b"RELAX_RESTART_FILE", b"RELAX_RESTART_PARENT", b"RELAX_RESTART_LIFELINE"];
+
+fn restart_var(name: &[u8]) -> bool {
+    RESTART.iter().any(|n| same_name(n, name))
+}
+
 pub fn run_fact(name: &[u8]) -> bool {
     RUN_FACTS.iter().any(|n| same_name(n, name))
 }
@@ -235,8 +248,10 @@ pub fn child_env(real: &[(Vec<u8>, Vec<u8>)], own: &[(Vec<u8>, Option<Vec<u8>>)]
     }
     let wrote = |k: &[u8]| own.iter().any(|(o, _)| same_name(o, k)) || spawn.edits.iter().any(|(e, _)| same_name(e, k));
     let host_value = |k: &[u8]| real.iter().find(|(r, _)| same_name(r, k)).map(|(_, v)| v.clone());
+    // the restart parent's names: only what the program or the spawn set (`RESTART`)
+    view.retain(|(k, _)| !restart_var(k) || wrote(k));
     let mut env = if spawn.self_exec {
-        let host: Env = real.iter().filter(|(k, _)| reserved(k) && !same_name(k, PROGRAM_ENV)).cloned().collect();
+        let host: Env = real.iter().filter(|(k, _)| reserved(k) && !same_name(k, PROGRAM_ENV) && !restart_var(k)).cloned().collect();
         let mut differ: Own = Vec::new();
         for (k, v) in &view {
             if reserved(k) && !host.iter().any(|(h, hv)| same_name(h, k) && hv == v) {
@@ -844,7 +859,7 @@ static PROGRAM_START: std::sync::OnceLock<Env> = std::sync::OnceLock::new();
 /// hands it to.
 fn build_part(env: &[(Vec<u8>, Vec<u8>)]) -> Env {
     let grant = |k: &[u8]| crate::options::GRANTS.iter().any(|(_, name)| same_name(name.as_bytes(), k));
-    env.iter().filter(|(k, _)| !run_fact(k) && !grant(k) && !HANDOVER.iter().any(|h| same_name(h, k))).cloned().collect()
+    env.iter().filter(|(k, _)| !run_fact(k) && !grant(k) && !restart_var(k) && !HANDOVER.iter().any(|h| same_name(h, k))).cloned().collect()
 }
 
 /// A child run handed a build environment (`BUILD_ENV`): `start` is its environment as started,
@@ -969,8 +984,9 @@ mod tests {
         assert_eq!(get(&host, "HOME"), Some(&b"/h"[..]), "the host keeps the build's HOME");
         assert_eq!(get(&host, "TOKEN"), None, "and has nothing the build lacked");
         assert_eq!(program, started, "the program gets its own");
-        let parent: Env = vec![(b("PATH"), b("/p")), (b("RELAX_SELF_EXEC"), b("x")), (b("RELAX_PROGRAM_ENV"), b("y")), (b("RELAX_ARG0"), b("z")), (b("RELAX_STD"), b("/s"))];
-        assert_eq!(build_part(&parent), vec![(b("PATH"), b("/p")), (b("RELAX_STD"), b("/s"))], "a run's build environment: no run fact or handover");
+        let parent: Env = vec![(b("PATH"), b("/p")), (b("RELAX_SELF_EXEC"), b("x")), (b("RELAX_PROGRAM_ENV"), b("y")), (b("RELAX_ARG0"), b("z")), (b("RELAX_STD"), b("/s")),
+            (b("RELAX_RESTART_FILE"), b("/f")), (b("RELAX_RESTART_PARENT"), b("7")), (b("RELAX_RESTART_LIFELINE"), b("3"))];
+        assert_eq!(build_part(&parent), vec![(b("PATH"), b("/p")), (b("RELAX_STD"), b("/s"))], "a run's build environment: no run fact, handover or restart parent's name");
         // a build environment the program writes (in process or on the Command) reaches no child
         let forged: Own = vec![(b("RELAX_BUILD_ENV"), Some(b("15:RELAX_ALLOW_C=1")))];
         for self_exec in [false, true] {
@@ -1045,6 +1061,24 @@ mod tests {
         assert_eq!(get(&nested, "RELAX_ALLOW_C"), None, "a foreign child (a nested `$RELAX_LOADER run`) does not inherit --allow-c");
         let again = child_env(&granted, &own, &Spawn { edits: &[], clear: false, self_exec: true, dir: ChildDir::Same, host: &[] });
         assert_eq!(get(&again, "RELAX_ALLOW_C"), Some(&b"1"[..]), "a self-exec child, this run again, keeps --allow-c");
+
+        // a run its restart parent started: no child takes the parent's names from this process
+        // (a self-exec child that did took itself for another run of that parent), a spawn that
+        // sets them gives them
+        let mut ran_by: Env = real.clone();
+        ran_by.extend([(b("RELAX_RESTART_FILE"), b("/f")), (b("RELAX_RESTART_PARENT"), b("7")), (b("RELAX_RESTART_LIFELINE"), b("3"))]);
+        let restart_names = |env: &Env| -> Own {
+            let mut all: Own = env.iter().filter(|(k, _)| restart_var(k)).map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
+            all.extend(program_env(env).into_iter().filter(|(k, _)| restart_var(k)));
+            all
+        };
+        let started = vec![(b("RELAX_RESTART_FILE"), Some(b("/mine")))];
+        for self_exec in [false, true] {
+            let child = child_env(&ran_by, &own, &Spawn { edits: &[], clear: false, self_exec, dir: ChildDir::Same, host: &[] });
+            assert_eq!(restart_names(&child), vec![], "a child (self-exec {self_exec}) took the restart parent's names of the run that started it");
+            let child = child_env(&ran_by, &own, &Spawn { edits: &started, clear: false, self_exec, dir: ChildDir::Same, host: &[] });
+            assert_eq!(restart_names(&child), started, "a child (self-exec {self_exec}) has the restart parent's names its spawn set, and only those");
+        }
 
         let plain = child_env(&real, &[], &Spawn { edits: &[], clear: false, self_exec: true, dir: ChildDir::Same, host: &[] });
         assert_eq!(get(&plain, "RELAX_PROGRAM_ENV"), None, "a self-exec child of a program with no values of its own gets no PROGRAM_ENV");

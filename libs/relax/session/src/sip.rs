@@ -36,6 +36,16 @@ fn round(v: &mut [u64; 4]) {
 const K0: u64 = 0x6174_732d_6469_7061;
 const K1: u64 = 0x0031_762d_656c_6261;
 
+/// Streams derived `Hash` impls into the 128-bit hash (`finish128`); `finish` is its low half.
+impl std::hash::Hasher for Sip128 {
+    fn write(&mut self, b: &[u8]) {
+        Sip128::write(self, b);
+    }
+    fn finish(&self) -> u64 {
+        self.finish128() as u64
+    }
+}
+
 impl Default for Sip128 {
     fn default() -> Self {
         Sip128::new()

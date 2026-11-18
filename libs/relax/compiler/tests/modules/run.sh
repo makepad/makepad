@@ -9,12 +9,15 @@ FAILS=0
 BASE_BUDGET=""
 for TIER in 0 1; do
 # (stdout and stderr apart: an O3 trace line on stderr can land inside an `out` line of stdout)
-SO=$(mktemp); SE=$(mktemp)
+SO=$(mktemp); SE=$(mktemp); PROG=$(mktemp -u)
+# (tiering on: the test waits for the tier-up through the JIT's O3 progress file, not for a time)
+if [ "$TIER" = 1 ]; then export RELAX_O3_PROGRESS="$PROG"; fi
 RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/budget.rs" >"$SO" 2>"$SE"
 STATUS=$?
+unset RELAX_O3_PROGRESS
 GOT=$(grep '^out ' "$SO")
 OUT="$(cat "$SO" "$SE")"
-rm -f "$SO" "$SE"
+rm -f "$SO" "$SE" "$PROG" "$PROG.tmp"
 if [ "$STATUS" != 0 ] || ! echo "$GOT" | grep -q '^out owned string results: true$'; then
     echo "modules budget (tier1=$TIER): FAIL"; echo "$OUT" | tail -50; FAILS=$((FAILS + 1)); continue
 fi

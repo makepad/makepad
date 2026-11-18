@@ -8,7 +8,7 @@ use crate::lang_items::LangItem;
 impl Tcx {
     pub fn generics_require_sized_self(&self, prog: &Program, def: DefId) -> bool {
         let Some(sized) = self.lang_items.get(LangItem::Sized) else { return false; };
-        for p in self.clauses_of(prog, def) { for p in self.supertraits(prog, p) {
+        for p in self.clauses_of(prog, def) { for p in self.supertraits_unfiltered(prog, p) {
             if let PredicateKind::Clause(ClauseKind::Trait(t)) = p.kind {
                 if t.trait_ref.def_id == sized && matches!(t.trait_ref.args.first(), Some(GenericArg::Type(t)) if matches!(self.tys.kind(*t), TyKind::Param(0))) { return true; }
             }
@@ -21,7 +21,7 @@ impl Tcx {
         let mut violations = Vec::new();
         let identity = collect::trait_predicate(def, self.generic_indices_of(prog, def).identity_args(&self.tys));
         let mut supers = Vec::new();
-        for p in self.supertraits(prog, identity) { if let PredicateKind::Clause(ClauseKind::Trait(t)) = p.kind { if !supers.contains(&t.trait_ref.def_id) { supers.push(t.trait_ref.def_id); } } }
+        for p in self.supertraits_unfiltered(prog, identity) { if let PredicateKind::Clause(ClauseKind::Trait(t)) = p.kind { if !supers.contains(&t.trait_ref.def_id) { supers.push(t.trait_ref.def_id); } } }
         for td in supers {
             if self.generics_require_sized_self(prog, td) { violations.push(td); }
             for p in self.clauses_of(prog, td) { if predicate_references_self(self, prog, td, &p, false) { violations.push(td); } }
@@ -129,7 +129,7 @@ struct IllegalSelfTypeVisitor<'a> { tcx: &'a Tcx, prog: &'a Program, supers: Vec
 impl<'a> IllegalSelfTypeVisitor<'a> {
     fn new(tcx: &'a Tcx, prog: &'a Program, td: DefId, allow: bool) -> Self {
         let mut supers = Vec::new();
-        for p in tcx.supertraits(prog, collect::trait_predicate(td, tcx.generic_indices_of(prog, td).identity_args(&tcx.tys))) {
+        for p in tcx.supertraits_unfiltered(prog, collect::trait_predicate(td, tcx.generic_indices_of(prog, td).identity_args(&tcx.tys))) {
             if let PredicateKind::Clause(ClauseKind::Trait(mut p)) = p.kind { erase_args(&tcx.tys, &mut p.trait_ref.args); supers.push(p.trait_ref); }
         }
         IllegalSelfTypeVisitor { tcx, prog, supers, allow, illegal: false }

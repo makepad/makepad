@@ -36,6 +36,11 @@ struct State {
     /// the latest completed run's results, its edit group and the groups undone before it
     /// (`test-results`)
     results: Option<(u32, Vec<u32>, Arc<[TestResult]>)>,
+    /// the OS id of the thread the harness runs on (it parks in `complete`)
+    harness_thread: u64,
+    /// what `fresh_statics` did before this run, for its verdict: how many of the program's
+    /// statics held an earlier run's values, and whether they went back
+    statics: Option<(usize, bool)>,
 }
 
 static LIVE: OnceLock<(Mutex<State>, Condvar)> = OnceLock::new();
@@ -67,7 +72,7 @@ pub(crate) fn start(restart: Option<&str>) -> Result<(), String> {
             Edit { paths, group, compile_ms, restarted: true, changed: None, patch: None, reverted: Vec::new() }
         }
     };
-    let _ = LIVE.set((Mutex::new(State { edit, waiting: false, faults: Vec::new(), runs: 0, results: None }), Condvar::new()));
+    let _ = LIVE.set((Mutex::new(State { edit, waiting: false, faults: Vec::new(), runs: 0, results: None, harness_thread: 0, statics: None }), Condvar::new()));
     Ok(())
 }
 
@@ -137,6 +142,7 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
     let (state, ready) = LIVE.get().unwrap();
     let mut s = state.lock().unwrap();
     s.runs += 1;
+    s.harness_thread = crate::inspect::threads::self_os_id();
     // a test session presents no frame: each run's end is its present, the settle and its rebuild
     // follow it as they follow a domain's first frame (run.rs)
     crate::run::domain_present(format!("live test run {}", s.runs));
@@ -149,9 +155,15 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
     // and that run's verdict names them as `reverted`
     let faulted = if s.faults.is_empty() { String::new() } else { format!(",\"faulted\":{:?}", s.faults) };
     let selected = if why.is_none() { "affected" } else { "all" };
+    let (statics, statics_note) = match s.statics.take() {
+        Some((n, true)) if n > 0 => (format!(",\"statics_reset\":{n}"), format!(" statics_reset={n}")),
+        Some((n, false)) => (format!(",\"statics_carried\":{n}"),
+            format!(" statics_carried={n} (they hold an earlier run's values: the restart that gives a fresh run failed)")),
+        _ => (String::new(), String::new()),
+    };
     let why_field = why.as_ref().map_or(String::new(), |s| format!(",\"why\":{}", json_str(s)));
     // the verdict stays small at any test count: each test's outcome is the `results` query's
-    let fields = format!("{},\"ran\":{ran},\"passed\":{passed},\"failed\":{failed},\"ignored\":{ignored},\"failures\":[{}],\"ms\":{ms},\"selected\":\"{selected}\",\"skipped\":{skipped},\"stale\":[{}]{why_field}{faulted},\"results\":\"test-results group={}\"",
+    let fields = format!("{},\"ran\":{ran},\"passed\":{passed},\"failed\":{failed},\"ignored\":{ignored},\"failures\":[{}],\"ms\":{ms},\"selected\":\"{selected}\",\"skipped\":{skipped},\"stale\":[{}]{why_field}{faulted}{statics},\"results\":\"test-results group={}\"",
         s.edit.fields(), failures.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","),
         stale.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","), s.edit.group);
     s.results = Some((s.edit.group, s.edit.reverted.clone(), tests.into()));
@@ -163,6 +175,7 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
     if !s.edit.reverted.is_empty() {
         note += &format!(" reverted={:?} (these tests ran the code from before the edit, not the saved source)", s.edit.reverted);
     }
+    note += &statics_note;
     println!("testverdict group={} ran={ran} passed={passed} failed={failed} ms={ms:.1} selected={selected} skipped={skipped}{note}", s.edit.group);
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -178,6 +191,48 @@ pub(crate) fn wait_initial() {
     let mut s = state.lock().unwrap();
     while !s.waiting { s = ready.wait(s).unwrap(); }
     s.faults.clear();
+}
+
+/// Before a rerun (reload.rs `test_edit`): the statics of the program's own crates go back to their
+/// initial images, as a fresh run of the test binary starts with them. Without it a counter, a
+/// filled `OnceLock` or a table built by the code from before the edit carried over, and a test
+/// that passes on a fresh run failed on the rerun, or passed on what an earlier run left. Std's
+/// crates keep theirs: the harness runs in them, between runs as within one cargo run. They go
+/// back only while nothing else runs in the program: a thread an earlier test started (it may
+/// read them) or the program's own `#[global_allocator]` (its state is the heap's) is Err(why),
+/// and the tests restart into a fresh process instead. The verdict counts them
+/// (`statics_reset`, or `statics_carried` when that restart failed). Nothing changed: Ok.
+pub(crate) fn fresh_statics(up: *mut crate::jit::Unit) -> Result<(), String> {
+    let (state, _) = LIVE.get().unwrap();
+    let harness = state.lock().unwrap().harness_thread;
+    let started = std::time::Instant::now();
+    let (changed, blocked) = crate::owner::call(crate::owner::Class::Program, || unsafe {
+        let u = &*up;
+        let std = crate::check::std_crates(&u.prog);
+        let ours = |d: crate::program::DefId| !std.contains(&u.prog.def(d).krate);
+        let (changed, syms) = crate::domain::changed_statics(u, ours);
+        let threads = if changed == 0 { Vec::new() } else { crate::domain::threads_besides(u.syms.dom0(), harness) };
+        let blocked = if changed == 0 {
+            None
+        } else if !threads.is_empty() {
+            let more = if threads.len() > 3 { format!(" and {} more", threads.len() - 3) } else { String::new() };
+            Some(format!("{changed} static(s) of the program hold an earlier run's values, and {} thread(s) an earlier test started still run ({}{more})",
+                threads.len(), threads[..threads.len().min(3)].join(", ")))
+        } else if let Some(d) = u.global_allocator_static().filter(|d| ours(*d)) {
+            Some(format!("{changed} static(s) of the program hold an earlier run's values, and its own #[global_allocator] `{}` keeps its state with the heap",
+                u.prog.def_path(d)))
+        } else {
+            crate::domain::restore_initial(u, &syms);
+            None
+        };
+        if u.session.options.verbose {
+            eprintln!("relax test timing: statics_ms={:.3} changed={changed} symbols={} (of {} with initial images)",
+                started.elapsed().as_secs_f64() * 1000.0, syms.len(), u.syms.initial_data.lock().unwrap_or_else(|e| e.into_inner()).len());
+        }
+        (changed, blocked)
+    });
+    state.lock().unwrap().statics = Some((changed, blocked.is_none()));
+    blocked.map_or(Ok(()), Err)
 }
 
 /// Wake the program after verification and wait for its verdict before another patch can land.

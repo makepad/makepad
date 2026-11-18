@@ -26,6 +26,22 @@ impl<'a> TypeChecker<'a> {
     }
 }
 
+impl<'a> TypeChecker<'a> {
+    /// The fn pointer type `ty` with its binder opened with placeholders, whose inputs and output `scope`
+    /// assumes well formed; `ty` itself when it binds no region.
+    pub(super) fn enter_fn_ptr_binder(&mut self, scope: &mut super::binder_scope::BinderScope, ty: TyId, locations: Locations, category: ConstraintCategory) -> TyId {
+        let tcx = self.tcx;
+        let TyKind::FnPtr(inputs, output, header, _) = tcx.tys.kind(ty).clone() else { return ty };
+        let bound = Bound { tys: tcx.tys.list(inputs).iter().copied().chain([output]).collect(), regions: vec![] };
+        let mut relating = NllTypeRelating::new(self, locations, category, UniverseInfo::Other, V::Co);
+        if relating.no_bound_vars(&bound) { return ty; }
+        let p = relating.enter_forall(&bound);
+        self.assume_wf(scope, &p.tys);
+        let n = p.tys.len() - 1;
+        tcx.tys.intern(TyKind::FnPtr(tcx.tys.mk_list(&p.tys[..n]), p.tys[n], header, 0))
+    }
+}
+
 /// Values under one binder: a fn signature's inputs and output, a dyn principal's
 /// arguments and lifetime arguments, or an associated-type binding's term.
 #[derive(Clone, Debug)]
@@ -269,33 +285,41 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
 
     /// `for<..> A <: for<..> B`: B's bound regions become placeholders (universe U1), then
     /// A's become existentials in U1; never the other way round.
-    fn binders(&mut self, a: &Bound, b: &Bound, relate: &mut dyn FnMut(&mut Self, &Bound, &Bound) -> Result<(), NoSolution>)
+    /// `fn_sig`: the values are a fn signature, opened by the rule of `binder_scope`.
+    fn binders(&mut self, a: &Bound, b: &Bound, fn_sig: bool, relate: &mut dyn FnMut(&mut Self, &Bound, &Bound) -> Result<(), NoSolution>)
         -> Result<(), NoSolution> {
         if self.no_bound_vars(a) && self.no_bound_vars(b) { return relate(self, a, b); }
         match self.ambient_variance {
-            V::Co => {
-                // Any instantiation of A against every instantiation of B. Placeholders
-                // first, or the existentials get the wrong universe.
-                let b = self.enter_forall(b);
-                let a = self.instantiate_binder_with_existentials(a);
-                relate(self, &a, &b)
-            }
-            V::Contra => {
-                let a = self.enter_forall(a);
-                let b = self.instantiate_binder_with_existentials(b);
-                relate(self, &a, &b)
-            }
+            // Any instantiation of A against every instantiation of B.
+            V::Co => self.open_binders(b, a, fn_sig, &mut |this, b, a| relate(this, a, b)),
+            V::Contra => self.open_binders(a, b, fn_sig, relate),
             V::Inv => {
                 // `exists<..> A == for<..> B` and `exists<..> B == for<..> A`.
-                let b2 = self.enter_forall(b);
-                let a2 = self.instantiate_binder_with_existentials(a);
-                relate(self, &a2, &b2)?;
-                let a3 = self.enter_forall(a);
-                let b3 = self.instantiate_binder_with_existentials(b);
-                relate(self, &a3, &b3)
+                self.open_binders(b, a, fn_sig, &mut |this, b, a| relate(this, a, b))?;
+                self.open_binders(a, b, fn_sig, relate)
             }
             V::Bi => Ok(()),
         }
+    }
+
+    /// `forall` with placeholders, then `exists` with existentials (placeholders first, or the existentials
+    /// get the wrong universe), related as `relate(forall, exists)`. A fn signature's placeholder side is
+    /// assumed well formed and its existential side proven so; a type with inference variables keeps today's
+    /// relation (its variables may take the binder's regions out of it).
+    fn open_binders(&mut self, forall: &Bound, exists: &Bound, fn_sig: bool, relate: &mut dyn FnMut(&mut Self, &Bound, &Bound) -> Result<(), NoSolution>)
+        -> Result<(), NoSolution> {
+        let tys = &self.tcx().tys;
+        let rule = fn_sig && !forall.tys.iter().chain(&exists.tys).any(|&t| tys.flags(t).intersects(crate::types::TypeFlags::HAS_TY_INFER));
+        let mut scope = rule.then(|| self.type_checker.open_binder_scope());
+        let opened = !self.no_bound_vars(forall);
+        let p = self.enter_forall(forall);
+        if let Some(scope) = &mut scope { if opened { self.type_checker.assume_wf(scope, &p.tys); } }
+        let instantiated = !self.no_bound_vars(exists);
+        let e = self.instantiate_binder_with_existentials(exists);
+        if rule && instantiated { for &t in &e.tys { self.register_wf(t); } }
+        let r = relate(self, &p, &e);
+        if let Some(scope) = scope { self.type_checker.close_binder_scope(scope); }
+        r
     }
 
     /// Relate for FnSig: headers must agree; inputs are contravariant.
@@ -339,14 +363,14 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
                 if ad != bd || tys.list(abind).len() != tys.list(bbind).len() || aautos != bautos || tys.list(aargs).len() != tys.list(bargs).len() { return Err(NoSolution); }
                 let a_principal = Bound { tys: tys.list(aargs).to_vec(), regions: tys.region_args(ars).to_vec() };
                 let b_principal = Bound { tys: tys.list(bargs).to_vec(), regions: tys.region_args(brs).to_vec() };
-                self.binders(&a_principal, &b_principal, &mut |this, a, b| {
+                self.binders(&a_principal, &b_principal, false, &mut |this, a, b| {
                     for (&a, &b) in a.tys.iter().zip(&b.tys) { this.relate_with_variance(V::Inv, a, b)?; }
                     for (&a, &b) in a.regions.iter().zip(&b.regions) { this.relate_regions_with_variance(V::Inv, a, b); }
                     Ok(())
                 })?;
                 for (&(a_item, a_term, _), &(b_item, b_term, _)) in tys.list(abind).iter().zip(tys.list(bbind)) {
                     if a_item != b_item { return Err(NoSolution); }
-                    self.binders(&Bound { tys: vec![a_term], regions: vec![] }, &Bound { tys: vec![b_term], regions: vec![] },
+                    self.binders(&Bound { tys: vec![a_term], regions: vec![] }, &Bound { tys: vec![b_term], regions: vec![] }, false,
                         &mut |this, a, b| this.relate_with_variance(V::Inv, a.tys[0], b.tys[0]))?;
                 }
                 self.regions(ar, br);
@@ -380,7 +404,7 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
             (TyKind::FnPtr(ai, ao, ah, _), TyKind::FnPtr(bi, bo, bh, _)) => {
                 let a_sig = Bound { tys: tys.list(ai).iter().copied().chain([ao]).collect(), regions: vec![] };
                 let b_sig = Bound { tys: tys.list(bi).iter().copied().chain([bo]).collect(), regions: vec![] };
-                self.binders(&a_sig, &b_sig, &mut |this, a, b| this.fn_sigs(a, ah, b, bh))
+                self.binders(&a_sig, &b_sig, true, &mut |this, a, b| this.fn_sigs(a, ah, b, bh))
             }
             // Rigid projections (normalization already failed to make progress).
             (TyKind::Const(a), TyKind::Const(b)) => self.consts(a, b),

@@ -11,6 +11,7 @@ use super::region_name::{give_region_a_name, get_var_name_and_span_for_region, E
 use super::{Diag, DiagCx};
 use crate::borrowck::constraints::{AnnotationSource, ConstraintCategory, OutlivesConstraint, RegionVid, ReturnConstraint};
 use crate::borrowck::region_infer::RegionErrorKind;
+use crate::infer::outlives::components::Callable;
 use crate::mir::{Local, Span};
 use crate::types::{RegionKind, TyKind};
 
@@ -66,7 +67,24 @@ pub fn report_region_errors(cx: &DiagCx<'_>, errors: &[RegionErrorKind]) -> Vec<
             }
         }
     }
+    report_advisories(cx);
     out
+}
+
+fn report_advisories(cx: &DiagCx<'_>) {
+    if !crate::lint::enabled() { return; }
+    // give_region_a_name requires a universal region; use the error path's conversion for inferred regions.
+    let name = |r| to_error_region_vid(cx, r).and_then(|r| give_region_a_name(cx, r)).map(|n| n.name).unwrap_or_else(|| "'_".into());
+    for &index in &cx.regions.regioncx.advisory_failures {
+        let a = &cx.regions.advisories[index];
+        let (sup, sub) = (name(a.sup), name(a.sub));
+        let (signature, value) = match a.callable {
+            Callable::FnItem(def) => (format!("the signature of `{}`", cx.prog.def_path(def)), "function item"),
+            Callable::Closure => ("this closure's signature".into(), "closure"),
+        };
+        let msg = format!("{signature} names `{sup}`, which is not known to outlive `{sub}`, a lifetime the {value} must outlive here -- note: a callable outlives a lifetime only if every lifetime its signature names does -- help: state the bound where both lifetimes are declared (`{sup}: {sub}`, naming the anonymous one first if needed, e.g. `fn f<'a, {sup}: 'a>(&'a self) -> impl .. + 'a`)");
+        crate::lint::emit(cx.prog, cx.owner, &crate::lint::CALLABLE_OUTLIVES, a.span.file, a.span.lo, &msg);
+    }
 }
 
 fn blame(cx: &DiagCx<'_>, from: RegionVid, to: RegionVid) -> (ConstraintCategory, Span, Vec<OutlivesConstraint>, bool) {

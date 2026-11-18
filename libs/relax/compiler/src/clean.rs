@@ -339,7 +339,7 @@ mod tests {
         w(&custom.join("relax/x"), "x");
         let cfg = tmp("cfg");
         w(&cfg.join("Cargo.toml"), "[workspace]\n");
-        w(&cfg.join(".cargo/config.toml"), &format!("[build]\ntarget-dir = \"{}\"\n", custom.display()));
+        w(&cfg.join(".cargo/config.toml"), &format!("[build]\ntarget-dir = {:?}\n", custom.display().to_string()));
         assert_eq!(checked_dir(&cfg.display().to_string(), false).unwrap(), Some(std::fs::canonicalize(custom.join("relax")).unwrap()));
 
         // a relax dir that is a link elsewhere: refused

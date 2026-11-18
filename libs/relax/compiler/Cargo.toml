@@ -18,6 +18,9 @@ include = ["../build_stamp.rs", "../self_stamp.rs", "std"]
 [package.metadata.makepad]
 test-tree = "its build script runs cargo metadata on the checkout"
 
+[package.metadata.makepad.platform-gaps]
+windows = { "lib" = "16 of 468 fail there: cache and check reuse (4); platform gaps (6): native binaries (3), a 32-bit lab, WSABUF, a directory read as a file; untriaged (6)" }
+
 [lib]
 name = "relax_compiler"
 path = "src/lib.rs"

@@ -74,6 +74,11 @@ pub fn program_stack_size() -> usize {
     })
 }
 
+/// The machine's RAM in bytes (16 GB where the system does not say).
+pub fn physical_memory() -> usize {
+    imp::physical_memory()
+}
+
 /// Runs `f` on a program stack: one large reservation (`program_stack_size`, halved until the
 /// system grants one; or one a finished thread left, `Spares`), committed as it is touched, with
 /// a no-access guard below it. A recursion that overruns it faults on the guard (reported as a
@@ -250,20 +255,33 @@ fn grow<R, F: FnOnce() -> R>(f: F) -> R {
     struct Job<F, R> {
         f: Option<F>,
         r: Option<std::thread::Result<R>>,
+        alt: Option<imp::AltRoom>,
     }
     extern "C" fn run<F: FnOnce() -> R, R>(p: *mut u8) {
         let job = unsafe { &mut *(p as *mut Job<F, R>) };
+        if let Some(alt) = &job.alt {
+            alt.on_segment();
+        }
         let f = job.f.take().unwrap();
         // a Rust panic must not unwind through the stack switch (no unwind info for it)
         job.r = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+        if let Some(alt) = &job.alt {
+            alt.off_segment();
+        }
     }
     let seg = match SPARE_SEGMENTS.try_take().or_else(|| imp::stack_segment(STACK_SEGMENT)) {
         Some(seg) => seg,
         None => return f(),
     };
-    let mut job: Job<F, R> = Job { f: Some(f), r: None };
+    let mut job: Job<F, R> = Job { f: Some(f), r: None, alt: None };
+    // a signal handler's call, from the alternate signal stack: that stack is the room below the
+    // handler's frames while the call runs on the segment (`imp::AltRoom`)
+    job.alt = imp::AltRoom::below(&job as *const Job<F, R> as usize);
     STACK.with(|c| c.set((seg.lo, seg.top)));
     unsafe { imp::call_on_segment(&seg, run::<F, R>, &mut job as *mut Job<F, R> as *mut u8) };
+    if let Some(alt) = &job.alt {
+        alt.back();
+    }
     STACK.with(|c| c.set((lo, hi)));
     segment_done(seg);
     match job.r.take().unwrap() {
@@ -470,6 +488,112 @@ mod imp {
         if n > 0 && p > 0 { (n as usize).saturating_mul(p as usize) } else { 16 << 30 }
     }
 
+    /// A signal handler's call on the alternate signal stack, moved to a segment (`grow`).
+    ///
+    /// Linux places a signal's frame by the stack pointer alone: on the segment the thread is off
+    /// the alternate stack as the kernel sees it, so a signal that came then (a run end's kick, a
+    /// program's signal) had its frame written from that stack's top, over the live frames of the
+    /// handler that made the call (its interrupted context, its locals). The handler then
+    /// resumed to pc 0, or wrote through a zeroed pointer with its own signal blocked: the
+    /// kernel's kill, no report. For the call the alternate stack is the room below those frames,
+    /// where the kernel would put a nested frame natively (no room left: none, the segment takes
+    /// it). The change is made off the alternate stack (the kernel refuses it on the stack), so
+    /// signals stay blocked across each switch. (macOS marks the thread as on its alternate stack
+    /// until the handler returns, wherever its stack pointer is: nothing to do.)
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) struct AltRoom {
+        /// the alternate stack: its base and size
+        sp: usize,
+        size: usize,
+        /// the top of the room below the handler's frames
+        floor: usize,
+        /// the thread's signal mask before the switch
+        mask: [u64; 16],
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[repr(C)]
+    struct StackT {
+        sp: usize,
+        flags: i32,
+        size: usize,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    extern "C" {
+        fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
+        fn pthread_sigmask(how: i32, set: *const [u64; 16], old: *mut [u64; 16]) -> i32;
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    impl AltRoom {
+        const SS_DISABLE: i32 = 2;
+        const SIG_BLOCK: i32 = 0;
+        const SIG_SETMASK: i32 = 2;
+        /// Below `live` (the lowest frame of `grow` the call returns to): the switch's own frame
+        /// and the red zone.
+        const MARGIN: usize = 8192;
+
+        /// On the alternate stack at `live` (a local of `grow`): its room, and every signal
+        /// blocked until the call runs on the segment (`on_segment`). None elsewhere.
+        pub(super) fn below(live: usize) -> Option<AltRoom> {
+            let mut cur = StackT { sp: 0, flags: 0, size: 0 };
+            if unsafe { sigaltstack(std::ptr::null(), &mut cur) } != 0 || cur.flags & Self::SS_DISABLE != 0 {
+                return None;
+            }
+            if !(cur.sp <= live && live < cur.sp + cur.size) {
+                return None;
+            }
+            let floor = live.saturating_sub(Self::MARGIN).max(cur.sp) & !15;
+            let mut room = AltRoom { sp: cur.sp, size: cur.size, floor, mask: [0; 16] };
+            unsafe { pthread_sigmask(Self::SIG_BLOCK, &[!0u64; 16], &mut room.mask) };
+            Some(room)
+        }
+
+        /// On the segment: the alternate stack is the room below the handler's frames (none when
+        /// the kernel takes no room that small: the segment's stack takes nested frames), and the
+        /// signals go through again.
+        pub(super) fn on_segment(&self) {
+            let room = StackT { sp: self.sp, flags: 0, size: self.floor.saturating_sub(self.sp) };
+            unsafe {
+                if room.size == 0 || sigaltstack(&room, std::ptr::null_mut()) != 0 {
+                    let off = StackT { sp: 0, flags: Self::SS_DISABLE, size: 0 };
+                    sigaltstack(&off, std::ptr::null_mut());
+                }
+                pthread_sigmask(Self::SIG_SETMASK, &self.mask, std::ptr::null_mut());
+            }
+        }
+
+        /// Still on the segment, the call done: every signal blocked, the whole alternate stack
+        /// back.
+        pub(super) fn off_segment(&self) {
+            let whole = StackT { sp: self.sp, flags: 0, size: self.size };
+            unsafe {
+                pthread_sigmask(Self::SIG_BLOCK, &[!0u64; 16], std::ptr::null_mut());
+                sigaltstack(&whole, std::ptr::null_mut());
+            }
+        }
+
+        /// Back on the alternate stack: the signals go through again.
+        pub(super) fn back(&self) {
+            unsafe { pthread_sigmask(Self::SIG_SETMASK, &self.mask, std::ptr::null_mut()) };
+        }
+    }
+
+    /// (elsewhere the kernel keeps a handler's thread on its alternate stack: `AltRoom` on Linux)
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub(super) struct AltRoom;
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    impl AltRoom {
+        pub(super) fn below(_live: usize) -> Option<AltRoom> {
+            None
+        }
+        pub(super) fn on_segment(&self) {}
+        pub(super) fn off_segment(&self) {}
+        pub(super) fn back(&self) {}
+    }
+
     /// Calls `f(data)` with the stack pointer at the segment's top, back on this stack after.
     /// The call's return address goes to `SWITCH_RETURN` first (stack walkers recognise this
     /// frame by it); x86_64 keeps this function's own sp at the call's sp on the segment (the
@@ -518,6 +642,18 @@ mod imp {
 mod imp {
     use super::Segment;
     use relax_session::win32::*;
+
+    /// (no alternate signal stack here: `AltRoom` on Linux)
+    pub(super) struct AltRoom;
+
+    impl AltRoom {
+        pub(super) fn below(_live: usize) -> Option<AltRoom> {
+            None
+        }
+        pub(super) fn on_segment(&self) {}
+        pub(super) fn off_segment(&self) {}
+        pub(super) fn back(&self) {}
+    }
 
     const GUARD: usize = 65536;
 
@@ -699,6 +835,18 @@ mod imp {
         1 << 30
     }
     pub(super) unsafe fn call_on_segment(_s: &Segment, _f: extern "C" fn(*mut u8), _data: *mut u8) {}
+
+    /// (no alternate signal stack here: `AltRoom` on Linux)
+    pub(super) struct AltRoom;
+
+    impl AltRoom {
+        pub(super) fn below(_live: usize) -> Option<AltRoom> {
+            None
+        }
+        pub(super) fn on_segment(&self) {}
+        pub(super) fn off_segment(&self) {}
+        pub(super) fn back(&self) {}
+    }
 }
 
 #[cfg(test)]
@@ -760,8 +908,45 @@ mod tests {
         }
         let (lo, hi) = super::stack_bounds();
         assert!(hi > lo, "the thread's stack is known");
+        // Linux: the highest free gap under the stack, from the process's map, taken exactly (a
+        // run under the JIT reserves wide ranges there, and the system places a hint whose range
+        // is taken elsewhere: above). None: no gap, or the map changed meanwhile.
+        #[cfg(target_os = "linux")]
+        let below_gap = |len: usize| -> Option<usize> {
+            const FIXED_NOREPLACE: i32 = 0x10_0000;
+            let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+            let mut spans: Vec<(usize, usize)> = maps
+                .lines()
+                .filter_map(|l| {
+                    let (a, b) = l.split_whitespace().next()?.split_once('-')?;
+                    Some((usize::from_str_radix(a, 16).ok()?, usize::from_str_radix(b, 16).ok()?))
+                })
+                .collect();
+            spans.sort_unstable();
+            let (mut end, mut best) = (1usize << 20, None);
+            for &(a, b) in spans.iter().take_while(|s| s.0 < lo) {
+                let at = a.saturating_sub(len) & !0xffff;
+                if at >= end {
+                    best = Some(at);
+                }
+                end = end.max(b);
+            }
+            let at = best?;
+            let got = unsafe { mmap(at as *mut c_void, len, 3, anon | FIXED_NOREPLACE, -1, 0) } as usize;
+            if got != at && got as isize != -1 {
+                // (a kernel without the flag took it as a hint)
+                unsafe { munmap(got as *mut c_void, len) };
+            }
+            (got == at).then_some(at)
+        };
         // (a hint: the system maps there when it is free; further out until one lands on that side)
         let map = |above: bool| -> usize {
+            #[cfg(target_os = "linux")]
+            if !above {
+                if let Some(at) = below_gap(SMALL + GUARD) {
+                    return at;
+                }
+            }
             for shift in 28..40 {
                 let hint = if above { hi.checked_add(1 << shift) } else { lo.checked_sub(1 << shift) };
                 let Some(hint) = hint.map(|h| h & !0xffff) else { continue };

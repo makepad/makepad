@@ -315,7 +315,7 @@ impl Fcx<'_> {
                     let mut compact = vec![ty]; compact.extend_from_slice(self.tcx.tys.list(*args));
                     let mut p = crate::next_solver::collect::trait_predicate(*td, self.tcx.complete_args(self.prog, *td, &compact, *regions));
                     p.bound_vars = vec![crate::next_solver::BoundVariableKind::Region(crate::types::BoundRegionKind::Anon); *bound as usize].into();
-                    return self.tcx.supertraits(self.prog, p).into_iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(tr)) if tr.trait_ref.def_id == parent)).expect("object supertrait");
+                    return self.tcx.supertraits_unfiltered(self.prog, p).into_iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(tr)) if tr.trait_ref.def_id == parent)).expect("object supertrait");
                 }
                 TyKind::Ref(_, inner, _) | TyKind::Ptr(_, inner) => ty = *inner,
                 _ => ty = overloaded_deref_ty(&self.infcx, self.prog, &self.param_env, ty).expect("object pick never dereferenced to an object"),

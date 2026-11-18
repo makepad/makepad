@@ -52,6 +52,11 @@ struct Found {
     expected: String,
 }
 
+/// The `#[test]` fns of `krates` (where the background type check of a test run starts).
+pub(crate) fn test_fns(prog: &crate::program::Program, krates: &[u32]) -> Vec<DefId> {
+    collect(prog, krates).into_iter().map(|f| f.def).collect()
+}
+
 /// The `#[test]` fns of `krates` (each crate's root module is not part of the name).
 fn collect(prog: &crate::program::Program, krates: &[u32]) -> Vec<Found> {
     let mut out = Vec::new();

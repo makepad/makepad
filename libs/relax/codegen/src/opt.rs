@@ -1248,6 +1248,16 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
     f.inl.push((call_pos, anchor));
     f.inl_slots.push(id);
     f.inl_slots.extend_from_slice(&callee.inl_slots);
+    // the digest gate: what each new context took in, and whether a frame can wait in it (the
+    // body holds a call, or a cycle: an edge to a block at or before its own), parallel to
+    // inl_slots (a callee whose lists fell short of its contexts: unknown, and can wait)
+    let waits = callee.blocks.iter().enumerate().any(|(b, blk)| blk.insts.iter().any(|i| matches!(i, Inst::Call(..))) || blk.term.succs().any(|t| t as usize <= b));
+    f.inl_digest.push(callee.digest.clone());
+    f.inl_waits.push(waits);
+    for k in 0..callee.inl_slots.len() {
+        f.inl_digest.push(callee.inl_digest.get(k).cloned().flatten());
+        f.inl_waits.push(callee.inl_waits.get(k).copied().unwrap_or(true));
+    }
     let base = f.inl.len() as u64;
     // a callee position in the caller: its own body (context 0) under the new context, its
     // context c (callee.inl[c - 1]) at f.inl[base + c - 1]
@@ -7108,6 +7118,87 @@ mod inline_priority_tests {
         let c = conds(&f);
         assert!(c.len() == 3 && c.iter().all(|x| *x == c[0]), "{:?} {}", c, f.dump());
         assert!(f.guard_size.insts < size.insts, "{:?} -> {:?}", size, f.guard_size);
+    }
+
+    /// The digest gate's contexts (gate.rs): an inline context records the digest of the body it
+    /// took in and whether a frame can wait in that copy (it holds a call or a cycle), parallel to
+    /// `inl_slots`, a nested inline's contexts included.
+    #[test]
+    fn inline_contexts_carry_their_bodies_digests_and_waits() {
+        let options = &relax_session::Options::default();
+        let digested = |mut f: Func| {
+            f.digest = Some(std::sync::Arc::new(f.lowering_digest()));
+            f
+        };
+        let leaf = digested(callee(2));
+        // a call it keeps (9 is never inlined)
+        let mut calls = callee(2);
+        calls.blocks[0].insts[1] = Inst::Call(Callee::Fn(9), vec![], vec![]);
+        let calls = digested(calls);
+        // a loop: block 1 branches back to itself
+        let mut looping = callee(2);
+        looping.block();
+        looping.block();
+        looping.blocks[0].term = Term::Jump(1);
+        looping.blocks[1].term = Term::Branch(VReg(0), 1, 2);
+        looping.blocks[2].term = Term::Ret(vec![]);
+        let looping = digested(looping);
+        let mut middle = callee(3);
+        middle.blocks[0].insts = vec![Inst::Call(Callee::Fn(7), vec![], vec![]), Inst::Call(Callee::Fn(8), vec![], vec![]), Inst::Call(Callee::Fn(6), vec![], vec![])];
+        let mut middle = digested(middle);
+        let get = |id: u32| match id {
+            7 => Some((&leaf as *const Func, ATTR_ALWAYS)),
+            8 => Some((&calls as *const Func, ATTR_ALWAYS)),
+            6 => Some((&looping as *const Func, ATTR_ALWAYS)),
+            _ => None,
+        };
+        inline_calls(options, &mut middle, 1, &get, &|_| false, &InlineLimits::tier1());
+        let d = |f: &Func| f.digest.clone();
+        assert_eq!(middle.inl_slots, vec![7, 8, 6], "{}", middle.dump());
+        assert_eq!(middle.inl_digest, vec![d(&leaf), d(&calls), d(&looping)], "each context: the digest of the body it took in");
+        assert_eq!(middle.inl_waits, vec![false, true, true], "a leaf's copy cannot wait; one holding a call or a loop can");
+        let mut outer = callee(1);
+        outer.blocks[0].insts[0] = Inst::Call(Callee::Fn(2), vec![], vec![]);
+        let get = |id: u32| (id == 2).then_some((&middle as *const Func, ATTR_ALWAYS));
+        inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1());
+        assert_eq!(outer.inl_slots, vec![2, 7, 8, 6]);
+        assert_eq!(outer.inl_digest, vec![d(&middle), d(&leaf), d(&calls), d(&looping)], "a nested inline keeps its contexts' digests");
+        assert_eq!(outer.inl_waits, vec![true, false, true, true], "the middle copy holds the call and the loop it took in");
+    }
+
+    /// The digest gate's lowering digest (`Func::lowering_digest`): the body with its slots and
+    /// symbols numbered by first occurrence (the session resolves them to identities), positions
+    /// out, noalias facts one set whether withheld or not; a changed literal, callee or symbol
+    /// offset is another body.
+    #[test]
+    fn lowering_digest_is_the_body_up_to_slot_and_symbol_numbers() {
+        let body = |slots: [u32; 2], sym: u32, off: i64, lit: i64, pos: u64| {
+            let mut f = Func::new("f".into(), 0);
+            let v = f.vreg(Cls::I);
+            f.block();
+            f.blocks[0].insts = vec![
+                Inst::Iconst(v, lit),
+                Inst::Addr(v, relax_backend::rir::Sym { id: sym, off }),
+                Inst::Call(Callee::Fn(slots[0]), vec![v], vec![]),
+                Inst::Call(Callee::Fn(slots[1]), vec![], vec![]),
+            ];
+            f.blocks[0].pos = vec![pos; 4];
+            f.blocks[0].term = Term::Ret(vec![]);
+            f.noalias = vec![v];
+            f
+        };
+        let a = body([5, 6], 3, 0, 1, 0).lowering_digest();
+        assert_eq!((a.slots.clone(), a.syms.clone()), (vec![5, 6], vec![3]));
+        let renumbered = body([9, 10], 11, 0, 1, 0).lowering_digest();
+        assert_eq!(a.raw, renumbered.raw, "renumbered slots and symbols: the same body");
+        assert_eq!((renumbered.slots, renumbered.syms), (vec![9, 10], vec![11]));
+        assert_eq!(a, body([5, 6], 3, 0, 1, 77).lowering_digest(), "positions are out");
+        let mut withheld = body([5, 6], 3, 0, 1, 0);
+        withheld.withheld_noalias = std::mem::take(&mut withheld.noalias);
+        assert_eq!(a, withheld.lowering_digest(), "withheld noalias facts (SPEC-V) are the same body");
+        assert_ne!(a.raw, body([5, 6], 3, 0, 2, 0).lowering_digest().raw, "a changed literal");
+        assert_ne!(a.raw, body([5, 5], 3, 0, 1, 0).lowering_digest().raw, "a changed callee: the second call names the first one's slot");
+        assert_ne!(a.raw, body([5, 6], 3, 8, 1, 0).lowering_digest().raw, "a changed symbol offset");
     }
 
     #[test]

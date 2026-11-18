@@ -29,9 +29,9 @@ impl Program {
     pub fn attribute_errors(&self, own: &[bool]) -> Vec<String> {
         let mut out = Vec::new();
         // the helper attributes of a derive, by crate, module and path: the macro table answers
-        // them, the same for every file
+        // them, the same for every file (None: no proc-macro derive of the table answers the path)
         let scope = crate::macros::MacroScope::new(self.macros.clone());
-        let mut derive_helpers: HashMap<(&str, String, Vec<String>), Vec<String>> = HashMap::default();
+        let mut derive_helpers: HashMap<(&str, String, Vec<String>), Option<Vec<String>>> = HashMap::default();
         let mut by_file: Vec<Vec<DefId>> = vec![Vec::new(); self.files.len()];
         for (i, d) in self.defs.iter().enumerate() {
             if own.get(d.krate as usize).copied().unwrap_or(false) && (d.file as usize) < by_file.len() {
@@ -53,6 +53,9 @@ impl Program {
             let mut ranges: Vec<Attr> = f.ast.root_attrs.iter().copied().collect();
             let n_root = ranges.len();
             let mut retained_helpers = crate::fxhash::HashSet::default();
+            // the attributes of an item with a derive whose helpers are not known (a derive the
+            // macro table does not answer): any of them may be a helper, so none is judged
+            let mut unjudged = crate::fxhash::HashSet::default();
             // what each attribute is on: 0 the crate, 1 a struct / enum / union, 2 another item, 3 a field or variant
             let mut targets: Vec<u8> = vec![0; n_root];
             for &d in &by_file[fi] {
@@ -67,6 +70,7 @@ impl Program {
                 // (the module's path only for an item with a derive: most have none)
                 let mut mname: Option<String> = None;
                 let mut custom_helpers = Vec::new();
+                let mut helpers_known = true;
                 for a in f.ast.list(it.attrs) {
                     let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
                     if hi <= lo || text(lo as u32) != "derive" { continue; }
@@ -77,10 +81,21 @@ impl Program {
                             T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper => path.push(text(i as u32).to_string()),
                             T::PathSep if path.is_empty() => path.push(String::new()),
                             T::Comma | T::CloseParen => {
-                                let helpers = derive_helpers.entry((kname, mname.clone(), std::mem::take(&mut path))).or_insert_with_key(|(_, _, path)| {
-                                    scope.proc_macro_path(kname, mname, path, crate::macro_reg::Kind::Derive, &mut Default::default()).map_or_else(Vec::new, |entry| crate::macro_reg::derive_helpers(&entry))
+                                let path = std::mem::take(&mut path);
+                                // a std derive (`Clone`, `core::fmt::Debug`) has no helpers but
+                                // `Default`'s, which the file's walk below adds
+                                let std_derive = path.last().is_some_and(|n| STD_DERIVES.contains(&n.as_str()))
+                                    && (path.len() == 1 || matches!(path.iter().find(|s| !s.is_empty()).map(String::as_str), Some("core" | "std" | "alloc")));
+                                if path.is_empty() || std_derive {
+                                    continue;
+                                }
+                                let helpers = derive_helpers.entry((kname, mname.clone(), path)).or_insert_with_key(|(_, _, path)| {
+                                    scope.proc_macro_path(kname, mname, path, crate::macro_reg::Kind::Derive, &mut Default::default()).and_then(|entry| crate::macro_reg::derive_helpers(&entry))
                                 });
-                                custom_helpers.extend(helpers.iter().cloned());
+                                match helpers {
+                                    Some(helpers) => custom_helpers.extend(helpers.iter().cloned()),
+                                    None => helpers_known = false,
+                                }
                             }
                             _ => {}
                         }
@@ -114,7 +129,9 @@ impl Program {
                     targets.resize(ranges.len(), 3);
                 }
                 for a in &ranges[attrs_start..] {
-                    if a.toks.hi > a.toks.lo && custom_helpers.iter().any(|name| name == text(a.toks.lo)) {
+                    if !helpers_known {
+                        unjudged.insert(a.toks.lo);
+                    } else if a.toks.hi > a.toks.lo && custom_helpers.iter().any(|name| name == text(a.toks.lo)) {
                         retained_helpers.insert(a.toks.lo);
                     }
                 }
@@ -126,10 +143,8 @@ impl Program {
                     targets.resize(ranges.len(), 2);
                 }
             }
-            // registered tools; derive helpers of non-std derives are not tracked: such a file
-            // keeps its inert attributes
+            // registered tools
             let mut tools: Vec<&str> = Vec::new();
-            let mut helpers = false;
             let mut std_helpers: Vec<&str> = Vec::new();
             let mut unknown_derives: Vec<(u32, &str)> = Vec::new();
             let mut path_derive_errors: Vec<(u32, String)> = Vec::new();
@@ -206,9 +221,6 @@ impl Program {
                             if f.tok(i).kind == T::Ident && text(i) == "Default" {
                                 std_helpers.push("default");
                             }
-                            if f.tok(i).kind == T::Ident && !STD_DERIVES.contains(&text(i)) && f.tok(i + 1).kind != T::PathSep && !path_derive_errors.iter().any(|(p, _)| *p == f.tok(i).lo) {
-                                helpers = true;
-                            }
                         }
                     }
                     _ => {}
@@ -220,12 +232,9 @@ impl Program {
             for (pos, name) in unknown_derives {
                 out.push(self.record_error(fi as u32, pos, "resolve", format!("cannot find derive macro `{name}` in this scope")));
             }
-            if helpers {
-                continue;
-            }
             for (ai, a) in ranges.iter().enumerate() {
                 let (lo, hi) = (a.toks.lo, a.toks.hi);
-                if hi <= lo || hi as usize > f.toks.len() {
+                if hi <= lo || hi as usize > f.toks.len() || unjudged.contains(&lo) {
                     continue;
                 }
                 // the path: idents joined by `::`

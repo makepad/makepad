@@ -7,6 +7,8 @@ use core::time::Duration;
 
 pub type clockid_t = u32;
 pub const CLOCK_REALTIME: clockid_t = 0;
+/// The most buffers one writev(2) takes (real std's fd max_iov: IOV_MAX on Apple targets).
+pub const MAX_IOV: usize = 1024;
 /// What real std's Instant uses on Apple targets (does not advance while asleep, like
 /// mach_absolute_time).
 pub const CLOCK_INSTANT: clockid_t = 8; // CLOCK_UPTIME_RAW

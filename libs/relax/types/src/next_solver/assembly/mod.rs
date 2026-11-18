@@ -204,7 +204,7 @@ impl EvalCtxt<'_, '_> {
                 ecx.inspect.record_impl_args(ecx.delegate, ecx.max_input_universe, args.clone());
                 let impl_ref = tcx.impl_trait_ref(ecx.solver.prog, imp, &args);
                 ecx.eq_args(env, &tr.args, &impl_ref.args)?;
-                ecx.add_item_clauses(env, imp, &args, GoalSource::ImplWhereBound, false)?;
+                ecx.add_item_clauses(env, imp, &args, GoalSource::UserImplWhereBound, false)?;
                 // trait_goals.rs:104-120: elaborated supertrait outlives obligations.
                 for predicate in tcx.impl_super_outlives(ecx.solver.prog, imp) {
                     let predicate = tcx.instantiate_predicate(ecx.solver.prog, imp, &args, predicate);

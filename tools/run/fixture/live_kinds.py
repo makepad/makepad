@@ -570,6 +570,10 @@ binary = os.path.join(os.environ.get("CARGO_TARGET_DIR", "target"), "host", "mak
 warm = subprocess.run([sys.executable, "libs/relax/compiler/tests/live_closure_owner_app/run.py", "--makepad", binary, "--warm"], capture_output=True, text=True)
 print(warm.stdout[-3000:], flush=True)
 consts = subprocess.run([sys.executable, "tools/run/tests/cache_warm_const_edit/run.py", "--makepad", binary], capture_output=True, text=True)
+# its failed rows wherever they are (the tail alone hid an early row's), then the tail
+failed = [l for l in consts.stdout.splitlines() if " ms value=" in l and l.split()[1] not in ("landed", "restart")]
+if failed:
+    print("cache_warm_const_edit failed rows:\n" + "\n".join(failed), flush=True)
 print(consts.stdout[-3000:], flush=True)
 shutil.rmtree(root, ignore_errors=True)
 sys.exit(0 if landed == len(results) and warm.returncode == 0 and consts.returncode == 0 else 1)

@@ -11,6 +11,10 @@ pub mod constraint_conversion;
 mod input_output;
 pub mod liveness;
 mod relate_tys;
+mod binder_scope;
+#[cfg(test)]
+pub(crate) use binder_scope::{held_targets, hold_alias, set_aside, split_aside, BinderFrame, HeldAlias};
+pub use binder_scope::scope_closes;
 
 use super::borrowck_errors::{BorrowckError, ErrorKind};
 use super::constraints::{AnnotationSource, ConstraintCategory, OutlivesConstraint, OutlivesConstraintSet,
@@ -19,7 +23,7 @@ use super::mir_nll::LocationMap;
 use super::polonius::PoloniusContext;
 use super::universal_regions::UniversalRegions;
 use crate::mir::move_paths::MoveData;
-use super::region_infer::{NllRegionVariableOrigin, TypeTest};
+use super::region_infer::{Advisory, NllRegionVariableOrigin, TypeTest};
 use super::region_infer::values::{LivenessValues, PlaceholderIndices};
 use crate::lang_items::LangItem;
 use crate::consts::GenericArg;
@@ -75,6 +79,8 @@ pub struct MirBug { pub span: Span, pub message: String }
 pub trait BorrowckTypeOps: liveness::LivenessOps {
     fn universe(&self) -> UniverseIndex;
     fn create_next_universe(&mut self) -> UniverseIndex;
+    /// The region variables created so far (`RegionVid`s are below it).
+    fn num_region_vars(&self) -> usize;
     /// `next_nll_region_var_in_universe`; the result is a `ReVar` region.
     fn next_nll_region_var(&mut self, origin: NllRegionVariableOrigin, universe: UniverseIndex) -> RegionId;
     /// UniversalRegions::to_region_vid: `ReVar(v)` is `v`; universal regions map to their vids.
@@ -94,6 +100,10 @@ pub trait BorrowckTypeOps: liveness::LivenessOps {
         locations: Locations, category: ConstraintCategory);
     /// `prove_clause(ClauseKind::WellFormed(ty))`.
     fn prove_wf(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, locations: Locations, category: ConstraintCategory);
+    /// `ty: region` through constraint conversion (`outer`: the operation's category, `category` the obligation's):
+    /// a binder scope's held alias obligation, submitted again when the scope closes.
+    fn type_must_outlive(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, region: RegionId, locations: Locations, span: Span,
+        outer: ConstraintCategory, category: ConstraintCategory);
     fn normalize_and_prove_instantiated_clauses(&mut self, out: &mut MirTypeckRegionConstraints, owner: ClauseOwner,
         args: &[GenericArg], locations: Locations);
     fn normalize(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, locations: Locations) -> TyId;
@@ -176,12 +186,16 @@ pub struct MirTypeckRegionConstraints {
     /// Insertion-ordered (FxIndexMap in nightly).
     pub universe_causes: Vec<(UniverseIndex, UniverseInfo)>,
     pub type_tests: Vec<TypeTest>,
+    pub advisories: Vec<Advisory>,
+    /// The open binder scopes that assume an alias outlives one of their placeholders, innermost last, with the
+    /// alias obligations each holds until it closes (`binder_scope.rs`).
+    binder_frames: Vec<binder_scope::BinderFrame>,
 }
 impl MirTypeckRegionConstraints {
     pub fn new(num_points: usize) -> Self {
         Self { placeholder_indices: Default::default(), placeholder_index_to_region: vec![],
             liveness_constraints: LivenessValues::new(0, num_points), outlives_constraints: Default::default(),
-            universe_causes: vec![], type_tests: vec![] }
+            universe_causes: vec![], type_tests: vec![], advisories: vec![], binder_frames: vec![] }
     }
     /// The region for a placeholder (an interned `RePlaceholder`), created once.
     pub fn placeholder_region(&mut self, infcx: &mut dyn BorrowckTypeOps, tcx: &Tcx, placeholder: RegionId) -> RegionId {
@@ -649,7 +663,7 @@ impl<'a> TypeChecker<'a> {
                 let implicit = source == CoercionSource::Implicit;
                 let Some(mut src_sig) = self.fn_sig(ty_from) else { return self.mirbug(format!("reify of non-function {ty_from:?}")) };
                 // Target safety: a safe fn item may be reified to an unsafe fn pointer.
-                let TyKind::FnPtr(_, _, target_hdr, target_bound) = *tys.kind(ty) else { return self.mirbug(format!("reify to {ty:?}")) };
+                let TyKind::FnPtr(_, _, target_hdr, _) = *tys.kind(ty) else { return self.mirbug(format!("reify to {ty:?}")) };
                 // type_check/mod.rs:1047-1057: a safe #[target_feature] fn item is safe where
                 // the body has its features
                 if let TyKind::FnDef(def_id, _, _) = *tys.kind(ty_from) {
@@ -662,25 +676,22 @@ impl<'a> TypeChecker<'a> {
                 if src_sig.sig.header.safety == Safety::Safe && target_hdr.safety == Safety::Unsafe {
                     src_sig.sig.header.safety = Safety::Unsafe;
                 }
-                // Casting a higher-ranked fn item to a non-higher-ranked fn pointer throws away
-                // implied bounds, so prove the instantiated signature WF first.
-                let target_has_bound = target_bound != 0 && self.fn_ptr_has_bound_vars(ty);
-                if src_sig.bound_regions != 0 && self.poly_sig_has_bound_vars(&src_sig) && !target_has_bound {
-                    let sig = self.instantiate_with_fresh_vars(&src_sig);
-                    let src_ty = mk_fn_ptr(self.tcx, &sig, 0);
-                    self.infcx.prove_wf(&mut self.constraints, src_ty, locations, cast(implicit));
-                    let src_ty = self.infcx.normalize(&mut self.constraints, src_ty, locations);
-                    if let Err(terr) = self.sub_types(src_ty, ty, locations, cast(implicit)) {
-                        self.mirbug(format!("equating {ty:?} with {src_ty:?} yields {terr:?}"));
-                    }
-                }
-                let src_ty = mk_fn_ptr(self.tcx, &src_sig.sig, src_sig.bound_regions);
-                // The fn item's signature is not WF-checked through the FnDef type.
+                // The fn item's signature is not WF-checked through the FnDef type, and reifying it to a
+                // pointer throws away the bounds its body assumes: the target's binder is opened with
+                // placeholders (assuming its inputs and output well formed), the source's with fresh
+                // variables, and the instantiated source signature is proven well formed, unnormalized and
+                // normalized (`binder_scope`; rustc issue 25860, its non-higher-ranked case rustc's #129021).
+                let mut scope = self.open_binder_scope();
+                let target = self.enter_fn_ptr_binder(&mut scope, ty, locations, cast(implicit));
+                let sig = self.instantiate_with_fresh_vars(&src_sig);
+                let src_ty = mk_fn_ptr(self.tcx, &sig, 0);
                 self.infcx.prove_wf(&mut self.constraints, src_ty, locations, cast(implicit));
-                let src_ty = self.infcx.normalize(&mut self.constraints, src_ty, locations);
-                if let Err(terr) = self.sub_types(src_ty, ty, locations, cast(implicit)) {
-                    self.mirbug(format!("equating {src_ty:?} with {ty:?} yields {terr:?}"));
+                let normalized = self.infcx.normalize(&mut self.constraints, src_ty, locations);
+                if normalized != src_ty { self.infcx.prove_wf(&mut self.constraints, normalized, locations, cast(implicit)); }
+                if let Err(terr) = self.sub_types(normalized, target, locations, cast(implicit)) {
+                    self.mirbug(format!("equating {normalized:?} with {ty:?} yields {terr:?}"));
                 }
+                self.close_binder_scope(scope);
             }
             CastKind::PointerCoercion(PointerCoercion::ClosureFnPointer(_), source) => {
                 // Relax closure types carry their un-tupled signature as a FnPtr.
@@ -795,12 +806,6 @@ impl<'a> TypeChecker<'a> {
             _ => None,
         }
     }
-    fn poly_sig_has_bound_vars(&self, sig: &PolyFnSig) -> bool {
-        sig.sig.inputs.iter().chain([&sig.sig.output]).any(|&t| self.tcx.tys.has_vars_bound_at_or_above(t, 0))
-    }
-    fn fn_ptr_has_bound_vars(&self, ty: TyId) -> bool {
-        match self.fn_sig(ty) { Some(sig) => self.poly_sig_has_bound_vars(&sig), None => false }
-    }
     /// `instantiate_binder_with_fresh_vars(HigherRankedType)`.
     fn instantiate_with_fresh_vars(&mut self, sig: &PolyFnSig) -> FnSig {
         let tcx = self.tcx;
@@ -818,6 +823,9 @@ impl<'a> TypeChecker<'a> {
     fn visit_body_checked(&mut self, body: &'a Body) {
         for (i, decl) in body.local_decls.iter().enumerate() {
             self.check_local_decl(Local(i as u32), decl);
+        }
+        for (i, decl) in body.local_decls.iter().enumerate() {
+            self.prove_local_wf(Local(i as u32), decl);
         }
         for (b, block_data) in body.basic_blocks.iter().enumerate() {
             let mut location = Location { block: BasicBlock(b as u32), statement_index: 0 };
@@ -980,6 +988,18 @@ impl<'a> TypeChecker<'a> {
         if !self.infcx.unsized_fn_params() && matches!(self.local_kind(local), LocalKind::Temp | LocalKind::UserVar) {
             self.ensure_place_sized(decl.ty, decl.source_info.span);
         }
+    }
+    /// Every value the body holds is of a well-formed type: a temporary's or variable's type is proven WF
+    /// everywhere. rustc proves it only for annotated types, so subtyping can shrink a type below what its
+    /// definition requires: `let mut s = S(&STATIC); s.0 = short;` with `struct S<T: 'static>(T)` gives an
+    /// `S<&'short u8>` whose impls assume `T: 'static` (rustc issue 164250). The type check proved the trait
+    /// parts with regions erased, so a type without free regions has nothing left to prove. Arguments and the
+    /// return place have the signature's types, proven by the item's own WF check.
+    fn prove_local_wf(&mut self, local: Local, decl: &LocalDecl) {
+        if !matches!(self.local_kind(local), LocalKind::Temp) || !self.tcx.tys.flags(decl.ty).intersects(crate::types::TypeFlags::HAS_FREE_REGIONS) {
+            return;
+        }
+        self.infcx.prove_wf(&mut self.constraints, decl.ty, Locations::All(decl.source_info.span), ConstraintCategory::Boring);
     }
     fn local_kind(&self, local: Local) -> LocalKind {
         if local.0 == 0 { LocalKind::Return } else if local.0 <= self.body.arg_count { LocalKind::Arg } else { LocalKind::Temp }

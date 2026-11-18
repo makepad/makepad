@@ -45,6 +45,24 @@ fewer_definitions: a session whose crate has fewer definitions than the cache's 
 fill had is gone): the image's types still name the old crate's, past the program's; edits land.
 const_skipped, skipped_offline: a module the boot skips (RELAX_LAZY_DEFER, every run) edited,
 live or between runs: the new text's runs show the new value.
+stale_*: the stale direction, code that holds a copy of what an edit changes where the edited item's own
+code is no reader of it (src/stale.rs, src/stale_frames.rs). It lands (MUST) where that code is rebuilt:
+a const only an always-inlined fn reads, held by its looping host; a callee edited to unwind, its caller's
+guard running as the panic passes (once the session reads late: no watcher attached); a callee edited to keep the pointer it is given, its caller reading its
+local again; and a thread's loop host with a leaf copy, entered before its tier-up (the session asks for its
+O3 build before the edit), whose frame runs the version the tier-up retired. It restarts (MUST) where a
+thread's frame keeps the copy for good: a reader with its own loop inlined into a thread's closure, a reader
+blocked in a call inside its copy. An associated const read by a std instance's loop lands or restarts, as
+the instance took the reader in or not, never stale.
+gate_*: the digest gate's count of an edit (it decides nothing yet), the edit const_direct's: what it
+must not misread (GATE). gate_closure_kept: a closure of the edited file the edit leaves alone keeps its
+identity, so std's spawn over it reads the same across the commit, as its drop glue does, whether
+that glue's key came from the startup image or was encoded after the commit. gate_install_digest:
+code the first edit's patch built into a slot that held no RIR (a reader the const's change rebuilt)
+carries its digest to the install, so the gate reads it, not "new code has no digest".
+const_held: the const_direct edit, the session held past the landing check (a second after the
+install, HOLD): field_spawn's worker, a thread spawned with a closure of the edited file, runs on in
+std's run_main over that closure, which the edit leaves alone: it must not restart the app.
 --cold: the same sessions with the disk cache off, for comparison.
 --window: the same program with a window (hidden), so a restart keeps the process and the window: the
 new value must show in the same pid.
@@ -62,10 +80,15 @@ ROOT = os.path.abspath(os.path.join(HERE, "../../../.."))
 V = "src/values.rs"
 F = "src/fields.rs"
 M = "src/main.rs"
+S = "src/stale.rs"
+SF = "src/stale_frames.rs"
 # probe -> (the printed name, file, old text, new text, the value it prints after the edit)
 PROBES = [
     ("const_direct", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2),
     ("const_through", V, "CONST_THROUGH: u64 = 1;", "CONST_THROUGH: u64 = 2;", 2),
+    ("gate_closure_kept", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2),
+    ("gate_install_digest", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2),
+    ("const_held", V, "CONST_DIRECT: u64 = 1;", "CONST_DIRECT: u64 = 2;", 2),
     ("const_inlined", V, "CONST_INLINED: u64 = 1;", "CONST_INLINED: u64 = 2;", 2),
     ("const_derived", V, "CONST_BASE: u64 = 1;", "CONST_BASE: u64 = 2;", 4),
     ("const_assoc", V, "for A {\n    const K: u64 = 1;", "for A {\n    const K: u64 = 2;", 2),
@@ -134,6 +157,15 @@ PROBES = [
     ("static_late", V, "STATIC_LATE: u64 = 1;", "STATIC_LATE: u64 = 2;", 2),
 ]
 PROBES += [
+    ("stale_inlined_only", S, "F1_K: u64 = 1;", "F1_K: u64 = 2;", 2),
+    ("stale_unwind", S, "fn f2_callee(x: u64) -> u64 {\n    x\n", "fn f2_callee(x: u64) -> u64 {\n    if x == 1 {\n        std::panic::panic_any(Quiet);\n    }\n    x\n", 2),
+    ("stale_nocapture", S, "fn f2_look(c: &Cell<u64>) -> u64 {\n    c.get()\n", "fn f2_look(c: &Cell<u64>) -> u64 {\n    F2_KEPT.store(c as *const Cell<u64> as *mut Cell<u64>, Relaxed);\n    c.get()\n", 2),
+    ("stale_loop_copy", SF, "F3_LOOP_K: u64 = 1;", "F3_LOOP_K: u64 = 2;", 2),
+    ("stale_blocked_copy", SF, "F3_BLOCK_K: u64 = 1;", "F3_BLOCK_K: u64 = 2;", 2),
+    ("stale_std_loop", SF, "for F3K {\n    const K: u64 = 1;", "for F3K {\n    const K: u64 = 2;", 2),
+    ("stale_tiered_frame", SF, "F4_K: u64 = 1;", "F4_K: u64 = 2;", 2),
+]
+PROBES += [
     ("const_nonliteral", V, "CONST_NONLIT: u64 = 1 + 0;", "CONST_NONLIT: u64 = 2 + 0;", 2),
     ("const_discr", V, "CONST_DISCR: isize = 1;", "CONST_DISCR: isize = 2;", 2),
     ("const_array_derived", V, "CONST_ARR_BASE: usize = 1;", "CONST_ARR_BASE: usize = 2;", 4),
@@ -186,6 +218,9 @@ FIRST["include_after_body"] = (V, "pub fn late_tiny() -> u64 {\n    1\n", "pub f
 # stores the next session starts from as the fill wrote them, not with the edited file's hash in
 # their ledger (the next probe's session, the file restored, found them stale and started cold).
 SETTLE = {"include_found": r"is not written: an included file it reads changed in this run"}
+# A session held this long after its edit landed: past the landing check (a second after the
+# install), which restarts the app when a thread still runs code the patch replaced.
+HOLD = {"const_held": 1.5}
 # A Rust file include! reads edited: the items it expands to, a body's expression, a const's value. The
 # file is no source of the program: its save is an edit of the including file, and the keys of the
 # code it expands into follow its text (a body's key named only the names its text has).
@@ -211,6 +246,9 @@ READS = {"const_every": {"every_direct": 2, "every_fn": 2, "every_inlined": 2, "
 READS["field_every"] = {n: 47 for n in ("fe_method", "fe_free", "fe_pattern", "fe_closure", "fe_generic", "fe_inlined", "fe_macro", "fe_update", "fe_update_self", "fe_clone", "fe_nested", "fe_dyn", "fe_late")}
 READS["field_every"].update(fe_eq=1, fe_debug=4, fe_write=48, fe_held=40, fe_rest=3)
 READS["const_after_body"] = {"const_direct": 2}
+READS["gate_closure_kept"] = {"const_direct": 2}
+READS["gate_install_digest"] = {"const_direct": 2}
+READS["const_held"] = {"const_direct": 2}
 READS["include_after_body"] = {"const_include": 2}
 READS["const_skipped"] = {"const_skipped": 2, "skipped_own": 2}
 # (a new run makes the held value with the new layout)
@@ -231,12 +269,15 @@ def FRAME_OF(struct, fn):
 # (pkg's own: the edit adds a line above it), not by the JIT's number for it
 DYN_CLOSURE = r"struct `DcS` changed its layout, and the running code made trait objects of the closure in `[^`]*values::dc_new` at [^ ]*src/values\.rs:%d:\d+," % (
     open(os.path.join(HERE, "pkg", V)).read().split("\n").index("    Box::new(move || s.sum())") + 1)
-# ... and one std's thread start wraps: the program's closure, then std's fn it was passed to
-SPAWN_CLOSURE = r"struct `SpS` changed its layout, and the running code made trait objects of the closure in `[^`]*values::sp_start` at [^ ]*src/values\.rs:%d:\d+, passed to `std::thread::Builder::spawn_unchecked_`," % (
+# ... and one std's thread start wraps: the program's closure, then std's fn it was passed to. The
+# worker runs it, so its frame is found first since 11-16 (invalid.rs frame_in), named the same
+# way: the program's closure by the fn that makes it and its line, never std's or the JIT's number
+SPAWNED = r"the closure in `[^`]*values::sp_start` at [^ ]*src/values\.rs:%d:\d+" % (
     open(os.path.join(HERE, "pkg", V)).read().split("\n").index("    std::thread::spawn(move || {") + 1)
+SPAWN_CLOSURE = r"struct `SpS` changed its layout, and (the running code made trait objects of %s, passed to `std::thread::Builder::spawn_unchecked_`,|%s(, passed to `std::thread::Builder::spawn_unchecked_`)? is running on thread)" % (SPAWNED, SPAWNED)
 # what an edit must do: consts only values read land, consts a type uses restart with their reason
 MUST = {
-    "const_direct": LAND, "const_through": LAND, "const_inlined": LAND, "const_derived": LAND, "const_assoc": LAND,
+    "const_direct": LAND, "const_held": LAND, "const_through": LAND, "const_inlined": LAND, "const_derived": LAND, "const_assoc": LAND,
     "const_assoc_named": LAND, "const_assoc_foreign": LAND, "const_assoc_dep_generic": LAND, "const_assoc_wrapped": LAND,
     "const_assoc_prim": LAND, "const_assoc_blanket": LAND, "const_assoc_closure": LAND, "const_assoc_chain": LAND,
     "const_opaque": LAND, "const_inferred": LAND, "trait_default": LAND, "const_macro": LAND, "const_macro_same": LAND,
@@ -257,6 +298,23 @@ MUST = {
     # a variant inserted before a held one: lands; restarts when code that ran read the numbers it moves
     "enum_insert": LAND, "field_copy": LAND, "field_copy_frame": FRAME_OF("CpF", "run"), "field_dyn": r"struct `DjS` changed its layout, and the running code made trait objects of `[^`]*DjS`", "field_dyn_closure": DYN_CLOSURE, "field_spawn": SPAWN_CLOSURE, "field_closure_box": LAND, "enum_insert_cast": r"read them as numbers", "enum_insert_hash": r"derived `Hash`",
     "enum_chan": r"enum `[^`]*Wk`: variant `Skip` was added, and the values of .* made before the edit would be read wrong",
+    # the stale direction: the copy's holder is rebuilt, or its frame keeps the copy and the edit restarts
+    "stale_inlined_only": LAND, "stale_unwind": LAND, "stale_nocapture": LAND,
+    "stale_tiered_frame": LAND, "stale_loop_copy": STILL_RUNS, "stale_blocked_copy": STILL_RUNS,
+}
+# a fn the session builds at O3 before the edit (`inspect tier <fn> o3 fresh=1`): its running frame is
+# left in the retired version
+TIER_FIRST = {"stale_tiered_frame": "f4_loop"}
+# probe -> (the session's environment, lines the session must print, lines it must not): the digest
+# gate's count of the edit (RELAX_GATE_PROBE: slots lowered before the commit and after it, compared
+# per name; RELAX_GATE_TRACE: a reason per unknown)
+GATE = {
+    "gate_closure_kept": ({"RELAX_GATE_PROBE": "std::thread::spawn"},
+        [r"relax reload: gate: .*closure ordinal file misses 0 ", r"gate probe, across the edit: slot #\d+ std::thread::spawn: "],
+        [r"gate probe, across the edit: slot #\d+ std::thread::spawn: .* -- DIFFERS"]),
+    "gate_install_digest": ({"RELAX_GATE_TRACE": "1"},
+        [r"relax reload: gate: "],
+        [r"gate unknown \(new code has no digest"]),
 }
 # (--cold: the session compiled that module's code itself, so its readers are known: it lands)
 if cold:
@@ -294,6 +352,8 @@ for k in ("RELAX_CACHE", "RELAX_PRELINK", "WARM_EDIT_ONCE", "WARM_EDIT_LATE"):
     env.pop(k, None)
 # (every run: the image's selection is the boot's)
 env["RELAX_LAZY_DEFER"] = "src/skipped.rs"
+# (a panic nobody watches does not park: stale_unwind's edit panics at every late tick)
+env["RELAX_PANIC_PARK"] = "0"
 if cold:
     env["RELAX_CACHE"] = "0"
 cmd = [relax, "run", "--verbose", "cache-warm-const-edit"] + (["--features", "window"] if window else [])
@@ -344,7 +404,7 @@ def session(probe, rel, old, new, want):
     for f in (ready, late):
         if os.path.exists(f):
             os.remove(f)
-    p = subprocess.Popen(cmd, cwd=pkg, env=dict(env, RELAX_LIVE_READY=ready, RELAX_RELOAD_TRACE="1", WARM_EDIT_LATE=late, MAKEPAD_REMOTE="1"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    p = subprocess.Popen(cmd, cwd=pkg, env=dict(env, RELAX_LIVE_READY=ready, RELAX_RELOAD_TRACE="1", WARM_EDIT_LATE=late, MAKEPAD_REMOTE="1", **GATE.get(probe, ({},))[0]), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     out, err = [], []
     def pump(f, acc):
         for line in f:
@@ -405,6 +465,13 @@ def session(probe, rel, old, new, want):
             if first.get("event") != "patchverified":
                 row["outcome"] = "FIRST EDIT DID NOT LAND"
                 return row, err
+        if probe in TIER_FIRST:
+            built = ask("tier", TIER_FIRST[probe], "o3", "fresh=1")
+            if not built:
+                row["outcome"] = "TIER-UP FAILED"
+                return row, err
+            if "-v" in args:
+                print("    | tier-up before the edit: %s" % " ".join(built.split())[:300], flush=True)
         seen = newest()
         waiting = pending()
         t_save = time.time()
@@ -446,6 +513,12 @@ def session(probe, rel, old, new, want):
             landed = second.get("event") == "patchverified" and wait(lambda: last() is not None and shows_new(last(), probe, want), 2)
             if not landed:
                 row["outcome"], row["patch"] = "SECOND EDIT DID NOT LAND", next((l for l in err[mark:] if "a restart applies it" in l or "REFUSED" in l), "")[:96]
+                return row, err
+        if landed and probe in HOLD:
+            time.sleep(HOLD[probe])
+            held = next((l for l in err[mark:] if "still runs the code from before the edit" in l), "")
+            if held:
+                row["outcome"], row["patch"] = "RESTARTED AFTER LANDING", re.sub(r"^.*?: ", "", held)[:96]
                 return row, err
         if landed and probe in SETTLE:
             t_settle = time.time()
@@ -598,6 +671,13 @@ for probe, rel, old, new, want in PROBES:
         row["outcome"], ok = "RESTART, MUST LAND", False
     if ok and must and must != LAND and (row["outcome"] != "restart" or not any(re.search(must, l) for l in err)):
         row["outcome"], ok = "MUST RESTART WITH REASON", False
+    if ok and probe in GATE:
+        _, said, never = GATE[probe]
+        missing = [w for w in said if not any(re.search(w, l) for l in err)]
+        misread = [l for l in err if any(re.search(n, l) for n in never)]
+        if missing or misread:
+            row["outcome"], ok = "GATE MISREAD", False
+            row["patch"] = (misread[0] if misread else "no line like " + missing[0])[:160]
     fails += 0 if ok else 1
     print("%-23s %-15s %6s ms value=%-4s want=%-2s relaunch=%-4s fresh=%-4s %s | %s" % (probe, row["outcome"], row.get("ms", "-"), row["value"], want, row.get("relaunch", "-"), row.get("fresh", "-"), row["trace"] + (" settle_ms=%d" % row["settle_ms"] if "settle_ms" in row else ""), row["patch"]), flush=True)
     if not ok and "-v" in args:

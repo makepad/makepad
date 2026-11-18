@@ -93,7 +93,7 @@ fn regions_of(b: &Body, r: &Regions) -> crate::borrowck::mir_nll::MirRegionResul
     for c in &r.constraints { outlives.push(*c); }
     let input = RegionInput { universe_causes: vec![], polonius: Default::default(), tainted_by_errors: false,
         relations: UniversalRegionRelations::create(UniversalRegions::new(0, None, universal), definitions.len(), &[]),
-        definitions, outlives, liveness, type_tests: vec![] };
+        definitions, outlives, liveness, type_tests: vec![], advisories: vec![] };
     let prog = Program::new(&std::sync::Arc::new(crate::Session::default()));
     let tcx = Tcx::new();
     compute_regions(&tcx, &prog, b, input, false)

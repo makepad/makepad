@@ -242,6 +242,7 @@ mod tests {
             cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
             reuse: Default::default(), previous: None,
             context: crate::source_context::Context::new("/tmp/relax-parse-reuse.rs", Default::default(), sess),
+            line_origins: Default::default(),
         };
         let initial = "#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)] struct S { x: u32 }\nmacro_rules! m { ($x:literal) => { $x + 1 }; }\nfn f() -> u32 { m!(2) }\nfn g() -> u32 { 0 }";
         for text in [initial.to_string(), initial.replace("{ 0 }", "{ 1 }"),
@@ -281,6 +282,7 @@ mod tests {
                 cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
                 reuse: Default::default(), previous: None,
                 context: crate::source_context::Context::new(path, Default::default(), sess),
+                line_origins: Default::default(),
             }
         };
         let text = "#[derive(Debug, Clone, Copy, PartialEq)] struct S { x: u32 }\nmacro_rules! m { ($x:literal) => { $x + 1 }; }\nfn f() -> u32 { m!(2) }";
@@ -335,6 +337,7 @@ mod tests {
             cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
             reuse: Default::default(), previous: None,
             context: crate::source_context::Context::new(path, Default::default(), sess),
+            line_origins: Default::default(),
         };
         let text = "#[derive(Debug, Clone, Copy, PartialEq)] struct S { x: u32 }\nmacro_rules! m { ($x:literal) => { $x + 1 }; }\nfn f() -> u32 { m!(2) }";
         // the load: the crate's context holds the file's text, and the demand load's outline

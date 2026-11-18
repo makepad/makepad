@@ -12,6 +12,9 @@ pub enum GoalSource {
     /// A nested goal required to prove that types are equal/subtypes (always unproductive).
     TypeRelating,
     ImplWhereBound,
+    /// A where-clause of a written impl: an `ImplWhereBound` that gives a cycle of a coinductive trait no
+    /// productive step, so `unsafe impl Sync for S where S: Sync` does not prove itself (rustc issue 149743).
+    UserImplWhereBound,
     AliasBoundConstCondition,
     AliasWellFormed,
     /// A normalization of an alias in a nested goal, tracking the nested goal's own path kind.

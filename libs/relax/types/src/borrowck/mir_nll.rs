@@ -2,7 +2,7 @@
 use super::constraints::OutlivesConstraintSet;
 use super::dataflow::RegionScope;
 use super::handle_placeholders::compute_sccs_applying_placeholder_outlives_constraints;
-use super::region_infer::{RegionDefinition, RegionInferenceContext, TypeTest};
+use super::region_infer::{Advisory, RegionDefinition, RegionInferenceContext, TypeTest};
 use super::region_infer::values::LivenessValues;
 use super::type_check::free_region_relations::UniversalRegionRelations;
 use crate::mir::{Body, Location, Region};
@@ -89,6 +89,7 @@ pub struct RegionInput {
     pub relations: UniversalRegionRelations,
     pub liveness: LivenessValues,
     pub type_tests: Vec<TypeTest>,
+    pub advisories: Vec<Advisory>,
     /// Why each universe was created (diagnostics of placeholder errors).
     pub universe_causes: Vec<(UniverseIndex, super::type_check::UniverseInfo)>,
 }
@@ -99,6 +100,7 @@ pub struct MirRegionResult {
     pub regioncx: RegionInferenceContext,
     pub locations: LocationMap,
     pub type_tests: Vec<TypeTest>,
+    pub advisories: Vec<Advisory>,
     pub universe_causes: Vec<(UniverseIndex, super::type_check::UniverseInfo)>,
 }
 impl RegionScope for MirRegionResult {
@@ -114,8 +116,8 @@ pub fn compute_regions(tcx: &Tcx, prog: &Program, body: &Body, input: RegionInpu
     let lowered = compute_sccs_applying_placeholder_outlives_constraints(
         input.definitions, input.outlives, input.relations.universal_regions.fr_static);
     let regioncx = RegionInferenceContext::solve(tcx, prog, lowered, input.relations, input.liveness,
-        locations.num_points(), &input.type_tests, nested);
-    MirRegionResult { polonius: input.polonius, nested, tainted_by_errors: input.tainted_by_errors, regioncx, locations, type_tests: input.type_tests, universe_causes: input.universe_causes }
+        locations.num_points(), &input.type_tests, &input.advisories, nested);
+    MirRegionResult { polonius: input.polonius, nested, tainted_by_errors: input.tainted_by_errors, regioncx, locations, type_tests: input.type_tests, advisories: input.advisories, universe_causes: input.universe_causes }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -137,7 +139,6 @@ use crate::types::{RegionId, RegionKind, TyId, TyKind, UniverseIndex};
 
 /// What the driver needs of N01's inference context beyond the type operations.
 pub trait RegionDriverOps: BorrowckTypeOps {
-    fn num_region_vars(&self) -> usize;
     /// The origin and universe `next_nll_region_var*` recorded for `vid`.
     fn region_var_info(&self, vid: RegionVid) -> (NllRegionVariableOrigin, UniverseIndex);
     /// `renumber_mir`: every free region of the body and of its promoted bodies becomes a fresh variable.
@@ -222,9 +223,9 @@ impl MirTypeck {
     pub fn into_region_input(self, infcx: &dyn RegionDriverOps) -> RegionInput {
         let definitions = self.definitions(infcx);
         let relations = self.relations(definitions.len());
-        let MirTypeckRegionConstraints { outlives_constraints, liveness_constraints, type_tests, universe_causes, .. } = self.constraints;
+        let MirTypeckRegionConstraints { outlives_constraints, liveness_constraints, type_tests, advisories, universe_causes, .. } = self.constraints;
         RegionInput { polonius: self.polonius, tainted_by_errors: self.tainted_by_errors, definitions, outlives: outlives_constraints,
-            relations, liveness: liveness_constraints, type_tests, universe_causes }
+            relations, liveness: liveness_constraints, type_tests, advisories, universe_causes }
     }
 }
 
@@ -334,7 +335,6 @@ pub fn free_regions_in_order(tcx: &Tcx, ty: TyId) -> Vec<RegionId> {
 }
 
 impl RegionDriverOps for super::infer_ctxt::BorrowckInferCtxt<'_> {
-    fn num_region_vars(&self) -> usize { self.infcx.num_region_vars() }
     fn region_var_info(&self, vid: RegionVid) -> (NllRegionVariableOrigin, UniverseIndex) {
         use crate::infer::region_constraints::RegionVariableOrigin;
         let origin = match self.infcx.region_var_origin(vid as u32) {
@@ -372,7 +372,14 @@ impl RegionDriverOps for super::infer_ctxt::BorrowckInferCtxt<'_> {
         match super::type_check::canonical::fully_perform_op_raw(self, universals, &self.region_bound_pairs, &self.param_env.clauses, out,
             super::type_check::Locations::All(span), span, super::constraints::ConstraintCategory::Internal, op) {
             Ok(ty) => ty,
-            Err(_) => { self.tainted_by_errors.set(true); self.type_op_failed.set(true); self.tcx.tys.error }
+            Err(_) => {
+                self.tainted_by_errors.set(true);
+                self.type_op_failed.set(true);
+                if self.type_op_failure.borrow().is_none() {
+                    *self.type_op_failure.borrow_mut() = Some(format!("normalize the signature type `{}`", crate::typeck::ty_to_string(false, self.prog, &self.tcx, ty)));
+                }
+                self.tcx.tys.error
+            }
         }
     }
 }

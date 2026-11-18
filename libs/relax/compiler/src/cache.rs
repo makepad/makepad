@@ -20,10 +20,11 @@
 //!
 //! RELAX_CACHE=on (default) | off | verify | readonly;
 //! Stores live in `<cargo target dir>/relax/cache` (dirs.rs); RELAX_CACHE_DIR replaces
-//! the run dir for tests and measurement. RELAX_CACHE_MAX (MB) caps them (default: twice
-//! what the run uses, at least 4096; prune_root). The `--allow-c` builds beside them
-//! (`relax/native`) have no cap: what the last build of each slot uses stays, the rest goes
-//! (native.rs, roots).
+//! the run dir for tests and measurement. No size caps them: a store goes when no run used it
+//! for a week, or while its volume has less than a tenth free, least recently used first, never
+//! one a running pass uses (prune_root). The `--allow-c` builds beside them (`relax/native`) are
+//! kept by reachability: what the last build of each slot uses stays, the rest goes (native.rs,
+//! roots).
 
 use crate::borrowck::lazy::StoredVerdict;
 use crate::types::AliasTyKind;
@@ -133,12 +134,15 @@ fn enc_verdict(v: &StoredVerdict) -> Vec<u8> {
     match v {
         StoredVerdict::Clean => Vec::new(),
         StoredVerdict::Unchecked(why) => std::iter::once(1u8).chain(why.bytes()).collect(),
+        // the errors, each ended by a 0 byte
+        StoredVerdict::Failed(errors) => std::iter::once(2u8).chain(errors.iter().flat_map(|e| e.bytes().chain(std::iter::once(0u8)))).collect(),
     }
 }
 fn dec_verdict(p: &[u8]) -> Option<StoredVerdict> {
     match p.split_first() {
         None => Some(StoredVerdict::Clean),
         Some((1, why)) => Some(StoredVerdict::Unchecked(String::from_utf8(why.to_vec()).ok()?)),
+        Some((2, errors)) => Some(StoredVerdict::Failed(errors.split(|&b| b == 0).filter(|e| !e.is_empty()).map(|e| String::from_utf8(e.to_vec()).ok()).collect::<Option<Vec<String>>>()?)),
         Some(_) => None,
     }
 }
@@ -193,47 +197,42 @@ const TIER_QUEUED_SALT: u128 = 0x7469_6572_2d71_7565_7565_642d_7261_7465;
 /// stores a front image was mapped from: kept for the rest of the process (the arrays point
 /// into their mappings)
 static FRONT_STORES: relax_session::sync::Mutex<Vec<std::sync::Arc<Store>>> = relax_session::sync::Mutex::new(Vec::new());
-/// front images this run mapped (store, index entry): checksummed in the background
-static FRONT_USED: relax_session::sync::Mutex<Vec<(std::sync::Arc<Store>, usize)>> = relax_session::sync::Mutex::new(Vec::new());
 
-/// Pins a store a front image or collected image was mapped from (FRONT_STORES), and with `used`
-/// queues that entry's background checksum (FRONT_USED).
-fn pin_front(st: &std::sync::Arc<Store>, used: Option<usize>) {
+/// Pins a store a front image or collected image was mapped from (FRONT_STORES). What is mapped
+/// from it was proven by Store::get_at: a payload of the current epoch needs no check, and one of
+/// an earlier boot was checked at that first read (a mismatch was a miss).
+fn pin_front(st: &std::sync::Arc<Store>) {
     let mut keep = FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner());
     if !keep.iter().any(|k| std::sync::Arc::ptr_eq(k, st)) {
         keep.push(st.clone());
     }
-    drop(keep);
-    if let Some(i) = used {
-        FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st.clone(), i));
-    }
 }
 
-/// Checksums the front images this run mapped, on a low-priority background thread (after the
-/// start). A mismatch -- a store damaged on disk -- removes that store file, so the next run
-/// parses and compiles that crate afresh; this run already validated the images' structure
-/// (offsets, lengths, alignment) and, against its own parse, their source bytes.
-pub fn verify_front_images() {
-    let used = std::mem::take(&mut *FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()));
-    if used.is_empty() {
+/// The background pass after the start, on a low-priority thread: seals what the stores this run
+/// opened hold of an earlier boot's (store.rs seal_suspects), stopping at the quit. The front
+/// images and collected images this run mapped need no pass of their own: Store::get_at proved
+/// each at its first read, so a warm start of the boot that wrote its cache reads none of their
+/// payloads, and a store whose earlier-boot payload fails here is removed (the next run makes it
+/// again).
+pub fn background_seal() {
+    if !crate::store::suspects_pending() {
         return;
     }
     { let _k = crate::zone_alloc::kept();
     let _ = crate::run_threads::spawn("run-cache-verify", move || { let _z = crate::zone_alloc::compiler_thread();
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
-        let mut bad: Vec<std::path::PathBuf> = Vec::new();
-        for (st, i) in &used {
-            if !st.verify_at(*i) && !bad.contains(&st.path) {
-                bad.push(st.path.clone());
-            }
-        }
-        for p in bad {
-            if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("relax cache: a front image in {} does not match its checksum: the store is removed (the next run rebuilds it)", p.display());
-            }
-            let _ = std::fs::remove_file(crate::store::current(&p));
-        }
+        background_checks();
     });
+    }
+}
+
+/// `background_seal`'s work, on the calling thread.
+fn background_checks() {
+    let t = std::time::Instant::now();
+    let sealed = crate::store::seal_suspects(&|| crate::jit::QUIT_SEEN.load(std::sync::atomic::Ordering::Relaxed));
+    if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("relax cache: background checks: an earlier boot's payloads: {} stores sealed ({} bytes), {} removed, in {:.1} ms; epoch reads {}",
+            sealed.stores, sealed.bytes, sealed.removed, t.elapsed().as_secs_f64() * 1e3, sealed.epoch_reads);
     }
 }
 const LEDGER_KEY: u128 = 0;
@@ -251,7 +250,7 @@ const LEDGER_KEY: u128 = 0;
 // 36: a coroutine's closure type has tags of its own (enc_ty 29 for 17's form, 30 for 28's).
 // 37: a type its tree has written before is a back-reference (TY_BACKREF) when that is shorter,
 // and a callee key the entry's relocation list has written before is one (RELOC_KEY_REF).
-const ENTRY_VERSION: u32 = 37;
+const ENTRY_VERSION: u32 = 38;
 /// enc_ty's tag for "the n-th type this tree wrote in full" (a u32 n follows): written for a type
 /// whose first write was longer than this back-reference.
 const TY_BACKREF: u8 = 63;
@@ -725,6 +724,8 @@ pub(crate) struct PendingRecord {
     epoch: u64,
     /// O3 code: its inlined slots and nounwind inputs (`record_o3`)
     o3: Option<(Vec<u32>, Vec<(u32, bool)>)>,
+    /// what the code was built from (gate.rs), taken at the install
+    digest: Option<std::sync::Arc<crate::gate::CodeDigest>>,
 }
 
 /// Is a deferred record still describing the sources its code was built from?
@@ -769,6 +770,36 @@ fn record_inlined(u: &Unit, id: u32, extra: &[u32]) -> Vec<u32> {
     inlined.sort_unstable();
     inlined.dedup();
     inlined
+}
+
+/// The digest gate's identities (gate.rs): a slot by its key identity bytes, a definition by its
+/// crate and key, as the entries name them (they hold across runs).
+impl crate::gate::Ids for Cache {
+    fn slot(&mut self, u: &Unit, x: u32) -> Option<u128> {
+        let b = self.slot_bytes(u, x)?;
+        Some(relax_session::sip::hash_bytes(&b))
+    }
+    fn def(&mut self, u: &Unit, d: DefId) -> Option<u128> {
+        if self.crate_ident.get(u.prog.def(d).krate as usize).is_none() {
+            return None;
+        }
+        // (not one of an entry's named definitions: enc_defs collects a key's)
+        let named = self.enc_defs.take();
+        let mut e = E::default();
+        let mut cr = Vec::new();
+        self.enc_def(u, d, &mut e, &mut cr);
+        self.enc_defs = named;
+        Some(relax_session::sip::hash_bytes(&e.0))
+    }
+    fn slot_bytes_from(&mut self, u: &Unit, x: u32) -> (&'static str, Option<Vec<u8>>) {
+        if let Some(b) = self.fnkey_bytes.get(&x) {
+            return ("memo", b.clone());
+        }
+        if let Some(b) = self.image_ids.as_ref().and_then(|i| i.bytes_of(x)) {
+            return ("startup image", Some(b.to_vec()));
+        }
+        ("fresh encode", self.slot_bytes(u, x))
+    }
 }
 
 pub struct Cache {
@@ -949,6 +980,11 @@ pub struct Cache {
     pub last_tier1: Option<Vec<u32>>,
     /// ... and the callees that build kept as calls for lack of a body (jit.rs cached_tier1)
     pub last_kept: Vec<u32>,
+    /// ... and the digests its entry recorded (gate.rs), noted with its code at the install
+    pub(crate) last_digest: Option<std::sync::Arc<crate::gate::CodeDigest>>,
+    /// the entry being encoded: its inlined slots in the order their keys were written (the
+    /// digest gate's contexts name them by position)
+    cur_inl: Vec<u32>,
     /// the hit just linked is O2 code (a `#[relax(O2)]` slot's, or a slot an earlier run found
     /// hot): no O2 build for it this run
     pub last_o2: bool,
@@ -1038,6 +1074,11 @@ pub struct Cache {
     slot_keys: HashMap<u32, Option<u128>>,
     /// An unnamed image slot must not cache a failed key before its identity is decoded.
     key_waits: bool,
+    /// The re-key's comparison (linked_readers): a closure of a file version a live edit committed
+    /// takes its ordinal form, as the boot's text names the same closure (its owner, its ordinal
+    /// among the owner's closures, its text), so a slot over a closure the edit left alone keeps
+    /// its key. Such a key is only compared: it is never remembered (key_waits) nor stored.
+    ordinal_in_edits: bool,
     /// a slot's encoded key (None: not encodable), and encoded keys already decoded to slots
     fnkey_bytes: HashMap<u32, Option<Vec<u8>>>,
     /// borrow-check verdicts recorded by this run (not flushed yet)
@@ -1431,9 +1472,12 @@ impl Cache {
             linked_key: HashMap::new(),
             slot_keys: HashMap::new(),
             key_waits: false,
+            ordinal_in_edits: false,
             last_callees: Vec::new(),
             last_tier1: None,
             last_kept: Vec::new(),
+            last_digest: None,
+            cur_inl: Vec::new(),
             last_o2: false,
             last_provisional: None,
             last_base: false,
@@ -1631,8 +1675,8 @@ impl Cache {
             }
             crate::store::note_program(*root as u64, &roles);
         }
-        // other Relax builds' files and the cap: pruned off the start's critical path, after
-        // this run's stores are open (so marked live: store::live)
+        // replaced and unused stores, and room on the volume: pruned off the start's critical
+        // path, after this run's stores are open (so marked live: store::live)
         if mode != Mode::ReadOnly {
             let r = root.clone();
             // the shared code folder too (by size alone: prune_shared)
@@ -2189,23 +2233,38 @@ impl Cache {
         self.closure_fps.get(&(file, expr)).copied()
     }
 
-    /// Item `item`'s closures in order, memoized per item and file version.
-    fn item_closures(&mut self, u: &Unit, item: DefId) -> std::sync::Arc<[u32]> {
-        let file = u.prog.def(item).file;
-        self.closure_ords.entry((item, file)).or_insert_with(|| crate::program::closure_exprs(&u.prog, item).into()).clone()
+    /// Item `item`'s closures in order in file version `file` (its current one, or an older one a
+    /// running closure names: program::item_in_version), memoized per item and file version.
+    /// None: the item has no item in that version.
+    fn item_closures(&mut self, u: &Unit, item: DefId, file: u32) -> Option<std::sync::Arc<[u32]>> {
+        if let Some(v) = self.closure_ords.get(&(item, file)) {
+            return Some(v.clone());
+        }
+        let at = crate::program::item_in_version(&u.prog, item, file)?;
+        let v: std::sync::Arc<[u32]> = crate::program::closure_exprs_at(&u.prog, file, at).into();
+        self.closure_ords.insert((item, file), v.clone());
+        Some(v)
     }
 
     /// Closure `expr` of `file` as its owner knows it, the way rustc's DefPath names a closure:
     /// its ordinal among the closures of the item that encloses it (`owner`, or the item a closure
     /// def `owner` is in) and its text, with no file version and no position -- a line added above
     /// it, or anywhere else in its file, leaves it the same closure (its code's entries still say
-    /// where it is: code keys hash the enclosing bodies' text and position). None: an async fn's
-    /// body, or an expression the item's closures do not hold (it keeps the file-keyed identity).
+    /// where it is: code keys hash the enclosing bodies' text and position). The ordinal is taken in
+    /// the file version the closure names: after a live edit commits its file, the owner's def is
+    /// the new version's while a running closure's type still names the old one, which the boot
+    /// parsed; counted there, it keeps the identity the boot gave it, whichever form an encode of it
+    /// came from (the startup image's, or a fresh one after the commit). None: an async fn's body,
+    /// an owner with no item in that version, or an expression the item's closures do not hold (it
+    /// keeps the file-keyed identity).
     fn closure_ordinal(&mut self, u: &Unit, owner: DefId, file: u32, expr: u32) -> Option<(u32, u64)> {
         if expr & crate::tcx::ASYNC_FN_BODY != 0 || (owner.0 as usize) >= u.prog.defs.len() { return None; }
         let item = closure_item(u, owner);
-        if u.prog.def(item).file != file { return None; }
-        let ord = self.item_closures(u, item).iter().position(|&x| x == expr)? as u32;
+        let Some(closures) = self.item_closures(u, item, file) else {
+            crate::gate::CLOSURE_ORDINAL_FILE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        };
+        let ord = closures.iter().position(|&x| x == expr)? as u32;
         Some((ord, closure_text_only_fp(u, file, expr)?))
     }
 
@@ -2215,7 +2274,7 @@ impl Cache {
         if (owner.0 as usize) >= u.prog.defs.len() { return None; }
         let item = closure_item(u, owner);
         let file = u.prog.def(item).file;
-        let expr = *self.item_closures(u, item).get(ord as usize)?;
+        let expr = *self.item_closures(u, item, file)?.get(ord as usize)?;
         (closure_text_only_fp(u, file, expr)? == fp).then_some((file, expr))
     }
 
@@ -2437,7 +2496,10 @@ impl Cache {
                     let item = closure_item(u, d);
                     if !v.contains(&item) { v.push(item); }
                 }
-                if let Some((ord, fp)) = def.filter(|_| !u.prog.is_edit_version(file)).and_then(|d| self.closure_ordinal(u, d, file, expr)) {
+                let edit = u.prog.is_edit_version(file);
+                if let Some((ord, fp)) = def.filter(|_| !edit || self.ordinal_in_edits).and_then(|d| self.closure_ordinal(u, d, file, expr)) {
+                    // (an edit version's closure, named for the re-key's comparison: not remembered)
+                    if edit { self.key_waits = true; }
                     e.u8(if coroutine { 30 } else { 28 });
                     crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                     self.enc_ty(u, owner, e, crates, depth + 1)?;
@@ -2850,7 +2912,10 @@ impl Cache {
                 }
                 // its owner's closure ordinal, as rustc names it (closure_ordinal)
                 let owner = key_defs(u, &u.fns[parent as usize].key).first().copied();
-                if let Some((ord, fp)) = owner.filter(|_| !u.prog.is_edit_version(file)).and_then(|o| self.closure_ordinal(u, o, file, expr)) {
+                let edit = u.prog.is_edit_version(file);
+                if let Some((ord, fp)) = owner.filter(|_| !edit || self.ordinal_in_edits).and_then(|o| self.closure_ordinal(u, o, file, expr)) {
+                    // (an edit version's closure, named for the re-key's comparison: not remembered)
+                    if edit { self.key_waits = true; }
                     e.u8(KeyKind::Closure as u8);
                     crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                     e.u32(ord);
@@ -3544,6 +3609,18 @@ impl Cache {
         Some(k)
     }
 
+    /// The key of one file's progress in a crate's background check (typeck_bg.rs Files): every
+    /// body owner of the file at `path` was checked clean under the crate's key `crate_key`
+    /// (crate_check_key: the crate's text, every file of it, and the Relax build). A borrowck-kind
+    /// entry in the crate's store, written once; the crate's verdict comes when all its files are in.
+    pub fn file_check_key(&mut self, crate_key: u128, path: &str) -> u128 {
+        let k = file_check_key(crate_key, path);
+        if let Some(&c) = self.key_crate.get(&crate_key) {
+            self.key_crate.insert(k, c);
+        }
+        k
+    }
+
     /// The key of the warnings of `makepad test`'s check of the crates whose check keys
     /// (crate_check_key) are `keys`, in the order checked.
     fn test_warnings_key(keys: &[u128]) -> u128 {
@@ -3944,12 +4021,13 @@ impl Cache {
             pending: rir.map_or_else(Vec::new, |r| r.pending.clone()),
             epoch: crate::jit::patch_epoch(),
             o3: None,
+            digest: rir.map(|r| crate::gate::of_func(r)),
         })
     }
 
     /// `record_o3`'s inputs for an encoding later (the O3 install is a publish: the record's key and
     /// certificate encoding runs in the bounded record batches instead). None: it would store nothing.
-    pub(crate) fn defer_record_o3(&self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], inlined: &[u32], nounwind: &[(u32, bool)]) -> Option<PendingRecord> {
+    pub(crate) fn defer_record_o3(&self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], inlined: &[u32], nounwind: &[(u32, bool)], digest: std::sync::Arc<crate::gate::CodeDigest>) -> Option<PendingRecord> {
         if matches!(u.fns[id as usize].key, FnKey::Ctfe(_)) { return None; }
         if self.mode == Mode::ReadOnly || u.fns[id as usize].patch_gen != 0 {
             return None;
@@ -3968,6 +4046,7 @@ impl Cache {
             pending: Vec::new(),
             epoch: crate::jit::patch_epoch(),
             o3: Some((inlined.to_vec(), nounwind.to_vec())),
+            digest: Some(digest),
         })
     }
 
@@ -4327,12 +4406,16 @@ impl Cache {
                     self.why(what);
                     return None;
                 };
-                keys.push(b);
+                keys.push((b, x));
             }
             keys.sort_unstable();
             e.u32(keys.len() as u32);
-            for b in &keys {
+            for (b, _) in &keys {
                 e.bytes(b);
+            }
+            // (the digest gate names an inline context's slot by its key's position here)
+            if what == "inlined slot key" {
+                self.cur_inl = keys.into_iter().map(|k| k.1).collect();
             }
         }
         // its nounwind inputs: stable keys replace session slots; false answers are included
@@ -4495,6 +4578,16 @@ impl Cache {
                 e.u128(0);
             }
         }
+        // last, the digest gate's tail (gate.rs): what the code was built from -- the pending
+        // record's (taken at the install), else the slot's RIR (an O1 record made at its build)
+        let digest = match pending {
+            Some(p) => p.digest.clone(),
+            None if o3.is_none() => u.fns[id as usize].rir.as_ref().map(|r| crate::gate::of_func(r)),
+            None => None,
+        };
+        let inl = std::mem::take(&mut self.cur_inl);
+        let mut r = crate::gate::Resolver::new(u, self);
+        crate::gate::encode(&mut |g| r.resolve(g), id, digest.as_deref(), &inl, &mut e.0);
         Some((e.0, sealed))
     }
 
@@ -4541,7 +4634,7 @@ impl Cache {
     // ------------------------------------------------------------ writing
 
     /// Writes the entries recorded this run as one new pack (with this run's late macro inputs),
-    /// then trims the cache to its size cap. Called at exit.
+    /// then prunes the cache (prune_root). Called at exit.
     fn manifest_key(&self, root: u32) -> Option<u128> {
         let mut h = Sip128::new();
         h.str("startup slots");
@@ -4634,6 +4727,15 @@ impl Cache {
 
     /// Reads the newest startup manifest of the program rooted at crate `root` (and its
     /// prelinked startup image, if it has one).
+    /// Where the loaded startup manifest holds slot `id`: Some(true) among its own slots,
+    /// Some(false) in the session tail after them, None not at all.
+    #[cfg(test)]
+    pub(crate) fn manifest_holds(&mut self, u: &Unit, id: u32) -> Option<bool> {
+        let b = self.slot_bytes(u, id)?;
+        let i = self.manifest.iter().position(|m| *m == b)?;
+        Some(i < self.manifest_main)
+    }
+
     pub fn load_manifest(&mut self, root: u32) {
         self.manifest_root = Some(root);
         let Some(key) = self.manifest_key(root) else { return };
@@ -4799,14 +4901,23 @@ impl Cache {
             if i % 1024 == 1023 && stop() { return false; }
             new += !old.contains(b.0.as_slice()) as usize;
         }
+        // The manifest and its image are the union of recent startups: a start whose slots the
+        // loaded ones already hold is not recorded again, whichever of the recent starts it was (a
+        // suite's tests, an app opened on another tab), and a new one is recorded with the slots
+        // of the loaded ones added. Two tests that started differently each rebuilt the 38 MB image
+        // for their own start, which the next test rebuilt back: 175-315 ms on the owner and up
+        // to half a second of the exit, every session. The image's slots no call reached are
+        // dropped once they outnumber the ones calls reached (`lean`): a start that moved on
+        // prelinks no dead weight. (A loaded manifest that is not valid is not kept either.)
+        let lean = !self.startup_manifest_valid() || crate::jit::not_called_at_present() * 2 > self.image_slots;
         // the same start as before (within 2%), the loaded manifest still valid and its image
-        // current (within 2%, covering all but 2% of its cached slots, and at most 2% of its slots
-        // ones no call reached while its window was open: jit::startup_set_called): no new one
+        // current (within 2%, covering all but 2% of its cached slots, and not mostly slots no
+        // call reached while its window was open: jit::startup_set_called): no new one
         let (replaced, _) = self.image_replaced();
         let image_current = !self.image_rewrite && match &self.image_built {
             // this run's image: its slots replaced since it was built
             Some((_, n, _)) => replaced * 50 <= *n,
-            None => self.image_slots == 0 || ((self.image_stale + replaced) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49 && crate::jit::not_called_at_present() * 50 <= self.image_slots),
+            None => self.image_slots == 0 || ((self.image_stale + replaced) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49 && !lean),
         };
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
             self.manifest_done = true; self.manifest_len = order.len();
@@ -4816,6 +4927,34 @@ impl Cache {
         if self.verbose {
             eprintln!("relax cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}; of the image's own slots {}), image slots {} stale {} cached at present {}",
                 self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], replaced, self.image_slots, self.image_stale, self.manifest_present_cached);
+        }
+        // the union: the loaded manifest's own slots this start did not install, after this start's,
+        // and the slots its image installed ahead in this run's image. A carried slot keeps its
+        // recorded code entry only when this run takes that key as its own (recorded_key: the
+        // loaded manifest was made from these sources, or every crate the slot names is unchanged
+        // since, and no live edit), else none (its key is made again when it runs). This manifest
+        // is stamped with this run's sources, so the next start trusts every key it names: a key
+        // carried across a source change named code made for the earlier source, and a struct
+        // that gained a field had its old layout's code prelinked by every later start.
+        let mut image_ids = present_ids;
+        let mut carried = (0, 0, 0);
+        if !lean {
+            let mine: HashSet<u128> = list.iter().map(|(b, _)| identity_hash(b)).collect();
+            for (i, b) in self.manifest[..self.manifest_main.min(self.manifest.len())].iter().enumerate() {
+                if i % 1024 == 1023 && stop() { return false; }
+                if mine.contains(&identity_hash(b)) { continue; }
+                let k = self.recorded_key(b).filter(|k| self.has_index(k) || self.pending_keys.contains(k)).unwrap_or(0);
+                carried.2 += (k == 0 && self.manifest_old_keys.get(i).is_some_and(|o| *o != 0)) as usize;
+                list.push((b.clone(), k));
+                carried.0 += 1;
+            }
+            let have: HashSet<u32> = image_ids.iter().copied().collect();
+            let ahead: Vec<u32> = crate::jit::prelinked_ahead().into_iter().filter(|id| !have.contains(id)).collect();
+            carried.1 = ahead.len();
+            image_ids.extend(ahead);
+        }
+        if self.verbose {
+            eprintln!("relax cache: startup manifest {}: {} slots of the loaded manifest ({} without the code entry it recorded: not this run's key) and {} its image installed ahead kept with this start's", if lean { "lean (this start's slots only)" } else { "the union of recent startups" }, carried.0, carried.2, carried.1);
         }
         crate::run::yield_section("manifest image");
         // the image an earlier try built and then gave way after (a busy session's tries each
@@ -4830,7 +4969,12 @@ impl Cache {
             None => {
                 let at = self.replaced.len();
                 let img = if self.mode != Mode::Verify {
-                    match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
+                    let t = std::time::Instant::now();
+                    let built = self.build_image(u, &image_ids, stop);
+                    if self.verbose {
+                        eprintln!("relax cache: startup image of {} slots {} in {:.1} ms", image_ids.len(), if built.is_ok() { "built" } else { "gave way" }, t.elapsed().as_secs_f64() * 1e3);
+                    }
+                    match built { Err(()) => return false, Ok(img) => img }
                 } else { None };
                 (img, at)
             }
@@ -5067,7 +5211,7 @@ impl Cache {
         let late = crate::sip::late_inputs();
         let moved = crate::sip::late_moved();
         pack::ensure_private_dir(&self.dir)?;
-        let _io = SPILL_IO.write().unwrap_or_else(|e| e.into_inner());
+        let _io = spill_io_write();
         let ncode = self.code_path.len() as u32;
         for ((c, front), entries) in self.by_store_shared(pending) {
             if self.reads_moved(self.crate_of_store(c), front, &moved) {
@@ -5416,9 +5560,28 @@ fn append_store(path: &std::path::Path, entries: Vec<NewEntry>, stale: bool, mar
     crate::store::append(path, entries, stale).map_err(|e| format!("{}: {}", path.display(), e))
 }
 
+/// The slowest store a spill wrote (diagnostics, verbose): path, ms, entries
+static SPILL_SLOWEST: relax_session::sync::Mutex<Option<(PathBuf, f64, usize)>> = relax_session::sync::Mutex::new(None);
+
+fn spill_slowest(path: &std::path::Path, t: std::time::Instant, n: usize) {
+    if !crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) { return; }
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let mut s = SPILL_SLOWEST.lock().unwrap_or_else(|e| e.into_inner());
+    // (process state: kept heap)
+    if s.as_ref().is_none_or(|x| x.1 < ms) { crate::zone_alloc::kept_with(|| *s = Some((path.to_path_buf(), ms, n))); }
+}
+
 /// Spills/flushes exclude all writers. Cold writers share the gate only while holding
 /// their store's lock, so independent stores can progress during serial collection.
 pub static SPILL_IO: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn spill_io_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+    SPILL_IO.write().unwrap_or_else(|e| e.into_inner())
+}
+
+fn spill_io_read() -> std::sync::RwLockReadGuard<'static, ()> {
+    SPILL_IO.read().unwrap_or_else(|e| e.into_inner())
+}
 
 // Weak entries coordinate concurrent compiler worlds without retaining old stores.
 static PATHS: relax_session::sync::Mutex<Option<HashMap<PathBuf, std::sync::Weak<relax_session::sync::Mutex<()>>>>> = relax_session::sync::Mutex::new(None);
@@ -5435,9 +5598,17 @@ fn front_store_lock(path: &std::path::Path) -> std::sync::Arc<relax_session::syn
 
 impl Spill {
     pub fn write(self) -> Result<usize, String> {
-        let _g = SPILL_IO.write().unwrap_or_else(|e| e.into_inner());
+        let t = std::time::Instant::now();
+        let _g = spill_io_write();
+        let gate = t.elapsed();
         let late = crate::sip::late_inputs();
-        self.write_locked(&_g, &late)
+        let (files, shared) = (self.files.len(), self.shared.len());
+        let r = self.write_locked(&_g, &late);
+        if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+            let (slow, slow_ms, slow_n) = crate::zone_alloc::kept_with(|| SPILL_SLOWEST.lock().unwrap_or_else(|e| e.into_inner()).take()).unwrap_or_default();
+            eprintln!("relax cache: spill write: the gate in {:.1} ms, {} stores and {} shared batches written in {:.1} ms (slowest {} of {} entries, {:.1} ms)", gate.as_secs_f64() * 1e3, files, shared, (t.elapsed() - gate).as_secs_f64() * 1e3, slow.display(), slow_n, slow_ms);
+        }
+        r
     }
 
     /// The caller holds SPILL_IO exclusively, or shared plus the cold store's lock.
@@ -5453,7 +5624,9 @@ impl Spill {
                 n += entries.len();
                 entries.insert(0, NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: own_ledger(&path, late) }.into());
             }
+            let (t, n_entries) = (std::time::Instant::now(), entries.len());
             append_store(&path, entries, stale, &self.marks)?;
+            spill_slowest(&path, t, n_entries);
             if !code.is_empty() {
                 // process state: kept heap
                 let mut w = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
@@ -5465,8 +5638,10 @@ impl Spill {
         for SharedSpill { path, entries, merge, fallback, fallback_ledger } in self.shared {
             n += entries.len();
             let code: Vec<u128> = entries.iter().filter(|e| e.kind == KIND_CODE || e.kind == KIND_DATA).map(|e| e.key).collect();
+            let (t, n_entries) = (std::time::Instant::now(), entries.len());
             let back = crate::store::append_ledgered(&path, entries, LEDGER_KEY, &mut |disk| merge.merge(disk).map(|payload| NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload }))
                 .map_err(|e| format!("{}: {}", path.display(), e))?;
+            spill_slowest(&path, t, n_entries);
             let at = match back {
                 None => path,
                 Some(mut back) => {
@@ -5924,32 +6099,53 @@ pub fn app_store_files(dir: &std::path::Path, krate: &str) -> Vec<PathBuf> {
     files
 }
 
-/// The cap's floor (MB) when RELAX_CACHE_MAX is unset.
-const CAP_FLOOR_MB: u64 = 4096;
-/// A store stamped this recently is taken to be in use by another run (every run stamps the
-/// stores it opens: store::mark_live).
-const IN_USE_BY_OTHERS: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+// Relax keeps a tenth of the store folder's volume free, at most FREE_MAX (prune): room for every
+// other program's writes between two runs (swap growth, a few builds). Under it, stores go, least
+// recently used first. The rule is relax-session's, where devhub's disk guard reads it too.
+use relax_session::store_floor::{free_floor, FREE_MAX, FREE_SHARE};
+/// Under the floor, Relax holds back when all it could free is under 1/FUTILE_SHARE of what the
+/// volume lacks: other programs' files fill it, and deleting the cache would cost warm starts and
+/// leave the volume as short (said once per process).
+const FUTILE_SHARE: u64 = 10;
+
+/// The floor's rule, as the messages say it.
+fn floor_rule() -> String {
+    format!("1/{FREE_SHARE} of it, at most {} GB", FREE_MAX >> 30)
+}
+/// A store no run used for this long goes (prune): what a cache holds is what its runs used in
+/// the last week, not every build and crate version it ever saw. A run uses one again cold.
+const UNUSED_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+/// A build script's output folder or a `--allow-c` build's that no root names stays this long
+/// after its last use (native.rs, unitgraph.rs prune_build: a run that started meanwhile may be
+/// about to name it), as does a store of an older store format (prune: a run of a build from
+/// before the change may be using it).
+const UNNAMED_KEPT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Keeps the cache: first every store's older generations go (store.rs: a rewrite leaves the
 /// generation it replaced for readers that still have it open), except one this process
 /// itself opened; a delete that fails (open elsewhere, on Windows) is retried by the next
-/// start. Other Relax builds' stores stay for when that build runs again: store names hash the
+/// start. A store of another store format goes once no run stamped it for UNNAMED_KEPT: no build
+/// of this format can read it. Other Relax builds' stores stay for when that build runs again: store names hash the
 /// codegen identity (codegen_id.rs), so no other build ever reads them, and a box whose lanes run
 /// several builds went cold each time one of them pruned (the Windows node lost a stopped app's
-/// 109 code stores to a test of another build, 11-04). While `<root>/cache` holds more than the
-/// cap (RELAX_CACHE_MAX megabytes, else twice what this run uses (its live stores), at least
-/// CAP_FLOOR_MB), whole store files go, least recently used first, whichever build wrote them (a
-/// run stamps the files it uses; other crate versions' files are never stamped again) -- never
-/// one this process opened or wrote, nor one another run stamped in the last IN_USE_BY_OTHERS,
-/// nor one of a build running right now (every running process holds its build's live lock). A
-/// build with no store left loses its sets and its lock file. Only checked store files are ever
-/// deleted. Returns (bytes before, after).
+/// 109 code stores to a test of another build, 11-04). Whole store files go, whichever build wrote
+/// them (a run stamps the files it uses: store::mark_live), when no run used them for UNUSED_FOR,
+/// and, while the volume holding `<root>/cache` has less than its floor free (1/FREE_SHARE of it, at
+/// most FREE_MAX), least recently used first until it has -- unless all it could free is under
+/// 1/FUTILE_SHARE of the shortfall -- never one a running pass touched (store::running_passes: a
+/// `check -p` command's stores stay from its first package to its last), nor one this process
+/// opened or wrote, nor one of a build running right now (every running process holds its
+/// build's live lock). No size of the cache is a reason: a fixed or run-derived cap evicted what
+/// the next pass of the same packages needed (a 317-package check reused nothing, 11-16). What
+/// went, and why, is kept in `<root>/cache/evicted.log`; on a volume under its floor the run also
+/// says so. A build with no store left loses its sets and its lock file. Only checked store files
+/// are ever deleted. Returns (bytes before, after).
 /// `--allow-c` build outputs (`<root>/native`) are kept by reachability, not by size: what a
 /// slot's last build uses stays (native.rs prune). So are the outputs of the build scripts Relax
 /// runs (`<root>/build`): what a script pass's last run used stays (unitgraph.rs prune_build).
 pub fn prune_root(root: &std::path::Path) -> (u64, u64) {
-    let sizes = prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), cache_max());
-    let since = std::time::SystemTime::now().checked_sub(IN_USE_BY_OTHERS).unwrap_or(std::time::UNIX_EPOCH);
+    let sizes = prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), None);
+    let since = std::time::SystemTime::now().checked_sub(UNNAMED_KEPT).unwrap_or(std::time::UNIX_EPOCH);
     let native = crate::native::prune(&root.join("native"), since, false);
     if native > 0 && std::env::var_os("RELAX_CACHE_TRACE").is_some() {
         eprintln!("relax cache: pruned {native} native build director(ies) no root names");
@@ -5961,27 +6157,33 @@ pub fn prune_root(root: &std::path::Path) -> (u64, u64) {
     sizes
 }
 
-/// RELAX_CACHE_MAX in bytes (None: unset, the default cap).
-fn cache_max() -> Option<u64> {
-    std::env::var("RELAX_CACHE_MAX").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20)
-}
-
-/// Keeps a shared code folder (SharedCode, Target B) by size alone: prune with no programs, so no
+/// Keeps a shared code folder (SharedCode, Target B) by use alone: prune with no programs, so no
 /// store sets and no retiring list there (a program's set is named by the program's identity, the
 /// same in two checkouts of one app: one checkout's set would retire the stores of the other's
-/// views), and the cap on this folder alone (RELAX_CACHE_MAX, else twice this run's stores there,
-/// at least CAP_FLOOR_MB). Replaced generations go; then whole stores, least recently used first,
-/// never one this process uses, one another run stamped in the last IN_USE_BY_OTHERS or one of a
-/// running build (its live lock in the folder). An evicted entry is compiled again: a miss, never a
-/// failure. Returns (bytes before, after).
+/// views). Replaced generations go; then whole stores no run used for UNUSED_FOR, and while the
+/// folder's volume is under its floor the least recently used, never one a running pass touched,
+/// one this process uses or one of a running build (its live lock in the folder). An evicted entry
+/// is compiled again: a miss, never a failure. Returns (bytes before, after).
 pub fn prune_shared(root: &std::path::Path) -> (u64, u64) {
-    prune_shared_with(root, &crate::store::live(), &crate::store::open_files(), cache_max())
+    prune_shared_with(root, &crate::store::live(), &crate::store::open_files(), None)
 }
 
-/// prune_shared with this run's stores `live`, the generation files it opened `open` and the cap
-/// in bytes (None: the default).
-fn prune_shared_with(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf>, cap: Option<u64>) -> (u64, u64) {
-    prune(root, live, open, &[], cap)
+/// prune_shared with this run's stores `live`, the generation files it opened `open` and the
+/// bytes to free (None: what the volume's floor asks for).
+fn prune_shared_with(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf>, need: Option<u64>) -> (u64, u64) {
+    prune(root, live, open, &[], need)
+}
+
+/// What the volume holding store folder `dir` lacks of its floor (1/FREE_SHARE of it free, at most
+/// FREE_MAX), in bytes, with what it has free and its floor; 0 where the system does not say.
+fn below_floor(dir: &std::path::Path) -> (u64, u64, u64) {
+    match crate::dirs::volume_space(dir) {
+        Some((free, size)) => {
+            let floor = free_floor(size);
+            (floor.saturating_sub(free), free, floor)
+        }
+        None => (0, 0, 0),
+    }
 }
 
 /// At exit: every store's replaced generations go, including the ones this process itself
@@ -6012,8 +6214,8 @@ pub fn retire_replaced_in_use() {
 }
 
 /// prune_root with this run's stores `live` (generation 0 paths), the generation files it opened
-/// `open`, and the cap in bytes (None: the default).
-fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf>, programs: &[(u64, std::collections::BTreeMap<String, String>)], cap: Option<u64>) -> (u64, u64) {
+/// `open`, and the bytes to free (None: what the volume's floor asks for, below_floor).
+fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf>, programs: &[(u64, std::collections::BTreeMap<String, String>)], need: Option<u64>) -> (u64, u64) {
     let mut before = 0u64;
     let dir = root.join("cache");
     let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = match std::fs::read_dir(&dir) {
@@ -6055,13 +6257,34 @@ fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf
         .map(|f| f.1.clone())
         .collect();
     let now = std::time::SystemTime::now();
-    let recent = |t: &std::time::SystemTime| now.duration_since(*t).map_or(true, |age| age < IN_USE_BY_OTHERS);
+    // the stores running passes touched (their records, read once a store could go); the records
+    // of passes that ended go now
+    let passes = crate::store::running_passes(&dir);
+    let pass_names: std::cell::OnceCell<HashSet<String>> = std::cell::OnceCell::new();
+    let in_pass = |n: &str| pass_names.get_or_init(|| crate::store::pass_lists(&passes)).contains(n);
     // this build's replaced crate stores (store sets, write_sets): one a program's set named and
-    // its current set no longer names goes once no set or demand part names it, this run does
-    // not use it and no run stamped it recently (until then it stays on the retiring list)
+    // its current set no longer names goes once no set or demand part names it and no running
+    // pass uses it (until then it stays on the retiring list)
     let name = |p: &PathBuf| crate::store::base_path(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // stores of another store format: no build of this format reads them (store.rs Header::parse),
+    // only a build from before the format changed, whose runs stamp what they use. One no run
+    // stamped for UNNAMED_KEPT goes, a run store too: kept by use for UNUSED_FOR, as other builds'
+    // stores are, they outweighed the stores of every build since the change. (A store of
+    // this format names its build, so only a store with none is read for its format.)
+    let mut outdated: Vec<String> = Vec::new();
+    files.retain(|(t, p, len)| {
+        let age = now.duration_since(*t).unwrap_or_default();
+        let gone = builds[p].is_none() && age >= UNNAMED_KEPT && crate::store::format_of(p).is_some_and(|f| f != crate::store::FORMAT)
+            && !live.contains(&crate::store::base_path(p)) && !open.contains(p) && !in_pass(&name(p)) && crate::store::delete_checked(p);
+        if gone { outdated.push(format!("{} {} MB, last used {} h ago: an older store format", name(p), len >> 20, age.as_secs() / 3600)); }
+        !gone
+    });
+    if !outdated.is_empty() {
+        note_evicted(&dir, &outdated);
+        crate::progress::log(&format!("relax cache: {} store(s) of an older store format went ({}/evicted.log)", outdated.len(), dir.display()));
+    }
     let keep = |f: &(std::time::SystemTime, PathBuf, u64)| builds.get(&f.1).copied().flatten() != Some(me)
-        || live.contains(&crate::store::base_path(&f.1)) || open.contains(&f.1) || recent(&f.0);
+        || live.contains(&crate::store::base_path(&f.1)) || open.contains(&f.1) || in_pass(&name(&f.1));
     let (named, retiring) = write_sets(&sets, me, programs);
     let mut part_named: HashSet<String> = HashSet::new();
     // the front stores demand parts take images from (each graph store lists them); a graph
@@ -6100,21 +6323,87 @@ fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf
         }); }
     }
     let mut total: u64 = files.iter().map(|f| f.2).sum();
-    let live_bytes: u64 = files.iter().filter(|f| live.contains(&crate::store::base_path(&f.1))).map(|f| f.2).sum();
-    let cap = cap.unwrap_or((CAP_FLOOR_MB << 20).max(2 * live_bytes));
+    // whole stores: the ones no run used for UNUSED_FOR (run stores go by reference, above), and
+    // while the volume lacks room the least recently used -- never one in use
+    let (lack, free, floor) = match need {
+        Some(n) => (n, 0, 0),
+        None => below_floor(&dir),
+    };
+    // under the floor: what this rule could free at most (every store not in use). Far below what
+    // the volume lacks, it frees nothing: the cache is not what fills the volume
+    let futile = need.is_none() && lack > 0 && {
+        let evictable: u64 = files.iter()
+            .filter(|(_, p, _)| !(live.contains(&crate::store::base_path(p)) || running.contains(p) || in_pass(&name(p))))
+            .map(|f| f.2).sum();
+        let futile = evictable < lack / FUTILE_SHARE;
+        static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if futile && !HELD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::progress::say(&format!("relax cache: the volume holding {} has {} MB free, under the {} MB ({}) Relax keeps free, but the cache could free only {} MB of the {} MB it lacks: it keeps its stores (other files fill the volume)",
+                dir.display(), free >> 20, floor >> 20, floor_rule(), evictable >> 20, lack >> 20));
+        }
+        futile
+    };
+    let lack = if futile { 0 } else { lack };
     files.sort();
     let mut evicted: HashSet<&PathBuf> = HashSet::new();
+    let (mut freed, mut unused, mut pressed) = (0u64, (0usize, 0u64), (0usize, 0u64));
+    let mut lines: Vec<String> = Vec::new();
     for (t, p, len) in &files {
-        if total <= cap {
+        let age = now.duration_since(*t).unwrap_or_default();
+        let old = age >= UNUSED_FOR;
+        // stamps ascend: once neither rule applies, none applies to a later store
+        if !old && freed >= lack {
             break;
         }
-        let in_use = live.contains(&crate::store::base_path(p)) || recent(t) || running.contains(p);
-        if !in_use && crate::store::delete_checked(p) {
-            total -= len;
-            evicted.insert(p);
+        let n = name(p);
+        let aged = old && family(&n) != RUN_STORE_FAMILY;
+        if (!aged && freed >= lack) || live.contains(&crate::store::base_path(p)) || running.contains(p) || in_pass(&n) {
+            continue;
+        }
+        if !crate::store::delete_checked(p) {
+            continue;
+        }
+        total -= len;
+        freed += len;
+        evicted.insert(p);
+        let why = if aged {
+            unused.0 += 1;
+            unused.1 += len;
+            format!("no run used it for {} days", age.as_secs() / 86400)
+        } else {
+            pressed.0 += 1;
+            pressed.1 += len;
+            match need {
+                Some(_) => format!("asked to free {lack} bytes"),
+                None => format!("the volume has {} MB free, under the {} MB ({}) kept free", free >> 20, floor >> 20, floor_rule()),
+            }
+        };
+        lines.push(format!("{n} {} MB, last used {} h ago: {why}", len >> 20, age.as_secs() / 3600));
+    }
+    if !lines.is_empty() {
+        note_evicted(&dir, &lines);
+        let what = |(n, b): (usize, u64)| format!("{n} store(s), {} MB", b >> 20);
+        if unused.0 > 0 {
+            crate::progress::log(&format!("relax cache: {} no run used for {} days went ({}/evicted.log)", what(unused), UNUSED_FOR.as_secs() / 86400, dir.display()));
+        }
+        if pressed.0 > 0 {
+            // a person may want to make room: said, not only logged
+            crate::progress::say(&format!("relax cache: the volume holding {} has {} MB free, under the {} MB ({}) Relax keeps free: {} went, least recently used first (evicted.log there)",
+                dir.display(), free >> 20, floor >> 20, floor_rule(), what(pressed)));
+        }
+        if std::env::var_os("RELAX_CACHE_TRACE").is_some() {
+            for l in &lines {
+                eprintln!("relax cache: evicted {l}");
+            }
         }
     }
-    // a build the cap took the last store of (or that left only its lock file)
+    static SHORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if need.is_none() && freed < lack && !SHORT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        // what is left is in use: the run goes on, its writes may fail (a miss, never a failure)
+        crate::progress::say(&format!("relax cache: the volume holding {} has {} MB free, under the {} MB ({}) Relax keeps free; the {} MB left in the cache is in use",
+            dir.display(), (free + freed) >> 20, floor >> 20, floor_rule(), total >> 20));
+    }
+    // a build prune took the last store of (or that left only its lock file)
     let holding: HashSet<u64> = files.iter().filter(|f| !evicted.contains(&f.1)).filter_map(|f| builds[&f.1]).collect();
     for b in crate::store::lock_builds(&dir) {
         if b != me && !holding.contains(&b) {
@@ -6126,24 +6415,41 @@ fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf
             });
         }
     }
-    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if total > cap && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        // what stayed over the cap, and why: this run's stores, then other running builds'
-        // stores, then stores another run of this build stamped recently
-        let (mut other_running, mut other_runs) = (0u64, 0u64);
-        for (t, p, len) in files.iter().filter(|f| !evicted.contains(&f.1) && !live.contains(&crate::store::base_path(&f.1))) {
-            if running.contains(p) {
-                other_running += len;
-            } else if recent(t) {
-                other_runs += len;
-            }
-        }
-        eprintln!(
-            "relax cache: {} MB stays over the cap ({} MB): this run's stores {} MB, running other builds' {} MB, stores other runs used in the last {} min {} MB",
-            total >> 20, cap >> 20, live_bytes >> 20, other_running >> 20, IN_USE_BY_OTHERS.as_secs() / 60, other_runs >> 20
-        );
-    }
     (before, total)
+}
+
+/// Appends what prune evicted (`lines`) to `<dir>/evicted.log`, each line with the time (UTC),
+/// this process and its pass (one write: two processes' lines do not interleave). Past
+/// EVICTED_LOG_MAX bytes the log keeps its newer half.
+fn note_evicted(dir: &std::path::Path, lines: &[String]) {
+    const EVICTED_LOG_MAX: u64 = 1 << 20;
+    let path = dir.join("evicted.log");
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let head = format!("{} pid {} pass {}:", utc_text(secs), std::process::id(), crate::store::pass_token());
+    let text: String = lines.iter().map(|l| format!("{head} {l}\n")).collect();
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else { return };
+    let _ = std::io::Write::write_all(&mut f, text.as_bytes());
+    if f.metadata().map_or(0, |m| m.len()) > EVICTED_LOG_MAX {
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let half = old.len() / 2;
+        let from = old[half..].find('\n').map_or(old.len(), |i| half + i + 1);
+        let _ = pack::write_atomic_with(dir, "evicted.log", |f| std::io::Write::write_all(f, old[from..].as_bytes()));
+    }
+}
+
+/// `secs` after the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ` (the civil calendar from days).
+fn utc_text(secs: u64) -> String {
+    let (days, rem) = ((secs / 86400) as i64, secs % 86400);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 /// The run stores' family (front_run.rs): file images, kept while a store refers to them.
@@ -7109,7 +7415,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     mark("demand-encode");
     let payload = crate::crate_image::encode(&graph);
     entries.push(NewEntry { key: front_graph_key(recipe.identity), kind: KIND_FRONT_GRAPH, payload });
-    let _io = SPILL_IO.write().unwrap_or_else(|e| e.into_inner());
+    let _io = spill_io_write();
     mark("io-lock");
     let _commit = crate::load_profile::span(job.profile, "front-graph-commit", "graph writer");
     crate::store::append(&path, entries, true).ok()?;
@@ -7176,7 +7482,7 @@ pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::pat
         let path = dir.join(front_store_name(&prog.session.options, prog.syms.str(prog.crates[ci].name), stored[ci]));
         let lock = front_store_lock(&path);
         let _store = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let guard = SPILL_IO.read().unwrap_or_else(|e| e.into_inner());
+        let guard = spill_io_read();
         Spill { dir: dir.to_owned(), files: vec![(path, false, entries)], shared: Vec::new(), marks: marks.clone() }.write_locked(&guard, &late)?;
     }
     let mut probes: std::collections::BTreeMap<String, bool> = base.probes.iter().cloned().collect();
@@ -7194,7 +7500,7 @@ pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::pat
         inputs, stamps, probes: probes.into_iter().collect(), demand_image: None,
     };
     let entry = NewEntry { key: front_graph_key(recipe.identity), kind: KIND_FRONT_GRAPH, payload: crate::crate_image::encode(&graph) };
-    let _io = SPILL_IO.write().unwrap_or_else(|e| e.into_inner());
+    let _io = spill_io_write();
     crate::store::append(&front_graph_path(dir, recipe.identity), vec![entry], true).map_err(|e| format!("the graph write: {e}"))?;
     Ok(stored)
 }
@@ -7415,10 +7721,10 @@ impl FrontImages {
         if !ledger_current(&st, &present, &mut HashMap::new()) {
             return None;
         }
-        // Offsets, lengths and kinds are checked here; the payload checksums run in the
-        // background after the start (verify_front_images: a mismatch removes the store, the
-        // next run parses), as for file images -- checksumming every image here touched all of
-        // their pages on the boot path. Pin only after validation.
+        // Offsets, lengths and kinds are checked here; an image of the current epoch needs no
+        // payload checksum, and one of an earlier boot is checked at its first read
+        // (Store::get_at) -- checksumming every image here touched all of their pages on the
+        // boot path. Pin only after validation.
         // the file images: all in this store, else the record still certifies the fingerprint
         // (dependents restore; this crate is parsed)
         let restored = (|| -> Option<Vec<(String, crate::preload::Preparsed)>> {
@@ -7561,7 +7867,7 @@ impl FrontImages {
             pf.sink = sink.clone();
             if f.prep.idents.iter().any(|&(lo, hi)| lo > hi || hi as usize > pf.src.len()) { return None; }
             let used = crate::macros::MacroUse::from_replay(f.used.local, f.used.uses, &f.replay.0)?;
-            // (a store an image is taken from is in use: the cap keeps it)
+            // (a store an image is taken from is in use: prune keeps it)
             st.mark_used();
             Some(crate::preload::Preparsed {
                 error: None,
@@ -8067,8 +8373,8 @@ fn front_record_from(prog: &FrontRecordView) -> Option<crate::crate_image::Recor
 /// A front image entry of store `st` (index entry `e`, key `key`), mapped for the rest of the
 /// process: inline (a demand part's) or a file's image a reference names (front_run.rs). The
 /// location is Some for a file's image. `check`: verify the payload checksums now; else
-/// structure only here (bounds; the image reader checks every section) and the checksum in the
-/// background (verify_front_images).
+/// structure only here (bounds; the image reader checks every section), the payload proven by
+/// Store::get_at (its epoch, or a check at its first read).
 fn front_entry(st: &std::sync::Arc<Store>, e: usize, key: u128, check: bool) -> Option<(Option<crate::parser::ImageLoc>, &'static [u8])> {
     let (kind, b) = st.get_at(e, key)?;
     if check && !st.verify_at(e) {
@@ -8080,7 +8386,7 @@ fn front_entry(st: &std::sync::Arc<Store>, e: usize, key: u128, check: bool) -> 
             Some((Some(loc), img))
         }
         KIND_FRONT => {
-            pin_front(st, (!check).then_some(e));
+            pin_front(st);
             // SAFETY: the store (and its mapping) is kept alive above for the rest of the
             // process, and a committed payload never changes (store.rs)
             Some((None, unsafe { std::slice::from_raw_parts(b.as_ptr(), b.len()) }))
@@ -8409,7 +8715,7 @@ fn write_front_record(job: FrontWrite) -> Result<Option<usize>, String> {
     if entries.is_empty() { return Ok(None); }
     let lock = front_store_lock(&path);
     let _store = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let guard = SPILL_IO.read().unwrap_or_else(|e| e.into_inner());
+    let guard = spill_io_read();
     let _profile = crate::load_profile::span(profile, "front-record-write", name);
     // Keep code/old parts, even if the boot record was rejected. Cache::open decides
     // staleness after loading; an early write must not retire still-linkable code.
@@ -8613,6 +8919,89 @@ mod cold_tests {
         assert_eq!(warm.prog.crates.len(), unit.prog.crates.len());
         assert_eq!(crate::crate_image::encode(&read_front_graph(&store, identity).unwrap()), crate::crate_image::encode(&graph),
             "run-time preload and collected publication must not alter the boot demand certificate");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The collected program captured under a front read, off the owner thread (run.rs
+    /// record_collected). A front writer that comes during the capture stops it at its next
+    /// check and takes the lock once the read is released, and nothing is written; a table
+    /// changed without the front write (the shape guard) drops the image too; the next capture
+    /// records the owner's image byte for byte, and a start restores the program from it.
+    #[test]
+    fn a_collected_capture_under_a_front_read_gives_way_and_guards_its_shape() {
+        isolated_test!(a_collected_capture_under_a_front_read_gives_way_and_guards_its_shape);
+        let mut session = crate::Session::default();
+        session.options.rs_lazy = true;
+        let sess = &std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-collected-capture-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        let package = dir.join("host");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("Cargo.toml"), "[package]\nname = \"capture\"\nversion = \"0.1.0\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+        let root = package.join("lib.rs").to_string_lossy().into_owned();
+        std::fs::write(&root, "pub struct Pair { pub a: u32, pub b: u64 } pub fn sum(p: &Pair) -> u64 { p.a as u64 + p.b } pub fn main() {}").unwrap();
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let pre = vec![crate::preload::PreCrate { name: "capture".into(), root, edition: 2021, cfg: cfg.clone(),
+            deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
+        let store = dir.join("cache");
+        pack::ensure_private_dir(&store).unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.record_front = true;
+        prog.front_sink = Some(FrontSink::for_dir(&store));
+        prog.preload(pre.clone());
+        prog.load_crate(&pre[0].name, &pre[0].root, 2021, cfg, vec![]).unwrap();
+        prog.resolve_imports();
+        assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+        ColdFront::default().finish_in(&mut prog, store.clone());
+        let identity = prog.front_graph.as_ref().unwrap().identity;
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let unit = Unit::new(prog, tcx, 0);
+        let mut cache = Cache::open_in(&unit, Mode::On, dir.join("collected")).unwrap();
+        cache.dir = store.clone();
+        cache.crate_path = vec![store.join(front_store_name(&sess.options, "capture", cache.fps[0]))];
+        let bytes = |payload: &crate::image::Writer<'_>| { let mut b = Vec::new(); payload.write_to(&mut b).unwrap(); b };
+        let owners = match cache.encode_collected(&unit.prog, &unit.tcx, &|| false) {
+            CollectedRecord::Ready(_, payload) => bytes(&payload),
+            _ => panic!("the owner's encode records the program"),
+        };
+        let inputs = cache.collected_record_inputs();
+        let stored = || Store::open(&collected::path(&store, identity)).is_some();
+
+        // a front writer comes during the capture: the capture's next check stops it
+        let epoch = crate::jit::front_epoch();
+        std::thread::scope(|s| {
+            let read = crate::jit::front_read("test capture");
+            let writer = s.spawn(|| drop(crate::jit::front_write()));
+            let r = inputs.capture(&unit.prog, &unit.tcx, &|| {
+                while !crate::preempt::writer_waiting() { std::thread::yield_now(); }
+                crate::run::capture_stop()
+            });
+            assert!(matches!(r, Ok(CollectedRecord::Yielded)), "a waiting front writer stops the capture");
+            drop(read);
+            writer.join().unwrap();
+        });
+        assert!(crate::jit::front_epoch() > epoch, "the writer took the front lock");
+        assert!(!stored(), "a stopped capture writes nothing");
+
+        // a table changed without the front write while the capture ran
+        collected::SHAPE_CHANGED.with(|c| c.set(true));
+        let guarded = inputs.capture(&unit.prog, &unit.tcx, &|| false);
+        assert!(guarded.as_ref().is_err_and(|why| why.contains("without the front write")), "the shape guard drops the image");
+        assert!(!stored());
+
+        // the next capture records the owner's image, and a start restores from it
+        let read = crate::jit::front_read("test capture");
+        let (dest, payload) = match inputs.capture(&unit.prog, &unit.tcx, &crate::run::capture_stop) {
+            Ok(CollectedRecord::Ready(dest, payload)) => (dest, payload),
+            _ => panic!("an undisturbed capture records the program"),
+        };
+        drop(read);
+        assert!(bytes(&payload) == owners, "the capture off the owner is the owner's image");
+        Cache::commit_collected(None, dest, payload, &|| false).expect("the capture is written");
+        let images = FrontImages { dir: store.clone(), ..Default::default() };
+        let (saved, saved_tcx, _) = images.restore_collected(sess, &pre).expect("a start restores the captured program");
+        assert_eq!((saved.defs.len(), saved.files.len(), saved_tcx.tys.len()), (unit.prog.defs.len(), unit.prog.files.len(), unit.tcx.tys.len()));
+        std::mem::forget(unit);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -9194,7 +9583,7 @@ mod data_tests {
         let method_slot = u.fn_id(FnKey::Inst(method, vec![]));
         keys.extend([FnKey::Inst(method, vec![]), FnKey::Plain(method_slot)]);
         let owner_file = u.prog.def(owner).file;
-        let owner_closures = cache.item_closures(&u, owner);
+        let owner_closures = cache.item_closures(&u, owner, owner_file).expect("the owner's closures");
         assert_eq!(owner_closures.len(), 2);
         keys.extend(owner_closures.iter().map(|&expr| FnKey::Closure(owner_file, expr, owner_slot)));
         // glue kinds: one byte below 0xFF, else the 0xFF escape and a u32 (constructors of variant
@@ -9496,6 +9885,74 @@ mod data_tests {
         assert_eq!(relax_codegen::warm::lost_slot(&name(fresh)), None, "fresh is no miss of recorded code");
         assert_eq!(relax_codegen::warm::strict_code(0), 1, "a validated warm start that missed recorded code passed the strict run");
         assert_eq!(relax_codegen::warm::strict_code(3), 3, "a failing run keeps its code");
+        drop(cache);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The digest gate's tail (gate.rs) crosses runs: an entry recorded from a slot's RIR carries
+    /// its digests, which a later run links back -- its own by the identities of what it names, a
+    /// context by the position of its slot's key in the entry, its own code as itself -- and so
+    /// does the startup image written from that entry.
+    #[test]
+    fn a_records_digests_link_back_from_its_entry_and_its_image() {
+        isolated_test!(a_records_digests_link_back_from_its_entry_and_its_image);
+        use crate::gate::{CodeDigest, Dg, NO_SLOT};
+        use relax_backend::rir::BodyDigest;
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-gate-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "#![no_std] pub fn kept() -> u32 { 1 } pub fn inner() -> u32 { 2 }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("a", dir.join("a.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let def = |u: &Unit, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap();
+        let (kept_def, inner_def) = (def(&u, "kept"), def(&u, "inner"));
+        let (kept, inner) = (u.fn_id(FnKey::Inst(kept_def, vec![])), u.fn_id(FnKey::Inst(inner_def, vec![])));
+        let krate = u.prog.def(kept_def).krate;
+        // kept's code: its lowering names inner; it took in inner's body (a copy that can wait)
+        // and itself (an inlined recursive call, no digest)
+        let own = std::sync::Arc::new(BodyDigest { raw: 7, slots: vec![inner], syms: vec![] });
+        let copied = std::sync::Arc::new(BodyDigest { raw: 8, slots: vec![], syms: vec![] });
+        let mut f = relax_backend::rir::Func::new("kept".into(), 0);
+        f.digest = Some(own.clone());
+        f.inl_slots = vec![inner, kept];
+        f.inl_digest = vec![Some(copied.clone()), None];
+        f.inl_waits = vec![true, false];
+        u.fns[kept as usize].rir = Some(std::sync::Arc::new(f));
+        let cache_dir = dir.join("cache");
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.record(&u, kept, &[0xc3], &[], &[]);
+        assert!(cache.record_manifest(&u, krate, &[kept], 1, &|| false));
+        cache.flush().unwrap();
+        drop(cache);
+        // the next run: resolved by identity, as the record was; it loads the manifest as a start does
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.load_manifest(krate);
+        assert!(cache.has_startup_manifest(), "the manifest was recorded and loads");
+        let want = {
+            let mut r = crate::gate::Resolver::new(&u, &mut cache);
+            (r.resolve(&Dg::Taken(own)), r.resolve(&Dg::Taken(copied)))
+        };
+        assert!(want.0.is_some() && want.1.is_some(), "both resolve: {want:?}");
+        let check = |d: &CodeDigest, from: &str| {
+            let v = |g: &Dg| match g {
+                Dg::Resolved(x) => Some(*x),
+                _ => None,
+            };
+            assert_eq!(v(&d.own), want.0, "{from}: its own digest");
+            let ctx: Vec<(u32, Option<u128>, bool)> = d.ctx.iter().map(|(s, g, w)| (*s, v(g), *w)).collect();
+            assert_eq!(ctx, vec![(inner, want.1, true), (kept, None, false)], "{from}: its contexts");
+            assert!(d.ctx.iter().all(|c| c.0 != NO_SLOT));
+        };
+        assert!(cache.lookup(&mut u, kept).is_some(), "kept links from its entry");
+        check(&cache.last_digest.take().expect("the entry's digests"), "the entry");
+        assert!(cache.has_startup_image(), "the manifest wrote a startup image");
+        check(&cache.image_digest(&u, kept).expect("the image slot's digests"), "the image");
         drop(cache);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -9830,14 +10287,15 @@ mod data_tests {
         std::fs::remove_dir_all(&a2).unwrap();
         std::fs::rename(&a, &a2).unwrap();
         assert_eq!(run(&mut ua2, &a2_ids, a2_path, &a2, fresh, home), (first, [6, 0, 0, 1, 1]), "the moved checkout links only the shared code");
-        // the shared folder's cap evicts the store (not stamped lately, used by no run of this
-        // process now): the next run compiles that code again and shares it, a miss and no failure
+        // short of room on its volume, prune evicts the shared store (used by no running pass, nor
+        // by a run of this process now): the next run compiles that code again and shares it, a
+        // miss and no failure
         let shared_dir = top.join("home/code");
         for e in std::fs::read_dir(shared_dir.join("cache")).unwrap().flatten().filter(|e| e.path().is_file()) {
             std::fs::File::options().write(true).open(e.path()).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
         }
-        let (before, after) = prune_shared_with(&shared_dir, &HashSet::new(), &HashSet::new(), Some(1));
-        assert!(before > 0 && after == 0, "the cap took the shared store ({before} -> {after} bytes)");
+        let (before, after) = prune_shared_with(&shared_dir, &HashSet::new(), &HashSet::new(), Some(u64::MAX));
+        assert!(before > 0 && after == 0, "prune took the shared store ({before} -> {after} bytes)");
         assert_eq!(run(&mut ua2, &a2_ids, a2_path, &a2, fresh, home), ([false, false, true, true, true, true, true, true], [1, 1, 1, 0, 1]),
             "after the eviction dep::same::<u32> misses, is compiled again and shared again; a2's own code hits");
         drop((ua, ub, ub2, ua2));
@@ -11798,6 +12256,9 @@ impl Linker {
             // never another file's (file 0 printed std's cmp.rs:1:1 for inlined code)
             files.push(self.cache().dec_file(u, &mut d).unwrap_or(u32::MAX));
         }
+        // the digest gate's tail, last (gate.rs): noted with the code at its install
+        let digest = crate::gate::decode(&d.b[d.p..], id, &|i| inl.get(i as usize).copied());
+        self.cache().last_digest = digest;
         let pc = raw.into_iter().map(|(o, p)| (o, (*files.get(relax_backend::rir::pos_file(p) as usize).unwrap_or(&u32::MAX) as u64) << 32 | (p & 0xffff_ffff) | (p & !relax_backend::rir::pos_plain(u64::MAX)))).collect();
         self.cache().last_callees = callees;
         // trait objects this code makes: the vtables it names (an impl's removal checks their makers)
@@ -12024,6 +12485,10 @@ impl Cache {
         let (n, mut by_key, mut by_cert) = (ids.len(), 0usize, 0usize);
         let mut keys: HashMap<Vec<u8>, Option<u128>> = HashMap::new();
         let mut readers = Vec::new();
+        // a certificate's slot decodes to the closures of the text now: an edit version's, named
+        // as the boot named them (ordinal_in_edits)
+        self.ordinal_in_edits = true;
+        let waits = self.key_waits;
         for id in ids {
             let Some(&entry) = self.linked_key.get(&id) else { readers.push(id); continue };
             let same = self.slot_key(u, id) == Some(entry) || {
@@ -12038,6 +12503,8 @@ impl Cache {
                 readers.push(id);
             }
         }
+        self.ordinal_in_edits = false;
+        self.key_waits = waits;
         if self.verbose {
             eprintln!("relax cache: re-key: {} of {} linked slots read the edit ({} by key, {} by what their code took in; {} keys of those) in {:.1} ms", readers.len(), n, by_key, by_cert, keys.len(), t0.elapsed().as_secs_f64() * 1e3);
         }
@@ -12348,9 +12815,24 @@ mod prune_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A running pass `token` that touched the stores `names` in store folder `dir`, as
+    /// store::open_pass records one: running while the returned lock lives.
+    fn other_pass(dir: &std::path::Path, token: &str, names: &[&str]) -> std::fs::File {
+        let passes = dir.join("passes");
+        std::fs::create_dir_all(&passes).unwrap();
+        std::fs::write(passes.join(token), names.iter().map(|n| format!("{n}\n")).collect::<String>()).unwrap();
+        let held = std::fs::File::create(passes.join(format!("{token}.held"))).unwrap();
+        held.lock_shared().unwrap();
+        held
+    }
+
+    /// Prune: with room on the volume only a store no run used for UNUSED_FOR goes; short of room
+    /// the least recently used go first, never this run's nor one a running pass touched, however
+    /// old its stamp; an ended pass's record goes and protects nothing; evicted.log says what went
+    /// and why; a rewritten store's older generation goes.
     #[test]
-    fn a_runs_stores_survive_a_tiny_cap_and_stale_ones_go_first() {
-        isolated_test!(a_runs_stores_survive_a_tiny_cap_and_stale_ones_go_first);
+    fn a_runs_and_a_running_pass_stores_stay_and_stale_ones_go_first() {
+        isolated_test!(a_runs_and_a_running_pass_stores_stay_and_stale_ones_go_first);
         let root = std::env::temp_dir().join(format!("relax-prune-{}-{}", std::process::id(), crate::clock::wall_ns()));
         let dir = root.join("cache");
         std::fs::create_dir_all(&dir).unwrap();
@@ -12363,27 +12845,42 @@ mod prune_tests {
             p
         };
         // this run's stores carry the oldest stamps, and still are never evicted
-        let used = [store("bitflags-0000000000000001.rcs", 3 * day), store("memchr-0000000000000002.rcs", 3 * day)];
+        let used = [store("bitflags-0000000000000001.rcs", 9 * day), store("memchr-0000000000000002.rcs", 3 * day)];
         let stale_old = store("bitflags-00000000000000aa.rcs", 2 * day);
         let stale_new = store("memchr-00000000000000bb.rcs", day);
-        // stamped a minute ago by another run
-        let other_run = store("amp-00000000000000cc.rcs", 60);
+        // touched by another pass that still runs (a `check -p` package checked an hour ago)
+        let pass_used = store("amp-00000000000000cc.rcs", 3600);
+        let unused = store("unused-00000000000000ee.rcs", 8 * day);
+        let pass = other_pass(&dir, "4242", &["amp-00000000000000cc.rcs"]);
         let live: HashSet<PathBuf> = used.iter().cloned().collect();
-        let all: u64 = [&used[0], &used[1], &stale_old, &stale_new, &other_run].iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
-        // one store over the cap: the least recently used one not in use goes
-        let (before, after) = prune(&root, &live, &HashSet::new(), &[], Some(all - 1));
+        let all: u64 = [&used[0], &used[1], &stale_old, &stale_new, &pass_used, &unused].iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
+        // room on the volume: only what no run used for a week goes (not this run's, 9 days old)
+        let (before, after) = prune(&root, &live, &HashSet::new(), &[], Some(0));
         assert_eq!(before, all);
+        assert!(!unused.exists(), "no run used it for 8 days");
+        assert!(used.iter().all(|p| p.exists()) && stale_old.exists() && stale_new.exists() && pass_used.exists());
+        // short of a byte: the least recently used one not in use goes
+        prune(&root, &live, &HashSet::new(), &[], Some(1));
         assert!(!stale_old.exists());
         assert!(stale_new.exists());
-        assert!(after < all);
-        // a tiny cap: every unused store goes; the run's own and the other run's stay (reported)
-        let (_, after) = prune(&root, &live, &HashSet::new(), &[], Some(1));
+        // short of everything: every unused store goes; the run's own and the running pass's stay
+        let (_, after_all) = prune(&root, &live, &HashSet::new(), &[], Some(u64::MAX));
         assert!(!stale_new.exists());
-        assert!(used.iter().all(|p| p.exists()));
-        assert!(other_run.exists());
-        assert!(after > 1);
-        // the default cap (floor, or twice the run's stores) keeps what is left
-        assert_eq!(prune(&root, &live, &HashSet::new(), &[], None).1, after);
+        assert!(used.iter().all(|p| p.exists()), "this run's");
+        assert!(pass_used.exists(), "a running pass's");
+        assert!(after_all < after);
+        // the pass ends: its record goes at the next prune, and its stores may go
+        drop(pass);
+        prune(&root, &live, &HashSet::new(), &[], Some(0));
+        assert!(!dir.join("passes/4242").exists() && !dir.join("passes/4242.held").exists(), "an ended pass's record goes");
+        assert!(pass_used.exists(), "with room, used an hour ago: it stays");
+        prune(&root, &live, &HashSet::new(), &[], Some(u64::MAX));
+        assert!(!pass_used.exists());
+        let log = std::fs::read_to_string(dir.join("evicted.log")).unwrap();
+        let line = |n: &str| log.lines().find(|l| l.contains(n)).unwrap_or_else(|| panic!("{n} in evicted.log:\n{log}")).to_string();
+        assert!(line("unused-00000000000000ee.rcs").ends_with("no run used it for 8 days"), "{log}");
+        assert!(line("bitflags-00000000000000aa.rcs").ends_with("asked to free 1 bytes"), "{log}");
+        assert!(line("amp-00000000000000cc.rcs").contains(&format!("pid {} pass {}:", std::process::id(), crate::store::pass_token())), "{log}");
         // a rewritten store's older generation goes at the next prune (also a store this run
         // uses), unless this run itself reads that generation file
         let stale_gen = store("serde-00000000000000dd.rcs", 60);
@@ -12393,23 +12890,19 @@ mod prune_tests {
         let used_gen1 = crate::store::gen_path(&used[1], 1);
         std::fs::copy(&used[1], &used_gen1).unwrap();
         let open: HashSet<PathBuf> = [used[0].clone()].into_iter().collect();
-        prune(&root, &live, &open, &[], None);
+        prune(&root, &live, &open, &[], Some(0));
         assert!(!stale_gen.exists() && crate::store::gen_path(&stale_gen, 1).exists());
         assert!(used[0].exists() && used_gen.exists());
         assert!(!used[1].exists() && used_gen1.exists());
-        for p in [crate::store::gen_path(&stale_gen, 1), used_gen, used_gen1, used[0].clone(), other_run] {
-            std::fs::remove_file(p).unwrap();
-        }
-        // the folder also holds this process's live lock (store::hold_build)
-        std::fs::remove_dir_all(&dir).unwrap();
-        std::fs::remove_dir(&root).unwrap();
+        // the folder also holds this process's live lock (store::hold_build) and pass record
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Store sets: a program's run names its store per role; a crate store the previous run's set
     /// named that the program's set no longer names (an edit changed the crate's fingerprint, a
     /// crate left the program) goes unless another program's set or a graph's demand parts name it
-    /// -- once no run stamped it recently, also at a later prune (the retiring list); a run store
-    /// no store refers to goes; a store no set ever named stays (the cap's business).
+    /// -- once no running pass uses it, also at a later prune (the retiring list); a run store
+    /// no store refers to goes; a store no set ever named stays (age and room decide).
     #[test]
     fn replaced_crate_stores_retire_by_store_sets() {
         isolated_test!(replaced_crate_stores_retire_by_store_sets);
@@ -12450,42 +12943,42 @@ mod prune_tests {
         let roles: std::collections::BTreeMap<String, String> = [("code w", "widgets-0000000000000011.rcs"), ("front w", "widgets-0000000000000031.rcs"),
             ("code s", "shared-0000000000000015.rcs"), ("front p", "parted-0000000000000017.rcs"), ("graph", "front_graph-0000000000000008.rcs")].into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         let live: HashSet<PathBuf> = [code_v2.clone(), front_v2.clone(), parted_v2.clone(), graph.clone()].into_iter().collect();
-        // a replaced store another run stamped recently stays for now
-        stamp(&removed, std::time::SystemTime::now());
-        prune(&root, &live, &HashSet::new(), &[(prog, roles.clone())], Some(u64::MAX));
+        // a replaced store another running pass uses stays for now
+        let pass = other_pass(&dir, "4243", &["removed-0000000000000004.rcs"]);
+        prune(&root, &live, &HashSet::new(), &[(prog, roles.clone())], Some(0));
         assert!(!code_v1.exists() && !front_v1.exists(), "replaced crate stores go");
         assert!(parted_v1.exists(), "a demand part takes images from it");
-        assert!(removed.exists(), "stamped recently");
+        assert!(removed.exists(), "a running pass uses it");
         assert!(shared_v1.exists(), "another program's set names it");
         assert!(code_v2.exists() && front_v2.exists() && shared_v2.exists());
-        assert!(unnamed.exists(), "never named: the cap's business");
+        assert!(unnamed.exists(), "never named: age and room decide");
         assert!(!run_kept.exists() && !run_dead.exists(), "run stores: go once no store refers to them (front_v1 went)");
         let set = std::fs::read_to_string(sets.join(format!("{me:016x}-{prog:016x}"))).unwrap();
         assert_eq!(set, "code s shared-0000000000000015.rcs\ncode w widgets-0000000000000011.rcs\nfront p parted-0000000000000017.rcs\nfront w widgets-0000000000000031.rcs\ngraph front_graph-0000000000000008.rcs\n");
         assert_eq!(std::fs::read_to_string(sets.join(format!("{me:016x}.retiring"))).unwrap(), "parted-0000000000000007.rcs\nremoved-0000000000000004.rcs\n");
-        // later: the retiring store is no longer recent and goes; the other program dropping `shared` too lets it go
-        stamp(&removed, old);
+        // later: the pass that used the retiring store ended, and it goes; the other program dropping `shared` too lets it go
+        drop(pass);
         std::fs::write(sets.join(format!("{me:016x}-{other:016x}")), "code s shared-0000000000000015.rcs\n").unwrap();
         let roles2 = roles.clone();
-        prune(&root, &live, &HashSet::new(), &[(prog, roles)], Some(u64::MAX));
+        prune(&root, &live, &HashSet::new(), &[(prog, roles)], Some(0));
         assert!(!removed.exists());
         assert!(shared_v1.exists(), "dropped by the other program without a run of it here: not on the list");
         // the part was encoded again against the new store: the old one goes
         crate::store::append(&graph, vec![NewEntry { key: 3, kind: KIND_DEMAND_STORES, payload: b"parted-0000000000000017.rcs\n".to_vec() }], true).unwrap();
         stamp(&graph, old);
-        prune(&root, &live, &HashSet::new(), &[(prog, roles2)], Some(u64::MAX));
+        prune(&root, &live, &HashSet::new(), &[(prog, roles2)], Some(0));
         assert!(!parted_v1.exists());
         assert_eq!(std::fs::read_to_string(sets.join(format!("{me:016x}.retiring"))).unwrap(), "");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A shared code folder is kept by size alone (prune_shared): two checkouts of one program that
+    /// A shared code folder is kept by use alone (prune_shared): two checkouts of one program that
     /// name different views of a crate (their store sets would retire each other's store) keep both
-    /// stores, and no store set is written there; under the cap every build's stores stay; over it
-    /// the least recently used go first, never this run's or a running build's.
+    /// stores, and no store set is written there; with room every build's stores stay; short of
+    /// room the least recently used go first, never this run's or a running build's.
     #[test]
-    fn a_shared_code_folder_is_pruned_by_size_alone() {
-        isolated_test!(a_shared_code_folder_is_pruned_by_size_alone);
+    fn a_shared_code_folder_is_pruned_by_use_alone() {
+        isolated_test!(a_shared_code_folder_is_pruned_by_use_alone);
         let root = std::env::temp_dir().join(format!("relax-shared-prune-{}-{}", std::process::id(), crate::clock::wall_ns()));
         let dir = root.join("cache");
         std::fs::create_dir_all(&dir).unwrap();
@@ -12514,29 +13007,28 @@ mod prune_tests {
         for view in [&view_a, &view_b, &view_a] {
             let roles: std::collections::BTreeMap<String, String> = [("code dep".to_string(), name(view))].into_iter().collect();
             crate::store::note_program(0x5eed, &roles);
-            prune_shared_with(&root, &live, &HashSet::new(), Some(u64::MAX));
+            prune_shared_with(&root, &live, &HashSet::new(), Some(0));
         }
         assert!(view_a.exists() && view_b.exists(), "neither checkout's view of dep retires the other's");
         assert!(!dir.join("sets").exists(), "no store sets in a shared folder");
-        assert!(other.exists() && running.exists() && used.exists(), "under the cap every build's stores stay");
-        let size = |p: &PathBuf| std::fs::metadata(p).unwrap().len();
-        let all: u64 = [&view_a, &view_b, &other, &running, &used].iter().map(|p| size(p)).sum();
-        prune_shared_with(&root, &live, &HashSet::new(), Some(all - 1));
-        assert!(!other.exists(), "over the cap the least recently used store not in use goes first");
-        assert!(view_a.exists() && view_b.exists());
+        assert!(other.exists() && running.exists() && used.exists(), "with room every build's stores stay");
         prune_shared_with(&root, &live, &HashSet::new(), Some(1));
+        assert!(!other.exists(), "short of room the least recently used store not in use goes first");
+        assert!(view_a.exists() && view_b.exists());
+        prune_shared_with(&root, &live, &HashSet::new(), Some(u64::MAX));
         assert!(!view_a.exists() && !view_b.exists(), "down to what is in use");
         assert!(used.exists() && running.exists(), "this run's store and a running build's stay");
         drop(lock);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// Another build's stores stay until the cap needs their room, as this build's do: least
+    /// Another build's stores stay until the volume needs their room, as this build's do: least
     /// recently used first, never while a process of that build runs (it holds that build's live
-    /// lock, store::hold_build). A build with no store left loses its sets and lock file.
+    /// lock, store::hold_build) nor while a running pass uses them. A build with no store left
+    /// loses its sets and lock file.
     #[test]
-    fn other_builds_stores_stay_until_the_cap_needs_their_room() {
-        isolated_test!(other_builds_stores_stay_until_the_cap_needs_their_room);
+    fn other_builds_stores_stay_until_the_volume_needs_their_room() {
+        isolated_test!(other_builds_stores_stay_until_the_volume_needs_their_room);
         let root = std::env::temp_dir().join(format!("relax-retire-{}-{}", std::process::id(), crate::clock::wall_ns()));
         let dir = root.join("cache");
         std::fs::create_dir_all(&dir).unwrap();
@@ -12559,6 +13051,20 @@ mod prune_tests {
         let unnamed = store("std-00000000000000a2.rcs", 4000, Some(0));
         let other_running = store("core-00000000000000b1.rcs", 5000, Some(alive));
         let other_stamped = store("core-00000000000000c1.rcs", 60, Some(me ^ 0x4444));
+        // stores of an older store format: no build of this one reads them, so with room too they
+        // go once no run stamped them for UNNAMED_KEPT, a run store as well
+        let older = |name: &str, age_s: u64| -> PathBuf {
+            let p = store(name, age_s, None);
+            let mut b = std::fs::read(&p).unwrap();
+            b[4..8].copy_from_slice(&(crate::store::FORMAT - 1).to_le_bytes());
+            std::fs::write(&p, b).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_s)).unwrap();
+            p
+        };
+        let (older_idle, older_run, older_stamped) = (older("serde-00000000000000d1.rcs", 1200), older("front_run-00000000000000d2.rcs", 1200), older("serde-00000000000000d3.rcs", 60));
+        assert_eq!((crate::store::build_of(&older_idle), crate::store::format_of(&older_idle)), (None, Some(crate::store::FORMAT - 1)));
+        // a pass of that build runs and uses it
+        let pass = other_pass(&dir, "4244", &["core-00000000000000c1.rcs"]);
         assert_eq!(crate::store::build_of(&mine_old), Some(me));
         assert_eq!(crate::store::build_of(&other_running), Some(alive));
         // a process of build `alive` (its lock, as hold_build takes it)
@@ -12575,30 +13081,31 @@ mod prune_tests {
         std::fs::write(&ended_set, "").unwrap();
         std::fs::write(&idle_set, "").unwrap();
         let live: HashSet<PathBuf> = [mine_used.clone()].into_iter().collect();
-        prune(&root, &live, &HashSet::new(), &[], Some(u64::MAX));
-        assert!(other_old.exists() && unnamed.exists() && other_running.exists() && other_stamped.exists(), "under the cap every build's stores stay");
+        prune(&root, &live, &HashSet::new(), &[], Some(0));
+        assert!(!older_idle.exists() && !older_run.exists(), "an older format's idle stores go, with room too");
+        assert!(older_stamped.exists(), "one a run stamped within UNNAMED_KEPT stays");
+        assert!(std::fs::read_to_string(dir.join("evicted.log")).unwrap().contains("serde-00000000000000d1.rcs 0 MB, last used 0 h ago: an older store format"));
+        assert!(other_old.exists() && unnamed.exists() && other_running.exists() && other_stamped.exists(), "with room every build's stores stay");
         assert!(idle_set.exists(), "and what names them");
         assert!(mine_old.exists() && mine_used.exists());
         assert!(dir.join("live").join(format!("{me:016x}")).exists(), "this process holds its build's lock");
         assert!(!ended_set.exists(), "an ended build's sets go with its last store");
         #[cfg(unix)]
         assert!(!ended.exists(), "and its lock file");
-        // the cap takes the least recently used first, whichever build wrote them
-        let size = |p: &PathBuf| std::fs::metadata(p).unwrap().len();
-        let all = [&mine_old, &mine_used, &other_old, &unnamed, &other_running, &other_stamped].iter().map(|p| size(p)).sum::<u64>();
-        prune(&root, &live, &HashSet::new(), &[], Some(all - 1));
+        // short of room, the least recently used go first, whichever build wrote them
+        prune(&root, &live, &HashSet::new(), &[], Some(1));
         assert!(!unnamed.exists(), "the oldest not running goes first");
         assert!(other_old.exists() && mine_old.exists());
         assert!(other_running.exists(), "older, but its build runs");
-        // down to what is in use: this run's, another run's stamped just now, a running build's
-        prune(&root, &live, &HashSet::new(), &[], Some(1));
+        // down to what is in use: this run's, a running pass's, a running build's
+        prune(&root, &live, &HashSet::new(), &[], Some(u64::MAX));
         assert!(!other_old.exists() && !mine_old.exists());
-        assert!(!idle_set.exists(), "the cap took that build's last store: its sets go");
+        assert!(!idle_set.exists(), "prune took that build's last store: its sets go");
         assert!(mine_used.exists() && other_stamped.exists() && other_running.exists());
-        // that build's process ends: the cap may take its stores now
-        drop(lock);
-        prune(&root, &live, &HashSet::new(), &[], Some(1));
-        assert!(!other_running.exists());
+        // that build's process and the pass end: prune may take their stores now
+        drop((lock, pass));
+        prune(&root, &live, &HashSet::new(), &[], Some(u64::MAX));
+        assert!(!other_running.exists() && !other_stamped.exists());
         #[cfg(unix)]
         assert!(!dir.join("live").join(format!("{alive:016x}")).exists());
         std::fs::remove_dir_all(&root).unwrap();
@@ -12617,7 +13124,6 @@ pub static RECORDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     warm_count::reset_statics();
-    reset(&FRONT_USED, relax_session::sync::Mutex::new(Vec::new()));
     reset(&WRITTEN, relax_session::sync::Mutex::new(Vec::new()));
     reset(&OPENED, relax_session::sync::Mutex::new(Vec::new()));
     reset(&TRACE, relax_session::sync::Mutex::new(None));
@@ -12625,6 +13131,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&DEFERRED_FRONT, relax_session::sync::Mutex::new(Vec::new()));
     reset(&THUNK_DECODED, std::sync::atomic::AtomicU64::new(0));
     reset(&THUNK_DECODE_NS, std::sync::atomic::AtomicU64::new(0));
+    reset(&SPILL_SLOWEST, relax_session::sync::Mutex::new(None));
     // the next run's entry sets it again (run.rs cmd_run_inner); the stores this one found stale
     // go with it
     reset(&SHARED_CODE, relax_session::sync::Mutex::new(None));
@@ -12635,4 +13142,13 @@ pub(crate) unsafe fn reset_statics() {
 pub(crate) unsafe fn reset_stores() {
     front_run::reset_statics();
     relax_session::reset_static(&FRONT_STORES, relax_session::sync::Mutex::new(Vec::new()));
+}
+
+/// The hash of `Cache::file_check_key`: a file of the crate whose check key is `crate_key`.
+pub(crate) fn file_check_key(crate_key: u128, path: &str) -> u128 {
+    let mut h = Sip128::new();
+    h.str("run-typeck-file");
+    h.u128(crate_key);
+    h.str(path);
+    h.finish128()
 }

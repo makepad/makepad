@@ -7,6 +7,8 @@ use core::time::Duration;
 
 pub type clockid_t = c_int;
 pub const CLOCK_REALTIME: clockid_t = 0;
+/// The most buffers one writev(2) takes (real std's fd max_iov: UIO_MAXIOV on Linux and Android).
+pub const MAX_IOV: usize = 1024;
 pub const CLOCK_MONOTONIC: clockid_t = 1;
 /// What real std's Instant uses on Linux.
 pub const CLOCK_INSTANT: clockid_t = 1;

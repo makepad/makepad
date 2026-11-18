@@ -6,6 +6,9 @@ use std::sync::{Arc, OnceLock};
 // Same-build data: the definition is Copy and contains only enums and integer IDs.
 unsafe impl crate::image::Pod for Def {}
 
+/// The id of a collected Program image's last component, its late names
+const LATE_NAMES: u32 = 0x4c41_5445;
+
 crate::collected_fields!(Def, kind, name, parent, file, item, sub, is_pub, krate, scope);
 crate::collected_fields!(Module, def, lexical_parent, normal, parent_mod, krate, file,
     types, values, macros, globs, anon_traits, import_pub);
@@ -272,11 +275,7 @@ impl Program {
                 || d.scope as usize >= self.mods.len() || d.file as usize >= self.files.len()
                 || (d.parent != NO_DEF && d.parent.0 as usize >= self.defs.len())) { return None; }
         let mut w = Vec::new();
-        6u32.put(&mut w);
-        let late = self.syms.late.lock().unwrap_or_else(|e| e.into_inner());
-        late.1.len().put(&mut w);
-        for s in &late.1 { s.to_string().put(&mut w); }
-        drop(late);
+        7u32.put(&mut w);
         self.crates.len().put(&mut w);
         for c in &self.crates {
             c.name.put(&mut w); c.root_mod.put(&mut w); c.edition.put(&mut w);
@@ -328,6 +327,16 @@ impl Program {
         lists!(list);
         self.repeat_expr_counts.write_image(&mut image, &mut id);
         self.collected_definitions.write_image(&mut image, &mut id);
+        // the late names last: a body parsed meanwhile (a lazy compile beside a capture under a
+        // front read) interns its expansions' names and marks its part interned, which the head
+        // above records; its names are here then too. The list only grows: a longer one is harmless.
+        let mut names = Vec::new();
+        {
+            let late = self.syms.late.lock().unwrap_or_else(|e| e.into_inner());
+            late.1.len().put(&mut names);
+            for s in &late.1 { s.to_string().put(&mut names); }
+        }
+        image.add_bytes(LATE_NAMES, names);
         Some(image)
     }
 
@@ -364,7 +373,8 @@ impl Program {
         note("repeat_expr_counts", self.repeat_expr_counts.adopt(t, retired));
         let t = crate::collected::ImageSet::read_image(&image, &mut k, &mut id)?;
         note("collected_definitions", self.collected_definitions.adopt(t, retired));
-        (k == image.len()).then_some(())
+        // (then the late names)
+        (k + 1 == image.len()).then_some(())
     }
 
     pub fn restore_collected(
@@ -377,10 +387,13 @@ impl Program {
         };
         let image = crate::image::Reader::new(bytes)?;
         let mut r = Decode::new(image.bytes(0, 0)?);
-        if u32::get(&mut r)? != 6 { return None; }
+        if u32::get(&mut r)? != 7 { return None; }
         let mut p = Program::new(session);
         p.syms = Interner::from_image(&image, 3, 3)?;
-        for s in Vec::<String>::get(&mut r)? { p.syms.intern_late(&s); }
+        // the late names are the image's last component (collected_writer_with)
+        let mut late = Decode::new(image.bytes(image.len().checked_sub(1)?, LATE_NAMES)?);
+        for s in Vec::<String>::get(&mut late)? { p.syms.intern_late(&s); }
+        if !late.bytes.is_empty() { return None; }
         phase("symbols");
         let n = usize::get(&mut r)?;
         if n > r.bytes.len() || n != pre.len() { return None; }
@@ -417,7 +430,8 @@ impl Program {
         lists!(list);
         p.repeat_expr_counts = crate::collected::ImageSet::read_image(&image, &mut k, &mut id)?;
         p.collected_definitions = crate::collected::ImageSet::read_image(&image, &mut k, &mut id)?;
-        if k != image.len() { return None; }
+        // (then the late names, read first)
+        if k + 1 != image.len() { return None; }
         phase("bindings");
         let n = usize::get(&mut r)?;
         if n != p.file_paths.len() || n != p.file_crate.len() || n != p.file_blocks.len() { return None; }

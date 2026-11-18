@@ -312,6 +312,12 @@ pub fn install_usr1(out: &mut [u64; 8]) {
     assert_eq!(unsafe { sigaction(out[0] as i32, &a, null_mut()) }, 0, "the watchdog signal's installation must succeed");
 }
 
+/// A thread of the program calls the host's out[4] and ends; joined.
+pub fn a_thread_calls_and_ends(out: &mut [u64; 8]) {
+    let f: extern "C" fn() = unsafe { std::mem::transmute(out[4] as usize) };
+    std::thread::spawn(move || f()).join().expect("the program's thread must end normally");
+}
+
 /// Raises out[1] (0: none); out[2], out[3]: the SIGUSR1 and watchdog-signal handlers' runs.
 pub fn raise_and_count(out: &mut [u64; 8]) {
     if out[1] != 0 {
@@ -765,6 +771,53 @@ fn a_program_sigusr1_and_its_send_of_the_watchdog_signal_run_its_handlers() {
     out[1] = watch as u64;
     call(&mut u, krate, "raise_and_count", arg);
     assert_eq!((out[2], out[3]), (1, 1), "the program's own send of the watchdog's signal runs its handler once");
+}
+
+/// `send_at_its_end`'s send: 1 + what pthread_kill returned (0: not sent).
+static SENT_AT_ITS_END: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// On a thread of the program: once its program code has returned (a thread-local's destructor),
+/// the watchdog's signal is sent at it, as the program's own kick of it would come then.
+extern "C" fn send_at_its_end() {
+    struct AtItsEnd;
+    impl Drop for AtItsEnd {
+        fn drop(&mut self) {
+            let r = unsafe { pthread_kill(pthread_self(), crate::os::fault::watchdog_signal()) };
+            SENT_AT_ITS_END.store(1 + r, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    thread_local! {
+        static AT_ITS_END: AtItsEnd = const { AtItsEnd };
+    }
+    AT_ITS_END.with(|_| {});
+}
+
+/// The program's own send of the watchdog's signal at one of its threads (a kick of a JIT the
+/// program runs) that comes as the thread ends stays on that thread: it ends with the thread. Sent
+/// on to the process, it ran the program's handler on a thread it was not aimed at, where that
+/// handler found no kick of its own and ended the process.
+#[test]
+fn a_kick_aimed_at_a_thread_at_its_end_stays_on_that_thread() {
+    const TEST: &str = "a_kick_aimed_at_a_thread_at_its_end_stays_on_that_thread";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        let output = child(TEST, "");
+        assert!(output.status.success(), "the thread-end child must succeed: {:?}\n{}", output.status, String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let (mut u, krate) = setup();
+    let _program = crate::os::program_thread();
+    let watch = crate::os::fault::watchdog_signal();
+    let mut out = [0u64; 8];
+    out[0] = watch as u64;
+    let arg = out.as_mut_ptr() as u64;
+    call(&mut u, krate, "install_usr1", arg);
+    out[4] = send_at_its_end as *const () as usize as u64;
+    call(&mut u, krate, "a_thread_calls_and_ends", arg);
+    assert_eq!(SENT_AT_ITS_END.load(std::sync::atomic::Ordering::SeqCst), 1, "the thread must send the signal at itself at its end");
+    assert_eq!(crate::os::progsig::counts(watch)[2], 0, "a signal aimed at a thread at its end must not go on to the process");
+    out[1] = 0;
+    call(&mut u, krate, "raise_and_count", arg);
+    assert_eq!(out[3], 0, "the program's handler must not run for it on another thread");
 }
 
 #[cfg(target_os = "linux")]

@@ -10,6 +10,9 @@ publish = false
 [package.metadata.commercial]
 include = ["../self_stamp.rs"]
 
+[package.metadata.makepad.platform-gaps]
+windows = { "lib" = "4 of 204 fail there: root resolution (2), progenv, dirs" }
+
 [dependencies]
 makepad-cpu-budget = { workspace = true }
 relax-lex = { workspace = true }

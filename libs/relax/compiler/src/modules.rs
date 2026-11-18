@@ -182,7 +182,12 @@ pub(crate) fn const_body_refusal(prog: &crate::program::Program, tcx: &crate::tc
         let errors = match (def.kind, prog.def_id_to_node_id.get(&d)) {
             (DefKind::AnonConst, Some((_, relax_front::def_collector::NodeId::AnonConst(expr)))) => crate::borrowck::check_anon_const(&cx, prog, tcx, &body, *expr),
             (DefKind::AnonConst, _) => Vec::new(),
-            _ => crate::borrowck::check_body(&cx, prog, tcx, &body).errors,
+            _ => {
+                let v = crate::borrowck::check_body(&cx, prog, tcx, &body);
+                let mut errors: Vec<String> = v.errors.iter().map(|e| e.one_line()).collect();
+                errors.extend(v.unchecked.iter().chain(&v.unsupported).map(|x| format!("not borrow-checked: {x}")));
+                return errors;
+            }
         };
         errors.iter().map(|e| e.one_line()).collect()
     }));

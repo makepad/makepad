@@ -581,7 +581,7 @@ impl Interp<'_> {
         });
         let Some(span) = span else { return unsupported("caller_location span") };
         let (Some(file), Some(path)) = (self.prog.files.get(span.file as usize), self.prog.file_paths.get(span.file as usize)) else { return unsupported("caller_location file") };
-        let (line, col) = file.line_col(span.lo);
+        let (line, col) = file.location(span.lo);
         let mut name = path.as_bytes().to_vec();
         name.push(0);
         let n = name.len() as u64;

@@ -238,3 +238,86 @@ against it, on top of what the program itself allocates.
 This is by design: the JIT and the program are one process. A program that tests itself under a
 tight data limit needs headroom for the JIT above what it uses itself. When the JIT itself runs
 out under such a limit, it says so, names the limit, and the run stops with exit code 101.
+
+## 12. The early check of a dependency finds type errors only
+
+A test run, and a program that never presents a frame, type-check the bodies of the registry crates
+their code sees in the background, and say once, early, when one does not compile (a body that
+names a std item Relax lacks, for instance); the verdict is stored, so a warm run checks nothing
+again. That check is the type checker's: names, types, traits.
+
+- rustc: cargo compiles every body of every dependency before the program starts, so any body it
+  cannot compile stops the build.
+- Relax: a body that type-checks but that Relax then fails to lower or compile is found only when
+  the run first calls it. Its error is printed then, once, and each test that calls it fails with
+  its one-line message; the run's end names the body.
+
+Start in compiler/src/typeck_bg.rs (the background check and its stored verdicts) and jit.rs
+install_error (the report when a body's build fails).
+
+## 13. A lint in a local `macro_rules!` expansion is reported at the call, rustc in the macro
+
+```rust
+#![warn(unsafe_code)]
+pub unsafe trait Plain {}  // (in a dependency, so the trait itself is not linted)
+macro_rules! plain {
+    ($t:ident) => {
+        unsafe impl Plain for $t {}
+    };
+}
+pub struct S(pub u8);
+plain!(S);
+```
+
+- rustc: the `unsafe_code` warning points at `unsafe impl` inside the macro's body, with the
+  expansion as a note.
+- Relax: the same warning, at `plain!(S);`.
+
+Diagnostics of expanded code take the call site's position. Start where lints map a position in a
+local rules expansion back to the file (types/src/lint.rs, front/src/parser.rs expansion_kind and
+the origin tables).
+
+## 14. `unsafe_code` misses an unsafe block in a function an attribute macro passes on
+
+A proc-macro crate with `#[proc_macro_attribute] pub fn pass(_: TokenStream, item: TokenStream)
+-> TokenStream { item }`, and in a crate with `#![warn(unsafe_code)]`:
+
+```rust
+#[mac::pass]
+pub fn first(v: &[u8]) -> u8 {
+    unsafe { *v.get_unchecked(0) }
+}
+```
+
+- rustc: warns "usage of an `unsafe` block" (the tokens are the input's, written by the crate).
+- Relax: nothing; the same function without the attribute is reported.
+
+Start in types/src/lint_late2.rs (the unsafe block lint) and how lint::external and expansion_kind
+classify the tokens an attribute macro passes on from its input.
+
+## 15. A vectored write sends only its first non-empty buffer, outside TcpStream
+
+`write_vectored` with several non-empty buffers, on a writer whose Relax impl is `io::Write`'s
+default:
+
+```rust
+use std::io::{IoSlice, Write};
+fn main() {
+    let parts = [IoSlice::new(b"a"), IoSlice::new(b"b\n")];
+    let mut out: Box<dyn Write> = Box::new(std::io::stdout());
+    println!("{}", out.write_vectored(&parts).unwrap());
+}
+```
+
+- rustc: one call takes every buffer, so this prints `ab`, then `3`, on two lines. The unix fds
+  (File, Stdout, Stderr, UnixStream, PipeWriter, ChildStdin) do one writev(2), Windows' TcpStream
+  does one WSASend, and `&mut W` and `Box<W>` pass the call on to the writer.
+- Relax: only TcpStream on unix has its own (net/socket_unix.rs `write_vectored`). Every other
+  writer, and any writer behind `&mut W` or `Box<W>` (io/mod.rs), writes the first non-empty
+  buffer, so this prints `a1`: the first buffer, then the count 1. That is a short write, not an
+  error, so `write_all` loops still work; a caller that takes one vectored write for the whole
+  message loses the rest.
+
+Start in io/mod.rs: forward `write_vectored` in the `&mut W` and `Box<W>` impls. Then give the unix
+fds a writev, as net/socket_unix.rs does. Windows' File, Stdout and pipes keep the default, as in
+rustc's std.

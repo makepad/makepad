@@ -232,10 +232,12 @@ pub(crate) struct Reuse {
 /// How a check runs, not what it rests on: the threads it checks on (`RELAX_JOBS`: the check and
 /// the boot hand every pass's results back in item order) and whom the run works for
 /// (`RELAX_RUN_OWNER`: a build farm's job or lease, which names it in the build-script claims it
-/// holds). So a store one lease filled, on any number of cores, serves the next. Only the variables
-/// named here leave the keys: any other `RELAX_*` one, one the keys do not know among them, checks
-/// again (a cold check is safe, a stale verdict is not).
-pub(crate) const RUN_RESOURCE_VARS: [&str; 2] = ["RELAX_JOBS", "RELAX_RUN_OWNER"];
+/// holds), and the `check -p` command it is one package's check of (`RELAX_CHECK_GROUP`: that
+/// command's pid, its pass: store.rs). So a store one lease filled, on any number of cores, serves
+/// the next, and one `check -p` serves the next. Only the variables named here leave the keys: any
+/// other `RELAX_*` one, one the keys do not know among them, checks again (a cold check is safe, a
+/// stale verdict is not).
+pub(crate) const RUN_RESOURCE_VARS: [&str; 3] = ["RELAX_JOBS", "RELAX_RUN_OWNER", "RELAX_CHECK_GROUP"];
 
 pub(crate) fn env_key(prog: &Program) -> u128 {
     let mut h = Sip128::new();

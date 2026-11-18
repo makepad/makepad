@@ -35,7 +35,7 @@ impl VerifyBound {
 pub struct Verify { pub ty: TyId, pub region: RegionId, pub bound: VerifyBound, pub span: u32 }
 /// An alias type is rigid or not by how it was produced (Relax's solver marks the aliases it could not normalize);
 /// rustc's types do not say so, and two spellings of one alias are the same type.
-fn forget_rigidity(tys: &crate::types::Types, t: TyId) -> TyId {
+pub(crate) fn forget_rigidity(tys: &crate::types::Types, t: TyId) -> TyId {
     struct Forget;
     impl crate::types::fold::TypeFolder for Forget {
         fn fold_ty(&mut self, tys: &crate::types::Types, t: TyId, depth: u32) -> TyId {

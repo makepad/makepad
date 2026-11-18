@@ -451,6 +451,7 @@ impl Pool {
         st.scanned[ci].insert(key, r);
         st.scan_left[ci] -= 1;
         drop(self.publish(st));
+        crate::program::load_step();
         self.cv.notify_all();
     }
 
@@ -757,6 +758,7 @@ impl Pool {
                     if !st.cancelled.remove(&key) {
                         st.done.insert(key, x);
                     }
+                    crate::program::load_step();
                     self.cv.notify_all();
                 }
             }

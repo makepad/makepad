@@ -186,8 +186,8 @@ fn compute_polonius_regions(tcx: &Tcx, prog: &Program, body: &Body, regions: &Mi
     let invalidated = matches!(body.source.kind, BodyKind::Fn | BodyKind::Closure(_) | BodyKind::Shim(_));
     let borrows = BorrowSet::build(tcx, body, invalidated, moves);
     let liveness = regions.polonius.compute_loan_liveness(tcx, prog, body, moves, &regions.locations, &borrows, &regions.regioncx);
-    let regioncx = regions.regioncx.with_liveness(tcx, prog, liveness, regions.locations.num_points(), &regions.type_tests, regions.nested);
-    MirRegionResult { regioncx, locations: regions.locations.clone(), type_tests: regions.type_tests.clone(), universe_causes: regions.universe_causes.clone(),
+    let regioncx = regions.regioncx.with_liveness(tcx, prog, liveness, regions.locations.num_points(), &regions.type_tests, &regions.advisories, regions.nested);
+    MirRegionResult { regioncx, locations: regions.locations.clone(), type_tests: regions.type_tests.clone(), advisories: regions.advisories.clone(), universe_causes: regions.universe_causes.clone(),
         polonius: regions.polonius.clone(), nested: regions.nested, tainted_by_errors: regions.tainted_by_errors }
 }
 
@@ -349,8 +349,8 @@ impl MirBorrowckCtxt<'_> {
             StatementKind::StorageDead(local) => self.access_place(&Place::local(*local), Shallow(None),
                 Write(WriteKind::StorageDeadOrDrop), true, at, span, state),
             StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(op)) => self.consume_operand(op, at, span, state),
-            StatementKind::AscribeUserType(..) | StatementKind::PlaceMention(..)
-            | StatementKind::ConstEvalCounter | StatementKind::StorageLive(..) => {}
+            StatementKind::PlaceMention(place) => self.check_place_mention(place, at, span, state),
+            StatementKind::AscribeUserType(..) | StatementKind::ConstEvalCounter | StatementKind::StorageLive(..) => {}
             // does not affect borrowck itself: the lint `tail_expr_drop_order` for borrows still live there
             StatementKind::BackwardIncompatibleDropHint { place, reason: BackwardIncompatibleDropReason::Edition2024 } => self.check_backward_incompatible_drop(place, state),
             _ => unreachable!("preflight rejected invalid phase"),
@@ -826,6 +826,17 @@ impl MirBorrowckCtxt<'_> {
         }
         if let Some(path) = self.exact_path(place) {
             if let Some(i) = self.uninit_descendant(path, state) { self.report_use_of_moved_or_uninitialized(place, place, i, action, at, span); }
+        }
+    }
+    /// A place mention (`let _ = *r;`, a `match` on a place) evaluates its place, and going through a `Deref`
+    /// reads the pointer it goes through: that pointer must be initialized, as an assignment through it
+    /// requires (`check_if_assigned_path_is_moved`). rustc checks nothing at a mention (lib.rs:855), so a
+    /// mention through an uninitialized reference compiles and dereferences whatever its bytes hold (rustc
+    /// issue 164705). A mention without a `Deref` reads nothing and stays unchecked.
+    fn check_place_mention(&mut self, place: &Place, at: Location, span: Span, state: BorrowckDomain<'_>) {
+        if let Some(i) = place.projection.iter().rposition(|e| matches!(e, PlaceElem::Deref)) {
+            let pointer = Place { local: place.local, projection: place.projection[..i].to_vec() };
+            self.check_if_full_path_is_moved(&pointer, InitAction::Use, at, span, state);
         }
     }
     fn check_if_assigned_path_is_moved(&mut self, place: &Place, at: Location, span: Span, state: BorrowckDomain<'_>) {

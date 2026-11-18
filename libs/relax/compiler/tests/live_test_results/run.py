@@ -5,10 +5,13 @@ Relax issue 131 (ported from makepad/relax PR 134).
 
 `makepad test --live live-test-results --lib -- --skip filtered`, found with `inspect list`:
 1. The first verdict names its query, `test-results group=<g>`; the query answers the group and
-   test count, then each test: both plain tests passed and ran, `ignored` ignored, `filtered`
+   test count, then each test: the plain tests passed and ran, `ignored` ignored, `filtered`
    filtered (neither ran).
 2. An edit of value() fails value_is_one: the next verdict's query has it failed and run, and
    `independent`, which the edit does not reach, passed from the earlier run (ran false).
+   `fresh_statics` passes again: the rerun starts from the program's initial statics, as a fresh
+   run does, and the verdict says it put the one static the first run changed back
+   (`statics_reset`: 1). Before, the static kept the first run's value and the rerun failed it.
 3. The first verdict's group is refused now: its results are gone, the error names the group kept.
 4. An edit whose patched value() faults (a read of an unmapped address): its verdict says
    `faulted` with its group, the JIT undoes it, and the run after that says `reverted` with the
@@ -86,23 +89,23 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
             rows = inspect(pid, *v["results"].split())
             head = [r for r in rows if "test_count" in r]
             tests = {r["name"]: (r["status"], r["ran"]) for r in rows if "name" in r}
-            if head != [{"group": v["group"], "test_count": 4}] or len(tests) != 4:
+            if head != [{"group": v["group"], "test_count": 5}] or len(tests) != 5:
                 fail("%s: header %s, %d rows: %s" % (step, head, len(tests), rows), log)
             return tests
 
         first = verdict(0)
         got = results(first, "first verdict")
-        want = {"value_is_one": ("passed", True), "independent": ("passed", True), "ignored": ("ignored", False), "filtered": ("filtered", False)}
+        want = {"value_is_one": ("passed", True), "fresh_statics": ("passed", True), "independent": ("passed", True), "ignored": ("ignored", False), "filtered": ("filtered", False)}
         if got != want:
             fail("first verdict: %s, want %s" % (got, want), log)
         lib = pkg / "src" / "lib.rs"
         time.sleep(1.1)
         lib.write_text(lib.read_text().replace("{ 1 }", "{ 2 }"))
         edited = verdict(first["seq"])
-        if edited["group"] <= first["group"] or edited.get("failures") != ["value_is_one"]:
+        if edited["group"] <= first["group"] or edited.get("failures") != ["value_is_one"] or edited.get("statics_reset") != 1:
             fail("the edit's verdict: %s" % edited, log)
         got = results(edited, "the edit's verdict")
-        want = {"value_is_one": ("failed", True), "independent": ("passed", False), "ignored": ("ignored", False), "filtered": ("filtered", False)}
+        want = {"value_is_one": ("failed", True), "fresh_statics": ("passed", True), "independent": ("passed", False), "ignored": ("ignored", False), "filtered": ("filtered", False)}
         if got != want:
             fail("the edit's verdict: %s, want %s" % (got, want), log)
         stale = inspect(pid, "test-results", "group=%d" % first["group"], check=False)
@@ -118,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
         if undone["group"] != g or undone.get("reverted") != [g] or "faulted" in undone:
             fail("the verdict after the revert: %s" % undone, log)
         head = [r for r in inspect(pid, *undone["results"].split()) if "test_count" in r]
-        if head != [{"group": g, "test_count": 4, "reverted": [g]}]:
+        if head != [{"group": g, "test_count": 5, "reverted": [g]}]:
             fail("the results after the revert: %s" % head, log)
     finally:
         try:

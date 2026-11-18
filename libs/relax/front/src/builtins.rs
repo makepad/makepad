@@ -36,6 +36,9 @@ pub struct FileCtx {
     pub manifest_dir: String,
     pub pkg_name: String,
     pub pkg_version: String,
+    /// line!() and column!() in a region copied from another text count from there
+    /// (parser::LineOrigins)
+    pub line_origins: crate::parser::LineOrigins,
     lines: std::cell::OnceCell<Vec<u32>>,
     continuations: std::cell::OnceCell<Vec<u32>>,
 }
@@ -187,6 +190,7 @@ impl FileCtx {
             manifest_dir,
             pkg_name,
             pkg_version,
+            line_origins: Default::default(),
             lines: std::cell::OnceCell::new(),
             continuations: std::cell::OnceCell::new(),
         }
@@ -978,7 +982,12 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
             }
             let pos = orig_pos(p, call_lo);
             let lc = match ctx {
-                Some(c) => line_col(p.src, c.line_starts(p.src), pos),
+                Some(c) => {
+                    let ls = c.line_starts(p.src);
+                    let lc = line_col(p.src, ls, pos);
+                    let (line, column) = c.line_origins.locate(pos, (lc.line, lc.column), |q| line_col(p.src, ls, q).line);
+                    LineColumn { line, column }
+                }
                 None => line_col(p.src, &line_starts(p.src), pos),
             };
             return Ok(one(T::Int, &if b == Builtin::Line { format!("{}u32", lc.line) } else { format!("{}u32", lc.column) }));

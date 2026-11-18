@@ -39,6 +39,15 @@ pub enum RegionErrorKind {
 }
 #[derive(Clone, Debug)]
 pub struct TypeTest { pub generic_kind: TyId, pub lower_bound: RegionVid, pub span: super::constraints::Span, pub verify_bound: VerifyBound }
+/// A signature outlives requirement checked after solving, never added to the constraint graph or propagated.
+#[derive(Clone, Copy, Debug)]
+pub struct Advisory {
+    pub sup: RegionVid,
+    pub sub: RegionVid,
+    pub span: crate::mir::Span,
+    pub category: super::constraints::ConstraintCategory,
+    pub callable: crate::infer::outlives::components::Callable,
+}
 #[derive(Clone, Debug)]
 pub enum VerifyBound { IfEq { ty: TyId, bound: RegionId }, IsEmpty, OutlivedBy(RegionVid), AnyBound(Vec<VerifyBound>), AllBounds(Vec<VerifyBound>) }
 

@@ -135,6 +135,7 @@ makepad_hal::backend::windows::win32::dialog::open::WORKER	dialog worker thread
 makepad_hal::backend::windows::win32::global::SHARED	win32 shell connection; session-keyed parts cleared by session_closed (d3d11/mod.rs:457)
 makepad_hal::backend::windows::win32::log_enabled::ON	env MAKEPAD_HAL_LOG read once, nothing sets it
 makepad_hal::backend::windows::win32::system_dpi::DPI	system DPI of the OS
+makepad_hal::backend::windows::win32::tray::set::SAID	says once per process that it runs in the services' session, which no run changes
 makepad_hal::before_exit_at_exit::ONCE	one-shot atexit install
 makepad_hal::call_scope::HOOKS	one-shot host hook install
 makepad_hal::clock::qpc_to_ns::FREQ	clock frequency
@@ -412,8 +413,9 @@ relax_compiler::cache::collected::new::ON	env RELAX_COLLECTED_TRACE read once, n
 relax_compiler::cache::dump_filter::F	env RELAX_CACHE_DUMP read once, nothing sets it
 relax_compiler::cache::front_run::RUNS	per-process store, content keys
 relax_compiler::cache::front_run::SINKS	per-process store, content keys
-relax_compiler::cache::prune::REPORTED	once per process
+relax_compiler::cache::prune::HELD	once per process
 relax_compiler::cache::prune::RUNS_CHECKED	once per process
+relax_compiler::cache::prune::SHORT	once per process
 relax_compiler::cache::trace_on::T	env RELAX_CACHE_TRACE read once, nothing sets it
 relax_compiler::check::SUBJECTS	`makepad test` only, the harness restarts by exec
 relax_compiler::check::TEST_DEPS	`makepad test` only, the harness restarts by exec
@@ -438,6 +440,8 @@ relax_compiler::forkexec::EXEC_CHILD	set in the fork child only
 relax_compiler::forkexec::VERBOSE	env switch
 relax_compiler::forkexec::table::T	pointer to the shared anonymous page for fork bookkeeping; slots follow child pids, not a Unit (forkexec.rs:56)
 relax_compiler::front::verify::ON	env RELAX_FRONT_VERIFY read once, nothing sets it
+relax_compiler::gate::gate_trace::ON	env RELAX_GATE_TRACE read once, nothing sets it
+relax_compiler::gate::probe_parts::P	env RELAX_GATE_PROBE read once, nothing sets it
 relax_compiler::hot_failure::ACTIVE	a recovery spans the restart: the replacement's completed restore (restored) ends it (STATE keeps recovery)
 relax_compiler::hot_failure::ERROR	a failed restart's JIT error verdict: no run follows it in place
 relax_compiler::hot_failure::PUMP	lock around pump (hot_failure.rs:240), holds no state
@@ -581,6 +585,7 @@ relax_compiler::jit::DEMAND_LAST	last-compile time on a monotonic clock; old is 
 relax_compiler::jit::DEMAND_SINCE	tier_clock offset, slots of the new Unit only hold later readings
 relax_compiler::jit::EXEC_CHECK	no-codegen or env switch
 relax_compiler::jit::FRONT_RW	lock, no value; must be unheld when threads end, or the next run wedges
+relax_compiler::jit::FRONT_WRITES	monotone count: readers compare two of its values (front_epoch)
 relax_compiler::jit::LOWER_AHEAD_DONE	mutex and condvar pair, no value
 relax_compiler::jit::NEXT	the count in relax_anon_fd's temp names (macOS): each file is removed as it opens, so a kept count only makes the next name new
 relax_compiler::jit::PATCH_EPOCH	monotone, only compared with captured epochs of itself
@@ -737,6 +742,7 @@ relax_compiler::os::tls::fixed::NEXT	handed out once per process, survivors hold
 relax_compiler::os::tls::imp::DTOR	native dtor, overwritten with the same fn; cfg-off: windows
 relax_compiler::owner::BETWEEN_REQUESTS	marker address, never read (owner.rs:261)
 relax_compiler::owner::CHILD	fork child latch
+relax_compiler::owner::MAIN_AHEAD	monotone count: readers take differences (run.rs mid_flush)
 relax_compiler::owner::NOW_CLASS	what the owner serves now, overwritten
 relax_compiler::owner::NOW_FROM	what the owner serves now, overwritten
 relax_compiler::owner::NOW_SITE	what the owner serves now, overwritten
@@ -789,6 +795,10 @@ relax_compiler::reload::watch_events::native::KICK	wake of the OS watcher, a sta
 relax_compiler::reload::watch_events::native::flush::N	flush marker counter never reused (reload_watch.rs:324)
 relax_compiler::reload::watch_events::native::kick_fd::FD	eventfd of the process
 relax_compiler::reload::watch_events::native::port::PORT	OS completion port; cfg-off: windows
+relax_compiler::restart_parent::FILE	the request file of the restart parent that started this process: a run that starts again in place is still that parent's run, its pid the same
+relax_compiler::restart_parent::PARENT	the pid of the restart parent that started this process: a run that starts again in place is still its run
+relax_compiler::restart_parent::unix::CHILD	the restart parent's own, a process that runs no program (no run ends in place in it): the run it waits for, read by its signal handler
+relax_compiler::restart_parent::unix::STOP	the restart parent's own, a process that runs no program (no run ends in place in it): the signal it passed on, after which no run starts
 relax_compiler::run::APP_START	set only in cmd_run_app, which restart skips
 relax_compiler::run::BOOTING	the boot gate: the restart that ends a run sets it for the next run's boot, which clears it (run_end)
 relax_compiler::run::CHECK_RECORDS_COLLECTED	`makepad check` only
@@ -823,12 +833,17 @@ relax_compiler::stale::WAKE_W	pipe of the run-stale watcher, which its ONCE spaw
 relax_compiler::stale::start_watcher::ONCE	Once of the run-stale watcher thread, which stays (stale.rs:251)
 relax_compiler::std_dir::HINT	path hint
 relax_compiler::std_source::SELECTED	std selection needs one check per process
+relax_compiler::store::EPOCH_READS	a count for the background checks' trace line; only grows, nothing reads it to decide
 relax_compiler::store::GENS	current_gen rechecks the disk on every look; a relist replaces what was known of the folder (a deleted generation goes)
 relax_compiler::store::HELD	shared build lock, held until process exit by design
 relax_compiler::store::LIVE	files this process opened, kept from eviction; only grows, no wrong behaviour
 relax_compiler::store::OPEN_FILES	files this process opened, kept from eviction; only grows, no wrong behaviour
+relax_compiler::store::PASSES	this process's pass records (a shared lock and the stores it touched, per store folder), held until process exit by design: a run that ends in place is the same process and the same pass
 relax_compiler::store::PROGRAMS	store sets by root identity, a later call replaces the same key
+relax_compiler::store::epoch::BOOT	the machine's boot identity, read once: one value for every run of the process
+relax_compiler::store::fresh_epoch::FRESH	env RELAX_STORE_FRESH_EPOCH read once, nothing sets it
 relax_compiler::store::profiling::P	env RELAX_PROFILE read once, nothing sets it
+relax_compiler::store::write_failed::SAID	log once
 relax_compiler::syms::reloc_sig::F	env RELAX_RELOC_SIG read once, nothing sets it
 relax_compiler::syms::reloc_sig_code::VALUE	env RELAX_RELOC_SIG_CODE read once, nothing sets it
 relax_compiler::syms::reloc_sig_verbose::ON	env RELAX_RELOC_SIG_VERBOSE read once, nothing sets it
@@ -915,6 +930,7 @@ relax_types::borrowck::lazy::SEQ	event sequence never reused (lazy.rs:32)
 relax_types::borrowck::lazy::WAKE	wake handle
 relax_types::borrowck::lazy::front_trace::ON	env RELAX_FRONT_TRACE read once, nothing sets it
 relax_types::borrowck::lazy::worker::COUNTS	env RELAX_BODY_COUNTS read once, nothing sets it
+relax_types::borrowck::type_check::binder_scope::SCOPE_CLOSES	scope closes by outcome for `makepad check`'s summary (check.rs), only incremented; no run reads it
 relax_types::feature_gate::stability_table::TABLE	table from include_str in the binary (feature_gate.rs:1231)
 relax_types::lint::cmdline::FLAGS	env RELAX_LINT_FLAGS read once, nothing sets it
 relax_types::lint_table::GROUPS	constant table

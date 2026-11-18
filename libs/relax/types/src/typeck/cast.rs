@@ -154,11 +154,14 @@ impl Fcx<'_> {
                 if source_mut || !target_mut {
                     // cast.rs check_ref_cast: the referent is structurally resolved (an alias of an array)
                     let inner = self.norm(inner);
-                    if let TyKind::Array(element, _) = self.tcx.tys.kind(self.shallow(inner)).clone() {
+                    let inner = self.shallow(inner);
+                    if let TyKind::Array(element, _) = self.tcx.tys.kind(inner).clone() {
                         let snapshot = self.start_snapshot();
                         if self.eq(element, pointee) {
                             self.commit_from(snapshot);
-                            self.set_coerce(x.0, Coerce::RefToRaw(source_mut), target);
+                            // the coercion is to the pointer to the array (`array_ptr_type`), not to the element
+                            let array_ptr = self.tcx.tys.intern(TyKind::Ptr(source_mut, inner));
+                            self.set_coerce(x.0, Coerce::RefToRaw(source_mut), array_ptr);
                             // (no reborrow besides: `&mut [T; N] as *const T` is `&raw mut *x`)
                             return;
                         } else { self.rollback_to(snapshot); }

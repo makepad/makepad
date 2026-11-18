@@ -41,7 +41,7 @@ impl Tcx {
         for &(def, term, n) in self.tys.list(*bounds) {
             let owner = prog.def(def).parent;
             let mut tr = None;
-            if *principal != NO_DEF { for p in self.supertraits(prog, predicates[0].clone()) {
+            if *principal != NO_DEF { for p in self.supertraits_unfiltered(prog, predicates[0].clone()) {
                 if let PredicateKind::Clause(ClauseKind::Trait(t)) = p.kind { if t.trait_ref.def_id == owner { tr = Some(t.trait_ref); break; } }
             } }
             let tr = tr.expect("object projection's defining trait");

@@ -90,6 +90,8 @@ pub mod infer;
 
 #[cfg(test)]
 mod fnhdr_tests;
+#[cfg(test)]
+mod rejected_shape_tests;
 
 #[cfg(test)]
 mod token_source_tests;

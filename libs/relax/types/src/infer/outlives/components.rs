@@ -1,6 +1,6 @@
 // ported from N:rustc_type_ir/src/outlives.rs @8d1a764
 use crate::tcx::Tcx;
-use crate::program::Program;
+use crate::program::{DefId, Program};
 use crate::types::{AliasTy, RegionId, RegionKind, TyId, TyKind, Types};
 use crate::types::fold::{TypeFolder, super_fold_ty};
 use std::collections::HashSet;
@@ -50,4 +50,57 @@ pub fn alias_region_is_bivariant(tcx: &Tcx, prog: &Program, alias: &AliasTy, ind
         return variances[indices.lifetimes[index] as usize] == crate::types::variance::V::Bi;
     }
     false
+}
+
+/// The callable whose signature supplies an advisory lifetime requirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Callable { FnItem(DefId), Closure }
+
+/// Collect free signature regions separately, so the borrow check keeps its ordinary outlives components.
+pub fn push_signature_regions(tcx: &Tcx, prog: &Program, ty: TyId, out: &mut Vec<(RegionId, Callable)>) {
+    SignatureCollector { tcx, prog, out, visited: HashSet::new() }.fold_ty(&tcx.tys, ty, 0);
+}
+struct SignatureCollector<'a> { tcx: &'a Tcx, prog: &'a Program, out: &'a mut Vec<(RegionId, Callable)>, visited: HashSet<TyId> }
+impl TypeFolder for SignatureCollector<'_> {
+    fn fold_ty(&mut self, tys: &Types, ty: TyId, depth: u32) -> TyId {
+        if !self.visited.insert(ty) { return ty; }
+        match tys.kind(ty) {
+            TyKind::FnDef(def, args, regions) => {
+                for &t in tys.list(*args) { self.fold_ty(tys, t, depth); }
+                let tcx = self.tcx;
+                if let Some(sig) = tcx.fn_item_sig(self.prog, *def) {
+                    let args = tcx.complete_args(self.prog, *def, tys.list(*args), *regions);
+                    let mut collector = SignatureRegions { callable: Callable::FnItem(*def), out: self.out, visited: HashSet::new() };
+                    for &t in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+                        let t = tcx.instantiate_ty(self.prog, *def, &args, t);
+                        collector.fold_ty(tys, t, depth);
+                    }
+                }
+            }
+            TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: upvars, closure_sig_as_fn_ptr_ty: sig, .. }) => {
+                self.fold_ty(tys, *upvars, depth);
+                SignatureRegions { callable: Callable::Closure, out: self.out, visited: HashSet::new() }.fold_ty(tys, *sig, depth);
+            }
+            TyKind::Alias(_, alias) => {
+                // Match OutlivesCollector: only escaping aliases expose their type arguments here.
+                if tys.has_vars_bound_at_or_above(ty, 0) { for &t in tys.list(alias.args) { self.fold_ty(tys, t, depth); } }
+            }
+            TyKind::Param(_) | TyKind::Placeholder(_) | TyKind::Infer(_) | TyKind::IntVar(_) | TyKind::FloatVar(_) | TyKind::Bound(..) => {},
+            _ => { super_fold_ty(tys, ty, self, depth); }
+        }
+        ty
+    }
+}
+
+struct SignatureRegions<'a> { callable: Callable, out: &'a mut Vec<(RegionId, Callable)>, visited: HashSet<TyId> }
+impl TypeFolder for SignatureRegions<'_> {
+    fn fold_ty(&mut self, tys: &Types, ty: TyId, depth: u32) -> TyId {
+        if self.visited.insert(ty) { super_fold_ty(tys, ty, self, depth); }
+        ty
+    }
+    fn fold_region(&mut self, tys: &Types, r: RegionId, _: u32) -> RegionId {
+        // A signature contributes only free regions; bound regions and type parameters add no requirement.
+        if !matches!(tys.region_kind(r), RegionKind::ReBound(..)) && !self.out.contains(&(r, self.callable)) { self.out.push((r, self.callable)); }
+        r
+    }
 }

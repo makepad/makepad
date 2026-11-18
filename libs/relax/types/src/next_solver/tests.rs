@@ -186,16 +186,14 @@ fn round12_coherence_distinguishes_upstream_downstream_and_local_ownership() {
         assert_eq!(actual,expected);
     }
     let tr=TraitRef { def_id:named(&p,"Foreign"),args:vec![GenericArg::Type(unknown),GenericArg::Type(local_ty)] };
-    let result=coherence::orphan_check_trait_ref(&t,&p,&tr,1,coherence::InCrate::Local { mode: coherence::OrphanCheckMode::Proper },&mut |ty| { let ty = infcx.shallow_resolve(ty); (ty, Ok(ty)) }).unwrap();
+    let result=coherence::orphan_check_trait_ref(&t,&p,&tr,1,coherence::InCrate::Local,&mut |ty| { let ty = infcx.shallow_resolve(ty); (ty, Ok(ty)) }).unwrap();
     assert!(matches!(result,Err(coherence::OrphanCheckErr::UncoveredTyParams { local_ty:Some(t),.. }) if t==local_ty));
 }
 #[test]
-fn round33_orphan_check_compat_mode_accepts_uncovered_projection() {
+fn round33_orphan_check_an_uncovered_parameter_in_a_projection_is_uncovered() {
     // rustc_hir_analysis/src/coherence/orphan.rs:20-50,305-385 + rustc_next_trait_solver
-    // coherence.rs (Alias arm): an uncovered type parameter inside a rigid projection fails in
-    // Proper mode and passes in Compat mode (future-compat lint); a bare `T` fails in both.
-    // (the future-compat lint goes to the lint sink, which only collects while lints are on)
-    crate::lint::enable();
+    // coherence.rs (Alias arm): an uncovered type parameter inside a rigid projection fails as a bare `T` does
+    // (rustc's Compat mode, which passes it behind a future-compat lint, is left out: rustc issue 99554).
     let sess = &std::sync::Arc::new(crate::Session::default());
     let mut prog = Program::new(sess);
     let dir = std::env::temp_dir().join(format!("relax-r33-orphan-{}", std::process::id()));
@@ -211,20 +209,16 @@ fn round33_orphan_check_compat_mode_accepts_uncovered_projection() {
     let mut t = Tcx::new(); t.collect(&prog);
     let impls: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| prog.def(d).kind == crate::program::DefKind::Impl).collect();
     assert_eq!(impls.len(), 4);
+    use coherence::OrphanCheckErr;
     // coherence.rs Adt arm: a #[fundamental] type is looked through, a plain foreign one is not.
-    assert!(t.orphan_check_impl(&prog, impls[2], Proper).is_ok());
-    assert!(matches!(t.orphan_check_impl(&prog, impls[3], Proper), Err(OrphanCheckErr::NonLocalInputType(_))));
-    use coherence::{OrphanCheckMode::{Proper, Compat}, OrphanCheckErr};
-    assert!(matches!(t.orphan_check_impl(&prog, impls[0], Proper), Err(OrphanCheckErr::UncoveredTyParams { .. })));
-    assert!(t.orphan_check_impl(&prog, impls[0], Compat).is_ok());
-    for mode in [Proper, Compat] {
-        assert!(matches!(t.orphan_check_impl(&prog, impls[1], mode), Err(OrphanCheckErr::UncoveredTyParams { .. })), "{mode:?}");
+    assert!(t.orphan_check_impl(&prog, impls[2]).is_ok());
+    assert!(matches!(t.orphan_check_impl(&prog, impls[3]), Err(OrphanCheckErr::NonLocalInputType(_))));
+    for imp in [impls[0], impls[1]] {
+        assert!(matches!(t.orphan_check_impl(&prog, imp), Err(OrphanCheckErr::UncoveredTyParams { .. })));
     }
-    // The collection-time check reports E0210 for the bare parameter only and warns for the projection.
-    assert_eq!(t.errors.iter().filter(|e| e.contains("E0210")).count(), 1, "{:?}", t.errors);
+    // The collection-time check reports E0210 for the projection and the bare parameter.
+    assert_eq!(t.errors.iter().filter(|e| e.contains("E0210")).count(), 2, "{:?}", t.errors);
     assert_eq!(t.errors.iter().filter(|e| e.contains("E0117")).count(), 1, "{:?}", t.errors);
-    let (_, warnings) = crate::lint::take();
-    assert!(warnings.iter().any(|w| w.contains("uncovered_param_in_projection")), "{warnings:?}");
 }
 #[test]
 fn round33_elaboration_dedups_alpha_equivalent_supertraits() {
@@ -1378,6 +1372,26 @@ fn round41_preempted_typeck_can_be_checked_later() {
     drop(writer);
     let body = tcx.typeck(&prog, def);
     assert!(body.errors.is_empty(), "{:?}", body.errors);
+}
+
+/// A constant's typeck preempted while the borrow check qualifies it (`BuildProvider::mir_const_qualif`, a
+/// `thread_local!` initializer or a `const` the body reads) unwinds as the preemption it is: the JIT retries the
+/// body. Caught as "typeck panicked", the body was left unchecked and reported as an internal error.
+#[test]
+fn a_preempted_constant_typeck_unwinds_through_its_qualification() {
+    use crate::mir::transform::qualifs::ConstQualifsProvider;
+    let (prog, tcx) = program("const C: u32 = 1 + 2;\nfn reads() -> u32 { C }", "preempt_qualif");
+    let c = named(&prog, "C");
+    let provider = crate::mir::build::driver::BuildProvider { prog: &prog, tcx: &tcx, memo: Default::default() };
+    let writer = crate::preempt::WriterWaiting::new();
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _on = crate::preempt::Preemptible::on();
+        provider.mir_const_qualif(c)
+    }));
+    assert!(first.as_ref().is_err_and(|p| crate::preempt::is_preempted(&**p)), "the preemption became the constant's qualification: {:?}", first.as_ref().ok());
+    drop(writer);
+    let again = provider.mir_const_qualif(c);
+    assert!(again.is_ok(), "the constant is not qualified once the writer is done (a stale in-progress mark?): {again:?}");
 }
 
 /// The panic of a check that reaches an anonymous const nobody fed names it: this message is the

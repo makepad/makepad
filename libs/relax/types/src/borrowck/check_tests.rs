@@ -41,7 +41,7 @@ fn input(body: &Body, scopes: &[Vec<Location>]) -> RegionInput {
     liveness.add_all_points(0);
     for (r, points) in scopes.iter().enumerate() { for &at in points { liveness.add_point(r + 1, map.point(at)); } }
     RegionInput { universe_causes: vec![], polonius: Default::default(), tainted_by_errors:false, relations: UniversalRegionRelations::create(UniversalRegions::new(0, None, vec![(0, Class::Global)]), definitions.len(), &[]),
-        definitions, outlives: OutlivesConstraintSet::default(), liveness, type_tests: vec![] }
+        definitions, outlives: OutlivesConstraintSet::default(), liveness, type_tests: vec![], advisories: vec![] }
 }
 fn gather(tcx: &Tcx, body: &Body) -> MoveData {
     let session = std::sync::Arc::new(crate::Session::default());
@@ -304,7 +304,7 @@ fn external_input(b: &Body) -> RegionInput {
     let definitions=vec![RegionDefinition {origin:Origin::FreeRegion,universe:UniverseIndex(0),external_name:None};3];
     RegionInput { universe_causes: vec![], polonius: Default::default(), tainted_by_errors:false, definitions, outlives:OutlivesConstraintSet::default(),
         relations:UniversalRegionRelations::create(UniversalRegions::new(0,None,vec![(0,Class::Global),(1,Class::External),(2,Class::External)]),3,&[]),
-        liveness:LivenessValues::new(3,LocationMap::new(b).num_points()),type_tests:vec![] }
+        liveness:LivenessValues::new(3,LocationMap::new(b).num_points()),type_tests:vec![],advisories:vec![] }
 }
 /// `_1: i32` borrowed as `_2 = &_1` (region living across the yield), then a yield: a coroutine body.
 fn yielding(tcx: &Tcx, movability: Movability, borrowed: Place) -> Body {

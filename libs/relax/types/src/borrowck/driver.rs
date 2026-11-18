@@ -109,7 +109,7 @@ impl std::fmt::Display for RootName<'_> {
 
 /// Check one typeck root. See the module doc.
 pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::Body, fv_cache: Option<&Rc<SummaryCx>>) -> Verdict {
-    let mut v = Verdict { errors: Vec::new(), unchecked: Vec::new(), fv_only: Vec::new(), fv_records: Vec::new(), relaxed_records: Vec::new(), bodies: 0 };
+    let mut v = Verdict { errors: Vec::new(), unchecked: Vec::new(), unsupported: Vec::new(), fv_only: Vec::new(), fv_records: Vec::new(), relaxed_records: Vec::new(), bodies: 0 };
     let name = RootName { prog, def: typeck.def, text: Default::default() };
     let env = TypingEnv {
         limit: crate::tcx::RecursionLimit::for_item(prog, typeck.def),
@@ -352,6 +352,7 @@ struct Group<'a, 'b> {
 fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &mut Verdict) {
     let Group { cx, prog, tcx, typeck, env, root, name, fv_cache } = *g;
     let env = env;
+    let errors_before = v.errors.len();
     let provider = BuildProvider { prog, tcx, memo: Default::default() };
 
     // S3/S4 build, S5 promote. Any stop unchecks the root (see the module doc).
@@ -360,7 +361,11 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         crate::preempt::point();
         let mir = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::memstat::tagged(crate::memstat::Tag::Mir, || build_mir(&root, owner)))) {
             Ok(Ok(mir)) => mir,
-            Ok(Err(e)) => { v.unchecked.push(format!("{name}: {}", describe_build_error(&e.reason))); return; }
+            Ok(Err(e)) => {
+                let why = format!("{name}: {}", describe_build_error(&e.reason));
+                if is_unsupported_construct(&e.reason) { v.unsupported.push(why) } else { v.unchecked.push(why) }
+                return;
+            }
             Err(p) => {
                 if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); }
                 v.unchecked.push(format!("{name}: internal error in the MIR builder: {}", super::lazy::panic_message(&p)));
@@ -550,10 +555,11 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         }
         // `report_opaque_type_errors`: only when the region inference found no error (those would explain them).
         let opaque_errors = checked.regions.regioncx.errors.is_empty() && !checked.deferred_opaque_type_errors.is_empty();
-        // The borrow set, region names and diagnostics context exist to render errors; rustc makes the
-        // names only when it reports one. A body with nothing to render builds none of them.
+        // The borrow set, region names and diagnostics context also render advisory warnings. A body with
+        // nothing to report builds none of them.
         let r = &checked.result;
-        if !r.errors.is_empty() || !r.region_errors.is_empty() || !r.fv_only.is_empty() || opaque_errors {
+        let advisory_warnings = crate::lint::enabled() && !checked.regions.regioncx.advisory_failures.is_empty();
+        if !r.errors.is_empty() || !r.region_errors.is_empty() || !r.fv_only.is_empty() || opaque_errors || advisory_warnings {
             let borrows = BorrowSet::build(tcx, &p.mir, matches!(p.mir.source.kind, BodyKind::Fn | BodyKind::Closure(_)), &p.moves);
             let names = universal_names(tcx, prog, p);
             let mut dcx = DiagCx::new(tcx, prog, p.owner.owner, &p.mir, &p.moves, &checked.regions, &borrows, &names);
@@ -566,6 +572,14 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         }
         v.fv_records.extend(checked.result.fv_records.iter().cloned());
         v.relaxed_records.extend(checked.result.relaxed_records.iter().cloned());
+    }
+    // A type op failed and no error of the group explains it (decided after the region errors, so any real
+    // error counts): rustc's delayed bug, so the body is not taken as checked.
+    if v.errors.len() == errors_before {
+        if let Some(p) = prepared.iter().find(|p| p.infcx.type_op_failed.get()) {
+            let what = p.infcx.type_op_failure.borrow().clone().unwrap_or_default();
+            v.unchecked.push(format!("{name}: a type operation failed and no error explains it: {}", render_ids(prog, tcx, &what)));
+        }
     }
 }
 
@@ -584,6 +598,13 @@ fn render_ids(prog: &Program, tcx: &Tcx, text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// A construct the MIR builder does not express (a known gap, named by the check), as opposed to a
+/// failure inside the builder (an internal error).
+fn is_unsupported_construct(reason: &crate::mir::build::UnsupportedReason) -> bool {
+    use crate::mir::build::UnsupportedReason::*;
+    matches!(reason, CustomMir | CVariadic | InlineAsm | Reborrow | UnsafeBinder | AsyncDrop | NotYetBuilt(_))
 }
 
 fn describe_build_error(reason: &crate::mir::build::UnsupportedReason) -> String {

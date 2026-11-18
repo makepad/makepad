@@ -74,7 +74,16 @@ impl crate::mir::transform::qualifs::ConstQualifsProvider for BuildProvider<'_> 
                     (CheckedBody { owner: root, kind }, root)
                 }
             };
-            let typeck_body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tcx.typeck(self.prog, typeck_root))).map_err(|_| Blocked("typeck panicked"))?;
+            let typeck_body = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tcx.typeck(self.prog, typeck_root))) {
+                Ok(body) => body,
+                // A cancellation (a preemption, a module the lazy selection skipped) is the build's to retry, not
+                // this constant's failure: it goes on unwinding, and the in-progress mark goes with it.
+                Err(p) if crate::preempt::is_cancelled(&*p) => {
+                    self.memo.borrow_mut().remove(&def);
+                    std::panic::resume_unwind(p)
+                }
+                Err(_) => return Err(Blocked("typeck panicked")),
+            };
             if !typeck_body.errors.is_empty() {
                 return Err(Blocked("typeck errors"));
             }

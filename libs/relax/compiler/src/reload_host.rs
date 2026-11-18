@@ -287,9 +287,10 @@ pub(crate) fn apply_at_boot(change: &crate::provided::ProvidedChange) -> i32 {
         crate::run::report_failed(&message, 1);
         1
     };
-    // this process is that rebuild already (the exec below keeps the pid): makepad is built from
-    // other sources than the program's copy of the crate, and building again cannot change that
-    if std::env::var(REBUILT_ENV).ok().and_then(|v| v.parse::<u32>().ok()) == Some(std::process::id()) {
+    // this process is that rebuild already (the restart below keeps the run's parent: its parent
+    // process's pid, or its terminal's through an exec in place): makepad is built from other
+    // sources than the program's copy of the crate, and building again cannot change that
+    if std::env::var(REBUILT_ENV).ok().and_then(|v| v.parse::<u32>().ok()) == Some(restart_key()) {
         return failed(format!("the rebuilt {tool} differs from the program's copy too ({tool} is built from other sources than the program uses)", tool = crate::tool_name()));
     }
     let (mut cmd, shown) = match command(Priority::Boot) {
@@ -311,19 +312,28 @@ pub(crate) fn apply_at_boot(change: &crate::provided::ProvidedChange) -> i32 {
     eprintln!("relax: {tool} rebuilt in {:.0} s; the program runs on it", t0.elapsed().as_secs_f64(), tool = crate::tool_name());
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(&exe);
-        cmd.args(std::env::args_os().skip(1)).env(REBUILT_ENV, std::process::id().to_string());
+        cmd.args(std::env::args_os().skip(1)).env(REBUILT_ENV, restart_key().to_string());
         // the rebuilt loader builds the program's native packages as a restart does (NATIVE_RECEIPTS)
         for name in super::NATIVE_RECEIPTS { cmd.env_remove(name); }
-        // fd 2 back to the terminal before the exec (the transcript tee is a thread of this process)
+        // fd 2 back to the terminal before the restart (the transcript tee is a thread of this process)
         crate::tui::exit_code(0);
         crate::tui::finish(false);
-        let e = cmd.exec();
+        let e = crate::restart_parent::replace(&mut cmd);
         failed(format!("cannot start the rebuilt {tool}: {e}", tool = crate::tool_name()))
     }
     #[cfg(not(unix))]
     failed(format!("this platform cannot start the rebuilt {tool} in place", tool = crate::tool_name()))
+}
+
+/// What stays the same across a restart of this run, its process's parent: the run's parent
+/// process (restart_parent.rs), or through an exec in place the process's own parent. A program the
+/// restarted run starts has another.
+fn restart_key() -> u32 {
+    #[cfg(unix)]
+    return std::os::unix::process::parent_id();
+    #[cfg(not(unix))]
+    std::process::id()
 }
 
 /// Cached text only: no manifest scan or git process on the UI thread.
@@ -352,6 +362,39 @@ pub(super) fn relaunch() -> Option<Result<String, String>> {
         fail(e.clone());
         e
     }))
+}
+
+/// `session relaunch process=1`: the run starts again on the loader binary it runs, nothing
+/// rebuilt, as it restarts into a rebuilt one (macOS: a new process behind the run's parent; an
+/// exec elsewhere): an app that restarts with its state hands it over at its next safe point. A
+/// way into that restart that waits for no build (the tray example's restart_process test; an app
+/// whose process went bad). A rebuilt binary that waits is taken instead, and a build that runs is
+/// waited for.
+pub(super) fn relaunch_process() -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        let loader = loader().ok_or_else(|| format!("the {tool} binary's path is unknown", tool = crate::tool_name()))?;
+        let why = "a restart as a new process (`session relaunch process=1`)".to_string();
+        {
+            let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            match st.phase {
+                Phase::Building => {
+                    RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
+                    end_low_cargo(&mut st);
+                    return Ok(format!("rebuild {tool}, then restart with the program's state", tool = crate::tool_name()));
+                }
+                Phase::Restarting => {}
+                Phase::Idle | Phase::Failed => {
+                    let stamps = stamps(&st.paths);
+                    *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handover { loader, stamps });
+                    st.phase = Phase::Restarting;
+                }
+            }
+        }
+        apply_ready(why)
+    }
+    #[cfg(not(unix))]
+    Err(format!("this platform restarts a run as a new process only into a rebuilt {tool}", tool = crate::tool_name()))
 }
 
 fn apply_ready(why: String) -> Result<String, String> {
@@ -793,7 +836,7 @@ fn build_loop() {
             let what = format!("rebuild produced no change: cargo left the {tool} this process runs as it was (the edit is not in what {tool} is built from, or was undone)", tool = crate::tool_name());
             // a live test session's tests already ran on this binary: no run answers it but this
             if crate::harness::live::enabled() { super::patch_refused_event(&why, true, std::slice::from_ref(&what)); }
-            else { super::patch_verified_event(&format!("{why}: {what}"), 0, &[]); }
+            else { super::patch_verified_event(&format!("{why}: {what}"), 0, &[], &[]); }
             super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1},\"unchanged\":true}}"));
             let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
             if st.again { drop(st); continue; }
@@ -921,7 +964,6 @@ fn restart(h: Handover, state: Option<&[u8]>) {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
         let mut cmd = std::process::Command::new(&h.loader);
         cmd.args(&args);
@@ -938,16 +980,19 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         // for the next one (NATIVE_RECEIPTS)
         for name in super::NATIVE_RECEIPTS { cmd.env_remove(name); }
         super::restart_begins();
-        // the run ends as at exit (exec skips the exit handlers); fd 2 goes back to the terminal
-        // now (the transcript tee is a thread of this process: the new one starts its own), so
-        // the line below and the new process's output are not lost in the old pipe
+        // the run ends as at exit (neither an exec nor the parent's request runs the exit
+        // handlers); fd 2 goes back to the terminal now (the transcript tee is a thread of this
+        // process: the new one starts its own), so the line below and the new process's output
+        // are not lost in the old pipe
         crate::run::summary("restart");
         // a restart is a clean end of this process (its transcript is not kept)
         crate::tui::exit_code(0);
         crate::tui::finish(false);
         eprintln!("relax live: restarting: {reason}");
         super::hand_over(&mut cmd);
-        let e = cmd.exec();
+        // (the run's parent starts it as a new process on macOS: an exec there keeps a pid whose
+        // window-server session the system has marked as exiting, restart_parent.rs)
+        let e = crate::restart_parent::replace(&mut cmd);
         super::hand_back();
         fail(format!("restart into the rebuilt {tool} failed: {e}; the app runs the previous code", tool = crate::tool_name()));
     }

@@ -69,10 +69,10 @@ fn lint(root: &Path, roots: &[String]) -> Result<String, String> {
 
 /// `makepad check --no-default-features <root>` in the slice checkout, per root.
 fn check(dir: &Path, roots: &[String]) -> Result<String, String> {
-    let loader = crate::loader_cmd();
+    let (loader, _) = crate::loader()?;
     let mut said = Vec::new();
     for r in roots {
-        let o = Command::new(&loader[0]).args(&loader[1..]).args(["check", r, "--no-default-features"]).current_dir(dir).stdin(Stdio::null()).output().map_err(|e| format!("relax check: {e}"))?;
+        let o = Command::new(&loader).args(["check", r, "--no-default-features"]).current_dir(dir).stdin(Stdio::null()).output().map_err(|e| format!("relax check: {e}"))?;
         let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
         let summary = text.lines().rev().find(|l| l.trim_end().ends_with(" errors")).unwrap_or("").to_string();
         let errors = summary.trim_end().strip_suffix(" errors").and_then(|h| h.rsplit([' ', ',']).next()).and_then(|n| n.parse::<u64>().ok());

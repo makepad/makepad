@@ -527,6 +527,20 @@ pub(crate) fn program_thread() -> ProgramThread {
     ProgramThread(s)
 }
 
+impl ProgramThread {
+    /// The program's part of the thread ends with the thread: its kicks end first
+    /// (`os::thread::kicks_done`: the watchdog's signal is blocked on it from here), then its state.
+    /// A signal that reaches a thread with no program state goes to the process (`route`), and
+    /// the watchdog's signal may be the program's own, aimed at this thread (the kick of a JIT
+    /// the program runs, which counts its kicks per thread): moved to another thread, it is no
+    /// kick there, and its handler's default action ended the process. Blocked, a kick on its way
+    /// ends with the thread, as natively a signal that races a thread's end does.
+    pub(crate) fn end_with_thread(self) {
+        crate::os::thread::kicks_done();
+        drop(self);
+    }
+}
+
 impl Drop for ProgramThread {
     fn drop(&mut self) {
         if self.0.is_null() {
@@ -565,7 +579,7 @@ struct Adopted(std::cell::Cell<*mut SigState>);
 
 impl Drop for Adopted {
     fn drop(&mut self) {
-        drop(ProgramThread(self.0.replace(std::ptr::null_mut())));
+        ProgramThread(self.0.replace(std::ptr::null_mut())).end_with_thread();
     }
 }
 

@@ -1465,6 +1465,46 @@ pub struct Func {
     /// the fn whose copies keep their guards) once a patch moved the version, and never coming back.
     /// Its fast blocks hold no guard and no slow call.
     pub patched_path: bool,
+    /// The digest gate (JITPERF): the digest of this body's own lowering, before inlining and
+    /// passes (`lowering_digest`), carried through the passes. None: not taken (unknown).
+    pub digest: Option<std::sync::Arc<BodyDigest>>,
+    /// Parallel to `inl_slots`: the digest of the body each inline context took in (that body's
+    /// `digest`; None unknown), so a host's record says what it copied even of a callee that has
+    /// no code of its own.
+    pub inl_digest: Vec<Option<std::sync::Arc<BodyDigest>>>,
+    /// Parallel to `inl_slots`: the body each context took in held a call or a cycle, so a frame
+    /// can wait inside the copy (`opt::inline_site`).
+    pub inl_waits: Vec<bool>,
+}
+
+/// A body's digest as lowered (the digest gate, JITPERF): a hash of what its code does, with the
+/// function slots and the symbols it names numbered by first occurrence, plus those slots and
+/// symbol ids in that order. Equal raw hashes and the same instances and objects in the lists
+/// are the same code. Positions are out (a moved fn is the same code); a panic's location is in,
+/// through its symbol. The session resolves the lists to identities (a slot's instance identity,
+/// a data object's content), giving a digest that holds across runs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BodyDigest {
+    pub raw: u128,
+    pub slots: Vec<u32>,
+    pub syms: Vec<u32>,
+}
+
+/// Numbers by first occurrence (`Func::lowering_digest`).
+#[derive(Default)]
+struct FirstSeen {
+    ix: std::collections::HashMap<u32, u32>,
+    order: Vec<u32>,
+}
+
+impl FirstSeen {
+    fn get(&mut self, x: u32) -> u32 {
+        let n = self.order.len() as u32;
+        *self.ix.entry(x).or_insert_with(|| {
+            self.order.push(x);
+            n
+        })
+    }
 }
 
 /// The guards' share of a body (`Func::guard_size`): their compares at the sites (the check and
@@ -1562,7 +1602,7 @@ impl Func {
     /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
     /// injective maps: the bodies are equal up to a renaming of their slots.
     pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
         let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
             (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
             (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
@@ -1624,10 +1664,102 @@ impl Func {
             && *keep_frames == o.keep_frames
     }
 
+    /// The digest gate's digest of this body as lowered (`BodyDigest`): everything that changes what
+    /// the code does, its slots and symbols numbered by first occurrence. Left out: positions
+    /// (`pos`, `term_pos`, `inl`, `dbg`, `file`), block counts, the coverage probes' words, and
+    /// what a build sets after lowering (tier flags, pending slots, guards, copy versions). The
+    /// noalias facts count as one set, withheld or not (SPEC-V moves them by verdict, not text).
+    pub fn lowering_digest(&self) -> BodyDigest {
+        use std::hash::Hash;
+        let Func { name: _, blocks, vregs, slots, params, rets, file: _, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline: _, lowering: _, pending: _, full: _, owned, nonnull, param_ints, ranged, naked, inl: _, inl_slots: _, dbg: _, halves, patch_flag: _, guard_calls: _, unguarded_flags: _, copy_ver: _, guard_size: _, patched_path: _, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
+        fn sym(s: &Sym, h: &mut relax_session::sip::Sip128, sy: &mut FirstSeen) {
+            sy.get(s.id).hash(h);
+            s.off.hash(h);
+        }
+        fn callee(c: &Callee, h: &mut relax_session::sip::Sip128, sl: &mut FirstSeen, sy: &mut FirstSeen) {
+            std::mem::discriminant(c).hash(h);
+            match c {
+                Callee::Fn(x) => sl.get(*x).hash(h),
+                Callee::CFn(x, g) => {
+                    sl.get(*x).hash(h);
+                    g.hash(h);
+                }
+                Callee::Host(s) => sym(s, h, sy),
+                Callee::CHost(s, g) => {
+                    sym(s, h, sy);
+                    g.hash(h);
+                }
+                Callee::Asm(a) => {
+                    let AsmBlock { code, fixups, ins, outs, regs, writes, opts } = &**a;
+                    (code, ins, outs, regs, writes, opts).hash(h);
+                    fixups.len().hash(h);
+                    for (o, k, s) in fixups {
+                        (o, k).hash(h);
+                        sym(s, h, sy);
+                    }
+                }
+                Callee::Indirect(_) | Callee::CIndirect(..) => c.hash(h),
+            }
+        }
+        let mut h = relax_session::sip::Sip128::new();
+        let (mut sl, mut sy) = (FirstSeen::default(), FirstSeen::default());
+        blocks.len().hash(&mut h);
+        for b in blocks {
+            b.insts.len().hash(&mut h);
+            for i in &b.insts {
+                std::mem::discriminant(i).hash(&mut h);
+                match i {
+                    // (a probe's counter word is this run's address; the probe itself is kept)
+                    Inst::Coverage { .. } => {}
+                    Inst::Addr(v, s) | Inst::TlsAddr(v, s) | Inst::TlsStatic(v, s) => {
+                        v.hash(&mut h);
+                        sym(s, &mut h, &mut sy);
+                    }
+                    Inst::FnAddr(v, x) => {
+                        v.hash(&mut h);
+                        sl.get(*x).hash(&mut h);
+                    }
+                    Inst::Call(c, a, r) => {
+                        callee(c, &mut h, &mut sl, &mut sy);
+                        a.hash(&mut h);
+                        r.hash(&mut h);
+                    }
+                    _ => i.hash(&mut h),
+                }
+            }
+            b.term.hash(&mut h);
+        }
+        vregs.hash(&mut h);
+        slots.len().hash(&mut h);
+        for Slot { size, align, arg, born, ret } in slots {
+            (size, align, arg, born, ret).hash(&mut h);
+        }
+        let mut na: Vec<u32> = noalias.iter().chain(withheld_noalias.iter()).map(|v| v.0).collect();
+        na.sort_unstable();
+        na.dedup();
+        (params, rets, na, plain_calls, deref, cabi, sret).hash(&mut h);
+        sret_callees.len().hash(&mut h);
+        for x in sret_callees {
+            sl.get(*x).hash(&mut h);
+        }
+        nocapture.len().hash(&mut h);
+        for (c, i, r, e) in nocapture {
+            callee(c, &mut h, &mut sl, &mut sy);
+            (i, r, e).hash(&mut h);
+        }
+        nounwind_inputs.len().hash(&mut h);
+        for (x, v) in nounwind_inputs {
+            sl.get(*x).hash(&mut h);
+            v.hash(&mut h);
+        }
+        (owned, nonnull, param_ints, ranged, naked, halves, keep_frames).hash(&mut h);
+        BodyDigest { raw: h.finish128(), slots: sl.order, syms: sy.order }
+    }
+
     /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
     pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
         fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
             match c {
                 Callee::Fn(x) => {
@@ -1874,7 +2006,7 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false, keep_frames: false }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false, keep_frames: false, digest: None, inl_digest: Vec::new(), inl_waits: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);

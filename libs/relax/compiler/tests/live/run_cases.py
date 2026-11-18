@@ -219,8 +219,15 @@ def check_case(name, d, a, tmp):
     fp = os.path.join(d, "forbid")
     if os.path.exists(fp):
         for bad in [l.strip() for l in open(fp) if l.strip()]:
-            # from the first edit on (warm-up before it is the program's own first run)
+            # from the first edit on (warm-up before it is the program's own first run). The edit's
+            # own work reports before its edit line: from the end of the program's last output
+            # line before that.
             k = text.find("\nedit ")
+            if k >= 0:
+                j = max(text.rfind("\nout ", 0, k), text.rfind("\nchecksum ", 0, k))
+                end = text.find("\n", j + 1) if j >= 0 else -1
+                if 0 <= end < k:
+                    k = end
             if k >= 0 and bad in text[k:]:
                 msgs.append("forbidden output: %r" % bad)
     segs = segments(text)

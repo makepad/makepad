@@ -114,7 +114,8 @@ pub fn thread_id() -> u32 {
 /// once published (a node is complete before the bucket head points at it, Release/Acquire);
 /// inserts take one of a few stripe locks and prepend, so the newest value of a key wins.
 /// `clear` swaps in a fresh table; the old one stays allocated (readers may still walk it)
-/// until the map is dropped. For caches filled once and read many times from many threads,
+/// until the map is dropped. A walk reads only the bucket runs an insert marked, so a large
+/// table costs its untouched pages nothing. For caches filled once and read many times from many threads,
 /// where an RwLock's shared counter would bounce between cores.
 pub struct MemoMap<K, V> {
     table: std::sync::atomic::AtomicPtr<MemoTable<K, V>>,
@@ -377,6 +378,9 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         (n, b)
     }
 
+    /// Retires the table for a fresh one, unless no insert ever marked one of its bucket runs:
+    /// an empty table is kept as it is, so clearing a map that holds nothing allocates nothing
+    /// and leaves nothing for the drop to free.
     pub fn clear(&self) {
         let table = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
         if table.unused() {

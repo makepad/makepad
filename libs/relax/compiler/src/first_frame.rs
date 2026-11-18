@@ -63,8 +63,9 @@ fn remember(package: &str, state: &str, ms: u64) -> std::io::Result<()> {
     for (package, state, ms, jit) in keep.into_iter().rev() { text.push_str(&format!("{package} {state} {ms} {jit}\n")); }
     file.rewind()?;
     file.write_all(text.as_bytes())?;
-    file.set_len(text.len() as u64)?;
-    file.sync_data()
+    // no barrier: one forces a journal commit of the whole filesystem, which on a busy disk held
+    // the process's other file operations behind it; a row a crash loses is one measurement
+    file.set_len(text.len() as u64)
 }
 
 /// The deadline of a start in `state` (warm / cold): 3x the median of its measured first frames,
@@ -111,6 +112,100 @@ fn still_compiling(running: bool, age_ns: u64) -> bool {
 fn compiling() -> bool {
     let (running, age) = crate::jit::demand_compile_age();
     still_compiling(running, age)
+}
+
+/// Past its deadline a start is hung only once it made no progress for this long: its deadline
+/// is when the watch starts to look, never a kill by itself.
+const STALL_WINDOW_MS: f64 = 10_000.0;
+/// The process's CPU over the window that counts as work: half a core. A GPU driver compiling
+/// changed shaders ran 0.9 of a core in its shader compiler beside the JIT's tier-up at 0.5,
+/// and a start waiting on nothing (its threads parked, its main loop waiting for events) runs
+/// a few percent.
+const WORKING_CORES: f64 = 0.5;
+
+/// What the process has done, read at one look: its CPU time (all its threads, a GPU driver's
+/// shader compiler among them) and the JIT's finished compiles and installed builds. Not the bytes
+/// it wrote: the run's own writers (its log, its flight recorder's recordings of the waits) write
+/// while a start hangs, and would count as its work.
+#[derive(Clone, Copy, Debug)]
+struct Work {
+    cpu_ns: u64,
+    compiles: u64,
+}
+
+fn work() -> Work {
+    Work { cpu_ns: process_cpu_ns(), compiles: crate::jit::progress_count(crate::jit::PROGRESS_JIT) }
+}
+
+/// The process's CPU time, every thread's (ns).
+#[cfg(unix)]
+fn process_cpu_ns() -> u64 {
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clk: i32, ts: *mut Timespec) -> i32;
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 12;
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    if unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut ts) } != 0 { return 0; }
+    ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
+}
+
+#[cfg(windows)]
+fn process_cpu_ns() -> u64 {
+    use makepad_windows_sys::Win32::{Foundation::FILETIME, System::Threading::{GetCurrentProcess, GetProcessTimes}};
+    let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    if unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) }.is_err() { return 0; }
+    let ticks = |t: &FILETIME| (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64;
+    (ticks(&kernel) + ticks(&user)).saturating_mul(100)
+}
+
+/// One look at a start past its deadline ([`Overrun::look`]).
+#[derive(Debug, PartialEq)]
+enum Look {
+    /// look again: the window has not passed, or the start works and said so before
+    Wait,
+    /// it works: what it did over the window, said once
+    Working(String),
+    /// no progress over the window: what it did
+    Hung(String),
+}
+
+/// A start past its first-frame deadline, judged by its progress, never by the clock: each
+/// [`STALL_WINDOW_MS`] it is hung only when the window saw no compile finish and under
+/// [`WORKING_CORES`] of CPU. Two live sessions' first frames came late while the GPU driver
+/// recompiled changed shaders, and the 30 s warm deadline killed both (their reruns passed, 11-18).
+struct Overrun {
+    since_ms: f64,
+    at: Work,
+    said: bool,
+}
+
+impl Overrun {
+    fn new(now_ms: f64, at: Work) -> Overrun {
+        Overrun { since_ms: now_ms, at, said: false }
+    }
+
+    fn look(&mut self, now_ms: f64, now: Work) -> Look {
+        let span = now_ms - self.since_ms;
+        if span < STALL_WINDOW_MS { return Look::Wait; }
+        let cores = now.cpu_ns.saturating_sub(self.at.cpu_ns) as f64 / 1e6 / span;
+        let compiles = now.compiles.saturating_sub(self.at.compiles);
+        let what = format!("{:.0}% of a core, {compiles} compile(s) finished", cores * 100.0);
+        (self.since_ms, self.at) = (now_ms, now);
+        if cores < WORKING_CORES && compiles == 0 {
+            return Look::Hung(format!("no progress in its last {:.0} s ({what})", span / 1000.0));
+        }
+        if self.said { return Look::Wait; }
+        self.said = true;
+        Look::Working(format!("it still works ({what} in its last {:.0} s): no timeout while it does", span / 1000.0))
+    }
 }
 
 /// A start counted warm (its cache holds a startup manifest) that compiled most of its code
@@ -253,17 +348,27 @@ pub(crate) fn arm_window(package: &str) {
 
 fn watch_window(package: &str) {
     let mut said = false;
-    let (secs, basis) = loop {
+    let mut overrun: Option<Overrun> = None;
+    let (secs, basis, hung) = loop {
         if WINDOW_OPEN.load(Acquire) || crate::run_threads::ending() { return; }
         // a warm start that compiles most of its code fresh is judged as a cold one (`watch`)
         let state = if CACHE_STATE.load(Acquire) == 2 && !cold_like() { "warm" } else { "cold" };
         let (secs, basis) = deadline(package, state);
         let left = secs as f64 * 1000.0 - crate::clock::ms_since_process_start();
         if left <= 0.0 {
-            if !compiling() { break (secs, basis); }
-            if !said {
-                said = true;
-                if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
+            if compiling() {
+                overrun = None;
+                if !said {
+                    said = true;
+                    if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
+                }
+            } else {
+                let now = crate::clock::ms_since_process_start();
+                match overrun.get_or_insert_with(|| Overrun::new(now, work())).look(now, work()) {
+                    Look::Hung(why) => break (secs, basis, why),
+                    Look::Working(what) => if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and {what}"); },
+                    Look::Wait => {}
+                }
             }
             std::thread::park_timeout(Duration::from_millis(500));
             continue;
@@ -273,8 +378,8 @@ fn watch_window(package: &str) {
         std::thread::park_timeout(Duration::from_secs_f64((left / 1000.0).min(1.0)));
     };
     if WINDOW_OPEN.load(Acquire) { return; }
-    let s = snapshot::capture(&format!("first-frame timeout after {secs} s ({basis}): the boot window has not presented"));
-    eprintln!("relax: first-frame timeout: {package}'s boot window presented no frame in {secs} s ({basis})");
+    let s = snapshot::capture(&format!("first-frame timeout after {secs} s ({basis}), then {hung}: the boot window has not presented"));
+    eprintln!("relax: first-frame timeout: {package}'s boot window presented no frame in {secs} s ({basis}), then {hung}");
     eprintln!("relax: likely cause: {}", s.cause);
     eprintln!("relax: report: {}", s.path.display());
     let reason = format!("{} [report {}]", s.cause, s.path.display());
@@ -287,7 +392,8 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
     let mut deadline_ms = started + secs as f64 * 1000.0;
     let mut wm = false;
     let mut said = false;
-    loop {
+    let mut overrun: Option<Overrun> = None;
+    let hung = loop {
         if crate::run_threads::ending() { return; }
         if let Some(ms) = snapshot::first_present_ms().filter(|ms| *ms <= deadline_ms) {
             let shell = snapshot::hal_shell();
@@ -314,13 +420,22 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
             }
         }
         if left <= 0.0 {
-            if !compiling() { break; }
-            if !said {
-                said = true;
-                if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
+            let now = crate::clock::ms_since_process_start();
+            if compiling() {
+                overrun = None;
+                if !said {
+                    said = true;
+                    if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
+                }
+            } else {
+                match overrun.get_or_insert_with(|| Overrun::new(now, work())).look(now, work()) {
+                    Look::Hung(why) => break why,
+                    Look::Working(what) => if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and {what}"); },
+                    Look::Wait => {}
+                }
             }
-            // (a first present from now on still counts: the deadline moves with the compiles)
-            deadline_ms = crate::clock::ms_since_process_start() + 500.0;
+            // (a first present from now on still counts: the deadline moves with its progress)
+            deadline_ms = now + 500.0;
             continue;
         }
         if crate::jit::first_present_seen() {
@@ -328,17 +443,17 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
         } else {
             std::thread::park_timeout(Duration::from_secs_f64(left / 1000.0));
         }
-    }
+    };
     if snapshot::hal_shell().as_ref().is_some_and(snapshot::all_hidden) {
         eprintln!("relax: {package} hid its window before its first frame; no first-frame timeout");
         return;
     }
     let presented = crate::jit::first_present_seen();
-    let s = snapshot::capture(&format!("first-frame timeout after {secs} s ({basis})"));
+    let s = snapshot::capture(&format!("first-frame timeout after {secs} s ({basis}), then {hung}"));
     if presented {
-        eprintln!("relax: first-frame timeout: {package} drew, but no frame of it reached the WM in {secs} s ({basis})");
+        eprintln!("relax: first-frame timeout: {package} drew, but no frame of it reached the WM in {secs} s ({basis}), then {hung}");
     } else {
-        eprintln!("relax: first-frame timeout: {package} drew no frame in {secs} s ({basis})");
+        eprintln!("relax: first-frame timeout: {package} drew no frame in {secs} s ({basis}), then {hung}");
     }
     eprintln!("relax: likely cause: {}", s.cause);
     eprintln!("relax: report: {}", s.path.display());
@@ -404,6 +519,45 @@ mod tests {
         assert!(!super::still_compiling(false, 3 * s), "quiet for 3 s: hung");
         assert!(super::still_compiling(true, 30 * s), "a compile runs");
         assert!(!super::still_compiling(true, 61 * s), "one compile running past a minute is a hang");
+    }
+
+    /// Past its deadline a start is judged by its progress, never by the clock: a start whose
+    /// GPU driver recompiles changed shaders (steady CPU, no compile of the JIT's) presents its
+    /// first frame at 45 s, past a 30 s deadline, and is not killed; one whose JIT compiles works
+    /// too; one idle for the window is hung at its end, and says what it did. Two live sessions were killed at the 30 s warm deadline while
+    /// the driver compiled (11-18).
+    #[test]
+    fn a_start_past_its_deadline_is_hung_only_without_progress() {
+        use super::{Look, Overrun, Work};
+        // looks every 500 ms from the deadline at 30 s until its frame; the ms of its hang
+        let run = |cores: f64, compile_every_ms: Option<f64>, frame_ms: f64| -> (Option<f64>, Vec<String>) {
+            let at = |ms: f64| Work { cpu_ns: (ms * cores * 1e6) as u64, compiles: compile_every_ms.map_or(0, |e| (ms / e) as u64) };
+            let mut said = Vec::new();
+            let mut o = Overrun::new(30_000.0, at(30_000.0));
+            let mut ms = 30_000.0;
+            while ms < frame_ms {
+                match o.look(ms, at(ms)) {
+                    Look::Hung(why) => { said.push(why); return (Some(ms), said); }
+                    Look::Working(what) => said.push(what),
+                    Look::Wait => {}
+                }
+                ms += 500.0;
+            }
+            (None, said)
+        };
+        let (hung, said) = run(0.9, None, 45_000.0);
+        assert_eq!(hung, None, "a driver compiling shaders at 0.9 of a core: its frame at 45 s counts");
+        assert_eq!(said, vec!["it still works (90% of a core, 0 compile(s) finished in its last 10 s): no timeout while it does".to_string()], "said once");
+        assert_eq!(run(0.05, Some(4_000.0), 60_000.0).0, None, "the JIT's compiles finish: it works");
+        let (hung, said) = run(0.05, None, 60_000.0);
+        assert_eq!(hung, Some(40_000.0), "idle for the window: hung at its end, not at the deadline");
+        assert_eq!(said, vec!["no progress in its last 10 s (5% of a core, 0 compile(s) finished)".to_string()]);
+        // it works, then stops: hung one window after its last work
+        let mut o = Overrun::new(30_000.0, Work { cpu_ns: 0, compiles: 0 });
+        assert_eq!(o.look(39_500.0, Work { cpu_ns: 9_000_000_000, compiles: 0 }), Look::Wait);
+        assert!(matches!(o.look(40_000.0, Work { cpu_ns: 9_000_000_000, compiles: 0 }), Look::Working(_)));
+        assert_eq!(o.look(45_000.0, Work { cpu_ns: 9_100_000_000, compiles: 0 }), Look::Wait);
+        assert!(matches!(o.look(50_000.0, Work { cpu_ns: 9_200_000_000, compiles: 0 }), Look::Hung(_)));
     }
 
     /// A batch program is one whose main goes quiet while it runs. Not one whose app ended: a

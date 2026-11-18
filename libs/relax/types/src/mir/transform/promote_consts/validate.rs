@@ -1,7 +1,7 @@
 //! Checks whether locals that appear in a promotion context (`Candidate`) are actually promotable:
 //! rustc_mir_transform/src/promote_consts.rs `Validator` (1.97.1).
 use super::super::const_check::{ConstContext, ConstCx};
-use super::super::qualifs::{in_rvalue, last_projection, operand_ty, place_prefix_ty, place_ty, HasMutInterior, NeedsDrop, Qualif};
+use super::super::qualifs::{in_rvalue, last_projection, operand_ty, place_prefix_ty, place_ty, HasMutInterior, NeedsDrop, NotSync, Qualif};
 use super::{is_thread_local_static, stmt_at, Candidate, StmtOrTerm, TempState};
 use crate::mir::*;
 use crate::program::DefKind;
@@ -212,6 +212,9 @@ impl Validator<'_> {
             BorrowKind::Shared => {
                 let has_mut_interior = self.qualif_local::<HasMutInterior>(place.local);
                 if has_mut_interior {
+                    return Err(Unpromotable);
+                }
+                if shares_across_threads(ccx) && self.qualif_local::<NotSync>(place.local) {
                     return Err(Unpromotable);
                 }
             }
@@ -461,6 +464,14 @@ impl Validator<'_> {
         // This passed all checks, so let's accept.
         Ok(())
     }
+}
+
+/// Limits the additional shared-borrow refusal for rustc issue 49206 to fn and const fn bodies
+/// (extending rustc_mir_transform/src/promote_consts.rs:411). Const and static initializers can
+/// already retain `&NotSync` through lifetime extension of their tail expression, so refusing
+/// promotion there would not prevent that sharing.
+fn shares_across_threads(ccx: &ConstCx<'_>) -> bool {
+    matches!(ccx.const_kind, None | Some(ConstContext::ConstFn))
 }
 
 /// Can we try to evaluate a given constant at this point in compilation? Attempting to evaluate a

@@ -129,8 +129,8 @@ pub struct Parser<'a> {
     /// definition position, length), ascending
     pub body_origin: OSeg<'a, Maps>,
     /// proc-macro output tokens the macro made (spanned at its call site): (text lo, text hi,
-    /// the macro crate's edition), ascending; only where that edition is not the one the call
-    /// site gives (edition_of)
+    /// the macro crate's edition), ascending; every such range (edition_of reads the edition,
+    /// ParsedFile::made_by_proc_macro that the macro made them)
     pub pm_editions: OSeg<'a, Regions>,
     /// compound tokens split by the grammar, with their old value
     pub tok_undo: Vec<(u32, Tok)>,
@@ -6303,14 +6303,11 @@ impl Parser<'_> {
 
     fn append_origins(&mut self, expansion: &crate::builtins::Expansion, call: u32) {
         let base = (self.src.len() + self.ext.len()) as u32;
-        // the tokens a proc macro made have its crate's edition; a row only where the call
-        // site would not give that edition already (a call in this file's own text gives the
-        // file's)
-        let at_source = (call as usize) < self.src.len();
+        // the tokens a proc macro made have its crate's edition, and are the macro's own code
+        // (lints are not reported in them): a row for each run of them, also where the call
+        // site gives the same edition
         for &(lo, hi, edition) in &expansion.editions {
-            if !(at_source && edition == self.edition) {
-                self.pm_editions.push((base + lo, base + hi, edition as u32));
-            }
+            self.pm_editions.push((base + lo, base + hi, edition as u32));
         }
         if expansion.origins.is_empty() {
             let source = self.source_span(call);
@@ -6386,6 +6383,33 @@ pub struct ParsedFile {
     pub image: Option<ImageLoc>,
     /// Writes this file's lazily parsed part as an image (ImageSink::part) before it is published.
     pub sink: Option<std::sync::Arc<dyn ImageSink>>,
+    /// The regions of the text whose lines count from another text (LineOrigins::locate).
+    pub line_origins: LineOrigins,
+}
+
+/// The regions of a file's text that were copied from another text and count their lines from
+/// there. A save that holds items back for a restart (reload's hold_back) puts their running text
+/// past the end of the saved text: line!(), column!() and the locations its code passes and panics
+/// with name its line in the running file, as fns of it compiled before the save do. Per region,
+/// in order: its start in this text (a line start), and the line and column the region's first
+/// byte has in the text it came from. A region runs to the next one, or the end of the text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineOrigins(pub Vec<(u32, u32, u32)>);
+
+impl LineOrigins {
+    /// Where the first region starts: the text before it is the file's own.
+    pub fn start(&self) -> Option<u32> {
+        self.0.first().map(|r| r.0)
+    }
+
+    /// The line and column of position `pos` (`here`: its line and column in this text), counted
+    /// from where its region came from. `line_of` is a position's line in this text.
+    pub fn locate(&self, pos: u32, here: (usize, usize), line_of: impl Fn(u32) -> usize) -> (usize, usize) {
+        let i = self.0.partition_point(|r| r.0 <= pos);
+        let Some(&(at, line, col)) = i.checked_sub(1).map(|i| &self.0[i]) else { return here };
+        let first = line_of(at);
+        if here.0 <= first { (line as usize, col as usize + here.1 - 1) } else { (line as usize + here.0 - first, here.1) }
+    }
 }
 
 /// A written front image: the compiler's image store (its file name) and the entry's key.
@@ -6855,6 +6879,31 @@ impl ParsedFile {
         1
     }
 
+    /// Whether the token at `pos` is one a proc macro made (spanned at its call: rustc's
+    /// `Span::call_site()`, `mixed_site()` and `def_site()`), or comes from one through a
+    /// substitution. rustc gives such a token the macro's expansion as its context, and
+    /// `Span::in_external_macro` holds for every proc macro's expansion (a derive, an attribute
+    /// or a function-like one): lints are not reported there. The token may still map to the
+    /// call site for its hygiene (append_origins), which expansion_kind follows.
+    pub fn made_by_proc_macro(&self, mut pos: u32) -> bool {
+        for _ in 0..4096 {
+            if pos < self.src_len {
+                return false;
+            }
+            let made = self.part_at(pos).map_or(&self.pm_editions, |p| &p.pm_editions);
+            if let Some((_, r)) = OSegRef::from(made).floor(pos) {
+                if pos < r.1 {
+                    return true;
+                }
+            }
+            match origin_of(self.tables(pos).0, pos) {
+                Some(o) => pos = o,
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Which kind of expansion's text holds position `pos` (not following the origin of a token
     /// substituted from the call site): the file's own text, the output of a `macro_rules!`
     /// (this file's or another's), or the output of a derive / attribute / built-in macro.
@@ -7006,6 +7055,15 @@ impl ParsedFile {
         (line + 1, (pos - starts[line]) as usize + 1)
     }
 
+    /// The line and column that line!() and the locations code passes and panics with name for a
+    /// position: line_col, counted in a region copied from another text from where it came from
+    /// (LineOrigins). Diagnostics stay at line_col, which names the text that was parsed.
+    pub fn location(&self, pos: u32) -> (usize, usize) {
+        let here = self.line_col(pos);
+        if self.line_origins.0.is_empty() || self.token_input { return here; }
+        self.line_origins.locate(self.diagnostic_pos(pos).min(self.src_len), here, |p| self.line_col(p).0)
+    }
+
     #[inline]
     /// An identifier's name: a raw identifier without its `r#` (`r#in` names `in`, as in rustc).
     pub fn text(&self, id: Ident) -> &str {
@@ -7080,6 +7138,7 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
     let sources = Some(sources.unwrap_or_default());
     let src_len = src.len() as u32;
     let token_input = input.is_some();
+    let line_origins = bctx.as_ref().map(|c| c.line_origins.clone()).unwrap_or_default();
     let (toks, ast, ext, exp_map, tok_origin, token_origins, rules_exp, body_origin, pm_editions, used, lazy) = {
         let toks = if token_input { Vec::new() } else { match pre {
             Some(t) => t,
@@ -7144,7 +7203,7 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
     };
     src.reserve_exact(ext.len());
     src.extend_from_slice(&ext);
-    let mut pf = ParsedFile { src: src.into(), toks: toks.into(), ast, edition, exp_map: Table::from_rows(&exp_map), line_starts: std::sync::OnceLock::new(), src_len, source_hash: Default::default(), numbering: Default::default(), tok_origin: Table::from_rows(&tok_origin), token_origins: Table::from_rows(&token_origins), token_input, sources, rules_exp: Table::from_rows(&rules_exp), body_origin: Table::from_rows(&body_origin), pm_editions: Table::from_rows(&pm_editions), lazy: lazy.into(), part: std::sync::OnceLock::new(), impl_heads: std::sync::OnceLock::new(), image: None, sink: None };
+    let mut pf = ParsedFile { src: src.into(), toks: toks.into(), ast, edition, exp_map: Table::from_rows(&exp_map), line_starts: std::sync::OnceLock::new(), src_len, source_hash: Default::default(), numbering: Default::default(), tok_origin: Table::from_rows(&tok_origin), token_origins: Table::from_rows(&token_origins), token_input, sources, rules_exp: Table::from_rows(&rules_exp), body_origin: Table::from_rows(&body_origin), pm_editions: Table::from_rows(&pm_editions), lazy: lazy.into(), part: std::sync::OnceLock::new(), impl_heads: std::sync::OnceLock::new(), image: None, sink: None, line_origins };
     pf.shrink();
     Ok((pf, used))
 }
@@ -7210,7 +7269,9 @@ pub fn parse_part(pf: &ParsedFile, cfg: &crate::cfg::CfgSet) -> (FilePart, Ast) 
     p.ast.base = ast_tail.ends().into();
     let (n_ext, n_toks, n_rules) = (pf.src.len() - n_src, pf.toks.len(), pf.rules_exp.len());
     p.krate = ctx.krate.clone();
-    p.bctx = Some(std::rc::Rc::new(crate::builtins::FileCtx::new(&ctx.krate, &ctx.path, &ctx.module_path, cfg)));
+    let mut bctx = crate::builtins::FileCtx::new(&ctx.krate, &ctx.path, &ctx.module_path, cfg);
+    bctx.line_origins = pf.line_origins.clone();
+    p.bctx = Some(std::rc::Rc::new(bctx));
     let mut bodies = Vec::new();
     let mut roots = Vec::new();
     for (ii, it) in pf.ast.items.iter().enumerate() {

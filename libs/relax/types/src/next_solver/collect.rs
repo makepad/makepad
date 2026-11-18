@@ -418,8 +418,8 @@ impl Tcx {
             callable_output = Some(output);
             vec![self.tys.intern(TyKind::Tuple(self.tys.mk_list(&ps)))]
         } else { self.lower_generic_args(cx, prog, def.file, def.scope, &env, &path) };
-        let ta = self.fill_trait_defaults(cx, prog, td, ty, written);
         let regions = self.lower_region_args(cx.infcx, prog, def.file, def.scope, &env, &path);
+        let ta = self.fill_trait_defaults(cx, prog, td, ty, written, regions);
         let mut compact = vec![ty]; compact.extend_from_slice(&ta);
         let args = self.complete_args(prog, td, &compact, regions);
         let vars: Arc<[BoundVariableKind]> = env.regions.bound_vars().into();
@@ -460,7 +460,7 @@ impl Tcx {
                         for e in errs { self.err(cx, prog, def.file, lo, e); }
                         continue;
                     }
-                    let supertrait = if prog.def(ad).parent == td { pred.clone() } else { self.supertraits(prog, pred.clone()).into_iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(c)) if c.trait_ref.def_id == prog.def(ad).parent)).expect("associated item's supertrait") };
+                    let supertrait = if prog.def(ad).parent == td { pred.clone() } else { self.supertraits_unfiltered(prog, pred.clone()).into_iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(c)) if c.trait_ref.def_id == prog.def(ad).parent)).expect("associated item's supertrait") };
                     let PredicateKind::Clause(ClauseKind::Trait(c)) = supertrait.kind else { unreachable!() };
                     let mut args = Vec::new();
                     let mut rs = Vec::new();

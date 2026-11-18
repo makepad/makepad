@@ -2811,6 +2811,36 @@ pub fn vmaxnmvq_f32(a: float32x4_t) -> f32 {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmaxnmv_f32(a: float32x2_t) -> f32 {
+    neon_minmax_f32(a.0[0], a.0[1], true, true)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmaxnmvq_f64(a: float64x2_t) -> f64 {
+    neon_minmax_f64(a.0[0], a.0[1], true, true)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmaxv_f32(a: float32x2_t) -> f32 {
+    neon_minmax_f32(a.0[0], a.0[1], true, false)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmaxvq_f32(a: float32x4_t) -> f32 {
+    neon_minmax_f32(
+        neon_minmax_f32(a.0[0], a.0[1], true, false),
+        neon_minmax_f32(a.0[2], a.0[3], true, false),
+        true,
+        false,
+    )
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmaxvq_f64(a: float64x2_t) -> f64 {
+    neon_minmax_f64(a.0[0], a.0[1], true, false)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vmaxq_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
     unsafe {
         vx::vx_binary(a, b, 53, 32)
@@ -2945,6 +2975,36 @@ pub fn vminnmvq_f32(a: float32x4_t) -> f32 {
         false,
         true,
     )
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vminnmv_f32(a: float32x2_t) -> f32 {
+    neon_minmax_f32(a.0[0], a.0[1], false, true)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vminnmvq_f64(a: float64x2_t) -> f64 {
+    neon_minmax_f64(a.0[0], a.0[1], false, true)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vminv_f32(a: float32x2_t) -> f32 {
+    neon_minmax_f32(a.0[0], a.0[1], false, false)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vminvq_f32(a: float32x4_t) -> f32 {
+    neon_minmax_f32(
+        neon_minmax_f32(a.0[0], a.0[1], false, false),
+        neon_minmax_f32(a.0[2], a.0[3], false, false),
+        false,
+        false,
+    )
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vminvq_f64(a: float64x2_t) -> f64 {
+    neon_minmax_f64(a.0[0], a.0[1], false, false)
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]

@@ -96,6 +96,12 @@ relax inspect <pid> watch on=testverdict,patchrefused,patchfailed,patchreverted 
 ```
 
 A `testverdict` names the edited paths and the patch `group`, with counts and the failing tests.
+Each run starts from the program's initial statics, as a fresh run of the test binary does: before
+a rerun, what the earlier runs left in the statics of the program's own crates goes back (std's
+crates keep theirs), and the verdict counts those statics in `statics_reset`. When a thread an
+earlier test started still runs, or the program has its own `#[global_allocator]`, the tests restart
+into a fresh process instead (`restarted`); `statics_carried` means that restart failed and the run
+kept the earlier values.
 Its `results` field is the query for each test's outcome, `test-results group=<n>`:
 
 ```sh

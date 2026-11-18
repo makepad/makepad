@@ -114,6 +114,92 @@ mod test_child {
         command.output().unwrap()
     }
 
+    /// `output`, the child ended once it has run `secs`: Err with what it wrote until then and
+    /// its state before it was ended (`hung_state`).
+    #[cfg(unix)]
+    fn output_within(command: &mut Command, secs: u64) -> Result<Output, (Output, String)> {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let _slot = slot();
+        let child = command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let pid = child.id() as i32;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output().unwrap());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(out) => Ok(out),
+            Err(_) => {
+                let state = hung_state(pid as u32);
+                unsafe { kill(pid, 9) };
+                Err((rx.recv().unwrap(), state))
+            }
+        }
+    }
+
+    /// A child past its deadline, as it is (a hang diagnoses itself the first time it happens):
+    /// its JIT's `why-hung` (the wait chain, every thread's stack with each frame's code version
+    /// and tier) and `jit queue`, each given 20 s; when its JIT does not answer (its inspector
+    /// waits too, as in a malloc lock), the system's view: `sample` on macOS, each thread's state
+    /// and wait channel on Linux.
+    #[cfg(unix)]
+    fn hung_state(pid: u32) -> String {
+        let mut out = String::new();
+        for line in ["why-hung", "jit queue"] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut got: Vec<String> = Vec::new();
+                let r = match makepad_remote::discovery::by_pid(pid) {
+                    Some(app) => crate::inspect::client::ask(&app, line, &mut |l| {
+                        got.push(l.to_string());
+                        true
+                    })
+                    .map_err(|e| e.to_string()),
+                    None => Err("no inspect server (no discovery file)".to_string()),
+                };
+                let _ = tx.send(r.map(|_| got.join("\n")));
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(Ok(text)) => out.push_str(&format!("-- {line}\n{text}\n")),
+                Ok(Err(why)) => {
+                    out.push_str(&format!("-- {line}: {why}\n"));
+                    break;
+                }
+                Err(_) => {
+                    out.push_str(&format!("-- {line}: no answer in 20 s\n"));
+                    break;
+                }
+            }
+        }
+        if !out.contains("-- jit queue\n") {
+            out.push_str(&os_threads(pid));
+        }
+        out
+    }
+
+    #[cfg(target_os = "macos")]
+    fn os_threads(pid: u32) -> String {
+        match Command::new("/usr/bin/sample").args([&pid.to_string(), "2", "-mayDie", "-file", "/dev/stdout"]).output() {
+            Ok(o) => format!("-- sample\n{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+            Err(e) => format!("-- sample: {e}\n"),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn os_threads(pid: u32) -> String {
+        let mut out = String::from("-- threads (tid, name, state, wait channel)\n");
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else { return out + "(no /proc)\n" };
+        for t in tasks.flatten() {
+            let dir = t.path();
+            let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
+            let stat = read("stat");
+            let state = stat.rsplit_once(") ").and_then(|(_, rest)| rest.split_whitespace().next()).unwrap_or("?").to_string();
+            out.push_str(&format!("  {} {} {} {}\n", t.file_name().to_string_lossy(), read("comm").trim(), state, read("wchan").trim()));
+        }
+        out
+    }
+
     /// `command` (a child of this test binary) run to its end in a slot.
     pub fn status(command: &mut Command) -> ExitStatus {
         let _slot = slot();
@@ -128,6 +214,17 @@ mod test_child {
 
     /// `run_alone`, with an optional CPU budget for the child instead of its parent's share.
     pub fn run_alone_with_cores(module: &str, name: &str, cores: Option<usize>) -> bool {
+        run_alone_as(module, name, cores, None)
+    }
+
+    /// `run_alone` for a test whose regression is a hang: a child that has not ended `secs` after
+    /// it started is ended, and the test fails saying so.
+    #[cfg(any(target_vendor = "apple", all(target_os = "linux", target_arch = "x86_64")))]
+    pub fn run_alone_within(module: &str, name: &str, secs: u64) -> bool {
+        run_alone_as(module, name, None, Some(secs))
+    }
+
+    fn run_alone_as(module: &str, name: &str, cores: Option<usize>, within: Option<u64>) -> bool {
         let module = module.split_once("::").map_or("", |(_, rest)| rest);
         let test = if module.is_empty() { name.to_string() } else { format!("{module}::{name}") };
         if std::env::var(CHILD).is_ok_and(|t| t == test) {
@@ -139,7 +236,15 @@ mod test_child {
         if let Some(cores) = cores {
             command.env("MAKEPAD_CPU_CORES", cores.to_string());
         }
-        let output = output(&mut command);
+        let output = match within {
+            None => output(&mut command),
+            #[cfg(unix)]
+            Some(secs) => output_within(&mut command, secs).unwrap_or_else(|(out, state)| {
+                panic!("{test} in its own process: it had not ended {secs} s after it started (ended)\n{}\n{}\n-- its state at the deadline\n{state}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+            }),
+            #[cfg(not(unix))]
+            Some(_) => output(&mut command),
+        };
         let all = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         if !(output.status.success() && all.contains("test result: ok. 1 passed")) {
             panic!("{test} in its own process: {}\n{all}", child_cause(&all, &test, output.status));
@@ -225,7 +330,6 @@ include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
 pub mod run;
 mod first_frame;
 pub mod hot_failure;
-#[cfg(any(windows, test))]
 pub mod restart_parent;
 pub mod run_end;
 mod harness;
@@ -240,6 +344,8 @@ mod typeck_bg;
 mod gandalf_out;
 pub mod serve;
 mod serve_rpc;
+/// `makepad check -p a -p b ...`: a process per package, several side by side, output in order.
+mod check_packages;
 mod serve_query;
 mod serve_os;
 pub mod boundary;
@@ -256,6 +362,8 @@ pub mod store;
 pub mod codegen_id;
 pub mod kernel_store;
 pub mod cache;
+/// the digest gate's digests and its patch count (JITPERF)
+pub(crate) mod gate;
 pub mod clean;
 pub mod mainprof;
 pub mod inspect;

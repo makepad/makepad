@@ -94,6 +94,7 @@ fn certificate(graph: &crate::crate_image::GraphImage) -> u128 {
 /// IDs and lazy state together, without trying to prune the live interner afterwards.
 /// `'p`: the program and types sections borrow the arrays of the program they were captured
 /// from (`'static` once frozen: CollectedBoot::into_owned).
+#[derive(Clone)]
 pub(super) struct CollectedBoot<'p> {
     recipe: GraphRecipe,
     program: Arc<crate::image::Writer<'p>>,
@@ -382,15 +383,15 @@ impl FrontImages {
         why = "collected store missing or unreadable";
         let st = Arc::new(Store::open(&path(&self.dir, graph.identity))?);
         // Like a front image: structure only here (bounds; the image reader checks every
-        // section), the checksum in the background (verify_front_images), so the boot reads
-        // only the pages of the tables it uses, not the whole image.
+        // section), the payload proven by Store::get_at (its epoch, or a check at its first
+        // read), so a warm boot reads only the pages of the tables it uses, not the whole image.
         why = "no collected entry in its store";
         let at = st.index.binary_search_by(|e| { let k = e.key; k.cmp(&key(graph.identity)) }).ok()?;
         why = "collected entry unreadable";
         let (kind, bytes) = st.get_at(at, key(graph.identity))?;
         why = "collected entry of another kind";
         if kind != KIND_COLLECTED { return None; }
-        pin_front(&st, Some(at));
+        pin_front(&st);
         // The checked, immutable mapping is pinned for the Program's mapped definition arena.
         let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
         why = "collected image header";
@@ -641,9 +642,72 @@ pub(crate) struct CollectedInputs {
     crate_ident: Vec<u128>,
     mapped: Option<(MappedDefinitions, usize)>,
     recipe: Option<GraphRecipe>,
+    /// the run's record as the cache holds it (collected_record_inputs): its frozen boot
+    /// snapshot, and whether this program's image is committed already
+    boot: Option<CollectedBoot<'static>>,
+    committed: bool,
 }
 
 impl CollectedInputs {
+    /// The run's collected record, as `Cache::encode_collected` makes it, off the owner thread
+    /// (run.rs record_collected, under the caller's front read): Current when this program's
+    /// image is committed, the frozen boot snapshot when the run has one, else the program
+    /// captured now. The image owns its arrays: its store write needs no lock.
+    pub(crate) fn encode_record(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool) -> CollectedRecord<'static> {
+        Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
+            crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: self.boot.as_ref(), committed: self.committed,
+            mapped: self.mapped.as_ref().map(|(m, n)| (m, *n)), recipe: None }
+            .encode_as(prog, tcx, stop, false, |boot| boot.into_owned(stop))
+    }
+
+    /// The crate count a record of these inputs covers (verbose).
+    pub(crate) fn crates(&self, prog: &Program) -> usize {
+        self.boot.as_ref().map_or(prog.crates.len(), |boot| boot.recipe.crates.len())
+    }
+
+    /// `encode_record` under the caller's front read, with the shape guard: the program's tables
+    /// and the type context's declarations change only under the front write, so the read holds
+    /// them while the image copies them. A count that differs after the copy means a table
+    /// changed without it: the image is dropped (Err says what changed) and nothing is written.
+    /// The interners (types, late names) grow under a shared reference and are not compared:
+    /// each is encoded after everything that can name it.
+    pub(crate) fn capture(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool) -> Result<CollectedRecord<'static>, String> {
+        let before = Shape::of(prog, tcx);
+        let record = self.encode_record(prog, tcx, stop);
+        #[allow(unused_mut)]
+        let mut after = Shape::of(prog, tcx);
+        // (a test's definition added without the front write)
+        #[cfg(test)]
+        if SHAPE_CHANGED.with(|c| c.take()) { after.0[0] += 1; }
+        if before != after {
+            return Err(format!("the program changed without the front write while it was captured: {before:?} -> {after:?}"));
+        }
+        Ok(record)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// (tests) the next capture finds a definition added while it ran
+    pub(super) static SHAPE_CHANGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The table counts a capture compares (CollectedInputs::capture): definitions, files, crates,
+/// modules, imports, impls, traits, variants, symbols; the type context's ADTs, impl selves, impl
+/// traits and trait impls.
+#[derive(PartialEq, Debug)]
+struct Shape([usize; 13]);
+
+impl Shape {
+    fn of(prog: &Program, tcx: &Tcx) -> Shape {
+        Shape([prog.defs.len(), prog.files.len(), prog.crates.len(), prog.mods.len(), prog.imports.len(), prog.impls.len(),
+            prog.traits.len(), prog.variants.len(), prog.syms.len(), tcx.adts.len(), tcx.impl_self.len(), tcx.impl_trait.len(),
+            tcx.trait_impls.len()])
+    }
+}
+
+impl CollectedInputs {
+
     /// The collected image of the program as it is now: neither a committed mark nor a frozen
     /// boot snapshot short-circuits it, so the image covers every type, definition and file
     /// added since the first encode (the settle rebuild restores from it, and compares the counts).
@@ -675,7 +739,7 @@ impl CollectedInputs {
         let crate_path = self.crate_path.iter().cloned().chain((boot..pre.len())
             .map(|ci| self.dir.join(front_store_name(&prog.session.options, &pre[ci].name, fps[ci])))).collect();
         Ok(CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps, iface_plain, crate_path, crate_ident: self.crate_ident.clone(),
-            mapped: self.mapped.clone(), recipe: Some(recipe) })
+            mapped: self.mapped.clone(), recipe: Some(recipe), boot: None, committed: false })
     }
 }
 
@@ -683,7 +747,13 @@ impl Cache {
     pub(crate) fn collected_inputs(&self) -> CollectedInputs {
         CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps: self.fps.clone(), iface_plain: self.iface_plain.clone(),
             crate_path: self.crate_path.clone(), crate_ident: self.crate_ident.clone(),
-            mapped: self.mapped_definitions.clone().map(|m| (m, self.crate_defs_n)), recipe: None }
+            mapped: self.mapped_definitions.clone().map(|m| (m, self.crate_defs_n)), recipe: None, boot: None, committed: false }
+    }
+
+    /// `collected_inputs` with the run's record state (its frozen boot snapshot, its commit), for
+    /// the collected record made off the owner thread (CollectedInputs::encode_record).
+    pub(crate) fn collected_record_inputs(&self) -> CollectedInputs {
+        CollectedInputs { boot: self.collected_boot.clone(), committed: self.collected_committed, ..self.collected_inputs() }
     }
 
     fn encoder(&self) -> Encoder<'_> {
@@ -927,7 +997,7 @@ impl Cache {
         if { ix.len } != written.len || { ix.sum } != written.sum || { ix.kind } != KIND_COLLECTED { return None; }
         let (_, bytes) = st.get_at(at, written.key)?;
         // the mapping is pinned for the rest of the process: the tables point into it
-        pin_front(&st, Some(at));
+        pin_front(&st);
         let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
         let image = crate::image::Reader::new(bytes)?;
         if image.len() != 7 { return None; }

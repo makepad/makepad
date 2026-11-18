@@ -10,6 +10,9 @@ publish = false
 [package.metadata.commercial]
 include = ["../self_stamp.rs", "../base/src/sha256.rs"]
 
+[package.metadata.makepad.platform-gaps]
+windows = { "lib" = "9 of 129 fail there: native (4), unit-graph scripts (3), lazy preload, builtins payload" }
+
 [dependencies]
 relax-base = { workspace = true }
 relax-session = { workspace = true }

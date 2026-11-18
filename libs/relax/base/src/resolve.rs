@@ -314,6 +314,22 @@ fn table<'a>(t: &'a TomlTable, k: &str) -> Option<&'a TomlTable> {
     t.get(k).and_then(|v| v.as_table())
 }
 
+/// The manifest's targets of one kind (`bin`, `test`, `example`, `bench`), as cargo reads them:
+/// `[[bin]]` headers or an inline array of tables (`bin = [{ name = "x" }]`), both in source
+/// order. Anything else under the key is an error, as in cargo, never a package without them.
+fn target_tables<'a>(t: &'a TomlTable, kind: &str, manifest: &str) -> Result<Vec<&'a TomlTable>, String> {
+    match t.get(kind) {
+        None => Ok(Vec::new()),
+        Some(Toml::ArrayOfTables(tables)) => Ok(tables.iter().collect()),
+        Some(Toml::Array(values)) => values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.as_table().ok_or_else(|| format!("{manifest}: `{kind}` entry {} is not a table: each target is `{{ name = .. }}`", i + 1)))
+            .collect(),
+        Some(_) => Err(format!("{manifest}: `{kind}` is not an array of tables: write `[[{kind}]]` or `{kind} = [{{ name = .. }}]`")),
+    }
+}
+
 /// A `[patch]` replacement: a path package or a git source.
 #[derive(Clone, Debug)]
 enum Patch {
@@ -816,7 +832,8 @@ impl Resolver {
         });
         // [[bin]] + discovered bins
         let mut bins: Vec<Target> = Vec::new();
-        let explicit = t.get("bin").and_then(|b| b.as_array_of_tables()).map(|v| v.to_vec()).unwrap_or_default();
+        let manifest = format!("{}/Cargo.toml", dir);
+        let explicit = target_tables(&t, "bin", &manifest)?;
         for bt in &explicit {
             let Some(bname) = s(bt, "name") else { continue };
             let path = match s(bt, "path") {
@@ -867,7 +884,7 @@ impl Resolver {
         // unless `autotests = false`; an explicit target replaces the discovered one of its name
         // or path; edition 2015 packages with explicit [[test]] targets discover none)
         let mut tests: Vec<Target> = Vec::new();
-        let explicit_tests = t.get("test").and_then(|b| b.as_array_of_tables()).map(|v| v.to_vec()).unwrap_or_default();
+        let explicit_tests = target_tables(&t, "test", &manifest)?;
         for tt in &explicit_tests {
             let Some(tname) = s(tt, "name") else { continue };
             let path = match s(tt, "path") {
@@ -911,7 +928,7 @@ impl Resolver {
         // examples/*/main.rs unless `autoexamples = false`, as for tests). A `crate-type` other
         // than `bin` is a library example: no program to run.
         let mut examples: Vec<Target> = Vec::new();
-        let explicit_examples = t.get("example").and_then(|b| b.as_array_of_tables()).map(|v| v.to_vec()).unwrap_or_default();
+        let explicit_examples = target_tables(&t, "example", &manifest)?;
         for et in &explicit_examples {
             let Some(ename) = s(et, "name") else { continue };
             let path = match s(et, "path") {
@@ -2847,12 +2864,13 @@ fn metadata_targets(m: &Manifest) -> Result<Vec<String>, String> {
     if let Some(lib) = &m.lib { targets.push(target(&lib.kind, &lib.kind, &lib.name, &lib.path)); }
     for t in m.bins.iter().chain(&m.tests) { targets.push(target(&t.kind, &bin, &t.name, &t.path)); }
     // Examples and benches have no units in a normal run, but are still manifest targets.
-    let t = read_toml(&format!("{}/Cargo.toml", m.dir))?;
+    let manifest = format!("{}/Cargo.toml", m.dir);
+    let t = read_toml(&manifest)?;
     let pkg = table(&t, "package").unwrap();
     for (kind, folder, auto) in [("example", "examples", "autoexamples"), ("bench", "benches", "autobenches")] {
-        let explicit = t.get(kind).and_then(|x| x.as_array_of_tables()).unwrap_or_default();
+        let explicit = target_tables(&t, kind, &manifest)?;
         let mut found = Vec::new();
-        for e in explicit {
+        for e in &explicit {
             let Some(name) = s(e, "name") else { continue };
             let path = match s(e, "path") {
                 Some(path) => join(&m.dir, &path),
@@ -3357,6 +3375,63 @@ required-features = ["b", "manual"]
         bin.required_features.clear();
         assert!(bin.enabled(&BTreeSet::new(), false).unwrap());
         assert!(bin.enabled(&BTreeSet::new(), true).unwrap());
+    }
+
+    /// Targets written as inline arrays of tables (`bin = [{ .. }]`, cargo's other spelling of
+    /// `[[bin]]`) are the package's targets with their settings, in the unit graph's targets and
+    /// in the metadata's; a key that holds anything but tables is the manifest's error, as in cargo
+    /// (relax PR 232: an inline bin had been dropped, and with it its CARGO_BIN_EXE_<name>).
+    #[test]
+    fn inline_target_arrays_are_targets() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = tree("inline-targets", &[
+            ("Cargo.toml", r#"
+bin = [{ name = "tool", path = "other/tool.rs", test = false, required-features = ["extra"] }]
+test = [{ name = "checks", path = "other/checks.rs", harness = false }]
+example = [{ name = "demo", path = "other/demo.rs", crate-type = ["rlib"] }]
+bench = [{ name = "speed", path = "other/speed.rs", harness = false }]
+
+[package]
+name = "inline"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+extra = []
+"#),
+            ("src/lib.rs", ""),
+            ("other/tool.rs", "fn main() {}"),
+            ("other/checks.rs", "fn main() {}"),
+            ("other/demo.rs", "pub fn demo() {}"),
+            ("other/speed.rs", "fn main() {}"),
+        ]);
+        let mut r = Resolver::new(sess, &root).unwrap();
+        let i = r.load(&root, Source::Path).unwrap();
+        let m = &r.manifests[i];
+        let bins: Vec<_> = m.bins.iter().map(|t| (t.name.as_str(), t.test, t.required_features.clone())).collect();
+        assert_eq!(bins, [("tool", false, vec!["extra".to_string()])], "the inline bin, its `test` and `required-features`");
+        let tests: Vec<_> = m.tests.iter().map(|t| (t.name.as_str(), t.harness, t.path.ends_with("/other/checks.rs"))).collect();
+        assert_eq!(tests, [("checks", false, true)], "the inline test, at its path, with its `harness`");
+        let examples: Vec<_> = m.examples.iter().map(|t| (t.name.as_str(), t.kind.clone())).collect();
+        assert_eq!(examples, [("demo", vec!["rlib".to_string()])], "the inline example with its crate type");
+        let meta = metadata_targets(m).unwrap();
+        for (kind, name) in [("bin", "tool"), ("test", "checks"), ("example", "demo"), ("bench", "speed")] {
+            let (kind_field, name_field) = (format!("\"kind\":[\"{kind}\"]"), format!("\"name\":\"{name}\""));
+            assert!(meta.iter().any(|t| t.contains(&kind_field) && t.contains(&name_field)), "metadata names the inline {kind} `{name}`: {meta:?}");
+        }
+        for (text, why) in [("bin = 1", "not an array"), ("bin = { name = 'a' }", "a table"), ("bin = [{ name = 'a' }, 'b']", "an entry that is not a table")] {
+            assert!(target_tables(&parse_toml(text).unwrap().root, "bin", "Cargo.toml").is_err(), "{why}: {text}");
+        }
+        assert!(target_tables(&parse_toml("bin = []").unwrap().root, "bin", "Cargo.toml").unwrap().is_empty(), "an empty inline array");
+        let names = |text: &str| target_tables(&parse_toml(text).unwrap().root, "bin", "Cargo.toml").unwrap().iter().filter_map(|t| s(t, "name")).collect::<Vec<_>>();
+        assert_eq!(names("[[bin]]\nname = 'a'\n[[bin]]\nname = 'b'"), ["a", "b"], "headers, in source order");
+        assert_eq!(names("bin = [{ name = 'b' }, { name = 'a' }]"), ["b", "a"], "an inline array, in source order");
+        let _ = std::fs::remove_dir_all(&root);
+        // a malformed target key fails the package's load, naming its manifest
+        let bad = tree("inline-targets-bad", &[("Cargo.toml", "test = 'checks'\n[package]\nname = \"bad\"\nversion = \"0.1.0\"\n"), ("src/lib.rs", "")]);
+        let err = Resolver::new(sess, &bad).unwrap().load(&bad, Source::Path).err().expect("a string `test` is refused");
+        assert!(err.contains("Cargo.toml") && err.contains("`test`"), "{err}");
+        let _ = std::fs::remove_dir_all(&bad);
     }
 
     fn tree(name: &str, files: &[(&str, &str)]) -> String {

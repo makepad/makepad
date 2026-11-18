@@ -152,9 +152,9 @@ g commit -q -am plan
 fail=""
 # the master's dealer for one shard (bucket.rs Dealer): each GATEWANT of its output answered in its $DEVHUB_TOLD with
 # the queue's next unit, the ones other shards took (DEAL_TAKEN: indexes by ,) skipped, then none; DEAL_DIGEST: the
-# dealer's queue is another
+# dealer's queue is another; DEAL_NONE=1: it tells this shard of another queue none of its own (`<n> - <digest>`)
 dealer='import os, sys, time
-out, told, taken, digest = sys.argv[1:5]
+out, told, taken, digest, none = sys.argv[1:6]
 taken = {int(x) for x in taken.split(",") if x}
 queue, nxt, answered = None, 0, set()
 while True:
@@ -166,17 +166,17 @@ while True:
             answered.add(w[2])
             while nxt in taken:
                 nxt += 1
-            said = f"{w[2]} {nxt} {queue[1]}" if nxt < queue[0] else f"{w[2]} -"
+            said = f"{w[2]} - {queue[1]}" if none else f"{w[2]} {nxt} {queue[1]}" if nxt < queue[0] else f"{w[2]} -"
             nxt += 1
             with open(told, "a") as f:
                 f.write(said + "\n")
     time.sleep(0.1)'
-gate() { # gate <label> <rev> <expect ok|fail> <ran: packages, sorted> <grep -F'd lines, | between>: land_gate.sh testrun
+gate() { # gate <label> <rev> <expect ok|fail|lost> <ran: packages, sorted> <grep -F'd lines, | between>: land_gate.sh testrun
   local out code ran want pid st deals=""
   g checkout -q "$2"
   rm -f "$dir/ran" "$dir/out"
   if [ "${GATE_QUEUE:-}" = 1 ] && [ -n "${DEVHUB_TOLD:-}" ]; then
-    : > "$DEVHUB_TOLD"; python3 -I -c "$dealer" "$dir/out" "$DEVHUB_TOLD" "${DEAL_TAKEN:-}" "${DEAL_DIGEST:-}" & deals=$!
+    : > "$DEVHUB_TOLD"; python3 -I -c "$dealer" "$dir/out" "$DEVHUB_TOLD" "${DEAL_TAKEN:-}" "${DEAL_DIGEST:-}" "${DEAL_NONE:-}" & deals=$!
   fi
   # the gate's shell's own CPU (utime + stime, not its children's) into gate_ticks, read until it ends
   (cd "$dir/repo" && TEST_RUN_LOG=$dir/ran exec bash "$here/land_gate.sh" testrun "$base" -) > "$dir/out" 2>&1 &
@@ -188,7 +188,7 @@ gate() { # gate <label> <rev> <expect ok|fail> <ran: packages, sorted> <grep -F'
   if [ -n "$deals" ]; then kill "$deals"; wait "$deals" 2>/dev/null; fi
   gate_out=$out
   ran=$(sort "$dir/ran" 2>/dev/null | paste -sd' ' -)
-  case "$3:$code" in ok:0|fail:1) ;; *) fail="$fail $1(exit $code)"; echo "$out" | tail -20;; esac
+  case "$3:$code" in ok:0|fail:1|lost:4) ;; *) fail="$fail $1(exit $code)"; echo "$out" | tail -20;; esac
   [ "$ran" = "$4" ] || { fail="$fail $1(ran: ${ran:-none}; want $4)"; }
   local IFS='|'
   for want in $5; do
@@ -210,8 +210,12 @@ GATE_RETRY="test test-run-plan" GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=
 order=$(echo "$gate_out" | grep -oE '^GATEUNIT ok test [a-z-]+' | paste -sd' ' -)
 [ "$order" = "GATEUNIT ok test test-run-plan GATEUNIT ok test makepad-draw" ] || fail="$fail queue(order: $order)"
 ! echo "$gate_out" | grep -q "^GATEWANT L7 4" || fail="$fail queue(asked past none left)"
-# a dealer whose queue is another's: the shard runs none of it and fails, saying so; no lease telling it: it fails
-GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 GATE_TIMES=$times gate stale shape fail "" "testrun: the dealer's queue 000000000000 is not this shard's|NODEGATE-FAIL: queue"
+# a dealer whose queue is another's (a run's shard asked after a master restart, 11-17): told a unit of it, the shard
+# runs none and says no verdict, as a lost lease's run (exit 4, its bucket runs it once more), never a red; told none
+# of it, it runs none and passes empty. No lease telling it: it fails
+GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 GATE_TIMES=$times gate stale shape lost "" "testrun: the dealer's queue 000000000000 is not this shard's|testrun: no verdict: told a unit of another queue"
+! echo "$gate_out" | grep -qE '^(NODEGATE-|GATESTEP fail)' || fail="$fail stale(a verdict said)"
+GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 DEAL_NONE=1 GATE_TIMES=$times gate other shape ok "" "is not the run's 000000000000 (made from other measures): it takes none of it|NODEGATE-OK testrun 0 packages"
 GATE_QUEUE=1 gate untold shape fail "" "NODEGATE-FAIL: queue (no \$DEVHUB_TOLD"
 gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one"
 # every failing test named, each with its own panic whole (a passing test's caught one is no failure's)

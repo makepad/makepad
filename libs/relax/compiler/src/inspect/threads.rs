@@ -81,6 +81,25 @@ impl Raw {
 }
 
 pub use imp::{each_thread, list, regs_now, tid_of_handle};
+
+/// The kernel function a thread in uninterruptible sleep waits in (Linux: its `wchan`), for the
+/// reports: its user stack ends at the system call, and only this names what it waits behind
+/// (a disk that does not answer, a journal commit). A boot window that presented nothing for
+/// 30 s had its open in `opendir`, in that state, with no word of why. None elsewhere, or when
+/// the kernel does not say.
+pub fn kernel_wait(os_id: u64) -> Option<String> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let w = std::fs::read_to_string(format!("/proc/self/task/{os_id}/wchan")).ok()?;
+        let w = w.trim();
+        (!w.is_empty() && w != "0").then(|| w.to_string())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = os_id;
+        None
+    }
+}
 #[cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
 pub(crate) use imp::capture_taken;
 

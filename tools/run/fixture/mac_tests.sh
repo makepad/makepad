@@ -1,0 +1,91 @@
+#!/bin/bash
+# mac_tests.sh <makepad base sha> <commercial base sha|->: the mac bucket's gate (bucket.rs `mac`), on a Mac's lease
+# in its checkout of the tip. It runs the test targets only a Mac can fail (a package's
+# `[package.metadata.makepad.macos-tests]`, affected.py `macos_tests`) that the landings since <base> reach
+# (affected.py --runs with GATE_MACOS=1: a JIT or workspace-wide change reaches them all), each under this box's JIT
+# ($MAKEPAD_LOADER) as `devhub test` runs it, one at a time. The Linux buckets build them as empty targets, so
+# nothing after a landing ran them (a menu-bar item's restart guard, Metal parity, 11-17).
+# Its lines are land_gate.sh's (GATESTART, GATEEND, GATETIME, a unit's FAILED/panicked/error lines before its
+# GATEUNIT ok|fail, NODEGATE-OK|FAIL), for the bucket to read the same way. Written for the Mac's own bash 3.2
+# (no setsid, no `wait -n`, no /proc), which land_gate.sh needs.
+# A unit hangs when its JIT parks (a panic or compile error waiting at its call: nobody resumes an unattended run),
+# or when its tests give no new result for HUNG_QUIET s while its processes stay under 5% of a core. Its state goes
+# into its log (`sample`), it is stopped by its pid and its children's, and it fails HUNG. A unit at work, or one
+# still building, is never stopped.
+set -u
+QBASE=${1:?mac_tests.sh <makepad base sha> <commercial base sha|->}; QCBASE=${2:--}
+here=$(cd "$(dirname "$0")" && pwd)
+log=$(mktemp -d "${TMPDIR:-/tmp}/macgate.XXXXXX") || exit 2
+HUNG_QUIET=${HUNG_QUIET:-600}
+TP="--profile release-checks"
+fail=""
+who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown) in $PWD]"
+# The JIT of this tree: the one this box built before from exactly its inputs (the hub names it: $MAKEPAD_LOADER), else
+# built here and kept by content as land_gate.sh's step_jit does (loader_build.sh): a Mac whose prebuild had not built the
+# tip named none, and its run stopped before any unit (11-17).
+B=${MAKEPAD_LOADER:-}
+if [ -z "$B" ] || [ ! -x "$B" ]; then
+  echo "mac gate: this box holds no JIT of this tree (\$MAKEPAD_LOADER '$B'): it builds one"
+  out=$(bash "$here/loader_build.sh" 2>&1) || { echo "$out"; echo "GATESTEP fail jit"; echo "NODEGATE-FAIL: jit $who"; exit 1; }
+  echo "$out" | grep -v '^LOADER-OK'
+  B=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
+  [ -x "$B" ] || { echo "mac gate: no JIT at $B after its build"; echo "GATESTEP fail jit"; echo "NODEGATE-FAIL: jit $who"; exit 1; }
+fi
+echo "mac gate: the JIT $B"
+GATE_MACOS=1 python3 -I "$here/affected.py" --runs "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || {
+  tail -5 "$log/affected.err"; echo "GATESTEP fail affected"; echo "NODEGATE-FAIL: affected $who"; exit 1
+}
+echo "mac gate: $(grep -c '^tests ' "$log/affected") unit(s) the landings reach"
+# tree <pid>: it and its descendants, by parent pid (never by name)
+tree() { local c; echo "$1"; for c in $(pgrep -P "$1" 2>/dev/null); do tree "$c"; done; }
+# cpu <pid>: the % of a core it and its descendants use now
+cpu() { local p; for p in $(tree "$1"); do ps -o %cpu= -p "$p" 2>/dev/null; done | awk '{ s += $1 } END { printf "%d", s }'; }
+# results <out>: how many test results its tests gave so far
+results() { grep -cE '^test .* \.\.\. |^test result:' "$1" 2>/dev/null; }
+# running <out>: a target's tests run (its `running N tests` past its last `test result:`)
+running() { awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ { if (d) d-- } END { exit !d }' "$1"; }
+stop() { local p; for p in $(tree "$1"); do kill -KILL "$p" 2>/dev/null; done; }
+units=0
+while read -r word pkg dir rest; do
+  [ "$word" = tests ] || continue
+  units=$((units + 1))
+  unit="test $pkg${rest:+ $rest}"
+  out="$log/unit-$units.log"
+  echo "GATESTART $unit $(date +%s)"
+  t0=$SECONDS
+  MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$B" test "$pkg" $TP $rest > "$out" 2>&1 < /dev/null &
+  pid=$!
+  hung="" seen=-1 quiet_from=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 5
+    park=$(grep -m1 -E '^relax: (panic parked on thread |compile error parked on thread |stale access parked as P[0-9]|.* -- parked as P[0-9]+ \(the app holds still)' "$out")
+    if [ -n "$park" ]; then hung="its JIT parked: $park"; break; fi
+    n=$(results "$out")
+    if [ "$n" != "$seen" ] || ! running "$out" || [ "$(cpu "$pid")" -ge 5 ]; then seen=$n quiet_from=$SECONDS; continue; fi
+    if [ $((SECONDS - quiet_from)) -ge "$HUNG_QUIET" ]; then hung="no new test result for $HUNG_QUIET s, its processes idle"; break; fi
+  done
+  if [ -n "$hung" ]; then
+    { echo "== its state as it hung"; sample "$pid" 2 2>&1 | head -200; } >> "$out"
+    stop "$pid"
+    wait "$pid" 2>/dev/null
+    code=124
+  else
+    wait "$pid"; code=$?
+  fi
+  echo "GATEEND $unit"
+  grep -qE '^running [0-9]+ tests?$' "$out" && [ -z "$hung" ] && echo "GATETIME $unit $((SECONDS - t0))"
+  r=$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i ~ /^(passed|failed);?$/) s[$i] += $(i - 1) } END { printf "%d passed, %d failed", s["passed;"], s["failed;"] }' "$out")
+  if [ "$code" = 0 ]; then
+    echo "$unit: ok ($r, $((SECONDS - t0)) s)"
+    echo "GATEUNIT ok $unit"
+  else
+    [ -z "$hung" ] || echo "HUNG: $unit: $hung; stopped; $r before it"
+    grep -E '^(FAILED |panicked at |error(\[E[0-9]+\])?: )' "$out" | head -60
+    echo "$unit: FAILED (exit $code, $r); its output's end:"
+    tail -25 "$out" | cut -c1-300
+    echo "GATEUNIT fail $unit"
+    fail="$fail $unit"
+  fi
+done < "$log/affected"
+if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail $who"; exit 1; fi
+echo "NODEGATE-OK mac $units unit(s) $who"

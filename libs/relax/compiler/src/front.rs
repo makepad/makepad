@@ -573,6 +573,7 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
         impl_heads: Default::default(),
         image: None,
         sink: None,
+        line_origins: Default::default(),
     })
 }
 

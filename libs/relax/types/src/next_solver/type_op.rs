@@ -81,6 +81,9 @@ pub struct Normalize { pub value: TyId }
 pub struct NormalizeSignature { pub value: TyId }
 #[derive(Clone, Debug)]
 pub struct ProvePredicate { pub predicate: Predicate }
+/// A callee's instantiated clauses, normalized before they are proved: see `normalize_clauses_without_defining`.
+#[derive(Clone, Debug)]
+pub struct NormalizeClauses { pub clauses: Vec<Predicate> }
 
 /// normalize.rs:14 try_fast_path; rustc_traits type_op.rs:41 type_op_normalize with the
 /// next solver's deep normalization (at.query_normalize).
@@ -116,6 +119,17 @@ impl TypeOp for ParamEnvAnd<Normalize> {
         normalize_without_defining(infcx, prog, self.param_env, self.value.value, false)
     }
     fn input(&self) -> TypeOpInput { TypeOpInput::Normalize(self.param_env, self.value.value) }
+}
+impl TypeOp for ParamEnvAnd<NormalizeClauses> {
+    type Output = Vec<Predicate>;
+    /// normalize.rs:15, as for `Normalize`: clauses without an alias are their own normalization.
+    fn try_fast_path(&self, infcx: &InferCtxt<'_>, _prog: &Program) -> Option<Vec<Predicate>> {
+        let aliases = crate::types::TypeFlags::HAS_ALIAS.bits() | crate::types::TypeFlags::HAS_TY_PROJECTION.bits() | crate::types::TypeFlags::HAS_TY_OPAQUE.bits();
+        self.value.clauses.iter().all(|p| p.flags(&infcx.tcx.tys) & aliases == 0).then(|| self.value.clauses.clone())
+    }
+    fn fully_perform(self, infcx: &InferCtxt<'_>, prog: &Program) -> Result<TypeOpOutput<Vec<Predicate>>, NoSolution> {
+        normalize_clauses_without_defining(infcx, prog, self.param_env, self.value.clauses)
+    }
 }
 impl TypeOp for ParamEnvAnd<NormalizeSignature> {
     type Output = TyId;
@@ -307,19 +321,37 @@ pub fn make_query_region_constraints(outlives_obligations: Vec<(TyId, RegionId)>
 
 
 /// `set_aliases_to_non_rigid` for the opaque aliases `defining` only.
-fn unrigid_opaques(tcx: &crate::tcx::Tcx, ty: TyId, defining: &[crate::program::DefId]) -> TyId {
-    use crate::types::fold::{TypeFolder, super_fold_ty};
-    struct F<'a>(&'a [crate::program::DefId]);
-    impl TypeFolder for F<'_> {
-        fn fold_ty(&mut self, tys: &crate::types::Types, ty: TyId, depth: u32) -> TyId {
-            if !tys.has_opaque(ty) { return ty; }
-            let ty = super_fold_ty(tys, ty, self, depth);
-            match tys.kind(ty) {
-                TyKind::Alias(crate::consts::IsRigid::Yes, alias) if matches!(alias.kind, crate::types::AliasTyKind::Opaque { def_id } if self.0.contains(&def_id)) =>
-                    tys.intern(TyKind::Alias(crate::consts::IsRigid::No, alias.clone())),
-                _ => ty,
-            }
+struct Unrigid<'a>(&'a [crate::program::DefId]);
+impl crate::types::fold::TypeFolder for Unrigid<'_> {
+    fn fold_ty(&mut self, tys: &crate::types::Types, ty: TyId, depth: u32) -> TyId {
+        if !tys.has_opaque(ty) { return ty; }
+        let ty = crate::types::fold::super_fold_ty(tys, ty, self, depth);
+        match tys.kind(ty) {
+            TyKind::Alias(crate::consts::IsRigid::Yes, alias) if matches!(alias.kind, crate::types::AliasTyKind::Opaque { def_id } if self.0.contains(&def_id)) =>
+                tys.intern(TyKind::Alias(crate::consts::IsRigid::No, alias.clone())),
+            _ => ty,
         }
     }
-    F(defining).fold_ty(&tcx.tys, ty, 0)
+}
+fn unrigid_opaques(tcx: &crate::tcx::Tcx, ty: TyId, defining: &[crate::program::DefId]) -> TyId {
+    use crate::types::fold::TypeFolder;
+    Unrigid(defining).fold_ty(&tcx.tys, ty, 0)
+}
+
+/// `Normalize` of instantiated clauses (rustc normalizes each with `normalize_with_category` before it proves
+/// it): normalizing defines no opaque type, and the occurrences of the body's own opaque types it leaves rigid
+/// go back to the opaque, to be defined by whatever proving the clause relates them to.
+pub fn normalize_clauses_without_defining(infcx: &InferCtxt<'_>, prog: &Program, param_env: ParamEnvId, clauses: Vec<Predicate>) -> Result<TypeOpOutput<Vec<Predicate>>, NoSolution> {
+    let mode = infcx.typing_mode.get();
+    let crate::tcx::TypingMode::PostTypeckUntilBorrowck { defining_opaque_types } = mode else {
+        return scrape_region_constraints(infcx, prog, |ocx| clauses.iter().map(|p| ocx.deeply_normalize_predicate(&param_env, p)).collect());
+    };
+    infcx.typing_mode.set(crate::tcx::TypingMode::PostTypeckUntilBorrowck { defining_opaque_types: Default::default() });
+    let result = scrape_region_constraints(infcx, prog, |ocx| clauses.iter().map(|p| ocx.deeply_normalize_predicate(&param_env, p)).collect::<Result<Vec<_>, _>>());
+    infcx.typing_mode.set(mode);
+    let defining = infcx.tcx.defining_opaques(defining_opaque_types);
+    result.map(|mut out| {
+        for p in &mut out.output { *p = super::fold::fold_predicate(&infcx.tcx.tys, p, &mut Unrigid(defining)); }
+        out
+    })
 }

@@ -105,8 +105,11 @@ impl<A: Codec, B: Codec, C: Codec, D: Codec> Codec for (A, B, C, D) {
 }
 impl<T: Codec> Codec for OnceLock<T> {
     fn put(&self, w: &mut Vec<u8>) {
-        self.get().is_some().put(w);
-        if let Some(v) = self.get() { v.put(w); }
+        // read once: another thread may fill the cell meanwhile (an image written under a front
+        // read, beside lazy compiles); two reads wrote its empty flag and then its value
+        let v = self.get();
+        v.is_some().put(w);
+        if let Some(v) = v { v.put(w); }
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
         Some(if bool::get(r)? { Self::from(T::get(r)?) } else { Self::new() })
@@ -753,6 +756,41 @@ mod image_table_tests {
         let mut w = crate::image::Writer::default();
         write(&mut w);
         crate::image::Reader::new(mapped(w.finish())).unwrap()
+    }
+
+    /// A cell that another thread fills while its image is written (the collected program
+    /// captured under a front read while lazy compiles fill signatures) is written whole:
+    /// empty, or its full value. Never the empty flag followed by the value's bytes, which
+    /// misaligns every later field of the image.
+    #[test]
+    fn a_cell_filled_while_its_image_is_written_is_written_whole() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const CELLS: usize = 2048;
+        // (a value whose first byte is no bool: a torn cell fails the decode)
+        const VALUE: u64 = 0xA5A5_A5A5_A5A5_A5A5;
+        let mut images = 0u32;
+        for round in 0..200 {
+            let cells: Vec<OnceLock<u64>> = (0..CELLS).map(|_| OnceLock::new()).collect();
+            let (go, filled) = (AtomicBool::new(false), AtomicBool::new(false));
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    while !go.load(Ordering::Acquire) { std::hint::spin_loop(); }
+                    // from the end: each image, written from the start, meets the filler once
+                    for c in cells.iter().rev() { let _ = c.set(VALUE); }
+                    filled.store(true, Ordering::Release);
+                });
+                go.store(true, Ordering::Release);
+                loop {
+                    let last = filled.load(Ordering::Acquire);
+                    let bytes = crate::crate_image::encode(&cells);
+                    let back = crate::crate_image::decode::<Vec<OnceLock<u64>>>(&bytes);
+                    assert!(back.is_some_and(|b| b.len() == CELLS && b.iter().all(|c| c.get().is_none_or(|v| *v == VALUE))),
+                        "round {round}, image {images}: a cell filled while it was written broke the image");
+                    images += 1;
+                    if last { break; }
+                }
+            });
+        }
     }
 
     #[test]

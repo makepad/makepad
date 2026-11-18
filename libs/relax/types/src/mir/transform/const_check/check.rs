@@ -8,12 +8,14 @@ use crate::mir::visit::Visitor;
 use crate::mir::*;
 use crate::program::DefKind;
 use crate::types::{TyId, TyKind};
-use super::super::qualifs::{in_any_value_of_ty, in_place, ConstQualifs, HasMutInterior, NeedsDrop, NeedsNonConstDrop, Qualif, QualifResults};
+use super::super::qualifs::{in_any_value_of_ty, in_place, ConstQualifs, HasMutInterior, NeedsDrop, NeedsNonConstDrop, NotSync, Qualif, QualifResults};
 
-/// The three flow-sensitive qualif analyses, each computed on first use.
+/// The four flow-sensitive qualif analyses, each computed on first use.
 #[derive(Default)]
 struct Qualifs {
     has_mut_interior: Option<QualifResults<HasMutInterior>>,
+    /// Cached value analysis so named constants carry the qualification for rustc issue 49206.
+    not_sync: Option<QualifResults<NotSync>>,
     needs_drop: Option<QualifResults<NeedsDrop>>,
     needs_non_const_drop: Option<QualifResults<NeedsNonConstDrop>>,
 }
@@ -48,6 +50,16 @@ impl Qualifs {
         self.has_mut_interior.get_or_insert_with(|| QualifResults::compute(ccx)).contains_before(ccx, local, location)
     }
 
+    /// Finds `NotSync` in `local` at `location`, computing value flow only if the type may qualify,
+    /// like rustc_const_eval/src/check_consts/check.rs:55 for `HasMutInterior`.
+    fn not_sync(&mut self, ccx: &ConstCx<'_>, local: Local, location: Location) -> bool {
+        let ty = ccx.body.local_decls[local.0 as usize].ty;
+        if !NotSync::in_any_value_of_ty(ccx, ty) {
+            return false;
+        }
+        self.not_sync.get_or_insert_with(|| QualifResults::compute(ccx)).contains_before(ccx, local, location)
+    }
+
     fn in_return_place(&mut self, ccx: &ConstCx<'_>, tainted_by_errors: bool) -> ConstQualifs {
         // Find the `Return` terminator if one exists.
         //
@@ -65,6 +77,7 @@ impl Qualifs {
             needs_drop: self.needs_drop(ccx, Local(0), return_loc),
             needs_non_const_drop: self.needs_non_const_drop(ccx, Local(0), return_loc),
             has_mut_interior: self.has_mut_interior(ccx, Local(0), return_loc),
+            not_sync: self.not_sync(ccx, Local(0), return_loc),
             tainted_by_errors,
         }
     }

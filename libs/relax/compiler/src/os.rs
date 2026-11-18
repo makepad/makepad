@@ -44,6 +44,10 @@ pub(crate) struct ProgramThread;
 pub(crate) fn program_thread() -> ProgramThread {
     ProgramThread
 }
+#[cfg(windows)]
+impl ProgramThread {
+    pub(crate) fn end_with_thread(self) {}
+}
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {

@@ -27,6 +27,8 @@ pub struct Blocked(pub &'static str);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConstQualifs {
     pub has_mut_interior: bool,
+    /// Whether the return value cannot be shared across threads, for rustc issue 49206.
+    pub not_sync: bool,
     pub needs_drop: bool,
     pub needs_non_const_drop: bool,
     pub tainted_by_errors: bool,
@@ -50,6 +52,7 @@ impl ConstQualifsProvider for NoProvider {
 pub fn in_any_value_of_ty(cx: &ConstCx<'_>, ty: TyId, tainted_by_errors: bool) -> ConstQualifs {
     ConstQualifs {
         has_mut_interior: HasMutInterior::in_any_value_of_ty(cx, ty),
+        not_sync: NotSync::in_any_value_of_ty(cx, ty),
         needs_drop: NeedsDrop::in_any_value_of_ty(cx, ty),
         needs_non_const_drop: NeedsNonConstDrop::in_any_value_of_ty(cx, ty),
         tainted_by_errors,
@@ -124,6 +127,45 @@ impl Qualif for HasMutInterior {
         // structurally for all other types.
         !cx.tcx.adts.get(&adt).is_some_and(|a| a.is_unsafe_cell())
     }
+}
+
+/// A value that cannot be shared across threads: rustc issue 49206. Promotion in a function shares
+/// one allocation, so it needs a static's `Sync` requirement (rustc_hir_analysis/src/check/wfcheck.rs:1249).
+/// Like `HasMutInterior` (rustc_const_eval/src/check_consts/qualifs.rs:79), this follows values so
+/// empty arrays and absent enum payloads remain promotable without `T: Sync`.
+pub struct NotSync;
+
+/// Propagates `NotSync` through values using the `HasMutInterior` defaults for moves and promoteds
+/// (rustc_const_eval/src/check_consts/qualifs.rs:81).
+impl Qualif for NotSync {
+    /// Reads the constant's value qualification so uses of named constants preserve it.
+    fn in_qualifs(qualifs: &ConstQualifs) -> bool {
+        qualifs.not_sync
+    }
+
+    /// Requires definite `Sync` when only the type, rather than its value, is known.
+    fn in_any_value_of_ty(cx: &ConstCx<'_>, ty: TyId) -> bool {
+        !is_sync(cx, ty)
+    }
+
+    /// Recurses only when `Sync` follows actual fields: `PhantomData` holds no parameter value,
+    /// and either polarity of explicit impl overrides structural auto-trait reasoning
+    /// (rustc_middle/src/ty/trait_def.rs:139 selects relevant impls).
+    fn is_structural_in_adt_value(cx: &ConstCx<'_>, adt: DefId) -> bool {
+        let Some(sync) = cx.tcx.lang_items.get(crate::lang_items::LangItem::Sync) else { return false };
+        !cx.tcx.adts.get(&adt).is_some_and(|a| a.is_phantom_data())
+            && !cx.tcx.trait_impls.get(&(crate::tcx::TyKey::Adt(adt), sync)).is_some_and(|impls| !impls.is_empty())
+    }
+}
+
+/// Proves `Sync` modulo regions (rustc_ty_utils/src/common_traits.rs:47), accepting only a definite
+/// solver answer. Primitive const items are common, so their known `Sync` needs no solver call.
+fn is_sync(cx: &ConstCx<'_>, ty: TyId) -> bool {
+    if matches!(cx.tcx.tys.kind(ty), TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str | TyKind::Never) {
+        return true;
+    }
+    let Some(sync) = cx.tcx.lang_items.get(crate::lang_items::LangItem::Sync) else { return false };
+    cx.tcx.type_implements_trait(cx.prog, cx.env, crate::next_solver::TraitRef { def_id: sync, args: vec![crate::consts::GenericArg::Type(ty)] }).must_apply_modulo_regions()
 }
 
 /// Constant containing an ADT that implements `Drop`. This must be ruled out because implicit

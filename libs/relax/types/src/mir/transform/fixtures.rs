@@ -10,6 +10,7 @@ use crate::types::TyKind;
 /// Items every fixture program has.
 pub(crate) const PRELUDE: &str = r#"
 #[lang = "sized"] pub trait Sized {}
+#[lang = "sync"] pub unsafe auto trait Sync {}
 #[lang = "drop"] pub trait Drop { fn drop(&mut self); }
 #[lang = "unsafe_cell"] pub struct UnsafeCell<T>(T);
 pub struct D; impl Drop for D { fn drop(&mut self) {} }

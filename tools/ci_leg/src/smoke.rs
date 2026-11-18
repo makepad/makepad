@@ -500,12 +500,12 @@ impl Runtime {
         let index = self.apps.len();
         let report = self.run.path(&format!("{}-{index}-report", safe_name(&name)));
         let _ = std::fs::remove_file(&report);
-        let loader = crate::loader();
+        let (loader, _) = crate::loader()?;
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let data = std::env::temp_dir().join(format!("ci-leg-data-{}-{index}-{stamp}", std::process::id()));
         let fresh = fresh_data(&data)?;
-        let mut command = Command::new(&loader[0]);
-        command.args(&loader[1..]).arg("run").arg("--report-to").arg(&report).arg(&target.package);
+        let mut command = Command::new(&loader);
+        command.arg("run").arg("--report-to").arg(&report).arg(&target.package);
         if target.binary != target.package {
             command.arg("--bin").arg(&target.binary);
         }
@@ -735,20 +735,28 @@ impl Runtime {
         Ok(lines.join("\n"))
     }
 
-    /// No `[E]` line, panic or JIT compile error in the app's log and output, and alive.
-    /// A warning, never a failure, and it only reads what is already captured.
+    /// A warning, never a failure: the app keeps drawing untouched ([`idle_drawing`]). Only when
+    /// its last readings say so does it wait for one more ([`still_drawing`]).
     fn flag_idle_drawing(&mut self, i: usize) -> Result<()> {
         if self.dry {
             return Ok(());
         }
         self.drain_app(i)?;
         let app = &self.apps[i];
-        if let Some(warning) = app.child.text.get(app.started_at..).and_then(idle_drawing) {
+        let before = app.child.text.get(app.started_at..).unwrap_or_default().to_string();
+        if idle_drawing(&before).is_none() {
+            return Ok(());
+        }
+        std::thread::sleep(READING_EVERY);
+        self.drain_app(i)?;
+        let app = &self.apps[i];
+        if let Some(warning) = app.child.text.get(app.started_at..).and_then(|after| still_drawing(&before, after)) {
             self.warning = warning;
         }
         Ok(())
     }
 
+    /// No `[E]` line, panic or JIT compile error in the app's log and output, and alive.
     fn no_errors(&mut self, i: usize) -> Result<()> {
         if self.dry {
             return Ok(());
@@ -1325,6 +1333,19 @@ fn idle_drawing(log: &str) -> Option<String> {
 
 const IDLE_FRAMES_PER_S: f64 = 30.0;
 
+/// [`idle_drawing`] of `after`, the app's output [`READING_EVERY`] past `before`, if a reading came
+/// in between. An app whose drawing ended (an animation that ran its course) prints no reading
+/// until its next event, so its last two stay those of the animation however long it is quiet
+/// after: aires' demo question moved in for 2.4 s and read as drawing untouched 8 s later (11-18).
+fn still_drawing(before: &str, after: &str) -> Option<String> {
+    let readings = |log: &str| log.matches("[frame-sources] ").count();
+    if readings(after) > readings(before) { idle_drawing(after) } else { None }
+}
+
+/// An app that draws prints a `[frame-sources]` reading at its first frame a second after the
+/// last: within this, one comes.
+const READING_EVERY: Duration = Duration::from_millis(1500);
+
 fn allow(vm: &mut ScriptVm) -> bool {
     if vm.has_captured_errors() {
         let e = vm.take_errors().join("\n");
@@ -1751,7 +1772,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_two_full_seconds_in_a_row_at_the_end_are_flagged() {
+    fn only_two_full_seconds_in_a_row_at_the_end_are_flagged_while_readings_still_come() {
         let busy = "[frame-sources] 1.00s beats=60 next_frame=60 redraw=2\n    60 next_frame  a.rs:1\n";
         let gap = "[frame-sources] 7.50s beats=2 next_frame=1 redraw=1\n";
         assert!(idle_drawing("").is_none(), "a quiet app prints nothing");
@@ -1759,6 +1780,10 @@ mod tests {
         assert!(idle_drawing(&format!("{busy}{busy}")).is_some());
         assert!(idle_drawing(&format!("{busy}{busy}{gap}")).is_none(), "it went quiet");
         assert!(idle_drawing(&format!("{busy}{gap}{busy}")).is_none());
+        let flagged = format!("{busy}{busy}");
+        assert!(still_drawing(&flagged, &flagged).is_none(), "no reading since: its drawing ended");
+        assert!(still_drawing(&flagged, &format!("{flagged}{busy}")).is_some(), "a new reading at its rate: it still draws");
+        assert!(still_drawing(&flagged, &format!("{flagged}{gap}")).is_none(), "the new reading is a quiet one");
     }
 
     /// One app for a close (an endpoint per process): a drawn window, the quit noted, and a frame

@@ -598,7 +598,6 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
     match caps {
         Err(e) => eprintln!("relax: layout patch gen {}: the program's stacks could not be read ({}): a thread still in first-version code of a rebuilt fn is not held", gen, e),
         Ok(caps) => {
-            let code = u.code.read().unwrap_or_else(|e| e.into_inner());
             for c in caps {
                 // pc, return addresses; a leaf's caller (arm64 lr; x86-64 the word at sp: a
                 // frameless leaf, a prologue)
@@ -612,10 +611,14 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
                         at.push((usize::MAX, u64::from_le_bytes(w[..8].try_into().unwrap()).wrapping_sub(1)));
                     }
                 }
-                let hit = at.iter().find_map(|&(k, a)| {
-                    let (start, len, slot) = code.entry_at(a)?;
-                    (affected.contains(&slot) && start != u.fns[slot as usize].code && crate::stale::lookup(a).is_none()).then_some((k, start, len, slot))
-                });
+                // (the code tables' lock for the lookup alone: never across the thread's hold)
+                let hit = {
+                    let code = u.code.read().unwrap_or_else(|e| e.into_inner());
+                    at.iter().find_map(|&(k, a)| {
+                        let (start, len, slot) = code.entry_at(a)?;
+                        (affected.contains(&slot) && start != u.fns[slot as usize].code && crate::stale::lookup(a).is_none()).then_some((k, start, len, slot))
+                    })
+                };
                 if let Some((k, start, len, slot)) = hit {
                     let ok = crate::inspect::instrument::hold_for_good(&c.t);
                     let pc = at.iter().find(|x| x.0 == k).map_or(start, |x| x.1);
@@ -640,7 +643,8 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
 /// A patch that changes a struct's layout in place (reload.rs fresh_layout_struct), about to
 /// install with the program threads paused (inspect::instrument::pause_for_patch): the first frame
 /// of a program thread in code of one of `slots` (any version: what the patch rebuilds was built
-/// for the old layout), in a slot of text the program no longer has (reload::retired_text: a fn
+/// for the old layout; named with what of retired text it runs or reaches, below, when it does),
+/// in a slot of text the program no longer has (reload::retired_text: a fn
 /// an edit removed or replaced, a closure inside one, a closure a patch kept on its old code), in
 /// a version that holds a copy of such code (an inlining tier's), in a slot that can still call
 /// such code (reload::over_retired: an instance over a kept closure),
@@ -650,12 +654,13 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
 /// found, and a stack could not be read to its end (what it hides is not known).
 pub(crate) fn frame_in(u: &Unit, slots: &crate::fxhash::HashSet<u32>) -> Result<Option<String>, String> {
     let caps = crate::inspect::capture_all(&crate::inspect::instrument::program_thread)?;
-    let code = u.code.read().unwrap_or_else(|e| e.into_inner());
     // (a thread is named as reports name it: one nobody named is its program thread, or `unnamed`)
     let listed: Vec<crate::inspect::threads::Thread> = caps.iter().map(|c| c.t.clone()).collect();
     // the hosts of copies of a closure a patch kept on its old code, for linked code below O3 (the
     // image and disk-cache links note `inlined_into`, not a list per code body)
     let hosts: crate::fxhash::HashMap<u32, u32> = u.kept_old.keys().flat_map(|&k| u.fns[k as usize].history().inlined_into.iter().map(move |&h| (h, k))).collect();
+    // a closure by the fn that makes it and its place, not by the JIT's number for it
+    let shown = |slot: u32| crate::reload::slot_shown(u, slot);
     let mut unread = None;
     for c in caps {
         if let Some(e) = c.err {
@@ -677,30 +682,42 @@ pub(crate) fn frame_in(u: &Unit, slots: &crate::fxhash::HashSet<u32>) -> Result<
         }
         let thread = format!("`{}` (tid {})", crate::inspect::shown_name(&c.t, &listed), c.t.os_id);
         for a in at {
-            let Some((start, _, slot)) = code.entry_at(a) else { continue };
-            let f = &u.fns[slot as usize];
-            if slots.contains(&slot) {
-                return Ok(Some(format!("`{}` is running on thread {}", f.name, thread)));
-            }
-            if let Some(retired) = crate::reload::retired_text(u, slot) {
-                return Ok(Some(format!("`{}` runs on thread {} {}", f.name, thread, retired)));
-            }
-            // a copy of such code inlined into this version
-            // (code built in this run lists what it inlined when it inlined anything: none listed,
-            // none taken in, whatever a later version of the slot took)
-            let copy = match code.inlined_at(start) {
-                Some(list) => list.iter().find_map(|&c| crate::reload::retired_text(u, c).map(|r| (c, r))),
-                None if matches!(code.kind_of(start).origin, crate::jit::origin::CACHE | crate::jit::origin::IMAGE) => hosts.get(&slot).and_then(|&c| crate::reload::retired_text(u, c).map(|r| (c, r))),
-                None => None,
+            // (the code tables' lock for the lookups alone: naming a closure below asks type
+            // queries, and one can run code whose install takes the lock to write)
+            let found = {
+                let code = u.code.read().unwrap_or_else(|e| e.into_inner());
+                code.entry_at(a).map(|(start, _, slot)| (start, slot, code.inlined_at(start).map(|l| l.to_vec()), code.kind_of(start).origin))
             };
-            if let Some((c, retired)) = copy {
-                return Ok(Some(format!("`{}` runs on thread {} in code that holds a copy of `{}`, {}", f.name, thread, u.fns[c as usize].name, retired)));
+            let Some((start, slot, inlined, origin)) = found else { continue };
+            let f = &u.fns[slot as usize];
+            // what of retired text the frame runs or reaches; for a slot the patch rebuilds too, so
+            // the reason names both
+            let retired = || {
+                if let Some(retired) = crate::reload::retired_text(u, slot) {
+                    return Some(retired);
+                }
+                // a copy of such code inlined into this version
+                // (code built in this run lists what it inlined when it inlined anything: none listed,
+                // none taken in, whatever a later version of the slot took)
+                let copy = match inlined.as_deref() {
+                    Some(list) => list.iter().find_map(|&c| crate::reload::retired_text(u, c).map(|r| (c, r))),
+                    None if matches!(origin, crate::jit::origin::CACHE | crate::jit::origin::IMAGE) => hosts.get(&slot).and_then(|&c| crate::reload::retired_text(u, c).map(|r| (c, r))),
+                    None => None,
+                };
+                if let Some((c, retired)) = copy {
+                    return Some(format!("in code that holds a copy of {}, {}", shown(c), retired));
+                }
+                crate::reload::over_retired(u, slot).map(|over| format!("and can still call {over}"))
+            };
+            if slots.contains(&slot) {
+                let more = retired().map_or_else(String::new, |r| format!(" {r}"));
+                return Ok(Some(format!("{} is running on thread {}{}", shown(slot), thread, more)));
             }
-            if let Some(over) = crate::reload::over_retired(u, slot) {
-                return Ok(Some(format!("`{}` runs on thread {} and can still call {}", f.name, thread, over)));
+            if let Some(r) = retired() {
+                return Ok(Some(format!("{} runs on thread {} {}", shown(slot), thread, r)));
             }
             if start != f.code {
-                return Ok(Some(format!("`{}` runs code from before an earlier edit on thread {}", f.name, thread)));
+                return Ok(Some(format!("{} runs code from before an earlier edit on thread {}", shown(slot), thread)));
             }
         }
     }

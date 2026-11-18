@@ -1,6 +1,6 @@
 // ported from N:rustc_borrowck/src/region_infer/region_context.rs @8d1a764
 use crate::types::{AliasTy, AliasTyKind};
-use super::{NllRegionVariableOrigin as Origin, RegionDefinition, RegionErrorKind, TypeTest, VerifyBound, ConstraintSccs};
+use super::{NllRegionVariableOrigin as Origin, RegionDefinition, RegionErrorKind, Advisory, TypeTest, VerifyBound, ConstraintSccs};
 use super::values::{LivenessValues, PlaceholderIndices, RegionElement, RegionValues};
 use crate::borrowck::constraints::{ConstraintCategory as Category, OutlivesConstraint, OutlivesConstraintSet, ReturnConstraint};
 use crate::borrowck::constraints::graph::ConstraintGraph;
@@ -17,6 +17,7 @@ pub struct RegionInferenceContext {
     pub scc_values: RegionValues,
     pub universal_region_relations: UniversalRegionRelations,
     pub errors: Vec<RegionErrorKind>,
+    pub advisory_failures: Vec<usize>,
     pub propagated_outlives_requirements: Vec<OutlivesConstraint>,
     pub propagated_type_requirements: Vec<super::ClosureTypeRequirement>,
     constraints: OutlivesConstraintSet,
@@ -26,7 +27,7 @@ pub struct RegionInferenceContext {
 }
 impl RegionInferenceContext {
     pub fn solve(tcx: &Tcx, prog: &Program, lowered: LoweredConstraints, universal_region_relations: UniversalRegionRelations,
-        liveness_constraints: LivenessValues, num_points: usize, type_tests: &[TypeTest], nested: bool) -> Self {
+        liveness_constraints: LivenessValues, num_points: usize, type_tests: &[TypeTest], advisories: &[Advisory], nested: bool) -> Self {
         let LoweredConstraints { definitions, constraint_sccs, scc_annotations, outlives_constraints } = lowered;
         let mut placeholders = PlaceholderIndices::default();
         for d in &definitions { if let Origin::Placeholder(p) = d.origin { placeholders.insert(p); } }
@@ -42,10 +43,11 @@ impl RegionInferenceContext {
         }
         let constraint_graph = outlives_constraints.graph(definitions.len());
         let mut this = Self { definitions, constraint_sccs, scc_values, universal_region_relations,
-            errors: vec![], propagated_outlives_requirements: vec![], propagated_type_requirements: vec![], constraints: outlives_constraints,
+            errors: vec![], advisory_failures: vec![], propagated_outlives_requirements: vec![], propagated_type_requirements: vec![], constraints: outlives_constraints,
             constraint_graph, scc_annotations, liveness_constraints };
         this.propagate_constraints();
         this.check_type_tests(tcx, prog, type_tests, nested);
+        this.check_advisories(advisories, nested);
         this.check_universal_regions(tcx, nested);
         this
     }
@@ -57,10 +59,10 @@ impl RegionInferenceContext {
     }
     pub fn liveness_constraints(&self) -> &LivenessValues { &self.liveness_constraints }
     pub fn outlives_constraints(&self) -> &OutlivesConstraintSet { &self.constraints }
-    pub fn with_liveness(&self, tcx: &Tcx, prog: &Program, liveness: LivenessValues, num_points: usize, tests: &[TypeTest], nested: bool) -> Self {
+    pub fn with_liveness(&self, tcx: &Tcx, prog: &Program, liveness: LivenessValues, num_points: usize, tests: &[TypeTest], advisories: &[Advisory], nested: bool) -> Self {
         let lowered = LoweredConstraints { definitions: self.definitions.clone(), constraint_sccs: self.constraint_sccs.clone(),
             scc_annotations: self.scc_annotations.clone(), outlives_constraints: self.constraints.clone() };
-        Self::solve(tcx, prog, lowered, self.universal_region_relations.clone(), liveness, num_points, tests, nested)
+        Self::solve(tcx, prog, lowered, self.universal_region_relations.clone(), liveness, num_points, tests, advisories, nested)
     }
     pub fn region_contains_point(&self, r: usize, point: usize) -> bool { self.scc_values.contains_point(self.constraint_sccs.scc(r), point) }
     pub fn universal_regions_outlived_by(&self, r: usize) -> impl Iterator<Item=usize> + '_ {
@@ -136,6 +138,42 @@ impl RegionInferenceContext {
                 ty == other && tests[i].span == t.span && self.constraint_sccs.scc(tests[i].lower_bound) == static_scc) { continue; }
             if reported.insert((ty,t.lower_bound,t.span)) { self.errors.push(RegionErrorKind::TypeTest { test }); }
         }
+    }
+    fn check_advisories(&mut self, advisories: &[Advisory], nested: bool) {
+        // A closure body's requirement needs its parent environment; propagating advisories is out of scope.
+        if nested || advisories.is_empty() { return; }
+        let mut reported = crate::fxhash::HashSet::default();
+        // the SCCs each SCC is contained in (the reverse of `successors`), built for the first advisory that does
+        // not hold as solved
+        let mut containers: Option<Vec<Vec<usize>>> = None;
+        for (index, a) in advisories.iter().enumerate() {
+            if self.eval_outlives(a.sup, a.sub) { continue; }
+            let containers = containers.get_or_insert_with(|| {
+                let mut c = vec![Vec::new(); self.constraint_sccs.num_sccs()];
+                for s in self.constraint_sccs.all_sccs() { for &t in self.constraint_sccs.successors(s) { c[t].push(s); } }
+                c
+            });
+            if !self.advisory_would_fail(a, containers) { continue; }
+            if reported.insert((self.constraint_sccs.scc(a.sup), self.constraint_sccs.scc(a.sub), a.span)) { self.advisory_failures.push(index); }
+        }
+    }
+    /// Whether `sup: sub`, added as a constraint, would make a universal region outlive one it is not known to: the
+    /// universal regions whose SCC contains `sup`'s (its own included) would then hold the universal regions `sub`'s
+    /// value holds. An inference region in `sup` grows to meet the requirement, as it would under the constraint, so
+    /// it alone never fails it. (A requirement met only by a longer loan, not by a universal region, is not seen.)
+    fn advisory_would_fail(&self, a: &Advisory, containers: &[Vec<usize>]) -> bool {
+        let sccs = &self.constraint_sccs;
+        let held: Vec<usize> = self.scc_values.universal_regions_outlived_by(sccs.scc(a.sub)).collect();
+        if held.is_empty() { return false; }
+        let mut seen = vec![false; sccs.num_sccs()];
+        let mut stack = vec![sccs.scc(a.sup)];
+        seen[sccs.scc(a.sup)] = true;
+        while let Some(s) = stack.pop() {
+            for &c in &containers[s] { if !seen[c] { seen[c] = true; stack.push(c); } }
+        }
+        let relations = &self.universal_region_relations;
+        relations.universal_regions.universal_regions_iter()
+            .any(|u| seen[sccs.scc(u)] && held.iter().any(|&x| u != x && !relations.outlives(u, x)))
     }
     fn try_promote_type_test(&mut self, tcx: &Tcx, test: &TypeTest) -> bool {
         let Some(subject) = self.try_promote_type_test_subject(tcx,test.generic_kind) else { return false; };

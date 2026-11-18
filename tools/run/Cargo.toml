@@ -26,6 +26,11 @@ platforms = ["desktop", "mobile"]
 "test:confined_macros" = "it re-runs its own binary as each case's runner: under makepad test each runner is a JIT of its own, and six at once took 41 GB"
 "test:confined_scripts" = "it re-runs its own binary as each case's runner, as confined_macros does"
 
+# checked on Windows (devhub native work may run there); the tests that need sandboxed modules, bash
+# or Unix tools are cfg(not(windows)) in fixture/modules_harness.rs, each with its reason
+[package.metadata.makepad.platform-gaps]
+windows = { "test:confined_macros" = "does not build there: it uses std::os::unix (PermissionsExt)", "test:confined_scripts" = "does not build there: it uses std::os::unix (symlinks)" }
+
 [lib]
 name = "makepad_run"
 path = "src/lib.rs"

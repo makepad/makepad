@@ -57,6 +57,8 @@ extern "C" {
     // io
     pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t;
     pub fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t;
+    // `iov`: an array of `struct iovec`, which `io::IoSlice` is on unix (io/mod.rs IoBuf)
+    pub fn writev(fd: c_int, iov: *const c_void, iovcnt: c_int) -> ssize_t;
     pub fn pread(fd: c_int, buf: *mut c_void, count: size_t, offset: off_t) -> ssize_t;
     pub fn pwrite(fd: c_int, buf: *const c_void, count: size_t, offset: off_t) -> ssize_t;
     pub fn close(fd: c_int) -> c_int;

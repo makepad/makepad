@@ -1964,8 +1964,10 @@ mod abort_tests {
             assert_eq!(unsafe { setrlimit(2, &[1 << 40, lim[1]]) }, 0);
             super::install();
             super::start_abort_reporter();
-            // what handle_alloc_error does after the allocator refuses an infallible request
-            let p = unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 60, 1).unwrap()) };
+            // what handle_alloc_error does after the allocator refuses an infallible request. The
+            // pointer escapes (black_box): an optimized build removes an allocation only compared
+            // with null and takes it to have succeeded, so nothing would be asked or refused
+            let p = std::hint::black_box(unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 60, 1).unwrap()) });
             assert!(p.is_null());
             std::process::abort();
         }

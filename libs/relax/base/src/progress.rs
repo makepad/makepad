@@ -54,6 +54,14 @@ pub fn say(line: &str) {
     }
 }
 
+/// A line of Relax's own for the session log alone (a wait the terminal need not hear of), when
+/// the run keeps one.
+pub fn log(line: &str) {
+    if let Some(log_only) = LOG_ONLY.get() {
+        log_only(line);
+    }
+}
+
 fn step_of(done: u64, total: Option<u64>) -> u64 {
     match total {
         Some(t) if t > 0 => done.min(t) * 100 / t,

@@ -619,7 +619,8 @@ impl Cx<'_> {
                 let block = self.fmt_block(e, &xs, stmt_scope, blocks, diverges, inner_ty)?;
                 self.thir.exprs[block.0 as usize].clone()
             }
-            _ => return self.unresolved(span, "unsupported builtin macro"),
+            "asm" | "naked_asm" => return Err(self.error(span, crate::mir::build::UnsupportedReason::InlineAsm)),
+            _ => return self.not_built(span, "this builtin macro"),
         };
         if !debug {
             return Ok(inner);

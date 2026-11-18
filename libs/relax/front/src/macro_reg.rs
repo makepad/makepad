@@ -903,12 +903,14 @@ pub fn outline_identity() -> u128 {
 }
 
 /// Helpers declared by the resolved derive, including one that shadows a builtin.
-pub(crate) fn derive_helpers(entry: &Entry) -> Vec<String> {
+/// The helper attributes of the derive `entry` names (`attributes(..)` of its
+/// `#[proc_macro_derive]`); None when the registry holds no such derive, so its helpers are not known.
+pub(crate) fn derive_helpers(entry: &Entry) -> Option<Vec<String>> {
     REG.with(|r| {
         let r = r.borrow();
-        let Some(r) = r.as_ref() else { return Vec::new(); };
-        let Some((name, _)) = r.derives.iter().find(|(_, e)| e.unit == entry.unit && e.fname == entry.fname) else { return Vec::new(); };
-        r.helpers.iter().filter(|(unit, n, _)| *unit == entry.unit && n == name).flat_map(|(_, _, hs)| hs.iter().cloned()).collect()
+        let r = r.as_ref()?;
+        let (name, _) = r.derives.iter().find(|(_, e)| e.unit == entry.unit && e.fname == entry.fname)?;
+        Some(r.helpers.iter().filter(|(unit, n, _)| *unit == entry.unit && n == name).flat_map(|(_, _, hs)| hs.iter().cloned()).collect())
     })
 }
 

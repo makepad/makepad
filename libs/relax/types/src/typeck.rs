@@ -560,6 +560,9 @@ pub struct Fcx<'a> {
     deferred_dyn: Vec<(ExprId, TyId, TyId, u32)>,
     /// Reference-to-pointer casts and casts whose target pointee was open.
     deferred_casts: Vec<(ExprId, TyId, TyId)>,
+    /// The deferred casts to a raw pointer whose source was an open type at the cast: only a source
+    /// that resolved to a reference takes the deferred path, any other is the cast check's alone.
+    open_source_casts: Vec<ExprId>,
     /// every `e as T` (cast expression's position), validated after fallback (cast.rs)
     cast_checks: Vec<(ExprId, TyId, TyId, u32)>,
     /// how many patterns enclose the one being checked
@@ -609,6 +612,20 @@ pub fn checked_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def:
 
 pub fn instantiate_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> Body {
     try_instantiate_body(cx, prog, tcx, def, args).unwrap_or_else(|_| no_codegen_body(prog, tcx, def, args))
+}
+
+/// The body the borrow check reads for the instance `def<args>`, typed as the check types it:
+/// rustc_borrowck reads the identity body's typeck results (TypingMode::borrowck), where another
+/// fn's opaque return stays the opaque its signature names. The identity instance is the stored
+/// typeck body (as check_crate and the background checker pass it); a concrete one is normalized
+/// in the borrowck mode. `instantiate_body`'s instance is revealed (PostAnalysis, codegen's view):
+/// a call's destination there is the callee's hidden type while the check reads the callee's output
+/// as the opaque, a MIR bug (call dest mismatch) at every call of a fn returning `impl Trait`.
+pub fn borrowck_body(prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> Result<std::sync::Arc<Body>, crate::next_solver::NoSolution> {
+    let body = tcx.typeck(prog, def);
+    if *body.args == *args { return Ok(body); }
+    let env = crate::tcx::TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, def), param_env: crate::tcx::ParamEnvId::EMPTY, mode: crate::tcx::TypingMode::borrowck(tcx, prog, def) };
+    instantiate::try_normalize_body(prog, tcx, env, &body, args).map(std::sync::Arc::new)
 }
 
 static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -818,6 +835,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         diverging: Vec::new(),
         deferred_dyn: Vec::new(),
         deferred_casts: Vec::new(),
+        open_source_casts: Vec::new(),
         cast_checks: Vec::new(),
         pat_nest: 0,
         bind_mode: 0,
@@ -1084,6 +1102,21 @@ impl<'a> Fcx<'a> {
 
     fn fresh(&mut self, kind: u8) -> TyId {
         match kind { 0 => self.infcx.next_ty_var(), 1 => self.infcx.next_int_var(), 2 => self.infcx.next_float_var(), _ => unreachable!() }
+    }
+
+    /// fn_ctxt/_impl.rs structurally_resolve_type: whether `t`'s outer type is known, the pending goals
+    /// settled first. A type variable still open there (a closure's parameter only a later call
+    /// names) is E0282, unless the body has an error already, and becomes `{error}`: false.
+    fn structurally_resolve(&mut self, t: TyId, lo: u32) -> bool {
+        if !matches!(self.tcx.tys.kind(self.shallow(t)), TyKind::Infer(_)) { return true; }
+        self.retry_goals(false);
+        if !matches!(self.tcx.tys.kind(self.shallow(t)), TyKind::Infer(_)) { return true; }
+        if self.b.errors.is_empty() && !self.infcx.tainted_by_errors() {
+            self.err(lo, "E0282: type annotations needed".to_string());
+        }
+        let error = self.tcx.tys.error;
+        self.eq(t, error);
+        false
     }
 
     fn shallow(&mut self, t: TyId) -> TyId {
@@ -1838,13 +1871,15 @@ impl<'a> Fcx<'a> {
                     } else {
                         self.rollback_to(snap);
                         // rustc check_ref_cast: &[T; N] -> *const T first coerces
-                        // to a pointer to the array, using the source mutability.
+                        // to a pointer to the array, using the source mutability
+                        // (`array_ptr_type`); the cast then goes from it to the element.
                         let inner = self.shallow(inner);
                         if let TyKind::Array(element, _) = self.tcx.tys.kind(inner).clone() {
                             let snap = self.start_snapshot();
                             if self.eq(element, pointee) {
                                 self.commit_from(snap);
-                                self.set_coerce(e.0, Coerce::RefToRaw(sm), target);
+                                let array_ptr = self.tcx.tys.intern(TyKind::Ptr(sm, inner));
+                                self.set_coerce(e.0, Coerce::RefToRaw(sm), array_ptr);
                             } else { self.rollback_to(snap); }
                         }
                     }
@@ -2065,7 +2100,11 @@ impl<'a> Fcx<'a> {
             order.extend(deferred.into_iter().flatten().map(|d| (Some(d), None)));
         }
         for (d, check) in order {
-            if let Some((x, xt, target)) = d { self.finish_deferred_cast(x, xt, target); }
+            if let Some((x, xt, target)) = d {
+                // an open source that resolved to anything but a reference is the cast check's alone
+                let open = self.open_source_casts.contains(&x);
+                if !open || matches!(self.tcx.tys.kind(self.shallow(xt)), TyKind::Ref(..)) { self.finish_deferred_cast(x, xt, target); }
+            }
             if let Some((x, xt, target, lo)) = check { self.check_cast_final(x, xt, target, lo); }
         }
         // pending pointer-to-dyn coercions, now that their pointees are known
@@ -3792,7 +3831,7 @@ impl<'a> Fcx<'a> {
                     explicit2.push(e);
                 }
             }
-            let targs = self.tcx.fill_trait_defaults(&self.cx.with_infcx(&self.infcx), prog, td, self_t, explicit2);
+            let targs = self.tcx.fill_trait_defaults(&self.cx.with_infcx(&self.infcx), prog, td, self_t, explicit2, crate::types::RegionArgsId::EMPTY);
             let mut args = vec![self_t];
             args.extend(targs);
             // the item's own args from the path (`<S as T<123>>::l::<true>()`)
@@ -5211,6 +5250,8 @@ impl<'a> Fcx<'a> {
                 // rustc_hir_typeck/src/expr.rs check_expr_unary and op.rs:960-1080.
                 UnOp::Neg | UnOp::Not => {
                     let t = self.check_expr(*x, expected);
+                    // the operand's type is resolved structurally first (E0282 while still open)
+                    if !self.structurally_resolve(t, lo) { return error; }
                     let st = self.shallow(t);
                     let builtin = match (op, self.tcx.tys.kind(st)) {
                         (UnOp::Neg, TyKind::Int(_) | TyKind::Float(_) | TyKind::IntVar(_) | TyKind::FloatVar(_)) => true,
@@ -5227,6 +5268,7 @@ impl<'a> Fcx<'a> {
                 }
                 UnOp::Deref => {
                     let t = self.check_expr(*x, None);
+                    if !self.structurally_resolve(t, lo) { return error; }
                     // (a built-in `*` is no adjustment; an overloaded one is the operand's Deref::deref)
                     match self.deref_step_raw(t) {
                         Some((i, overloaded)) => {
@@ -5327,6 +5369,12 @@ impl<'a> Fcx<'a> {
                 let (kx, kt) = (self.tcx.tys.kind(sx).clone(), self.tcx.tys.kind(st).clone());
                 if matches!((&kx, &kt), (TyKind::Ref(..), TyKind::Ptr(..))) {
                     self.deferred_casts.push((*x, xt, target));
+                } else if matches!((&kx, &kt), (TyKind::Infer(_), TyKind::Ptr(..))) {
+                    // an open source (`get(&s) as *const u32`, the element of `s` decided later):
+                    // rustc checks every cast at the end of typeck, where a reference source is
+                    // borrowed raw like one known here
+                    self.deferred_casts.push((*x, xt, target));
+                    self.open_source_casts.push(*x);
                 } else if let Some((src, dy)) = self.dyn_coercion(&kx, &kt) {
                     self.set_coerce(x.0, Coerce::ToDyn(src, dy), target);
                 } else if let Some((sd, dd)) = self.dyn_upcast(&kx, &kt) {
@@ -7412,11 +7460,13 @@ impl<'a> Fcx<'a> {
         self.loops = save_loops;
         self.in_loop_condition = save_condition;
         self.coerce_or_unify(bt, rt, Some(body), self.ast().expr(body).lo);
-        // a coerced body keeps its own type: lowering converts it to the return type. So does one
-        // whose pointer-to-dyn coercion waits for its pointee (`|s| s` returning `&mut dyn Tr` for
-        // a `&mut ?S`): typed as the return type, its thin value was lowered as a fat one (relax
+        // a coerced body keeps its own type: lowering converts it to the return type. So does a
+        // reborrowed one (`|| f()` with `f` returning `&mut T` for a `&T` return type: typed as the
+        // return type, the call would write a `&mut T` into a `&T` place), and one whose
+        // pointer-to-dyn coercion waits for its pointee (`|s| s` returning `&mut dyn Tr` for a
+        // `&mut ?S`): typed as the return type, its thin value was lowered as a fat one (relax
         // issue 202).
-        if self.b.coerce(body.0).is_none() && !self.deferred_dyn.iter().any(|&(x, ..)| x.0 == body.0) {
+        if self.b.coerce(body.0).is_none() && self.b.reborrow(body.0).is_none() && !self.deferred_dyn.iter().any(|&(x, ..)| x.0 == body.0) {
             self.set_ty(body, rt);
         }
         self.ret_stack.pop();

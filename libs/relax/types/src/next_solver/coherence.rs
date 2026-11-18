@@ -5,12 +5,11 @@ use crate::types::{TyKind, TypeFlags};
 use crate::program::{Program, NO_DEF};
 use std::ops::ControlFlow;
 
-/// rustc_next_trait_solver/src/coherence.rs: Compat mode (orphan.rs:29-50) lets uncovered
-/// type parameters inside rigid projections pass, behind the UNCOVERED_PARAM_IN_PROJECTION lint.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OrphanCheckMode { Proper, Compat }
+/// rustc_next_trait_solver/src/coherence.rs `InCrate`. rustc's `OrphanCheckMode::Compat` (orphan.rs:29-50), in
+/// which an uncovered type parameter inside a rigid projection passes behind the future-compat lint
+/// `uncovered_param_in_projection`, is left out: such a projection is a type parameter (Proper mode).
 #[derive(Clone, Copy)]
-pub enum InCrate { Local { mode: OrphanCheckMode }, Remote }
+pub enum InCrate { Local, Remote }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conflict { Upstream, Downstream }
 #[derive(Debug)]
@@ -49,7 +48,7 @@ pub fn trait_ref_is_knowable(ecx:&mut EvalCtxt<'_, '_>,env:&ParamEnvId,tr:&Trait
     };
     if orphan_check_trait_ref(tcx,prog,tr,local_crate,InCrate::Remote,&mut normalize)?.is_ok() { return Ok(Err(Conflict::Downstream)); }
     if prog.def(tr.def_id).krate==local_crate || fundamental(prog,tr.def_id) { return Ok(Ok(())); }
-    if orphan_check_trait_ref(tcx,prog,tr,local_crate,InCrate::Local { mode: OrphanCheckMode::Proper },&mut normalize)?.is_ok() { Ok(Ok(())) } else { Ok(Err(Conflict::Upstream)) }
+    if orphan_check_trait_ref(tcx,prog,tr,local_crate,InCrate::Local,&mut normalize)?.is_ok() { Ok(Ok(())) } else { Ok(Err(Conflict::Upstream)) }
 }
 fn fundamental(prog:&Program,def:DefId)->bool {
     let d=prog.def(def); let ast=&prog.files[d.file as usize].ast;
@@ -66,7 +65,7 @@ impl OrphanChecker<'_> {
         for &arg in &tr.args { if let GenericArg::Type(t)=arg { self.visit_ty(t)?; } }
         ControlFlow::Continue(())
     }
-    fn def_id_is_local(&self,def:DefId)->bool { matches!(self.in_crate,InCrate::Local { .. }) && self.prog.def(def).krate==self.local_crate }
+    fn def_id_is_local(&self,def:DefId)->bool { matches!(self.in_crate,InCrate::Local) && self.prog.def(def).krate==self.local_crate }
     fn found_non_local_ty(&mut self,t:TyId)->ControlFlow<OrphanCheckEarlyExit> { self.non_local_tys.push((t,self.in_self_ty)); ControlFlow::Continue(()) }
     fn found_uncovered_ty_param(&mut self,t:TyId)->ControlFlow<OrphanCheckEarlyExit> {
         if self.search_first_local_ty { ControlFlow::Continue(()) } else { ControlFlow::Break(OrphanCheckEarlyExit::UncoveredTyParam(t)) }
@@ -82,11 +81,10 @@ impl OrphanChecker<'_> {
         let result=match tcx.tys.kind(ty) {
             TyKind::Param(_)=>panic!("orphan check expects inference variables"),
             TyKind::Placeholder(_) | TyKind::Bound(..) | TyKind::Infer(_) | TyKind::IntVar(_) | TyKind::FloatVar(_)=>match self.in_crate {
-                InCrate::Local { .. }=>self.found_uncovered_ty_param(ty), InCrate::Remote=>ControlFlow::Break(OrphanCheckEarlyExit::LocalTy(ty)),
+                InCrate::Local=>self.found_uncovered_ty_param(ty), InCrate::Remote=>ControlFlow::Break(OrphanCheckEarlyExit::LocalTy(ty)),
             },
             TyKind::Alias(_,alias) if tcx.tys.flags(ty).intersects(TypeFlags::HAS_TY_PLACEHOLDER | TypeFlags::HAS_TY_BOUND | TypeFlags::HAS_TY_INFER)=>match self.in_crate {
-                InCrate::Local { mode: OrphanCheckMode::Compat } if matches!(alias.kind, crate::types::AliasTyKind::Projection { .. })=>ControlFlow::Continue(()),
-                InCrate::Local { .. }=>self.found_uncovered_ty_param(ty), InCrate::Remote=>ControlFlow::Break(OrphanCheckEarlyExit::LocalTy(ty)),
+                InCrate::Local=>self.found_uncovered_ty_param(ty), InCrate::Remote=>ControlFlow::Break(OrphanCheckEarlyExit::LocalTy(ty)),
             },
             TyKind::Ref(_,t,_)=>self.visit_ty(*t),
             TyKind::Adt(def,args,_)=>{
@@ -105,8 +103,8 @@ impl OrphanChecker<'_> {
     }
 }
 impl crate::tcx::Tcx {
-    /// rustc_hir_analysis/src/coherence/orphan.rs:305-385 (orphan_check) in `mode`.
-    pub fn orphan_check_impl(&self,prog:&Program,imp:DefId,mode:OrphanCheckMode)->Result<(),OrphanCheckErr> {
+    /// rustc_hir_analysis/src/coherence/orphan.rs:305-385 (orphan_check) in Proper mode.
+    pub fn orphan_check_impl(&self,prog:&Program,imp:DefId)->Result<(),OrphanCheckErr> {
         let local_crate=prog.def(imp).krate;
         let mut infcx=crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::Coherence, imp);
         infcx.coherence_crate=Some(local_crate);
@@ -124,7 +122,7 @@ impl crate::tcx::Tcx {
             if !ocx.try_evaluate_obligations().is_empty() { return (user_ty, Ok(user_ty)); }
             (user_ty, Ok(ty))
         };
-        match orphan_check_trait_ref(self,prog,&tr,local_crate,InCrate::Local { mode },&mut normalize) {
+        match orphan_check_trait_ref(self,prog,&tr,local_crate,InCrate::Local,&mut normalize) {
             Ok(result)=>result,
             Err(_)=>unreachable!("the HIR orphan check's normalizer never fails"),
         }

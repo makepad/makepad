@@ -42,6 +42,7 @@ unset RELAX_STD
 fail() {
     echo "live_gates: FAILED $1"
     grep -E '^(value|makepad)' "$S/log" | uniq | tail -20
+    echo '--- session log tail'; grep -v '^value\|^gates' "$S/log" | tail -80
     exit 1
 }
 # said <step> <pattern>: the first line of the session's output matching <pattern>, as it is

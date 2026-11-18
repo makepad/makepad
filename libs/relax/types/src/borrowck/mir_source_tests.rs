@@ -13,7 +13,7 @@ pub(super) fn borrowck_source_in(source: &str, edition: u16) -> (Vec<String>, Ve
 }
 
 /// The crate `source` (named `crate_name`, as `#![crate_name]` does in rustc's tests) over Relax's core, alloc and std.
-fn load_source(source: &str, edition: u16, crate_name: &str) -> (Program, Tcx, u32) {
+pub(crate) fn load_source(source: &str, edition: u16, crate_name: &str) -> (Program, Tcx, u32) {
     crate::borrowck::event::FORCE_USER_TYPES.with(|f| f.set(Some(true)));
     let sess = &std::sync::Arc::new(crate::Session::default());
     let mut prog = Program::new(sess);
@@ -868,27 +868,6 @@ fn an_async_closure_cannot_move_out_of_a_shared_reference() {
 }
 
 #[test]
-fn bevys_param_set_takes_the_outlives_its_normalization_registers_as_implied_bounds() {
-    // `ParamSet<Query<&'a u8>>` is well-formed only where `'a: 'static` (the impl's `Q: 'static`); rustc keeps
-    // accepting bevy_ecs's use of it by assuming the region obligations normalizing its where clauses registers.
-    let source = "
-        pub trait WorldQuery {}
-        impl WorldQuery for &u8 {}
-        pub struct Query<Q: WorldQuery>(Q);
-        pub trait SystemParam { type State; }
-        impl<Q: WorldQuery + 'static> SystemParam for Query<Q> { type State = (); }
-        pub struct ParamSet<T: SystemParam>(T) where T::State: Sized;
-        fn handler<'a>(x: ParamSet<Query<&'a u8>>) { let _: ParamSet<_> = x; }
-        fn ref_handler<'a>(_: &ParamSet<Query<&'a u8>>) {}";
-    let (errors, unchecked) = borrowck_source_named(source, 2021, "bevy_ecs");
-    assert!(unchecked.is_empty(), "{unchecked:?}");
-    assert!(errors.is_empty(), "{errors:?}");
-    // another crate's ParamSet gets no such allowance
-    let (errors, _) = borrowck_source_named(source, 2021, "other_crate");
-    assert!(!errors.is_empty(), "{errors:?}");
-}
-
-#[test]
 fn a_local_without_an_annotation_is_instantiated_by_the_coercion_of_its_initializer() {
     // type-inference/generalize-subtyped-variables.rs: `let y = x` relates two type variables later, so the
     // first use of `z` generalizes it to the non-higher-ranked `fn(&'0 ())`.
@@ -965,6 +944,54 @@ fn a_closure_stored_in_a_local_then_returned_as_an_opaque_type_is_e0597() {
         }", 2021);
     assert!(unchecked.is_empty(), "{unchecked:?}");
     assert!(errors.len() == 1 && errors[0].starts_with("E0597"), "{errors:?}");
+}
+
+#[test]
+fn a_closure_body_call_reborrowed_to_a_shared_return_type_is_checked() {
+    // A closure whose body is a call returning `&mut u8`, with the `&u8` return type from the expected
+    // signature: the call writes a value of its own type and the reborrow converts it, so the body is
+    // borrow-checked, and a borrow of a local escaping through it is E0597.
+    let (errors, unchecked) = borrowck_source_in("
+        fn take<T, F: FnOnce() -> T>(f: F) -> T { f() }
+        fn idm(x: &'static mut u8) -> &'static mut u8 { x }
+        fn idl<'a>(x: &'a mut u8) -> &'a mut u8 { x }
+        pub fn expected(x: &'static mut u8) -> &'static u8 { take::<&'static u8, _>(move || idm(x)) }
+        pub fn pointer(x: &'static mut u8) -> &'static u8 { let f: fn(&'static mut u8) -> &'static u8 = |x| idm(x); f(x) }
+        pub fn escapes() -> &'static u8 { let mut y = 0u8; take::<&'static u8, _>(|| idl(&mut y)) }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0597") && errors[0].contains("`y`"), "{errors:?}");
+}
+
+#[test]
+fn a_unary_operand_on_a_closure_parameter_needs_its_type_where_it_stands() {
+    // expr.rs check_expr_unop: `!`, `-` and `*` resolve their operand's type structurally first, so a
+    // closure's parameter that only a later call names is E0282 there (relax took it from the call
+    // and compiled what rustc refuses). A comparison, `+` and `||` register their obligation instead
+    // and take the type from the call: rustc accepts those.
+    const SOURCE: &str = "pub struct R { pub len: u32, pub writable: bool }
+pub fn not_param(rs: &[R]) -> u64 {
+    let count = |width, write| rs.iter().filter(|r| r.len >= width && (!write || r.writable)).count() as u64;
+    count(1, false)
+}
+pub fn neg_param() -> i32 { let g = |x| -x; g(1i32) }
+pub fn deref_param() -> u32 { let g = |a| *a; g(&1u32) }
+pub fn binary_params(rs: &[R]) -> u64 {
+    let n = |width| rs.iter().filter(|r| r.len >= width).count() as u64;
+    let add = |a, b| a + b;
+    let or = |a, b| a || b;
+    n(1) + add(1u64, 2u64) + or(true, false) as u64
+}";
+    let (prog, tcx, user) = load_source(SOURCE, 2021, "repro");
+    let mut by_fn = std::collections::HashMap::new();
+    for owner in crate::borrowck::body::owners(&prog) {
+        if prog.def(owner.owner).krate != user { continue; }
+        by_fn.insert(prog.syms.str(prog.def(owner.owner).name).to_string(), tcx.typeck(&prog, owner.owner).errors.clone());
+    }
+    for f in ["not_param", "neg_param", "deref_param"] {
+        let errors = &by_fn[f];
+        assert!(errors.len() == 1 && errors[0].contains(": E0282: "), "{f}: {errors:?}");
+    }
+    assert!(by_fn["binary_params"].is_empty(), "binary_params: {:?}", by_fn["binary_params"]);
 }
 
 #[test]
@@ -1078,4 +1105,29 @@ fn a_closures_higher_ranked_signature_regions_survive_normalization_under_the_bi
         fn demo(bar: Bar<'static>) { map::<_, &'static str>(bar, |bar, _| bar.string_1) }");
     assert!(unchecked.is_empty(), "{unchecked:?}");
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// A body holding inline asm is one the MIR builder does not express: it is listed as unsupported (the
+/// check names it in a note), not as an internal failure (the check reports those as errors), and the
+/// crate's other bodies are checked as before.
+#[test]
+fn an_inline_asm_body_is_unsupported_not_an_internal_failure() {
+    let (prog, tcx, user) = load_source("
+        pub fn spin() { unsafe { core::arch::asm!(\"nop\") } }
+        pub fn plain(x: &u8) -> u8 { *x }
+        pub fn bad() -> &'static u8 { let x = 1u8; &x }", 2021, "repro");
+    let (mut unsupported, mut errors) = (Vec::new(), Vec::new());
+    for owner in crate::borrowck::body::owners(&prog) {
+        if prog.def(owner.owner).krate != user { continue; }
+        let state = EvalState::new();
+        let cx = EvalCx::new(&prog, &tcx, TypingEnv::fully_monomorphized(&prog), &state);
+        let body = tcx.typeck(&prog, owner.owner);
+        assert!(body.errors.is_empty(), "typeck: {:?}", body.errors);
+        let v = crate::borrowck::driver::check_root(&cx, &prog, &tcx, &body, None);
+        assert!(v.unchecked.is_empty(), "internal failures: {:?}", v.unchecked);
+        unsupported.extend(v.unsupported);
+        errors.extend(v.errors.iter().map(|e| format!("{} {}", prog.def_path(owner.owner), e.code)));
+    }
+    assert!(unsupported.len() == 1 && unsupported[0].ends_with("spin: inline asm"), "{unsupported:?}");
+    assert!(errors.len() == 1 && errors[0].ends_with("bad E0515"), "the other bodies are checked: {errors:?}");
 }

@@ -93,6 +93,16 @@ fn wait_verdict(f: &TestFront, def: DefId) -> FnVerdict {
     }
 }
 
+/// The checks the worker has counted, once they are `n` or more: a verdict shows before its check
+/// is counted.
+fn wait_checked(n: u64) -> u64 {
+    loop {
+        let checked = CHECKED.load(Ordering::SeqCst);
+        if checked >= n { return checked; }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn events_arrive_per_fn_before_queue_drains() {
     if child("events_arrive_per_fn_before_queue_drains") { return; }
@@ -372,7 +382,9 @@ fn live_epoch_carries_verdicts_of_unreached_owners() {
     assert_eq!(wait_verdict(&front, clean), FnVerdict::Clean);
     assert!(matches!(wait_verdict(&front, edited), FnVerdict::Errors(_)));
     assert_eq!(wait_verdict(&front, fail), FnVerdict::Unchecked("typeck".into()));
-    let checked0 = CHECKED.load(Ordering::SeqCst);
+    // a check's verdict shows before the worker counts it: the three counted first, or the last
+    // one's count fell after the mark and read as a check of the carried owner (3 vs 2, 11-17)
+    let checked0 = wait_checked(3);
     // queued (or already running) when the patch lands: its check counts at the new epoch
     let queued = front.enqueue("c", false);
     // a live patch of `a`: every other owner reads what it read before
@@ -386,7 +398,7 @@ fn live_epoch_carries_verdicts_of_unreached_owners() {
     front.enqueue("a", false);
     assert!(matches!(wait_verdict(&front, edited), FnVerdict::Errors(_)));
     assert!(matches!(wait_verdict(&front, queued), FnVerdict::Errors(_)));
-    assert_eq!(CHECKED.load(Ordering::SeqCst) - checked0, 2, "the carried clean owner was checked again");
+    assert_eq!(wait_checked(checked0 + 2) - checked0, 2, "the carried clean owner was checked again");
     stop();
 }
 

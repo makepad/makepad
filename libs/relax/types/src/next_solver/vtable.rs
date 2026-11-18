@@ -73,7 +73,7 @@ impl Tcx {
             let mut sibling = false;
             while let Some((tr, emit_vptr, mut siblings)) = stack.pop() {
                 let mut has_entries = false;
-                for predicate in self.supertraits(prog, collect::trait_predicate(tr.def_id, tr.args.clone())) {
+                for predicate in self.supertraits_unfiltered(prog, collect::trait_predicate(tr.def_id, tr.args.clone())) {
                     if let PredicateKind::Clause(ClauseKind::Trait(t)) = predicate.kind {
                         has_entries |= !self.own_existential_vtable_entries(prog, t.trait_ref.def_id).is_empty();
                     }

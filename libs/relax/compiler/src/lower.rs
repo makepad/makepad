@@ -846,7 +846,7 @@ impl<'a> Lcx<'a> {
                                 let site = &sites[site_id as usize];
                                 (site.file, site.pos, site.msg.clone())
                             };
-                            let (line, col) = self.u.prog.files[file as usize].line_col(pos);
+                            let (line, col) = self.u.prog.files[file as usize].location(pos);
                             if name == "panic_site" {
                                 let sym = self.u.lit_sym(msg.as_bytes());
                                 args.push(self.sym_val(sym));
@@ -7052,7 +7052,7 @@ impl<'a> Lcx<'a> {
         if let Some(p) = self.caller_loc {
             return p;
         }
-        let (l, c) = self.u.prog.files[self.b.file as usize].line_col(self.pos);
+        let (l, c) = self.u.prog.files[self.b.file as usize].location(self.pos);
         let path = self.u.prog.file_paths[self.b.file as usize].clone();
         let addr = location_const(self.u, &path, l as u32, c as u32);
         let r = self.f.vreg(Cls::I);
@@ -12762,7 +12762,7 @@ impl<'a> Lcx<'a> {
                 // intrinsics_rt::panic_impl(msg, len, file, file_len, line, col) -> !: the
                 // runtime's report + unwind (live) / abort (AOT); abort reports "abort"
                 let args = if name == "abort" {
-                    let (l, c) = self.u.prog.files[self.b.file as usize].line_col(self.pos);
+                    let (l, c) = self.u.prog.files[self.b.file as usize].location(self.pos);
                     let path = self.u.prog.file_paths[self.b.file as usize].clone();
                     let m = self.u.lit_sym(b"abort");
                     let f = self.u.lit_sym(path.as_bytes());

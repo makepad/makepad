@@ -68,7 +68,7 @@ fn runtime_disjoint(v: &super::Verdict) -> Vec<(crate::mir::Span, crate::mir::Sp
 /// disjoint-index checks is checked again in every run (the checks are not part of the stored verdict).
 fn storable(result: &Result<Option<super::Verdict>, String>) -> Option<StoredVerdict> {
     match result {
-        Ok(Some(v)) if v.errors.is_empty() && runtime_disjoint(v).is_empty() => Some(v.unchecked.first().map_or(StoredVerdict::Clean, |why| StoredVerdict::Unchecked(why.clone()))),
+        Ok(Some(v)) if v.errors.is_empty() && runtime_disjoint(v).is_empty() => Some(v.unchecked.first().or(v.unsupported.first()).map_or(StoredVerdict::Clean, |why| StoredVerdict::Unchecked(why.clone()))),
         Ok(Some(_)) => None,
         Ok(None) => Some(StoredVerdict::Unchecked("typeck".into())),
         _ => None,
@@ -162,6 +162,7 @@ pub fn carry_epoch(src: usize, from: u64, to: u64, keep: &dyn Fn(DefId) -> bool)
         let mut d = DISJOINT.lock().unwrap_or_else(|e| e.into_inner());
         for k in &gone { d.remove(k); }
     }
+    let gone_defs: Vec<DefId> = gone.iter().map(|k| k.1).collect();
     for k in gone {
         q.seen.remove(&k);
         if let Some(at) = q.rank_of.remove(&k) {
@@ -172,6 +173,8 @@ pub fn carry_epoch(src: usize, from: u64, to: u64, keep: &dyn Fn(DefId) -> bool)
     }
     q.pending_ranks.retain(|k, _| k.0 != src || keep(k.1));
     q.pending_order.retain(|k| k.0 != src || keep(k.1));
+    // the dropped owners a waiting patch group wants: checked again at the carried epoch
+    if q.requeue_wanted(src, base, Some(&gone_defs)) > 0 { WAKE.notify_one(); }
 }
 
 /// The program behind `src` was rebuilt unchanged (the settle rebuild: a restored program and
@@ -216,14 +219,18 @@ pub trait FrontSource: Send + Sync {
 /// BORROWCK_VERSION), so an unchanged body is never checked again: Clean, or Unchecked -- the
 /// check completed but could not certify the body (its identity body has type errors, or a
 /// trait property stays unresolved). Both are deterministic for one build and source; errors
-/// and checker failures are never stored (they are reported again).
+/// and checker failures are never stored (they are reported again). Failed is a crate's (the
+/// background type check's, by crate check key): its bodies' type errors, a registry crate's
+/// Relax gaps, so a warm run does not check that crate again.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StoredVerdict { Clean, Unchecked(String) }
+pub enum StoredVerdict { Clean, Unchecked(String), Failed(Vec<String>) }
 impl StoredVerdict {
     fn reuse(self, key: ItemKey) {
         match self {
             StoredVerdict::Clean => { record(key, FnVerdict::Clean); CACHED_CLEAN.fetch_add(1, Ordering::Relaxed); }
             StoredVerdict::Unchecked(why) => { record(key, FnVerdict::Unchecked(why)); CACHED_UNCHECKED.fetch_add(1, Ordering::Relaxed); }
+            // (a crate's verdict, under no body's key)
+            StoredVerdict::Failed(_) => {}
         }
     }
 }
@@ -238,7 +245,11 @@ struct Queue {
     epoch: HashMap<usize, u64>, seq: u64,
     /// (src, epoch) -> the earlier epoch it stands for (carry_epoch): keys hold that one
     alias: HashMap<(usize, u64), u64>,
+    /// The checks live patch groups wait for (`want`), by (src, owner): queued again in the step
+    /// that drops them (`advance`, `carry_epoch`) until every group that wants one is settled.
+    wanted: HashMap<(usize, DefId), Wanted>,
 }
+struct Wanted { src: Arc<dyn FrontSource>, args: Vec<TyId>, groups: Vec<u32> }
 /// A live edit's checks: the person waits for its verdict. Ahead of hot code's: those are
 /// promoted keeping their place among the startup's checks, so a first edit after a cold start,
 /// at rank 0 with them, waited 9 s behind 362 promoted after it (an app, 11-04).
@@ -268,6 +279,22 @@ impl Queue {
         self.rank_of.remove(&item.key);
         Some((at.0, item))
     }
+    /// Queue the wanted checks of `src` at `epoch` again (of `defs` only, when given): the step
+    /// that dropped them asks for them, as no running code may (a static's initializer runs once).
+    fn requeue_wanted(&mut self, src: usize, epoch: u64, defs: Option<&[DefId]>) -> usize {
+        let again: Vec<(DefId, Arc<dyn FrontSource>, Vec<TyId>)> = self.wanted.iter()
+            .filter(|(k, _)| k.0 == src && defs.is_none_or(|d| d.contains(&k.1)) && !self.rank_of.contains_key(&(src, k.1, epoch)))
+            .map(|(k, w)| (k.1, w.src.clone(), w.args.clone())).collect();
+        let n = again.len();
+        for (def, item_src, args) in again {
+            let key = (src, def, epoch);
+            if specv_trace() { eprintln!("gandalf: the check of {def:?} a live patch waits for is queued again at epoch {epoch}"); }
+            self.seen.insert(key, ());
+            record(key, FnVerdict::Pending);
+            self.insert(Item { key, args: Some(args), cache_key: None, src: item_src, discovery: 0 }, RANK_EDIT);
+        }
+        n
+    }
     fn advance(&mut self, src: usize, epoch: u64) -> bool {
         let previous = self.epoch.get(&src).copied();
         if previous.is_some_and(|e| e > epoch) { return false; }
@@ -284,8 +311,28 @@ impl Queue {
             instances.retain(|k, _| k.0 != src || k.2 >= epoch);
             !instances.is_empty()
         });
+        self.requeue_wanted(src, epoch, None);
         true
     }
+}
+
+/// A live patch group (`group`) runs `def`'s code unverified and waits for its verdict: an epoch
+/// move or an edit's carry that drops the check queues it again in the same step, until `unwant`.
+pub fn want(src: &Arc<dyn FrontSource>, def: DefId, args: Vec<TyId>, group: u32) {
+    let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let q = guard.get_or_insert_with(Queue::default);
+    let w = q.wanted.entry((src.identity(), def)).or_insert_with(|| Wanted { src: src.clone(), args: Vec::new(), groups: Vec::new() });
+    w.args = args;
+    if !w.groups.contains(&group) { w.groups.push(group); }
+}
+/// Patch group `group` of `src` is settled (verified or reverted): its checks are not wanted again.
+pub fn unwant(src: usize, group: u32) {
+    let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(q) = guard.as_mut() else { return };
+    q.wanted.retain(|k, w| {
+        if k.0 == src { w.groups.retain(|g| *g != group); }
+        !w.groups.is_empty()
+    });
 }
 pub fn set_ranks(src: usize, epoch: u64, ranks: &[(DefId, Vec<TyId>, u32)]) {
     let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
@@ -421,7 +468,10 @@ pub fn note_compiled(options: &crate::options::Options, src: &Arc<dyn FrontSourc
 }
 fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: DefId, args: Option<Vec<TyId>>, cache_key: Option<u128>, epoch: u64, rank: Option<u32>, cached: Option<StoredVerdict>) {
     if !gandalf_enabled(options) { return; }
-    {
+    // (every way out below wakes the worker: the epoch move may have queued wanted checks again,
+    // and a worker waiting on an empty queue waits until it is woken; only a check queued here
+    // starts it)
+    let queued = 'locked: {
         let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         let q = guard.get_or_insert_with(Queue::default);
         let epoch = q.canon(src.identity(), epoch);
@@ -438,7 +488,7 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
                         q.items.remove(&at);
                     }
                     v.reuse(key);
-                    return;
+                    break 'locked false;
                 }
             }
             // Discovery may have queued this owner first. A compiled instance
@@ -452,12 +502,12 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
                     q.order.insert(next); q.items.insert(next, item); q.rank_of.insert(key, next);
                 }
             }
-            return;
+            break 'locked false;
         }
         q.seen.insert(key, ());
         if let Some(v) = cached {
             v.reuse(key);
-            return;
+            break 'locked false;
         }
         let k = (key.0, def);
         let pending = q.pending_ranks.remove(&k);
@@ -465,14 +515,72 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
         let rank = if def == crate::program::NO_DEF { RANK_DISCOVER } else if args.is_none() { RANK_OWNER } else { rank.or(pending).unwrap_or(RANK_DEFAULT) };
         record(key, FnVerdict::Pending);
         q.insert(Item { key, args, cache_key, src: src.clone(), discovery: 0 }, rank);
-    }
+        true
+    };
+    if queued { start_worker(src, options.verbose); } else { WAKE.notify_one(); }
+}
+/// The worker runs (started by the first check asked for) and looks at the queue again.
+fn start_worker(src: &Arc<dyn FrontSource>, verbose: bool) {
     if !STARTED.swap(true, Ordering::SeqCst) {
-        let s = src.clone(); let verbose = options.verbose;
+        let s = src.clone();
         { let _k = crate::zone_alloc::kept();
         let _ = crate::run_threads::spawn("gandalf", move || { let _z = crate::zone_alloc::compiler_thread(); worker(s, verbose) });
         }
     }
     WAKE.notify_one();
+}
+/// A live patch group (`group`) waits for `def`'s verdict: the watcher's settle asks for it (once per
+/// owner and epoch). It is wanted for the group from now on, and queued at the edit's rank unless a
+/// check of it is queued there, runs, or has its verdict. The install of the group's code asks for
+/// these checks; a request that went nowhere left the group waiting for good with the checker idle
+/// (an app, 11-17: the install of an unverified-mode twin queued nothing for its base, which had no
+/// code of its own). Returns what the checker had when no check was under way (None: one was, or
+/// its verdict is in), for the group's `unverified_why` and the log.
+pub fn ask(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: DefId, args: Vec<TyId>, epoch: u64, group: u32) -> Option<String> {
+    if !gandalf_enabled(options) { return None; }
+    let id = src.identity();
+    // (every way out wakes the worker: the epoch move below may have queued wanted checks again)
+    let found = 'locked: {
+        let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        let q = guard.get_or_insert_with(Queue::default);
+        let w = q.wanted.entry((id, def)).or_insert_with(|| Wanted { src: src.clone(), args: Vec::new(), groups: Vec::new() });
+        w.args = args.clone();
+        if !w.groups.contains(&group) { w.groups.push(group); }
+        let epoch = q.canon(id, epoch);
+        let was = q.epoch.get(&id).copied();
+        if !q.advance(id, epoch) {
+            break 'locked Some(format!("the checker is at epoch {}, past the program's {epoch}", was.unwrap_or(0)));
+        }
+        // (an epoch move nothing had told the checker of: the wanted checks are queued again)
+        let behind = was.filter(|&e| e < epoch).map(|e| format!("the checker was at epoch {e}, behind the program's {epoch}"));
+        let key = (id, def, epoch);
+        if let Some(at) = q.rank_of.get(&key).copied() {
+            if at.0 <= RANK_EDIT { break 'locked behind; }
+            // behind the background's checks (they wait for the compiles to go quiet)
+            q.order.remove(&at);
+            let item = q.items.remove(&at).unwrap();
+            let next = (RANK_EDIT, at.1);
+            q.order.insert(next); q.items.insert(next, item); q.rank_of.insert(key, next);
+            crate::preempt::set_urgent(true);
+            Some(format!("queued at rank {}, behind the background's checks: moved to the edit's rank", at.0))
+        } else {
+            let had = VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(&def).and_then(|i| i.get(&key)).cloned();
+            let running = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|r| r.1 == def);
+            let why = match had {
+                Some(FnVerdict::Pending) if running => break 'locked behind,
+                Some(FnVerdict::Pending) => "pending with no check queued or running".to_string(),
+                Some(FnVerdict::Unchecked(why)) if matches!(why.as_str(), "stale" | "not queued" | "changed") => why,
+                Some(_) => break 'locked behind,
+                None => "not queued".to_string(),
+            };
+            q.seen.insert(key, ());
+            record(key, FnVerdict::Pending);
+            q.insert(Item { key, args: Some(args), cache_key: None, src: src.clone(), discovery: 0 }, RANK_EDIT);
+            Some(format!("{why}: queued at the edit's rank"))
+        }
+    };
+    start_worker(src, options.verbose);
+    found
 }
 /// (trace) Where `def`'s check stands: its rank and the checks queued ahead of it; None: not queued.
 /// What the worker checks now: (rank, definition (NO_DEF: discovery), since wall ns).
@@ -594,7 +702,7 @@ fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[Ty
     let key = (src, def, epoch);
     match result {
         Ok(Some(v)) => {
-            let incomplete = v.errors.is_empty().then(|| v.unchecked.first().cloned()).flatten();
+            let incomplete = v.errors.is_empty().then(|| v.unchecked.first().or(v.unsupported.first()).cloned()).flatten();
             let checks = runtime_disjoint(&v);
             {
                 let mut d = DISJOINT.lock().unwrap_or_else(|e| e.into_inner());
@@ -720,7 +828,18 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
             }
             let _slow = Slow(std::time::Instant::now(), &phase, prog, *def, item.discovery);
             let now = tcx.collect_epoch.load(Ordering::SeqCst);
-            if QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(now != *epoch, |q| q.canon(*identity, now) != *epoch || q.epoch.get(identity).is_some_and(|e| *e > *epoch)) {
+            let moved = match QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                None => now != *epoch,
+                Some(q) => {
+                    // the program moved on since this check was queued: the queue moves with it here
+                    // (it drops the older epoch's checks and queues the wanted ones again), not only at
+                    // the next check asked for
+                    let at = q.canon(*identity, now);
+                    if at > *epoch { q.advance(*identity, at); }
+                    at != *epoch || q.epoch.get(identity).is_some_and(|e| *e > *epoch)
+                }
+            };
+            if moved {
                 stale = true; return;
             }
             if *def == crate::program::NO_DEF {

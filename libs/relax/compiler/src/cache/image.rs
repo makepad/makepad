@@ -515,11 +515,12 @@ impl Cache {
     }
 }
 
-/// The startup image section of a manifest ("PLI9" after the slot list; its slots' pending lists
+/// The startup image section of a manifest ("PLIA" after the slot list; its slots' pending lists
 /// are written empty, unused at the link, but O3 code's: the callees it kept as calls, registered
-/// at the link -- jit.rs cached_tier1; older images -- PLI8's slots carry no pending slots,
-/// PLI7's no payload checksum -- are not read: the manifest is written again with a new one).
-pub(super) const IMAGE_MAGIC: u32 = 0x3949_4c50;
+/// at the link -- jit.rs cached_tier1; each slot ends with its entry's digest gate tail, gate.rs;
+/// older images -- PLI9's slots carry no digests, PLI8's no pending slots, PLI7's no payload
+/// checksum -- are not read: the manifest is written again with a new one).
+pub(super) const IMAGE_MAGIC: u32 = 0x4149_4c50;
 
 /// A loaded manifest's image section, read in place: the store it is mapped from stays open.
 pub(super) struct ManifestImage {
@@ -849,6 +850,9 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
         d.u128()?;
         files.push(tab.files.id(&payload[start..d.p]));
     }
+    // the digest gate's tail (gate.rs), last in the entry: kept as it is (its contexts name the
+    // inlined keys by position, which the slot keeps)
+    let gate = &payload[d.p..];
     crates.sort_unstable();
     crates.dedup();
     let key = tab.keys.id(&key);
@@ -889,6 +893,7 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     let mut pc = Vec::with_capacity(raw.len() * 3);
     crate::jit::PcMap::encode_to(&mut pc, raw.into_iter().map(|(o, p)| (o, (files.get(relax_backend::rir::pos_file(p) as usize).copied().unwrap_or(u32::MAX) as u64) << 32 | (p & 0xffff_ffff) | (p & !relax_backend::rir::pos_plain(u64::MAX)))));
     e.bytes(&pc);
+    e.bytes(gate);
     blob.extend_from_slice(code);
     out.0.extend_from_slice(&e.0);
     Some(())
@@ -1177,6 +1182,8 @@ pub(crate) struct PrelinkedSlot {
     /// the tier decision an earlier run stored for its code below O3 (Cache::tier_verdict_key; O3
     /// code: None, unused)
     pub verdict: TierVerdict,
+    /// what its code was built from (gate.rs: its entry's digests)
+    pub digest: Option<std::sync::Arc<crate::gate::CodeDigest>>,
 }
 
 impl PrelinkedSlot {
@@ -1207,6 +1214,8 @@ struct ImgSlot {
     /// the image, read in place
     rel: (usize, usize),
     pc: (usize, usize),
+    /// its digest gate tail (gate.rs)
+    gate: (usize, usize),
 }
 
 /// An image relocation record: offset u32, kind u8, target u8, index u32.
@@ -1408,7 +1417,10 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
         let np = d.u32()? as usize;
         let pc = (d.p, d.p.checked_add(np)?);
         d.take(np)?;
-        slots.push(ImgSlot { entry, sum, key, tier, inl, kept, crates, code: (off, len), code_n, rel, pc });
+        let ng = d.u32()? as usize;
+        let gate = (d.p, d.p.checked_add(ng)?);
+        d.take(ng)?;
+        slots.push(ImgSlot { entry, sum, key, tier, inl, kept, crates, code: (off, len), code_n, rel, pc, gate });
     }
     let blob = d.bytes()?;
     let [keys, syms, files] = tables;
@@ -1966,8 +1978,9 @@ impl Linker {
             }
             let files = self.img_files(u, im);
             let s = &im.slots[si];
-            let (pcs, tier, inl, kept, entry, key, sum) = (s.pc, s.tier, s.inl, s.kept, s.entry, s.key, s.sum);
+            let (pcs, tier, inl, kept, entry, key, sum, gate) = (s.pc, s.tier, s.inl, s.kept, s.entry, s.key, s.sum, s.gate);
             let pc = crate::jit::PcMap::mapped(&im.bytes[pcs.0..pcs.1], files);
+            let digest = crate::gate::decode(&im.bytes[gate.0..gate.1], id, &|i| im.flat[inl.0..inl.1].get(i as usize).and_then(|&k| im.slot_of(k)));
             let inlined: Vec<u32> = im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect();
             let kept: Vec<u32> = im.flat[kept.0..kept.1].iter().filter_map(|&k| im.slot_of(k)).collect();
             if !u.aux { crate::harness::reach::note(id, inlined.iter().copied()); }
@@ -1988,7 +2001,7 @@ impl Linker {
             let provisional = (tier & super::TIER_PROVISIONAL != 0).then(|| super::tier_level(tier));
             let level = tier & !super::TIER_PROVISIONAL;
             let refs = crate::jit::CodeRefs::new(refs);
-            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, kept, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, refs, o2: level == TIER_O2, base: level == TIER_BASE, provisional, kind, verdict });
+            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, kept, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, refs, o2: level == TIER_O2, base: level == TIER_BASE, provisional, kind, verdict, digest });
         }
         out
     }
@@ -2219,6 +2232,26 @@ impl Linker {
 pub(crate) unsafe fn prelink_unit(up: *mut Unit, install: &mut dyn FnMut(&mut Unit, Vec<PrelinkedSlot>)) -> usize {
     let Some(cache) = (&*up).cache.as_ref().map(|c| c.get()) else { return 0 };
     Linker::new(cache).prelink(&mut *up, install)
+}
+
+/// (tests) The digests the loaded startup image holds for slot `id`'s code (gate.rs), its
+/// contexts' keys mapped to this run's slots by their encoding.
+#[cfg(test)]
+impl super::Cache {
+    pub(super) fn image_digest(&mut self, u: &Unit, id: u32) -> Option<std::sync::Arc<crate::gate::CodeDigest>> {
+        let (img, store) = self.image.as_ref().map(|i| (i.bytes(), i._store.clone()))?;
+        let im = {
+            let c = &*self;
+            parse_image(img, store, |ident, fp| c.crate_by_ident.get(&ident).map_or(false, |&k| c.fp_now(k as usize) == Some(fp)))?
+        };
+        let want = self.slot_bytes(u, id)?;
+        let s = im.slots.iter().find(|s| im.keys[s.key as usize] == &want[..])?;
+        let slots: Vec<Option<u32>> = im.flat[s.inl.0..s.inl.1]
+            .iter()
+            .map(|&k| (0..u.fns.len() as u32).find(|&x| self.slot_bytes(u, x).as_deref() == Some(im.keys[k as usize])))
+            .collect();
+        crate::gate::decode(&im.bytes[s.gate.0..s.gate.1], id, &|i| slots.get(i as usize).copied().flatten())
+    }
 }
 
 #[cfg(test)]

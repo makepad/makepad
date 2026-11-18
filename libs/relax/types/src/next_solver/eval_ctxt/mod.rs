@@ -153,6 +153,11 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
                 CurrentGoalKind::NormalizesTo => PathKind::Inductive,
                 CurrentGoalKind::Misc => PathKind::Unknown,
             },
+            // a written impl's where-clause: the structural steps of an auto trait stay productive, it is not one
+            GoalSource::UserImplWhereBound => match self.current_goal_kind {
+                CurrentGoalKind::CoinductiveTrait | CurrentGoalKind::Misc => PathKind::Unknown,
+                CurrentGoalKind::NormalizesTo => PathKind::Inductive,
+            },
             GoalSource::TypeRelating => PathKind::Inductive,
             GoalSource::AliasBoundConstCondition | GoalSource::AliasWellFormed => PathKind::Unknown,
         }

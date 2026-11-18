@@ -9,6 +9,8 @@ mod ballast;
 mod fields;
 mod readers;
 mod skipped;
+mod stale;
+mod stale_frames;
 mod values;
 use std::hint::black_box;
 
@@ -515,7 +517,7 @@ fn run() {
             ("skipped_own", skipped::skipped_own()),
         ];
         let mut line = format!("out tick {n}");
-        for (name, v) in row.into_iter().chain(readers::row(late)) {
+        for (name, v) in row.into_iter().chain(readers::row(late)).chain(stale::row(late)).chain(stale_frames::row()) {
             line += &format!(" {name}={v}");
         }
         println!("{line}");

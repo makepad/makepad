@@ -121,42 +121,6 @@ fn collected(name: &str, source: &[u8]) -> (crate::program::Program,Tcx) {
     (prog,tcx)
 }
 #[test]
-fn p3_compatibility_uses_only_registered_type_obligations_for_bevy_paramset() {
-    let (prog,tcx) = collected("bevy_ecs",b"#![no_std]\nstruct ParamSet<T>(T); struct Other<T>(T); struct Query<T>(T);");
-    let def = |name| *tcx.adts.keys().find(|&&d| prog.name(d) == name).unwrap();
-    let t = tcx.tys.intern(TyKind::Param(0)); let a = region(&tcx,0); let b = region(&tcx,1);
-    let paramset = tcx.tys.intern(TyKind::Adt(def("ParamSet"),tcx.tys.mk_list(&[t]),RegionArgsId::EMPTY));
-    let other = tcx.tys.intern(TyKind::Adt(def("Other"),tcx.tys.mk_list(&[paramset]),RegionArgsId::EMPTY));
-    let registered = [P::Type(t,a),P::Type(t,b),P::Region(a,b)];
-    // Audit's ParamSet<Query<&'a u8>> witness: the selected SystemParam
-    // obligation Q: 'static is registered by normalization, then decomposed.
-    let q = reference(&tcx,a,tcx.tys.u8_);
-    let query = tcx.tys.intern(TyKind::Adt(def("Query"),tcx.tys.mk_list(&[q]),RegionArgsId::EMPTY));
-    let nested = tcx.tys.intern(TyKind::Adt(def("ParamSet"),tcx.tys.mk_list(&[query]),RegionArgsId::EMPTY));
-    let static_region = tcx.tys.intern_region(RegionKind::ReStatic);
-    let mut result = ImpliedBounds::default();
-    result.consider_implied_bounds_compat(&tcx,&prog,nested,&[P::Type(q,static_region)]);
-    assert_eq!(result.outlives,[(a,static_region)]);
-    for ty in [paramset,reference(&tcx,a,reference(&tcx,b,paramset))] {
-        let mut result = ImpliedBounds::default();
-        result.consider_implied_bounds_compat(&tcx,&prog,ty,&registered[1..]);
-        assert_eq!(result.type_outlives,[(t,b)]);
-        assert!(result.outlives.is_empty());
-    }
-    for ty in [other,tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[paramset])))] {
-        let mut result = ImpliedBounds::default();
-        result.consider_implied_bounds_compat(&tcx,&prog,ty,&registered);
-        assert!(result.type_outlives.is_empty());
-    }
-    let (prog,tcx) = collected("not_bevy",b"#![no_std]\nstruct ParamSet<T>(T);");
-    let d = *tcx.adts.keys().next().unwrap();
-    let t = tcx.tys.intern(TyKind::Param(0));
-    let ty = tcx.tys.intern(TyKind::Adt(d,tcx.tys.mk_list(&[t]),RegionArgsId::EMPTY));
-    let mut result = ImpliedBounds::default();
-    result.consider_implied_bounds_compat(&tcx,&prog,ty,&[P::Type(t,region(&tcx,0))]);
-    assert!(result.type_outlives.is_empty());
-}
-#[test]
 fn v7_collected_object_supertraits_supply_wf_bounds() {
     let (prog,tcx) = collected("object_wf",br#"#![no_std]
         trait Base<'b>: 'b {} trait Derived<'b>: Base<'b> {}

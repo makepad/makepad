@@ -107,6 +107,7 @@ fn context<'a>(prog: &'a Program, tcx: &'a Tcx, state: &'a crate::tcx::EvalState
         diverging: Vec::new(),
         deferred_dyn: Vec::new(),
         deferred_casts: Vec::new(),
+        open_source_casts: Vec::new(),
         cast_checks: Vec::new(),
         pat_nest: 0,
         bind_mode: 0,

@@ -1888,8 +1888,19 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     let claim_path = format!("{}/relax-claim", base_dir);
     let claim = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&claim_path).ok();
     if let Some(claim) = claim.as_ref().filter(|claim| claim.try_lock().is_err()) {
-        // (a silent run's stderr is its program's: the line goes to the session log alone)
-        crate::progress::say(&format!("relax build-script: {} waits for its claim {}: {}", pname, claim_path, claim_holder(&claim_path)));
+        // (a silent run's stderr is its program's: the line goes to the session log alone.) Every
+        // wait is kept beside the claim (relax-claim-waits, the last 20), a check's too, which
+        // keeps no session log. A wait on a sibling of the same `check -p`, whose serial run never
+        // waits, is on stderr only with RELAX_PROFILE, as a script another run made is
+        let line = format!("relax build-script: {} waits for its claim {}: {}", pname, claim_path, claim_holder(&claim_path));
+        keep_noted(&format!("{}/relax-claim-waits", base_dir), &line);
+        if !held_by_sibling(&claim_path, run_group().as_deref()) {
+            crate::progress::say(&line);
+        } else if sess.runtime.profile {
+            eprintln!("{line}");
+        } else {
+            crate::progress::log(&line);
+        }
         let _ = claim.lock();
         // (the wait can be long: the checkout's files are read again)
         if let Some(content) = &shared {
@@ -2102,12 +2113,16 @@ pub fn bin_native(run_dir: &std::path::Path, bin: &str) -> std::path::PathBuf {
 const SCRIPT_RUN_SHAPE_VARS: [&str; 4] = ["RELAX_VFS", "RELAX_EDITS", "RELAX_SCRIPT_DEPTH", "RELAX_SCRIPT_CHAIN"];
 
 fn note_rerun(build_dir: &str, why: &str) {
-    let path = format!("{}/relax-rerun-why", build_dir);
-    let mut lines: Vec<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_string).collect();
+    keep_noted(&format!("{}/relax-rerun-why", build_dir), why);
+}
+
+/// `line` added to the note at `path` with its time and this run's pid, the last 20 kept.
+fn keep_noted(path: &str, line: &str) {
+    let mut lines: Vec<String> = std::fs::read_to_string(path).unwrap_or_default().lines().map(str::to_string).collect();
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    lines.push(format!("{} pid {} {}", t, std::process::id(), why));
+    lines.push(format!("{} pid {} {}", t, std::process::id(), line));
     let skip = lines.len().saturating_sub(20);
-    let _ = std::fs::write(&path, lines[skip..].join("\n") + "\n");
+    let _ = std::fs::write(path, lines[skip..].join("\n") + "\n");
 }
 
 
@@ -2762,13 +2777,29 @@ fn run_owner() -> String {
     std::env::var("RELAX_RUN_OWNER").ok().filter(|o| !o.is_empty() && !o.contains(char::is_whitespace)).unwrap_or_else(|| "none".to_string())
 }
 
-/// A build script's run that took its `relax-claim` writes in it who holds it: `<pid> <owner>`.
+/// The `check -p` this run is one package's check of, side by side with the others
+/// (`RELAX_CHECK_GROUP`: that command's pid, check_packages.rs), else none.
+fn run_group() -> Option<String> {
+    std::env::var("RELAX_CHECK_GROUP").ok().filter(|g| !g.is_empty() && !g.contains(char::is_whitespace))
+}
+
+/// A build script's run that took its `relax-claim` writes in it who holds it: `<pid> <owner>`,
+/// and its `check -p` group when it has one.
 fn name_claim(claim: &std::fs::File) {
     use std::io::{Seek, Write};
     let mut f = claim;
     let _ = f.set_len(0);
     let _ = f.seek(std::io::SeekFrom::Start(0));
-    let _ = writeln!(f, "{} {}", std::process::id(), run_owner());
+    let _ = match run_group() {
+        Some(group) => writeln!(f, "{} {} {group}", std::process::id(), run_owner()),
+        None => writeln!(f, "{} {}", std::process::id(), run_owner()),
+    };
+}
+
+/// Whether the claim at `path` is held by a run of `group` (the waiter's own `check -p`), as its
+/// holder named it.
+fn held_by_sibling(path: &str, group: Option<&str>) -> bool {
+    group.is_some_and(|g| std::fs::read_to_string(path).is_ok_and(|named| named.split_whitespace().nth(2) == Some(g)))
 }
 
 /// Who holds the claim at `path`, said: "held by pid N (owner O...)", from what its holder wrote in
@@ -2813,13 +2844,19 @@ mod script_error_tests {
     }
 
     /// A build script's claim names its holder to whoever waits on it: the pid and the owner
-    /// its holder wrote in it, the kernel's lock holder on Linux, else that it named none.
+    /// its holder wrote in it, the kernel's lock holder on Linux, else that it named none. A
+    /// holder of the waiter's own `check -p` group is its sibling.
     #[test]
     fn a_claims_waiter_hears_who_holds_it() {
         let path = std::env::temp_dir().join(format!("relax-claim-holder-{}", std::process::id()));
         let path_s = path.to_string_lossy().to_string();
         std::fs::write(&path, "4242 L7\n").unwrap();
         assert_eq!(super::claim_holder(&path_s), "held by pid 4242 (owner L7)", "what its holder wrote");
+        assert!(!super::held_by_sibling(&path_s, Some("31")), "a holder of no `check -p` group is no sibling");
+        std::fs::write(&path, "4242 L7 31\n").unwrap();
+        assert_eq!(super::claim_holder(&path_s), "held by pid 4242 (owner L7)", "a holder's group is not said");
+        assert!(super::held_by_sibling(&path_s, Some("31")), "a holder of the waiter's group is its sibling");
+        assert!(!super::held_by_sibling(&path_s, Some("32")) && !super::held_by_sibling(&path_s, None), "another group's, or a waiter of none");
         std::fs::write(&path, "").unwrap();
         assert_eq!(super::claim_holder(&path_s), "held by a run that has not named itself (owner unknown)");
         let claim = std::fs::OpenOptions::new().write(true).open(&path).unwrap();

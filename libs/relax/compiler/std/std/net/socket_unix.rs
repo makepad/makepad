@@ -92,6 +92,18 @@ impl Socket {
             Ok(r as usize)
         }
     }
+    /// Real std's (sys/fd/unix.rs FileDesc::write_vectored, which its TcpStream calls): one
+    /// writev(2) of the buffers, at most the OS's limit of them (the rest is the caller's next
+    /// write, as a short write is). `IoSlice` is a `struct iovec` on unix.
+    pub(crate) fn write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let n = bufs.len().min(sys::os::MAX_IOV) as c_int;
+        let r = unsafe { sys::writev(self.raw(), bufs.as_ptr() as *const c_void, n) };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(r as usize)
+        }
+    }
     pub(crate) fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         let h = match how {
             Shutdown::Read => sn::SHUT_RD,

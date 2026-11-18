@@ -130,7 +130,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
             if let Some(h) = &f.history {
                 put(2, (&**h as *const crate::jit::SlotHistory).cast(), std::mem::size_of::<crate::jit::SlotHistory>());
                 put(2, h.prev.as_ptr().cast(), h.prev.capacity() * std::mem::size_of::<(u64, u32, crate::jit::PcMap, u32)>());
-                put(2, h.retired.as_ptr().cast(), h.retired.capacity() * std::mem::size_of::<(u64, u32, crate::jit::PcMap)>());
+                put(2, h.retired.as_ptr().cast(), h.retired.capacity() * std::mem::size_of::<(u64, u32, crate::jit::PcMap, u32)>());
                 put(2, h.inlined_into.as_ptr().cast(), h.inlined_into.capacity() * 4);
                 for x in h.prev.iter() {
                     if let Some(p) = x.2.own_ptr() { put(1, p, x.2.bytes()); }

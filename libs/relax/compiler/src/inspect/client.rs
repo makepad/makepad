@@ -141,7 +141,7 @@ fn json_wanted(words: &[String]) -> bool {
 
 /// Sends one request; `each` gets every answer line but the end line (false: stop reading).
 /// Ok(true) when the answer had an error line.
-fn ask(app: &App, line: &str, each: &mut dyn FnMut(&str) -> bool) -> std::io::Result<bool> {
+pub(crate) fn ask(app: &App, line: &str, each: &mut dyn FnMut(&str) -> bool) -> std::io::Result<bool> {
     let to_io = |e: makepad_remote::link::Error| std::io::Error::other(e.to_string());
     if let Some(why) = app.unreachable() {
         return Err(std::io::Error::other(why));

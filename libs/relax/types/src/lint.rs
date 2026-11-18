@@ -65,12 +65,13 @@ pub const fn lint(name: &'static str) -> Lint {
 }
 
 pub const UNUSED_MUT: Lint = lint("unused_mut");
+/// Warn when a callable must outlive a lifetime that its signature's free lifetimes may not outlive.
+pub const CALLABLE_OUTLIVES: Lint = Lint { name: "relax_callable_outlives", default: Level::Warn, default_2024: Level::Warn, groups: &[] };
 pub const OVERFLOWING_LITERALS: Lint = lint("overflowing_literals");
 pub const UNUSED_UNSAFE: Lint = lint("unused_unsafe");
 pub const UNSAFE_OP_IN_UNSAFE_FN: Lint = lint("unsafe_op_in_unsafe_fn");
 pub const STATIC_MUT_REFS: Lint = lint("static_mut_refs");
 pub const UNREACHABLE_PATTERNS: Lint = lint("unreachable_patterns");
-pub const UNCOVERED_PARAM_IN_PROJECTION: Lint = lint("uncovered_param_in_projection");
 pub const COHERENCE_LEAK_CHECK: Lint = lint("coherence_leak_check");
 pub const TYVAR_BEHIND_RAW_POINTER: Lint = lint("tyvar_behind_raw_pointer");
 pub const AMBIGUOUS_ASSOCIATED_ITEMS: Lint = lint("ambiguous_associated_items");
@@ -637,10 +638,12 @@ pub fn check_literals(prog: &Program, tcx: &crate::tcx::Tcx, body: &crate::typec
 
 // ---------------------------------------------------------------- shared helpers
 
-/// Whether the code at `pos` is expanded from a macro of another crate, a built-in macro or a
-/// derive: rustc does not report lints there (`Span::in_external_macro`).
+/// Whether the code at `pos` is expanded from a macro of another crate, a built-in macro, a
+/// derive or a proc macro (the tokens it made, not the input it passed on): rustc does not
+/// report lints there (`Span::in_external_macro`).
 pub fn external(prog: &Program, file: u32, pos: u32) -> bool {
-    matches!(prog.files[file as usize].expansion_kind(pos), crate::parser::ExpnKind::ExternalRules | crate::parser::ExpnKind::Builtin)
+    let pf = &prog.files[file as usize];
+    matches!(pf.expansion_kind(pos), crate::parser::ExpnKind::ExternalRules | crate::parser::ExpnKind::Builtin) || pf.made_by_proc_macro(pos)
 }
 
 /// The attribute list's leading path (`allow`, `repr`, `doc`, `rustfmt::skip`) as bytes. An unsafe

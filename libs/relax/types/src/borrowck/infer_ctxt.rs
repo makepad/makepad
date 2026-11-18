@@ -26,6 +26,8 @@ pub struct BorrowckInferCtxt<'tcx> {
     /// A type op of the body failed (custom.rs scrape_region_constraints): the root's potentially
     /// region-dependent goals are re-proven (`check_potentially_region_dependent_goals`).
     pub type_op_failed: std::cell::Cell<bool>,
+    /// What the first failing type op was asked, for the report when no error explains the failure.
+    pub type_op_failure: RefCell<Option<String>>,
     encountered_re_error: std::cell::Cell<bool>,
     pub universal_regions: Option<super::universal_regions::UniversalRegions>,
     pub region_bound_pairs: Vec<(TyId, RegionId)>,
@@ -59,7 +61,7 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         for p in &*result.clauses { clauses.push(tcx.instantiate_predicate(prog, def_id, &full, p)); }
         let param_env = ParamEnv { clauses: clauses.into() };
         let param_env_id = std::cell::OnceCell::new();
-        BorrowckInferCtxt { infcx, prog, root_def_id, param_env, param_env_id, tainted_by_errors: std::cell::Cell::new(false), type_op_failed: std::cell::Cell::new(false), encountered_re_error: std::cell::Cell::new(false), universal_regions: None, region_bound_pairs: Vec::new(), mir_view: None, mir_views_outer: Vec::new(), reg_var_to_origin: RefCell::new(HashMap::default()), root_typeck: None }
+        BorrowckInferCtxt { infcx, prog, root_def_id, param_env, param_env_id, tainted_by_errors: std::cell::Cell::new(false), type_op_failed: std::cell::Cell::new(false), type_op_failure: RefCell::new(None), encountered_re_error: std::cell::Cell::new(false), universal_regions: None, region_bound_pairs: Vec::new(), mir_view: None, mir_views_outer: Vec::new(), reg_var_to_origin: RefCell::new(HashMap::default()), root_typeck: None }
     }
 
     pub(crate) fn param_env_id(&self) -> crate::tcx::ParamEnvId {
@@ -104,7 +106,7 @@ use crate::lang_items::LangItem;
 use crate::types::{UniverseIndex, AliasTyKind};
 use crate::types::variance::V;
 use crate::next_solver::{Goal, Predicate, PredicateKind, ClauseKind, Term};
-use crate::next_solver::type_op::{Normalize, ProvePredicate, CustomTypeOp, AscribeUserType};
+use crate::next_solver::type_op::{Normalize, NormalizeClauses, ProvePredicate, CustomTypeOp, AscribeUserType};
 
 impl<'tcx> BorrowckInferCtxt<'tcx> {
     /// type_check/mod.rs: the driver supplies the renumbered body's universal
@@ -157,6 +159,17 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         if result.is_err() {
             self.tainted_by_errors.set(true);
             self.type_op_failed.set(true);
+            if self.type_op_failure.borrow().is_none() {
+                let show = |t| crate::typeck::ty_to_string(false, self.prog, &self.tcx, t);
+                let what = match &input {
+                    crate::next_solver::type_op::TypeOpInput::Normalize(_, t) => format!("normalize `{}`", show(*t)),
+                    crate::next_solver::type_op::TypeOpInput::ProvePredicate(_, p) => format!("prove {:?}", p.kind),
+                    crate::next_solver::type_op::TypeOpInput::AscribeUserType(_, t, _) => format!("ascribe a user type to `{}`", show(*t)),
+                    crate::next_solver::type_op::TypeOpInput::DropckOutlives(_, t) => format!("the drop outlives of `{}`", show(*t)),
+                    crate::next_solver::type_op::TypeOpInput::Custom => "a relation of the body's types".to_string(),
+                };
+                *self.type_op_failure.borrow_mut() = Some(what);
+            }
             if let Some(input_dbg) = &input_dbg {
                 let show = |t| crate::typeck::ty_to_string(false, self.prog, &self.tcx, t);
                 let what = match input_dbg {
@@ -228,6 +241,7 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
 
 impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
     fn universe(&self) -> UniverseIndex { self.infcx.universe() }
+    fn num_region_vars(&self) -> usize { self.infcx.num_region_vars() }
     fn create_next_universe(&mut self) -> UniverseIndex { self.infcx.create_next_universe() }
     fn next_nll_region_var(&mut self, origin: NllRegionVariableOrigin, universe: UniverseIndex) -> RegionId { self.infcx.next_nll_region_var_in_universe(origin, universe) }
     fn to_region_vid(&self, r: RegionId) -> RegionVid {
@@ -254,7 +268,9 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
         }))
     }
     fn prove_trait_ref(&mut self, out: &mut MirTypeckRegionConstraints, trait_: LangItem, args: &[GenericArg], locations: Locations, category: ConstraintCategory) {
-        let def = self.tcx.lang_items.get(trait_).unwrap_or_else(|| panic!("required trait lang item: {trait_:?}"));
+        // A program without core has no `Sized` or `Copy` lang item and nothing of them to prove: sizedness is the
+        // solver's (trait_goals.rs), and building chose each copy without the trait.
+        let Some(def) = self.tcx.lang_items.get(trait_) else { return };
         // `try_fast_path`'s sizedness rule (prove_predicate.rs:13), asked before the predicate is built
         if let (LangItem::Sized | LangItem::MetaSized, Some(&GenericArg::Type(ty))) = (trait_, args.first()) {
             if crate::next_solver::eval_ctxt::fast_path::sizedness_holds(&self.infcx, self.prog, self.param_env_id(), def, trait_ == LangItem::MetaSized, ty) { return; }
@@ -262,26 +278,28 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
         let op = ProvePredicate { predicate: crate::next_solver::collect::trait_predicate(def, args.to_vec()) };
         let _ = self.fully_perform_op(out, locations, category, ParamEnvAnd { param_env: self.param_env_id(), value: op });
     }
+    fn type_must_outlive(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, region: RegionId, locations: Locations, span: Span,
+        outer: ConstraintCategory, category: ConstraintCategory) {
+        let universals = self.universal_regions.as_ref().expect("MIR type ops require universal regions");
+        super::type_check::constraint_conversion::ConstraintConversion::new(self, universals, &self.region_bound_pairs, &self.param_env.clauses,
+            locations, span, outer, out).convert_type_outlives(ty, region, category);
+    }
     fn prove_wf(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, locations: Locations, category: ConstraintCategory) {
         let op = ProvePredicate { predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(ty)))) };
         let _ = self.fully_perform_op(out, locations, category, ParamEnvAnd { param_env: self.param_env_id(), value: op });
     }
     fn normalize_and_prove_instantiated_clauses(&mut self, out: &mut MirTypeckRegionConstraints, owner: ClauseOwner, args: &[GenericArg], locations: Locations) {
+        // canonical.rs:143: each clause is normalized, which defines no opaque type (`NormalizeClauses`), then
+        // proved; proving one relates the body's opaque types like any other relation of the body, so a callee's
+        // `impl Trait` output met by the hidden type typeck gave the call is a use of it, not a failure.
         let def = self.clause_owner(owner); let env = self.param_env_id();
-        // (proving clauses never defines an opaque type: see `NormalizeSignature`)
-        let mode = self.infcx.typing_mode.get();
-        if matches!(mode, crate::tcx::TypingMode::PostTypeckUntilBorrowck { .. }) {
-            self.infcx.typing_mode.set(crate::tcx::TypingMode::PostTypeckUntilBorrowck { defining_opaque_types: Default::default() });
-        }
-        let _ = self.fully_perform_op(out, locations, ConstraintCategory::Predicate(self.locations_span(locations), def), CustomTypeOp::new(|ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>| {
-            for p in ocx.infcx.tcx.clauses_of(ocx.prog, def) {
-                let p = ocx.infcx.tcx.instantiate_predicate(ocx.prog, def, args, &p);
-                let predicate = ocx.normalize_predicate(&env, &p);
-                ocx.register_obligation(Goal { param_env: env.clone(), predicate });
-            }
+        let category = ConstraintCategory::Predicate(self.locations_span(locations), def);
+        let clauses = self.tcx.clauses_of(self.prog, def).iter().map(|p| self.tcx.instantiate_predicate(self.prog, def, args, p)).collect();
+        let Ok(clauses) = self.fully_perform_op(out, locations, category, ParamEnvAnd { param_env: env.clone(), value: NormalizeClauses { clauses } }) else { return };
+        let _ = self.fully_perform_op(out, locations, category, CustomTypeOp::new(|ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>| {
+            for predicate in clauses { ocx.register_obligation(Goal { param_env: env.clone(), predicate }); }
             Ok(())
         }));
-        self.infcx.typing_mode.set(mode);
     }
     fn normalize(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, locations: Locations) -> TyId {
         self.fully_perform_op(out, locations, ConstraintCategory::Boring, ParamEnvAnd { param_env: self.param_env_id(), value: Normalize { value: ty } }).unwrap_or(ty)
@@ -487,7 +505,7 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
         BorrowckTypeOps::normalize(self, out, ty, locations)
     }
     fn type_is_sized_modulo_regions(&mut self, ty: TyId) -> bool {
-        let def = self.tcx.lang_items.get(LangItem::Sized).expect("Sized lang item");
+        let Some(def) = self.tcx.lang_items.get(LangItem::Sized) else { return true };
         self.infcx.evaluate_obligation(self.prog, Goal { param_env: self.param_env_id(), predicate: crate::next_solver::collect::trait_predicate(def, vec![GenericArg::Type(ty)]) }).must_apply_modulo_regions()
     }
     fn simd_const_arg(&self, def: DefId) -> Option<(usize, &'static str)> {

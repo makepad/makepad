@@ -3,7 +3,8 @@ use super::{Locations, MirTypeckRegionConstraints};
 use crate::mir::Span;
 use crate::borrowck::constraints::{ConstraintCategory, OutlivesConstraint, RegionVid};
 use crate::borrowck::infer_ctxt::BorrowckInferCtxt;
-use crate::borrowck::region_infer::{TypeTest, VerifyBound};
+use crate::borrowck::region_infer::{Advisory, TypeTest, VerifyBound};
+use crate::infer::outlives::components::Callable;
 use crate::borrowck::universal_regions::UniversalRegions;
 use crate::infer::outlives::obligations::{TypeOutlives, TypeOutlivesDelegate};
 use crate::infer::outlives::verify;
@@ -39,6 +40,11 @@ impl<'a, 'tcx> ConstraintConversion<'a, 'tcx> {
         constraints: &'a mut MirTypeckRegionConstraints,
     ) -> Self {
         Self { infcx, universal_regions, region_bound_pairs, known_type_outlives_obligations, locations, span, category, constraints }
+    }
+
+    /// One `ty: region` obligation (a binder scope's held alias obligation, submitted again at its close).
+    pub fn convert_type_outlives(&mut self, ty: TyId, region: RegionId, category: ConstraintCategory) {
+        self.convert(OutlivesPredicate::Type(ty, region), category);
     }
 
     pub fn convert_all(&mut self, query_constraints: &QueryRegionConstraints) {
@@ -198,11 +204,30 @@ impl TypeOutlivesDelegate for ConstraintConversion<'_, '_> {
         self.add_outlives(b, a, constraint_category, self.span);
     }
 
+    fn push_advisory_region_constraint(&mut self, a: RegionId, b: RegionId, category: ConstraintCategory, callable: Callable) {
+        let placeholder = |r| match self.infcx.tcx.tys.region_kind(r) {
+            RegionKind::RePlaceholder { .. } => true,
+            RegionKind::ReVar(v) => matches!(self.infcx.infcx.region_var_origin(v),
+                crate::infer::region_constraints::RegionVariableOrigin::Nll(crate::borrowck::region_infer::NllRegionVariableOrigin::Placeholder(_))),
+            _ => false,
+        };
+        // Higher-ranked requirements need their binder's assumptions, including placeholders already mapped to vids.
+        if placeholder(a) || placeholder(b) { return; }
+        let sup = self.to_region_vid(b);
+        let sub = self.to_region_vid(a);
+        self.constraints.advisories.push(Advisory { sup, sub, span: self.span, category, callable });
+    }
+
     fn push_verify(&mut self, kind: TyId, a: RegionId, bound: verify::VerifyBound) {
         let kind = self.replace_placeholders_with_nll(kind);
         let kind = self.fold_to_region_vids(kind);
         let bound = self.verify_bound_to_nll(bound);
         let type_test = self.verify_to_type_test(kind, a, bound);
         self.add_type_test(type_test);
+    }
+
+    fn hold_alias(&mut self, ty: TyId, a: RegionId, category: ConstraintCategory) -> bool {
+        let held = super::binder_scope::HeldAlias { ty, region: a, outer: self.category, category, locations: self.locations, span: self.span };
+        super::binder_scope::hold_alias(&mut self.constraints.binder_frames, &self.infcx.tcx.tys, held)
     }
 }

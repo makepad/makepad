@@ -111,13 +111,16 @@ function Frozen-Stop {
 }
 
 # The Start Menu entry: the shell must read a target from it and starting it must run the app.
-function Started { @(Get-CimInstance Win32_Process -Filter "Name='makepad.exe'" | Where-Object { $_.ExecutablePath -eq $Makepad -and $_.CommandLine -match 'app task' }) }
+function Started { @(Get-CimInstance Win32_Process -Filter "Name='makepad.exe'" | Where-Object { $_.ExecutablePath -eq $Makepad -and $_.CommandLine -match 'app (--home "[^"]*" )?task' }) }
 function Pin-And-Start {
     Act ui act press role=button 'q=name~=Start' w=0 | Out-Null
     Until 'the shortcut' { Test-Path $link }
     $l = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
     if ($l.TargetPath -ne $Makepad) { throw "the shortcut's target is '$($l.TargetPath)', not $Makepad" }
-    if ($l.Arguments -ne 'app task') { throw "the shortcut's arguments are '$($l.Arguments)'" }
+    # a shortcut sets no environment: its words name the Runner's home (runner pin.rs)
+    if ($l.Arguments -notmatch '^app --home "([^"]+)" task$' -or [IO.Path]::GetFullPath($Matches[1]) -ne [IO.Path]::GetFullPath($home_)) {
+        throw "the shortcut's arguments are '$($l.Arguments)', not app --home `"$home_`" task"
+    }
     Invoke-Item $link
     Until 'the shortcut to start the app' { @(Started).Count -gt 0 }
     foreach ($a in @(Started)) { taskkill /T /F /PID $a.ProcessId 2>&1 | Out-Null }

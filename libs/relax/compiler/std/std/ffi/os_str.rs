@@ -448,8 +448,41 @@ impl Hash for OsString {
     }
 }
 
+/// Real std's Windows OsStr Debug (WTF-8).
+#[cfg(windows)]
+pub(crate) fn debug_os_bytes(bytes: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
+    // Windows strings are WTF-8 (real std's sys/os_str/wtf8.rs Debug): an unpaired surrogate is
+    // `\u{d800}`
+    f.write_str("\"")?;
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let (valid, after) = match core::str::from_utf8(rest) {
+            Ok(s) => (s, &rest[rest.len()..]),
+            Err(e) => (unsafe { core::str::from_utf8_unchecked(&rest[..e.valid_up_to()]) }, &rest[e.valid_up_to()..]),
+        };
+        for c in valid.chars() {
+            if c == '\'' {
+                f.write_str("'")?;
+            } else {
+                write!(f, "{}", c.escape_debug())?;
+            }
+        }
+        rest = after;
+        if rest.len() >= 3 && rest[0] == 0xED && (0xA0..=0xBF).contains(&rest[1]) && (0x80..=0xBF).contains(&rest[2]) {
+            let surrogate = 0xD000u32 | ((rest[1] as u32 & 0x3F) << 6) | (rest[2] as u32 & 0x3F);
+            write!(f, "\\u{{{:x}}}", surrogate)?;
+            rest = &rest[3..];
+        } else if !rest.is_empty() {
+            write!(f, "\\x{:02X}", rest[0])?;
+            rest = &rest[1..];
+        }
+    }
+    f.write_str("\"")
+}
+
 /// Real std's unix OsStr Debug (Utf8Chunks debug): chars via escape_debug, invalid bytes
 /// as `\xNN` (upper-case hex).
+#[cfg(not(windows))]
 pub(crate) fn debug_os_bytes(bytes: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
     f.write_str("\"")?;
     for chunk in bytes.utf8_chunks() {

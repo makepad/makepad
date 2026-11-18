@@ -702,6 +702,212 @@ fn a_front_made_after_a_patch_of_its_file_is_taken() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A hot fn whose O3 take gives way for a cause that lasts (TAKE_GIVES_WAY stands in for one: a
+/// front never made off the owner, a wait that never ends) is tried again once per change, not
+/// once per call. A take that gave way counted the slot again from the cost it had, over the
+/// threshold, so its next call queued it for the same take: a live session's O3 workers ran ~68
+/// builds a second for minutes with nothing edited (11-17). A build on the owner or an edit is a
+/// change: one more take each.
+#[test]
+fn a_take_that_gives_way_waits_for_a_change() {
+    isolated_test!(a_take_that_gives_way_waits_for_a_change);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-take-gives-way-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, TAKE_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "gives_way", false).unwrap();
+    let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let (twice, main) = (def(&prog, "twice"), def(&prog, "main"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    assert!(u.tier1.is_some(), "the fixture needs O3");
+    enable_pipelining(&u.prog.session.options);
+    // twice runs its first code under its count stub; its takes give way
+    let id = crate::owner::call(crate::owner::Class::Program, || {
+        let id = u.fn_id(FnKey::Inst(twice, Vec::new()));
+        let c = unsafe { compile_fn(up, id) }.unwrap();
+        u.install(id, &c.0, &c.2, c.1, 0).unwrap();
+        let code = u.fns[id as usize].code;
+        u.arm_counter_as(id, code, true);
+        id
+    });
+    TAKE_GIVES_WAY.store(id, Ordering::Relaxed);
+    let rec = crate::owner::call(crate::owner::Class::Program, || tier_rec(&u.slots, id) as usize) as *const AtomicU64;
+    let state = || unsafe { (*rec.add(3)).load(Ordering::Acquire) };
+    assert_eq!(state(), T_COUNTING, "twice counts its calls");
+    // a call turned it hot and queued it (queue_counting, without the inbox: no worker runs here)
+    let queue_again = || unsafe {
+        let (code, stub) = ((*rec.add(1)).load(Ordering::Relaxed), (*rec.add(2)).load(Ordering::Relaxed));
+        let _ = crate::owner::call(crate::owner::Class::Program, || SlotWord::of(&(&*up).slots, id).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst));
+        assert!((*rec.add(3)).compare_exchange(T_COUNTING, T_QUEUED, Ordering::SeqCst, Ordering::SeqCst).is_ok(), "twice was counting");
+    };
+    queue_again();
+    let mut takes = 0;
+    loop {
+        takes += 1;
+        assert!(!unsafe { compile_tier1(up, id) }, "twice's take gave way");
+        if state() != T_COUNTING || takes == 6 {
+            break;
+        }
+        queue_again();
+    }
+    assert_eq!(takes, 2, "with nothing changed, a take that gave way counted twice again after each of its {} takes: each next call queued it for the same take", takes);
+    assert_eq!(state(), T_QUEUED, "twice waits for a change: its calls are not counted");
+    // `why-tier stuck` names it, and what it waits for
+    crate::inspect::tierlog::drain();
+    crate::owner::call(crate::owner::Class::Program, || {
+        let stuck = tier_stuck(&u);
+        assert!(stuck.iter().any(|s| s.0 == id && s.1.contains("nothing changed")), "twice is stuck below O3 and says why: {:?}", stuck);
+    });
+    // a build on the owner is a change: one more take, then it waits again
+    crate::owner::call(crate::owner::Class::Program, || {
+        let m = u.fn_id(FnKey::Inst(main, Vec::new()));
+        let c = unsafe { compile_fn(up, m) }.unwrap();
+        u.install(m, &c.0, &c.2, c.1, 0).unwrap();
+    });
+    rearm_bailed(up);
+    assert_eq!(state(), T_COUNTING, "twice counts again after a build on the owner");
+    queue_again();
+    assert!(!unsafe { compile_tier1(up, id) }, "twice's take gave way again");
+    assert_eq!(state(), T_QUEUED, "one take per change: twice waits for the next one");
+    rearm_bailed(up);
+    assert_eq!(state(), T_QUEUED, "nothing changed since: twice still waits");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const EDIT_SOURCE: &str = r#"
+pub fn hot(out: &mut u32) { *out = 6; }
+fn main() {
+    let mut x = 0;
+    hot(&mut x);
+}
+"#;
+
+/// A hot fn edited mid-run counts its calls again, in front of its patch's code, and returns to O3
+/// within its normal count: whether the edit found it counting, at O3, in its counted (PGO)
+/// window, or with its O3 take running. A patch left a slot marked queued (O3 code, a counted
+/// window, a take) with its count stub gone, and a take it dropped left its slot the same: their
+/// calls were never counted again, and a live app's edited draw ran O1 code for the rest of the
+/// run (11-17).
+#[test]
+fn a_hot_fn_edited_mid_run_returns_to_o3() {
+    isolated_test!(a_hot_fn_edited_mid_run_returns_to_o3);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-edited-hot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, EDIT_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "edited_hot", false).unwrap();
+    let hot = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "hot").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    assert!(u.tier1.is_some(), "the fixture needs O3");
+    enable_pipelining(&u.prog.session.options);
+    let threshold = u.tier1.as_ref().unwrap().threshold;
+    // hot runs its first code under its count stub
+    let (id, file) = crate::owner::call(crate::owner::Class::Program, || {
+        let id = u.fn_id(FnKey::Inst(hot, Vec::new()));
+        let c = unsafe { compile_fn(up, id) }.unwrap();
+        u.install(id, &c.0, &c.2, c.1, 0).unwrap();
+        let code = u.fns[id as usize].code;
+        u.arm_counter_as(id, code, true);
+        (id, u.prog.def(hot).file)
+    });
+    let rec = crate::owner::call(crate::owner::Class::Program, || tier_rec(&u.slots, id) as usize) as *const AtomicU64;
+    // its count stub is in the slot, in front of the code it runs, and its count starts below the threshold
+    let counting = |what: &str| crate::owner::call(crate::owner::Class::Program, || unsafe {
+        let u = &*up;
+        let (code, stub) = ((*rec.add(1)).load(Ordering::Relaxed), (*rec.add(2)).load(Ordering::Relaxed));
+        assert_eq!((*rec.add(3)).load(Ordering::Acquire), T_COUNTING, "{what}: hot counts its calls");
+        assert!(stub != 0 && SlotWord::of(&u.slots, id).load(Ordering::SeqCst) == stub, "{what}: hot's count stub is in its slot");
+        assert_eq!(code, u.fns[id as usize].code, "{what}: the count stub runs hot's newest code");
+        assert!(!u.fns[id as usize].o3.load(Ordering::Relaxed), "{what}: hot's code is not O3");
+        let (now, _) = tier_clocks();
+        tier_cost_now(rec, threshold, now).0
+    });
+    let run = || {
+        let entry = unsafe { (&*up).fns[id as usize].code };
+        let mut r = 0u32;
+        unsafe { call_jit(up, entry, &mut r as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        r
+    };
+    // a call turned it hot and queued it (queue_counting, without the inbox: no worker runs here)
+    let queue_again = || unsafe {
+        let (code, stub) = ((*rec.add(1)).load(Ordering::Relaxed), (*rec.add(2)).load(Ordering::Relaxed));
+        let _ = crate::owner::call(crate::owner::Class::Program, || SlotWord::of(&(&*up).slots, id).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst));
+        assert!((*rec.add(3)).compare_exchange(T_COUNTING, T_QUEUED, Ordering::SeqCst, Ordering::SeqCst).is_ok(), "hot was counting");
+    };
+    let mut src = EDIT_SOURCE.to_string();
+    let mut edit = |from: &str, to: &str| {
+        src = src.replace(from, to);
+        let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file, path: path.to_string_lossy().into_owned(), src: src.clone().into_bytes() }]) };
+        assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    };
+    assert_eq!(run(), 6);
+    // edited while counting: it counts on, in front of the patch's code
+    edit("= 6;", "= 7;");
+    counting("counting, then edited");
+    assert_eq!(run(), 7);
+    // edited at O3: it counts again from nothing, and its next take builds the edit at O3
+    queue_again();
+    assert!(unsafe { compile_tier1(up, id) }, "hot gets O3 code");
+    assert!(u.fns[id as usize].o3.load(Ordering::Relaxed));
+    edit("= 7;", "= 8;");
+    let cost = counting("at O3, then edited");
+    assert!(cost < threshold, "an edited O3 fn counts from nothing: cost {cost} of {threshold}");
+    assert_eq!(run(), 8);
+    queue_again();
+    assert!(unsafe { compile_tier1(up, id) }, "the edited hot gets O3 code again");
+    assert!(u.fns[id as usize].o3.load(Ordering::Relaxed));
+    assert_eq!(run(), 8);
+    // edited in its counted (PGO) window: the window of the old body closes, it counts again
+    edit("= 8;", "= 9;");
+    counting("at O3 again, then edited");
+    queue_again();
+    assert!(u.fns[id as usize].rir.is_some(), "hot's patch left its RIR for the counted build");
+    assert!(unsafe { counted_build(up, id, false) }, "hot gets its counted build");
+    assert!(COUNTING.lock().unwrap().iter().any(|e| e.id == id), "hot's counted window is open");
+    edit("= 9;", "= 10;");
+    assert!(!COUNTING.lock().unwrap().iter().any(|e| e.id == id), "the counted window of hot's old body is closed");
+    counting("in its counted window, then edited");
+    assert_eq!(run(), 10);
+    // a patch lands while its O3 take runs: the take is dropped, the slot counts again
+    queue_again();
+    TAKE_MEETS_PATCH.store(id, Ordering::Relaxed);
+    assert!(!unsafe { compile_tier1(up, id) }, "a take a patch landed under is dropped");
+    TAKE_MEETS_PATCH.store(u32::MAX, Ordering::Relaxed);
+    counting("its take dropped by a patch");
+    queue_again();
+    assert!(unsafe { compile_tier1(up, id) }, "hot gets O3 code after its dropped take");
+    assert_eq!(run(), 10);
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 const LEFT_SOURCE: &str = r#"
 const K1: u32 = 40 + 2;
 const K2: u32 = 6 * 7;

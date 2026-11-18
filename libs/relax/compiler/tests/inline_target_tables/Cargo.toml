@@ -1,0 +1,12 @@
+# Targets written as inline arrays of tables, cargo's other spelling of `[[bin]]` and `[[test]]`
+# (run.sh). The keys come before the first table header, so they are the manifest's own.
+bin = [{ name = "inline-tool", path = "progs/tool.rs", test = false }]
+test = [{ name = "uses_tool", path = "progs/uses_tool.rs" }]
+
+[package]
+name = "inline-target-tables"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]

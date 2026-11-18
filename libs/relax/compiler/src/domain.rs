@@ -488,6 +488,61 @@ fn materialize_in(u: &Unit, base: u64, sym: u32, seen: &mut HashSet<u32>) {
     }
 }
 
+/// The statics of the definitions `ours` takes whose bytes in the compile domain (domain 0) are no
+/// longer their initial images, counting the writable blocks and data each points to: how many
+/// statics, and every symbol whose bytes differ (`restore_initial` writes them back). A live test
+/// session's rerun reads it (harness_live.rs `fresh_statics`). Domain 0's images already hold its
+/// own addresses, so no word needs rebasing.
+pub(crate) fn changed_statics(u: &Unit, ours: impl Fn(crate::program::DefId) -> bool) -> (usize, Vec<u32>) {
+    let ids: Vec<u32> = u.syms.initial_data.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
+    let mut seen = HashSet::new();
+    let mut syms = Vec::new();
+    let mut statics = 0;
+    for id in ids {
+        if matches!(u.syms.kind(id), Some(SymKind::Static(d)) if ours(d)) && changed_in(u, id, &mut seen, &mut syms) {
+            statics += 1;
+        }
+    }
+    (statics, syms)
+}
+
+/// `changed_statics` of one symbol and the writable storage its image points to (a static it
+/// names is its own entry): whether any of it differs.
+fn changed_in(u: &Unit, sym: u32, seen: &mut HashSet<u32>, syms: &mut Vec<u32>) -> bool {
+    if !seen.insert(sym) {
+        return false;
+    }
+    let Some(own) = offset_of(u, Sym::new(sym)) else { return false };
+    let Ok(bytes) = initial_bytes(u, sym) else { return false };
+    let now = unsafe { std::slice::from_raw_parts((u.syms.dom0() + own) as *const u8, bytes.len()) };
+    let mut changed = now != &bytes[..];
+    if changed {
+        syms.push(sym);
+    }
+    for (_, t) in provenance_words(u, &bytes) {
+        if !matches!(u.syms.kind(t.id), Some(SymKind::Static(_))) {
+            changed |= changed_in(u, t.id, seen, syms);
+        }
+    }
+    changed
+}
+
+/// Writes the initial images of `syms` (`changed_statics`) back into the compile domain. The
+/// caller makes sure no thread runs in it.
+pub(crate) fn restore_initial(u: &Unit, syms: &[u32]) {
+    for &sym in syms {
+        let (Some(own), Ok(bytes)) = (offset_of(u, Sym::new(sym)), initial_bytes(u, sym)) else { continue };
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), (u.syms.dom0() + own) as *mut u8, bytes.len()) };
+    }
+}
+
+/// The threads the domain whose block is at `base` counts on besides the one whose OS id is
+/// `but` (a live test session's harness): their names. One reserved and not started yet counts.
+pub(crate) fn threads_besides(base: u64, but: u64) -> Vec<String> {
+    domains().iter().find(|d| d.info.base == base)
+        .map_or_else(Vec::new, |d| d.threads.iter().filter(|t| t.os_id != but).map(|t| t.name.clone()).collect())
+}
+
 /// Makes a new domain's block: reserved once (it never moves), holding the initial image of
 /// every static laid out so far. Returns its base.
 pub fn create(u: &Unit) -> u64 {
@@ -1671,6 +1726,7 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, root:
             x.thread_done = true;
         }
         CHANGED.notify_all();
+        _program.end_with_thread();
     });
     match spawned {
         Ok(h) => Ok(h),

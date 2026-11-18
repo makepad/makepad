@@ -3,6 +3,8 @@
 // runs, and the failing ones print their output. One cargo test, so the test buckets run it.
 use std::process::Command;
 
+// gap on Windows: its fixtures are bash scripts or use Unix tools (bash, pwd), which a Windows box lacks
+#[cfg(not(windows))]
 #[test]
 fn the_module_fixtures_pass_under_the_runner() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -15,6 +17,8 @@ fn the_module_fixtures_pass_under_the_runner() {
 /// The fixture workspaces under libs/relax/compiler/tests that come with a script of their own
 /// (`run.sh <runner>` prints "<name>: ok"; cases of ported pull requests): all of them at once,
 /// each under the runner, the failing ones with their output.
+// gap on Windows: its fixtures are bash scripts or use Unix tools (bash, pwd), which a Windows box lacks
+#[cfg(not(windows))]
 #[test]
 fn the_fixture_scripts_pass_under_the_runner() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -39,6 +43,8 @@ fn the_fixture_scripts_pass_under_the_runner() {
 
 /// Together these programs contain all eleven crates in the loader's provided registry.
 /// Unreachable declarations need their tagged Option entries just as reached ops do.
+// gap on Windows: its provided fixture crate uses std::os::unix::process::CommandExt (tools/run/fixture/src/fork_busy.rs)
+#[cfg(not(windows))]
 #[test]
 fn the_provided_crates_have_every_tagged_option_entry() {
     use relax_session::options::CheckTarget;
@@ -109,6 +115,8 @@ fn a_run_refuses_what_rustc_refuses_in_the_apps_crates() {
 /// function a host calls (libs/relax/compiler/tests/wasm_export_entry: a static whose initializer
 /// compiles before `main`). The export took the run's first compiled function for its entry, here
 /// that initializer, which a module does not ship: the module exported no function at all.
+// gap on Windows: the web target's linear memory reservation runs on macOS and Linux only (jit.rs)
+#[cfg(not(windows))]
 #[test]
 fn a_bins_wasm_export_exports_its_main() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -116,10 +124,12 @@ fn a_bins_wasm_export_exports_its_main() {
     let out = std::env::temp_dir().join(format!("wasm-export-entry-{}", std::process::id()));
     std::fs::create_dir_all(&out).unwrap();
     let units = out.join("units.json");
+    // the paths are JSON strings: a Windows path's backslashes are escaped
+    let json_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
     let unit = format!(
         r#"{{"pkg_id":"path+file://{}#wasm_export_entry@0.0.0","target":{{"kind":["bin"],"name":"wasm_export_entry","src_path":"{}","edition":"2021"}},"mode":"build","features":[],"dependencies":[]}}"#,
-        out.display(),
-        dir.join("wasm_export_entry.rs").display()
+        json_path(&out),
+        json_path(&dir.join("wasm_export_entry.rs"))
     );
     std::fs::write(&units, format!(r#"{{"version":1,"roots":[0],"units":[{unit}]}}"#)).unwrap();
     let wasm = out.join("x.wasm");
@@ -144,6 +154,7 @@ fn a_bins_wasm_export_exports_its_main() {
 
 /// The export section of wasm module `b`: each export's name and kind (0 function, 1 table,
 /// 2 memory, 3 global).
+#[cfg(not(windows))]
 fn wasm_exports(b: &[u8]) -> Vec<(String, u8)> {
     fn leb(b: &[u8], i: &mut usize) -> usize {
         let (mut r, mut s) = (0, 0);
@@ -259,6 +270,8 @@ fn run_until(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)], deadlin
 /// sandbox, the next one's derive builds the macro world again, and the world holds more crates
 /// than the program then, so a crate index of one unit names a different crate in the other.
 /// Each unit keeps its own sandbox state (sandbox.rs `State`).
+// gap on Windows: sandboxed modules do not run on Windows yet (compiler/src/sandbox.rs: no arena windows)
+#[cfg(not(windows))]
 #[test]
 fn a_module_loads_while_the_macro_world_lives() {
     let (status, stdout, stderr) = run_fixture("module_beside_world", "mbw-app");
@@ -275,6 +288,8 @@ fn a_module_loads_while_the_macro_world_lives() {
 /// second takes it from the cache. The minimal ahead policy compiles nothing before its call.
 /// The second run's world also takes core, alloc, std and proc_macro from the crate images the
 /// first run wrote at its exit, where it parsed std again (#223).
+// gap on Windows: sandboxed modules do not run on Windows yet (compiler/src/sandbox.rs: no arena windows)
+#[cfg(not(windows))]
 #[test]
 fn a_late_macro_worlds_code_is_cached_for_the_next_run() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../libs/relax/compiler/tests/late_macro_world");
@@ -321,6 +336,8 @@ fn a_late_macro_worlds_code_is_cached_for_the_next_run() {
 
 /// A sandboxed module's std twins link from the disk cache on the next run, with the same
 /// results as the host's code (libs/relax/compiler/tests/module_warm_twins).
+// gap on Windows: sandboxed modules do not run on Windows yet (compiler/src/sandbox.rs: no arena windows)
+#[cfg(not(windows))]
 #[test]
 fn a_modules_std_twins_link_from_the_disk_cache_in_the_next_run() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -449,6 +466,8 @@ fn a_live_test_sessions_records_reach_the_next_sessions_macro_world() {
 /// so `unsafe` and raw pointers in a body loaded (a reference forged from an address, handed to
 /// the host). `makepad test` loads parse every body at once, which is why the module fixtures
 /// never saw it.
+// gap on Windows: sandboxed modules do not run on Windows yet (compiler/src/sandbox.rs: no arena windows)
+#[cfg(not(windows))]
 #[test]
 fn a_sandboxed_modules_escapes_in_lazily_parsed_bodies_are_refused() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -467,6 +486,8 @@ fn a_sandboxed_modules_escapes_in_lazily_parsed_bodies_are_refused() {
 /// sandbox's refusal and rustc's const check before anything evaluates them
 /// (libs/relax/compiler/tests/sandbox_const_bodies): each module is refused at load, no body of
 /// theirs ran, and a safe module loads and runs after them.
+// gap on Windows: sandboxed modules do not run on Windows yet (compiler/src/sandbox.rs: no arena windows)
+#[cfg(not(windows))]
 #[test]
 fn a_sandboxed_modules_const_bodies_are_checked_before_they_are_evaluated() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -502,6 +523,8 @@ fn a_sandboxed_modules_const_bodies_are_checked_before_they_are_evaluated() {
 /// `rustc-env`, the process environment, from which the self-exec child's host read them, so the
 /// child loaded the module and ran it without fuel; and a grant in the environment of the person's
 /// shell, a launcher or a handed build environment was the run's and its children's.
+// gap on Windows: sandboxed modules do not run on Windows yet (compiler/src/sandbox.rs: no arena windows)
+#[cfg(not(windows))]
 #[test]
 fn relax_takes_its_grants_from_the_command_line_alone() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -666,6 +689,249 @@ item [doc = " First line," | doc = " second line with \"quotes\"." | doc = " Aft
 item [] fields []
 item [doc = r" From a macro."] fields []"#;
     assert_eq!(stdout.trim(), expected, "{stderr}");
+}
+
+/// `#![warn(unsafe_code)]` is not reported in the `unsafe impl` a derive writes, whether the
+/// derive passes on the input's name token or makes every token itself: the tokens a proc macro
+/// makes are its own code, as rustc's in_external_macro has it (relax issue 238: both derives were
+/// reported, and failed the build under `deny`). The crate's own impls are still reported, the
+/// hand-written one and the one its local macro_rules writes. The workspace is written here (duc-mac
+/// the derives, duc-support the unsafe trait, duc-app the uses); `cargo check -p duc-app` warns for
+/// the same two impls (rustc points into the macro's body for the second, Relax at its call).
+#[test]
+fn a_derives_unsafe_impl_is_not_the_crates_unsafe_code() {
+    let ws = std::env::temp_dir().join(format!("derive-unsafe-code-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    let files = [
+        ("Cargo.toml", r##"[workspace]
+members = ["mac", "support", "app"]
+resolver = "2"
+"##),
+        ("mac/Cargo.toml", r##"[package]
+name = "duc-mac"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+proc-macro = true
+"##),
+        ("mac/src/lib.rs", r##"extern crate proc_macro;
+use proc_macro::{TokenStream, TokenTree};
+
+fn type_name(input: TokenStream) -> TokenTree {
+    let mut it = input.into_iter();
+    while let Some(t) = it.next() {
+        if matches!(&t, TokenTree::Ident(i) if i.to_string() == "struct") {
+            return it.next().unwrap();
+        }
+    }
+    panic!("not a struct")
+}
+
+/// `unsafe impl Plain for <the type> {}`, as a plain-old-data derive writes it: the impl's
+/// tokens are the macro's own (call-site spans), the type's name is the input's token.
+#[proc_macro_derive(Plain)]
+pub fn derive_plain(input: TokenStream) -> TokenStream {
+    let name = type_name(input);
+    let mut out: TokenStream = "unsafe impl ::duc_support::Plain for".parse().unwrap();
+    out.extend([name]);
+    out.extend("{}".parse::<TokenStream>().unwrap());
+    out
+}
+
+/// The same impl with every token the macro's own, the name included.
+#[proc_macro_derive(PlainByName)]
+pub fn derive_plain_by_name(input: TokenStream) -> TokenStream {
+    let name = type_name(input).to_string();
+    format!("unsafe impl ::duc_support::Plain for {name} {{}}").parse().unwrap()
+}
+"##),
+        ("support/Cargo.toml", r##"[package]
+name = "duc-support"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+duc-mac = { path = "../mac" }
+"##),
+        ("support/src/lib.rs", r##"/// # Safety
+/// Every bit pattern of the type is a valid value.
+pub unsafe trait Plain {}
+pub use duc_mac::{Plain, PlainByName};
+
+pub fn size_of<T: Plain>(_: &T) -> usize {
+    core::mem::size_of::<T>()
+}
+"##),
+        ("app/Cargo.toml", r##"[package]
+name = "duc-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+duc-support = { path = "../support" }
+"##),
+        ("app/src/lib.rs", r##"#![warn(unsafe_code)]
+
+#[repr(C)]
+#[derive(Clone, Copy, duc_support::Plain)]
+pub struct P {
+    pub x: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, duc_support::PlainByName)]
+pub struct Q {
+    pub y: u32,
+}
+
+#[repr(C)]
+pub struct R(pub u16);
+unsafe impl duc_support::Plain for R {}
+
+macro_rules! plain {
+    ($t:ident) => {
+        unsafe impl duc_support::Plain for $t {}
+    };
+}
+#[repr(C)]
+pub struct S(pub u8);
+plain!(S);
+
+pub fn sizes() -> [usize; 4] {
+    [duc_support::size_of(&P { x: 1.0 }), duc_support::size_of(&Q { y: 2 }), duc_support::size_of(&R(3)), duc_support::size_of(&S(4))]
+}
+"##),
+    ];
+    for (path, text) in &files {
+        let path = ws.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let (status, stdout, stderr) = run_in(&ws, &["check", "duc-app"]);
+    let _ = std::fs::remove_dir_all(&ws);
+    assert!(status.success(), "{stdout}\n{stderr}");
+    let out = format!("{stdout}{stderr}");
+    let reported: Vec<usize> = out
+        .lines()
+        .filter(|l| l.contains("[unsafe_code]"))
+        .map(|l| l.split("app/src/lib.rs:").nth(1).and_then(|r| r.split(':').next()).and_then(|n| n.parse().ok()).unwrap_or(0))
+        .collect();
+    let app = files.iter().find(|(path, _)| *path == "app/src/lib.rs").unwrap().1;
+    let line_of = |text: &str| app.lines().position(|l| l == text).unwrap() + 1;
+    let own = vec![line_of("unsafe impl duc_support::Plain for R {}"), line_of("plain!(S);")];
+    assert_eq!(reported, own, "unsafe_code is reported for the crate's own impls alone, not the derives': {out}");
+}
+
+/// An attribute is judged on an item with a proc-macro derive as on any other: a helper the
+/// item's derive declares (`attributes(tag)`) is inert there, and any other name no macro answers
+/// is "cannot find attribute", on the item, its fields, its variants and their fields. Relax used to
+/// judge no attribute of a file that held a derive other than std's (a widget that dropped the
+/// derive declaring `#[area]` and `#[redraw]` but kept them on its fields compiled under Relax and
+/// failed under rustc). A derive whose helpers Relax cannot list still leaves its item unjudged. The
+/// workspace is written here (dh-mac the derive, dh-app the uses); `cargo check -p dh-app` rejects
+/// it with "cannot find attribute" for exactly the three lines named below.
+#[test]
+fn an_attribute_no_derive_declares_is_not_found() {
+    let ws = std::env::temp_dir().join(format!("derive-helper-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    let files = [
+        ("Cargo.toml", r##"[workspace]
+members = ["mac", "app"]
+resolver = "2"
+"##),
+        ("mac/Cargo.toml", r##"[package]
+name = "dh-mac"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+proc-macro = true
+"##),
+        ("mac/src/lib.rs", r##"extern crate proc_macro;
+use proc_macro::TokenStream;
+
+/// Writes nothing; `#[tag]` is its helper.
+#[proc_macro_derive(Tag, attributes(tag))]
+pub fn derive_tag(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
+"##),
+        ("app/Cargo.toml", r##"[package]
+name = "dh-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dh-mac = { path = "../mac" }
+"##),
+        ("app/src/lib.rs", r##"use dh_mac::Tag;
+
+#[derive(Tag)]
+#[tag]
+pub struct Tagged {
+    #[tag]
+    pub a: u32,
+}
+
+#[derive(Clone, Tag)]
+pub struct Widget {
+    #[tag]
+    pub a: u32,
+    #[area]
+    pub b: u32,
+}
+
+#[derive(dh_mac::Tag)]
+pub enum Shape {
+    #[tag]
+    Round,
+    Square(#[redraw] u32),
+}
+
+#[derive(Clone)]
+pub struct Plain {
+    #[tag]
+    pub c: u32,
+}
+"##),
+    ];
+    for (path, text) in &files {
+        let path = ws.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let (status, stdout, stderr) = run_in(&ws, &["check", "dh-app"]);
+    let _ = std::fs::remove_dir_all(&ws);
+    let out = format!("{stdout}{stderr}");
+    assert!(!status.success(), "the check fails: {out}");
+    let mut reported: Vec<(usize, String)> = out
+        .lines()
+        .filter_map(|l| {
+            let name = l.split("cannot find attribute `").nth(1)?.split('`').next()?.to_string();
+            let line = l.split("app/src/lib.rs:").nth(1)?.split(':').next()?.parse().ok()?;
+            Some((line, name))
+        })
+        .collect();
+    reported.sort();
+    reported.dedup();
+    let app = files.iter().find(|(path, _)| *path == "app/src/lib.rs").unwrap().1;
+    let lines: Vec<&str> = app.lines().collect();
+    let line_of = |text: &str, after: &str| {
+        let from = lines.iter().position(|l| *l == after).unwrap();
+        from + lines[from..].iter().position(|l| *l == text).unwrap() + 1
+    };
+    let expected = vec![
+        (line_of("    #[area]", "pub struct Widget {"), "area".to_string()),
+        (line_of("    Square(#[redraw] u32),", "pub enum Shape {"), "redraw".to_string()),
+        (line_of("    #[tag]", "pub struct Plain {"), "tag".to_string()),
+    ];
+    assert_eq!(reported, expected, "the helpers of an item's own derive are found, no other name: {out}");
 }
 
 /// One crate's global_asm! that Relax cannot assemble (a zmm register needs EVEX) is left out
@@ -969,6 +1235,8 @@ fn an_examples_tests_run_when_it_says_test_true() {
 /// file differs, runs the script into an output of its own and prints its own data; checkout a's
 /// next run takes a's output again without running the script. Under cargo each checkout prints its
 /// own `data` line. The workspace is written here, twice.
+// gap on Windows: its fixtures are bash scripts or use Unix tools (bash, pwd), which a Windows box lacks
+#[cfg(not(windows))]
 #[test]
 fn checkouts_of_a_shared_workspace_keep_their_own_script_outputs() {
     let base = std::env::temp_dir().join(format!("shared-checkouts-{}", std::process::id()));
@@ -1016,6 +1284,8 @@ fn checkouts_of_a_shared_workspace_keep_their_own_script_outputs() {
 /// were shared: checkout b printed a's folders and commit. Under cargo each checkout prints its
 /// own; a's next run takes a's outputs again without running the scripts. The workspace is written
 /// here, twice.
+// gap on Windows: its fixtures are bash scripts or use Unix tools (bash, pwd), which a Windows box lacks
+#[cfg(not(windows))]
 #[test]
 fn a_script_output_that_names_its_checkout_stays_with_it() {
     let base = std::env::temp_dir().join(format!("shared-own-{}", std::process::id()));

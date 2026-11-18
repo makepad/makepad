@@ -411,65 +411,9 @@ fn connect(start: bool) -> Result<PathBuf, String> {
 }
 /// Only the ordinary package invocation auto-connects: flags changing compilation retain
 /// their one-shot meaning. An explicit --serve with such flags is rejected, never ignored.
-/// `-p <package>`: a package like one named plainly. Several: each checked by a process of its own,
-/// all of them whatever one says; the exit is the worst.
-fn check_packages(args: &[String], grants: &[String]) -> Result<Vec<String>, i32> {
-    let mut runs = package_args(args)?;
-    if runs.len() < 2 {
-        return Ok(runs.remove(0).1);
-    }
-    let exe = crate::dirs::loader_exe().map_err(|e| {
-        eprintln!("relax check: the loader's own path: {e}");
-        2
-    })?;
-    let mut worst = 0;
-    for (p, args) in runs {
-        let status = std::process::Command::new(&exe).arg("check").args(grants).args(&args).status();
-        let code = status.ok().and_then(|s| s.code()).unwrap_or(2);
-        if code != 0 {
-            eprintln!("relax check: {p}: exit {code}");
-        }
-        worst = worst.max(code);
-    }
-    Err(worst)
-}
-
-/// Each `-p` package with the arguments of its check: the command's own, the package standing
-/// where the first `-p` stood (`check [--json] <package> [target flags]` reads the flags after
-/// the package as its target flags). Without `-p`, the arguments as written (no package name).
-fn package_args(args: &[String]) -> Result<Vec<(String, Vec<String>)>, i32> {
-    let mut rest = Vec::new();
-    let mut packages = Vec::new();
-    let mut at = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-p" | "--package" => {
-                let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
-                    eprintln!("relax check: {} needs a package", args[i]);
-                    return Err(2);
-                };
-                at.get_or_insert(rest.len());
-                packages.push(p.clone());
-                i += 2;
-            }
-            _ => {
-                rest.push(args[i].clone());
-                i += 1;
-            }
-        }
-    }
-    let Some(at) = at else { return Ok(vec![(String::new(), rest)]) };
-    Ok(packages.into_iter().map(|p| {
-        let mut args = rest.clone();
-        args.insert(at, p.clone());
-        (p, args)
-    }).collect())
-}
-
 pub fn check(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     let grants = crate::options::grant_words(&sess.options, &sess.runtime);
-    let args = match check_packages(args, &grants) {
+    let args = match crate::check_packages::check_packages(args, &grants) {
         Ok(a) => a,
         Err(code) => return code,
     };
@@ -530,19 +474,5 @@ pub fn query(sess: &std::sync::Arc<crate::Session>, method: &str, args: &[String
     };
     match response {
         Ok(v) => { println!("{v}"); 0 }, Err(e) => { eprintln!("relax: {e}"); 2 }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn each_package_stands_before_the_target_flags() {
-        let words = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
-        let runs = |s: &str| super::package_args(&words(s)).unwrap().into_iter().map(|(_, a)| a.join(" ")).collect::<Vec<_>>();
-        assert_eq!(runs("-p a -p b --tests"), ["a --tests", "b --tests"], "several packages: each before the target flags");
-        assert_eq!(runs("--json -p a --test t -p b"), ["--json a --test t", "--json b --test t"], "a leading flag stays in front");
-        assert_eq!(runs("-p a --lib"), ["a --lib"], "one package keeps its place before the target flags");
-        assert_eq!(runs("a --tests"), ["a --tests"], "without -p the arguments stay as written");
-        assert_eq!(super::package_args(&words("-p --tests")).err(), Some(2), "-p without a package is a usage error");
     }
 }

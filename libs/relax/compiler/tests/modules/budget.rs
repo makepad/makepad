@@ -3,6 +3,7 @@
 // Module::with_host lends the GameCtx; concrete host API functions resolve Host<GameCtx>.
 // guard(deadline, ...) may wrap this as an additional wall-clock safety net.
 use std::relax::{Budget, BudgetError, Host, Module};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct GameCtx { pub count: u32, pub next: fn() -> u32 }
 pub fn reenter(h: Host<GameCtx>) -> u32 {
@@ -21,6 +22,10 @@ fn peak_rss() -> u64 {
 pub fn spawn(h: Host<GameCtx>, n: u32) -> bool {
     h.with(|ctx| { ctx.count += n; }).is_ok()
 }
+/// Host API: counts an entry of the module's `forever_entered` (the module block that calls it
+/// was charged before it ran).
+pub static ENTERED: AtomicU64 = AtomicU64::new(0);
+pub fn entered() { ENTERED.fetch_add(1, Ordering::SeqCst); }
 
 const CAP: u64 = 48 * 1024 * 1024;
 const SOURCE: &str = r#"
@@ -36,6 +41,7 @@ pub fn first(n: u64) -> u64 {
 pub fn second(n: u64) -> u64 { first(n) + 1 }
 pub fn third(n: u64) -> u64 { first(n) + 2 }
 pub fn forever() { loop { std::hint::black_box(1); } }
+pub fn forever_entered() { test_crate::entered(); forever() }
 pub fn allocate() {
     let mut keep = Vec::new();
     loop { keep.push(vec![0u8; 1024 * 1024]); }
@@ -59,6 +65,7 @@ fn budget() {
     let second: fn(u64) -> u64 = m.get("second").unwrap();
     let third: fn(u64) -> u64 = m.get("third").unwrap();
     let forever: fn() = m.get("forever").unwrap();
+    let forever_entered: fn() = m.get("forever_entered").unwrap();
     let allocate: fn() = m.get("allocate").unwrap();
     let reuse: fn() = m.get("reuse").unwrap();
     let callback: fn(Host<GameCtx>) -> bool = m.get("callback").unwrap();
@@ -77,9 +84,22 @@ fn budget() {
     m.call_with(&mut tick, || third(100)).unwrap();
     let count = tick.consumed_fuel();
     assert!(a > 0 && b > a && count > b && tick.remaining_fuel() == 500_000 - count);
-    // Warm each export and wait for tier installation, then compare the same paths.
+    // Warm each export and wait for tier installation, then compare the same paths. With tiering
+    // on, run.sh names the JIT's O3 progress file (RELAX_O3_PROGRESS: `pending installs`): the
+    // exports are called until no O3 build is pending and one was installed at least.
     for _ in 0..3000 { first(3); second(3); third(3); }
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    if let Ok(progress) = std::env::var("RELAX_O3_PROGRESS") {
+        loop {
+            let line = std::fs::read_to_string(&progress).unwrap_or_default();
+            let n: Vec<u64> = line.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            if n.len() == 2 && n[0] == 0 && n[1] > 0 {
+                eprintln!("budget: tier-up installed ({} O3 installs, none pending)", n[1]);
+                break;
+            }
+            for _ in 0..100 { first(3); second(3); third(3); }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     tick.reset(500_000, CAP);
     m.call_with(&mut tick, || { first(100); second(100); third(100); }).unwrap();
     assert_eq!(tick.consumed_fuel(), count);
@@ -144,10 +164,19 @@ fn budget() {
     for _ in 0..10000 { tick.reset(500_000, CAP); std::hint::black_box(m.call_with(&mut tick, init).unwrap()); }
     let budget_ns = start.elapsed().as_nanos() as f64 / 10000.0;
     eprintln!("budget cost: {:.1} ns plain, {:.1} ns budgeted, {:.1} ns extra", plain_ns, budget_ns, budget_ns - plain_ns);
-    // An outer watchdog skips the inner call_with continuation; counters still survive.
-    tick.reset(u64::MAX, CAP);
-    assert!(std::relax::guard(20, || m.call_with(&mut tick, forever)).is_err());
-    assert!(tick.consumed_fuel() > 0);
+    // An outer watchdog skips the inner call_with continuation; counters still survive. Asked once
+    // the call reached the module's code (its host call counted the entry, and the block making it
+    // was charged first): a watchdog that fired before that (a loaded machine) ended a call that
+    // ran nothing, and the call is made again.
+    loop {
+        tick.reset(u64::MAX, CAP);
+        let before = ENTERED.load(Ordering::SeqCst);
+        assert!(std::relax::guard(20, || m.call_with(&mut tick, forever_entered)).is_err());
+        if ENTERED.load(Ordering::SeqCst) != before {
+            assert!(tick.consumed_fuel() > 0);
+            break;
+        }
+    }
     tick.reset(500_000, CAP);
     assert_eq!(m.call_with(&mut tick, init).unwrap(), 42);
     println!("out watchdog accounting: true");

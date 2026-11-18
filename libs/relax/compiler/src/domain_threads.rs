@@ -223,7 +223,7 @@ fn thread_main(start: *mut Start) -> OsRet {
     let on_stack = |enter: u64, f: u64, arg: u64| {
         crate::stack::on_program_stack(crate::jit::program_stack_changed, || crate::jit::run_thread_body(enter, f, arg));
     };
-    match s.body {
+    let ret = match s.body {
         Body::Relax { f, arg } => {
             on_stack(s.enter, f, arg);
             unsafe { std::mem::zeroed::<OsRet>() }
@@ -232,7 +232,9 @@ fn thread_main(start: *mut Start) -> OsRet {
             on_stack(s.enter, os_body as *const () as usize as u64, &mut b as *mut OsBody as u64);
             b.ret
         }
-    }
+    };
+    _program.end_with_thread();
+    ret
 }
 
 #[cfg(unix)]

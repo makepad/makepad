@@ -108,7 +108,7 @@ pub(crate) fn bodies(u: &Unit, id: u32) -> Vec<Body<'_>> {
             v.push(Body { start: *c, len: *l, map: m, state: "replaced", gen: *g });
         }
     }
-    for (c, l, m) in f.history().retired.iter().rev() {
+    for (c, l, m, _) in f.history().retired.iter().rev() {
         if *l > 0 && *c != f.code {
             v.push(Body { start: *c, len: *l, map: m, state: "retired", gen: 0 });
         }

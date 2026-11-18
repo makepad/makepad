@@ -87,7 +87,7 @@ T=libs/relax/compiler/tests
 named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_ptr_capture_accept.rs tools/run/fixture/diff/pr1330_fixes.rs
   $T/impl_header_assoc_const.rs $T/n01_const_provider.rs $T/n01_round35_asm_goto.rs $T/coerce_unsized_pointers.rs $T/derive_gat_hrtb.rs $T/asm_goto_label.rs
   $T/supertrait_assoc_type_bounds.rs $T/const_param_projection_field.rs $T/macro_inner_use.rs $T/macro_file_order.rs $T/macro_file_shadow.rs
-  $T/arch_legacy_const_generics.rs $T/cow_slice_eq.rs $T/macro_tail_cfg.rs $T/macro_matcher_positions.rs $T/macro_forwarded_empty_vis.rs $T/derive_eq_nested_qself.rs $T/core_net_paths.rs $T/path_from_str.rs $T/macro_doc_after_empty_vis.rs $T/std_unchecked_split_collect.rs
+  $T/trait_default_names_lifetime.rs $T/arch_legacy_const_generics.rs $T/cow_slice_eq.rs $T/macro_tail_cfg.rs $T/macro_matcher_positions.rs $T/macro_forwarded_empty_vis.rs $T/derive_eq_nested_qself.rs $T/core_net_paths.rs $T/path_from_str.rs $T/macro_doc_after_empty_vis.rs $T/std_unchecked_split_collect.rs
   $T/std/core_dep_gaps_batch2.rs $T/std/core_dep_gaps_async_crypto.rs $T/std/box_dyn_read.rs $T/std/core_arch_neon_zmij.rs $T/std/core_arch_neon_recpe.rs $T/std/core_arch_sha3.rs $T/std/derive_split_tokens.rs
   $T/path_hash_matches_rustc.rs $T/cow_from_cstr.rs $T/avx_shuffle_and_mask_types.rs $T/avx_zext_si128.rs
   $T/vec_cfg_elements.rs $T/promoted_closure_fields.rs $T/self_path_param_impl.rs $T/gat_value_path_elided_lifetime.rs $T/const_owned_async_block.rs $T/int_bit_ones.rs $T/int_signed_isqrt.rs $T/should_panic_file_form.rs $T/os_str_join.rs $T/op_assign_ref_rhs.rs $T/op_overload_wide_operand.rs $T/closure_index_ref_capture.rs $T/slice_element_offset.rs $T/float_consts_golden_euler.rs $T/os_str_path_cow_cmp.rs $T/hint_cold_path.rs
@@ -143,7 +143,8 @@ named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_pt
   $T/macro_ty_bare_trait_object_bounds.rs
   $T/closure_param_index_from_call.rs
   $T/rc_arc_block_layout.rs
-  $T/cast_open_target.rs $T/paren_closure_arg_last.rs $T/unary_block_tail_infer.rs $T/unstable_inherent_yields_to_stable_trait.rs $T/infer_scope_gaps.rs"
+  $T/cast_open_target.rs $T/paren_closure_arg_last.rs $T/unary_block_tail_infer.rs $T/unstable_inherent_yields_to_stable_trait.rs $T/infer_scope_gaps.rs
+  $T/std/net_tcp_vectored_write.rs"
 [ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs $T/x86_carry_intrinsics.rs $T/x86_avx512_detect_runs_asm.rs"
 for f in "$fx"/accept/*.rs $named "$@"; do case_of "$f" 0; done
 # the differential files: real std and Relax's print the same `| ` lines

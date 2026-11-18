@@ -10,7 +10,9 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 CC_REAL=$(command -v cc)
 [ -n "$CC_REAL" ] || { echo "self_native: no cc"; exit 2; }
-printf '#!/bin/sh\nif [ -f "%s" ]; then echo "the C compiler is gone: the program was built" >&2; exit 42; fi\nexec "%s" "$@"\n' "$T/gone" "$CC_REAL" > "$T/cc"
+# (a refused call leaves $T/refused: the runner's own optimized build, beside the program, may
+# reach the compiler after the program broke it)
+printf '#!/bin/sh\nif [ -f "%s" ]; then echo "the C compiler is gone: the program was built" >&2; : > "%s"; exit 42; fi\nexec "%s" "$@"\n' "$T/gone" "$T/refused" "$CC_REAL" > "$T/cc"
 chmod +x "$T/cc"
 export RELAX_CACHE=off CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=$T/target RELAX_PANIC_PARK=0 CC=$T/cc COMPILER_GONE=$T/gone
 export RELAX_STD=$H/../../std
@@ -18,14 +20,25 @@ FAILS=0
 case_is() { # name ok?
     if [ "$2" = 1 ]; then echo "self_native: $1: ok"; else echo "self_native: $1: FAILED"; FAILS=$((FAILS + 1)); fi
 }
-rm -f "$T/gone"
+rm -f "$T/gone" "$T/refused"
 OUT=$(cd "$H" && "$1" run --quiet --allow-c sn-app 2>&1)
 rc=$?
 echo "$OUT" | tail -4
+# The program's last line is "ok". The runner's optimized native build runs beside the program
+# and may reach the C compiler after the program broke it, or not: after "ok" may come its
+# warning, only that, and only for a compiler call refused here. Anything else fails.
+OPT_FAILED="relax: --allow-c: the optimized native build failed (the opt-level 0 library stays): "
+AFTER=$(echo "$OUT" | awk '$0 == "ok" { n = 0; seen = 1; next } seen { rest[n++] = $0 } END { if (!seen) print "(no ok)"; for (i = 0; i < n; i++) print rest[i] }')
 ok=0
-[ $rc = 0 ] && [ "$(echo "$OUT" | tail -1)" = "ok" ] && ok=1
+if [ $rc = 0 ]; then
+    if [ -z "$AFTER" ]; then
+        ok=1
+    elif [ -f "$T/refused" ] && echo "$AFTER" | awk -v p="$OPT_FAILED" 'index($0, p) != 1 { bad = 1 } END { exit bad }'; then
+        ok=1
+    fi
+fi
 case_is "a program's run of itself" $ok
-rm -f "$T/gone"
+rm -f "$T/gone" "$T/refused"
 OUT=$(cd "$H" && "$1" test --allow-c sn-app 2>&1)
 rc=$?
 echo "$OUT" | tail -6

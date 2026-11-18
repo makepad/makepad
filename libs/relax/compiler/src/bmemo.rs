@@ -110,6 +110,22 @@ fn hash_prep<H: std::hash::Hasher>(p: &Prep, c: &mut Canon, h: &mut H) {
     }
 }
 
+/// The digest gate's digests (gate.rs) of the bodies preparation `p` of slot `root` gives its back
+/// end -- its own lowering's, its candidates' and theirs' contexts' -- by slot: a hit's code was
+/// built from these, up to the renaming (the stored instance's name the stored instance's slots).
+fn digests_of(p: &Prep, root: u32, out: &mut std::collections::HashMap<u32, Option<Arc<relax_backend::rir::BodyDigest>>>) {
+    out.entry(root).or_insert_with(|| p.func.digest.clone());
+    for (s, f, _) in &p.callees {
+        out.entry(*s).or_insert_with(|| f.digest.clone());
+        for (k, x) in f.inl_slots.iter().enumerate() {
+            out.entry(*x).or_insert_with(|| f.inl_digest.get(k).cloned().flatten());
+        }
+    }
+    for (s, _, q) in &p.deferred {
+        digests_of(q, *s, out);
+    }
+}
+
 /// What a stored back end got: the preparation (minus its name), slots as the build named them.
 pub(crate) struct SPrep {
     func: Func,
@@ -296,12 +312,16 @@ pub(crate) fn lookup(k: &Key, p: &Prep, counter: Option<relax_backend::rir::Sym>
     let name = |ix: u32| k.names.iter().find(|x| x.0 == ix).map(|x| x.1.clone()).unwrap_or_default();
     let mut words = Vec::new();
     word_pairs(p, &e.prep, &mut words);
+    let mut digests = std::collections::HashMap::new();
+    digests_of(p, k.canon.order[0], &mut digests);
     let func = |f: &Func, ix: u32| {
         let mut f = f.clone();
         f.fn_slots_mut(&mut |s| back(s));
         f.nounwind_inputs.sort_unstable();
         f.name = name(ix);
         rename_words(&mut f, &words);
+        f.digest = digests.get(&k.canon.order[ix as usize]).cloned().flatten();
+        f.inl_digest = f.inl_slots.iter().map(|s| digests.get(s).cloned().flatten()).collect();
         f
     };
     let inl = |v: &[(u32, usize)]| v.iter().map(|&(s, r)| (k.canon.order[s as usize], r)).collect::<Vec<_>>();
@@ -345,6 +365,10 @@ pub(crate) fn store(k: Key, prep: SPrep, opt: &Option<(Arc<Func>, Vec<(u32, usiz
         let mut f = Func { lowering: None, ..f.clone() };
         f.fn_slots_mut(&mut |s| to(s));
         f.name = String::new();
+        // (digests name slots by this instance's ids, some outside the key: a hit takes its own
+        // instance's from its preparation, `digests_of`)
+        f.digest = None;
+        f.inl_digest.iter_mut().for_each(|d| *d = None);
         f
     };
     let inl = |v: &[(u32, usize)]| v.iter().map(|&(s, r)| {

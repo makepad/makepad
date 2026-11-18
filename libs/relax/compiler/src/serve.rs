@@ -204,7 +204,12 @@ impl Session {
                 }
                 let polymorphic = args.iter().any(|a| !u.tcx.tys.is_concrete(*a));
                 if body.errors.is_empty() && crate::borrowck::enabled(options) {
-                    let verdict = u.tcx.with_errors(&cx, || crate::borrowck::check_body(&cx, &u.prog, &u.tcx, &body)).0;
+                    // the check reads the body as it types it (opaques kept), not the revealed instance
+                    let verdict = match crate::typeck::borrowck_body(&u.prog, &u.tcx, item, &args) {
+                        Ok(checked) => u.tcx.with_errors(&cx, || crate::borrowck::check_body(&cx, &u.prog, &u.tcx, &checked)).0,
+                        Err(_) => crate::check::unnormalized_verdict(&u.prog, item),
+                    };
+                    errors.extend(crate::check::verdict_gaps(&u.prog, item, &verdict));
                     borrow_diagnostics.extend(crate::borrowck::lazy::report_checked(&u.prog, 0, u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), item, &args, verdict.errors, crate::borrowck::event::Origin::Serve).iter().map(|e| e.error.to_diagnostic()));
                 }
                 // Match check_crate's treatment of polymorphic bodies: concrete instances
@@ -898,6 +903,37 @@ mod lazy_tests {
 #[cfg(test)]
 mod round45_tests {
     use super::*;
+
+    /// One file declared as two modules (`#[path]`), each with its own `here!`: each `label`
+    /// returns an opaque of a different hidden type. The check server borrow-checks the caller
+    /// as the borrow check types it, where the call's destination is the callee's opaque, as
+    /// its signature has it; typed as the revealed codegen instance, the destination was the
+    /// hidden type (`&str`, `u32`) and the check reported a MIR bug (call dest mismatch, 11-17).
+    #[test]
+    fn a_call_to_an_opaque_return_of_a_module_file_borrow_checks() {
+        isolated_test!(a_call_to_an_opaque_return_of_a_module_file_borrow_checks);
+        let dir = std::env::temp_dir().join(format!("relax-check-rpit-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("shared")).unwrap();
+        let root = dir.join("lib.rs").to_string_lossy().into_owned();
+        std::fs::write(&root, "#![no_std]\npub trait Shown {}\nimpl Shown for &'static str {}\nimpl Shown for u32 {}\n\
+            macro_rules! here { () => { \"one\" }; }\n#[path = \"shared/value.rs\"]\nmod first;\n\
+            macro_rules! here { () => { 2u32 }; }\n#[path = \"shared/value.rs\"]\nmod second;\n\
+            pub fn both() { let _ = (first::label(), second::label()); }\n").unwrap();
+        std::fs::write(dir.join("shared/value.rs"), "pub fn label() -> impl crate::Shown { here!() }\n").unwrap();
+        let session = std::sync::Arc::new(crate::Session::default());
+        let mut prog = crate::program::Program::new(&session);
+        let cfg = crate::cfg::CfgSet::host(&session, &[]);
+        let krate = prog.load_crate("module_file", &root, 2021, cfg, vec![]).unwrap();
+        prog.resolve_imports();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut warm = Session::new(Unit::new(prog, tcx, 0), krate, Vec::new());
+        warm.check();
+        let said: Vec<String> = warm.diagnostics().iter().map(|d| d.message.clone()).collect();
+        assert!(said.is_empty(), "the caller of both opaques borrow-checks: {said:?}");
+        drop(warm);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn checking_body_edits_publish_owner_legacy_results() {

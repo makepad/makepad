@@ -322,8 +322,9 @@ fn run(raw_args: Vec<Vec<u8>>) {
             std::process::exit(2);
         }
     };
-    // Windows has no exec: a run that can restart becomes the child of this process, which waits
-    #[cfg(windows)]
+    // a run that can restart becomes the child of this process, which waits: Windows has no exec,
+    // and on macOS an exec keeps a pid the window server has marked as exiting (restart_parent.rs)
+    #[cfg(any(windows, target_os = "macos"))]
     relax_compiler::restart_parent::enter(&raw_args);
     // a child started in a virtual folder of a git repository run gets the mount table
     if let Err(e) = relax_compiler::vfs::mount_from_env() {

@@ -78,7 +78,9 @@ pub const DROP_WHY: [&str; 6] = ["build panicked", "codegen error", "a patch cha
 pub const REFUSE_VERDICT: u8 = 0;
 pub const REFUSE_TAKE: u8 = 1;
 pub const REFUSE_PROFILE_GONE: u8 = 2;
-pub const REFUSE_WHY: [&str; 3] = ["not allowed (borrow-check verdict pending, or a patch without a clean verdict)", "its snapshot bailed", "its counted profile is gone (patched or rebuilt)"];
+/// its take gave way again with nothing changed since its last one (jit::count_again_after_bail)
+pub const REFUSE_UNCHANGED: u8 = 3;
+pub const REFUSE_WHY: [&str; 4] = ["not allowed (borrow-check verdict pending, or a patch without a clean verdict)", "its snapshot bailed", "its counted profile is gone (patched or rebuilt)", "its take gave way again with nothing changed since the last one: it waits for a build on the owner or an edit"];
 
 pub const Q_WHY: [&str; 5] = ["calls", "loop", "retier", "marked", "profiled"];
 

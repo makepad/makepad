@@ -14,6 +14,15 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // the loader its apps run under, said first: exactly the one named, or the leg fails
+    match makepad_ci_leg::loader() {
+        Ok((path, var)) => println!("{}", makepad_ci_leg::loader_line(&path, var)),
+        Err(e) => {
+            println!("CIERR ci-leg: {e}");
+            println!("CI-FAIL ci-leg: {e}");
+            std::process::exit(2);
+        }
+    }
     let code = match args.first().map(String::as_str) {
         Some("smoke") if args.len() >= 2 => {
             let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();

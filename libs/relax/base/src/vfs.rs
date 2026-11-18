@@ -1548,6 +1548,19 @@ pub fn edited_disk_path(path: &str) -> Option<std::path::PathBuf> {
     (!rel.starts_with(".makepad-run-") && p.exists()).then_some(p)
 }
 
+/// Whether `path`'s edit is gone from the edits folder while the ledger still names it and no
+/// whiteout does: taken back, its ledger not rewritten yet. devhub's ship-done removes such a
+/// file first, then renames the ship's files in, the whiteouts and the ledger last, so until then
+/// the rest of that ship may not be in place.
+pub fn take_back_pending(path: &str) -> bool {
+    let Some((disk, rel)) = edit_path(path) else { return false };
+    if rel.is_empty() || rel.starts_with(".makepad-run-") || disk.exists() {
+        return false;
+    }
+    let Some(dir) = EDITS.read().unwrap().clone() else { return false };
+    load_records(&dir).contains_key(&rel) && !load_deleted(&dir).contains(&rel)
+}
+
 /// The edits folder as one look found it: each file and folder in it (the run's own
 /// `.relax-*` files left out) with its (modified time, length). A watcher's round that
 /// looks at every virtual file takes their stamps from it: one walk of the edits instead of a

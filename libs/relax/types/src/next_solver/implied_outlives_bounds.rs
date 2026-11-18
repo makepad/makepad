@@ -11,22 +11,12 @@ use crate::infer::outlives::{env::{OutlivesBound, OutlivesEnvironment}, componen
 /// implied_outlives_bounds.rs `compute_implied_outlives_bounds_inner` with `disable_implied_bounds_hack = false`
 /// (every caller here: OutlivesEnvironment::new, and wfcheck, whose first, hack-disabled resolution only decides
 /// whether it retries with the hack -- more assumed bounds never add region errors, so the retry's result is this one).
-/// The query runs in the caller's context (see `implied_outlives_bounds`): "registered region obligations" are those
-/// this computation registered, from `start` on.
+/// The query runs in the caller's context (see `implied_outlives_bounds`). Nightly's compatibility rule for
+/// `bevy_ecs::ParamSet` (implied_outlives_bounds.rs:153-167, the region obligations its normalization registers
+/// are assumed too) is not ported: those are bounds nobody proves.
 pub fn query_compute_implied_outlives_bounds(ocx: &mut ObligationCtxt<'_, '_>, env: &ParamEnvId, ty: TyId) -> Result<Vec<OutlivesBound>, NoSolution> {
-    let start = ocx.infcx.inner.borrow().region_obligations().len();
     let normalized = ocx.deeply_normalize_ty(env, ty)?;
-    let mut bounds = compute_implied_outlives_bounds_inner(ocx, env, ty, normalized)?;
-    // implied_outlives_bounds.rs:153-167: a type naming `bevy_ecs::ParamSet` (#109628) also assumes the outlives
-    // obligations its normalization and well-formedness registered
-    if crate::borrowck::implied_bounds::contains_bevy_param_set(ocx.infcx.tcx, ocx.prog, ty) {
-        let registered: Vec<(TyId, crate::types::RegionId)> = ocx.infcx.inner.borrow().region_obligations()[start..].iter().map(|&(t, r, _)| (t, r)).collect();
-        for (sup, sub) in registered {
-            let mut parts = Vec::new(); components::push_outlives_components(ocx.infcx.tcx, ocx.prog, sup, &mut parts);
-            push_component_bounds(&mut bounds, sub, parts);
-        }
-    }
-    Ok(bounds)
+    compute_implied_outlives_bounds_inner(ocx, env, ty, normalized)
 }
 /// implied_bounds_from_components
 pub(crate) fn push_component_bounds(out: &mut Vec<OutlivesBound>, r: crate::types::RegionId, parts: Vec<Component>) {
@@ -70,9 +60,12 @@ pub fn implied_outlives_bounds(infcx: &crate::infer::InferCtxt<'_>, prog: &crate
     });
     bounds
 }
-pub fn compute_implied_outlives_bounds_inner(ocx: &mut ObligationCtxt<'_, '_>, env: &ParamEnvId, ty: TyId, normalized: TyId) -> Result<Vec<OutlivesBound>, NoSolution> {
+pub fn compute_implied_outlives_bounds_inner(ocx: &mut ObligationCtxt<'_, '_>, env: &ParamEnvId, _ty: TyId, normalized: TyId) -> Result<Vec<OutlivesBound>, NoSolution> {
     let mut checked = crate::fxhash::HashSet::default();
-    let mut wf_args = vec![Term::Ty(ty), Term::Ty(normalized)]; let mut result = Vec::new();
+    // Only the normalized type implies bounds. An alias that normalizes away is gone with its arguments, whose
+    // bounds no caller of a fn item through the `Fn` traits proves (rustc issues 100051, 129005); one that stays
+    // rigid implies what its arguments and its item's where-clauses hold, as in rustc.
+    let mut wf_args = vec![Term::Ty(normalized)]; let mut result = Vec::new();
     while let Some(arg) = wf_args.pop() {
         if !checked.insert(arg) { continue; }
         let Some(goals) = wf::unnormalized_obligations(ocx.infcx, ocx.prog, env, arg)? else { continue; };

@@ -1041,7 +1041,7 @@ mod imp {
 
     /// The arguments as UTF-8 (WTF-16 decoded lossily: the program's C argv view).
     pub fn os_args_bytes() -> Vec<Vec<u8>> {
-        std::env::args_os().map(|a| a.to_string_lossy().into_owned().into_bytes()).collect()
+        std::env::args_os().map(|a| a.into_encoded_bytes()).collect()
     }
 
     /// Cache files are created inside folders ensure_private_dir gave a protected owner-only

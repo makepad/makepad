@@ -398,6 +398,18 @@ fn drain_blocked(class: u8, noninteractive: usize, background: usize, limit: usi
 fn eligible(class: u8, burst: bool, noninteractive: usize) -> bool {
     !(burst && class != budget::INTERACTIVE && noninteractive != 0)
 }
+/// A tier-up of code the program was measured running (set_thread_hot: on macOS QoS DEFAULT, not
+/// UTILITY): an O3 build queued by its calls, its loops, its counted window or a retier, and an O2
+/// build of a slot with heat. Speculation, look-ahead, checks, a marked slot's build (`#[relax(O3)]`,
+/// a twin's base) and the housekeeping tick are nobody's measured demand: UTILITY.
+fn measured_hot(job: &Job, now: &HeatNow) -> bool {
+    match job {
+        Job::O3(e) => e.1 != super::Q_MARKED,
+        Job::O2(u, id, O2Kind::Normal) => now.heat(*u, *id).0 > 0,
+        _ => false,
+    }
+}
+
 /// A job's class while nobody waits on it (a waited-for job is promoted: Interactive). The checks
 /// ahead of the main thread's lazy compiles serve the startup and the UI's bursts; a tier-up (O2,
 /// O3) or a speculative build only speeds code up, so it runs in the background class, below the
@@ -1042,7 +1054,8 @@ fn worker_loop(index: usize) {
                     // that finds the rest blocked (the startup's ahead width) costs the owner its
                     // queue lock and the cores their caches
                     let more = q.runnable();
-                    Some((e, job, more, go_idle))
+                    let hot = measured_hot(&e.job, &now);
+                    Some((e, job, more, go_idle, hot))
                 });
                 // the hold ledger: a tier-up that starts ends the open interval; a worker that parks
                 // finds why the best queued one does not start (other work started leaves it open)
@@ -1062,7 +1075,7 @@ fn worker_loop(index: usize) {
                 }), other))
             };
             match next {
-                Ok((entry, permit, more, go_idle)) => {
+                Ok((entry, permit, more, go_idle, hot)) => {
                     worker.waiting.store(false, Ordering::SeqCst);
                     crate::lifeline::beat();
                     if go_idle {
@@ -1077,7 +1090,9 @@ fn worker_loop(index: usize) {
                         Some(TierActive(tier.0))
                     } else { None };
                     let (slot, cpu) = (entry.slot.map(|s| s.1), cpu_ns());
+                    budget::set_thread_hot(hot);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(entry.job)));
+                    budget::set_thread_hot(false);
                     note_job(tier, slot, cpu_ns().saturating_sub(cpu));
                     drop(active);
                     if let Err(payload) = result {

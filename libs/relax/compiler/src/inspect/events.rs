@@ -119,6 +119,12 @@ fn emit_record(kind: &'static str, key: &str, fields: &str) -> (u64, std::sync::
     (seq, json)
 }
 
+/// (tests) the newest event, as sent
+#[cfg(test)]
+pub(crate) fn newest() -> Option<std::sync::Arc<str>> {
+    EVENTS.lock().unwrap_or_else(|e| e.into_inner()).back().map(|e| e.json.clone())
+}
+
 /// The sequence number of the newest event so far.
 pub fn last_seq() -> u64 {
     SEQ.load(SeqCst)

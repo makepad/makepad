@@ -351,7 +351,20 @@ pub fn why_hung(req: &Req, out: &mut Out) {
                 }
             }
             let top = syms[m].first().map(|f| f.name.clone()).unwrap_or_default();
-            findings.push(("idle", format!("main is not stuck: {}% CPU, waiting for events or sleeping in {}", busy, super::short(&top, 100))));
+            // threads asleep in the kernel, uninterruptibly (a disk, a filesystem's journal): what an
+            // idle main may wait for without a wait of its own (a boot window's open sat 30 s in
+            // `opendir`); each by its first frame of user code and the kernel's wait (`wchan`)
+            let in_kernel: Vec<String> = caps.iter().enumerate().filter(|(_, c)| c.t.state == "uninterruptible").map(|(i, c)| {
+                let names = || syms[i].iter().map(|f| f.name.as_str());
+                let call = names().find(|n| !n.starts_with("__") && !n.starts_with("libc.so")).unwrap_or("?");
+                // and the program's or the runtime's own code that made it (past std's)
+                let from = names().find(|n| n.contains("::") && !["std::", "core::", "<std::", "<core::"].iter().any(|p| n.starts_with(p)));
+                let from = from.filter(|f| *f != call).map_or(String::new(), |f| format!(" from {}", super::short(f, 100)));
+                let kernel = super::threads::kernel_wait(c.t.os_id).map_or(String::new(), |k| format!(", kernel wait {k}"));
+                format!("{} ({}) in {}{from}{kernel}", c.t.name, super::tid_label(c.t.os_id), super::short(call, 60))
+            }).collect();
+            let in_kernel = if in_kernel.is_empty() { String::new() } else { format!("; in the kernel: {}", in_kernel.join(", ")) };
+            findings.push(("idle", format!("main is not stuck: {}% CPU, waiting for events or sleeping in {}{in_kernel}", busy, super::short(&top, 100))));
         }
     } else {
         findings.push(("unknown", "the main thread was not found".into()));

@@ -1738,6 +1738,7 @@ impl Program {
     }
 
     fn load_file(&mut self, path: &str, edition: u16, krate: u32) -> Result<u32, String> {
+        load_step();
         crate::why::event("load", path, 0, "", None);
         let _profile = crate::load_profile::span(self.session.runtime.profile, "load-file", path);
         // a check's committed version of the module being loaded (a file declared as two
@@ -2049,7 +2050,7 @@ impl Program {
         ParseSnapshot { old, path: path.to_string(), edition, kname, mod_path, dir, root: root.to_string(), together: Vec::new(),
             cfg: self.crates[krate as usize].cfg.clone(), macros,
             reuse: self.parse_reuse.get(&old).cloned().unwrap_or_default(),
-            previous: Some(self.files[old as usize].clone()), context: self.crates[krate as usize].context.clone() }
+            previous: Some(self.files[old as usize].clone()), context: self.crates[krate as usize].context.clone(), line_origins: Default::default() }
     }
 
     /// A parse of a NEW file that becomes child module `child` of module `parent` (makepad
@@ -2063,7 +2064,7 @@ impl Program {
         ParseSnapshot { old: self.mods[normal as usize].file, path: path.to_string(), edition: self.crates[krate as usize].edition, kname, mod_path,
             dir: dir_of(path).to_string(), root: self.crates[krate as usize].root_path().to_string(), together: Vec::new(),
             cfg: self.crates[krate as usize].cfg.clone(), macros: self.macros.clone(), reuse: Default::default(), previous: None,
-            context: self.crates[krate as usize].context.clone() }
+            context: self.crates[krate as usize].context.clone(), line_origins: Default::default() }
     }
 
     /// Adds `v` (a child_parse_snapshot parse) as a new private module `name` of module `parent`
@@ -6486,27 +6487,71 @@ fn shared_std_put(path: &str, sp: SharedParse) {
     if let Some(m) = g.as_mut() {
         m.insert(path.to_string(), std::sync::Arc::new(sp));
     }
+    load_step();
     SHARED_CV.notify_all();
+}
+
+/// Steps of this process's loads: each file the preload pool scans or parses, each file a loader
+/// loads, each std parse the program shares. The proc-macro world's wait for a std parse of the
+/// program's ends as a stall only when no step was taken for its interval (`shared_std_wait`): a
+/// load that moves, however slowly (a child of a `check -p` on two cores of a full machine, std
+/// taken from its images), is waited for.
+static LOAD_STEPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A load took a step (`LOAD_STEPS`).
+pub(crate) fn load_step() {
+    LOAD_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How long the loads may take no step while the world waits for a std parse of the program's
+/// before the wait counts as a cycle (`shared_std_wait`).
+const STD_WAIT_STALL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the world's wait for one of the program's std parses came to.
+enum StdWait {
+    Shared(std::sync::Arc<SharedParse>),
+    /// the program's load does not share it (it ended, or never shares; a thread waits for the
+    /// world): the world parses it itself
+    Alone,
+    /// no load took a step for the interval: a wait cycle between the world and the load
+    Stalled,
 }
 
 /// The program's parse of `path`, waiting for it while the program's std load runs.
 fn shared_std_wait(path: &str) -> Option<std::sync::Arc<SharedParse>> {
+    match shared_std_wait_on(path, &LOAD_STEPS, STD_WAIT_STALL) {
+        StdWait::Shared(sp) => Some(sp),
+        StdWait::Alone => None,
+        StdWait::Stalled => {
+            // never silent: a stall here is a wait cycle between the world and the load
+            eprintln!("relax: the proc-macro world waited for the program's parse of {}, and no load took a step for {} s; parsing it itself", path, STD_WAIT_STALL.as_secs());
+            None
+        }
+    }
+}
+
+/// `shared_std_wait` with its steps and the interval with none that is a stall.
+fn shared_std_wait_on(path: &str, steps: &std::sync::atomic::AtomicU64, stall: std::time::Duration) -> StdWait {
     let mut g = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
+    let mut seen = steps.load(std::sync::atomic::Ordering::Relaxed);
     loop {
-        let m = g.as_ref()?;
+        let Some(m) = g.as_ref() else { return StdWait::Alone };
         if let Some(sp) = m.get(path) {
-            return Some(sp.clone());
+            return StdWait::Shared(sp.clone());
         }
         if !SHARING.load(std::sync::atomic::Ordering::Acquire) || WORLD_WAITERS.load(std::sync::atomic::Ordering::Acquire) != 0 {
-            return None;
+            return StdWait::Alone;
         }
-        // a program that registered a graph but loads no std (never expected): parse alone
-        let (ng, to) = SHARED_CV.wait_timeout(g, std::time::Duration::from_secs(10)).unwrap_or_else(|e| e.into_inner());
+        let (ng, to) = SHARED_CV.wait_timeout(g, stall).unwrap_or_else(|e| e.into_inner());
         g = ng;
-        if to.timed_out() && g.as_ref().map_or(true, |m| !m.contains_key(path)) {
-            // never silent: a stall here is a wait cycle between the world and the load
-            eprintln!("relax: the proc-macro world waited 10 s for the program's parse of {}; parsing it itself", path);
-            return None;
+        if to.timed_out() {
+            // a program that registered a graph but loads no std (never expected), or a cycle:
+            // no step for the interval, and the file is not here
+            let now = steps.load(std::sync::atomic::Ordering::Relaxed);
+            if now == seen && g.as_ref().map_or(true, |m| !m.contains_key(path)) {
+                return StdWait::Stalled;
+            }
+            seen = now;
         }
     }
 }
@@ -6531,6 +6576,8 @@ pub struct ParseSnapshot {
     pub reuse: std::sync::Arc<crate::parse_work::Reuse>,
     pub previous: Option<std::sync::Arc<ParsedFile>>,
     pub context: std::sync::Arc<crate::source_context::Context>,
+    /// the regions of the text to parse that count their lines from another text (LineOrigins)
+    pub line_origins: crate::parser::LineOrigins,
 }
 /// Files edited together: each parse sees the imports the others write.
 pub fn share_import_edits<'a>(snapshots: &mut [Option<ParseSnapshot>], sources: impl Iterator<Item = &'a [u8]>) {
@@ -6580,7 +6627,9 @@ impl ParseSnapshot {
     /// diagnostics name it).
     pub fn parse_tokens(&self, src: Vec<u8>, stream: crate::pm_tokens::TokenStream) -> Result<FileVersion, String> {
         let Self { old, path, edition, kname, mod_path, cfg, macros, .. } = self;
-        let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(kname, path, mod_path, cfg));
+        let mut bctx = crate::builtins::FileCtx::new(kname, path, mod_path, cfg);
+        bctx.line_origins = self.line_origins.clone();
+        let bctx = std::rc::Rc::new(bctx);
         let context = self.context.edited(path, src.into());
         let (mut pf, used) = crate::parser::parse_token_stream(stream, path, *edition, Some(crate::macros::MacroScope::new(macros.clone())), bctx, context.sources().clone(), false)
             .map_err(|(span, m)| format!("{}:{}: {}", path, span.lo, m))?;
@@ -6591,7 +6640,9 @@ impl ParseSnapshot {
 
     pub fn parse_full(&self, src: Vec<u8>) -> Result<FileVersion, String> {
         let Self { old, path, edition, kname, mod_path, cfg, macros, .. } = self;
-        let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(kname, path, mod_path, cfg));
+        let mut bctx = crate::builtins::FileCtx::new(kname, path, mod_path, cfg);
+        bctx.line_origins = self.line_origins.clone();
+        let bctx = std::rc::Rc::new(bctx);
         let imports = crate::preload::import_edit(self, &src);
         let mut macros = macros.clone();
         if imports.is_some() || !self.together.is_empty() {
@@ -6803,17 +6854,49 @@ fn strip_cfg_stmts(ast: &mut Ast, src: Src, cfg: &CfgSet, b: BlockId) {
 /// Other bodies appended to the file arena never contribute to this ordinal.
 pub fn closure_exprs(prog: &Program, owner: DefId) -> Vec<u32> {
     let def = prog.def(owner);
-    let file = &prog.files[def.file as usize];
-    prog.item_expr_ranges(def.file, def.item).into_iter().flat_map(|(lo, hi)| lo..hi)
-        .filter(|&i| matches!(file.ast.expr(crate::ast::ExprId(i)).kind, crate::ast::ExprKind::Closure { .. } | crate::ast::ExprKind::Async(..))).collect()
+    closure_exprs_at(prog, def.file, def.item)
 }
+
+/// `closure_exprs` of item `item` of file version `file`.
+pub fn closure_exprs_at(prog: &Program, file: u32, item: ItemId) -> Vec<u32> {
+    let f = &prog.files[file as usize];
+    prog.item_expr_ranges(file, item).into_iter().flat_map(|(lo, hi)| lo..hi)
+        .filter(|&i| matches!(f.ast.expr(crate::ast::ExprId(i)).kind, crate::ast::ExprKind::Closure { .. } | crate::ast::ExprKind::Async(..))).collect()
+}
+
+/// Item def `item` in file version `file`: its item there, current or not. A commit moves the def
+/// to the new version (retarget_file), and an older version keeps its own entries in `item_defs`,
+/// so a closure of that version is counted among its owner's closures in the version it names.
+/// None: the item is not in that version (added by a later edit). A closure def stands for the
+/// item it is in.
+pub fn item_in_version(prog: &Program, mut item: DefId, file: u32) -> Option<ItemId> {
+    for _ in 0..64 {
+        let def = prog.def(item);
+        if def.kind != DefKind::Closure || def.parent == NO_DEF { break; }
+        item = def.parent;
+    }
+    let def = prog.def(item);
+    if def.file == file {
+        return Some(def.item);
+    }
+    let n = prog.files.get(file as usize)?.ast.items.len() as u32;
+    (0..n).find(|&i| prog.item_defs.get(&(file, i)) == Some(&item)).map(ItemId)
+}
+
+/// Closure names whose owner has no item in the closure's file version.
+pub static STABLE_CLOSURE_NAME_FILE_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// An owner-local closure ordinal; anonymous owners use a file-level fallback.
 pub fn stable_closure_name(prog: &Program, file: u32, e: u32, owner: Option<DefId>) -> String {
     let Some(f) = prog.files.get(file as usize) else { return format!("{{closure@{}}}", e) };
     let path = owner.map(|d| hint_path(&prog.defs, &prog.syms, &prog.files, d)).unwrap_or_default();
-    let n = owner.filter(|d| prog.def(*d).file == file)
-        .and_then(|d| closure_exprs(prog, d).iter().position(|&x| x == e))
+    // counted in the file version the closure names, as the cache's keys count it (closure_ordinal)
+    let n = owner.and_then(|d| {
+            let item = item_in_version(prog, d, file);
+            if item.is_none() { STABLE_CLOSURE_NAME_FILE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            item
+        })
+        .and_then(|i| closure_exprs_at(prog, file, i).iter().position(|&x| x == e))
         .unwrap_or_else(|| (0..e).filter(|&i| matches!(f.ast.exprs.get(i as usize).map(|x| &x.kind), Some(crate::ast::ExprKind::Closure { .. }))).count());
     if path.is_empty() {
         format!("{}::{{closure#{}}}", prog.file_paths.get(file as usize).map(|p| p.rsplit('/').next().unwrap_or(p)).unwrap_or("?"), n)
@@ -7047,6 +7130,45 @@ pub fn take_missing() -> Vec<(u32, String)> {
     let _ = MISSING_FROM.try_with(|f| f.set(0));
     bump_missing_gen();
     MISSING.try_with(|m| std::mem::take(&mut *m.borrow_mut())).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod std_wait_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// The world's wait for a std parse the program's load has not shared yet: while the loads
+    /// take steps, however slowly, it goes on through several of its intervals and ends when the
+    /// load ends its sharing (the world parses alone, nothing said); loads that take no step for
+    /// the interval are a stall, and the wait ends there (the cycle guard, which says so).
+    #[test]
+    fn a_slow_load_that_moves_is_waited_for_and_a_still_one_is_a_stall() {
+        let path = "/relax-std-wait-test/core/lib.rs";
+        let stall = Duration::from_millis(100);
+        let steps = AtomicU64::new(0);
+        share_std_begin();
+        let t = Instant::now();
+        let moving = std::thread::scope(|s| {
+            s.spawn(|| {
+                while t.elapsed() < 4 * stall {
+                    steps.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                share_std_end();
+            });
+            shared_std_wait_on(path, &steps, stall)
+        });
+        assert!(matches!(moving, StdWait::Alone), "a load that moves is waited for, then the world parses alone");
+        assert!(t.elapsed() >= 4 * stall, "through several intervals: {:?}", t.elapsed());
+        share_std_begin();
+        let t = Instant::now();
+        let still = shared_std_wait_on(path, &AtomicU64::new(0), stall);
+        share_std_end();
+        drop_shared_std();
+        assert!(matches!(still, StdWait::Stalled), "no step for the interval is a stall");
+        assert!(t.elapsed() >= stall, "it waits the interval out first: {:?}", t.elapsed());
+    }
 }
 
 #[cfg(test)]
@@ -7292,7 +7414,9 @@ pub(crate) unsafe fn reset_statics() {
     reset(&SHARED_STD, relax_session::sync::Mutex::new(None));
     reset(&SHARING, std::sync::atomic::AtomicBool::new(false));
     reset(&WORLD_WAITERS, std::sync::atomic::AtomicUsize::new(0));
+    reset(&LOAD_STEPS, std::sync::atomic::AtomicU64::new(0));
     reset(&PARSE_AGAIN, std::sync::atomic::AtomicU64::new(0));
+    reset(&STABLE_CLOSURE_NAME_FILE_MISSES, std::sync::atomic::AtomicU64::new(0));
     reset(&COLLECTING, std::sync::atomic::AtomicBool::new(false));
     reset(&COLLECT_MISSES, relax_session::sync::Mutex::new(Vec::new()));
 }

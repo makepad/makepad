@@ -1,6 +1,7 @@
-# A failed hot load ends in a warm restart and a ledger report, never a parked panic: hot_fail.py on
-# Windows, where the boxes have no Python and a restart is another process under one parent
-# (restart_parent.rs).
+# A failed hot load parks its call and offers a warm restart, never restarting the app by itself;
+# taken as a person takes it (`session relaunch`), the restart brings the app's state back with a
+# ledger report: hot_fail.py on Windows, where the boxes have no Python and a restart is another
+# process under one parent (restart_parent.rs).
 #
 # usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools/run/fixture/hot_fail.ps1
 #   (from the workspace root; RELAX_STD in the environment, default libs/relax/compiler/std)
@@ -18,6 +19,9 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 $Makepad = Join-Path $Target 'host\makepad.exe'
 $Bad = 'parked', 'paused on a panic', 'stale access', 'FATAL', 'Segmentation'
+# the failed load's call, parked for the person until the restart (reload.rs update_failed_at_call)
+$ParkedCall = 'The live update failed in this call'
+$Offered = 'a restart applies it; offered'
 if (-not $env:RELAX_STD) { $env:RELAX_STD = Join-Path $Root 'libs\relax\compiler\std' }
 
 cargo build --profile host -q --manifest-path (Join-Path $Root 'Cargo.toml') -p makepad-run --bin makepad
@@ -91,7 +95,15 @@ function Case($name, $hooks, $killParent) {
             [IO.File]::WriteAllText("$source.new", $text)
             [IO.File]::Replace("$source.new", $source, [NullString]::Value)
             $applied = { @(& $ticks | Select-Object -Skip $nTicks | Where-Object { $_ -like '*value=2*' }).Count -gt 0 }
-            if (-not (& $wait { @(& $restored).Count -gt 0 -and (& $applied) })) {
+            # the failed load offers the restart; the person takes it
+            if (-not (& $wait { @(Lines $errFile | Where-Object { $_ -like "*$Offered*" }).Count -gt 0 })) {
+                $null = $fails.Add("no-restart-offered($(@(& $outcomes) -join ','))")
+            } else {
+                $took = & $Makepad inspect @(& $pids)[-1] session relaunch 2>&1 | Out-String
+                if ($took -notlike '*relaunch: queued*') { $null = $fails.Add("relaunch-not-taken: $($took.Substring(0, [Math]::Min(200, $took.Length)))") }
+            }
+            if ($fails.Count -gt 0) {
+            } elseif (-not (& $wait { @(& $restored).Count -gt 0 -and (& $applied) })) {
                 $null = $fails.Add($(if (@(& $restored).Count -gt 0) { 'no-new-code' } else { 'no-restored-state' }))
             } elseif (@(& $restored)[-1] -lt $before) {
                 $null = $fails.Add('state-went-back')
@@ -100,6 +112,9 @@ function Case($name, $hooks, $killParent) {
                 # the edit after the restart: the restarted run's watcher takes it (a recovery its
                 # restore never ended parks the watcher, and every later edit is dropped)
                 # (until its value shows, a record or refusal of it comes, or the run ends)
+                # The restart's own record first: it can land after the restored state shows, and
+                # then it would read as the later edit's record.
+                $null = & $wait { (& $outcomes) -contains 'restarted' -or (& $outcomes) -contains 'restart_failed' }
                 $ids = @(& $ledger | ForEach-Object { $_.id })
                 $nLater = @(& $ticks).Count
                 $nErr = @(Lines $errFile).Count
@@ -152,7 +167,8 @@ function Case($name, $hooks, $killParent) {
                 if ($p.ExitCode -ne 7) { $null = $fails.Add("exit-code-$($p.ExitCode)") }
             }
         }
-        $wrong = Lines $errFile | Where-Object { $line = $_; $Bad | Where-Object { $line -like "*$_*" } } | Select-Object -First 1
+        # nothing parks but the failed call before the restart
+        $wrong = Lines $errFile | Where-Object { $line = $_; ($Bad | Where-Object { $line -like "*$_*" }) -and $line -notlike "*$ParkedCall*" } | Select-Object -First 1
         if ($wrong) { $null = $fails.Add("bad-line: $($wrong.Substring(0, [Math]::Min(200, $wrong.Length)))") }
     } catch {
         $null = $fails.Add("script: $_")

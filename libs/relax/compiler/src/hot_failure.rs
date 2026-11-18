@@ -322,9 +322,9 @@ pub(crate) fn hand_over() -> Result<Option<std::path::PathBuf>, String> {
     Ok(Some(path))
 }
 
-/// Windows: the next run never started, and the run that asked for it has ended, so its parent
+/// The next run never started, and the run that asked for it has ended, so its parent
 /// (restart_parent.rs) closes the recovery that run's file `path` describes.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) fn next_run_failed(path: &std::path::Path, why: &str) {
     let Some(r) = std::fs::read_to_string(path).ok().and_then(|s| Record::parse(&s)) else {
         eprintln!("relax hot: cannot read the recovery record {}", path.display());
