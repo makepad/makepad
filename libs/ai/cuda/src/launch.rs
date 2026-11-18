@@ -1907,6 +1907,38 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_cuda_conv3x3_planar_f16_mma(
+            x: *const f32,
+            packed: *const u16,
+            bias: *const f32,
+            out: *mut f32,
+            in_width: u32,
+            in_height: u32,
+            out_width: u32,
+            out_height: u32,
+            in_channels: u32,
+            out_channels: u32,
+            stride: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_conv3x3_planar_f16_mma_half(
+            x: *const u16,
+            packed: *const u16,
+            bias: *const f32,
+            out: *mut u16,
+            in_width: u32,
+            in_height: u32,
+            out_width: u32,
+            out_height: u32,
+            in_channels: u32,
+            out_channels: u32,
+            stride: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_mma_available() -> cudaError_t;
+
         fn makepad_cuda_group_norm_planar_f32(
             input: *const f32,
             gamma: *const f32,
@@ -4139,9 +4171,15 @@ mod imp {
                 Ok(buffer) => buffer,
                 Err(_) => {
                     // Likely device OOM: drop every pooled activation buffer
-                    // and retry once before giving up.
+                    // and retry once before giving up. A loop that keeps its
+                    // working memory between frames stops keeping it: the
+                    // room it held is what ran short.
                     perf_count(&PERF_POOL_OOM_CLEARS, 1);
-                    gpu_pool_clear();
+                    if gpu_pool_keeping() {
+                        pool_keep_give_way("the GPU ran short of memory");
+                    } else {
+                        gpu_pool_clear();
+                    }
                     DeviceBuffer::new(rounded)?
                 }
             }
@@ -4250,26 +4288,93 @@ mod imp {
 
     thread_local! {
         static GPU_POOL_KEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        // This thread's keep gave its memory back: its phases free their
+        // working memory again, as without a keep, until the keep ends.
+        static GPU_POOL_KEEP_GAVE_WAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        // The last give-back request ([`gpu_pool_give_back`]) this thread's
+        // keep has seen.
+        static GPU_POOL_KEEP_SEEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    // Asks to give the memory kept between frames back, from any thread:
+    // a count each keep compares at its phase ends, and why it was asked.
+    static GPU_POOL_GIVE_BACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static GPU_POOL_GIVE_BACK_WHY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+    /// Whether this thread's phases keep their working memory between them.
+    fn gpu_pool_keeping() -> bool {
+        GPU_POOL_KEEPS.with(|keeps| keeps.get()) > 0 && !GPU_POOL_KEEP_GAVE_WAY.with(|gave| gave.get())
+    }
+
+    /// This thread's idle pooled memory and conv scratch freed, and their
+    /// device bytes (what a [`gpu_pool_clear`] hands to `cudaFree`).
+    fn gpu_pool_clear_counted() -> usize {
+        let pooled_before = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
+        let conv_before = CONV_SCRATCH.with(|cell| {
+            cell.try_borrow().map_or(0, |scratch| scratch.iter().flatten().map(|buffer| buffer.size_bytes).sum::<usize>())
+        });
+        gpu_pool_clear();
+        let pooled_after = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
+        pooled_before.saturating_sub(pooled_after).saturating_add(conv_before)
+    }
+
+    /// This thread's keep gives its memory back now and keeps none for the
+    /// rest of its life, said once with `why`.
+    fn pool_keep_give_way(why: &str) {
+        GPU_POOL_KEEP_GAVE_WAY.with(|gave| gave.set(true));
+        let freed = gpu_pool_clear_counted();
+        eprintln!(
+            "[gpu-pool] {why}: a loop gave back the {} MB it kept between frames, and frees its working memory after each phase until it ends",
+            freed >> 20
+        );
+    }
+
+    /// Asks every loop that keeps its working memory between frames
+    /// ([`GpuPoolKeep`]) to give it back, `why` naming who needs the room
+    /// (the desktop's UI, a model to load). Answered from any thread at
+    /// once: each such loop frees it at its next phase end and keeps none
+    /// for the rest of its run.
+    pub fn gpu_pool_give_back(why: &str) {
+        *GPU_POOL_GIVE_BACK_WHY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = why.to_string();
+        GPU_POOL_GIVE_BACK.fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// A phase of a model's run is over (its denoise, its VAE encode or
     /// decode): its idle working memory is freed, so the next phase's never
     /// sits beside it, unless a [`GpuPoolKeep`] lives on this thread (a live
     /// loop running the same phases frame after frame), when it stays for
-    /// the next frame's same phase to take again.
+    /// the next frame's same phase to take again. A keep asked to give its
+    /// memory back ([`gpu_pool_give_back`]) frees it here and keeps no more.
     pub fn gpu_pool_phase_end() {
-        if GPU_POOL_KEEPS.with(|keeps| keeps.get()) == 0 {
+        if !gpu_pool_keeping() {
             gpu_pool_clear();
+            return;
+        }
+        let asked = GPU_POOL_GIVE_BACK.load(std::sync::atomic::Ordering::Acquire);
+        if asked != GPU_POOL_KEEP_SEEN.with(|seen| seen.get()) {
+            GPU_POOL_KEEP_SEEN.with(|seen| seen.set(asked));
+            let why = GPU_POOL_GIVE_BACK_WHY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            pool_keep_give_way(&why);
         }
     }
 
     /// While it lives, the phases run on this thread keep their working
     /// memory between them ([`gpu_pool_phase_end`]); dropped, that memory
-    /// is freed. The pool is this thread's, so the keep stays on it.
+    /// is freed (and said). It gives the memory back sooner, and keeps no
+    /// more, when an allocation runs short or [`gpu_pool_give_back`] asks.
+    /// The pool is this thread's, so the keep stays on it.
     pub struct GpuPoolKeep(std::marker::PhantomData<*const ()>);
 
     pub fn gpu_pool_keep() -> GpuPoolKeep {
-        GPU_POOL_KEEPS.with(|keeps| keeps.set(keeps.get() + 1));
+        let first = GPU_POOL_KEEPS.with(|keeps| {
+            keeps.set(keeps.get() + 1);
+            keeps.get() == 1
+        });
+        if first {
+            // Only requests from now on are this keep's to answer.
+            GPU_POOL_KEEP_SEEN.with(|seen| seen.set(GPU_POOL_GIVE_BACK.load(std::sync::atomic::Ordering::Acquire)));
+            GPU_POOL_KEEP_GAVE_WAY.with(|gave| gave.set(false));
+        }
         GpuPoolKeep(std::marker::PhantomData)
     }
 
@@ -4280,7 +4385,10 @@ mod imp {
                 keeps.get()
             });
             if left == 0 {
-                gpu_pool_clear();
+                let freed = gpu_pool_clear_counted();
+                if freed > 0 {
+                    eprintln!("[gpu-pool] a loop ended: the {} MB it kept between frames is freed", freed >> 20);
+                }
             }
         }
     }
@@ -4290,26 +4398,14 @@ mod imp {
     /// [`gpu_pool_clear`], this lifecycle trim also drops the grow-to-max
     /// cuDNN workspace; phase-boundary clears keep that workspace warm.
     pub fn gpu_pool_trim() -> usize {
-        let pooled_before = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
-        let conv_before = CONV_SCRATCH.with(|cell| {
-            cell.borrow()
-                .iter()
-                .flatten()
-                .map(|buffer| buffer.size_bytes)
-                .sum::<usize>()
-        });
-        gpu_pool_clear();
-        let pooled_after = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
+        let pooled = gpu_pool_clear_counted();
         let cudnn_workspace = CUDNN_WS.with(|cell| {
             cell.borrow_mut()
                 .take()
                 .map(|buffer| buffer.size_bytes)
                 .unwrap_or(0)
         });
-        pooled_before
-            .saturating_sub(pooled_after)
-            .saturating_add(conv_before)
-            .saturating_add(cudnn_workspace)
+        pooled.saturating_add(cudnn_workspace)
     }
 
     /// A captured denoise-step graph: replaying it re-runs the step's whole
@@ -5378,13 +5474,10 @@ mod imp {
         crate::cudnn::available()
     }
 
-    /// cuDNN loaded, or the error that says it is not there.
-    pub fn gpu_cudnn_require() -> Result<(), String> {
-        if crate::cudnn::available() {
-            Ok(())
-        } else {
-            Err(format!("cuDNN not found: {}", crate::cudnn::LIBRARY))
-        }
+    /// Whether the device runs the tensor-core mma kernels
+    /// (`gpu_conv3x3_planar_f16_mma`): an sm_80 or later GPU.
+    pub fn gpu_mma_available() -> bool {
+        is_available() && gpu_check(unsafe { makepad_cuda_mma_available() }).is_ok()
     }
 
     fn gpu_check(status: cudaError_t) -> Result<(), String> {
@@ -14662,21 +14755,6 @@ mod imp {
         }
     }
 
-    /// Round-to-nearest-even f16 packing — bit-matches torch `.half()`
-    /// weight casts.  The RealESRGAN parity lock is calibrated against it;
-    /// the truncating [`pack_f16_bytes`] stays for consumers whose dumps
-    /// were recorded with it.
-    fn pack_f16_bytes_rn(values: &[f32]) -> Vec<u8> {
-        let mut packed = vec![0u16; values.len()];
-        for (dst, src) in packed.iter_mut().zip(values) {
-            *dst = crate::quant::f32_to_f16_rn(*src);
-        }
-        unsafe {
-            std::slice::from_raw_parts(packed.as_ptr().cast::<u8>(), packed.len() * size_of::<u16>())
-                .to_vec()
-        }
-    }
-
     fn gpu_conv2d_1x1_nchw_packed_f16(
         x: &GpuTensor,
         channels: usize,
@@ -16003,8 +16081,9 @@ mod imp {
         })
     }
 
-    /// cuDNN f16 3x3 stride-1 "same" convolution, batch 1, planar rows.
-    /// Reads the first `in_channels` rows of `input` and writes
+    /// An f16 3x3 stride-1 "same" convolution on our tensor cores
+    /// (f32 sums), batch 1, planar rows. Reads the first `in_channels` (a
+    /// multiple of 16) rows of `input` and writes
     /// `out_channels` raw (biasless) rows of `output` starting at
     /// `out_row_offset` — with batch 1 a planar row block is exactly a
     /// contiguous NCHW tensor, so dense-block concats become pointer offsets.
@@ -16039,16 +16118,13 @@ mod imp {
         if weights.len() != out_channels * in_channels * 9 {
             return Err("gpu_realesrgan_conv3x3_f16 weight length mismatch".into());
         }
-        if !crate::cudnn::available() {
-            return Err("gpu_realesrgan_conv3x3_f16 requires cuDNN".into());
-        }
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             let x_ptr = input.device_ptr_u16()?;
             let y_ptr = unsafe { output.device_ptr_u16()?.add(out_row_offset * plane) };
             let conv = Conv3x3 { in_channels, out_channels, width, height };
-            cudnn_conv3x3_f16(backend, conv, &format!("{}::{weight_cache_key}", owner.namespace()), weights, x_ptr, y_ptr)?;
+            realesrgan_conv3x3_f16_mma(backend, conv, &format!("{}::{weight_cache_key}", owner.namespace()), weights, x_ptr, y_ptr)?;
             gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
             Ok(())
         })
@@ -16063,131 +16139,50 @@ mod imp {
         height: usize,
     }
 
-    // cuDNN f16 3x3 stride-1 "same" conv, batch 1 (a planar block is then a
-    // contiguous NCHW tensor), raw (biasless): `input` holds `in_channels`
-    // f16 planes, `output` gets `out_channels`. The f16 weights are cached
-    // under `{weight_key}::nchw16`, the descriptor per shape.
-    fn cudnn_conv3x3_f16(
-        backend: &mut CudaDenseLinearBackend,
-        conv: Conv3x3,
-        weight_key: &str,
-        weights: &[f32],
-        input: *const u16,
-        output: *mut u16,
-    ) -> Result<(), String> {
-        let Conv3x3 { in_channels, out_channels, width, height } = conv;
-        let key = (
-            1u32,
-            in_channels as u32,
-            out_channels as u32,
-            height as u32,
-            width as u32,
-            height as u32,
-            3u32,
-            1u32,
-            1u32,
-            0x30u32,
-            crate::cudnn::CUDNN_DATA_HALF as u32,
-        );
-        CUDNN_DESCS.with(|cell: &RefCell<CudnnDescMap>| {
-            let mut map = cell.borrow_mut();
-            if !map.contains_key(&key) {
-                let desc = crate::cudnn::prepare_nchw_strided_f16(
-                    1,
-                    in_channels as i32,
-                    out_channels as i32,
-                    height as i32,
-                    width as i32,
-                    3,
-                    3,
-                    1,
-                    1,
-                    backend.stream,
-                )?;
-                map.insert(key, desc);
-            }
-            let desc = map.get(&key).expect("just inserted");
-            let ws_bytes = crate::cudnn::workspace_bytes(desc);
-            let ws_ptr = if ws_bytes == 0 {
-                std::ptr::null_mut()
-            } else {
-                CUDNN_WS.with(|ws| -> Result<*mut std::ffi::c_void, String> {
-                    let mut slot = ws.borrow_mut();
-                    let need_new = match slot.as_ref() {
-                        Some(buf) => buf.size_bytes < ws_bytes,
-                        None => true,
-                    };
-                    if need_new {
-                        *slot = Some(DeviceBuffer::new(gpu_pool_round(ws_bytes.max(1)))?);
-                    }
-                    Ok(slot.as_ref().unwrap().ptr.as_ptr())
-                })?
-            };
-            let w_key = format!("{weight_key}::nchw16");
-            backend.cached_weight_buffer(
-                &w_key,
-                weights.len() * size_of::<u16>(),
-                || Ok(pack_f16_bytes_rn(weights)),
-            )?;
-            let weight_ptr = backend
-                .weight_buffers
-                .get(&w_key)
-                .ok_or_else(|| format!("missing packed conv {w_key}"))?
-                .ptr
-                .as_ptr();
-            crate::cudnn::convolution_forward_f16(
-                desc,
-                input.cast(),
-                weight_ptr,
-                output.cast(),
-                ws_ptr,
-                backend.stream,
-            )
-        })
-    }
-
-    /// A stride-1 "same" 3x3 planar conv2d on cuDNN, f32 in and out: the
-    /// input rounds to f16 (as the GEMM path's im2col rounds it), the conv
-    /// accumulates in f32 and stores f16, and the bias is added in f32 after
-    /// it widens. Implicit GEMM: no im2col slab, half the time of
-    /// `gpu_conv2d_planar_cached` at a VAE decode's large planes. The weights
-    /// and bias are cached under `weight_key`.
-    pub fn gpu_conv2d_planar_cudnn_f16(
+    /// A 3x3 conv of a planar f32 map on f16 tensor cores, as an implicit
+    /// GEMM in one pass (sm_80 and later; nothing beside CUDA). `stride` 1 is
+    /// the "same" conv (pad 1 all round); `stride` 2 is a downsample whose
+    /// taps past the right and bottom edges read zero (pad 0 on the left
+    /// and top, 1 on the right and bottom). The input and weights round to
+    /// f16, the sums are f32, and the bias is added in f32 to an f32
+    /// output. The input's channels must be a multiple of 16. The weights
+    /// and bias are cached under `weight_key`. Returns the output and its
+    /// width and height.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_conv3x3_planar_f16_mma(
         x: &GpuTensor,
         width: usize,
         height: usize,
+        stride: usize,
         weight_key: &WeightKey,
         weights: &[f32],
         bias: &[f32],
         out_channels: usize,
-    ) -> Result<GpuTensor, String> {
+    ) -> Result<(GpuTensor, usize, usize), String> {
         let weight_key = weight_key.as_str();
         let (in_channels, plane) = (x.rows, width * height);
         if x.half || x.cols != plane {
-            return Err(format!("gpu_conv2d_planar_cudnn_f16 wants f32 {in_channels}x{plane}, got {}x{} half={}", x.rows, x.cols, x.half));
+            return Err(format!("gpu_conv3x3_planar_f16_mma wants f32 {in_channels}x{plane}, got {}x{} half={}", x.rows, x.cols, x.half));
+        }
+        if in_channels == 0 || in_channels % 16 != 0 {
+            return Err(format!("gpu_conv3x3_planar_f16_mma wants input channels in sixteens, got {in_channels}"));
         }
         if weights.len() != out_channels * in_channels * 9 || bias.len() != out_channels {
-            return Err("gpu_conv2d_planar_cudnn_f16 weight/bias shape mismatch".into());
+            return Err("gpu_conv3x3_planar_f16_mma weight/bias shape mismatch".into());
         }
-        if !crate::cudnn::available() {
-            return Err("gpu_conv2d_planar_cudnn_f16 requires cuDNN".into());
+        let pads = match stride {
+            1 => 2,
+            2 => 1,
+            _ => return Err(format!("gpu_conv3x3_planar_f16_mma takes stride 1 or 2, got {stride}")),
+        };
+        if width + pads < 3 || height + pads < 3 {
+            return Err(format!("gpu_conv3x3_planar_f16_mma: a {width}x{height} plane is smaller than its kernel"));
         }
+        let (out_width, out_height) = ((width + pads - 3) / stride + 1, (height + pads - 3) / stride + 1);
         let prof_start = std::time::Instant::now();
-        let input = gpu_to_f16(x)?;
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let output = GpuTensor::from_pool_half(out_channels, plane)?;
-            let conv = Conv3x3 { in_channels, out_channels, width, height };
-            cudnn_conv3x3_f16(backend, conv, weight_key, weights, input.device_ptr_u16()?, output.device_ptr_u16()?)?;
-            let widened = GpuTensor::from_pool(out_channels, plane)?;
-            gpu_check(unsafe {
-                makepad_cuda_f16_to_f32_precise(
-                    output.device_ptr_u16()?,
-                    widened.device_ptr()?,
-                    (out_channels * plane) as u32,
-                    backend.stream,
-                )
-            })?;
+            let packed_ptr = conv3x3_mma_weights(backend, weight_key, weights, in_channels, out_channels)?;
             let bias_key = format!("{weight_key}::bias");
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 Ok(bias.iter().flat_map(|b| b.to_le_bytes()).collect())
@@ -16197,13 +16192,92 @@ mod imp {
                 .get(&bias_key)
                 .ok_or_else(|| format!("missing cached conv bias {bias_key}"))?
                 .ptr
-                .as_ptr()
-                .cast::<f32>();
+                .as_ptr();
+            let out = GpuTensor::from_pool(out_channels, out_width * out_height)?;
             gpu_check(unsafe {
-                makepad_cuda_add_planes_vec_f32(widened.device_ptr()?, bias_ptr, plane as u32, out_channels as u32, backend.stream)
+                makepad_cuda_conv3x3_planar_f16_mma(
+                    x.device_ptr()?,
+                    packed_ptr,
+                    bias_ptr.cast::<f32>(),
+                    out.device_ptr()?,
+                    width as u32,
+                    height as u32,
+                    out_width as u32,
+                    out_height as u32,
+                    in_channels as u32,
+                    out_channels as u32,
+                    stride as u32,
+                    backend.stream,
+                )
             })?;
             gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
-            Ok(widened)
+            Ok((out, out_width, out_height))
+        })
+    }
+
+    /// `weights` (`[out][in][3][3]` f32) as the tensor-core conv reads them,
+    /// cached under `{key}::mma16`: `[in / 16][out rounded up to 64][9
+    /// taps][16]` f16 rounded to nearest even (torch's `.half()`), the
+    /// padding zero.
+    fn conv3x3_mma_weights(
+        backend: &mut CudaDenseLinearBackend,
+        key: &str,
+        weights: &[f32],
+        in_channels: usize,
+        out_channels: usize,
+    ) -> Result<*const u16, String> {
+        let packed_key = format!("{key}::mma16");
+        let co_pad = out_channels.div_ceil(64) * 64;
+        backend.cached_weight_buffer(&packed_key, in_channels * co_pad * 9 * size_of::<u16>(), || {
+            let mut packed = vec![0u16; in_channels * co_pad * 9];
+            for co in 0..out_channels {
+                for ci in 0..in_channels {
+                    for tap in 0..9 {
+                        let at = (((ci / 16) * co_pad + co) * 9 + tap) * 16 + ci % 16;
+                        packed[at] = crate::quant::f32_to_f16_rn(weights[(co * in_channels + ci) * 9 + tap]);
+                    }
+                }
+            }
+            Ok(packed.iter().flat_map(|h| h.to_le_bytes()).collect())
+        })?;
+        backend
+            .weight_buffers
+            .get(&packed_key)
+            .map(|buffer| buffer.ptr.as_ptr().cast::<u16>().cast_const())
+            .ok_or_else(|| format!("missing cached conv weights {packed_key}"))
+    }
+
+    /// [`gpu_realesrgan_conv3x3_f16`]'s contract on our tensor-core conv:
+    /// the first `in_channels` rows of `input` in, `out_channels` raw
+    /// (biasless) f16 rows of `output` from `out_row_offset` out.
+    fn realesrgan_conv3x3_f16_mma(
+        backend: &mut CudaDenseLinearBackend,
+        conv: Conv3x3,
+        key: &str,
+        weights: &[f32],
+        input: *const u16,
+        output: *mut u16,
+    ) -> Result<(), String> {
+        let Conv3x3 { in_channels, out_channels, width, height } = conv;
+        if in_channels % 16 != 0 {
+            return Err(format!("realesrgan conv on tensor cores wants input channels in sixteens, got {in_channels}"));
+        }
+        let packed = conv3x3_mma_weights(backend, key, weights, in_channels, out_channels)?;
+        gpu_check(unsafe {
+            makepad_cuda_conv3x3_planar_f16_mma_half(
+                input,
+                packed,
+                std::ptr::null(),
+                output,
+                width as u32,
+                height as u32,
+                width as u32,
+                height as u32,
+                in_channels as u32,
+                out_channels as u32,
+                1,
+                backend.stream,
+            )
         })
     }
 

@@ -110,6 +110,8 @@ pub struct GenerateParams {
     pub speed: f32,
     /// Speech: publish each clause as it is rendered (see `ContentBackend::set_chunk_sink`).
     pub stream: bool,
+    /// The results stay in memory, never on disk (`memory_only` on the wire).
+    pub memory_only: bool,
     /// Speech language hint (`language` on the wire); "" = model default.
     pub language: String,
     /// The request's `domain` as given: speech-to-text reads its output mode
@@ -184,8 +186,10 @@ pub enum ModelControl {
     Load,
     Unload,
     /// Give `mb` of GPU memory back to the UI (`crate::gpu_yield`); the chat
-    /// model itself is unloaded only with `unload`.
-    Yield { mb: u64, unload: bool },
+    /// model itself is unloaded only with `unload`. `free_mb`: the device's
+    /// free memory when the UI asked, so what came free before the yield
+    /// runs counts toward it (None: no reading).
+    Yield { mb: u64, unload: bool, free_mb: Option<u64> },
 }
 
 /// One picture of a chat request: its key in the rendered prompt and its
@@ -448,6 +452,7 @@ impl GenerateParams {
             language: request.language.clone().unwrap_or_default(),
             request_domain: request.domain.clone().unwrap_or_default(),
             stream: request.stream.unwrap_or(false),
+            memory_only: request.memory_only.unwrap_or(false),
             speed: if speed.is_finite() && speed > 0.0 {
                 speed.clamp(0.25, 4.0) as f32
             } else {
@@ -589,6 +594,30 @@ impl SeedMode {
             SeedMode::Fixed => "fixed",
             SeedMode::Increment => "increment",
             SeedMode::Random => "random",
+        }
+    }
+}
+
+/// How a live session's model computes. `Stored` (the default): as its
+/// weights are stored, what its jobs run. `Fast`: the faster arithmetic the
+/// backend has for live loops, speed over the last bits (flux2-klein: its
+/// DiT's MLPs in FP8 and its VAE's convs on f16 tensor cores, our own CUDA
+/// both); a backend without one runs as stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Arithmetic {
+    #[default]
+    Stored,
+    Fast,
+}
+
+impl Arithmetic {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "stored" => Ok(Arithmetic::Stored),
+            "fast" => Ok(Arithmetic::Fast),
+            other => Err(AssetAiError::Params(format!(
+                "unknown arithmetic {other:?} (expected \"stored\" or \"fast\")"
+            ))),
         }
     }
 }
@@ -912,6 +941,12 @@ pub struct LiveConfig {
     pub anchor_follow: f32,
     pub noise_mode: NoiseMode,
     pub drift: DriftParams,
+    /// Fixed when the session opens (a control message never changes it).
+    pub arithmetic: Arithmetic,
+    /// The rows of the prompt's text window the model reads (see
+    /// `RealtimeRequestJson::text_rows`); `None`, the whole window. Fixed
+    /// when the session opens.
+    pub text_rows: Option<usize>,
 }
 
 impl Default for LiveConfig {
@@ -932,6 +967,8 @@ impl Default for LiveConfig {
             anchor_follow: 0.0,
             noise_mode: NoiseMode::default(),
             drift: DriftParams::default(),
+            arithmetic: Arithmetic::default(),
+            text_rows: None,
         }
     }
 }
@@ -1072,6 +1109,7 @@ impl LiveParams {
             .filter(|v| v.is_finite())
             .map(|v| v as f32);
         let seed_mode = SeedMode::parse(request.seed_mode.as_deref().unwrap_or(""))?;
+        let arithmetic = Arithmetic::parse(request.arithmetic.as_deref().unwrap_or(""))?;
         let loop_mode = LoopMode::parse(request.loop_mode.as_deref().unwrap_or(""))?;
         let input_encoding = match request.input_encoding.as_deref() {
             None | Some("") => OutputEncoding::default_for_this_build(),
@@ -1121,6 +1159,8 @@ impl LiveParams {
             anchor_follow: 0.0,
             noise_mode: NoiseMode::Auto,
             drift: DriftParams::default(),
+            arithmetic,
+            text_rows: request.text_rows.map(|rows| rows as usize),
         };
         if let Some(text) = request.noise_mode.as_deref().filter(|t| !t.is_empty()) {
             // Unlike a control message, a malformed open request is refused.
@@ -1176,12 +1216,18 @@ pub struct LiveFrameIn<'a> {
 /// own wall-clock cost (surfaced in the `stats` message's `stage_ms.model`)
 /// and, inside that, the share the text encoder took (`stage_ms.text_encode`;
 /// 0 for backends without one, and near 0 on frames where `flux2_backend`
-/// served the prompt embeds from its cache).
+/// served the prompt embeds from its cache), and for a diffusion backend the
+/// shares of encoding the input, denoising and decoding the output
+/// (`stage_ms.encode`, `.denoise`, `.decode`; 0 for backends that do not
+/// split their time so).
 pub struct LiveFrameOut {
     pub image: RgbImage,
     pub aux_json: Option<String>,
     pub model_ms: f64,
     pub text_encode_ms: f64,
+    pub encode_ms: f64,
+    pub denoise_ms: f64,
+    pub decode_ms: f64,
 }
 
 /// Maximum adapters one job may stack. Each one is merged into the resident

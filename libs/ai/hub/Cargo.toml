@@ -5,6 +5,9 @@ edition = "2021"
 description = "AI content generation service: wraps local GPU model runtimes (image/mesh/video/audio) behind an HTTP port, with on-demand HuggingFace model download"
 license = "MIT OR Apache-2.0"
 
+[package.metadata.makepad.platform-gaps]
+windows = {}
+
 [features]
 ai-common = ["dep:makepad-ai-common"]
 # Default for a build of this crate itself: the local LLM and Whisper

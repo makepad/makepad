@@ -10,8 +10,8 @@
 //! maps to BFL `decoder.up.{3-i}` because construction prepends.
 
 use crate::backend::{
-    gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached, gpu_conv2d_planar_cudnn_f16,
-    gpu_conv2d_planar_strided, gpu_cudnn_require, gpu_device_available, gpu_download,
+    gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached,
+    gpu_conv2d_planar_strided, gpu_conv3x3_planar_f16_mma, gpu_device_available, gpu_download, gpu_mma_available,
     gpu_group_norm_planar, gpu_pool_cap_override, gpu_pool_phase_end, gpu_silu, gpu_upload,
     gpu_upsample_nearest2x, GpuTensor, WeightOwner,
 };
@@ -25,16 +25,19 @@ use std::sync::Arc;
 
 const VAE_GROUP_NORM_EPSILON: f32 = 1.0e-6;
 
-/// How the VAE's stride-1 3x3 convs run.
+/// How the VAE's 3x3 convs run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Flux2VaeConvs {
-    /// cuBLAS GEMMs over an f16 im2col slab: needs nothing beside CUDA.
+    /// cuBLAS GEMMs over an f16 im2col slab, and the downsamples in f32:
+    /// any CUDA GPU.
     #[default]
     Gemm,
-    /// cuDNN's implicit GEMM in f16, no slab: about half the time at the
-    /// decode's large planes, each conv's output stored f16. Needs cuDNN: a
-    /// load without it fails ("cuDNN not found: ..."), it never runs `Gemm`.
-    Cudnn,
+    /// Our own implicit GEMM on f16 tensor cores (`gpu_conv3x3_planar_f16_mma`):
+    /// every 3x3 conv whose input has channels in sixteens, the
+    /// downsamples' stride-2 ones too, each in one pass with its bias, its
+    /// output f32; no slab. It takes tensor-core mma (an sm_80 or later
+    /// GPU): on a GPU before that the VAE runs `Gemm`, said once.
+    F16Mma,
 }
 
 #[derive(Clone, Debug)]
@@ -77,15 +80,18 @@ impl Flux2VaeWeights {
         Self::load_with(path, Flux2VaeConvs::Gemm)
     }
 
-    pub fn load_with(path: impl AsRef<Path>, convs: Flux2VaeConvs) -> Result<Self> {
-        Self::load_on(path, convs, gpu_cudnn_require)
+    /// The convs the next calls run: those asked for, as this GPU runs them.
+    pub fn convs(&self) -> Flux2VaeConvs {
+        self.convs
     }
 
-    /// [`Self::load_with`], `cudnn` saying whether cuDNN is there (asked only for its convs).
-    fn load_on(path: impl AsRef<Path>, convs: Flux2VaeConvs, cudnn: impl FnOnce() -> std::result::Result<(), String>) -> Result<Self> {
-        if convs == Flux2VaeConvs::Cudnn {
-            cudnn().map_err(DiffusionError::workflow)?;
-        }
+    /// Runs the next calls' convs as `convs`, as this GPU runs them (see
+    /// [`Flux2VaeConvs::F16Mma`]).
+    pub fn set_convs(&mut self, convs: Flux2VaeConvs) {
+        self.convs = runnable_convs(convs, gpu_mma_available);
+    }
+
+    pub fn load_with(path: impl AsRef<Path>, convs: Flux2VaeConvs) -> Result<Self> {
         let path = path.as_ref();
         let file = Flux2WeightFile::load(path)?;
         let mut tensors = HashMap::new();
@@ -122,7 +128,7 @@ impl Flux2VaeWeights {
             owner: Arc::new(WeightOwner::new("flux2-vae")),
             path: path.to_path_buf(),
             config: Flux2VaeConfig::flux2_dev(),
-            convs,
+            convs: runnable_convs(convs, gpu_mma_available),
             tensors,
             shapes,
             bn_mean,
@@ -623,32 +629,39 @@ fn conv2d(
         )));
     }
     let three_same = (kernel.kw, kernel.kh, pad_x, pad_y) == (3, 3, 1, 1);
-    let tensor = if three_same && weights.convs == Flux2VaeConvs::Cudnn {
-        gpu_conv2d_planar_cudnn_f16(
+    if three_same && weights.convs == Flux2VaeConvs::F16Mma && kernel.in_channels % 16 == 0 {
+        let (tensor, _, _) = gpu_conv3x3_planar_f16_mma(
             &input.tensor,
             input.width,
             input.height,
+            1,
             &ns.key(weight_name),
             kernel.data,
             bias,
             kernel.out_channels,
         )
-    } else {
-        gpu_conv2d_planar_cached(
-            &input.tensor,
-            input.width,
-            input.height,
-            ns,
-            weight_name,
-            kernel.data,
-            bias,
-            kernel.out_channels,
-            kernel.kw,
-            kernel.kh,
-            pad_x,
-            pad_y,
-        )
+        .map_err(DiffusionError::model)?;
+        return Ok(GpuSpatial {
+            tensor,
+            width: input.width,
+            height: input.height,
+            channels: kernel.out_channels,
+        });
     }
+    let tensor = gpu_conv2d_planar_cached(
+        &input.tensor,
+        input.width,
+        input.height,
+        ns,
+        weight_name,
+        kernel.data,
+        bias,
+        kernel.out_channels,
+        kernel.kw,
+        kernel.kh,
+        pad_x,
+        pad_y,
+    )
     .map_err(DiffusionError::model)?;
     Ok(GpuSpatial {
         tensor,
@@ -671,6 +684,26 @@ fn downsample(
     let bias = weights.values(&format!("{prefix}.bias"))?;
     let out_w = input.width / 2;
     let out_h = input.height / 2;
+    if weights.convs == Flux2VaeConvs::F16Mma && (kernel.kw, kernel.kh) == (3, 3) && kernel.in_channels % 16 == 0 {
+        let (tensor, width, height) = gpu_conv3x3_planar_f16_mma(
+            &input.tensor,
+            input.width,
+            input.height,
+            2,
+            &ns.key(&format!("{prefix}.weight")),
+            kernel.data,
+            bias,
+            kernel.out_channels,
+        )
+        .map_err(DiffusionError::model)?;
+        if (width, height) != (out_w, out_h) {
+            return Err(DiffusionError::model(format!(
+                "flux2 vae {prefix}: a {}x{} downsample came out {width}x{height}",
+                input.width, input.height
+            )));
+        }
+        return Ok(GpuSpatial { tensor, width, height, channels: kernel.out_channels });
+    }
     let tensor = gpu_conv2d_planar_strided(
         &input.tensor,
         input.width,
@@ -696,6 +729,17 @@ fn downsample(
         height: out_h,
         channels: kernel.out_channels,
     })
+}
+
+/// `convs` as a GPU runs them, `mma` saying whether it has tensor-core mma
+/// (asked only for `F16Mma`): without it, `Gemm`, said once.
+fn runnable_convs(convs: Flux2VaeConvs, mma: impl FnOnce() -> bool) -> Flux2VaeConvs {
+    if convs != Flux2VaeConvs::F16Mma || mma() {
+        return convs;
+    }
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| eprintln!("flux2 vae: this GPU has no tensor-core mma (sm_80 and later); its convs run as GEMMs"));
+    Flux2VaeConvs::Gemm
 }
 
 fn group_norm(
@@ -917,12 +961,11 @@ mod tests {
     }
 
     #[test]
-    fn a_vae_on_cudnn_without_cudnn_does_not_load_and_says_so() {
-        // cuDNN as if it were not installed: the VAE's file is not even read
-        let error = Flux2VaeWeights::load_on("no-such-vae.safetensors", Flux2VaeConvs::Cudnn, || Err("cuDNN not found: none here".into()))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("cuDNN not found: none here"), "{error}");
+    fn a_vae_runs_its_tensor_core_convs_only_on_a_gpu_with_them() {
+        assert_eq!(runnable_convs(Flux2VaeConvs::F16Mma, || true), Flux2VaeConvs::F16Mma, "with mma, as asked");
+        assert_eq!(runnable_convs(Flux2VaeConvs::F16Mma, || false), Flux2VaeConvs::Gemm, "without, the GEMMs");
+        let never = || -> bool { panic!("the GEMMs ask nothing of the GPU") };
+        assert_eq!(runnable_convs(Flux2VaeConvs::Gemm, never), Flux2VaeConvs::Gemm, "the GEMMs run anywhere");
     }
 
     #[test]

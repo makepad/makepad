@@ -6,8 +6,14 @@
 
 use crate::serve::{Phase, Published};
 use crate::settings::{Backend, IdleOff, Settings};
+use crate::usage::{Provider, ProviderState};
+use std::sync::Arc;
+
+#[path = "usage_view.rs"]
+mod usage_view;
 use makepad_ai_hub_panel::hub_control::{HubCommand, HubSnapshot};
 use makepad_ai_hub_panel::HubPanel;
+use makepad_shell_kit::graph::DrawShellTrace;
 use makepad_shell_kit::ui::{contains, cut_top, inset, rect, DrawShellFill, HAlign, Ico, ShellDraw};
 use makepad_shell_kit::{alpha, darker, CtrlState, ShellTokens};
 use makepad_widgets::*;
@@ -22,6 +28,7 @@ script_mod! {
         height: Fill
         draw_bg +: {}
         d +: {}
+        g +: {}
     }
 }
 
@@ -32,6 +39,12 @@ pub enum HubAppAction {
     SetIdleOff(Backend, IdleOff),
     /// "Open at login" (where the app offers it)
     SetLogin(bool),
+    /// The Usage section's switch: read the CLIs' account usage or not.
+    SetUsage(bool),
+    /// End a tool's warm CLI and start a fresh one.
+    Reconnect(Provider),
+    /// Spend one of this account's free resets of its limits (the person confirmed it).
+    ResetLimits(Provider, String),
     Hub(HubCommand),
     #[default]
     None,
@@ -43,6 +56,14 @@ enum Hit {
     Service(Backend),
     IdleOff(Backend, IdleOff),
     Login,
+    Usage,
+    Reconnect(Provider),
+    /// An account's line (an index into the drawn lines): opens or closes its detail.
+    Row(usize),
+    /// The line's Reset limits button: asks first.
+    Reset(usize),
+    ResetConfirm(usize),
+    ResetCancel(usize),
 }
 
 /// What the window shows, set by the app from its settings and the hub owner.
@@ -57,6 +78,8 @@ pub struct ViewState {
     pub off_at: Vec<(Backend, u64)>,
     /// "Open at login": None = not offered here, else the switch's state.
     pub login: Option<bool>,
+    /// Each tool's usage as its worker last published it.
+    pub usage: Vec<Arc<ProviderState>>,
 }
 
 const PAD: f64 = 16.0;
@@ -78,6 +101,9 @@ pub struct HubAppView {
     d: ShellDraw,
     #[live]
     tokens: ShellTokens,
+    /// the usage history's sparklines
+    #[live]
+    g: DrawShellTrace,
     /// drawn as a flyout card (the tray dropdown)
     #[live]
     card: bool,
@@ -98,6 +124,15 @@ pub struct HubAppView {
     noted: String,
     #[rust]
     view_h: f64,
+    /// The account lines as last drawn, for their hits.
+    #[rust]
+    rows: Vec<(Provider, String)>,
+    /// The account line whose detail is open.
+    #[rust]
+    expanded: Option<(Provider, String)>,
+    /// The account line asking "Use 1 of N resets?".
+    #[rust]
+    confirm: Option<(Provider, String)>,
     #[redraw]
     #[area]
     #[rust]
@@ -149,52 +184,53 @@ impl HubAppView {
         let (sep, mut rest) = cut_top(rest, 12.0);
         self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
 
-        // The backends: a switch each, the inactivity turn-off, and why one does not serve.
+        // The backends: one row each (its name, the inactivity turn-off as a small joined pill,
+        // its switch) over the line that says what it serves or why not. A panel too narrow for
+        // the pill beside the name gives the pill a row of its own under that line.
         let (head, r2) = cut_top(rest, 22.0);
         rest = r2;
         self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Offered to the fleet");
+        let pill_w = self.idle_pill_width(cx, &tok);
         for backend in Backend::ALL {
             let svc = *st.settings.service(backend);
-            let (row, r2) = cut_top(rest, 30.0);
+            let label_w = self.d.measure(cx, false, tok.font.body, backend.label());
+            let inline = idle_pill_inline(rest.size.x, label_w, pill_w);
+            let (block, r2) = cut_top(rest, backend_block_height(inline));
             rest = r2;
-            let sw = self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - 48.0, row.pos.y + 6.0), &tok, svc.on, fg);
+            let (row, below) = cut_top(block, ROW_H);
+            let sw = self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - SWITCH_W, row.pos.y + (ROW_H - 22.0) * 0.5), &tok, svc.on, fg);
             self.hits.push((Hit::Service(backend), inset(sw, -6.0)));
             let dim = if st.settings.enabled { fg } else { darker(fg, 1.4) };
-            self.d.label_elided(cx, rect(row.pos.x, row.pos.y, row.size.x - 64.0, row.size.y), false, tok.font.body, dim, HAlign::Left, backend.label());
-            // The state line.
-            let line = state_line(&st, backend);
-            let (row, r2) = cut_top(rest, 18.0);
-            rest = r2;
-            self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, &line);
-            // Turn off after inactivity.
-            let (row, r2) = cut_top(rest, 28.0);
-            rest = r2;
-            self.d.label(cx, rect(row.pos.x, row.pos.y, 150.0, row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Turn off when idle for");
-            let x0 = row.pos.x + 150.0;
-            let w = ((row.size.x - 150.0) / IdleOff::ALL.len() as f64).min(80.0);
-            for (i, idle) in IdleOff::ALL.into_iter().enumerate() {
-                let r = rect(x0 + i as f64 * w + 1.0, row.pos.y + 2.0, w - 2.0, row.size.y - 4.0);
-                let hit = Hit::IdleOff(backend, idle);
-                let state = if svc.idle_off == idle { CtrlState::Selected } else if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
-                self.d.button(cx, r, &tok, state, None, idle.label(), tok.font.body_small, fg, true);
-                self.hits.push((hit, r));
+            let pill_x = row.pos.x + row.size.x - SWITCH_W - GAP - pill_w;
+            let label_right = if inline { pill_x - GAP } else { row.pos.x + row.size.x - SWITCH_W - GAP };
+            self.d.label_elided(cx, rect(row.pos.x, row.pos.y, (label_right - row.pos.x).max(0.0), row.size.y), false, tok.font.body, dim, HAlign::Left, backend.label());
+            if inline {
+                self.idle_pill(cx, &tok, fg, rect(pill_x, row.pos.y + (ROW_H - PILL_H) * 0.5, pill_w, PILL_H), backend, svc.idle_off);
             }
-            rest = cut_top(rest, 8.0).1;
+            let line = state_line(&st, backend);
+            let (row, below) = cut_top(below, LINE_H);
+            self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, &line);
+            if !inline {
+                self.idle_pill(cx, &tok, fg, rect(below.pos.x, below.pos.y + 2.0, pill_w.min(below.size.x), PILL_H), backend, svc.idle_off);
+            }
         }
 
         // Open at login (an installed bundle only).
         if let Some(on) = st.login {
-            let (row, r2) = cut_top(rest, 30.0);
+            let (row, r2) = cut_top(rest, ROW_H);
             rest = r2;
-            let sw = self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - 48.0, row.pos.y + 6.0), &tok, on, fg);
+            let sw = self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - SWITCH_W, row.pos.y + (ROW_H - 22.0) * 0.5), &tok, on, fg);
             self.hits.push((Hit::Login, inset(sw, -6.0)));
-            self.d.label_elided(cx, rect(row.pos.x, row.pos.y, row.size.x - 64.0, row.size.y), false, tok.font.body, fg, HAlign::Left, "Open at login");
+            self.d.label_elided(cx, rect(row.pos.x, row.pos.y, row.size.x - SWITCH_W - GAP, row.size.y), false, tok.font.body, fg, HAlign::Left, "Open at login");
             let note = format!("login switch at ({}, {}) in the window, {}", sw.pos.x + sw.size.x * 0.5 - window.pos.x, sw.pos.y + sw.size.y * 0.5 - window.pos.y, if on { "on" } else { "off" });
             if self.noted != note {
                 crate::selftest_note(&note);
                 self.noted = note;
             }
         }
+
+        // Which account each coding CLI is signed in as, and its limits.
+        rest = self.draw_usage(cx, &tok, fg, rest, &st);
 
         // The fleet as this hub hears it.
         let (sep, r2) = cut_top(rest, 12.0);
@@ -252,6 +288,59 @@ impl HubAppView {
     pub fn content_height(&self) -> f64 {
         self.content_h
     }
+
+    /// The inactivity turn-off's width: its caption and the joined segments.
+    fn idle_pill_width(&mut self, cx: &mut Cx2d, tok: &ShellTokens) -> f64 {
+        let caption = self.d.measure(cx, false, tok.font.caption, IDLE_CAPTION) + 6.0;
+        caption + IdleOff::ALL.into_iter().map(|i| self.d.measure(cx, true, tok.font.body_small, i.short()) + 2.0 * SEG_PAD).sum::<f64>()
+    }
+
+    /// "Off after [15m|1h|4h|never]": one joined pill, the choice filled.
+    #[allow(clippy::too_many_arguments)]
+    fn idle_pill(&mut self, cx: &mut Cx2d, tok: &ShellTokens, fg: Vec4f, r: Rect, backend: Backend, chosen: IdleOff) {
+        let caption = self.d.measure(cx, false, tok.font.caption, IDLE_CAPTION) + 6.0;
+        self.d.label(cx, rect(r.pos.x, r.pos.y, caption, r.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, IDLE_CAPTION);
+        let x0 = r.pos.x + caption;
+        let widths: Vec<f64> = IdleOff::ALL.into_iter().map(|i| self.d.measure(cx, true, tok.font.body_small, i.short()) + 2.0 * SEG_PAD).collect();
+        let total: f64 = widths.iter().sum();
+        self.d.control(cx, rect(x0, r.pos.y, total, r.size.y), &tok.controls, CtrlState::Normal);
+        let mut x = x0;
+        for (idle, w) in IdleOff::ALL.into_iter().zip(widths) {
+            let seg = rect(x, r.pos.y, w, r.size.y);
+            let hit = Hit::IdleOff(backend, idle);
+            let state = if chosen == idle { CtrlState::Selected } else if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
+            if state != CtrlState::Normal {
+                self.d.control(cx, seg, &tok.controls, state);
+            }
+            self.d.label(cx, seg, state == CtrlState::Selected, tok.font.body_small, fg, HAlign::Center, idle.short());
+            self.hits.push((hit, seg));
+            x += w;
+        }
+    }
+}
+
+/// The rows of the backend list (the switch row, the state line, the pill's own row when the
+/// panel is narrow, the gap after a backend).
+const ROW_H: f64 = 24.0;
+const LINE_H: f64 = 16.0;
+const PILL_H: f64 = 20.0;
+const BLOCK_GAP: f64 = 6.0;
+/// The toggle switch's track width (the kit's: 1.9 × its 22 px height).
+const SWITCH_W: f64 = 42.0;
+const GAP: f64 = 10.0;
+const SEG_PAD: f64 = 7.0;
+const IDLE_CAPTION: &str = "Off after";
+
+/// Whether a backend's inactivity pill fits on its switch row beside its name (else it gets a
+/// row of its own under the state line).
+fn idle_pill_inline(row_w: f64, label_w: f64, pill_w: f64) -> bool {
+    label_w + GAP + pill_w + GAP + SWITCH_W <= row_w
+}
+
+/// One backend's height in the list: the switch row and state line, plus the pill's own row on
+/// a narrow panel.
+fn backend_block_height(inline: bool) -> f64 {
+    ROW_H + LINE_H + if inline { 0.0 } else { PILL_H + 4.0 } + BLOCK_GAP
 }
 
 /// The line under a backend's switch: what it serves now, why not, or when it turned off.
@@ -340,12 +429,43 @@ impl Widget for HubAppView {
                     self.redraw(cx);
                     return;
                 }
+                let hit = self.hit_at(e.abs);
+                // a question not answered is dropped by any other click
+                if self.confirm.is_some() && !matches!(hit, Some(Hit::ResetConfirm(_) | Hit::ResetCancel(_))) {
+                    self.confirm = None;
+                    self.redraw(cx);
+                }
+                let line = |i: usize| self.rows.get(i).cloned();
                 let st = &self.state.settings;
-                let action = match self.hit_at(e.abs) {
+                let action = match hit {
+                    Some(Hit::Row(i)) => {
+                        let line = line(i);
+                        self.expanded = if self.expanded == line { None } else { line };
+                        self.redraw(cx);
+                        return;
+                    }
+                    Some(Hit::Reset(i)) => {
+                        self.confirm = line(i);
+                        self.redraw(cx);
+                        return;
+                    }
+                    Some(Hit::ResetCancel(_)) => {
+                        self.confirm = None;
+                        self.redraw(cx);
+                        return;
+                    }
+                    Some(Hit::ResetConfirm(i)) => {
+                        let Some((provider, account)) = line(i).filter(|l| self.confirm.as_ref() == Some(l)) else { return };
+                        self.confirm = None;
+                        self.redraw(cx);
+                        HubAppAction::ResetLimits(provider, account)
+                    }
                     Some(Hit::Enabled) => HubAppAction::SetEnabled(!st.enabled),
                     Some(Hit::Service(b)) => HubAppAction::SetService(b, !st.service(b).on),
                     Some(Hit::IdleOff(b, i)) => HubAppAction::SetIdleOff(b, i),
                     Some(Hit::Login) => HubAppAction::SetLogin(!self.state.login.unwrap_or(false)),
+                    Some(Hit::Usage) => HubAppAction::SetUsage(!st.usage),
+                    Some(Hit::Reconnect(p)) => HubAppAction::Reconnect(p),
                     None => return,
                 };
                 cx.widget_action(self.uid, action);
@@ -363,3 +483,23 @@ impl Widget for HubAppView {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The user asked for less height here: a backend was 84 px (its switch row 30, the state
+    /// line 18, the "Turn off when idle for" row 28, a gap 8).
+    #[test]
+    fn a_backend_takes_about_half_its_old_height_and_a_narrow_panel_wraps_its_pill() {
+        const OLD: f64 = 84.0;
+        // The dropdown's content (460 px less its padding) holds the longest name ("Claude for PR
+        // reviews", about 125 px in the body font), the pill (about 150 px) and the switch.
+        let (name, pill) = (130.0, 155.0);
+        assert!(idle_pill_inline(460.0 - 2.0 * PAD, name, pill), "the pill sits on the switch row");
+        assert!(backend_block_height(true) <= 0.55 * OLD, "{} px against {OLD}", backend_block_height(true));
+        // A narrow window: the pill takes a row of its own rather than running under the name or
+        // the switch, and the block still stays under the old height.
+        assert!(!idle_pill_inline(300.0, name, pill));
+        assert!(backend_block_height(false) < OLD);
+    }
+}

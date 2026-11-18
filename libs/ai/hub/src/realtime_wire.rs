@@ -319,6 +319,12 @@ pub struct StageMsJson {
     /// The text encoder's share of `model` (0 when the backend has none or
     /// served cached prompt embeds).
     pub text_encode: f64,
+    /// A diffusion backend's shares of `model`: encoding the input to
+    /// latents, the denoising steps, decoding the output (0 when a backend
+    /// does not split its time so).
+    pub encode: f64,
+    pub denoise: f64,
+    pub decode: f64,
     pub post: f64,
 }
 
@@ -648,7 +654,7 @@ mod tests {
             frame_index: 3,
             fps: 30.0,
             frame_ms: 33.3,
-            stage_ms: StageMsJson { prep: 1.0, model: 30.0, text_encode: 4.0, post: 2.3 },
+            stage_ms: StageMsJson { prep: 1.0, model: 30.0, text_encode: 4.0, encode: 3.0, denoise: 20.0, decode: 2.5, post: 2.3 },
             frames_in: 3,
             frames_out: 3,
             dropped: 0,

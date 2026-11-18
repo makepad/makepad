@@ -6946,3 +6946,379 @@ extern "C" cudaError_t makepad_cuda_realesrgan_quantize_rgb8_f32(
         input, output, plane);
     return cudaGetLastError();
 }
+
+// ---------------------------------------------------------------------------
+// A 3x3 conv on planar f32 maps as an implicit GEMM on f16 tensor cores.
+//
+//   out[co][oy][ox] = bias[co]
+//       + sum_{ci,ky,kx} w[co][ci][ky][kx] * x[ci][oy*S + ky - P][ox*S + kx - P]
+//
+// S = 1, P = 1: the "same" conv. S = 2, P = 0: a downsample whose taps past
+// the right and bottom edges read zero (BFL's pad (0,1,0,1) then stride 2).
+// The inputs and weights round to f16, the sums are f32, and the bias is
+// added in f32 to an f32 output: one pass, with no im2col slab and no
+// conversion passes around it.
+//
+// A block makes BM = 64 output channels x 128 output pixels (8 rows x 16
+// columns), or for a conv of at most 32 channels BM = 32 x 256 (16 x 16),
+// with 4 warps of 32 channels x 64 pixels (2 x 8 m16n8k16 tiles) each.
+// The K loop takes 16 input channels at a time. For each, the input's halo
+// tile goes to shared memory as [pixel][16 channels] f16 (loaded into
+// registers a chunk ahead, rounded there), and the BM channels' weights as
+// [tap][channel][16] f16 (cp.async from the packed copy, a chunk ahead);
+// then 9 taps of the warp's 16 mma. Rows are 32 B: their two 16 B halves
+// swap every 4 rows, so each ldmatrix 8-row read hits 8 distinct bank
+// groups. For S = 2 the halo's even columns are stored before its odd
+// ones, so the 8 pixels of an n-tile are 8 consecutive rows for every tap.
+//
+// The packed weights: [ci / 16][co rounded up to 64][9 taps][16] f16.
+constexpr int CONV_MMA_TW = 16;
+constexpr int CONV_MMA_THREADS = 128;
+
+template <int S, int BM>
+struct ConvMma {
+    static constexpr int warps_m = BM / 32; // warps across the channels
+    static constexpr int th = 4 * (4 / warps_m); // tile rows: 4 per warp across them
+    static constexpr int w_halves = BM * 9 * 16; // one chunk's weights
+    static constexpr int rows = (th - 1) * S + 3;
+    static constexpr int cols = (CONV_MMA_TW - 1) * S + 3;
+    static constexpr int pixels = rows * cols;
+    static constexpr int even_cols = (cols + 1) / 2;
+    // Pixels each thread stages per chunk.
+    static constexpr int per_thread = (pixels + CONV_MMA_THREADS - 1) / CONV_MMA_THREADS;
+    static constexpr size_t smem_bytes =
+        2 * static_cast<size_t>(pixels) * 16 * sizeof(__half)
+        + 2 * static_cast<size_t>(w_halves) * sizeof(__half);
+};
+
+// The shared row of halo column `hx` (S = 2 stores even columns first).
+template <int S, int BM>
+static __device__ __forceinline__ int makepad_cuda_conv_mma_col(int hx) {
+    return S == 2 ? ((hx & 1) * ConvMma<S, BM>::even_cols + (hx >> 1)) : hx;
+}
+
+// The address of 16 B half `h` of 32 B row `row`, swizzled.
+static __device__ __forceinline__ __half * makepad_cuda_conv_mma_row(
+        __half * base, int row, int h) {
+    return base + row * 16 + ((h ^ ((row >> 2) & 1)) << 3);
+}
+
+// The maps' element: f32, or f16 (read as is, written rounded to nearest).
+static __device__ __forceinline__ float makepad_cuda_conv_mma_in(const float * p) {
+    return __ldg(p);
+}
+static __device__ __forceinline__ float makepad_cuda_conv_mma_in(const __half * p) {
+    return __half2float(__ushort_as_half(__ldg(reinterpret_cast<const unsigned short *>(p))));
+}
+static __device__ __forceinline__ void makepad_cuda_conv_mma_out(float * p, float v) {
+    *p = v;
+}
+static __device__ __forceinline__ void makepad_cuda_conv_mma_out(__half * p, float v) {
+    *p = __float2half_rn(v);
+}
+
+template <int S, typename T, int BM>
+static __global__ void __launch_bounds__(CONV_MMA_THREADS)
+makepad_cuda_conv3x3_planar_f16_mma_kernel(
+        const T * __restrict__ x,
+        const __half * __restrict__ packed,
+        const float * __restrict__ bias,
+        T * __restrict__ out,
+        uint32_t in_width,
+        uint32_t in_height,
+        uint32_t out_width,
+        uint32_t out_height,
+        uint32_t in_channels,
+        uint32_t out_channels,
+        uint32_t co_pad,
+        uint32_t tiles_x) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    using Halo = ConvMma<S, BM>;
+    constexpr int P = S == 1 ? 1 : 0;
+    extern __shared__ __align__(16) unsigned char conv_mma_smem[];
+    __half * in_buf = reinterpret_cast<__half *>(conv_mma_smem);
+    __half * w_buf = in_buf + 2 * Halo::pixels * 16;
+    constexpr int W_HALVES = Halo::w_halves;
+
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int wm = warp % Halo::warps_m; // which 32 of the block's channels
+    const int wn = warp / Halo::warps_m; // which 4 of the tile's rows
+    const int oy0 = static_cast<int>(blockIdx.x / tiles_x) * Halo::th;
+    const int ox0 = static_cast<int>(blockIdx.x % tiles_x) * CONV_MMA_TW;
+    const int co0 = static_cast<int>(blockIdx.y) * BM;
+    const size_t plane = static_cast<size_t>(in_width) * in_height;
+    const int iy0 = oy0 * S - P;
+    const int ix0 = ox0 * S - P;
+    const uint32_t chunks = in_channels / 16;
+
+    // A chunk's halo pixels, rounded to f16, in registers.
+    uint32_t staged[Halo::per_thread][8];
+    auto load_input = [&](uint32_t chunk) {
+        const T * src = x + static_cast<size_t>(chunk) * 16 * plane;
+        #pragma unroll
+        for (int i = 0; i < Halo::per_thread; i++) {
+            const int hp = tid + i * CONV_MMA_THREADS;
+            const int hy = hp / Halo::cols;
+            const int hx = hp - hy * Halo::cols;
+            const int iy = iy0 + hy;
+            const int ix = ix0 + hx;
+            const bool inside = hp < Halo::pixels && iy >= 0 && ix >= 0
+                && iy < static_cast<int>(in_height) && ix < static_cast<int>(in_width);
+            const T * at = src + (inside ? static_cast<size_t>(iy) * in_width + ix : 0);
+            #pragma unroll
+            for (int c = 0; c < 8; c++) {
+                const float a = inside ? makepad_cuda_conv_mma_in(at + (2 * c) * plane) : 0.0f;
+                const float b = inside ? makepad_cuda_conv_mma_in(at + (2 * c + 1) * plane) : 0.0f;
+                staged[i][c] = makepad_cuda_fa2_pack(a, b);
+            }
+        }
+    };
+    auto store_input = [&](__half * buf) {
+        #pragma unroll
+        for (int i = 0; i < Halo::per_thread; i++) {
+            const int hp = tid + i * CONV_MMA_THREADS;
+            if (hp < Halo::pixels) {
+                const int hy = hp / Halo::cols;
+                const int hx = hp - hy * Halo::cols;
+                const int row = hy * Halo::cols + makepad_cuda_conv_mma_col<S, BM>(hx);
+                *reinterpret_cast<uint4 *>(makepad_cuda_conv_mma_row(buf, row, 0)) =
+                    make_uint4(staged[i][0], staged[i][1], staged[i][2], staged[i][3]);
+                *reinterpret_cast<uint4 *>(makepad_cuda_conv_mma_row(buf, row, 1)) =
+                    make_uint4(staged[i][4], staged[i][5], staged[i][6], staged[i][7]);
+            }
+        }
+    };
+    // One chunk's weights for this block's BM channels: BM x 18 16 B copies.
+    auto load_weights = [&](uint32_t chunk, __half * buf) {
+        const __half * src = packed
+            + (static_cast<size_t>(chunk) * co_pad + co0) * 9 * 16;
+        for (int q = tid; q < W_HALVES / 8; q += CONV_MMA_THREADS) {
+            const int co = q / 18;
+            const int tap = (q - co * 18) >> 1;
+            const int h = q & 1;
+            makepad_cuda_fa_cp_async16(
+                makepad_cuda_conv_mma_row(buf, tap * BM + co, h), src + q * 8, 16);
+        }
+        makepad_cuda_fa_cp_commit();
+    };
+
+    float acc[2][8][4];
+    #pragma unroll
+    for (int m = 0; m < 2; m++) {
+        #pragma unroll
+        for (int n = 0; n < 8; n++) {
+            acc[m][n][0] = acc[m][n][1] = acc[m][n][2] = acc[m][n][3] = 0.0f;
+        }
+    }
+
+    load_weights(0, w_buf);
+    load_input(0);
+    store_input(in_buf);
+    // ldmatrix lanes: which 8-row group (matrix) and which row of it.
+    const int group = lane >> 3;
+    const int r8 = lane & 7;
+    for (uint32_t chunk = 0; chunk < chunks; chunk++) {
+        __half * ib = in_buf + (chunk & 1) * Halo::pixels * 16;
+        __half * wb = w_buf + (chunk & 1) * W_HALVES;
+        const bool ahead = chunk + 1 < chunks;
+        if (ahead) {
+            load_weights(chunk + 1, w_buf + ((chunk + 1) & 1) * W_HALVES);
+            load_input(chunk + 1);
+            makepad_cuda_fa_cp_wait<1>();
+        } else {
+            makepad_cuda_fa_cp_wait<0>();
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int tap = 0; tap < 9; tap++) {
+            const int ky = tap / 3;
+            const int kx = tap - ky * 3;
+            uint32_t a[2][4];
+            #pragma unroll
+            for (int m = 0; m < 2; m++) {
+                // Matrices: rows 0-7 k 0-7, rows 8-15 k 0-7, rows 0-7 k 8-15, rows 8-15 k 8-15.
+                const int co = wm * 32 + m * 16 + (group & 1) * 8 + r8;
+                makepad_cuda_fa2_ldmatrix_x4(
+                    a[m], makepad_cuda_conv_mma_row(wb, tap * BM + co, group >> 1));
+            }
+            #pragma unroll
+            for (int pair = 0; pair < 4; pair++) {
+                // Matrices: n-tile 2*pair k 0-7, k 8-15, then n-tile 2*pair+1 k 0-7, k 8-15.
+                const int n = pair * 2 + (group >> 1);
+                const int ty = wn * 4 + (n >> 1);
+                const int tx = (n & 1) * 8 + r8;
+                const int row = (ty * S + ky) * Halo::cols
+                    + makepad_cuda_conv_mma_col<S, BM>(tx * S + kx);
+                uint32_t b[4];
+                makepad_cuda_fa2_ldmatrix_x4(b, makepad_cuda_conv_mma_row(ib, row, group & 1));
+                #pragma unroll
+                for (int m = 0; m < 2; m++) {
+                    makepad_cuda_fa2_mma(acc[m][pair * 2], a[m], b[0], b[1]);
+                    makepad_cuda_fa2_mma(acc[m][pair * 2 + 1], a[m], b[2], b[3]);
+                }
+            }
+        }
+        if (ahead) {
+            store_input(in_buf + ((chunk + 1) & 1) * Halo::pixels * 16);
+        }
+        __syncthreads();
+    }
+
+    // Each lane holds rows g and g + 8 of its m-tiles, columns 2q and 2q + 1
+    // of its n-tiles: channels, and pairs of pixels along a row.
+    const int g = lane >> 2;
+    const int q2 = (lane & 3) * 2;
+    const size_t out_plane = static_cast<size_t>(out_width) * out_height;
+    #pragma unroll
+    for (int m = 0; m < 2; m++) {
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            const int co = co0 + wm * 32 + m * 16 + g + half * 8;
+            if (co >= static_cast<int>(out_channels)) {
+                continue;
+            }
+            const float b = bias != nullptr ? bias[co] : 0.0f;
+            T * dst = out + static_cast<size_t>(co) * out_plane;
+            #pragma unroll
+            for (int n = 0; n < 8; n++) {
+                const int oy = oy0 + wn * 4 + (n >> 1);
+                const int ox = ox0 + (n & 1) * 8 + q2;
+                if (oy >= static_cast<int>(out_height)) {
+                    continue;
+                }
+                T * at = dst + static_cast<size_t>(oy) * out_width + ox;
+                if (ox < static_cast<int>(out_width)) {
+                    makepad_cuda_conv_mma_out(at, acc[m][n][half * 2] + b);
+                }
+                if (ox + 1 < static_cast<int>(out_width)) {
+                    makepad_cuda_conv_mma_out(at + 1, acc[m][n][half * 2 + 1] + b);
+                }
+            }
+        }
+    }
+#else
+    (void) x; (void) packed; (void) bias; (void) out; (void) in_width; (void) in_height;
+    (void) out_width; (void) out_height; (void) in_channels; (void) out_channels; (void) co_pad; (void) tiles_x;
+#endif
+}
+
+template <int S, typename T, int BM>
+static cudaError_t makepad_cuda_conv3x3_planar_f16_mma_launch(
+        const T * x,
+        const __half * packed,
+        const float * bias,
+        T * out,
+        uint32_t in_width,
+        uint32_t in_height,
+        uint32_t out_width,
+        uint32_t out_height,
+        uint32_t in_channels,
+        uint32_t out_channels,
+        cudaStream_t stream) {
+    using Shape = ConvMma<S, BM>;
+    static bool configured = false;
+    if (!configured) {
+        const cudaError_t err = cudaFuncSetAttribute(
+            makepad_cuda_conv3x3_planar_f16_mma_kernel<S, T, BM>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(Shape::smem_bytes));
+        if (err != cudaSuccess) {
+            return err;
+        }
+        configured = true;
+    }
+    // The packed weights' channel stride: rounded up to 64 whatever the block.
+    const uint32_t co_pad = (out_channels + 63) / 64 * 64;
+    const uint32_t tiles_x = (out_width + CONV_MMA_TW - 1) / CONV_MMA_TW;
+    const uint32_t tiles_y = (out_height + Shape::th - 1) / Shape::th;
+    const dim3 grid(tiles_x * tiles_y, (out_channels + BM - 1) / BM, 1);
+    makepad_cuda_conv3x3_planar_f16_mma_kernel<S, T, BM>
+        <<<grid, dim3(CONV_MMA_THREADS, 1, 1), Shape::smem_bytes, stream>>>(
+            x, packed, bias, out, in_width, in_height, out_width, out_height, in_channels, out_channels, co_pad, tiles_x);
+    return cudaGetLastError();
+}
+
+template <typename T>
+static cudaError_t makepad_cuda_conv3x3_planar_f16_mma_any(
+        const T * x,
+        const uint16_t * packed,
+        const float * bias,
+        T * out,
+        uint32_t in_width,
+        uint32_t in_height,
+        uint32_t out_width,
+        uint32_t out_height,
+        uint32_t in_channels,
+        uint32_t out_channels,
+        uint32_t stride,
+        cudaStream_t stream) {
+    const cudaError_t sm80 = makepad_cuda_require_sm80();
+    if (sm80 != cudaSuccess) {
+        return sm80;
+    }
+    if (in_channels == 0 || in_channels % 16 != 0 || out_channels == 0 || (stride != 1 && stride != 2)) {
+        return cudaErrorInvalidValue;
+    }
+    if (out_width == 0 || out_height == 0) {
+        return cudaSuccess;
+    }
+    const __half * w = reinterpret_cast<const __half *>(packed);
+    if (stride == 2) {
+        return makepad_cuda_conv3x3_planar_f16_mma_launch<2, T, 64>(
+            x, w, bias, out, in_width, in_height, out_width, out_height, in_channels, out_channels, stream);
+    }
+    // At most 32 channels: a 32-channel block, so no mma runs on padding.
+    return out_channels <= 32
+        ? makepad_cuda_conv3x3_planar_f16_mma_launch<1, T, 32>(
+            x, w, bias, out, in_width, in_height, out_width, out_height, in_channels, out_channels, stream)
+        : makepad_cuda_conv3x3_planar_f16_mma_launch<1, T, 64>(
+            x, w, bias, out, in_width, in_height, out_width, out_height, in_channels, out_channels, stream);
+}
+
+// `stride` 1 or 2 (see the kernel); `in_channels` a multiple of 16 (the
+// first `in_channels` planes of `x` are read); `packed` as above, its
+// channels rounded up to 64; `bias` may be null. The output is
+// `out_channels x out_height x out_width`, planar.
+extern "C" cudaError_t makepad_cuda_conv3x3_planar_f16_mma(
+        const float * x,
+        const uint16_t * packed,
+        const float * bias,
+        float * out,
+        uint32_t in_width,
+        uint32_t in_height,
+        uint32_t out_width,
+        uint32_t out_height,
+        uint32_t in_channels,
+        uint32_t out_channels,
+        uint32_t stride,
+        cudaStream_t stream) {
+    return makepad_cuda_conv3x3_planar_f16_mma_any<float>(
+        x, packed, bias, out, in_width, in_height, out_width, out_height, in_channels, out_channels, stride, stream);
+}
+
+// The same on f16 maps: read as they are, written rounded to nearest.
+extern "C" cudaError_t makepad_cuda_conv3x3_planar_f16_mma_half(
+        const uint16_t * x,
+        const uint16_t * packed,
+        const float * bias,
+        uint16_t * out,
+        uint32_t in_width,
+        uint32_t in_height,
+        uint32_t out_width,
+        uint32_t out_height,
+        uint32_t in_channels,
+        uint32_t out_channels,
+        uint32_t stride,
+        cudaStream_t stream) {
+    return makepad_cuda_conv3x3_planar_f16_mma_any<__half>(
+        reinterpret_cast<const __half *>(x), packed, bias, reinterpret_cast<__half *>(out),
+        in_width, in_height, out_width, out_height, in_channels, out_channels, stride, stream);
+}
+
+// cudaSuccess when the device runs the m16n8k16 mma kernels (sm_80 and
+// later), cudaErrorNotSupported when not.
+extern "C" cudaError_t makepad_cuda_mma_available() {
+    return makepad_cuda_require_sm80();
+}

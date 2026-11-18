@@ -54,8 +54,8 @@ pub struct RemoteSession {
 }
 
 impl RemoteSession {
-    /// Opens `program` on the stream's node: Err when the node refuses it (busy, over its
-    /// limits) or the stream breaks.
+    /// Opens `program` on the stream's node: Err when the node cannot take it (its program, its
+    /// inputs) or the stream breaks. A node that runs as many sessions as it may has it wait.
     pub fn open(stream: &Arc<KernelStream>, program: &Program, config: RemoteConfig) -> Result<RemoteSession, AssetAiError> {
         let opened = Self::open_unless(stream, program, config, &mut || false)?;
         Ok(opened.expect("an open that never goes stale ends with the node's answer"))
@@ -65,10 +65,18 @@ impl RemoteSession {
     /// it says nothing, and None comes back once it says yes (a session the node opens after
     /// that is cancelled as its answer comes).
     pub fn open_unless(stream: &Arc<KernelStream>, program: &Program, config: RemoteConfig, stale: &mut dyn FnMut() -> bool) -> Result<Option<RemoteSession>, AssetAiError> {
+        Self::open_waiting(stream, program, config, &mut |_| stale())
+    }
+
+    /// [`Self::open_unless`] for an opener that says how its open goes: `wait` hears None while
+    /// the node says nothing, and the node's word once the node has the open wait for room (it runs
+    /// as many sessions as it may; the open goes on as one ends, never refused for it), at once and
+    /// at each ask after. Its yes gives the open up, as `stale`'s does.
+    pub fn open_waiting(stream: &Arc<KernelStream>, program: &Program, config: RemoteConfig, wait: &mut dyn FnMut(Option<&str>) -> bool) -> Result<Option<RemoteSession>, AssetAiError> {
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
         let codec = config.codec.unwrap_or_else(|| stream.codec());
         let open = wire::Open { program: program.clone(), params: config.params, limits: config.limits, seed: config.seed, codec, class: config.class, keep: config.keep, inputs: config.inputs };
-        let Some((id, device)) = stream.program_open(&open, threads, stale)? else {
+        let Some((id, device)) = stream.program_open(&open, threads, wait)? else {
             return Ok(None);
         };
         Ok(Some(RemoteSession { stream: stream.clone(), id, device, rev: AtomicU64::new(0), end: Mutex::new(None), threads }))

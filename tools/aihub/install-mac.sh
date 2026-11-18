@@ -3,11 +3,15 @@
 #
 #   bash tools/aihub/install-mac.sh          (from anywhere; it finds the repository by its own path)
 #
-# 1. cargo build --release -p makepad-app-aihub (the native build, this Mac's default features),
-# 2. assembles "AI Hub.app" under target/aihub-install/: Contents/MacOS/makepad-app-aihub,
+# 1. cargo build --release -p makepad-app-aihub -p makepad-agents (the native build, this Mac's
+#    default features, and the pty helper),
+# 2. assembles "AI Hub.app" under target/aihub-install/: Contents/MacOS/makepad-app-aihub and
+#    agents (the pty helper: on macOS a terminal's program starts through it, found next to the
+#    executable; the Usage section reads Claude's limits in such a terminal),
 #    Info.plist (nl.makepad.aihub, LSUIElement: a menu-bar app, no Dock icon, no menu bar),
 #    icon.icns made from apps/aihub/resources/icon_1024.png with the system's sips + iconutil,
-# 3. signs it (tools/macos/sign-app.sh) as nl.makepad.aihub with the local identity "makepad local
+# 3. signs it (tools/macos/sign-app.sh: the helper as nl.makepad.aihub.agents, then the bundle)
+#    as nl.makepad.aihub with the local identity "makepad local
 #    signing" when this Mac has it (made once by tools/macos/make-signing-identity.sh; the same code
 #    identity every build, so macOS privacy answers stay), else ad-hoc; MAKEPAD_SIGN_IDENTITY overrides,
 # 4. stops the installed copy (by the pid it recorded in ~/.makepad/ai-hub/app.pid, and only
@@ -31,10 +35,11 @@ VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$REPO/apps/aihub/Cargo.toml" | 
 TARGET_DIR=${CARGO_TARGET_DIR:-$REPO/target}
 
 cd "$REPO"
-CARGO_INCREMENTAL=0 cargo build --release -p makepad-app-aihub
+CARGO_INCREMENTAL=0 cargo build --release -p makepad-app-aihub -p makepad-agents
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ICONSET"
 cp "$TARGET_DIR/release/$EXE" "$APP/Contents/MacOS/$EXE"
+cp "$TARGET_DIR/release/agents" "$APP/Contents/MacOS/agents"
 
 for size in 16 32 64 128 256 512 1024; do
     sips -z $size $size "$PNG" --out "$ICONSET/s$size.png" > /dev/null
@@ -83,7 +88,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# the stable local identity when present (tools/macos/make-signing-identity.sh), else ad-hoc
+# the stable local identity when present (tools/macos/make-signing-identity.sh), else ad-hoc;
+# the nested helper first, then the bundle around it
+bash "$REPO/tools/macos/sign-app.sh" "$APP/Contents/MacOS/agents" "$ID.agents"
 bash "$REPO/tools/macos/sign-app.sh" "$APP" "$ID"
 
 # stop the installed copy: its recorded pid, and only if that pid runs the installed executable

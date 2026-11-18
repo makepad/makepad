@@ -695,6 +695,10 @@ pub struct GenerateRequestJson {
     /// rendered, so playback can start at the first clause; the final artifacts
     /// (the whole take and its word timings) are unchanged.
     pub stream: Option<bool>,
+    /// The job's results stay in this hub's memory and never touch its disk
+    /// (people's voices and faces, say): the client fetches them and then
+    /// discards the job, which frees them. Default false: results are files.
+    pub memory_only: Option<bool>,
     /// Language for speech models: ISO 639-1 (`"en"`) or a BCP-47 tag.
     /// STT (`whisper`): the spoken language; TTS: the voice language when
     /// `voice` is unset. Absent = the model default (English).
@@ -1207,7 +1211,8 @@ pub struct LiveStatusJson {
 //    (when a backend produces structured per-frame data; sent before that
 //    frame, and still sent when output_encoding is "none")
 //   {"type":"stats", "frame_index":N, "fps":.., "frame_ms":..,
-//    "stage_ms":{"prep":..,"model":..,"text_encode":..,"post":..},
+//    "stage_ms":{"prep":..,"model":..,"text_encode":..,"encode":..,
+//    "denoise":..,"decode":..,"post":..},
 //    "frames_in":.., "frames_out":.., "dropped":..,
 //    "codec":{"input":"h264","output":"h264","dropped_decode":N},
 //    "loop_mode":"feed"|"feedback", "frame_diff":<mean |out - previous
@@ -1278,6 +1283,17 @@ pub struct RealtimeRequestJson {
     pub noise_mode: Option<String>,
     pub camera: Option<crate::realtime_wire::CameraUpdateJson>,
     pub drift: Option<crate::realtime_wire::DriftUpdateJson>,
+    /// "stored" (default): the model computes as its weights are stored,
+    /// as its jobs do. "fast": the faster arithmetic the backend has for
+    /// live loops, speed over the last bits (flux2-klein: FP8 MLPs and f16
+    /// tensor-core VAE convs). Set at open only.
+    pub arithmetic: Option<String>,
+    /// How many rows of the prompt's text window the model reads: the
+    /// prompt's own tokens always, then pad rows up to this many (0: the
+    /// prompt's tokens alone). Absent: the whole window, as the reference
+    /// reads it (flux2-klein: 512). Fewer is less work every step. Set at
+    /// open only; a backend without a text window reads the prompt as ever.
+    pub text_rows: Option<u32>,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]

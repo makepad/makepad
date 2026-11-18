@@ -87,19 +87,26 @@ pub const SMALL_SHEET: SheetTier = SheetTier {
     max_context: 2048,
 };
 
-/// Free VRAM at load time from which the large sheet is affordable.
-pub const LARGE_SHEET_FREE_MB: u64 = 30 * 1024;
+/// Free VRAM the large sheet needs beside the model's own weights (its gguf
+/// and tower files): the 27B's measured 24.6 GB peak, with headroom, made
+/// 30 GB free for its 17.2 GB of files. Relative to the weights, so a small
+/// model is not held to the 27B's bar: the 4B CI judge model ran its 512 px
+/// sheet on one hub and its 256 px sheet on a 24 GB one, and the same grab
+/// (a dark window with a thin toolbar) passed on the first and failed on the
+/// second (11-17).
+pub const LARGE_SHEET_WORK_MB: u64 = 13 * 1024;
 
-/// Picks the sheet tier from the box's free VRAM at load time.
+/// Picks the sheet tier from the box's free VRAM at load time, for a model
+/// whose files take `weights_mb`.
 ///
 /// `None` — no NVML on this machine — is a Metal/unified-memory box, not a
 /// small one: there is no CUDA VRAM ceiling to protect and the large sheet is
 /// the shape this tower was measured on there (24.6 GB peak). Guessing small
 /// would quietly halve the answer quality on the machine most likely to be
 /// serving a single interactive user.
-pub fn tier_for_free_vram(free_mb: Option<u64>) -> SheetTier {
+pub fn tier_for_free_vram(free_mb: Option<u64>, weights_mb: u64) -> SheetTier {
     match free_mb {
-        Some(mb) if mb < LARGE_SHEET_FREE_MB => SMALL_SHEET,
+        Some(mb) if mb < weights_mb + LARGE_SHEET_WORK_MB => SMALL_SHEET,
         _ => LARGE_SHEET,
     }
 }
@@ -487,10 +494,12 @@ mod resident {
             // The tier is a load-time decision, taken against the VRAM the
             // box has free RIGHT NOW rather than against its card's spec: a
             // box already holding the text model has less to give.
-            let tier = tier_for_free_vram(crate::residency::fresh_free_mb());
-            let gb = std::fs::metadata(&gguf)
-                .map(|m| m.len() as f64 / 1e9)
-                .unwrap_or(0.0);
+            let bytes = |p: &PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let tier = tier_for_free_vram(
+                crate::residency::fresh_free_mb(),
+                (bytes(&gguf) + bytes(&mmproj)) >> 20,
+            );
+            let gb = bytes(&gguf) as f64 / 1e9;
             (ctx.progress)(
                 &format!(
                     "load vision gguf ({gb:.1}GB) + tower, {}px sheet",
@@ -987,19 +996,24 @@ mod tests {
     }
 
     #[test]
-    fn tier_follows_free_vram_and_treats_no_nvml_as_unified_memory() {
-        assert_eq!(tier_for_free_vram(Some(80 * 1024)), LARGE_SHEET);
-        assert_eq!(tier_for_free_vram(Some(LARGE_SHEET_FREE_MB)), LARGE_SHEET);
+    fn tier_follows_free_vram_beside_the_weights_and_treats_no_nvml_as_unified_memory() {
+        // the 27B (17.2 GB of files): about the 30 GB free it was measured to need
+        let big = 17_199;
+        assert_eq!(tier_for_free_vram(Some(80 * 1024), big), LARGE_SHEET);
+        assert_eq!(tier_for_free_vram(Some(big + LARGE_SHEET_WORK_MB), big), LARGE_SHEET);
         assert_eq!(
-            tier_for_free_vram(Some(LARGE_SHEET_FREE_MB - 1)),
+            tier_for_free_vram(Some(big + LARGE_SHEET_WORK_MB - 1), big),
             SMALL_SHEET
         );
-        // A GPU-A with the box otherwise idle: the small sheet.
-        assert_eq!(tier_for_free_vram(Some(24_000)), SMALL_SHEET);
-        assert_eq!(tier_for_free_vram(Some(0)), SMALL_SHEET);
+        // A GPU-A with the box otherwise idle: the small sheet for the 27B ...
+        assert_eq!(tier_for_free_vram(Some(24_000), big), SMALL_SHEET);
+        assert_eq!(tier_for_free_vram(Some(0), big), SMALL_SHEET);
+        // ... and the large one for the 4B (3.6 GB of files): every hub judges
+        // the same grab at the same sheet
+        assert_eq!(tier_for_free_vram(Some(24_000), 3_637), LARGE_SHEET);
         // No nvidia-smi (mac/Metal): the large sheet, which is what that box
         // class was measured on.
-        assert_eq!(tier_for_free_vram(None), LARGE_SHEET);
+        assert_eq!(tier_for_free_vram(None, big), LARGE_SHEET);
         // The tiers themselves are the measured pair, not adjustable prose.
         assert_eq!(LARGE_SHEET.sheet_px, 512);
         assert_eq!(LARGE_SHEET.max_context, 4096);

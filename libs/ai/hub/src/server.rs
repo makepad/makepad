@@ -175,7 +175,10 @@ pub enum ModelTrack {
 }
 
 pub struct ArtifactMeta {
+    /// The file it is kept in; empty when it is kept in memory (`bytes`).
     pub path: PathBuf,
+    /// A memory-only job's result (`memory_only`): never written to disk.
+    pub bytes: Option<Arc<[u8]>>,
     pub content_type: String,
     /// Lowercase-hex SHA-256 of the artifact bytes, computed at persist time
     /// — the hash-verified handoff contract (JSON `sha256` field + the
@@ -217,6 +220,9 @@ pub struct ServiceShared {
     pub started_ms: u64,
     /// VRAM admission/eviction policy (see [`crate::residency`]).
     pub residency: ResidencyConfig,
+    /// Models clients hold resident for a while (`POST /control/model
+    /// {"action": "hold"}`): kept like pins until released or run out.
+    pub holds: residency::Holds,
     /// Last time each model's backend ran a job (LRU input for eviction).
     pub last_used: Mutex<HashMap<String, Instant>>,
     /// Partition advertised on `/health` and LAN beacons.
@@ -400,6 +406,7 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         node_key,
         started_ms: crate::jobs::now_ms(),
         residency: ResidencyConfig::from_env(),
+        holds: residency::Holds::default(),
         last_used: Mutex::new(HashMap::new()),
         fleet: crate::discovery::normalize_fleet(&config.fleet),
         peer,
@@ -1131,10 +1138,11 @@ fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
             let artifacts = shared.artifacts.lock().unwrap();
             artifacts
                 .get(artifact_id)
-                .map(|meta| (meta.path.clone(), meta.content_type.clone(), meta.sha256.clone(), meta.byte_len))
+                .map(|meta| (meta.path.clone(), meta.bytes.clone(), meta.content_type.clone(), meta.sha256.clone(), meta.byte_len))
         };
         return match meta {
-            Some((path, content_type, sha256, byte_len)) => match fs::read(&path) {
+            Some((_, Some(bytes), content_type, sha256, _)) => artifact_response(&content_type, &sha256, bytes.to_vec()),
+            Some((path, None, content_type, sha256, byte_len)) => match fs::read(&path) {
                 Ok(bytes) => {
                     // Length gate against on-disk truncation between persist
                     // and serve; the client re-verifies the full hash.
@@ -1398,22 +1406,42 @@ fn submit_control(
     Ok(job_id)
 }
 
-/// `POST /control/model {"model": "<id>", "action": "load"|"unload"}`.
+/// `POST /control/model {"model": "<id>", "action": "load"|"unload"}`, or
+/// `{"model", "action": "hold", "for_s": N}` / `{"model", "action": "release"}`:
+/// the caller keeps the model resident for N s (default 120, at most
+/// [`residency::MAX_HOLD`]; renew to keep it longer) or lets it go. A hold
+/// loads nothing (`load` does) and answers at once.
 fn control_model(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, body: &[u8]) -> HttpServerResponse {
     let Ok(value) = json::parse(body) else {
-        return error_json(400, "need {\"model\": <id>, \"action\": \"load\"|\"unload\"}".to_string());
+        return error_json(400, "need {\"model\": <id>, \"action\": \"load\"|\"unload\"|\"hold\"|\"release\"}".to_string());
     };
     let Some(model) = value.get("model").and_then(Value::as_str) else {
         return error_json(400, "need \"model\"".to_string());
     };
-    let action = match value.get("action").and_then(Value::as_str) {
-        Some("load") => crate::backend::ModelControl::Load,
-        Some("unload") => crate::backend::ModelControl::Unload,
-        _ => return error_json(400, "action must be \"load\" or \"unload\"".to_string()),
-    };
     if shared.registry.find(model).is_none() {
         return error_json(404, format!("unknown model: {model}"));
     }
+    let action = match value.get("action").and_then(Value::as_str) {
+        Some("load") => crate::backend::ModelControl::Load,
+        Some("unload") => crate::backend::ModelControl::Unload,
+        Some("hold") => {
+            let time = Duration::from_secs(value.get("for_s").and_then(Value::as_u64).unwrap_or(120)).min(residency::MAX_HOLD);
+            let holder = holder_name(caller);
+            if shared.holds.hold(model, &holder, time) {
+                eprintln!("residency: {holder} holds {model} (for {} s at a time)", time.as_secs());
+            }
+            return ok_json(json::obj(vec![("held", Value::Bool(true)), ("for_s", Value::Int(time.as_secs() as i64))]).to_json());
+        }
+        Some("release") => {
+            let holder = holder_name(caller);
+            let released = shared.holds.release(model, &holder);
+            if released {
+                eprintln!("residency: {holder} let {model} go");
+            }
+            return ok_json(json::obj(vec![("released", Value::Bool(released))]).to_json());
+        }
+        _ => return error_json(400, "action must be \"load\", \"unload\", \"hold\" or \"release\"".to_string()),
+    };
     match submit_control(shared, caller, model, action) {
         Ok(job_id) => ok_json(json::obj(vec![("job_id", json::s(job_id))]).to_json()),
         Err(e @ (AssetAiError::Busy | AssetAiError::QueueFull(_) | AssetAiError::Unavailable(_))) => {
@@ -1421,6 +1449,19 @@ fn control_model(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
         }
         Err(e) => error_json(500, e.to_string()),
     }
+}
+
+/// Who a hold is by: the calling app and its fleet identity.
+fn holder_name(caller: &makepad_network::fleet::front::Caller) -> String {
+    match &caller.app {
+        Some(app) => format!("{app} ({})", caller.client_id),
+        None => caller.client_id.clone(),
+    }
+}
+
+/// Kept through an ordinary model switch and idle eviction: pinned, or held.
+fn kept(shared: &ServiceShared, model: &str) -> bool {
+    shared.residency.pins.contains(model) || shared.holds.held(model)
 }
 
 /// `POST /control/yield {"mb": N, "unload": bool, "reserve_mb": R}`: the
@@ -1467,7 +1508,7 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
                 return;
             }
             let model = chat_model_id(&shared).unwrap_or(model);
-            if let Err(e) = submit_control(&shared, &caller, &model, crate::backend::ModelControl::Yield { mb: 0, unload: false }) {
+            if let Err(e) = submit_control(&shared, &caller, &model, crate::backend::ModelControl::Yield { mb: 0, unload: false, free_mb: None }) {
                 eprintln!("[gpu-yield] relief not queued: {e}");
             }
         });
@@ -1476,7 +1517,16 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
         }
         return ok_json(json::obj(vec![("relief_in_s", Value::Int(in_s as i64))]).to_json());
     }
-    match submit_control(shared, caller, &model, crate::backend::ModelControl::Yield { mb, unload }) {
+    // A live loop holds the model worker for as long as it runs, so the
+    // yield job waits for it; the working memory the loop keeps between its
+    // frames is asked back now, and goes at its next phase end.
+    #[cfg(feature = "ai-common")]
+    makepad_ai_common::backend::gpu_pool_give_back(&format!("the desktop's UI asked for {mb} MB"));
+    // The yield may wait (behind a live loop, a load): what is free now (a
+    // reading at most two seconds old, as the routes read it) is what it
+    // counts from when it runs.
+    let free_mb = shared.gpu.get().vram_free_mb;
+    match submit_control(shared, caller, &model, crate::backend::ModelControl::Yield { mb, unload, free_mb }) {
         Ok(job_id) => ok_json(json::obj(vec![("job_id", json::s(job_id))]).to_json()),
         Err(e @ (AssetAiError::Busy | AssetAiError::QueueFull(_) | AssetAiError::Unavailable(_))) => generate_refused(&e),
         Err(e) => error_json(500, e.to_string()),
@@ -1515,11 +1565,14 @@ fn run_yield(
     shared: &Arc<ServiceShared>,
     backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     mb: u64,
+    free_when_asked: Option<u64>,
     allow_unload: bool,
     progress: &mut dyn FnMut(&str),
 ) -> Result<String, AssetAiError> {
     use crate::gpu_yield::{ChatFacts, Resident, Step};
     let free_before = residency::fresh_free_mb();
+    // What came free since the UI asked counts toward its ask.
+    let wanted = crate::gpu_yield::still_wanted_mb(mb, free_when_asked, free_before);
     let busy: Vec<String> = shared.jobs.with(|store| store.running_models());
     let chat_id = chat_model_id(shared).filter(|id| backends.get(id).is_some_and(|b| b.is_resident()));
     // The yield job itself runs under the chat model's id; a second job on it
@@ -1543,9 +1596,10 @@ fn run_yield(
             model: id.clone(),
             mb: crate::control::model_mb(id).unwrap_or(0),
             busy: busy.iter().any(|m| m == id),
+            held: shared.holds.held(id),
         })
         .collect();
-    let plan = crate::gpu_yield::plan(chat.as_ref(), &residents, mb, allow_unload);
+    let plan = crate::gpu_yield::plan(chat.as_ref(), &residents, wanted, allow_unload);
     if !plan.steps.is_empty() {
         crate::gpu_yield::note_yield();
     }
@@ -1562,6 +1616,10 @@ fn run_yield(
             Step::Unload { model, .. } => {
                 evict_resident(shared, backends, model, progress)?;
             }
+            Step::UnloadHeld { model, .. } => {
+                eprintln!("[gpu-yield] the UI needs the memory: unloading {model}, held by {}", shared.holds.holders(model).join(", "));
+                evict_resident(shared, backends, model, progress)?;
+            }
             Step::UnloadChat { model, .. } => {
                 evict_resident(shared, backends, model, progress)?;
                 reload = None;
@@ -1571,18 +1629,9 @@ fn run_yield(
     }
     let free_after = residency::fresh_free_mb();
     let freed = free_before.zip(free_after).map(|(b, a)| a.saturating_sub(b));
-    let mut report = format!(
-        "yield {mb} MB for the UI{}: {}; freed {} MB, {} MB free now",
-        if allow_unload { " (unload allowed)" } else { "" },
-        if done.is_empty() { "nothing to give".to_string() } else { done.join(", ") },
-        freed.map_or("?".to_string(), |f| f.to_string()),
-        free_after.map_or("?".to_string(), |f| f.to_string()),
-    );
-    if chat_busy {
+    let mut report = crate::gpu_yield::yield_report(mb, allow_unload, wanted, &done, freed, free_after, plan.short_mb);
+    if chat_busy && wanted > 0 {
         report.push_str("; the chat model is answering, left as is");
-    }
-    if plan.short_mb > 0 {
-        report.push_str(&format!("; {} MB short", plan.short_mb));
     }
     eprintln!("[gpu-yield] {report}");
     if let Some(model) = reload {
@@ -1788,6 +1837,7 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
                 ("resident_mb", num(if loaded { model_mb(&spec.id) } else { None })),
                 ("device", json::s(device_name.clone())),
                 ("pinned", Value::Bool(pinned)),
+                ("held", Value::Bool(shared.holds.held(&spec.id))),
                 // chat models only: the largest window the GPU budget allows
                 // now (0 = not even the minimum; null = never loaded here yet)
                 ("context_fit", if spec.backend == "llm" { num(context_fit(&spec.id)) } else { Value::Null }),
@@ -2774,7 +2824,9 @@ fn purge_jobs(shared: &Arc<ServiceShared>, jobs: &[crate::jobs::EvictedJob]) {
     for job in jobs {
         for artifact_id in &job.artifact_ids {
             if let Some(meta) = artifacts.remove(artifact_id) {
-                let _ = fs::remove_file(&meta.path);
+                if meta.bytes.is_none() {
+                    let _ = fs::remove_file(&meta.path);
+                }
             }
         }
         let dir = shared.cache_dir.join("artifacts").join(&job.job_id);
@@ -2814,7 +2866,7 @@ fn idle_evict_sweep(shared: &Arc<ServiceShared>) {
             .iter()
             .filter(|(model_id, backend)| {
                 backend.is_resident()
-                    && !shared.residency.pins.contains(*model_id)
+                    && !kept(shared, model_id)
                     && last_used
                         .get(*model_id)
                         .map(|at| at.elapsed() >= window)
@@ -2864,6 +2916,7 @@ fn execute_job(
         }
         None => return Err(AssetAiError::Backend(format!("job {job_id} has no params"))),
     };
+    let memory_only = params.memory_only;
     let spec = shared
         .registry
         .find(&params.model)
@@ -2897,7 +2950,7 @@ fn execute_job(
     cancel.check()?;
 
     // The UI asked for GPU memory: give it back in steps (`crate::gpu_yield`).
-    if let Some(crate::backend::ModelControl::Yield { mb, unload }) = params.control {
+    if let Some(crate::backend::ModelControl::Yield { mb, unload, free_mb }) = params.control {
         let job = job_id.to_string();
         let progress_shared = shared.clone();
         if mb == 0 {
@@ -2919,7 +2972,7 @@ fn execute_job(
             return Ok(Vec::new());
         }
         let report = with_backends(shared, |backends| {
-            run_yield(shared, backends, mb, unload, &mut |stage| {
+            run_yield(shared, backends, mb, free_mb, unload, &mut |stage| {
                 progress_shared.jobs.with(|store| store.set_progress(&job, stage, 0.5))
             })
         })?;
@@ -3240,7 +3293,7 @@ fn execute_job(
                         let chunk_job = job_id.to_string();
                         let mut index = 0usize;
                         backend.set_chunk_sink(Some(Box::new(move |piece: crate::backend::ArtifactData| {
-                            if let Ok(reference) = persist_partial_artifact(&chunk_shared, &chunk_job, index, piece) {
+                            if let Ok(reference) = persist_partial_artifact(&chunk_shared, &chunk_job, index, piece, memory_only) {
                                 chunk_shared.jobs.with(|store| store.push_partial_artifact(&chunk_job, reference));
                             }
                             index += 1;
@@ -3336,10 +3389,13 @@ fn execute_job(
         .unwrap()
         .insert(spec.id.clone(), Instant::now());
 
-    // Persist artifacts and hand out ids.
+    // Persist artifacts and hand out ids: files, or for a memory-only job
+    // bytes in this map alone.
     let dir = shared.cache_dir.join("artifacts").join(job_id);
-    fs::create_dir_all(&dir)
-        .map_err(|e| AssetAiError::Io(format!("artifact dir {}: {e}", dir.display())))?;
+    if !memory_only {
+        fs::create_dir_all(&dir)
+            .map_err(|e| AssetAiError::Io(format!("artifact dir {}: {e}", dir.display())))?;
+    }
     let mut refs = Vec::new();
     if let Some(first) = generated.first() {
         if first.content_type.starts_with("text/plain") {
@@ -3364,12 +3420,18 @@ fn execute_job(
         // status / artifact header is the handoff contract fetchers verify.
         let sha256 = crate::sha256::sha256_hex(&artifact.bytes);
         let byte_len = artifact.bytes.len() as u64;
-        fs::write(&path, &artifact.bytes)
-            .map_err(|e| AssetAiError::Io(format!("artifact write {}: {e}", path.display())))?;
+        let (path, bytes) = if memory_only {
+            (PathBuf::new(), Some(Arc::<[u8]>::from(artifact.bytes)))
+        } else {
+            fs::write(&path, &artifact.bytes)
+                .map_err(|e| AssetAiError::Io(format!("artifact write {}: {e}", path.display())))?;
+            (path, None)
+        };
         shared.artifacts.lock().unwrap().insert(
             artifact_id.clone(),
             ArtifactMeta {
                 path,
+                bytes,
                 content_type: artifact.content_type.to_string(),
                 sha256: sha256.clone(),
                 byte_len,
@@ -3392,22 +3454,29 @@ fn persist_partial_artifact(
     job_id: &str,
     index: usize,
     artifact: crate::backend::ArtifactData,
+    memory_only: bool,
 ) -> Result<ArtifactRefJson, AssetAiError> {
-    let dir = shared.cache_dir.join("artifacts").join(job_id);
-    fs::create_dir_all(&dir).map_err(|e| AssetAiError::Io(format!("artifact dir {}: {e}", dir.display())))?;
     let artifact_id = format!("{job_id}-p{index}");
-    let path = dir.join(format!("p{index}.{}", artifact.ext));
     let sha256 = crate::sha256::sha256_hex(&artifact.bytes);
     let byte_len = artifact.bytes.len() as u64;
-    fs::write(&path, &artifact.bytes).map_err(|e| AssetAiError::Io(format!("artifact write {}: {e}", path.display())))?;
+    let content_type = artifact.content_type.to_string();
+    let (path, bytes) = if memory_only {
+        (PathBuf::new(), Some(Arc::<[u8]>::from(artifact.bytes)))
+    } else {
+        let dir = shared.cache_dir.join("artifacts").join(job_id);
+        fs::create_dir_all(&dir).map_err(|e| AssetAiError::Io(format!("artifact dir {}: {e}", dir.display())))?;
+        let path = dir.join(format!("p{index}.{}", artifact.ext));
+        fs::write(&path, &artifact.bytes).map_err(|e| AssetAiError::Io(format!("artifact write {}: {e}", path.display())))?;
+        (path, None)
+    };
     shared.artifacts.lock().unwrap().insert(
         artifact_id.clone(),
-        ArtifactMeta { path, content_type: artifact.content_type.to_string(), sha256: sha256.clone(), byte_len },
+        ArtifactMeta { path, bytes, content_type: content_type.clone(), sha256: sha256.clone(), byte_len },
     );
     Ok(ArtifactRefJson {
         id: artifact_id.clone(),
         url: format!("/artifact/{artifact_id}"),
-        content_type: artifact.content_type.to_string(),
+        content_type,
         sha256: Some(sha256),
         byte_len: Some(byte_len),
     })
@@ -3612,6 +3681,13 @@ fn execute_live_job(
         };
         let backend = backends.get_mut(&spec.id).unwrap();
         cancel.check()?;
+        // A live loop runs the same phases frame after frame on this thread:
+        // their GPU working memory stays between them for the session and is
+        // freed when it ends (said in the log), rather than freed and taken
+        // again each frame. It goes sooner when the UI asks for memory or an
+        // allocation runs short (`gpu_pool_give_back`).
+        #[cfg(feature = "ai-common")]
+        let _keep = makepad_ai_common::backend::gpu_pool_keep();
         crate::realtime::run_live(&session, backend.as_mut(), &cancel, &mut progress_sink)
     })();
 
@@ -3989,7 +4065,7 @@ fn admit_for_load(
     let chat = chat_model_id(shared);
     for model_id in resident_others_lru(shared, backends, &spec.id)
         .into_iter()
-        .filter(|model_id| !shared.residency.pins.contains(model_id))
+        .filter(|model_id| !kept(shared, model_id))
     {
         cancel.check()?;
         progress(&format!("switching models: evicting {model_id}"));
@@ -4026,9 +4102,20 @@ fn admit_for_load(
 
     for model_id in resident_others_lru(shared, backends, &spec.id) {
         cancel.check()?;
-        progress(&format!(
-            "queued-for-memory: need {need} MB, free {free} MB — evicting pinned {model_id}"
-        ));
+        let holders = shared.holds.holders(&model_id);
+        if holders.is_empty() {
+            progress(&format!(
+                "queued-for-memory: need {need} MB, free {free} MB — evicting pinned {model_id}"
+            ));
+        } else {
+            let line = format!(
+                "queued-for-memory: need {need} MB for {}, free {free} MB — evicting {model_id}, held by {}",
+                spec.id,
+                holders.join(", ")
+            );
+            eprintln!("residency: {line}");
+            progress(&line);
+        }
         if chat.as_deref() == Some(model_id.as_str()) {
             crate::gpu_yield::note_policy(format!("unloaded {model_id} for {} (it loads again on the next chat)", spec.id));
         }
@@ -4112,6 +4199,10 @@ fn oom_evict_all_others(
             .with(|store| store.set_progress(job_id, stage, 0.0))
     };
     progress(&format!("oom-retry: evicting all residents after: {cause}"));
+    // A live loop on another worker may keep working memory between its
+    // frames: it gives that back at its next phase end.
+    #[cfg(feature = "ai-common")]
+    makepad_ai_common::backend::gpu_pool_give_back(&format!("{keep} ran short of GPU memory"));
     for model_id in resident_others_lru(shared, backends, keep) {
         evict_resident(shared, backends, &model_id, &mut progress)?;
     }
@@ -4244,6 +4335,9 @@ mod lifecycle_tests {
             if params.prompt.contains("long") {
                 return Err(AssetAiError::Params("context overflow: the prompt is 85827 tokens".into()));
             }
+            if params.prompt.contains("transcribe") {
+                return Ok(vec![ArtifactData { content_type: "application/json", ext: "json", bytes: br#"{"text":"a picnic"}"#.to_vec() }]);
+            }
             Ok(Vec::new())
         }
     }
@@ -4271,6 +4365,28 @@ mod lifecycle_tests {
         assert!(matches!(shared.models.lock().unwrap().get("testpattern"), Some(ModelTrack::Loaded)));
         assert!(run("a short prompt").is_ok());
         assert!(matches!(shared.models.lock().unwrap().get("testpattern"), Some(ModelTrack::Loaded)));
+    }
+
+    #[test]
+    fn a_memory_only_job_keeps_its_results_off_the_disk() {
+        let shared = activity_shared();
+        shared.backends.lock().unwrap().insert("testpattern".into(), Box::new(OverflowFixture { resident: false, loads: 0 }));
+        let mut params = crate::jobs::tests::generate_params("testpattern");
+        params.prompt = "transcribe".into();
+        params.memory_only = true;
+        let id = shared.jobs.submit(JobParams::Generate(params), QueuePolicy::Queue).unwrap();
+        assert_eq!(shared.jobs.with(|store| store.take_next()), Some(id.clone()));
+        let refs = execute_job(&shared, &id).unwrap();
+        {
+            let artifacts = shared.artifacts.lock().unwrap();
+            let meta = &artifacts[&refs[0].id];
+            assert!(meta.path.as_os_str().is_empty() && meta.bytes.is_some(), "kept in memory, no file named");
+        }
+        let served = route_get(&shared, &refs[0].url);
+        assert!(served.header.starts_with("HTTP/1.1 200"), "{}", served.header);
+        assert_eq!(served.body, br#"{"text":"a picnic"}"#.to_vec(), "served from memory");
+        purge_jobs(&shared, &[crate::jobs::EvictedJob { job_id: id.clone(), artifact_ids: vec![refs[0].id.clone()] }]);
+        assert!(shared.artifacts.lock().unwrap().is_empty(), "discarded, it is gone");
     }
 
     /// A backend that fails mid-generation and retires itself leaves its model
@@ -4513,6 +4629,7 @@ mod lifecycle_tests {
             node_key: "f".repeat(32),
             started_ms: 0,
             residency,
+            holds: residency::Holds::default(),
             last_used: Mutex::new(HashMap::new()),
             fleet: crate::discovery::DEFAULT_FLEET.to_string(),
             leases: Mutex::new(crate::lease::LeaseTable::new()),
@@ -5361,11 +5478,12 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn admission_keeps_pinned_residents_through_ordinary_switches() {
-        let shared = fixture_shared(&["hot-pin"]);
+    fn admission_keeps_pinned_and_held_residents_through_ordinary_switches() {
+        let mut shared = fixture_shared(&["hot-pin"]);
         let mut backends = HashMap::from([
             ("keep".to_string(), fixture(true)),
             ("hot-pin".to_string(), fixture(true)),
+            ("held".to_string(), fixture(true)),
             ("old".to_string(), fixture(true)),
         ]);
         let spec = ModelSpec {
@@ -5381,11 +5499,27 @@ mod lifecycle_tests {
             license: None,
             files: Vec::new(),
         };
+        Arc::get_mut(&mut shared).unwrap().registry.models.push(ModelSpec { id: "held".into(), ..spec.clone() });
+        let app = makepad_network::fleet::front::Caller {
+            client_id: "box".into(),
+            role: makepad_network::fleet::id::Role::Node,
+            admin: false,
+            this_machine: true,
+            app: Some("an app".into()),
+        };
+        let hold = route_post_by(&shared, &app, "/control/model", br#"{"model":"held","action":"hold","for_s":60}"#);
+        assert!(String::from_utf8(hold.body).unwrap().contains("\"for_s\":60"), "a hold answers at once with its time");
+        assert_eq!(shared.holds.holders("held"), vec!["an app (box)".to_string()], "held by the app, by name");
         let cancel = crate::backend::CancelToken::new();
         admit_for_load(&shared, &mut backends, &spec, "job-x", &cancel).unwrap();
         assert!(backends["keep"].is_resident());
         assert!(backends["hot-pin"].is_resident(), "pins survive a switch");
+        assert!(backends["held"].is_resident(), "a held model survives a switch");
         assert!(!backends["old"].is_resident());
+        let release = route_post_by(&shared, &app, "/control/model", br#"{"model":"held","action":"release"}"#);
+        assert!(String::from_utf8(release.body).unwrap().contains("\"released\":true"));
+        admit_for_load(&shared, &mut backends, &spec, "job-y", &cancel).unwrap();
+        assert!(!backends["held"].is_resident(), "released, it goes at the next switch");
     }
 
     #[test]

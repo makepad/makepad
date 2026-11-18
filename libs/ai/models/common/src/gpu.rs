@@ -2128,8 +2128,8 @@ mod imp {
         false
     }
 
-    pub fn gpu_cudnn_require() -> Result<(), String> {
-        Err("cuDNN not found: this build has no CUDA".to_string())
+    pub fn gpu_mma_available() -> bool {
+        false
     }
 
     pub fn gpu_act_f16_enabled() -> bool {
@@ -3351,15 +3351,17 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
-    pub fn gpu_conv2d_planar_cudnn_f16(
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_conv3x3_planar_f16_mma(
         _x: &GpuTensor,
         _width: usize,
         _height: usize,
+        _stride: usize,
         _weight_key: &WeightKey,
         _weights: &[f32],
         _bias: &[f32],
         _out_channels: usize,
-    ) -> Result<GpuTensor, String> {
+    ) -> Result<(GpuTensor, usize, usize), String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
@@ -4919,6 +4921,8 @@ mod imp {
     pub fn gpu_pool_trim() -> usize {
         0
     }
+
+    pub fn gpu_pool_give_back(_why: &str) {}
 
     pub fn gpu_pool_cap_override(_bytes: Option<usize>) {}
 }

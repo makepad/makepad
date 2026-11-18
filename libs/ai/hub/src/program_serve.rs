@@ -7,8 +7,8 @@
 //! fs, net, host or cx) under counted limits, its kernels are Splash compute (total, bounded,
 //! every access clamped to its buffer). On top of that the node:
 //! - caps what a client asks for at its own ceilings (instructions, heap, kernel work, buffer
-//!   bytes, inputs) and holds at most [`MAX_SESSIONS_PER_CLIENT`] sessions per credential and
-//!   [`MAX_SESSIONS`] in all;
+//!   bytes, inputs), and runs at most [`MAX_SESSIONS`] sessions: an open past them waits for one
+//!   to end (its client hears it waits, `wire::QUEUED`), it is never refused;
 //! - runs a session at the class its client opened it with (`Class`: interactive, visible,
 //!   background; the unified workpool's one OS priority table): its kernels on that class's
 //!   pool, its driver and sender threads at that class too. A person steering a zoom gets the
@@ -36,10 +36,13 @@ use makepad_script_compute_sched::sched::{Executor, ThreadExecutor};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-/// Sessions one credential may hold.
-pub const MAX_SESSIONS_PER_CLIENT: usize = 4;
-/// Sessions on the node.
-pub const MAX_SESSIONS: usize = 16;
+/// Sessions the node runs at once; an open past them waits for one to end. No client has a
+/// count of its own: an idle session costs two parked threads, and the class pools share the
+/// cores. (A count per credential put every app of a machine under one cap of 4, and a node's 16
+/// were refusals too: three apps on one hub, each with a grown part's two sessions, had the fifth
+/// refused and that part "could not grow", L1249194, 11-17.) As many as several apps with many
+/// grown parts hold.
+pub const MAX_SESSIONS: usize = 64;
 /// Words all of one open's inputs may hold (1 GiB).
 const MAX_INPUT_WORDS: usize = 1 << 28;
 /// Bytes of inputs and results a stream's slots keep; past them the slots kept in longest ago go
@@ -232,6 +235,8 @@ struct Inner {
     share: Mutex<Option<Share>>,
     /// Tells the thread that sets the share ([`Inner::share_thread`]) what the sessions want.
     share_cv: Condvar,
+    /// A session ended or a stream closed: the opens waiting for room look again.
+    room_cv: Condvar,
     share_started: OnceLock<()>,
     /// The GPU device sessions get besides the CPU, once the host installed one.
     gpu: Mutex<Option<GpuLink>>,
@@ -438,6 +443,7 @@ pub fn service() -> &'static ProgramService {
                 backend: if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) { Backend::Native } else { Backend::Interp },
                 share: Mutex::new(Share::find()),
                 share_cv: Condvar::new(),
+                room_cv: Condvar::new(),
                 share_started: OnceLock::new(),
                 gpu: Mutex::new(None),
             }),
@@ -497,11 +503,12 @@ impl ProgramService {
                 // Inputs decode and the program starts off the routing thread; this thread then
                 // sends its updates, each after the OPENED that names the session (the app
                 // drops an update for a session it was not told of).
-                let started = std::thread::Builder::new().name("program-session".into()).spawn(move || match open(&inner, &owner, &sender, &payload) {
+                let started = std::thread::Builder::new().name("program-session".into()).spawn(move || match open(&inner, &owner, &sender, word, &payload) {
                     Ok((id, device, served)) => {
                         send(&sender, wire::OPENED, word, wire::encode_opened(Ok((id, device))));
                         pump(&served, &sender, id, inner.workers + 1);
                         inner.sessions.lock().unwrap().remove(&id);
+                        inner.room_cv.notify_all();
                         inner.reshare();
                     }
                     Err(e) => send(&sender, wire::OPENED, word, wire::encode_opened(Err(e))),
@@ -546,6 +553,8 @@ impl ProgramService {
     pub fn end_all(&self) -> usize {
         let streams: Vec<(u64, Push)> = self.inner.streams.lock().unwrap().drain().map(|(socket, (_, push))| (socket, push)).collect();
         let ended: Vec<Arc<Served>> = self.inner.sessions.lock().unwrap().values().filter(|s| streams.iter().any(|(socket, _)| *socket == s.socket)).cloned().collect();
+        // (after the sessions' lock: an open waiting for room has its stream gone at its next look)
+        self.inner.room_cv.notify_all();
         for s in ended {
             s.session.cancel();
         }
@@ -562,6 +571,7 @@ impl ProgramService {
             return;
         }
         let ended: Vec<Arc<Served>> = self.inner.sessions.lock().unwrap().values().filter(|s| s.socket == socket).cloned().collect();
+        self.inner.room_cv.notify_all();
         for s in ended {
             s.session.cancel();
         }
@@ -576,9 +586,10 @@ fn send(push: &Push, kind: u8, word: u64, payload: Vec<u8>) {
     let _ = push.tx.send(frame);
 }
 
-/// An `OPEN`: the session's id, what it runs on, and the session (open now, its updates not yet
-/// sent).
-fn open(inner: &Arc<Inner>, owner: &str, push: &Push, payload: &[u8]) -> Result<(u64, Value, Arc<Served>), (u16, String)> {
+/// An `OPEN` (request `word`): the session's id, what it runs on, and the session (open now, its
+/// updates not yet sent). Past [`MAX_SESSIONS`] it waits for one to end, and says so to its client
+/// first; Err only for an open the node cannot take at all, or one whose stream closed meanwhile.
+fn open(inner: &Arc<Inner>, owner: &str, push: &Push, word: u64, payload: &[u8]) -> Result<(u64, Value, Arc<Served>), (u16, String)> {
     let threads = inner.workers + 1;
     let (open, arrived) = wire::decode_open(payload, MAX_INPUT_WORDS, threads).map_err(|e| (400, e))?;
     let inputs = {
@@ -592,12 +603,19 @@ fn open(inner: &Arc<Inner>, owner: &str, push: &Push, payload: &[u8]) -> Result<
     let class = open.class;
     class.apply();
     let id = {
-        let sessions = inner.sessions.lock().unwrap();
+        let mut sessions = inner.sessions.lock().unwrap();
         if sessions.len() >= MAX_SESSIONS {
-            return Err((503, format!("the node runs {MAX_SESSIONS} sessions")));
-        }
-        if sessions.values().filter(|s| s.owner == owner).count() >= MAX_SESSIONS_PER_CLIENT {
-            return Err((429, format!("{MAX_SESSIONS_PER_CLIENT} sessions per client")));
+            let why = format!("the node runs {MAX_SESSIONS} sessions; this one opens as one of them ends");
+            send(push, wire::QUEUED, word, wire::encode_queued(&why));
+            eprintln!("{}: programs: an open from {owner} waits: {why}", crate::SERVICE_NAME);
+            let waited = std::time::Instant::now();
+            while sessions.len() >= MAX_SESSIONS {
+                if !inner.streams.lock().unwrap().contains_key(&push.socket) {
+                    return Err((499, "the stream closed while the open waited for room".into()));
+                }
+                sessions = inner.room_cv.wait(sessions).unwrap();
+            }
+            eprintln!("{}: programs: an open from {owner} waited {:.1} s for room", crate::SERVICE_NAME, waited.elapsed().as_secs_f64());
         }
         let mut next = inner.next_id.lock().unwrap();
         *next += 1;

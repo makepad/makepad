@@ -73,6 +73,17 @@ impl Flux2TransformerWeights {
         Self::load_with(path, Flux2MlpArithmetic::AsStored)
     }
 
+    pub fn mlps(&self) -> Flux2MlpArithmetic {
+        self.mlps
+    }
+
+    /// Runs the next calls in `mlps`. Each arithmetic keeps its weights in
+    /// the cache under its own keys, so switching back and forth uploads
+    /// each set once and then holds both.
+    pub fn set_mlps(&mut self, mlps: Flux2MlpArithmetic) {
+        self.mlps = mlps;
+    }
+
     pub fn load_with(path: impl AsRef<Path>, mlps: Flux2MlpArithmetic) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = Flux2WeightFile::load(&path)?;

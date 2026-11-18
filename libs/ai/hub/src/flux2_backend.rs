@@ -5,14 +5,14 @@
 //!   (euler, 20 steps, guidance 4.0, 1024px default).
 
 use crate::backend::{
-    img2img_start_step, ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams,
-    LiveFrameIn, LiveFrameOut, ProgressSink, RgbImage,
+    img2img_start_step, Arithmetic, ArtifactData, BackendCtx, CancelToken, ContentBackend,
+    GenerateParams, LiveFrameIn, LiveFrameOut, ProgressSink, RgbImage,
 };
 use crate::error::AssetAiError;
 use makepad_ai_common::backend::gpu_device_available;
 use makepad_ai_flux::flux2_pipeline::{
     flux2_dev_paths_from_root, flux2_klein_paths_from_root, Flux2DevPipeline, Flux2EditRequest,
-    Flux2GenerateRequest, Flux2Img2Img, Flux2KleinPipeline, FLUX2_DEV_DEFAULT_GUIDANCE,
+    Flux2GenerateRequest, Flux2Img2Img, Flux2KleinArithmetic, Flux2KleinPipeline, FLUX2_DEV_DEFAULT_GUIDANCE,
     FLUX2_DEV_DEFAULT_SIZE, FLUX2_DEV_DEFAULT_STEPS,
 };
 use makepad_ai_flux::flux2_vae::{flux2_image_from_rgb_u8, flux2_image_to_rgb_u8};
@@ -164,6 +164,12 @@ impl ContentBackend for Flux2Backend {
             .pipeline
             .as_mut()
             .ok_or_else(|| AssetAiError::Backend(format!("{model_id} not loaded")))?;
+        // A job runs as stored, over the whole text window, whatever a live
+        // session ran in before it.
+        if let Flux2Pipeline::Klein(pipe) = pipe {
+            pipe.set_arithmetic(Flux2KleinArithmetic::AS_STORED);
+            pipe.set_text_rows(None);
+        }
         match pipe {
             // A reference image makes dev an instruction editor (same
             // multi-reference mechanism as klein, dev's conditioning +
@@ -397,6 +403,12 @@ impl ContentBackend for Flux2Backend {
             Flux2Pipeline::Klein(pipe) => pipe,
         };
         let config = frame.config;
+        let arithmetic = match config.arithmetic {
+            Arithmetic::Stored => Flux2KleinArithmetic::AS_STORED,
+            Arithmetic::Fast => Flux2KleinArithmetic::LIVE,
+        };
+        pipe.set_arithmetic(arithmetic);
+        pipe.set_text_rows(config.text_rows);
         let conditioning = frame.anchor.or(frame.init).ok_or_else(|| {
             AssetAiError::Params(
                 "flux2-klein-4b live mode needs an init image (feed: the latest input frame) or an \
@@ -501,6 +513,11 @@ impl ContentBackend for Flux2Backend {
             aux_json: None,
             model_ms: start.elapsed().as_secs_f64() * 1000.0,
             text_encode_ms: if embeds_cached { 0.0 } else { result.te_ms },
+            // The reference's VAE encode (a feed's init shares it), the
+            // transformer steps, and the VAE decode.
+            encode_ms: result.encode_ms,
+            denoise_ms: result.warm_ms,
+            decode_ms: result.decode_ms,
         })
     }
 }

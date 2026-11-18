@@ -382,6 +382,9 @@ impl ContentBackend for BodyNativeBackend {
             aux_json: Some(packet),
             model_ms: start.elapsed().as_secs_f64() * 1000.0,
             text_encode_ms: 0.0,
+            encode_ms: 0.0,
+            denoise_ms: 0.0,
+            decode_ms: 0.0,
         })
     }
 }

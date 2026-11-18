@@ -265,19 +265,27 @@ pub struct Resident {
     pub mb: u64,
     /// A job runs on it now: it is not dropped.
     pub busy: bool,
+    /// A client holds it (`crate::residency::Holds`): it goes after the
+    /// others and after a context cut.
+    pub held: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     ShrinkContext { model: String, from: u32, to: u32, frees_mb: u64 },
     Unload { model: String, frees_mb: u64 },
+    /// A side model a client holds: after the others and a context cut.
+    UnloadHeld { model: String, frees_mb: u64 },
     UnloadChat { model: String, frees_mb: u64 },
 }
 
 impl Step {
     pub fn frees_mb(&self) -> u64 {
         match self {
-            Step::ShrinkContext { frees_mb, .. } | Step::Unload { frees_mb, .. } | Step::UnloadChat { frees_mb, .. } => *frees_mb,
+            Step::ShrinkContext { frees_mb, .. }
+            | Step::Unload { frees_mb, .. }
+            | Step::UnloadHeld { frees_mb, .. }
+            | Step::UnloadChat { frees_mb, .. } => *frees_mb,
         }
     }
 
@@ -285,6 +293,7 @@ impl Step {
         match self {
             Step::ShrinkContext { model, from, to, frees_mb } => format!("{model} context {from} -> {to} (~{frees_mb} MB)"),
             Step::Unload { model, frees_mb } => format!("unload idle {model} (~{frees_mb} MB)"),
+            Step::UnloadHeld { model, frees_mb } => format!("unload held {model} (~{frees_mb} MB)"),
             Step::UnloadChat { model, frees_mb } => format!("unload chat model {model} (~{frees_mb} MB)"),
         }
     }
@@ -302,8 +311,8 @@ pub struct Plan {
 /// first; they load again on their next request and the chat model is not
 /// touched), then ONE context cut that frees what is still missing plus
 /// [`HEADROOM_MB`] (so a second cut right after is not needed; never under
-/// [`YIELD_FLOOR`]), and the chat model itself only when `allow_unload` and
-/// still short.
+/// [`YIELD_FLOOR`]), then idle side models a client holds, and the chat model
+/// itself only when `allow_unload` and still short.
 pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, allow_unload: bool) -> Plan {
     let mut out = Plan::default();
     if wanted_mb == 0 {
@@ -311,6 +320,7 @@ pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, al
     }
     let mut idle: Vec<&Resident> = residents.iter().filter(|r| !r.busy && r.mb > 0).collect();
     idle.sort_by(|a, b| b.mb.cmp(&a.mb).then_with(|| a.model.cmp(&b.model)));
+    let (held, idle): (Vec<&Resident>, Vec<&Resident>) = idle.into_iter().partition(|r| r.held);
     for r in idle {
         if out.frees_mb >= wanted_mb {
             break;
@@ -331,6 +341,13 @@ pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, al
             }
         }
     }
+    for r in held {
+        if out.frees_mb >= wanted_mb {
+            break;
+        }
+        out.steps.push(Step::UnloadHeld { model: r.model.clone(), frees_mb: r.mb });
+        out.frees_mb += r.mb;
+    }
     if out.frees_mb < wanted_mb && allow_unload {
         if let Some(chat) = chat {
             // The whole model goes: a context cut before it would only
@@ -344,6 +361,40 @@ pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, al
     }
     out.short_mb = wanted_mb.saturating_sub(out.frees_mb);
     out
+}
+
+/// What a yield still has to free when it runs. The UI asked for `asked_mb`
+/// more than the device had free then (`free_when_asked`); what came free
+/// since (`free_now`, a fresh reading: a live loop gave its kept memory
+/// back, a session ended while the yield waited behind it) counts toward
+/// it. Without both readings, the whole ask.
+pub fn still_wanted_mb(asked_mb: u64, free_when_asked: Option<u64>, free_now: Option<u64>) -> u64 {
+    match (free_when_asked, free_now) {
+        (Some(then), Some(now)) => (then + asked_mb).saturating_sub(now),
+        _ => asked_mb,
+    }
+}
+
+/// A yield's report: what the UI asked for, what it still needed when the
+/// yield ran (`wanted_mb`, [`still_wanted_mb`]), the steps done, what they
+/// freed and what is free now. The memory being free already is a plain yes.
+pub fn yield_report(asked_mb: u64, allow_unload: bool, wanted_mb: u64, done: &[String], freed_mb: Option<u64>, free_now_mb: Option<u64>, short_mb: u64) -> String {
+    let mb = |v: Option<u64>| v.map_or("?".to_string(), |v| v.to_string());
+    let asked = format!("yield {asked_mb} MB for the UI{}", if allow_unload { " (unload allowed)" } else { "" });
+    if wanted_mb == 0 {
+        return format!("{asked}: free already, {} MB free now; nothing to give", mb(free_now_mb));
+    }
+    let came_free = if wanted_mb < asked_mb { format!("{} MB came free since it was asked; ", asked_mb - wanted_mb) } else { String::new() };
+    let mut report = format!(
+        "{asked}: {came_free}{}; freed {} MB, {} MB free now",
+        if done.is_empty() { "nothing to give".to_string() } else { done.join(", ") },
+        mb(freed_mb),
+        mb(free_now_mb),
+    );
+    if short_mb > 0 {
+        report.push_str(&format!("; {short_mb} MB short"));
+    }
+    report
 }
 
 /// The window a chat session may be built with when `free_mb` is free
@@ -448,7 +499,19 @@ mod tests {
     }
 
     fn side(model: &str, mb: u64, busy: bool) -> Resident {
-        Resident { model: model.into(), mb, busy }
+        Resident { model: model.into(), mb, busy, held: false }
+    }
+
+    #[test]
+    fn a_held_model_goes_after_the_others_and_a_context_cut() {
+        let held = Resident { held: true, ..side("flux", 9000, false) };
+        let p = plan(Some(&qwen()), &[held.clone(), side("whisper", 1700, false)], 1500, false);
+        assert_eq!(p.steps, vec![Step::Unload { model: "whisper".into(), frees_mb: 1700 }], "an unheld model first, though smaller");
+        let p = plan(Some(&qwen()), &[held.clone()], 500, false);
+        assert!(matches!(p.steps.as_slice(), [Step::ShrinkContext { .. }]), "a context cut before a held model: {:?}", p.steps);
+        let p = plan(None, &[held], 3000, false);
+        assert_eq!(p.steps, vec![Step::UnloadHeld { model: "flux".into(), frees_mb: 9000 }], "and the held model when the UI still needs it");
+        assert_eq!(p.short_mb, 0);
     }
 
     #[test]
@@ -516,6 +579,30 @@ mod tests {
             Step::UnloadChat { model: "qwen3.8-27b".into(), frees_mb: 20_878 },
         ]);
         assert_eq!((p.frees_mb, p.short_mb), (21_278, 0));
+    }
+
+    #[test]
+    fn a_yield_for_memory_that_is_free_already_is_a_plain_yes() {
+        // The UI asked for 1024 MB with 10 350 MB free; the yield waited
+        // behind a live loop, which ended, and 16 812 MB are free when it runs.
+        let wanted = still_wanted_mb(1024, Some(10_350), Some(16_812));
+        assert_eq!(wanted, 0, "the memory the UI asked for is free");
+        let p = plan(None, &[side("flux2-klein-4b", 15_000, false)], wanted, true);
+        assert_eq!(p, Plan::default(), "nothing is unloaded for memory that is free");
+        let line = yield_report(1024, false, wanted, &[], Some(0), Some(16_812), p.short_mb);
+        assert_eq!(line, "yield 1024 MB for the UI: free already, 16812 MB free now; nothing to give");
+        // Part of it came free: only the rest is asked of the models.
+        let wanted = still_wanted_mb(4000, Some(1000), Some(3000));
+        assert_eq!(wanted, 2000, "what came free since counts");
+        let p = plan(None, &[side("kokoro", 400, false)], wanted, false);
+        let done: Vec<String> = p.steps.iter().map(Step::line).collect();
+        assert_eq!(
+            yield_report(4000, false, wanted, &done, Some(400), Some(3400), p.short_mb),
+            "yield 4000 MB for the UI: 2000 MB came free since it was asked; unload idle kokoro (~400 MB); freed 400 MB, 3400 MB free now; 1600 MB short"
+        );
+        // Without a reading at either end, the whole ask stands.
+        assert_eq!(still_wanted_mb(1024, None, Some(16_812)), 1024);
+        assert_eq!(still_wanted_mb(1024, Some(10_350), None), 1024);
     }
 
     #[test]

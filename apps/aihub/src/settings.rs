@@ -46,6 +46,16 @@ impl IdleOff {
         }
     }
 
+    /// The pill's segment: `15m`, `1h`, `4h`, `never`.
+    pub fn short(self) -> &'static str {
+        match self {
+            IdleOff::Min15 => "15m",
+            IdleOff::Hour1 => "1h",
+            IdleOff::Hour4 => "4h",
+            IdleOff::Never => "never",
+        }
+    }
+
     fn slug(self) -> &'static str {
         match self {
             IdleOff::Min15 => "15m",
@@ -120,6 +130,9 @@ pub struct Settings {
     /// The compute mode the hub runs under (the panel's Automatic / UI First / AI First /
     /// Unavailable picker), sent to the hub at each start.
     pub compute: makepad_ai_hub::activity::ComputeMode,
+    /// Read the coding CLIs' account usage (one warm Claude terminal and Codex app-server,
+    /// about every 10 min). On in the desktop app, off on a WM node.
+    pub usage: bool,
 }
 
 impl Default for Settings {
@@ -133,16 +146,20 @@ impl Default for Settings {
             port: DEFAULT_PORT,
             cache_dir: None,
             compute: makepad_ai_hub::activity::ComputeMode::Automatic,
+            usage: true,
         }
     }
 }
 
 impl Settings {
+    /// `MAKEPAD_AI_HUB_APP_CONF`, else under a test instance's own home (an absolute
+    /// `MAKEPAD_TEST_HOME`: a test never touches the machine's hub), else `~/.makepad/ai-hub`.
     pub fn path() -> PathBuf {
-        match std::env::var_os("MAKEPAD_AI_HUB_APP_CONF").filter(|p| !p.is_empty()) {
-            Some(path) => PathBuf::from(path),
-            None => makepad_ai_hub::home::makepad_home().join("ai-hub").join("app.conf"),
+        if let Some(path) = std::env::var_os("MAKEPAD_AI_HUB_APP_CONF").filter(|p| !p.is_empty()) {
+            return PathBuf::from(path);
         }
+        let home = std::env::var_os("MAKEPAD_TEST_HOME").map(PathBuf::from).filter(|h| h.is_absolute()).map(|h| h.join(".makepad"));
+        home.unwrap_or_else(makepad_ai_hub::home::makepad_home).join("ai-hub").join("app.conf")
     }
 
     /// The saved switches; without a file, the defaults (`node`: a WM node's hub serves its
@@ -156,7 +173,13 @@ impl Settings {
     pub fn node_defaults() -> Settings {
         let mut s = Settings::default();
         s.local = Service { on: true, idle_off: IdleOff::Never, auto_off_at: None };
+        s.usage = false;
         s
+    }
+
+    /// Where the app keeps its state: the settings' folder (the account usage histories too).
+    pub fn dir() -> PathBuf {
+        Self::path().parent().map(|p| p.to_path_buf()).unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -221,6 +244,7 @@ impl Settings {
             let (key, value) = (key.trim(), value.trim());
             match key {
                 "enabled" => s.enabled = on(value),
+                "usage" => s.usage = on(value),
                 "host" => s.host = value.to_string(),
                 "port" => s.port = value.parse().unwrap_or(DEFAULT_PORT),
                 "cache_dir" => s.cache_dir = (!value.is_empty()).then(|| PathBuf::from(value)),
@@ -246,7 +270,7 @@ impl Settings {
     pub fn render(&self) -> String {
         let flag = |b: bool| if b { "on" } else { "off" };
         let mut out = String::from("# AI Hub app settings (the app writes this file)\n");
-        out.push_str(&format!("enabled = {}\n", flag(self.enabled)));
+        out.push_str(&format!("enabled = {}\nusage = {}\n", flag(self.enabled), flag(self.usage)));
         for backend in Backend::ALL {
             let k = backend.key();
             let svc = self.service(backend);
@@ -312,6 +336,8 @@ mod tests {
     fn a_wm_nodes_first_start_serves_its_local_models_and_never_idles_them_off() {
         let s = Settings::node_defaults();
         assert!(s.enabled && s.local.on && !s.claude_lan.on && !s.claude_intake.on);
+        assert!(!s.usage, "a node starts no Claude or Codex CLI to read usage");
+        assert!(Settings::default().usage, "the desktop app reads it");
         assert_eq!(s.local.idle_off, IdleOff::Never);
         assert_eq!(s.offered(), vec![Backend::Local]);
     }
@@ -326,6 +352,7 @@ mod tests {
         s.host = "192.0.2.91".into();
         s.cache_dir = Some(PathBuf::from("/tmp/x"));
         s.compute = makepad_ai_hub::activity::ComputeMode::UiFirst;
+        s.usage = false;
         assert_eq!(Settings::parse(&s.render()), s);
         assert_eq!(s.offered(), vec![Backend::ClaudeIntake], "the PR-review switch alone");
         s.enabled = false;

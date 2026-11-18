@@ -44,6 +44,17 @@ pub struct Flux2KleinPipeline {
     pub text_prepared: Flux2KleinTextPrepared,
     pub tokenizer: makepad_ai_h3::h3_tokenizer::H3Tokenizer,
     pub vae: Flux2VaeWeights,
+    /// See [`Self::set_text_rows`].
+    text_rows: Option<usize>,
+}
+
+/// How many of a prompt's conditioning rows the DiT reads, of a `window`
+/// whose first `real` rows are the prompt's own tokens: those always, then
+/// pad rows up to `asked` (`Some(0)`: the prompt's tokens alone); `None`,
+/// the whole window. The text ids count from 0 and the pad rows only see
+/// the prompt, so a shorter window is the longer one's first rows.
+fn flux2_text_rows(asked: Option<usize>, real: usize, window: usize) -> usize {
+    asked.map_or(window, |rows| rows.max(real).min(window))
 }
 
 /// img2img init for the FLUX.2 samplers (Klein edit, dev generate/edit): the
@@ -186,7 +197,8 @@ impl Flux2EditResult {
     }
 }
 
-/// How a klein pipeline runs where its arithmetic has a choice.
+/// How a klein pipeline runs where its arithmetic has a choice: chosen at
+/// load, and again for any later call (`set_arithmetic`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flux2KleinArithmetic {
     pub mlps: Flux2MlpArithmetic,
@@ -196,14 +208,28 @@ pub struct Flux2KleinArithmetic {
 impl Flux2KleinArithmetic {
     /// The checkpoint's own, on CUDA alone: what `load` runs.
     pub const AS_STORED: Self = Self { mlps: Flux2MlpArithmetic::AsStored, vae_convs: Flux2VaeConvs::Gemm };
-    /// A live loop's: the DiT's MLPs in FP8 and the VAE's convs on cuDNN,
-    /// speed over the last bits.
-    pub const LIVE: Self = Self { mlps: Flux2MlpArithmetic::Fp8, vae_convs: Flux2VaeConvs::Cudnn };
+    /// A live loop's: the DiT's MLPs in FP8 and the VAE's convs on our f16
+    /// tensor-core GEMM, speed over the last bits; nothing beside CUDA (the
+    /// convs as GEMMs on a GPU before sm_80, see `Flux2VaeConvs::F16Mma`).
+    pub const LIVE: Self = Self { mlps: Flux2MlpArithmetic::Fp8, vae_convs: Flux2VaeConvs::F16Mma };
 }
 
 impl Flux2KleinPipeline {
     pub fn load(paths: Flux2KleinPaths) -> Result<Self> {
         Self::load_with(paths, Flux2KleinArithmetic::AS_STORED)
+    }
+
+    pub fn arithmetic(&self) -> Flux2KleinArithmetic {
+        Flux2KleinArithmetic { mlps: self.transformer.mlps(), vae_convs: self.vae.convs() }
+    }
+
+    /// The next calls run in `arithmetic`, on the weights already loaded:
+    /// each arithmetic's GPU weights sit under their own cache keys, so a
+    /// pipeline that serves both (a live loop beside stored-precision jobs)
+    /// uploads each set once and then holds both.
+    pub fn set_arithmetic(&mut self, arithmetic: Flux2KleinArithmetic) {
+        self.vae.set_convs(arithmetic.vae_convs);
+        self.transformer.set_mlps(arithmetic.mlps);
     }
 
     /// `load` with its arithmetic chosen (see `Flux2KleinArithmetic`).
@@ -213,7 +239,6 @@ impl Flux2KleinPipeline {
                 "flux2-klein-4b requires CUDA (MAKEPAD_GGML_REQUIRE_CUDA=1)",
             ));
         }
-        // First: what it needs beside CUDA is asked for before anything big loads.
         let vae = Flux2VaeWeights::load_with(&paths.vae, arithmetic.vae_convs)?;
         let tokenizer = flux2_klein_tokenizer_load(&paths.tokenizer)?;
         let text_encoder = Flux2WeightFile::load(&paths.text_encoder)?;
@@ -232,7 +257,20 @@ impl Flux2KleinPipeline {
             text_prepared,
             tokenizer,
             vae,
+            text_rows: None,
         })
+    }
+
+    /// The next calls' DiT reads this many of the prompt's 512
+    /// conditioning rows (see `flux2_text_rows`): `None`, all of them, as
+    /// the reference does; fewer is less work every step, the pad rows it
+    /// drops carrying only what the prompt's own rows already say.
+    pub fn set_text_rows(&mut self, rows: Option<usize>) {
+        self.text_rows = rows;
+    }
+
+    pub fn text_rows(&self) -> Option<usize> {
+        self.text_rows
     }
 
     pub fn edit(&mut self, request: &Flux2EditRequest) -> Result<Flux2EditResult> {
@@ -304,7 +342,10 @@ impl Flux2KleinPipeline {
             .iter()
             .map(|(tokens, ids, _)| (tokens.clone(), ids.clone()))
             .collect();
-        let txt_ids = flux2_text_ids(tokenized.token_ids.len());
+        let window = tokenized.token_ids.len();
+        let rows = flux2_text_rows(self.text_rows, tokenized.real_len, window);
+        let txt_ids = flux2_text_ids(rows);
+        let txt_tokens = &prompt_embeds[..prompt_embeds.len() / window * rows];
         let sigmas = flux2_schedule(request.steps, gen_tokens)?;
         let start_step = match &request.init {
             Some(init) => {
@@ -331,7 +372,7 @@ impl Flux2KleinPipeline {
                 &self.transformer,
                 &img_tokens,
                 &img_ids,
-                &prompt_embeds,
+                txt_tokens,
                 &txt_ids,
                 sigmas[step],
                 None,
@@ -1047,5 +1088,19 @@ pub fn flux2_require_cuda() -> Result<()> {
         Err(DiffusionError::workflow(
             "flux2-klein-4b is CUDA-only; refusing CPU/Metal fallback",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flux2_text_rows;
+
+    #[test]
+    fn the_text_rows_keep_the_whole_prompt_inside_the_window() {
+        assert_eq!(flux2_text_rows(None, 40, 512), 512, "none asked: the whole window");
+        assert_eq!(flux2_text_rows(Some(128), 40, 512), 128, "pad rows up to the rows asked");
+        assert_eq!(flux2_text_rows(Some(0), 40, 512), 40, "0: the prompt's own tokens alone");
+        assert_eq!(flux2_text_rows(Some(64), 200, 512), 200, "never fewer than the prompt's tokens");
+        assert_eq!(flux2_text_rows(Some(4096), 40, 512), 512, "never past the window");
     }
 }

@@ -660,6 +660,7 @@ mod tests {
             delay_ms: 0,
             pull_only: false,
             stream: false,
+            memory_only: false,
             control: None,
             input_bytes: vec![1, 2, 3],
             input_content_type: "image/png".to_string(),

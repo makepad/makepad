@@ -726,23 +726,6 @@ fn prepare_nchw_strided_math(
     })
 }
 
-pub fn prepare_nchw_strided_f16(
-    n: i32,
-    c_in: i32,
-    c_out: i32,
-    h: i32,
-    w: i32,
-    kh: i32,
-    kw: i32,
-    pad_h: i32,
-    pad_w: i32,
-    stream: cudaStream_t,
-) -> Result<ConvDesc, String> {
-    prepare_nchw_strided(
-        n, c_in, c_out, h, w, h, w, kh, kw, pad_h, pad_w, 1, 1, CUDNN_DATA_HALF, stream,
-    )
-}
-
 pub fn prepare_nchw_strided_f32(
     n: i32,
     c_in: i32,

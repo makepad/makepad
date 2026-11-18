@@ -1404,6 +1404,9 @@ pub fn run_live(
                     prep: prep_ms,
                     model: out.model_ms,
                     text_encode: out.text_encode_ms,
+                    encode: out.encode_ms,
+                    denoise: out.denoise_ms,
+                    decode: out.decode_ms,
                     post: post_ms,
                 },
                 frames_in,
@@ -1718,6 +1721,15 @@ mod tests {
         assert_eq!(params.config.camera, CameraMotion::feedback_default());
         assert_eq!(params.config.noise_mode.resolve(LoopMode::Feedback), NoiseMode::Hold);
         assert_eq!(params.config.noise_mode.resolve(LoopMode::Feed), NoiseMode::Reroll);
+        assert_eq!(params.config.arithmetic, crate::backend::Arithmetic::Stored, "a session computes as stored unless asked");
+
+        let fast = RealtimeRequestJson { model: "testpattern".to_string(), arithmetic: Some("fast".to_string()), ..Default::default() };
+        assert_eq!(LiveParams::from_request(&fast).unwrap().config.arithmetic, crate::backend::Arithmetic::Fast);
+        let unknown = RealtimeRequestJson { model: "testpattern".to_string(), arithmetic: Some("quick".to_string()), ..Default::default() };
+        assert!(LiveParams::from_request(&unknown).is_err(), "an unknown arithmetic is refused, never run as another");
+        assert_eq!(params.config.text_rows, None, "a session reads the whole text window unless asked");
+        let short = RealtimeRequestJson { model: "testpattern".to_string(), text_rows: Some(64), ..Default::default() };
+        assert_eq!(LiveParams::from_request(&short).unwrap().config.text_rows, Some(64));
     }
 
     #[test]
@@ -2051,6 +2063,9 @@ mod tests {
                 aux_json: None,
                 model_ms: 0.1,
                 text_encode_ms: 0.0,
+                encode_ms: 0.0,
+                denoise_ms: 0.0,
+                decode_ms: 0.0,
             })
         }
     }

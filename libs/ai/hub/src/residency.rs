@@ -19,6 +19,11 @@
 //! - a classified CUDA OOM evicts everything else once and retries once;
 //!   there is NO silent CPU/Python/other-node fallback — the second failure
 //!   is the job's explicit error;
+//! - a client can hold a model for a while (`POST /control/model {"action":
+//!   "hold"}`, [`Holds`]): held, it is kept like a pin until its holders
+//!   release it or stop renewing, and it still goes when a load cannot find
+//!   the memory otherwise or the UI asks for memory, with a log line naming
+//!   its holders;
 //! - unified memory uses the figures to choose evictions and window sizes;
 //!   after reclamation it admits even beyond the recommended working set;
 //! - machines without a memory probe skip the byte gating but keep the
@@ -30,8 +35,9 @@
 use crate::error::AssetAiError;
 use crate::gpu::query_gpu;
 use crate::registry::ModelSpec;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Default admission safety reserve on top of a model's estimated peak.
@@ -153,6 +159,65 @@ pub fn insufficient_vram_message(
     format!(
         "insufficient VRAM for {model_id}: need {need_mb} MB (estimate {estimate_mb} MB + reserve {reserve_mb} MB), only {free_mb} MB free after evicting every resident and releasing {released_pool_mb} MB of cached pool — refusing to load (no CPU/other-node fallback)"
     )
+}
+
+/// The longest a hold lasts without a renewal: a holder that went away
+/// without releasing its model frees it after this at the latest.
+pub const MAX_HOLD: Duration = Duration::from_secs(600);
+
+/// Models clients keep resident for a while, say an app whose people are
+/// about to use it again any moment. Per model, its holders and until when.
+/// A held model is kept like a pin: a switch to another model loads beside
+/// it, and idle eviction passes it by. It still goes when a load cannot find
+/// the memory otherwise, or when the UI asks for memory.
+#[derive(Debug, Default)]
+pub struct Holds(Mutex<HashMap<String, HashMap<String, Instant>>>);
+
+impl Holds {
+    /// `holder` keeps `model` for `time` (at most [`MAX_HOLD`]) from now on.
+    /// True when the holder did not hold it already (not a renewal).
+    pub fn hold(&self, model: &str, holder: &str, time: Duration) -> bool {
+        self.hold_at(model, holder, time, Instant::now())
+    }
+
+    fn hold_at(&self, model: &str, holder: &str, time: Duration, now: Instant) -> bool {
+        let mut holds = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        prune(&mut holds, now);
+        holds.entry(model.to_string()).or_default().insert(holder.to_string(), now + time.min(MAX_HOLD)).is_none()
+    }
+
+    /// `holder` lets `model` go; true when it held it.
+    pub fn release(&self, model: &str, holder: &str) -> bool {
+        let mut holds = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        prune(&mut holds, Instant::now());
+        let released = holds.get_mut(model).is_some_and(|by| by.remove(holder).is_some());
+        holds.retain(|_, by| !by.is_empty());
+        released
+    }
+
+    /// Who holds `model` now, by name.
+    pub fn holders(&self, model: &str) -> Vec<String> {
+        self.holders_at(model, Instant::now())
+    }
+
+    fn holders_at(&self, model: &str, now: Instant) -> Vec<String> {
+        let holds = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut holders: Vec<String> =
+            holds.get(model).map(|by| by.iter().filter(|(_, until)| **until > now).map(|(holder, _)| holder.clone()).collect()).unwrap_or_default();
+        holders.sort();
+        holders
+    }
+
+    pub fn held(&self, model: &str) -> bool {
+        !self.holders(model).is_empty()
+    }
+}
+
+fn prune(holds: &mut HashMap<String, HashMap<String, Instant>>, now: Instant) {
+    holds.retain(|_, by| {
+        by.retain(|_, until| *until > now);
+        !by.is_empty()
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -376,6 +441,27 @@ fn wait_for_admission_with(
 mod tests {
     use super::*;
     use crate::registry::Domain;
+
+    #[test]
+    fn a_hold_lasts_until_released_or_its_time_runs_out() {
+        let holds = Holds::default();
+        let now = Instant::now();
+        assert!(holds.hold_at("flux", "party", Duration::from_secs(120), now), "a new hold");
+        assert!(!holds.hold_at("flux", "party", Duration::from_secs(120), now), "the same holder renews");
+        assert!(holds.hold_at("flux", "stage", Duration::from_secs(30), now), "a second holder");
+        assert_eq!(holds.holders_at("flux", now), vec!["party".to_string(), "stage".to_string()]);
+        assert_eq!(holds.holders_at("flux", now + Duration::from_secs(60)), vec!["party".to_string()], "a hold not renewed runs out");
+        assert!(holds.holders_at("flux", now + Duration::from_secs(121)).is_empty(), "and so does the other");
+        assert!(holds.holders_at("whisper", now).is_empty(), "nobody holds another model");
+        holds.hold_at("flux", "party", Duration::from_secs(3600), now);
+        assert!(holds.holders_at("flux", now + MAX_HOLD + Duration::from_secs(1)).is_empty(), "no hold outlasts MAX_HOLD without a renewal");
+        holds.hold("flux", "party", Duration::from_secs(120));
+        assert!(holds.release("flux", "party"), "a release says it held");
+        assert!(!holds.release("flux", "party"), "a second release has nothing to let go");
+        assert_eq!(holds.holders("flux"), vec!["stage".to_string()], "the other holder keeps it");
+        assert!(holds.release("flux", "stage"));
+        assert!(!holds.held("flux"));
+    }
 
     #[test]
     fn an_admission_wait_ends_when_free_memory_stops_rising() {

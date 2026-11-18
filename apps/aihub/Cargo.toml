@@ -54,3 +54,8 @@ makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, feature
 makepad-compute-program-gpu = { path = "../../libs/compute_program_gpu" }
 makepad-network = { path = "../../platform/network" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-civil-time = { path = "../../libs/civil_time" }
+
+# The usage readers' warm Claude terminal: a PTY and a terminal emulator.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+makepad-agents = { path = "../../tools/agents" }

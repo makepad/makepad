@@ -1046,6 +1046,7 @@ pub(crate) mod tests {
             text: String::new(),
             voice: String::new(),
             stream: false,
+            memory_only: false,
             language: String::new(),
             request_domain: String::new(),
             speed: 1.0,

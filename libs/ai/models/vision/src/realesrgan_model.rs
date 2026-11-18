@@ -9,7 +9,7 @@ use crate::backend::WeightOwner;
 use std::sync::Arc;
 use crate::backend::{
     gpu_add, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_device_available,
-    gpu_download, gpu_realesrgan_alloc_f16, gpu_realesrgan_alloc_f32,
+    gpu_download, gpu_mma_available, gpu_realesrgan_alloc_f16, gpu_realesrgan_alloc_f32,
     gpu_realesrgan_bias_lrelu_f16, gpu_realesrgan_bias_lrelu_f32,
     gpu_realesrgan_conv3x3_f16, gpu_realesrgan_conv3x3_f32, gpu_realesrgan_lrelu,
     gpu_realesrgan_quantize_rgb8_f32, gpu_realesrgan_scale_add,
@@ -50,13 +50,20 @@ enum ForwardOutput {
     Rgb8(Vec<u8>),
 }
 
-/// Default is the cuDNN f16 fast path (the official CUDA forward is fp16).
-/// `MAKEPAD_REALESRGAN_MODE=reference` selects the f32 planar validation path.
+/// Default is the f16 fast path (the official CUDA forward is fp16): its
+/// dense blocks on tensor-core mma, so a GPU without it (before sm_80) runs
+/// the f32 planar path, said once. `MAKEPAD_REALESRGAN_MODE=reference`
+/// selects that path anyway, for validation.
 fn fast_mode_enabled() -> bool {
-    match std::env::var("MAKEPAD_REALESRGAN_MODE") {
-        Ok(value) => value != "reference",
-        Err(_) => true,
+    if std::env::var("MAKEPAD_REALESRGAN_MODE").is_ok_and(|value| value == "reference") {
+        return false;
     }
+    if !gpu_mma_available() {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| eprintln!("realesrgan: this GPU has no tensor-core mma (sm_80 and later); upscales run the f32 planar path"));
+        return false;
+    }
+    true
 }
 
 /// Prepared host-side checkpoint.  Convolution tensors stay f32; the shared
@@ -187,8 +194,9 @@ impl RealEsrganModel {
         }
     }
 
-    /// cuDNN fast forward.  All 345 dense-block convolutions run in f16 over
-    /// one persistent 256-row planar buffer: with batch 1 a planar row block
+    /// Fast forward.  All 345 dense-block convolutions run in f16 on our
+    /// tensor-core conv (f32 sums) over one persistent 256-row planar
+    /// buffer: with batch 1 a planar row block
     /// is a contiguous NCHW tensor, so every "concat" in the released graph
     /// is a pointer offset and the epilogue kernels fold bias/LeakyReLU/
     /// residual scaling in place.  Zero concat copies, zero im2col slabs.

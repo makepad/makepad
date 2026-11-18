@@ -105,3 +105,8 @@ path = "src/bin/llama_reset_probe.rs"
 [package.metadata.relax]
 # reads the GPU kernel builds' outputs: stays with them
 build-script = "keep"
+
+# the test targets only a Mac can fail: the mac bucket runs them after the landings that reach them
+# (tools/run/fixture/affected.py macos_tests); the Linux buckets build them empty
+[package.metadata.makepad.macos-tests]
+"test:metal_op_parity" = "the ops through the real Metal executor against the CPU reference (cfg macos)"

@@ -25,6 +25,10 @@ mod login;
 mod serve;
 mod settings;
 mod tray;
+mod usage;
+mod usage_claude;
+mod usage_codex;
+mod usage_history;
 mod view;
 
 use makepad_ai_hub::node_conf::{NodeConf, NODE_CONF_ENV};
@@ -35,6 +39,8 @@ use makepad_shell_kit::tray_app::TrayDropdown;
 use makepad_widgets::*;
 use serve::{Phase, Plan, Published, Serve};
 use settings::{apply_idle_offs, Backend, Settings};
+use std::sync::Arc;
+use usage::{ProviderState, UsageWorker};
 use view::{HubAppAction, HubAppView, ViewState};
 
 app_main!(App);
@@ -100,6 +106,11 @@ struct Hub {
     tray_key: String,
     /// A WM node's hub: its `ai-hub.conf` (path and what it said at start).
     node: Option<(PathBuf, NodeConf)>,
+    /// The coding CLIs' usage readers while the Usage switch is on, and what each last said.
+    usage: Option<UsageWorker>,
+    usage_states: Vec<Arc<ProviderState>>,
+    /// The minute the panel last drew its reset countdowns in.
+    usage_minute: u64,
 }
 
 /// What the dropdown does, for a tray selftest (`MAKEPAD_TRAY_SELFTEST`) to read.
@@ -122,7 +133,37 @@ impl Hub {
         let serve = Serve::start();
         serve.plan(Plan::of(&settings, node.as_ref().map(|(_, c)| c)));
         let now = now_ms();
-        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: Backend::ALL.map(|b| (b, now)), last_seq: u64::MAX, tray_key: String::new(), node }
+        let usage = settings.usage.then(|| UsageWorker::start(cx, &Settings::dir()));
+        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: Backend::ALL.map(|b| (b, now)), last_seq: u64::MAX, tray_key: String::new(), node, usage, usage_states: Vec::new(), usage_minute: 0 }
+    }
+
+    /// The Usage switch: on starts the readers (one warm CLI per tool), off ends them.
+    fn set_usage(&mut self, cx: &mut Cx, on: bool) {
+        self.settings.usage = on;
+        self.usage = on.then(|| UsageWorker::start(cx, &Settings::dir()));
+        self.usage_states.clear();
+        if let Err(e) = self.settings.save() {
+            log!("aihub: settings not saved: {e}");
+        }
+    }
+
+    /// The usage workers' new states; true when one changed, or a minute passed (the panel's
+    /// countdowns).
+    fn poll_usage(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(worker) = self.usage.as_mut() {
+            for state in worker.poll() {
+                self.usage_states.retain(|s| s.provider != state.provider);
+                self.usage_states.push(state);
+                changed = true;
+            }
+        }
+        let minute = now_ms() / 60_000;
+        if self.usage.is_some() && minute != self.usage_minute {
+            self.usage_minute = minute;
+            changed = true;
+        }
+        changed
     }
 
     fn plan(&self) -> Plan {
@@ -253,6 +294,7 @@ impl App {
         let Some(hub) = self.hub.as_mut() else { return };
         let p = hub.serve.published();
         let turned_off = hub.idle_check(&p);
+        let usage_changed = hub.poll_usage();
         // The tray: set only when what it shows changed.
         let (glyph, status) = hub.status(&p);
         let key = format!("{glyph:?}|{status}|{}", hub.settings.render());
@@ -260,7 +302,7 @@ impl App {
             hub.tray_key = key;
             cx.set_tray(tray::icon(&hub.settings, glyph, &status, !(cfg!(target_os = "linux") && cx.desktop_has_tray_dropdown())));
         }
-        if !(force || turned_off || p.seq != hub.last_seq || glyph == tray::Glyph::Working) {
+        if !(force || turned_off || usage_changed || p.seq != hub.last_seq || glyph == tray::Glyph::Working) {
             return;
         }
         hub.last_seq = p.seq;
@@ -272,7 +314,7 @@ impl App {
         if let Some((_, conf)) = &hub.node {
             settings.compute = conf.compute;
         }
-        let state = ViewState { settings, off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms(), login: login::state() };
+        let state = ViewState { settings, off_at: hub.off_at(&p), published: p, snapshot, now_ms: now_ms(), login: login::state(), usage: hub.usage_states.clone() };
         // only what shows draws; opening either refreshes it first
         if self.dropdown.is_open() {
             if let Some(mut v) = self.ui.widget(cx, ids!(drop_view)).borrow_mut::<HubAppView>() {
@@ -370,6 +412,11 @@ impl MatchEvent for App {
             self.ui.window(cx, ids!(main_window)).show(cx);
             self.refresh(cx, true);
         }
+        // `MAKEPAD_AI_HUB_OPEN=1`: the panel opens as a window at start (a frame grab, a check
+        // by hand), as devhub's `MAKEPAD_DEVHUB_OPEN`
+        if !self.window_shown && std::env::var_os("MAKEPAD_AI_HUB_OPEN").is_some_and(|v| v == "1") {
+            self.open_window(cx);
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -387,6 +434,17 @@ impl MatchEvent for App {
                     Ok(()) => selftest_note(&format!("open at login {}", if on { "on" } else { "off" })),
                     Err(e) => log!("aihub: open at login: {e}"),
                 },
+                HubAppAction::SetUsage(on) => hub.set_usage(cx, on),
+                HubAppAction::Reconnect(provider) => {
+                    if let Some(worker) = hub.usage.as_mut() {
+                        worker.reconnect(provider);
+                    }
+                }
+                HubAppAction::ResetLimits(provider, account) => {
+                    if let Some(worker) = hub.usage.as_mut() {
+                        worker.reset_limits(provider, account);
+                    }
+                }
                 HubAppAction::Hub(command) => self.hub_command(command),
                 HubAppAction::None => continue,
             }
@@ -413,6 +471,10 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let (Event::Signal, Some(gpu)) = (event, self.gpu.as_mut()) {
             gpu.handle(cx);
+        }
+        // a usage worker published: show it now rather than at the next tick
+        if matches!(event, Event::Signal) && self.hub.as_mut().is_some_and(|h| h.poll_usage()) {
+            self.refresh(cx, true);
         }
         match event {
             Event::Timer(t) if self.hub.as_ref().is_some_and(|h| h.timer.is_timer(t).is_some()) => self.refresh(cx, false),

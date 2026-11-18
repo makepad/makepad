@@ -284,6 +284,8 @@ struct StreamState {
     open: usize,
     /// Program opens answered, by request.
     opened: HashMap<u64, Result<(u64, Value), (u16, String)>>,
+    /// Program opens the node has wait for room, by request: why.
+    queued: HashMap<u64, String>,
     /// Opens their opener stopped waiting for, by request, and the way out: a session one of
     /// them still gets is cancelled as its answer comes.
     given_up: HashMap<u64, std::sync::mpsc::Sender<Vec<u8>>>,
@@ -330,16 +332,17 @@ impl KernelStream {
     }
 
     /// Opens `open` on the node: its session id and device, once the node answers or the stream
-    /// breaks; None once `stale` says yes first (asked every [`ASK_EVERY`] while the node says
-    /// nothing). The inputs the node keeps go by their hash; when it no longer keeps one it says
-    /// so, and they all go again.
-    pub(crate) fn program_open(&self, open: &wire::Open, threads: usize, stale: &mut dyn FnMut() -> bool) -> Result<Option<(u64, Value)>, AssetAiError> {
+    /// breaks; None once `wait` says yes first (asked every [`ASK_EVERY`] while the node says
+    /// nothing, and at once when the node says the open waits for room: it hears why). The inputs
+    /// the node keeps go by their hash; when it no longer keeps one it says so, and they all go
+    /// again.
+    pub(crate) fn program_open(&self, open: &wire::Open, threads: usize, wait: &mut dyn FnMut(Option<&str>) -> bool) -> Result<Option<(u64, Value)>, AssetAiError> {
         let kept: std::collections::HashSet<u128> = self.kept.lock().unwrap().values().flatten().copied().collect();
         let (payload, hashes) = wire::encode_open(open, threads, &|h| kept.contains(&h));
-        let opened = match self.open_request(&payload, stale)? {
+        let opened = match self.open_request(&payload, wait)? {
             Some(Err((wire::NOT_KEPT, _))) => {
                 self.kept.lock().unwrap().clear();
-                self.open_request(&wire::encode_open(open, threads, &|_| false).0, stale)?
+                self.open_request(&wire::encode_open(open, threads, &|_| false).0, wait)?
             }
             other => other,
         };
@@ -353,8 +356,8 @@ impl KernelStream {
         Ok(Some((id, device)))
     }
 
-    /// One `wire::OPEN` and the node's answer to it; None once `stale` says yes first.
-    fn open_request(&self, payload: &[u8], stale: &mut dyn FnMut() -> bool) -> Result<Option<Result<(u64, Value), (u16, String)>>, AssetAiError> {
+    /// One `wire::OPEN` and the node's answer to it; None once `wait` says yes first.
+    fn open_request(&self, payload: &[u8], wait: &mut dyn FnMut(Option<&str>) -> bool) -> Result<Option<Result<(u64, Value), (u16, String)>>, AssetAiError> {
         let request = {
             let mut s = self.shared.state.lock().unwrap();
             s.next_request += 1;
@@ -363,26 +366,35 @@ impl KernelStream {
         };
         self.send(wire::OPEN, request, payload)?;
         let mut ask = Instant::now() + ASK_EVERY;
+        // the node said the open waits, and the opener heard it
+        let mut told = false;
         let mut s = self.shared.state.lock().unwrap();
         loop {
             if let Some(r) = s.opened.remove(&request) {
+                s.queued.remove(&request);
                 return Ok(Some(r));
             }
             if let Some(why) = &s.closed {
-                return Err(AssetAiError::Http(format!("kernel stream: {why}")));
+                let e = AssetAiError::Http(format!("kernel stream: {why}"));
+                s.queued.remove(&request);
+                return Err(e);
             }
-            // other sessions' updates wake this too: the time to ask is its own
+            let queued = s.queued.get(&request).cloned();
+            // other sessions' updates wake this too: the time to ask is its own (or the node's
+            // word that the open waits, at once)
             let now = Instant::now();
-            if now < ask {
+            if now < ask && (told || queued.is_none()) {
                 s = self.shared.cv.wait_timeout(s, ask - now).unwrap().0;
                 continue;
             }
+            told |= queued.is_some();
             drop(s);
-            let gone = stale();
+            let gone = wait(queued.as_deref());
             ask = Instant::now() + ASK_EVERY;
             s = self.shared.state.lock().unwrap();
             if gone && !s.opened.contains_key(&request) && s.closed.is_none() {
                 s.given_up.insert(request, self.out.lock().unwrap().clone());
+                s.queued.remove(&request);
                 s.open = s.open.saturating_sub(1);
                 return Ok(None);
             }
@@ -473,6 +485,12 @@ fn stream_frame(shared: &StreamShared, frame: &[u8]) {
                 Err(_) => s.open = s.open.saturating_sub(1),
             }
             s.opened.insert(word, r);
+        }
+        wire::QUEUED => {
+            if !s.given_up.contains_key(&word) {
+                let why = wire::decode_queued(&frame[9..]).unwrap_or_else(|e| format!("(the node's word on it did not decode: {e})"));
+                s.queued.insert(word, why);
+            }
         }
         wire::UPDATE => {
             // Decoded by the session's taker, on its thread; a session the app dropped is gone.

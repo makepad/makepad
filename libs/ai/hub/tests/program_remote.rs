@@ -14,6 +14,11 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 fn node() -> (MutexGuard<'static, ()>, Arc<KernelStream>) {
     static TEST: Mutex<()> = Mutex::new(());
     let guard = TEST.lock().unwrap_or_else(|e| e.into_inner());
+    (guard, stream())
+}
+
+/// A stream of an app of this machine to the test's node.
+fn stream() -> Arc<KernelStream> {
     static URL: OnceLock<String> = OnceLock::new();
     let url = URL.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("makepad-ai-hub-program-{}", std::process::id()));
@@ -32,8 +37,7 @@ fn node() -> (MutexGuard<'static, ()>, Arc<KernelStream>) {
         std::mem::forget(handle);
         url
     });
-    let stream = KernelStream::open(&KernelNode::new(url)).unwrap();
-    (guard, Arc::new(stream))
+    Arc::new(KernelStream::open(&KernelNode::new(url)).unwrap())
 }
 
 fn n(x: f64) -> Value {
@@ -176,6 +180,44 @@ fn an_open_goes_stale_on_a_silent_node_and_a_late_session_is_cancelled() {
     assert!(matches!(opened, Ok(None)), "a stale open comes back with no session");
     gave_up.send(()).unwrap();
     assert_eq!(cancelled.recv_timeout(std::time::Duration::from_secs(5)), Ok(77));
+}
+
+/// No open is refused for the sessions open. One app holds more sessions than a node used to let a
+/// client hold (4, counted per machine credential, so every app of a machine shared them) or hold
+/// at all (16), and each opens and completes. An open past what the node runs at once waits, its
+/// opener hears so, and it opens as one ends. (Three apps on one hub, each with a grown part's two
+/// sessions, had the fifth open refused, and that part "could not grow", L1249194, 11-17.)
+#[test]
+fn an_app_opens_past_the_nodes_sessions_and_every_one_completes() {
+    use makepad_ai_hub::program_serve::MAX_SESSIONS;
+    let (_guard, stream) = node();
+    let program = Program::new("t.splash", "{run: fn(s, p) { s.wait_inbox() return 1 }}");
+    let held: Vec<RemoteSession> = (0..MAX_SESSIONS)
+        .map(|n| RemoteSession::open(&stream, &program, RemoteConfig::default()).unwrap_or_else(|e| panic!("session {n} was refused: {e:?}")))
+        .collect();
+    // one more: the node runs as many as it may, so this one waits, and its opener hears why
+    let (heard_tx, heard_rx) = std::sync::mpsc::channel();
+    let late = {
+        let (stream, program) = (stream.clone(), program.clone());
+        std::thread::spawn(move || {
+            RemoteSession::open_waiting(&stream, &program, RemoteConfig::default(), &mut |queued| {
+                if let Some(why) = queued {
+                    let _ = heard_tx.send(why.to_string());
+                }
+                false
+            })
+        })
+    };
+    let why = heard_rx.recv().expect("an open past the node's sessions hears that it waits");
+    assert!(!late.is_finished(), "it waits for room ({why})");
+    // one ends: the late one opens
+    held[0].send("go", Value::Nil);
+    assert_eq!(held[0].wait_end(), Ok(Value::Number(1.0)));
+    let late = late.join().unwrap().expect("the late open").expect("opened, not given up");
+    for (n, session) in held.iter().skip(1).chain([&late]).enumerate() {
+        session.send("go", Value::Nil);
+        assert_eq!(session.wait_end(), Ok(Value::Number(1.0)), "session {}", n + 1);
+    }
 }
 
 #[test]
