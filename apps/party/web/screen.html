@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Party screen</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #f1ece6; font: 18px/1.35 system-ui, sans-serif; }
+  body.still { cursor: none; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #join { position: fixed; right: 2.5vmin; bottom: 2.5vmin; display: flex; align-items: center; gap: 1.6vmin; padding: 1.4vmin; border-radius: 1.6vmin; background: rgba(0, 0, 0, .55); }
+  #join img { width: 12vmin; height: 12vmin; border-radius: .8vmin; display: block; }
+  #join p { margin: 0; font-size: 2vmin; max-width: 30vmin; overflow-wrap: anywhere; }
+  #join b { display: block; font-size: 2.6vmin; }
+  #join.big { right: 50%; bottom: 50%; transform: translate(50%, 50%); flex-direction: column; text-align: center; padding: 4vmin; background: transparent; }
+  #join.big img { width: 40vmin; height: 40vmin; border-radius: 1.6vmin; }
+  #join.big p { font-size: 3vmin; max-width: 80vmin; }
+  #join.big b { font-size: 5vmin; margin-bottom: 1vmin; }
+  #join.hidden, #bar.hidden { display: none; }
+  #bar { position: fixed; left: 0; bottom: 0; height: .6vmin; width: 0; background: #a58cff; transition: width .3s; }
+  #caption { position: fixed; left: 2.5vmin; bottom: 2.5vmin; padding: 1vmin 1.8vmin; border-radius: 1vmin; background: rgba(0, 0, 0, .55); font-size: 2.6vmin; }
+  #caption:empty { display: none; }
+  #note { position: fixed; left: 2.5vmin; top: 2.5vmin; font-size: 2vmin; opacity: .6; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar" class="hidden"></div>
+<div id="join" class="big hidden"><img id="qr" alt="The code to scan to join the party"><p><b id="join-title"></b><span id="join-text"></span></p></div>
+<div id="caption"></div>
+<div id="note"></div>
+<script>
+"use strict";
+// The party's screen: the loops guests put on it, redrawn by the box and
+// shown full screen at the size it drew them. A new redraw plays from its
+// first frame and grows as its frames come; a finished loop from the wall
+// comes in whole and fades in over the one before. A guest live on the
+// screen has it while their turn lasts: their camera redrawn as they move,
+// scaled up smoothly. Click for full screen.
+const base = location.pathname.replace(/\/screen\/*$/, "") + "/";
+const $ = id => document.getElementById(id);
+const canvas = $("c"), g = canvas.getContext("2d");
+// Behind a loop that does not fill the screen: the same picture, tiny and
+// stretched across it (a soft blur that costs nothing), darkened.
+const backdrop = document.createElement("canvas"), bg = backdrop.getContext("2d");
+backdrop.width = 32; backdrop.height = 18;
+const FADE = 700;
+// What plays: a take's pictures by frame index, played from frame 0 on as
+// far as they have come.
+let playing = { take: null, fps: 8, got: new Map(), i: 0, at: 0 };
+// A finished loop coming in whole before it replaces what plays.
+let incoming = null;
+// The loop before, fading out: { picture, loop, at }.
+let fading = null;
+let shown = null, dirty = true, streamRetry = 0, joinUrl = null;
+// A guest live on the screen: their newest redrawn frame; the loops wait.
+let liveOn = false, liveFrame = null, liveAsked = 0, liveGot = 0;
+
+function run(loop) {
+  const out = [];
+  while (loop.got.has(out.length)) out.push(loop.got.get(out.length));
+  return out;
+}
+
+function forget(loop) {
+  if (loop) for (const picture of loop.got.values()) picture.close();
+}
+
+function onState(s) {
+  showJoin(s.join);
+  $("caption").textContent = s.live || "";
+  if (s.live) {
+    liveOn = true;
+    $("bar").classList.add("hidden");
+    return showCard();
+  }
+  if (liveOn) {
+    // Their turn is over: their last frame fades out over the loops.
+    liveOn = false;
+    if (liveFrame) {
+      if (fading) forget(fading.loop);
+      fading = { picture: liveFrame, loop: null, at: performance.now() };
+    }
+    liveFrame = null;
+    dirty = true;
+  }
+  const bar = $("bar");
+  bar.classList.toggle("hidden", !s.drawing || !s.total);
+  if (s.drawing && s.total) bar.style.width = (100 * s.frames / s.total).toFixed(1) + "%";
+  if (s.take == null) {
+    // Nothing on the screen any more: the loop shown fades out.
+    forget(incoming);
+    incoming = null;
+    if (playing.take != null) retire(playing);
+    playing = { take: null, fps: 8, got: new Map(), i: 0, at: 0 };
+    return showCard();
+  }
+  if (s.take === playing.take) {
+    playing.fps = s.fps || 1;
+    forget(incoming);
+    incoming = null;
+    return;
+  }
+  if (!incoming || incoming.take !== s.take) {
+    forget(incoming);
+    incoming = { take: s.take, fps: s.fps || 1, got: new Map(), i: 0, at: 0 };
+  }
+  Object.assign(incoming, { fps: s.fps || 1, drawing: s.drawing, total: s.frames });
+  promote();
+}
+
+async function onFrame(payload) {
+  const at = new DataView(payload.buffer, payload.byteOffset, 6);
+  const take = at.getUint32(0), i = at.getUint16(4);
+  const loop = playing.take === take ? playing : incoming && incoming.take === take ? incoming : null;
+  if (!loop || loop.got.has(i)) return;
+  let picture;
+  try {
+    picture = await createImageBitmap(new Blob([payload.subarray(6)], { type: "image/jpeg" }));
+  } catch (e) {
+    return;
+  }
+  if ((loop !== playing && loop !== incoming) || loop.got.has(i)) return picture.close();
+  loop.got.set(i, picture);
+  if (loop === incoming) promote();
+  dirty = true;
+}
+
+async function onLive(payload) {
+  if (!liveOn) return;
+  const n = ++liveAsked;
+  let picture;
+  try {
+    picture = await createImageBitmap(new Blob([payload], { type: "image/jpeg" }));
+  } catch (e) {
+    return;
+  }
+  // A frame decoded after a newer one, or after the turn, is not shown.
+  if (!liveOn || n < liveGot) return picture.close();
+  liveGot = n;
+  const old = liveFrame;
+  if (!old) {
+    // The live guest comes in over what played.
+    if (fading) forget(fading.loop);
+    fading = { picture: shown, loop: null, at: performance.now() };
+  } else if (!fading || fading.picture !== old) {
+    old.close();
+  }
+  liveFrame = picture;
+  dirty = true;
+  showCard();
+}
+
+// A redraw being drawn plays from its first frame; a finished loop once it
+// is all here, so it never shows half.
+function promote() {
+  const loop = incoming;
+  if (!loop || !loop.got.has(0)) return;
+  if (!loop.drawing && run(loop).length < loop.total) return;
+  incoming = null;
+  if (playing.take != null) retire(playing);
+  loop.at = performance.now();
+  playing = loop;
+  dirty = true;
+  showCard();
+}
+
+function retire(loop) {
+  if (fading) forget(fading.loop);
+  fading = { picture: shown, loop, at: performance.now() };
+}
+
+function draw(now) {
+  requestAnimationFrame(draw);
+  const w = Math.round(innerWidth * devicePixelRatio), h = Math.round(innerHeight * devicePixelRatio);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; dirty = true; }
+  const frames = run(playing);
+  if (frames.length) {
+    const step = 1000 / playing.fps;
+    if (now - playing.at >= step) {
+      playing.i = (playing.i + 1) % frames.length;
+      // Behind by more than a beat (a hidden tab): go on from now.
+      playing.at = now - playing.at > step + 250 ? now : playing.at + step;
+      dirty = true;
+    }
+  }
+  const picture = liveOn && liveFrame ? liveFrame : frames.length ? frames[Math.min(playing.i, frames.length - 1)] : null;
+  const fade = fading ? Math.min(1, (now - fading.at) / FADE) : 1;
+  if (!dirty && !fading) return;
+  dirty = false;
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, w, h);
+  // The loop before stays under the new one as it fades in, or fades out alone.
+  if (fading && fading.picture) paint(fading.picture, picture ? 1 : 1 - fade);
+  if (picture) paint(picture, fade);
+  shown = picture;
+  if (fading && fade >= 1) {
+    forget(fading.loop);
+    fading = null;
+  }
+}
+
+function paint(picture, alpha) {
+  const { width: w, height: h } = canvas;
+  g.globalAlpha = alpha;
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = "high";
+  const scale = Math.min(w / picture.width, h / picture.height);
+  const pw = picture.width * scale, ph = picture.height * scale;
+  if (pw < w - 1 || ph < h - 1) {
+    const cover = Math.max(backdrop.width / picture.width, backdrop.height / picture.height);
+    bg.drawImage(picture, (backdrop.width - picture.width * cover) / 2, (backdrop.height - picture.height * cover) / 2, picture.width * cover, picture.height * cover);
+    g.drawImage(backdrop, 0, 0, w, h);
+    g.fillStyle = "rgba(0, 0, 0, .6)";
+    g.fillRect(0, 0, w, h);
+  }
+  g.drawImage(picture, (w - pw) / 2, (h - ph) / 2, pw, ph);
+  g.globalAlpha = 1;
+}
+
+// Where guests join: large while nothing plays, small in a corner after.
+function showJoin(url) {
+  if (url === joinUrl) return;
+  joinUrl = url;
+  if (url) $("qr").src = base + "screen/join.svg";
+  showCard();
+}
+
+function showCard() {
+  const card = $("join"), empty = playing.take == null && !incoming && !(liveOn && liveFrame);
+  card.classList.toggle("hidden", !joinUrl);
+  card.classList.toggle("big", empty);
+  $("join-title").textContent = empty ? "Join the party" : "Join";
+  $("join-text").textContent = empty
+    ? "Scan this with your phone, record three seconds, and watch it come back redrawn here."
+    : joinUrl.replace(/^https:\/\//, "");
+}
+
+function joined(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a);
+  out.set(b, a.length);
+  return out;
+}
+
+async function openStream() {
+  let bye = false;
+  try {
+    const r = await fetch(base + "screen/stream", { cache: "no-store" });
+    if (!r.ok || !r.body) throw new Error("the box answered " + r.status);
+    $("note").textContent = "";
+    const reader = r.body.getReader(), text = new TextDecoder();
+    let buf = new Uint8Array(0);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      streamRetry = 0;
+      buf = joined(buf, value);
+      // Whole messages: [u32 length][kind][payload].
+      while (buf.length >= 5) {
+        const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0);
+        if (buf.length < 4 + len) break;
+        const kind = buf[4], payload = buf.slice(5, 4 + len);
+        buf = buf.slice(4 + len);
+        if (kind === 1) onState(JSON.parse(text.decode(payload)));
+        else if (kind === 2) onFrame(payload);
+        else if (kind === 3) bye = true;
+        else if (kind === 4) onLive(payload);
+      }
+    }
+  } catch (e) {
+    // opened again below
+  }
+  if (!bye) {
+    streamRetry = Math.min(10000, streamRetry ? streamRetry * 2 : 1000);
+    $("note").textContent = "Finding the party again…";
+  }
+  setTimeout(openStream, bye ? 0 : streamRetry);
+}
+
+// A screen stays on, and goes full screen on a click or F.
+async function stayAwake() {
+  try {
+    if (navigator.wakeLock && document.visibilityState === "visible") await navigator.wakeLock.request("screen");
+  } catch (e) {
+    // a screen without the wake lock sleeps as its settings say
+  }
+}
+
+function fullScreen() {
+  const root = document.documentElement;
+  if (!document.fullscreenElement && root.requestFullscreen) root.requestFullscreen().catch(() => {});
+}
+
+let still = null;
+function moved() {
+  document.body.classList.remove("still");
+  clearTimeout(still);
+  still = setTimeout(() => document.body.classList.add("still"), 2500);
+}
+
+document.addEventListener("visibilitychange", stayAwake);
+document.addEventListener("click", fullScreen);
+document.addEventListener("keydown", e => { if (e.key === "f" || e.key === "F") fullScreen(); });
+document.addEventListener("mousemove", moved);
+stayAwake();
+moved();
+requestAnimationFrame(draw);
+openStream();
+</script>
+</body>
+</html>

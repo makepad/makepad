@@ -1,0 +1,30 @@
+// CI smoke test for apps/aires, devhub's question inbox. Where the desktop has a tray dropdown
+// (macOS), aires starts as a menu-bar icon and opens no window, so the default smoke (launch, wait
+// for a window, grab and judge it) waited for one until it timed out. `AIRES_DEMO=1` runs it on
+// a demo inbox in memory instead of the master, shown in a window at start on every platform: a
+// launch that needs no devhub and always shows the same questions.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-aires"] targets: ci.host.targets})
+})
+
+// The frame trace goes to the log, and `flag_idle_drawing` reads it from there.
+let app = ci.launch({package: "makepad-app-aires" binary: "makepad-app-aires" cwd: "." app_env: {AIRES_DEMO: "1" MAKEPAD_FRAME_TRACE: "1"}})
+
+// The demo's question arrives 6 s after start, and its card moves in and glows for about 2.4 s:
+// the grab and the idle check come once it settled, so the check sees an app at rest and the grab
+// shows the inbox with the question that arrived.
+ci.step("comes up", fn(){
+    ci.sleep(10.0)
+    app.no_errors()
+    app.flag_idle_drawing()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The application is an inbox of questions, each shown as a card with a title and answer options. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Is any user interface visible, such as text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture? expected YES 3. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO 4. Is at least one question visible: a line of text ending in a question mark? expected YES")
+})
+
+app.no_errors()
+app.quit()
+nil

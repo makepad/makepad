@@ -7,6 +7,8 @@
 //! - `store`: guests, their sources and takes, keep levels.
 //! - `queue`: the takes waiting for the hub worker.
 //! - `worker`: the one thread that takes them to the hub.
+//! - `ideas`: the vision model's ideas for redrawing a guest's loop.
+//! - `settings`: the host's settings (how the live redraw computes).
 //! - `start`: starting a party (identity, store, worker, service), shared
 //!   by the party server and the big screen.
 //! - `wall_plan`: the big screen's layout and the size its pictures are
@@ -24,11 +26,13 @@ pub mod camtest;
 pub mod cert;
 pub mod code;
 pub mod hub;
+pub mod ideas;
 pub mod image;
 pub mod jpeg;
 pub mod live;
 pub mod queue;
 pub mod server;
+pub mod settings;
 pub mod start;
 pub mod store;
 pub mod wall_plan;

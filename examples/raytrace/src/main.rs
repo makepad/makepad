@@ -374,7 +374,9 @@ fn solid_glass_scene() -> SceneInput {
         scene.push_quad([[x0, 0.025, -0.085], [x1, 0.025, -0.085], [x1, 0.175, -0.085], [x0, 0.175, -0.085]], material);
     }
     push_box(&mut scene, vec3f(-0.06, 0.015, 0.0), vec3f(0.24, 0.17, 0.010), 30.0f32.to_radians(), 2);
-    push_box(&mut scene, vec3f(0.13, 0.0, 0.0), vec3f(0.09, 0.13, 0.06), -15.0f32.to_radians(), 3);
+    // Half a millimetre above the floor: a solid face in the floor's own plane leaves every ray at
+    // the contact to rounding, between leaving the glass and meeting the floor.
+    push_box(&mut scene, vec3f(0.13, 0.0005, 0.0), vec3f(0.09, 0.13, 0.06), -15.0f32.to_radians(), 3);
     scene.push_quad([[-0.4, 0.0, -0.3], [-0.4, 0.0, 0.3], [0.4, 0.0, 0.3], [0.4, 0.0, -0.3]], 4);
     scene.ensure_normals();
     scene.camera = Camera {

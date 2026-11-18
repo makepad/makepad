@@ -6,3 +6,11 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+
+[lints.rust]
+# `cfg(relax)`: tests/restart_process.rs runs under the JIT (`makepad test`) only
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
+
+[package.metadata.makepad.macos-tests]
+"test:restart_process" = "a menu-bar status item across a JIT restart"
+"test:stale_menu" = "a click in a menu-bar status item's replaced menu"

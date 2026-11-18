@@ -64,17 +64,22 @@ pub fn party(port: u16, code: Option<String>, extra: &[String], hub: Option<&str
     let kept = makepad_network::fleet::makepad_home().join("party").join("kept").join(&code);
     let budget = Party::default_budget();
     eprintln!("[party] guests' pictures may hold up to {} MB of memory, {} MB from any one address", budget.total >> 20, budget.per_address >> 20);
-    let party = Arc::new(Party::new(kept, budget));
+    let party = Arc::new(Party::new(kept, budget).with_settings(crate::settings::Settings::load(crate::settings::Settings::file())));
     match BoxHub::locate(hub) {
         Ok(box_hub) => {
             eprintln!("[party] redrawing with the hub at {}", box_hub.base);
             worker::start(party.clone(), box_hub).map_err(|e| format!("hub worker: {e}"))?;
+            worker::keep_warm(party.clone(), BoxHub::locate(hub)?).map_err(|e| format!("keeping the model warm: {e}"))?;
             // The live call has its own client of the same hub.
-            party.live.redraw_with(Box::new(crate::live::HubRedrawer(BoxHub::locate(hub)?)));
+            party.live.redraw_with(Box::new(crate::live::HubRedrawer { hub: BoxHub::locate(hub)?, settings: party.settings.clone() }));
         }
         Err(e) => eprintln!("[party] {e}: takes wait until the party runs where a hub is"),
     }
-    let handler: Arc<dyn Handler> = Arc::new(Api::new(party.clone()));
+    let api = match BoxHub::locate(hub) {
+        Ok(box_hub) => Api::new(party.clone()).with_hub(box_hub),
+        Err(_) => Api::new(party.clone()),
+    };
+    let handler: Arc<dyn Handler> = Arc::new(api);
     let server = Server::start(([0, 0, 0, 0], port).into(), id.tls, code.clone(), handler)
         .map_err(|e| format!("listen on port {port}: {e}"))?;
     // Live calls come to the same port number over UDP, on the LAN address.
@@ -87,6 +92,9 @@ pub fn party(port: u16, code: Option<String>, extra: &[String], hub: Option<&str
         None => eprintln!("[party] live is off: no LAN address to answer calls on"),
     }
     let urls = urls(id.lan, extra, server.port, &code, "");
+    if let Some(first) = urls.first() {
+        let _ = party.join.set(first.clone());
+    }
     Ok(Running { party, server, code, urls, names: id.names, fingerprint: id.fingerprint })
 }
 

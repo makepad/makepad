@@ -2,18 +2,81 @@
 //! node, every lease of the window with absolute times, each node's pressure samples), with the
 //! landing train, the last post-land buckets and the inbox counts beside it. The worker merges;
 //! the UI gets an immutable [`Fleet`] per answer and derives what it draws from it.
+//!
+//! What lies before that live window comes from the master's history as the timeline scrolls or
+//! zooms there ([`ViewSink`]): the nodes' load (exact samples close up, else columns the master
+//! reduced: [`Past`]) and, while the view spans a day or less, the leases that ran in it.
 
 use makepad_devhub::land::Entry as LandEntry;
-use makepad_devhub::lease::panel::{Answer, Row, Sample};
+use makepad_devhub::lease::panel::{Answer, Cols, Row, Sample};
 use makepad_devhub::lease::sched::NodeView;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-/// The widest window the panel shows (the master keeps pressure samples this long).
+/// The live window: what the master's `panel` answers carry (its scheduler's samples, the leases
+/// that ended in it). Older is asked from the history.
 pub const KEEP_MS: u64 = makepad_devhub::lease::panel::PRESSURE_KEEP_MS;
 
-/// A queue wait past this stands out.
-pub const LONG_WAIT_MS: u64 = 10 * 60_000;
+/// The widest view whose leases are fetched for the stretch before the live window (a day and
+/// a little: the "1 d" view and its margin); a wider one shows the load alone there.
+pub const ROWS_SPAN_MS: u64 = 26 * 3_600_000;
+
+/// A column narrower than this gets the history's exact samples (each holds until the next, as
+/// the live ones do); a wider one gets the master's reduced columns.
+pub const EXACT_COL_MS: u64 = 20_000;
+
+/// The sample fields the timeline draws from the history.
+pub const PAST_FIELDS: [&str; 4] = ["res_cores", "cpu_pct", "ram_used_gb", "gpu_pct"];
+
+/// The stretch the timeline shows and its column width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewReq {
+    pub t_left: u64,
+    pub t_right: u64,
+    pub col_ms: f64,
+}
+
+/// Where the timeline says what it shows (at each draw) and the worker reads it: a view that
+/// reaches before the live window wakes the worker to fetch that stretch.
+#[derive(Default)]
+pub struct ViewSink {
+    view: Mutex<Option<ViewReq>>,
+    changed: AtomicBool,
+}
+
+impl ViewSink {
+    pub fn set(&self, v: ViewReq) {
+        let mut g = self.view.lock().unwrap();
+        if *g != Some(v) {
+            *g = Some(v);
+            self.changed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn get(&self) -> Option<ViewReq> {
+        *self.view.lock().unwrap()
+    }
+
+    /// Whether the view moved since the last call and reaches before `live_from`.
+    pub fn moved_before(&self, live_from: u64) -> bool {
+        self.changed.swap(false, Ordering::Relaxed) && self.get().is_some_and(|v| v.t_left < live_from)
+    }
+}
+
+/// The nodes' load over `[from_ms, to_ms)` from the master's history: exact samples
+/// (`per_ms` 0), or per node and field ([`PAST_FIELDS`]) columns of `per_ms` from `from_ms`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Past {
+    pub from_ms: u64,
+    pub to_ms: u64,
+    pub per_ms: u64,
+    pub exact: HashMap<String, Vec<Sample>>,
+    pub cols: HashMap<(String, String), Cols>,
+}
+
+/// A queue wait past this stands out (the mark every count of long waits takes).
+pub use makepad_devhub::lease::LONG_WAIT_MS;
 
 /// How the panel reaches its master.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -260,6 +323,22 @@ pub struct Fleet {
     pub updating_since: HashMap<String, u64>,
     /// when the panel last found its master again after losing it (a master restart)
     pub reconnected_ms: Option<u64>,
+    /// the load before the live window, for the stretch the timeline shows
+    pub past: Option<Arc<Past>>,
+    /// the oldest sample in the master's history (None: an older master, or none yet)
+    pub first_ms: Option<u64>,
+    /// the landings and bucket runs of the stretch the timeline shows, from the master's history
+    /// (the live side holds the train since the window's start and each bucket's last runs)
+    pub marks: Option<Arc<Marks>>,
+}
+
+/// The landings and bucket runs of a stretch, from the master's history (`landings`, `buckets`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Marks {
+    pub from_ms: u64,
+    pub to_ms: u64,
+    pub land: Vec<LandEntry>,
+    pub buckets: Vec<Bucket>,
 }
 
 impl Fleet {
@@ -285,6 +364,12 @@ impl Fleet {
     /// Where a lease's bar ends: its end, or now while it runs.
     pub fn end_ms(&self, r: &Row) -> u64 {
         r.ended_ms.unwrap_or(self.now_ms)
+    }
+
+    /// The long waits as every count a person reads takes them
+    /// ([`makepad_devhub::lease::long_waits`]): a lane's serial plan once, the prebuilds apart.
+    pub fn long_waits(&self) -> makepad_devhub::lease::LongWaits<&Row> {
+        makepad_devhub::lease::long_waits(self.queued(), |r| self.wait_ms(r), |r| r.lane.clone(), |r| !r.own_wait.is_empty())
     }
 
     /// The waiting requests, in queue order (interactive first, then by position and age).

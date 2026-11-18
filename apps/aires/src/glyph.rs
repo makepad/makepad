@@ -8,7 +8,7 @@ fn segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     ((p.0 - a.0 - t * dx).powi(2) + (p.1 - a.1 - t * dy).powi(2)).sqrt()
 }
 
-pub fn image(count: usize) -> TrayImage {
+pub fn image(count: usize, new: bool) -> TrayImage {
     // Top, upper right, lower right, bottom, lower left, upper left, middle.
     const DIGITS: [u8; 10] = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f];
     const SEGMENTS: [((f32, f32), (f32, f32)); 7] = [
@@ -44,6 +44,10 @@ pub fn image(count: usize) -> TrayImage {
                 v = v.max(cover(segment(p, (28.0, 30.0), (34.0, 30.0)) - 0.8));
                 v = v.max(cover(segment(p, (31.0, 27.0), (31.0, 33.0)) - 0.8));
             }
+            if new {
+                let d = (p.0 - 30.5).hypot(p.1 - 6.5);
+                v = v * (1.0 - cover(d - 6.5)) + cover(d - 4.5);
+            }
             alpha[(y * SIZE + x) as usize] = (v * 255.0).round() as u8;
         }
     }
@@ -54,9 +58,12 @@ pub fn image(count: usize) -> TrayImage {
 mod tests {
     #[test]
     fn counts_have_distinct_full_size_masks() {
-        let masks = [0, 1, 7, 42, 150].map(super::image);
+        let counts = [0, 1, 7, 42, 150];
+        let masks = counts.map(|n| super::image(n, false));
         for (i, mask) in masks.iter().enumerate() {
             assert_eq!(mask.alpha.len(), 36 * 36, "each mask has 36 by 36 pixels");
+            assert_ne!(super::image(counts[i], true).alpha, mask.alpha,
+                "new-question badge changes the mask for count {}", counts[i]);
             for other in &masks[i + 1..] {
                 assert_ne!(mask.alpha, other.alpha, "each count has a distinct glyph");
             }

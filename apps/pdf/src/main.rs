@@ -198,9 +198,39 @@ script_mod! {
                             }
                         }
 
-                        viewer := MpPdfView{
+                        viewer_area := View{
                             width: Fill
                             height: Fill
+                            flow: Overlay
+
+                            viewer := MpPdfView{
+                                width: Fill
+                                height: Fill
+                            }
+
+                            empty_state := View{
+                                width: Fill
+                                height: Fill
+                                visible: false
+                                flow: Down
+                                align: Align{x: 0.5 y: 0.5}
+                                spacing: 8
+
+                                empty_title := Label{
+                                    text: "No document open"
+                                    draw_text +: {
+                                        color: mod.theme.color_text
+                                        text_style: theme.font_regular{font_size: 16}
+                                    }
+                                }
+                                empty_hint := Label{
+                                    text: "Open a PDF with: pdf <file.pdf>"
+                                    draw_text +: {
+                                        color: mod.theme.color_text
+                                        text_style: theme.font_regular{font_size: 11}
+                                    }
+                                }
+                            }
                         }
 
                         status_row := RectView{
@@ -434,6 +464,9 @@ impl App {
         self.ui
             .widget(cx, ids!(thumbs_button.sel))
             .set_visible(cx, status.thumbs);
+        self.ui
+            .widget(cx, ids!(empty_state))
+            .set_visible(cx, shows_empty_state(&status));
 
         self.ui
             .label(cx, ids!(status))
@@ -441,6 +474,12 @@ impl App {
 
         self.status = status;
     }
+}
+
+/// The viewer says, in its middle, that it has no document: started without one (a warm Quick
+/// Look viewer with nothing loaded has nothing to say).
+fn shows_empty_state(status: &PdfStatus) -> bool {
+    status.error.is_none() && status.page_count == 0 && status.name == "no document"
 }
 
 /// The status line: what the document is, how far it has loaded, where we
@@ -490,5 +529,40 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shows_empty_state, PdfStatus};
+
+    #[test]
+    fn the_empty_state_shows_only_without_a_document() {
+        let no_document = PdfStatus {
+            name: "no document".to_string(),
+            ..Default::default()
+        };
+        assert!(shows_empty_state(&no_document), "no document");
+
+        let warm_viewer = PdfStatus::default();
+        assert!(!shows_empty_state(&warm_viewer), "empty name / warm viewer");
+
+        let opening = PdfStatus {
+            name: "file.pdf".to_string(),
+            ..Default::default()
+        };
+        assert!(!shows_empty_state(&opening), "opening document");
+
+        let error = PdfStatus {
+            error: Some("Could not open document".to_string()),
+            ..no_document.clone()
+        };
+        assert!(!shows_empty_state(&error), "error with no document name");
+
+        let loaded = PdfStatus {
+            page_count: 3,
+            ..no_document
+        };
+        assert!(!shows_empty_state(&loaded), "loaded document with three pages");
     }
 }

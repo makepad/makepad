@@ -101,6 +101,36 @@ pub struct Source {
     pub wanted: Option<Keep>,
     /// Takes in the order they were asked for.
     pub takes: Vec<TakeId>,
+    /// What the vision model suggests redrawing it as (`ideas.rs`).
+    pub ideas: Ideas,
+}
+
+/// A source's ideas: not asked for yet, being asked for, or the answer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Ideas {
+    #[default]
+    Unasked,
+    Asking,
+    Ready(Arc<[String]>),
+}
+
+/// What an ask for a source's ideas is to do.
+#[derive(Debug, PartialEq)]
+pub enum IdeasClaim {
+    /// Here they are.
+    Ready(Arc<[String]>),
+    /// Another ask is getting them: wait for the store to change.
+    Wait,
+    /// This ask gets them, from this picture of the source.
+    Ask(Jpeg),
+}
+
+impl Source {
+    /// Whether the party's screen may show this source's redraws: it is on
+    /// the wall or kept, or asked for the wall and waits for its first redraw.
+    pub fn on_screen(&self) -> bool {
+        self.keep >= Keep::Wall || self.wanted.is_some_and(|w| w >= Keep::Wall)
+    }
 }
 
 pub struct Take {
@@ -112,8 +142,26 @@ pub struct Take {
     /// vision model. `None` until the hub worker has it.
     pub prompt: Option<String>,
     pub quality: Quality,
+    /// The redrawn frames at the size the model drew them, for the screen.
     pub frames: Vec<Jpeg>,
+    /// The same frames at the phone's size, for its preview: the frame
+    /// itself when it is no larger.
+    pub previews: Vec<Jpeg>,
     pub state: TakeState,
+}
+
+impl Take {
+    /// Frame `i` at the phone's size.
+    pub fn preview(&self, i: usize) -> Option<&Jpeg> {
+        self.previews.get(i).or_else(|| self.frames.get(i))
+    }
+
+    /// The bytes its frames and previews hold (a preview that is its frame counted once).
+    fn bytes(&self) -> usize {
+        let frames: usize = self.frames.iter().map(|f| f.len()).sum();
+        let previews: usize = self.previews.iter().zip(&self.frames).filter(|(p, f)| !Arc::ptr_eq(p, f)).map(|(p, _)| p.len()).sum();
+        frames + previews
+    }
 }
 
 struct Guest {
@@ -286,7 +334,7 @@ impl Store {
         let bytes: usize = frames.iter().map(|f| f.len()).sum();
         self.room_for(bytes * (1 + TAKE_ESTIMATE), Some(from))?;
         let id = self.id();
-        self.sources.insert(id, Source { id, guest, from, kind, frames, wish, keep: Keep::Me, wanted: None, takes: Vec::new() });
+        self.sources.insert(id, Source { id, guest, from, kind, frames, wish, keep: Keep::Me, wanted: None, takes: Vec::new(), ideas: Ideas::Unasked });
         self.guests.get_mut(&guest).unwrap().sources.push(id);
         self.changed();
         let persist = self.set_keep(Who::Guest(guest), id, keep)?;
@@ -302,6 +350,31 @@ impl Store {
 
     pub fn source(&self, who: Who, source: SourceId) -> Result<&Source, StoreError> {
         self.owned(who, source)
+    }
+
+    /// An ask for `source`'s ideas: the first gets to ask the vision model
+    /// (about its middle frame), and the source's ideas are being asked for
+    /// until [`Store::set_ideas`].
+    pub fn claim_ideas(&mut self, who: Who, source: SourceId) -> Result<IdeasClaim, StoreError> {
+        let s = self.owned(who, source)?;
+        let claim = match (&s.ideas, s.frames.get(s.frames.len() / 2)) {
+            (Ideas::Ready(ideas), _) => IdeasClaim::Ready(ideas.clone()),
+            (Ideas::Asking, _) => IdeasClaim::Wait,
+            (Ideas::Unasked, Some(frame)) => IdeasClaim::Ask(frame.clone()),
+            (Ideas::Unasked, None) => IdeasClaim::Ready(Arc::from([])),
+        };
+        if matches!(claim, IdeasClaim::Ask(_)) {
+            self.sources.get_mut(&source).unwrap().ideas = Ideas::Asking;
+        }
+        Ok(claim)
+    }
+
+    /// The vision model's ideas for `source`; `None`: it could not say, and
+    /// the next ask tries again.
+    pub fn set_ideas(&mut self, source: SourceId, ideas: Option<Vec<String>>) {
+        let Some(s) = self.sources.get_mut(&source) else { return };
+        s.ideas = ideas.map_or(Ideas::Unasked, |ideas| Ideas::Ready(ideas.into()));
+        self.changed();
     }
 
     pub fn set_wish(&mut self, who: Who, source: SourceId, wish: Option<String>) -> Result<(), StoreError> {
@@ -423,7 +496,7 @@ impl Store {
         let wish = s.wish.clone();
         self.room_for(source_bytes(s) * TAKE_ESTIMATE, None)?;
         let id = self.id();
-        self.takes.insert(id, Take { id, source, wish, prompt: None, quality, frames: Vec::new(), state: TakeState::Queued });
+        self.takes.insert(id, Take { id, source, wish, prompt: None, quality, frames: Vec::new(), previews: Vec::new(), state: TakeState::Queued });
         self.sources.get_mut(&source).unwrap().takes.push(id);
         self.changed();
         Ok(id)
@@ -449,9 +522,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn take_frame(&mut self, take: TakeId, frame: Jpeg) -> Result<(), StoreError> {
+    pub fn take_frame(&mut self, take: TakeId, frame: Jpeg, preview: Jpeg) -> Result<(), StoreError> {
         let t = self.takes.get_mut(&take).ok_or(StoreError::NotFound)?;
         t.frames.push(frame);
+        t.previews.push(preview);
         self.changed();
         Ok(())
     }
@@ -503,6 +577,39 @@ impl Store {
         source.takes.iter().rev().filter_map(|t| self.takes.get(t)).find(|t| t.state == TakeState::Done)
     }
 
+    /// The take the party's screen shows next, `seen` the newest it has
+    /// shown. A redraw on the screen newer than `seen` comes first, from its
+    /// first frame (a best-quality one once finished: it betters a loop the
+    /// screen has whole). Else `shown`, while it is drawn, or until its turn
+    /// is over while it is still on the screen. Else the wall's next loop
+    /// after `shown`'s, in turn.
+    pub fn screen_next(&self, shown: Option<TakeId>, seen: TakeId, turn_over: bool) -> Option<TakeId> {
+        let fresh = self
+            .sources
+            .values()
+            .filter(|s| s.on_screen())
+            .flat_map(|s| s.takes.iter().filter_map(|t| self.takes.get(t)))
+            .filter(|t| t.id > seen && !t.frames.is_empty())
+            .filter(|t| match t.quality {
+                Quality::Fast => matches!(t.state, TakeState::Running | TakeState::Done),
+                Quality::Best => t.state == TakeState::Done,
+            })
+            .map(|t| t.id)
+            .max();
+        if fresh.is_some() {
+            return fresh;
+        }
+        let current = shown.and_then(|t| self.takes.get(&t)).filter(|t| self.sources.get(&t.source).is_some_and(Source::on_screen));
+        if let Some(t) = current {
+            if t.state == TakeState::Running || !turn_over {
+                return Some(t.id);
+            }
+        }
+        let wall = self.wall();
+        let after = current.map(|t| t.source);
+        wall.iter().find(|(s, _)| after.is_some_and(|a| s.id > a)).or(wall.first()).map(|(_, t)| t.id)
+    }
+
     /// A take that gave way to a guest's (an upgrade the box will ask for
     /// again later): gone as if never asked.
     pub fn remove_take(&mut self, take: TakeId) {
@@ -537,7 +644,7 @@ impl Store {
     /// Bytes of pictures held, for the log.
     pub fn bytes_held(&self) -> usize {
         let sources: usize = self.sources.values().map(source_bytes).sum();
-        let takes: usize = self.takes.values().flat_map(|t| &t.frames).map(|f| f.len()).sum();
+        let takes: usize = self.takes.values().map(Take::bytes).sum();
         sources + takes
     }
 
@@ -561,7 +668,7 @@ impl Store {
             .iter()
             .filter_map(|t| self.takes.get(t))
             .map(|t| {
-                let held: usize = t.frames.iter().map(|f| f.len()).sum();
+                let held = t.bytes();
                 match t.state {
                     TakeState::Queued | TakeState::Running => held.max(bytes * TAKE_ESTIMATE),
                     TakeState::Done | TakeState::Failed(_) => held,
@@ -628,6 +735,49 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The party's screen: a new redraw for it from its first frame (a
+    /// best-quality one once finished), the loop shown kept for its turn,
+    /// then the wall's loops in turn; a guest's own redraws never.
+    #[test]
+    fn the_screen_shows_each_new_redraw_then_the_wall_in_turn() {
+        let mut store = Store::new(std::env::temp_dir().join("party-store-screen-unused"), Budget::UNLIMITED);
+        let (a, b) = (store.join("token-a".into()), store.join("token-b".into()));
+        let drawn = |store: &mut Store, source: SourceId, quality: Quality, finished: bool| {
+            let take = store.add_take(source, quality).unwrap();
+            store.take_running(take).unwrap();
+            store.take_frame(take, jpeg(11), jpeg(11)).unwrap();
+            if finished {
+                store.take_finished(take, Ok(())).unwrap();
+            }
+            take
+        };
+        let (own, _) = store.add_source(b, THERE, SourceKind::Loop { fps: 8 }, vec![jpeg(1)], None, Keep::Me).unwrap();
+        drawn(&mut store, own, Quality::Fast, true);
+        assert_eq!(store.screen_next(None, 0, false), None, "a guest's just-me redraw is never on the screen");
+        let (first, _) = store.add_source(a, HERE, SourceKind::Loop { fps: 8 }, vec![jpeg(2)], None, Keep::Me).unwrap();
+        store.set_keep(Who::Guest(a), first, Keep::Wall).unwrap();
+        let one = store.add_take(first, Quality::Fast).unwrap();
+        store.take_running(one).unwrap();
+        assert_eq!(store.screen_next(None, 0, false), None, "a redraw with no frame yet");
+        store.take_frame(one, jpeg(12), jpeg(12)).unwrap();
+        assert_eq!(store.screen_next(None, 0, false), Some(one), "a redraw asked for the wall, from its first frame");
+        assert_eq!(store.screen_next(Some(one), one, true), Some(one), "kept while it is drawn, turn over or not");
+        store.take_finished(one, Ok(())).unwrap();
+        assert_eq!(store.screen_next(Some(one), one, false), Some(one), "and for its turn once finished");
+        let (second, _) = store.add_source(a, HERE, SourceKind::Loop { fps: 8 }, vec![jpeg(3)], None, Keep::Me).unwrap();
+        store.set_keep(Who::Guest(a), second, Keep::Wall).unwrap();
+        let two = drawn(&mut store, second, Quality::Fast, true);
+        assert_eq!(store.screen_next(Some(one), one, false), Some(two), "a newer redraw comes first");
+        assert_eq!(store.screen_next(Some(two), two, true), Some(one), "then the wall's loops in turn");
+        assert_eq!(store.screen_next(Some(one), two, true), Some(two), "round");
+        let best = drawn(&mut store, first, Quality::Best, false);
+        assert_eq!(store.screen_next(Some(two), two, true), Some(one), "a best-quality redraw waits until it is finished");
+        store.take_finished(best, Ok(())).unwrap();
+        assert_eq!(store.screen_next(Some(one), two, false), Some(best), "then betters its loop at once");
+        store.set_keep(Who::Guest(a), first, Keep::Me).unwrap();
+        assert_eq!(store.screen_next(Some(best), best, false), Some(two), "a loop taken off the wall leaves the screen at once");
+    }
+
     #[test]
     fn the_wall_waits_for_a_finished_take_and_never_shows_a_raw_source() {
         let mut store = Store::new(std::env::temp_dir().join("party-store-wall-unused"), Budget::UNLIMITED);
@@ -639,7 +789,7 @@ mod tests {
         assert!(store.wall().is_empty(), "the raw source stays off the wall");
         let take = store.add_take(source, Quality::Fast).unwrap();
         store.take_running(take).unwrap();
-        store.take_frame(take, jpeg(11)).unwrap();
+        store.take_frame(take, jpeg(11), jpeg(11)).unwrap();
         assert!(store.wall().is_empty(), "an unfinished take stays off the wall too");
         assert!(store.take_finished(take, Ok(())).unwrap().is_empty(), "the wall writes nothing when the take finishes");
         let wall = store.wall();
@@ -659,8 +809,8 @@ mod tests {
         assert_eq!(store.source(Who::Host, source).unwrap().keep, Keep::Me);
         assert!(store.wall().is_empty());
         let take = store.add_take(source, Quality::Fast).unwrap();
-        store.take_frame(take, jpeg(11)).unwrap();
-        store.take_frame(take, jpeg(12)).unwrap();
+        store.take_frame(take, jpeg(11), jpeg(11)).unwrap();
+        store.take_frame(take, jpeg(12), jpeg(12)).unwrap();
         let steps = store.take_finished(take, Ok(())).unwrap();
         let files: Vec<_> = steps.into_iter().map(|step| match step {
             Persist::Write { path, bytes } => (path, bytes),
@@ -688,7 +838,7 @@ mod tests {
             assert!(store.set_keep(Who::Guest(guest), source, Keep::Me).unwrap().is_empty());
             assert_eq!(store.source(Who::Host, source).unwrap().wanted, None, "just me cancels {level:?}");
             let take = store.add_take(source, Quality::Fast).unwrap();
-            store.take_frame(take, jpeg(11)).unwrap();
+            store.take_frame(take, jpeg(11), jpeg(11)).unwrap();
             assert!(store.take_finished(take, Ok(())).unwrap().is_empty(), "the cancelled level writes nothing");
             assert_eq!(store.source(Who::Host, source).unwrap().keep, Keep::Me);
             assert!(store.wall().is_empty(), "the cancelled level never puts the source on the wall");
@@ -703,13 +853,13 @@ mod tests {
             let (source, _) = store.add_source(guest, HERE, SourceKind::Photo, vec![jpeg(1)], None, Keep::Me).unwrap();
             store.set_keep(Who::Guest(guest), source, level).unwrap();
             let failed = store.add_take(source, Quality::Fast).unwrap();
-            store.take_frame(failed, jpeg(9)).unwrap();
+            store.take_frame(failed, jpeg(9), jpeg(9)).unwrap();
             assert!(store.take_finished(failed, Err("redraw failed".into())).unwrap().is_empty());
             let s = store.source(Who::Host, source).unwrap();
             assert_eq!((s.keep, s.wanted), (Keep::Me, Some(level)), "a failed redraw leaves the level waiting");
             assert!(store.wall().is_empty());
             let take = store.add_take(source, Quality::Fast).unwrap();
-            store.take_frame(take, jpeg(11)).unwrap();
+            store.take_frame(take, jpeg(11), jpeg(11)).unwrap();
             let steps = store.take_finished(take, Ok(())).unwrap();
             assert_eq!(steps.len(), if level == Keep::Keep { 2 } else { 0 }, "only the source and successful take may be written");
             let s = store.source(Who::Host, source).unwrap();
@@ -717,6 +867,25 @@ mod tests {
             assert_eq!(store.wall()[0].1.id, take, "the later successful redraw applies the level");
             store.delete(Who::Guest(guest), source).unwrap();
         }
+    }
+
+    #[test]
+    fn a_source_is_looked_at_for_ideas_once_and_a_failed_look_is_tried_again() {
+        let mut store = Store::new(std::env::temp_dir().join("party-store-ideas-unused"), Budget::UNLIMITED);
+        let (a, b) = (store.join("token-a".into()), store.join("token-b".into()));
+        let (source, _) = store.add_source(a, HERE, SourceKind::Loop { fps: 8 }, vec![jpeg(1), jpeg(2), jpeg(3)], None, Keep::Me).unwrap();
+        assert_eq!(store.claim_ideas(Who::Guest(b), source), Err(StoreError::NotFound), "only its guest asks");
+        assert_eq!(store.claim_ideas(Who::Guest(a), source), Ok(IdeasClaim::Ask(jpeg(2))), "the first ask looks at the middle frame");
+        assert_eq!(store.claim_ideas(Who::Guest(a), source), Ok(IdeasClaim::Wait), "an ask meanwhile waits for that answer");
+        let version = store.version;
+        store.set_ideas(source, None);
+        assert!(store.version > version, "an answer wakes the asks waiting for it");
+        assert_eq!(store.claim_ideas(Who::Guest(a), source), Ok(IdeasClaim::Ask(jpeg(2))), "a look that failed is tried again");
+        store.set_ideas(source, Some(vec!["a tiny snow globe".into()]));
+        assert_eq!(store.claim_ideas(Who::Guest(a), source), Ok(IdeasClaim::Ready(Arc::from(["a tiny snow globe".to_string()]))), "then every ask gets the answer");
+        store.delete(Who::Guest(a), source).unwrap();
+        store.set_ideas(source, None);
+        assert_eq!(store.claim_ideas(Who::Guest(a), source), Err(StoreError::NotFound), "an answer for a deleted source is let go");
     }
 
     #[test]
@@ -756,8 +925,8 @@ mod tests {
         assert_eq!(store.take(fast).unwrap().wish.as_deref(), Some("as a painting"), "a take holds the wish it was asked with");
         store.take_running(fast).unwrap();
         store.take_prompt(fast, "a watercolour painting of two people".into()).unwrap();
-        store.take_frame(fast, jpeg(11)).unwrap();
-        store.take_frame(fast, jpeg(12)).unwrap();
+        store.take_frame(fast, jpeg(11), jpeg(11)).unwrap();
+        store.take_frame(fast, jpeg(12), jpeg(12)).unwrap();
         assert!(store.take_finished(fast, Ok(())).unwrap().is_empty(), "a take of an unkept source writes nothing");
         assert!(store.set_keep(Who::Guest(a), mine, Keep::Wall).unwrap().is_empty(), "the wall writes nothing");
         let wall = store.wall();
@@ -766,7 +935,7 @@ mod tests {
 
         // A better take replaces it on the wall; a failed one does not.
         let best = store.add_take(mine, Quality::Best).unwrap();
-        store.take_frame(best, jpeg(21)).unwrap();
+        store.take_frame(best, jpeg(21), jpeg(21)).unwrap();
         store.take_finished(best, Ok(())).unwrap();
         let failed = store.add_take(mine, Quality::Fast).unwrap();
         store.take_finished(failed, Err("out of memory".into())).unwrap();
@@ -779,7 +948,7 @@ mod tests {
         assert_eq!(store.upgrade_candidate(), None, "nothing finished to upgrade yet");
         let quick = store.add_take(fast_only, Quality::Fast).unwrap();
         assert!(store.busy(), "a queued take keeps the box busy");
-        store.take_frame(quick, jpeg(71)).unwrap();
+        store.take_frame(quick, jpeg(71), jpeg(71)).unwrap();
         store.take_finished(quick, Ok(())).unwrap();
         assert_eq!(store.upgrade_candidate(), Some(fast_only));
         let upgrade = store.add_take(fast_only, Quality::Best).unwrap();
@@ -787,10 +956,10 @@ mod tests {
         store.remove_take(upgrade);
         assert!(store.take(upgrade).is_none() && store.upgrade_candidate() == Some(fast_only), "a yielded upgrade is asked again");
         let upgrade = store.add_take(fast_only, Quality::Best).unwrap();
-        store.take_frame(upgrade, jpeg(72)).unwrap();
+        store.take_frame(upgrade, jpeg(72), jpeg(72)).unwrap();
         store.take_finished(upgrade, Ok(())).unwrap();
         let rewish = store.add_take(fast_only, Quality::Fast).unwrap();
-        store.take_frame(rewish, jpeg(73)).unwrap();
+        store.take_frame(rewish, jpeg(73), jpeg(73)).unwrap();
         store.take_finished(rewish, Ok(())).unwrap();
         let shown = store.wall().iter().find(|(s, _)| s.id == fast_only).map(|(_, t)| t.id);
         assert_eq!(shown, Some(rewish), "a new wish's take replaces the best one of the old wish");
@@ -807,7 +976,7 @@ mod tests {
         expected.sort();
         assert_eq!(files, expected, "the source's frames and its finished takes, not the failed one");
         let late = store.add_take(mine, Quality::Fast).unwrap();
-        store.take_frame(late, jpeg(31)).unwrap();
+        store.take_frame(late, jpeg(31), jpeg(31)).unwrap();
         Persist::run(store.take_finished(late, Ok(())).unwrap());
         assert!(dir.join(format!("take-{late}-000.jpg")).exists(), "a take finished after keep is written too");
         Persist::run(store.set_keep(Who::Guest(a), mine, Keep::Wall).unwrap());
@@ -821,18 +990,18 @@ mod tests {
         for take in [fast, best, failed, late, pending] {
             assert!(store.take(take).is_none(), "take {take} went with its source");
         }
-        assert_eq!(store.take_frame(pending, jpeg(41)), Err(StoreError::NotFound));
+        assert_eq!(store.take_frame(pending, jpeg(41), jpeg(41)), Err(StoreError::NotFound));
         assert!(store.wall().is_empty());
 
         // The host may delete anyone's; leaving takes everything of a guest.
         let (theirs, _) = store.add_source(b, HERE, SourceKind::Photo, vec![jpeg(5)], Some("a wish".into()), Keep::Wall).unwrap();
         let take = store.add_take(theirs, Quality::Fast).unwrap();
-        store.take_frame(take, jpeg(51)).unwrap();
+        store.take_frame(take, jpeg(51), jpeg(51)).unwrap();
         store.take_finished(take, Ok(())).unwrap();
         let (kept, persist) = store.add_source(b, HERE, SourceKind::Photo, vec![jpeg(6)], None, Keep::Keep).unwrap();
         Persist::run(persist);
         let take = store.add_take(kept, Quality::Fast).unwrap();
-        store.take_frame(take, jpeg(61)).unwrap();
+        store.take_frame(take, jpeg(61), jpeg(61)).unwrap();
         Persist::run(store.take_finished(take, Ok(())).unwrap());
         assert!(store.kept_dir(kept).join("source-000.jpg").exists());
         Persist::run(store.delete(Who::Host, theirs).unwrap());
@@ -852,7 +1021,7 @@ mod tests {
         let errors = Persist::run(persist);
         assert!(errors.is_empty(), "{errors:?}");
         let take = first.add_take(source, Quality::Fast).unwrap();
-        first.take_frame(take, jpeg(11)).unwrap();
+        first.take_frame(take, jpeg(11), jpeg(11)).unwrap();
         let errors = Persist::run(first.take_finished(take, Ok(())).unwrap());
         assert!(errors.is_empty(), "{errors:?}");
         let errors = Persist::run(first.set_keep(Who::Guest(guest), source, Keep::Keep).unwrap());
@@ -867,7 +1036,7 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(again, source, "a restart reuses the first source's id");
         let next_take = second.add_take(again, Quality::Fast).unwrap();
-        second.take_frame(next_take, jpeg(12)).unwrap();
+        second.take_frame(next_take, jpeg(12), jpeg(12)).unwrap();
         let errors = Persist::run(second.take_finished(next_take, Ok(())).unwrap());
         assert!(errors.is_empty(), "{errors:?}");
         let errors = Persist::run(second.set_keep(Who::Guest(guest), again, Keep::Keep).unwrap());
@@ -904,7 +1073,8 @@ mod tests {
         assert_eq!(store.wish(Who::Guest(a), first, Some("as a painting".into())).err(), Some(StoreError::Full), "nor for a wish's take");
         assert_eq!(store.source(Who::Host, first).unwrap().wish, None, "and the refused wish changed nothing");
         for n in 0..5 {
-            store.take_frame(take, frame(10 + n)).unwrap();
+            let f = frame(10 + n);
+            store.take_frame(take, f.clone(), f).unwrap();
         }
         store.take_finished(take, Ok(())).unwrap();
         assert_eq!(store.bytes_held(), 700, "the admitted take overshoots its count and is kept whole");
@@ -927,7 +1097,7 @@ mod tests {
         let queued = store.wish(Who::Guest(a), mine, Some("as a painting".into())).unwrap();
         let newest = store.wish(Who::Guest(a), mine, Some("on a stage".into())).unwrap();
         assert!(store.take(first).is_none() && store.take(queued).is_none(), "a new wish supersedes the running and the queued take");
-        assert_eq!(store.take_frame(first, jpeg(9)).err(), Some(StoreError::NotFound), "the running one stops at its next frame");
+        assert_eq!(store.take_frame(first, jpeg(9), jpeg(9)).err(), Some(StoreError::NotFound), "the running one stops at its next frame");
         assert_eq!(store.source(Who::Host, mine).unwrap().takes, vec![newest]);
 
         let mut asked = vec![newest];

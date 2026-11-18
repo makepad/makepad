@@ -36,6 +36,11 @@ impl Queue {
         }
     }
 
+    /// The newest take that waits, if any: the one a running take gives way to.
+    pub fn pop_newest(&self) -> Option<TakeId> {
+        self.takes.lock().unwrap_or_else(|p| p.into_inner()).pop_back()
+    }
+
     /// The next take if one waits.
     pub fn pop(&self) -> Option<TakeId> {
         self.takes.lock().unwrap_or_else(|p| p.into_inner()).pop_front()

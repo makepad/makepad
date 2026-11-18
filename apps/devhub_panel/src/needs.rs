@@ -45,6 +45,7 @@ pub enum What {
     Inbox,
     Held,
     Restart,
+    Prebuilds,
 }
 
 impl What {
@@ -63,6 +64,7 @@ impl What {
             What::Inbox => "INBOX",
             What::Held => "HELD",
             What::Restart => "RESTART",
+            What::Prebuilds => "PREBUILD",
         }
     }
 }
@@ -138,8 +140,9 @@ pub fn needs(f: &Fleet) -> Vec<Need> {
         n.job = job;
         v.push(n);
     }
-    // the queue: heads waiting over 10 min, and requests later ones overtook
-    for r in f.rows.iter().filter(|r| r.state == "queued" && !r.lane.starts_with(PREBUILD_LANE_PREFIX)) {
+    // the queue: heads waiting over 10 min, and requests later ones overtook; neither a lane's
+    // leases queued behind its own lease (its serial plan) nor the boxes' prebuilds
+    for r in f.rows.iter().filter(|r| r.state == "queued" && r.own_wait.is_empty() && !r.lane.starts_with(PREBUILD_LANE_PREFIX)) {
         let waited = f.wait_ms(r);
         let overtook = f
             .rows
@@ -163,6 +166,16 @@ pub fn needs(f: &Fleet) -> Vec<Need> {
         let mut n = need(sev, what, format!("{} {} of {} (#{} in its queue)", r.id, r.kind, r.lane, r.pos.max(1)), detail, waited);
         n.lease = Some(r.id.clone());
         n.act = vec![format!("{DH} why-queued {}", r.id), format!("{DH} job bump {}", r.id)];
+        v.push(n);
+    }
+    // the boxes' prebuilds waiting 10 min or more: a line of their own, never starvation (a box
+    // where one never fits, beside a live session, stays in sight)
+    let pre = f.long_waits().prebuilds;
+    if let Some(first) = pre.first() {
+        let detail = pre.iter().map(|r| format!("{} {}: {}", r.lane, dur(f.wait_ms(r)), if r.reason.is_empty() { "waiting" } else { r.reason.as_str() })).collect::<Vec<_>>().join("; ");
+        let mut n = need(Sev::Info, What::Prebuilds, if pre.len() == 1 { "1 prebuild waiting".into() } else { format!("{} prebuilds waiting", pre.len()) }, detail, pre.iter().map(|r| f.wait_ms(r)).max().unwrap_or(0));
+        n.lease = Some(first.id.clone());
+        n.act = vec![format!("{DH} why-queued {}", first.id)];
         v.push(n);
     }
     // hubs: unreachable, or a self-update that does not finish
@@ -284,6 +297,26 @@ mod tests {
         assert!(v.iter().all(|n| !n.act.is_empty() && n.act.iter().all(|a| a.starts_with(DH))), "each says what to run");
         let stalled = v.iter().find(|n| n.what == What::Stalled).unwrap();
         assert!(stalled.lease.as_deref().and_then(|l| f.row(l)).is_some_and(|r| r.ended_ms.is_none()), "a stall names its running lease");
+    }
+
+    /// A lane's leases queued behind its own lease are no queue need and count once among the
+    /// long waits; a prebuild waiting long is a line of its own, counted with none of them.
+    #[test]
+    fn a_serial_plan_counts_once_and_prebuilds_wait_apart() {
+        use makepad_devhub::lease::panel::Row;
+        const MIN: u64 = 60_000;
+        let now = 1_800_000_000_000;
+        let row = |id: &str, lane: &str, pos: u32, waited: u64, own: &str| std::sync::Arc::new(Row { id: id.into(), lane: lane.into(), kind: "test".into(), state: "queued".into(), asked_ms: now - waited, pos, reason: format!("why {id}"), own_wait: own.into(), ..Default::default() });
+        let f = Fleet { now_ms: now, rows: vec![row("L2", "sweep", 1, 20 * MIN, "L1"), row("L3", "sweep", 2, 20 * MIN, "L1"), row("L4", "other", 1, 15 * MIN, ""), row("L5", "prebuild-node-b", 1, 26 * MIN, ""), row("L6", "short", 3, 2 * MIN, "")], ..Default::default() };
+        let lw = f.long_waits();
+        assert_eq!((lw.count(), lw.starved.len(), lw.serial.len(), lw.prebuilds.len()), (2, 1, 1, 1), "{lw:?}");
+        let v = needs(&f);
+        let heads: Vec<&str> = v.iter().filter(|n| matches!(n.what, What::QueueHead | What::Overtaken)).filter_map(|n| n.lease.as_deref()).collect();
+        assert_eq!(heads, ["L4"], "only the starved head: {v:?}");
+        let pre: Vec<&Need> = v.iter().filter(|n| n.what == What::Prebuilds).collect();
+        assert_eq!(pre.len(), 1, "{v:?}");
+        assert!(pre[0].sev == Sev::Info && pre[0].title == "1 prebuild waiting" && pre[0].detail.starts_with("prebuild-node-b ") && pre[0].detail.ends_with(": why L5"), "{:?}", pre[0]);
+        assert_eq!(crate::queue::prebuilds_said(1), " \u{b7} 1 prebuild over 10 min");
     }
 
     /// A show held at its pair says why in its row, a quiet one; one that took the tip or ended says nothing.

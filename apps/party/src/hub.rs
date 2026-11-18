@@ -11,11 +11,12 @@
 use crate::image::Rgb;
 use makepad_ai_hub::client::{ContentProvider, LocalService};
 use makepad_ai_hub::node_conf::NodeConf;
-use makepad_ai_hub::protocol::{GenerateRequestJson, JobStatusJson};
+use makepad_ai_hub::protocol::{GenerateRequestJson, JobStatusJson, TranscriptJson};
 use makepad_ai_hub::providers::qwen::{FleetTransport, HttpFleetTransport};
 use makepad_ai_hub::realtime_wire::{self, FrameHeader, FrameKind};
 use makepad_ai_hub::registry::Domain;
 use makepad_base64::{base64_encode, BASE64_STANDARD};
+use makepad_micro_serde::DeJson;
 use makepad_network::plain_web_socket::PlainWebSocket;
 use makepad_network::{HttpMethod, HttpRequest, WebSocketMessage};
 use makepad_strict_json::{self as json, Value};
@@ -27,6 +28,8 @@ pub const FAST_MODEL: &str = "flux2-klein-4b";
 /// build runs on one (phase 0b: ~45 s for a 1024 px edit at 20 steps).
 pub const QUALITY_MODEL: &str = "flux2-dev-q4-24g";
 pub const VISION_MODEL: &str = "qwen3.5-4b-vision";
+/// Speech to words, for a guest who says their prompt.
+pub const VOICE_MODEL: &str = "whisper-large-v3-turbo";
 
 pub struct BoxHub {
     pub base: String,
@@ -89,6 +92,17 @@ impl BoxHub {
             .any(|m| m.get("id").and_then(Value::as_str) == Some(model) && m.get("pinned").and_then(Value::as_bool) == Some(true))
     }
 
+    /// Asks the hub to keep `model` loaded for `time` (renew to keep it
+    /// longer), or with `None` lets it go. The hub still unloads a held model
+    /// when the desktop's UI or a load needs the memory.
+    pub fn hold(&self, model: &str, time: Option<Duration>) -> Result<(), String> {
+        let mut fields = vec![("model", json::s(model)), ("action", json::s(if time.is_some() { "hold" } else { "release" }))];
+        if let Some(time) = time {
+            fields.push(("for_s", Value::Int(time.as_secs() as i64)));
+        }
+        HttpFleetTransport.post_json(&format!("{}/control/model", self.base), &json::obj(fields)).map(|_| ())
+    }
+
     /// Loads or unloads a model and waits for the hub to finish doing it.
     pub fn model(&self, model: &str, load: bool) -> Result<Duration, String> {
         let started = Instant::now();
@@ -149,6 +163,8 @@ impl BoxHub {
             height: size.map(|s| s.1),
             input_b64: Some(String::from_utf8(base64_encode(png, &BASE64_STANDARD)).unwrap_or_default()),
             input_content_type: Some("image/png".into()),
+            // A guest's face: the hub keeps the result in memory, not on disk.
+            memory_only: Some(true),
             ..Default::default()
         };
         let domain = if model == FAST_MODEL { Domain::Edit } else { Domain::Image };
@@ -163,6 +179,7 @@ impl BoxHub {
             domain: Some("vision".into()),
             prompt: Some(prompt.to_string()),
             max_tokens: Some(max_tokens),
+            memory_only: Some(true),
             input_b64: Some(String::from_utf8(base64_encode(image, &BASE64_STANDARD)).unwrap_or_default()),
             ..Default::default()
         };
@@ -171,12 +188,42 @@ impl BoxHub {
         Ok((status.text.unwrap_or_default(), time))
     }
 
+    /// What was said in `wav` (a WAV file of any rate), in whichever
+    /// language it was said. The hub keeps the audio and the words in memory
+    /// only, and lets them go once they are read.
+    pub fn transcribe(&self, wav: &[u8]) -> Result<(String, JobTime), String> {
+        let request = GenerateRequestJson {
+            model: VOICE_MODEL.to_string(),
+            domain: Some("stt".into()),
+            language: Some("auto".into()),
+            input_b64: Some(String::from_utf8(base64_encode(wav, &BASE64_STANDARD)).unwrap_or_default()),
+            input_content_type: Some("audio/wav".into()),
+            memory_only: Some(true),
+            ..Default::default()
+        };
+        let (status, time) = self.run(Domain::Stt, &request)?;
+        let bytes = self.first_artifact(&status)?;
+        let transcript = TranscriptJson::deserialize_json(&String::from_utf8_lossy(&bytes)).map_err(|e| format!("{}: transcript: {e:?}", status.job_id))?;
+        Ok((transcript.text.trim().to_string(), time))
+    }
+
     /// Opens a live session on `model` (only flux2-klein-4b has one): `input`
-    /// frames in, raw RGB frames out at `size`, `prompt` held until changed.
-    /// The session holds the box's GPU worker until it is dropped.
+    /// frames in, raw RGB frames out at `size`, `prompt` held until changed,
+    /// in `arithmetic`. The session holds the box's GPU worker until it is
+    /// dropped.
     #[allow(clippy::too_many_arguments)]
-    pub fn live(&self, model: &str, input: LiveInput, size: (u32, u32), prompt: &str, steps: u32, strength: f32, seed: u64) -> Result<LiveSession, String> {
-        let body = json::obj(vec![
+    pub fn live(
+        &self,
+        model: &str,
+        input: LiveInput,
+        size: (u32, u32),
+        prompt: &str,
+        steps: u32,
+        strength: f32,
+        seed: u64,
+        compute: Compute,
+    ) -> Result<LiveSession, String> {
+        let mut fields = vec![
             ("model", json::s(model)),
             ("width", Value::Int(size.0 as i64)),
             ("height", Value::Int(size.1 as i64)),
@@ -189,7 +236,15 @@ impl BoxHub {
             ("output_encoding", json::s("raw")),
             ("idle_timeout_s", Value::Int(30)),
             ("queue_policy", json::s("queue")),
-        ]);
+        ];
+        // Asked only when wanted: a hub from before the choices takes the session as ever.
+        if compute.arithmetic == Arithmetic::Fast {
+            fields.push(("arithmetic", json::s("fast")));
+        }
+        if let Some(rows) = compute.text_rows {
+            fields.push(("text_rows", Value::Int(rows as i64)));
+        }
+        let body = json::obj(fields);
         let answer = HttpFleetTransport.post_json(&format!("{}/realtime", self.base), &body)?;
         let job = answer.get("job_id").and_then(Value::as_str).ok_or_else(|| format!("realtime: {}", answer.to_json()))?.to_string();
         let ws_path = answer.get("ws_path").and_then(Value::as_str).ok_or_else(|| format!("realtime: {}", answer.to_json()))?;
@@ -200,6 +255,29 @@ impl BoxHub {
         });
         Ok(LiveSession { base: self.base.clone(), job, socket, rx, sent: 0 })
     }
+}
+
+/// How a live session's model computes: as its weights are stored, or the
+/// hub's faster arithmetic for live loops (for flux2-klein FP8 MLPs and
+/// f16 tensor-core convolutions), speed over the last bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arithmetic {
+    Stored,
+    Fast,
+}
+
+/// How a live session's model computes: its arithmetic, and how many rows
+/// of the prompt's text window it reads (`None`: the whole window, as the
+/// model's reference does; fewer rows, less work every step).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Compute {
+    pub arithmetic: Arithmetic,
+    pub text_rows: Option<u32>,
+}
+
+impl Compute {
+    /// The model's own: stored arithmetic over the whole text window.
+    pub const STORED: Self = Self { arithmetic: Arithmetic::Stored, text_rows: None };
 }
 
 /// One live session on the box's hub. Frames go one at a time: the session
@@ -219,6 +297,12 @@ pub struct LiveTime {
     pub frame_ms: f64,
     pub model_ms: f64,
     pub text_encode_ms: f64,
+    /// Before the model: the wait for the input and its preparation.
+    pub prep_ms: f64,
+    /// The model's shares: the input's encode, the steps, the decode.
+    pub encode_ms: f64,
+    pub denoise_ms: f64,
+    pub decode_ms: f64,
     pub wall: Duration,
 }
 
@@ -234,11 +318,27 @@ impl LiveSession {
     /// Sends `frame` and waits up to `timeout` for its redraw.
     pub fn redraw(&mut self, frame: &Rgb, timeout: Duration) -> Result<(Rgb, LiveTime), String> {
         let started = Instant::now();
+        self.send(frame)?;
+        let (image, mut time) = self.receive(timeout)?;
+        time.wall = started.elapsed();
+        Ok((image, time))
+    }
+
+    /// Sends `frame` without waiting. The session keeps only the latest
+    /// input it has not started on, so a caller sends the next frame only
+    /// once it has the redraw of the one before ([`LiveSession::receive`]).
+    pub fn send(&mut self, frame: &Rgb) -> Result<(), String> {
         let header = FrameHeader { kind: FrameKind::Raw, width: frame.width as u16, height: frame.height as u16, frame_index: self.sent };
         self.sent += 1;
         self.socket
             .send_message(WebSocketMessage::Binary(realtime_wire::encode_frame(header, &frame.data)))
-            .map_err(|_| "live: the session's socket is closed".to_string())?;
+            .map_err(|_| "live: the session's socket is closed".to_string())
+    }
+
+    /// Waits up to `timeout` for the redraw of the frame sent last, and the
+    /// box's timing of it (`wall`: this wait).
+    pub fn receive(&mut self, timeout: Duration) -> Result<(Rgb, LiveTime), String> {
+        let started = Instant::now();
         let mut image = None;
         let mut time = None;
         while image.is_none() || time.is_none() {
@@ -260,6 +360,10 @@ impl LiveSession {
                                 frame_ms: number(message.get("frame_ms")),
                                 model_ms: number(stage.and_then(|s| s.get("model"))),
                                 text_encode_ms: number(stage.and_then(|s| s.get("text_encode"))),
+                                prep_ms: number(stage.and_then(|s| s.get("prep"))),
+                                encode_ms: number(stage.and_then(|s| s.get("encode"))),
+                                denoise_ms: number(stage.and_then(|s| s.get("denoise"))),
+                                decode_ms: number(stage.and_then(|s| s.get("decode"))),
                                 wall: Duration::ZERO,
                             });
                         }

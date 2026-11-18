@@ -61,6 +61,8 @@ script_mod! {
             win_15 := HeadButton{text: "15 min"}
             win_60 := HeadButton{text: "1 h"}
             win_180 := HeadButton{text: "3 h"}
+            win_day := HeadButton{text: "1 d"}
+            win_week := HeadButton{text: "1 w"}
             View{width: 6 height: 1}
             panel_follow := HeadButton{text: "Following now"}
         }
@@ -102,7 +104,11 @@ impl DevhubPanel {
     fn start(&mut self, cx: &mut Cx) {
         self.started = true;
         match Source::start(&cx.thread_spawner(), Mode::from_env()) {
-            Ok(s) => self.data = Some(s),
+            Ok(s) => {
+                let sink = s.view_sink();
+                self.timeline(cx, |t, _| t.set_view_sink(sink));
+                self.data = Some(s);
+            }
             Err(e) => self.view.label(cx, ids!(panel_link)).set_text(cx, &format!("cannot start: {e}")),
         }
     }
@@ -297,7 +303,7 @@ impl WidgetMatchEvent for DevhubPanel {
                 }
             }
         }
-        for (id, ms) in [(ids!(win_15), 15.0), (ids!(win_60), 60.0), (ids!(win_180), 180.0)] {
+        for (id, ms) in [(ids!(win_15), 15.0), (ids!(win_60), 60.0), (ids!(win_180), 180.0), (ids!(win_day), 1440.0), (ids!(win_week), 10_080.0)] {
             if self.view.button(cx, id).clicked(actions) {
                 self.timeline(cx, |t, cx| t.set_window(cx, ms * 60_000.0));
                 self.header(cx);

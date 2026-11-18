@@ -30,11 +30,11 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use crate::image::Rgb;
-use crate::store::GuestId;
+use crate::store::{GuestId, Jpeg};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 pub use makepad_webrtc::calls::CallId;
@@ -60,11 +60,16 @@ pub const LIVE_SIDE: u32 = 512;
 /// often: an ask can be lost, and a hub that waited for its GPU may have
 /// missed the last one.
 pub const KEYFRAME_AGAIN: f64 = 2.0;
+/// The live frames' JPEG quality, for the screen page and the guest's phone.
+const LIVE_JPEG_QUALITY: u8 = 82;
 
 struct Waiter {
     guest: GuestId,
     queued: f64,
     seen: f64,
+    /// The guest's call shows on the party's screens ("On the screen"), or
+    /// only on their own phone ("Just me").
+    screen: bool,
 }
 
 struct Current {
@@ -78,6 +83,7 @@ struct Current {
     connected: Option<f64>,
     /// When the hub's first redrawn frame came: the slot's clock.
     live: Option<f64>,
+    screen: bool,
 }
 
 /// Where a guest stands.
@@ -94,12 +100,39 @@ pub enum Standing {
     Live { until: Option<f64> },
 }
 
-/// A redrawn live frame, as texels for the wall's texture: made on the live
-/// thread, so the screen only copies it in.
+/// A redrawn live frame, as texels for the wall's texture (made on the live
+/// thread, so the wall only copies them in) and as a JPEG for the screen page
+/// and the guest's phone.
 pub struct LiveFrame {
+    /// Which redrawn frame of the call (from 1).
+    pub count: u64,
     pub width: usize,
     pub height: usize,
     pub bgra: Vec<u32>,
+    rgb: Rgb,
+    jpeg: OnceLock<Option<Jpeg>>,
+}
+
+impl LiveFrame {
+    pub fn new(count: u64, rgb: Rgb) -> Self {
+        let bgra = crate::image::bgra(&rgb);
+        LiveFrame { count, width: rgb.width, height: rgb.height, bgra, rgb, jpeg: OnceLock::new() }
+    }
+
+    /// The frame as a JPEG: encoded by the first stream that sends it (a
+    /// few milliseconds at the live size), never on the live thread, and
+    /// not at all while no screen page or phone watches.
+    pub fn jpeg(&self) -> Option<Jpeg> {
+        self.jpeg
+            .get_or_init(|| match crate::image::encode_jpeg(&self.rgb, LIVE_JPEG_QUALITY) {
+                Ok(jpeg) => Some(Arc::from(jpeg)),
+                Err(e) => {
+                    eprintln!("[party] live: frame {} as a JPEG: {e}", self.count);
+                    None
+                }
+            })
+            .clone()
+    }
 }
 
 /// The live slot, for the wall.
@@ -156,9 +189,28 @@ impl Slots {
     /// `guest` joins the queue (or stays where they are).
     pub fn queue(&mut self, guest: GuestId, now: f64) {
         if !self.holds(guest) {
-            self.waiting.push_back(Waiter { guest, queued: now, seen: now });
+            self.waiting.push_back(Waiter { guest, queued: now, seen: now, screen: true });
         }
         self.seen(guest, now);
+    }
+
+    /// Whether `guest`'s call shows on the party's screens, while they wait
+    /// or are up or live.
+    pub fn set_screen(&mut self, guest: GuestId, screen: bool) {
+        if let Some(c) = self.current.as_mut().filter(|c| c.guest == guest) {
+            c.screen = screen;
+        }
+        if let Some(w) = self.waiting.iter_mut().find(|w| w.guest == guest) {
+            w.screen = screen;
+        }
+    }
+
+    /// Whether `guest`'s call shows on the party's screens.
+    pub fn screen(&self, guest: GuestId) -> bool {
+        match self.current.as_ref().filter(|c| c.guest == guest) {
+            Some(c) => c.screen,
+            None => self.waiting.iter().find(|w| w.guest == guest).is_none_or(|w| w.screen),
+        }
     }
 
     fn holds(&self, guest: GuestId) -> bool {
@@ -270,7 +322,7 @@ impl Slots {
         }
         if self.current.is_none() {
             if let Some(w) = self.waiting.pop_front() {
-                self.current = Some(Current { guest: w.guest, up: now, seen: w.seen, call: None, size: DEFAULT_SIZE, connected: None, live: None });
+                self.current = Some(Current { guest: w.guest, up: now, seen: w.seen, call: None, size: DEFAULT_SIZE, connected: None, live: None, screen: w.screen });
             }
         }
         hang_up
@@ -284,8 +336,14 @@ impl Slots {
     }
 
     /// The live slot as the wall shows it, if one is under way.
+    /// The live slot's standing when its guest's call shows on the screens.
     pub fn shown(&self) -> Option<Standing> {
-        self.current.as_ref().map(|c| self.standing(c.guest))
+        self.current.as_ref().filter(|c| c.screen).map(|c| self.standing(c.guest))
+    }
+
+    /// The guest who has the slot.
+    pub fn current_guest(&self) -> Option<GuestId> {
+        self.current.as_ref().map(|c| c.guest)
     }
 
     /// A guest is up or live: the takes wait.
@@ -329,8 +387,10 @@ pub struct Live {
     pub take_running: AtomicBool,
     /// The live guest's wish, and a count of the wishes set.
     wish: Mutex<(u64, Option<(GuestId, String)>)>,
-    /// The latest redrawn frame of the live call, for the wall.
+    /// The latest redrawn frame of the live call, for the wall; `framed`
+    /// is signalled when it changes.
     latest: Mutex<Option<Arc<LiveFrame>>>,
+    framed: Condvar,
     /// Redrawn frames so far (the wall redraws when it moves).
     pub frames: AtomicU64,
     /// Access units of the live call sent to the redraw.
@@ -349,6 +409,7 @@ impl Default for Live {
             take_running: AtomicBool::new(false),
             wish: Mutex::new((0, None)),
             latest: Mutex::new(None),
+            framed: Condvar::new(),
             frames: AtomicU64::new(0),
             pictures: AtomicU64::new(0),
         }
@@ -413,6 +474,22 @@ impl Live {
     /// The latest redrawn frame of the live call.
     pub fn latest(&self) -> Option<Arc<LiveFrame>> {
         lock(&self.latest).clone()
+    }
+
+    /// The latest redrawn frame once it is newer than frame `after` (frames
+    /// count up across calls), waiting at most `timeout` for it: for a
+    /// stream's thread, never a UI thread.
+    pub fn frame_after(&self, after: u64, timeout: Duration) -> Option<Arc<LiveFrame>> {
+        let newer = |f: &Option<Arc<LiveFrame>>| f.as_ref().is_some_and(|f| f.count > after);
+        let latest = lock(&self.latest);
+        let (latest, _) = self.framed.wait_timeout_while(latest, timeout, |f| !newer(f)).unwrap_or_else(|p| p.into_inner());
+        latest.clone().filter(|f| f.count > after)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn set_latest(&self, frame: Option<LiveFrame>) {
+        *lock(&self.latest) = frame.map(Arc::new);
+        self.framed.notify_all();
     }
 
     /// The live slot as the wall shows it, if a guest has it.
@@ -593,13 +670,13 @@ impl Live {
         let Some((call, guest, size, started)) = connected else {
             if bridge.call.take().is_some() {
                 *bridge = Bridge::default();
-                *lock(&self.latest) = None;
+                self.set_latest(None);
             }
             return;
         };
         if bridge.call != Some(call) {
             *bridge = Bridge { call: Some(call), ..Bridge::default() };
-            *lock(&self.latest) = None;
+            self.set_latest(None);
         }
         let Some(redraw) = bridge.redraw.as_mut() else {
             // A take under way finishes first.
@@ -636,9 +713,8 @@ impl Live {
         }
         match redraw.frame() {
             Ok(Some(frame)) => {
-                let frame = LiveFrame { width: frame.width, height: frame.height, bgra: crate::image::bgra(&frame) };
-                *lock(&self.latest) = Some(Arc::new(frame));
-                self.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let count = self.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                self.set_latest(Some(LiveFrame::new(count, frame)));
                 if !started && self.change(|slots, now| slots.started(call, now)) {
                     eprintln!("[party] live: call {call} is on the big screen");
                 }
@@ -687,13 +763,19 @@ pub fn serve(party: &Arc<crate::api::Party>, bind: std::net::SocketAddr, address
 }
 
 /// The box's hub redraws the live call: its fast model's live session,
-/// fed the camera's H.264.
-pub struct HubRedrawer(pub crate::hub::BoxHub);
+/// fed the camera's H.264, computed as the host's settings say when it opens
+/// (fast unless the host picked exact).
+pub struct HubRedrawer {
+    pub hub: crate::hub::BoxHub,
+    pub settings: std::sync::Arc<crate::settings::Settings>,
+}
 
-/// The live redraw's steps and how much of each frame it redraws: as a
-/// loop's (`worker.rs`), which keeps neighbouring frames alike.
-const LIVE_STEPS: u32 = 4;
-const LIVE_STRENGTH: f32 = 0.6;
+/// The live redraw's steps and how much of each frame it redraws. At 0.6
+/// the hub runs 2 of the 3 steps (a loop runs 3 of 4): on the party box
+/// that is 4.7 frames a second at the live size against 3.7, and the same
+/// look (`makepad-party-server --live-steps` measures and shows them).
+pub const LIVE_STEPS: u32 = 3;
+pub const LIVE_STRENGTH: f32 = 0.6;
 
 struct HubRedraw {
     session: crate::hub::LiveSession,
@@ -716,7 +798,8 @@ impl Redraw for HubRedraw {
 
 impl Redrawer for HubRedrawer {
     fn open(&self, size: (u32, u32), prompt: &str, seed: u64) -> Result<Box<dyn Redraw>, String> {
-        let session = self.0.live(crate::hub::FAST_MODEL, crate::hub::LiveInput::H264, size, prompt, LIVE_STEPS, LIVE_STRENGTH, seed)?;
+        let compute = self.settings.live().compute();
+        let session = self.hub.live(crate::hub::FAST_MODEL, crate::hub::LiveInput::H264, size, prompt, LIVE_STEPS, LIVE_STRENGTH, seed, compute)?;
         Ok(Box::new(HubRedraw { session, size }))
     }
 }
@@ -752,6 +835,41 @@ mod tests {
     /// outside the slot, a slot's minute, keeping on while nobody waits, the
     /// wrap-up once someone does, and places freed at once by leaving, by a
     /// quiet page, or by the call.
+    /// A guest's call shows on the screens unless they choose "Just me",
+    /// which they may change while they wait or are up; a stream waiting for
+    /// a frame wakes when one comes.
+    #[test]
+    fn just_me_keeps_a_call_off_the_screens() {
+        let mut slots = Slots::default();
+        let (a, b) = (1, 2);
+        slots.queue(a, 0.0);
+        slots.queue(b, 0.0);
+        slots.set_screen(b, false);
+        slots.tick(0.0);
+        assert!(slots.screen(a) && !slots.screen(b), "on the screen unless asked otherwise");
+        assert!(slots.shown().is_some(), "the guest up shows");
+        slots.set_screen(a, false);
+        assert_eq!(slots.shown(), None, "just me: nothing of the call on the screens");
+        slots.leave(a);
+        slots.tick(1.0);
+        assert_eq!((slots.current_guest(), slots.shown()), (Some(b), None), "a choice made while waiting holds once up");
+        slots.set_screen(b, true);
+        assert!(slots.shown().is_some());
+
+        let live = Arc::new(Live::default());
+        assert!(live.frame_after(0, Duration::ZERO).is_none(), "no call, no frame");
+        let framer = live.clone();
+        let sent = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            framer.set_latest(Some(LiveFrame::new(1, Rgb { width: 2, height: 1, data: vec![255, 0, 0, 0, 0, 255] })));
+        });
+        let frame = live.frame_after(0, Duration::from_secs(5)).expect("woken by the frame");
+        assert_eq!((frame.count, frame.bgra.clone()), (1, vec![0xffff_0000, 0xff00_00ff]));
+        assert!(frame.jpeg().is_some_and(|j| j.starts_with(&[0xff, 0xd8])), "a JPEG for the screens");
+        assert!(live.frame_after(1, Duration::ZERO).is_none(), "a frame already shown is not new");
+        sent.join().unwrap();
+    }
+
     #[test]
     fn one_live_guest_at_a_time() {
         const SIZE: (u32, u32) = (512, 288);

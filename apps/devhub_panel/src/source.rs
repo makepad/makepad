@@ -12,7 +12,11 @@
 //! - the landing train every 5 s (all of it once per connection, then what is open or recent);
 //! - the inbox counts every 10 s and its unseen entries every 15 s;
 //! - the bucket ledger every 30 s and the lanes' branches every 60 s;
-//! - the shows (`show list`) every 5 s: a held one's row says why it stays at its pair.
+//! - the shows (`show list`) every 5 s: a held one's row says why it stays at its pair;
+//! - the history (`history`, `exact` and `rows` on the panel channel) when the timeline shows a
+//!   stretch before the live window: that stretch's load, and its leases while the view spans a
+//!   day or less ([`fetch_past`]); asked again only when the view leaves what was fetched or its
+//!   column width changes, at once when the view moves there, not at the next round.
 //!
 //! A lost master (its restart) is redialled every 2 s, and the panel's header says so meanwhile.
 //! The UI gets a new fleet only when something it shows changed (not the clock, not a holder's
@@ -21,15 +25,15 @@
 //! to a second within one when it is shown again.
 
 use crate::demo::Demo;
-use crate::model::{Bucket, Fleet, InboxCounts, InboxEntry, JobBrief, JobDetail, LaneBrief, Link, Merge, Side, KEEP_MS};
+use crate::model::{Bucket, Fleet, InboxCounts, InboxEntry, JobBrief, JobDetail, LaneBrief, Link, Marks, Merge, Past, Side, ViewReq, ViewSink, EXACT_COL_MS, KEEP_MS, PAST_FIELDS, ROWS_SPAN_MS};
 use makepad_devhub::land::{Entry as LandEntry, St};
-use makepad_devhub::lease::panel::{Answer, Row};
+use makepad_devhub::lease::panel::{Answer, Hist, Row, MAX_COLS};
 use makepad_devhub::lease::sched::NodeView;
 use makepad_remote::link::{Client, Target};
 use makepad_remote::Event;
 use makepad_widgets::{SignalToUI, ThreadOptions, ThreadSpawner};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -88,6 +92,11 @@ impl Source {
         *self.shared.want.lock().unwrap() = id;
     }
 
+    /// Where the timeline says what it shows.
+    pub fn view_sink(&self) -> Arc<ViewSink> {
+        self.shared.sink.clone()
+    }
+
     /// The panel's window is closed to the tray (true) or shown: a hidden panel asks less often.
     pub fn set_hidden(&self, hidden: bool) {
         self.shared.hidden.store(hidden, Ordering::Relaxed);
@@ -102,6 +111,9 @@ struct Ask {
     want: Mutex<Option<String>>,
     hidden: AtomicBool,
     stop: AtomicBool,
+    /// what the timeline shows, and the oldest time the live window holds
+    sink: Arc<ViewSink>,
+    live_from: AtomicU64,
 }
 
 impl Ask {
@@ -115,9 +127,15 @@ impl Ask {
     }
 
     /// Waits out the round that began at `t`: a second, or while the panel is hidden up to
-    /// [`HIDDEN_TICK`] (a second at most once it is shown again).
+    /// [`HIDDEN_TICK`] (a second at most once it is shown again); a view moved before the live
+    /// window ends it at once.
     fn rest(&self, t: Instant) {
-        std::thread::sleep(TICK.saturating_sub(t.elapsed()));
+        while !self.stopped() && t.elapsed() < TICK {
+            std::thread::sleep(TICK.saturating_sub(t.elapsed()).min(Duration::from_millis(50)));
+            if self.sink.moved_before(self.live_from.load(Ordering::Relaxed)) {
+                return;
+            }
+        }
         while self.hidden.load(Ordering::Relaxed) && !self.stopped() && t.elapsed() < HIDDEN_TICK {
             std::thread::sleep(TICK.min(HIDDEN_TICK.saturating_sub(t.elapsed())));
         }
@@ -146,6 +164,104 @@ mod tests {
             assert_eq!(r.last.len(), want.rows.len() + want.nodes.len());
         }
     }
+
+    /// The landings and bucket runs are asked for the whole view, the live window's part too, once
+    /// per stretch: a pan within the margin asks nothing, past it both again; a view that follows
+    /// now asks again only once now passes the stretch; an older master's refusal is no entry.
+    #[test]
+    fn the_landings_and_bucket_runs_are_asked_once_per_stretch() {
+        use std::cell::RefCell;
+        let (t, h) = (1_800_000_000_000u64, 3_600_000u64);
+        let asked = RefCell::new(Vec::<String>::new());
+        let mut ask = |l: &str| -> Result<Vec<String>, String> {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            asked.borrow_mut().push(w[0].to_string());
+            let from: u64 = w[1].parse().unwrap();
+            Ok(match w[0] {
+                "landings" => vec![format!(r#"{{"t":"landings","from_ms":{from},"to_ms":0,"n":1}}"#), format!(r#"{{"id":7,"branch":"rc-a","state":"landed","asked_ms":{from},"changed_ms":{}}}"#, from + 1)],
+                _ => vec![r#"{"err":"panel <since_ms>"}"#.to_string()],
+            })
+        };
+        let mut p = PastState::default();
+        let mut step = |p: &mut PastState, l: u64, r: u64| -> (bool, Vec<String>) {
+            let changed = fetch_marks(&mut ask, p, Some(ViewReq { t_left: l, t_right: r, col_ms: 1.0 })).unwrap();
+            (changed, asked.borrow_mut().drain(..).collect())
+        };
+        let both = vec!["landings".to_string(), "buckets".to_string()];
+        assert_eq!(step(&mut p, t - 3 * h, t), (true, both.clone()), "a view: its landings and bucket runs");
+        let m = p.marks.clone().unwrap();
+        assert_eq!((m.land.iter().map(|e| e.id).collect::<Vec<_>>(), m.buckets.len()), (vec![7], 0), "the landing; a refused buckets ask is no run");
+        assert_eq!((m.from_ms, m.to_ms), (t - 3 * h - 3 * h / 2, t + 3 * h / 2), "half a view's margin each side");
+        assert_eq!(step(&mut p, t - 3 * h + h, t + h), (false, vec![]), "following now within the margin");
+        assert_eq!(step(&mut p, t - 3 * h + 2 * h, t + 2 * h), (true, both), "past it: both again");
+        p.unsupported = true;
+        assert_eq!(step(&mut p, t, t + h), (true, vec![]), "a master with no history: nothing asked, the marks go");
+    }
+
+    /// The worker asks the history only for what the view needs and was not fetched: a view in
+    /// the live window asks nothing, one before it its load and (a day or less wide) its leases
+    /// once; a pan within the margin asks nothing, past it again; a zoom asks the load again at
+    /// its new width; a wide view asks no leases and drops them; a close-up asks exact samples;
+    /// back in the live window the past goes; an older master is asked nothing more.
+    #[test]
+    fn the_past_is_asked_once_per_stretch_and_width() {
+        use std::cell::RefCell;
+        let live_from = 1_800_000_000_000u64;
+        let h = 3_600_000u64;
+        let asked = RefCell::new(Vec::<String>::new());
+        let older = RefCell::new(false);
+        let mut ask = |l: &str| -> Result<Vec<String>, String> {
+            asked.borrow_mut().push(l.split_whitespace().next().unwrap().to_string());
+            if *older.borrow() {
+                return Ok(vec![r#"{"err":"panel <since_ms>"}"#.to_string()]);
+            }
+            let w: Vec<u64> = l.split_whitespace().skip(1).take(3).filter_map(|x| x.parse().ok()).collect();
+            Ok(match l.split_whitespace().next() {
+                Some("history") => vec![
+                    format!(r#"{{"t":"hist","from_ms":{},"per_ms":{},"n":{},"level":1,"first_ms":5}}"#, w[0], w[1], w[2]),
+                    r#"{"t":"cols","node":"node-a","field":"cpu_pct","min":[1],"max":[2],"mean":[1.5]}"#.to_string(),
+                ],
+                Some("exact") => vec![format!(r#"{{"t":"exact","from_ms":{},"per_ms":1,"n":0,"level":0,"first_ms":5}}"#, w[0]), r#"{"t":"pressure","node":"node-a","s":[[7,50,1,2,3,4,5,6,7]]}"#.to_string()],
+                _ => vec![format!(r#"{{"t":"rows","from_ms":{},"per_ms":1,"n":1,"level":0,"first_ms":null}}"#, w[0]), Row { id: "L1".into(), asked_ms: w[0], ..Row::default() }.to_json()],
+            })
+        };
+        let mut p = PastState::default();
+        let live = std::cell::Cell::new(live_from);
+        let mut step = |p: &mut PastState, v: ViewReq| -> (bool, Vec<String>) {
+            let changed = fetch_past(&mut ask, p, Some(v), live.get()).unwrap();
+            (changed, asked.borrow_mut().drain(..).collect())
+        };
+        let view = |l: u64, r: u64| ViewReq { t_left: l, t_right: r, col_ms: (r - l) as f64 / 400.0 };
+        assert_eq!(step(&mut p, view(live_from, live_from + h)), (false, vec![]), "all in the live window");
+        let v = view(live_from - 2 * h, live_from + h);
+        assert_eq!(step(&mut p, v), (true, vec!["history".into(), "rows".into()]), "a stretch before it");
+        assert_eq!((p.first_ms, p.samples.as_ref().map(|s| s.per_ms)), (Some(5), Some(27_000)), "its width and the oldest sample");
+        assert_eq!(step(&mut p, v), (false, vec![]), "the same view again");
+        let pan = |v: ViewReq, by: u64| ViewReq { t_left: v.t_left - by, t_right: v.t_right - by, ..v };
+        assert_eq!(step(&mut p, pan(v, h)), (false, vec![]), "a pan within the margin");
+        assert_eq!(step(&mut p, pan(v, 3 * h)), (true, vec!["history".into(), "rows".into()]), "a pan past it");
+        let zoomed = view(live_from - 5 * h + h / 4, live_from - 2 * h - h / 4);
+        assert_eq!(step(&mut p, zoomed), (true, vec!["history".into()]), "a zoom: the load at its width, the leases fetched already");
+        let mut f = Fleet { rows: vec![Arc::new(Row { id: "L1".into(), node: "live".into(), ..Row::default() })], ..Fleet::default() };
+        p.onto(&mut f);
+        assert_eq!(f.rows.iter().map(|r| r.node.as_str()).collect::<Vec<_>>(), ["live"], "a lease the live window has is its own");
+        let day = view(live_from - 21 * h, live_from + 3 * h);
+        assert_eq!(step(&mut p, day), (true, vec!["history".into(), "rows".into()]), "a day view");
+        live.set(live_from + 60_000);
+        assert_eq!(step(&mut p, pan(day, 0)), (false, vec![]), "following it: the live window's start moved a minute, nothing is asked");
+        live.set(live_from);
+        assert_eq!(step(&mut p, view(live_from - 72 * h, live_from)), (true, vec!["history".into()]), "a wide view: the load alone");
+        assert!(p.rows.is_none(), "its leases are dropped");
+        let close = view(live_from - h, live_from - h / 2);
+        assert_eq!(step(&mut p, close), (true, vec!["exact".into(), "rows".into()]), "a close-up: exact samples");
+        assert_eq!(p.samples.as_ref().unwrap().exact["node-a"][0].cpu_pct, 50.0);
+        assert_eq!(step(&mut p, view(live_from, live_from + h)), (true, vec![]), "back in the live window: the past goes");
+        assert!(p.samples.is_none() && p.rows.is_none());
+        *older.borrow_mut() = true;
+        assert_eq!(step(&mut p, v).1, vec!["history".to_string()]);
+        assert!(p.unsupported, "an older master has no history");
+        assert_eq!(step(&mut p, pan(v, 10 * h)), (false, vec![]), "and is not asked again");
+    }
 }
 
 fn wall_ms() -> u64 {
@@ -160,10 +276,15 @@ fn demo(ask: &Ask) {
     // the panel has watched for a while: what it tracks itself (self-update since) has a past
     m.apply(d.answer(start - KEEP_MS, start - crate::demo::WATCHED_MS));
     let mut first = true;
+    // the month before the run, as a master's history answers it
+    let mut past = PastState { first_ms: Some(d.first_ms()), ..PastState::default() };
     while !ask.stopped() {
         let t = Instant::now();
         let now = wall_ms();
         let mut changed = m.apply(d.answer(m.next_since(now.saturating_sub(KEEP_MS)), now));
+        ask.live_from.store(m.from_ms, Ordering::Relaxed);
+        changed |= fetch_past(&mut |l: &str| Ok(d.history(l, now)), &mut past, ask.sink.get(), m.from_ms).unwrap_or(false);
+        changed |= fetch_marks(&mut |l: &str| Ok(d.history(l, now)), &mut past, ask.sink.get()).unwrap_or(false);
         let want = ask.want.lock().unwrap().clone();
         let before = side.clone();
         d.side(&mut side, now, want.as_deref());
@@ -171,6 +292,7 @@ fn demo(ask: &Ask) {
         if changed || first {
             let mut f = m.fleet(Link::Demo);
             side.onto(&mut f);
+            past.onto(&mut f);
             ask.publish(f);
             first = false;
         }
@@ -228,10 +350,11 @@ impl Side {
 fn master(ask: &Ask) {
     let mut m = Merge::default();
     let mut side = Side::default();
+    let mut past = PastState::default();
     let mut lost: Option<(u64, String)> = None;
     let mut reconnected_ms = None;
     while !ask.stopped() {
-        let (why, was_up) = match session(&mut m, &mut side, ask, &mut reconnected_ms, lost.is_some()) {
+        let (why, was_up) = match session(&mut m, &mut side, &mut past, ask, &mut reconnected_ms, lost.is_some()) {
             Ok(()) => return,
             Err(Ended::Older) => {
                 lost = None;
@@ -249,6 +372,7 @@ fn master(ask: &Ask) {
         lost = Some((since, why.clone()));
         let mut f = m.fleet(if m.now_ms == 0 { Link::Connecting } else { Link::Lost { since_ms: since, why } });
         side.onto(&mut f);
+        past.onto(&mut f);
         f.reconnected_ms = reconnected_ms;
         ask.publish(f);
         std::thread::sleep(Duration::from_secs(2));
@@ -309,7 +433,7 @@ impl Reparse {
 }
 
 /// One connection's life: asks until the link breaks.
-fn session(m: &mut Merge, side: &mut Side, ask: &Ask, reconnected_ms: &mut Option<u64>, was_lost: bool) -> Result<(), Ended> {
+fn session(m: &mut Merge, side: &mut Side, past: &mut PastState, ask: &Ask, reconnected_ms: &mut Option<u64>, was_lost: bool) -> Result<(), Ended> {
     let c = Client::new(Target::Unix(makepad_devhub::proto::control_socket()), "devhub-panel");
     c.conn().map_err(|e| Ended::Lost(e.to_string(), false))?;
     let has = |svc: &str| c.caps().iter().any(|s| s.split('/').next() == Some(svc));
@@ -332,6 +456,12 @@ fn session(m: &mut Merge, side: &mut Side, ask: &Ask, reconnected_ms: &mut Optio
     let mut n: u64 = 0;
     let mut wanted: Option<String> = None;
     let mut reparse = Reparse::default();
+    // the history's oldest sample (an older master has no history: its stretch stays empty)
+    past.unsupported = false;
+    match Hist::parse(&panel.ask(&format!("history {} 60000 0 cpu_pct", wall_ms())).map_err(lost)?) {
+        Ok(h) => past.first_ms = h.first_ms,
+        Err(_) => past.unsupported = true,
+    }
     while !ask.stopped() {
         let t = Instant::now();
         let now = wall_ms();
@@ -339,6 +469,9 @@ fn session(m: &mut Merge, side: &mut Side, ask: &Ask, reconnected_ms: &mut Optio
         let a = reparse.answer(panel.ask(&since.to_string()).map_err(lost)?).map_err(lost)?;
         let before = side.clone();
         let mut changed = m.apply(a) || n == 0;
+        ask.live_from.store(m.from_ms, Ordering::Relaxed);
+        changed |= fetch_past(&mut |l: &str| panel.ask(l), past, ask.sink.get(), m.from_ms).map_err(lost)?;
+        changed |= fetch_marks(&mut |l: &str| panel.ask(l), past, ask.sink.get()).map_err(lost)?;
         if n % 5 == 0 {
             if n == 0 {
                 // the whole train once: its landings older than the window are dropped here
@@ -387,10 +520,121 @@ fn session(m: &mut Merge, side: &mut Side, ask: &Ask, reconnected_ms: &mut Optio
         if changed {
             let mut f = m.fleet(Link::Live);
             side.onto(&mut f);
+            past.onto(&mut f);
             f.reconnected_ms = *reconnected_ms;
             ask.publish(f);
         }
         ask.rest(t);
     }
     Ok(())
+}
+
+/// What of the history the worker fetched for the view.
+#[derive(Default)]
+struct PastState {
+    samples: Option<Arc<Past>>,
+    /// the range asked and the leases that ran in it
+    rows: Option<(u64, u64, Vec<Arc<Row>>)>,
+    first_ms: Option<u64>,
+    /// the master has no history (an older one)
+    unsupported: bool,
+    /// the landings and bucket runs of the stretch asked
+    marks: Option<Arc<Marks>>,
+}
+
+impl PastState {
+    /// The past onto a fleet: its load, and its leases beside the live window's (a lease both
+    /// have is the live one).
+    fn onto(&self, f: &mut Fleet) {
+        f.past = self.samples.clone();
+        f.first_ms = self.first_ms;
+        f.marks = self.marks.clone();
+        if let Some((_, _, rows)) = &self.rows {
+            let have: HashSet<&str> = f.rows.iter().map(|r| r.id.as_str()).collect();
+            let extra: Vec<Arc<Row>> = rows.iter().filter(|r| !have.contains(r.id.as_str())).cloned().collect();
+            if !extra.is_empty() {
+                f.rows.extend(extra);
+                f.rows.sort_by(|a, b| a.asked_ms.cmp(&b.asked_ms).then_with(|| a.id.cmp(&b.id)));
+            }
+        }
+    }
+}
+
+/// The landings and bucket runs of the whole view, asked from the master's history with half a
+/// view's margin each side when the view leaves what was fetched: the live side holds only the
+/// train since the window's start and each bucket's last runs. A view that follows now asks
+/// again once now passes the stretch's end. An older master answers none, for that stretch.
+fn fetch_marks(ask: &mut dyn FnMut(&str) -> Result<Vec<String>, String>, p: &mut PastState, v: Option<ViewReq>) -> Result<bool, String> {
+    let Some(v) = v.filter(|_| !p.unsupported) else { return Ok(p.marks.take().is_some()) };
+    if p.marks.as_ref().is_some_and(|m| m.from_ms <= v.t_left && m.to_ms >= v.t_right) {
+        return Ok(false);
+    }
+    let span = v.t_right.saturating_sub(v.t_left).max(60_000);
+    let (from, to) = (v.t_left.saturating_sub(span / 2), v.t_right.saturating_add(span / 2));
+    let entries = |lines: Vec<String>| lines.into_iter().filter(|l| !l.starts_with("{\"t\"") && !l.starts_with("{\"err\""));
+    let land = entries(ask(&format!("landings {from} {to}"))?).filter_map(|l| LandEntry::parse(&l)).collect();
+    let mut buckets: Vec<Bucket> = entries(ask(&format!("buckets {from} {to}"))?).filter_map(|l| Bucket::parse(&l)).collect();
+    buckets.sort_by_key(|b| b.started_ms);
+    p.marks = Some(Arc::new(Marks { from_ms: from, to_ms: to, land, buckets }));
+    Ok(true)
+}
+
+/// What of the view lies before the live window (`live_from`) and is not fetched yet, asked from
+/// the master's history with half a view's margin each side: the load (exact samples for a column
+/// under [`EXACT_COL_MS`], else columns of the view's width) and, while the view spans at most
+/// [`ROWS_SPAN_MS`], the leases. The stretch runs into the live window (what both have is the
+/// live one's), so a view that follows now asks again once the live window's start passes its
+/// end, not each second as that start moves. A view all in the live window drops what was
+/// fetched. Whether the past changed; an error only for the link.
+fn fetch_past(ask: &mut dyn FnMut(&str) -> Result<Vec<String>, String>, p: &mut PastState, v: Option<ViewReq>, live_from: u64) -> Result<bool, String> {
+    let Some(v) = v.filter(|v| !p.unsupported && live_from > 0 && v.t_left < live_from) else {
+        let had = p.samples.take().is_some() | p.rows.take().is_some();
+        return Ok(had);
+    };
+    let span = v.t_right.saturating_sub(v.t_left).max(60_000);
+    let from = v.t_left.saturating_sub(span / 2);
+    let to = v.t_right.saturating_add(span / 2);
+    let need_to = live_from.min(v.t_right);
+    let per = (v.col_ms.round() as u64).max(1);
+    let exact = per < EXACT_COL_MS;
+    let mut changed = false;
+    let have = p.samples.as_ref().is_some_and(|s| (s.per_ms == 0) == exact && (exact || s.per_ms == per) && s.from_ms <= v.t_left && s.to_ms >= need_to);
+    if !have {
+        let (line, from) = if exact {
+            (format!("exact {from} {to}"), from)
+        } else {
+            let from = from / per * per;
+            let n = to.saturating_sub(from).div_ceil(per).min(MAX_COLS);
+            (format!("history {from} {per} {n} {}", PAST_FIELDS.join(",")), from)
+        };
+        match Hist::parse(&ask(&line)?) {
+            Ok(h) => {
+                p.first_ms = h.first_ms.or(p.first_ms);
+                p.samples = Some(Arc::new(Past {
+                    from_ms: from,
+                    to_ms: to,
+                    per_ms: if exact { 0 } else { per },
+                    exact: h.exact.into_iter().collect(),
+                    cols: h.cols.into_iter().map(|(n, f, c)| ((n, f), c)).collect(),
+                }));
+            }
+            // an older master: no history to show, nor asked again
+            Err(_) => {
+                p.unsupported = true;
+                return Ok(false);
+            }
+        }
+        changed = true;
+    }
+    if span <= ROWS_SPAN_MS {
+        if !p.rows.as_ref().is_some_and(|(a, b, _)| *a <= v.t_left && *b >= need_to) {
+            // (a master without `rows` answers none, and is not asked again for this stretch)
+            let rows = Hist::parse(&ask(&format!("rows {from} {to}"))?).map(|h| h.rows).unwrap_or_default();
+            p.rows = Some((from, to, rows.into_iter().map(Arc::new).collect()));
+            changed = true;
+        }
+    } else if p.rows.take().is_some() {
+        changed = true;
+    }
+    Ok(changed)
 }

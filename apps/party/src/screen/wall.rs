@@ -9,6 +9,8 @@
 //! While a guest is live their camera, redrawn, takes the wall's place (the
 //! join panel stays), with "starting…" until the hub's first frame and the
 //! seconds left once someone waits; the host taps it and Stop to end it.
+//! At the foot of the join panel the host picks how the live redraw
+//! computes (`settings.rs`): Fast or Exact, for the next live guest.
 //! The live thread makes each frame's texels; the wall copies the newest
 //! into its one live texture when the frame count moves (an atomic read per
 //! display frame) and reads the slot ten times a second.
@@ -23,6 +25,7 @@
 
 use crate::screen::frames::{Frames, Pic, Size, Want};
 use makepad_app_party::api::Party;
+use makepad_app_party::settings::{Detail, LiveSettings};
 use makepad_app_party::store::{Jpeg, Quality, SourceKind, Who};
 use makepad_app_party::wall_plan::{self, GAP};
 use makepad_qr::Qr;
@@ -46,8 +49,10 @@ script_mod! {
         draw_dim +: {color: #000a}
         draw_qr +: {color: #fff}
         draw_button +: {color: #b3261e}
+        draw_pill +: {color: #2b2521}
         draw_title +: {color: #f1ece6 text_style: theme.font_bold{font_size: 26}}
         draw_note +: {color: #c8bfb4 text_style: theme.font_regular{font_size: 13}}
+        draw_lit +: {color: #14110f text_style: theme.font_bold{font_size: 13}}
     }
 }
 
@@ -109,9 +114,14 @@ pub struct PartyWall {
     #[live]
     draw_button: DrawColor,
     #[live]
+    draw_pill: DrawColor,
+    #[live]
     draw_title: DrawText,
     #[live]
     draw_note: DrawText,
+    /// The words on a lit pill (the setting in use).
+    #[live]
+    draw_lit: DrawText,
     #[rust]
     party: Option<Arc<Party>>,
     #[rust]
@@ -168,6 +178,25 @@ pub struct PartyWall {
     live_rect: Option<Rect>,
     #[rust]
     stop_rect: Option<Rect>,
+    /// Where each side of the host's settings was last drawn, for taps.
+    #[rust]
+    setting_rects: Vec<(Rect, Setting, Detail)>,
+}
+
+/// The host's settings the panel shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setting {
+    Arithmetic,
+    Prompt,
+}
+
+impl Setting {
+    fn set(self, live: &mut LiveSettings, detail: Detail) {
+        match self {
+            Setting::Arithmetic => live.arithmetic = detail,
+            Setting::Prompt => live.prompt = detail,
+        }
+    }
 }
 
 impl PartyWall {
@@ -394,6 +423,32 @@ impl PartyWall {
         rect
     }
 
+    /// The host's live settings at the foot of the join panel, below `top`:
+    /// per setting its two sides, the one in use lit.
+    fn draw_settings(&mut self, cx: &mut Cx2d, panel: Rect, top: f64) {
+        let Some(live) = self.party.as_ref().map(|party| party.settings.live()) else { return };
+        let rows = [("Arithmetic", Setting::Arithmetic, live.arithmetic), ("Prompt window", Setting::Prompt, live.prompt)];
+        let (row_h, pill) = (44.0, dvec2(96.0, 34.0));
+        let y0 = (panel.pos.y + panel.size.y - 24.0 - 32.0 - rows.len() as f64 * row_h).max(top);
+        let x = panel.pos.x + 24.0;
+        self.draw_note.draw_abs(cx, dvec2(x, y0), "Live redraw");
+        for (row, (label, setting, now)) in rows.into_iter().enumerate() {
+            let y = y0 + 32.0 + row as f64 * row_h;
+            self.draw_note.draw_abs(cx, dvec2(x, y + 8.0), label);
+            for (i, (detail, name)) in [(Detail::Fast, "Fast"), (Detail::Exact, "Exact")].into_iter().enumerate() {
+                let rect = Rect { pos: dvec2(panel.pos.x + PANEL - 24.0 - 2.0 * pill.x - 8.0 + i as f64 * (pill.x + 8.0), y), size: pill };
+                if detail == now {
+                    self.draw_pick.draw_abs(cx, rect);
+                    self.draw_lit.draw_abs(cx, rect.pos + dvec2(24.0, 8.0), name);
+                } else {
+                    self.draw_pill.draw_abs(cx, rect);
+                    self.draw_note.draw_abs(cx, rect.pos + dvec2(24.0, 8.0), name);
+                }
+                self.setting_rects.push((rect, setting, detail));
+            }
+        }
+    }
+
     fn draw_qr_code(&mut self, cx: &mut Cx2d, at: Vec2d, side: f64) {
         let Some(qr) = &self.qr else { return };
         // A quiet zone of four modules all round, as readers expect.
@@ -456,6 +511,18 @@ impl Widget for PartyWall {
                 return;
             }
             self.last_change = now;
+            if let Some(&(_, setting, detail)) = self.setting_rects.iter().find(|(r, _, _)| r.contains(fe.abs)) {
+                if let Some(party) = &self.party {
+                    let mut live = party.settings.live();
+                    setting.set(&mut live, detail);
+                    match party.settings.set_live(live) {
+                        Ok(()) => log!("party: the next live guest is redrawn with {live:?}"),
+                        Err(e) => log!("party: the settings are not saved: {e}"),
+                    }
+                }
+                self.redraw(cx);
+                return;
+            }
             if self.live_caption.is_some() {
                 if self.stop_rect.is_some_and(|r| r.contains(fe.abs)) {
                     if self.party.as_ref().is_some_and(|party| party.live.stop()) {
@@ -490,6 +557,7 @@ impl Widget for PartyWall {
         self.remove_rect = None;
         self.live_rect = None;
         self.stop_rect = None;
+        self.setting_rects.clear();
         if let Some(message) = self.message.clone() {
             self.draw_title.draw_abs(cx, dvec2(rect.pos.x + 32.0, rect.pos.y + rect.size.y * 0.45), &message);
             return DrawStep::done();
@@ -533,6 +601,9 @@ impl Widget for PartyWall {
         };
         for (i, line) in lines.iter().enumerate() {
             self.draw_note.draw_abs(cx, dvec2(panel.pos.x + 24.0, panel.pos.y + 136.0 + qr_side + i as f64 * 24.0), line);
+        }
+        if live {
+            self.draw_settings(cx, panel, panel.pos.y + 136.0 + qr_side + lines.len() as f64 * 24.0 + 24.0);
         }
 
         if let Some(caption) = self.live_caption.clone() {

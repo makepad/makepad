@@ -14,7 +14,9 @@
 //! waiting rows. The selected lease glows in the accent colour.
 //!
 //! The wheel zooms around the pointer (over the gutter it scrolls the lanes), a drag pans, a
-//! click on a lease selects it (the panel opens its detail). While following, the right edge
+//! click on a lease selects it (the panel opens its detail). The view reaches back to the
+//! master's oldest sample: before the live window the load comes from its history ([`node_cols`])
+//! and, in a view of a day or less, the leases that ran there. While following, the right edge
 //! is the master's now, drawn as a glowing edge. Tooltips float over the view and are redrawn
 //! only when what is under the pointer changes; nothing reflows under the pointer.
 //!
@@ -24,7 +26,8 @@
 
 use crate::float::{draw_float, Float};
 use crate::fmt::{clock, dur, local_offset_s, short};
-use crate::model::{blocker_key, pack, pack_capped, Fleet, KEEP_MS, LONG_WAIT_MS};
+use crate::model::{blocker_key, pack, pack_capped, Bucket, Fleet, ViewReq, ViewSink, KEEP_MS, LONG_WAIT_MS, ROWS_SPAN_MS};
+use makepad_devhub::land::Entry as LandEntry;
 use crate::needs::Sev;
 use makepad_devhub::lease::panel::{Row, Sample};
 use makepad_devhub::lease::sched::NodeView;
@@ -357,10 +360,10 @@ enum Pick {
     Lease(usize, bool),
     /// a node's lane, behind its bars: its pressure (node index)
     Press(usize),
-    /// a landing (index into the fleet's land entries)
-    Landing(usize),
-    /// a bucket run (index into the fleet's buckets)
-    Bucket(usize),
+    /// a landing (index into the fleet's land entries, or with `true` its history's: [`landing_at`])
+    Landing(usize, bool),
+    /// a bucket run (index into the fleet's buckets, or with `true` its history's: [`bucket_at`])
+    Bucket(usize, bool),
     /// a node's header (node index)
     Head(usize),
     /// a node's leases that do not fit its collapsed rows
@@ -520,6 +523,9 @@ pub struct FleetTimeline {
     lanes_top: f64,
     #[rust]
     content_h: f64,
+    /// where each draw says what it shows (the worker fetches the history's part of it)
+    #[rust]
+    view_sink: Option<Arc<ViewSink>>,
 }
 
 impl FleetTimeline {
@@ -547,6 +553,16 @@ impl FleetTimeline {
             self.flags = flags;
             self.area.redraw(cx);
         }
+    }
+
+    pub fn set_view_sink(&mut self, sink: Arc<ViewSink>) {
+        self.view_sink = Some(sink);
+    }
+
+    /// The widest window: back to the history's oldest sample (the live window without one).
+    fn max_window(&self) -> f64 {
+        let span = self.fleet.as_ref().and_then(|f| Some(f.now_ms.saturating_sub(f.first_ms?))).unwrap_or(0).max(KEEP_MS);
+        span as f64 * 1.05
     }
 
     /// Shows the last `ms` and follows now.
@@ -581,13 +597,13 @@ impl FleetTimeline {
         let start = r.asked_ms as f64;
         if r.ended_ms.is_none() {
             let want = (f.now_ms as f64 - start) * 1.3 + 120_000.0;
-            self.window_ms = want.clamp(15.0 * 60_000.0, KEEP_MS as f64);
+            self.window_ms = want.clamp(15.0 * 60_000.0, self.max_window());
             self.ms_per_px = self.window_ms / plot_w;
             self.follow = true;
         } else {
             let end = f.end_ms(r) as f64;
             let span = (end - start).max(60_000.0);
-            self.ms_per_px = (span * 3.0 / plot_w).clamp(200.0, KEEP_MS as f64 / plot_w);
+            self.ms_per_px = (span * 3.0 / plot_w).clamp(200.0, self.max_window() / plot_w);
             self.t_right = end + span;
             self.unfollow(cx);
         }
@@ -757,6 +773,9 @@ impl FleetTimeline {
         }
         let t0 = self.t_left().max(0.0) as u64;
         let t1 = self.t_right.max(0.0) as u64;
+        if let Some(sink) = &self.view_sink {
+            sink.set(ViewReq { t_left: t0, t_right: t1, col_ms: self.ms_per_px * COL_W });
+        }
         let offset = local_offset_s(f.now_ms);
         let top = view.pos.y;
         // the gutter's ground, a shade off the plot's
@@ -779,7 +798,11 @@ impl FleetTimeline {
             }
             t += step;
         }
-        let window = format!("{} \u{2192} {} \u{b7} {}", clock(t0, offset, false), clock(t1.min(f.now_ms), offset, false), dur(t1.saturating_sub(t0)));
+        let mut window = format!("{} \u{2192} {} \u{b7} {}", clock(t0, offset, false), clock(t1.min(f.now_ms), offset, false), dur(t1.saturating_sub(t0)));
+        if t0 < f.from_ms && t1.saturating_sub(t0) > ROWS_SPAN_MS {
+            // past the live window, a view this wide shows each box's leases as how busy it was
+            window += " \u{b7} leases as busy share";
+        }
         let muted = self.muted;
         self.small(cx, view.pos.x + 8.0, top + 4.0, GUTTER - 16.0, &window, muted);
 
@@ -931,31 +954,39 @@ impl FleetTimeline {
 
     fn draw_train(&mut self, cx: &mut Cx2d, f: &Fleet, y: f64, t0: u64, t1: u64) -> f64 {
         let x = self.view.pos.x + 8.0;
-        let in_window = f.land.iter().filter(|e| e.changed_ms >= t0 && e.changed_ms <= t1).count();
+        let in_window = landings(f).filter(|(_, _, e)| e.changed_ms >= t0 && e.changed_ms <= t1).count();
         let ink = self.ink;
         let w = self.small(cx, x, y + 2.0, 80.0, "LANDINGS", ink);
         let muted = self.muted;
         self.small(cx, x + w + 6.0, y + 2.0, GUTTER - w - 22.0, &format!("{in_window} in view"), muted);
         let (plot_x, right) = (self.plot_x(), self.right());
-        // bucket runs as thin bars at the band's bottom
-        for (i, b) in f.buckets.iter().enumerate() {
+        // bucket runs as thin bars at the band's bottom (of a wide view, one a pixel and verdict)
+        let mut drawn: HashSet<(i64, bool)> = HashSet::new();
+        for (i, past, b) in bucket_runs(f) {
             if b.ended_ms < t0 || b.started_ms > t1 {
                 continue;
             }
             let x0 = self.x_of(b.started_ms).max(plot_x);
             let x1 = self.x_of(b.ended_ms).min(right).max(x0 + 2.0);
+            if x1 - x0 < 3.0 && !drawn.insert((x0 as i64, b.ok)) {
+                continue;
+            }
             let c = if b.ok { self.good } else { self.bad };
             self.draw_bar.plain(cx, Rect { pos: dvec2(x0, y + TRAIN_H - 4.0), size: dvec2(x1 - x0, 3.0) }, Self::with_alpha(c, 0.75), vec4(0.0, 0.0, 0.0, 0.0), 1.5);
-            self.picks.push((Rect { pos: dvec2(x0, y + TRAIN_H - 6.0), size: dvec2(x1 - x0, 7.0) }, Pick::Bucket(i)));
+            self.picks.push((Rect { pos: dvec2(x0, y + TRAIN_H - 6.0), size: dvec2(x1 - x0, 7.0) }, Pick::Bucket(i, past)));
         }
-        // landings as ticks: landed, failed, still queued
-        for (i, e) in f.land.iter().enumerate() {
+        // landings as ticks: landed, failed, still queued (of a wide view, one a pixel and state)
+        let mut drawn: HashSet<(i64, u8)> = HashSet::new();
+        for (i, past, e) in landings(f) {
             use makepad_devhub::land::St;
             let at = if matches!(e.state, St::Queued | St::Checking) { e.asked_ms } else { e.changed_ms };
             if at < t0 || at > t1 {
                 continue;
             }
             let x = self.x_of(at);
+            if !drawn.insert((x as i64, e.state as u8)) {
+                continue;
+            }
             let c = match e.state {
                 St::Landed => self.good,
                 St::Failed | St::Conflict => self.bad,
@@ -968,7 +999,7 @@ impl FleetTimeline {
             } else {
                 self.draw_bar.plain(cx, r, c, vec4(0.0, 0.0, 0.0, 0.0), 2.0);
             }
-            self.picks.push((Rect { pos: dvec2(x - 5.0, y), size: dvec2(10.0, TRAIN_H) }, Pick::Landing(i)));
+            self.picks.push((Rect { pos: dvec2(x - 5.0, y), size: dvec2(10.0, TRAIN_H) }, Pick::Landing(i, past)));
         }
         y + TRAIN_H + 1.0
     }
@@ -978,11 +1009,14 @@ impl FleetTimeline {
     fn draw_queue_area(&mut self, cx: &mut Cx2d, f: &Fleet, y: f64, t0: u64, t1: u64) -> f64 {
         let x = self.view.pos.x + 8.0;
         let q = f.queued();
-        let long = q.iter().filter(|r| f.wait_ms(r) >= LONG_WAIT_MS).count();
+        // (a lane's serial plan counts once, the prebuilds apart: [`Fleet::long_waits`])
+        let lw = f.long_waits();
+        let long = lw.count();
         let ink = self.ink;
         let w = self.bold(cx, x, y + 1.0, 80.0, "QUEUE", ink);
         let (c, muted) = (if long > 0 { self.warn } else { self.ink }, self.muted);
-        let line = if long > 0 { format!("{} waiting \u{b7} {long} over 10 min", q.len()) } else { format!("{} waiting", q.len()) };
+        let pre = crate::queue::prebuilds_said(lw.prebuilds.len());
+        let line = if long > 0 { format!("{} waiting \u{b7} {long} over 10 min{pre}", q.len()) } else { format!("{} waiting{pre}", q.len()) };
         self.text(cx, x + w + 6.0, y + 1.5, GUTTER - w - 22.0, &line, c);
         let stats = match f.wait_stats(t0, t1) {
             Some((p50, p90, max, n)) => format!("wait p50 {} \u{b7} p90 {} \u{b7} max {} ({n})", dur(p50), dur(p90), dur(max)),
@@ -1118,12 +1152,11 @@ impl FleetTimeline {
             return;
         }
         let g = self.col_grid();
-        let samples = f.pressure.get(&n.name).cloned();
         let caps = n.caps.clone();
         // its CPU use as a soft area behind the bars (collapsed), or its four pressure rows
-        if let (Some(s), Some(c)) = (samples.as_ref(), caps.as_ref()) {
+        if let Some(c) = caps.as_ref().filter(|_| f.pressure.contains_key(&n.name) || f.past.is_some()) {
             if l.mode == Mode::Collapsed {
-                let vals = columns(s, g.t0, g.per, g.n, f.now_ms, &|x: &Sample| if x.cpu_pct < 0.0 { -1.0 } else { x.cpu_pct / 100.0 });
+                let vals = node_cols(f, &n.name, &g, Field::Cpu, c.cores, c.ram_gb);
                 let me = &*self;
                 let heat: Vec<Vec4f> = (0..=20).map(|i| me.heat(i as f32 / 20.0)).collect();
                 let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.16);
@@ -1137,12 +1170,21 @@ impl FleetTimeline {
                     let ry = py + k as f64 * (PRESS_ROW + 1.0);
                     self.rect(cx, plot_x, ry + PRESS_ROW, right, 1.0, grid);
                     self.small_right(cx, plot_x - 6.0, ry, name, muted);
-                    let (cores, ram) = (c.cores, c.ram_gb);
-                    let vals = columns(s, g.t0, g.per, g.n, f.now_ms, &|x: &Sample| shares(x, cores, ram)[k]);
+                    let vals = node_cols(f, &n.name, &g, Field::ALL[k], c.cores, c.ram_gb);
                     let color_of = |v: f32| Self::with_alpha(heat[(v.clamp(0.0, 1.0) * 20.0) as usize], 0.6);
                     self.draw_area.series(cx, g.x0, plot_x, COL_W, ry, PRESS_ROW, &vals, &color_of, 0.95);
                 }
             }
+        }
+        // past the live window, a view wider than a day has no leases fetched: each column shows
+        // the share of the box's cores its leases held (the master's reduced reservation, at
+        // most), up to the live window, whose leases are bars
+        if let Some(c) = caps.as_ref().filter(|_| f.past.is_some() && t0 < f.from_ms && t1.saturating_sub(t0) > ROWS_SPAN_MS) {
+            let mut busy = node_cols(f, &n.name, &g, Field::Reserved, c.cores, c.ram_gb);
+            let live = (g.col(f.from_ms).floor().max(0.0) as usize).min(busy.len());
+            busy[live..].fill(-1.0);
+            let accent = Self::with_alpha(self.accent, 0.45);
+            self.draw_area.series(cx, g.x0, plot_x, COL_W, y + 1.0, l.bars_h, &busy, &|_| accent, 0.9);
         }
         // the queue waits first, as thin tails leading into their runs; the runs cover them
         for &(i, row) in &l.placed {
@@ -1306,10 +1348,19 @@ impl FleetTimeline {
         // the sparkline: its CPU over the window, as tall as the lane leaves it
         let sy = y + 14.0;
         let sh = (l.h - 17.0).max(8.0);
-        if let Some(s) = f.pressure.get(&n.name) {
+        if f.pressure.contains_key(&n.name) || f.past.is_some() {
+            // the view's CPU columns, each spark column the highest of those it covers
             let n_cols = (SPARK_W / COL_W) as usize;
+            let g = self.col_grid();
+            let main = node_cols(f, &n.name, &g, Field::Cpu, c.cores, c.ram_gb);
             let per = t1.min(f.now_ms).saturating_sub(t0) as f64 / n_cols.max(1) as f64;
-            let vals = columns(s, t0 as f64, per, n_cols, f.now_ms, &|x: &Sample| if x.cpu_pct < 0.0 { -1.0 } else { x.cpu_pct / 100.0 });
+            let vals: Vec<f32> = (0..n_cols)
+                .map(|j| {
+                    let a = g.col(t0 + (j as f64 * per) as u64).floor().max(0.0) as usize;
+                    let b = (g.col(t0 + ((j + 1) as f64 * per) as u64).ceil().max(0.0) as usize).min(main.len());
+                    main.get(a.min(b)..b).map_or(-1.0, |v| v.iter().copied().fold(-1.0, f32::max))
+                })
+                .collect();
             let g = self.grid;
             self.rect(cx, x, sy + sh, x + SPARK_W, 1.0, g);
             let me = &*self;
@@ -1381,8 +1432,8 @@ impl FleetTimeline {
                 continue;
             }
             match pick {
-                Pick::Lease(_, false) | Pick::Landing(_) | Pick::Hidden(_) => return Some(*pick),
-                Pick::Lease(_, true) | Pick::Bucket(_) => best = Some(*pick),
+                Pick::Lease(_, false) | Pick::Landing(..) | Pick::Hidden(_) => return Some(*pick),
+                Pick::Lease(_, true) | Pick::Bucket(..) => best = Some(*pick),
                 Pick::Press(_) | Pick::Head(_) | Pick::Queue => {
                     if best.is_none() {
                         best = Some(*pick);
@@ -1459,15 +1510,24 @@ impl FleetTimeline {
     }
 
     fn press_tip(&self, f: &Fleet, n: &NodeView, t: u64, offset: i64) -> Vec<String> {
-        let Some(s) = f.pressure.get(&n.name).and_then(|v| {
-            let i = v.partition_point(|s| s.t_ms <= t);
-            i.checked_sub(1).and_then(|i| v.get(i))
-        }) else {
-            return vec![format!("{} \u{b7} no samples here", n.name)];
-        };
         let c = n.caps.as_ref();
         let cores = c.map_or(0, |c| c.cores);
         let ram = c.map_or(0.0, |c| c.ram_gb);
+        let at = |v: &Vec<Sample>| {
+            let i = v.partition_point(|s| s.t_ms <= t);
+            i.checked_sub(1).and_then(|i| v.get(i)).copied()
+        };
+        let live = f.pressure.get(&n.name).filter(|v| v.first().is_some_and(|s| s.t_ms <= t));
+        let past = f.past.as_ref().filter(|p| t >= p.from_ms && t < p.to_ms);
+        let s = match (live, past) {
+            (Some(v), _) => at(v),
+            (None, Some(p)) if p.per_ms == 0 => p.exact.get(&n.name).and_then(at),
+            (None, Some(p)) => return past_tip(p, &n.name, t, offset, cores, ram),
+            (None, None) => None,
+        };
+        let Some(s) = s else {
+            return vec![format!("{} \u{b7} no samples here", n.name)];
+        };
         let mut v = vec![format!("{} at {}", n.name, clock(s.t_ms, offset, true))];
         v.push(format!("cpu {} \u{b7} load {:.1} \u{b7} RAM {:.0}/{ram:.0} GB used", if s.cpu_pct < 0.0 { "-".to_string() } else { format!("{:.0}%", s.cpu_pct) }, s.load1, s.ram_used_gb));
         v.push(format!("reserved {:.0}/{cores} cores \u{b7} {:.0}/{:.0} GB RAM budget", s.res_cores, s.res_ram_gb, ram * 0.85));
@@ -1514,9 +1574,7 @@ impl FleetTimeline {
                 let t = self.t_of(self.hover_at.x).max(0.0) as u64;
                 self.queue_tip(f, t.min(f.now_ms), offset)
             }
-            Pick::Landing(i) => f
-                .land
-                .get(i)
+            Pick::Landing(i, past) => landing_at(f, i, past)
                 .map(|e| {
                     let mut v = vec![format!("#{} {} \u{b7} {}", e.id, e.label(), e.state.as_str())];
                     if !e.agent.is_empty() {
@@ -1533,9 +1591,7 @@ impl FleetTimeline {
                     v
                 })
                 .unwrap_or_default(),
-            Pick::Bucket(i) => f
-                .buckets
-                .get(i)
+            Pick::Bucket(i, past) => bucket_at(f, i, past)
                 .map(|b| {
                     let mut v = vec![format!("bucket {} \u{b7} {} \u{b7} {}", b.name, if b.ok { "ok" } else { "FAILED" }, b.tip)];
                     v.push(format!("{} \u{2192} {} ({})", clock(b.started_ms, offset, true), clock(b.ended_ms, offset, true), dur(b.ended_ms.saturating_sub(b.started_ms))));
@@ -1612,7 +1668,7 @@ impl FleetTimeline {
 
     fn zoom(&mut self, factor: f64, x: f64) {
         let t = self.t_of(x);
-        self.ms_per_px = (self.ms_per_px * factor).clamp(200.0, KEEP_MS as f64 / self.plot_w() * 1.05);
+        self.ms_per_px = (self.ms_per_px * factor).clamp(200.0, self.max_window() / self.plot_w());
         self.t_right = t + (self.plot_x() + self.plot_w() - x) * self.ms_per_px;
     }
 
@@ -1814,15 +1870,151 @@ impl Widget for FleetTimeline {
     }
 }
 
-/// The shares a sample's pressure rows show: reserved cores of the node's cores, CPU, RAM used
-/// of its RAM, the busiest GPU (negative: none).
-fn shares(s: &Sample, cores: u32, ram_gb: f64) -> [f32; 4] {
-    [s.res_cores / (cores as f32).max(1.0), s.cpu_pct / 100.0, s.ram_used_gb / (ram_gb as f32).max(1.0), s.gpu_pct / 100.0]
+/// A pressure row's measure: reserved cores of the node's cores, CPU, RAM used of its RAM, the
+/// busiest GPU (negative: not measured).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Field {
+    Reserved,
+    Cpu,
+    Ram,
+    Gpu,
+}
+
+impl Field {
+    /// in [`PRESS_ROWS`]' order
+    const ALL: [Field; 4] = [Field::Reserved, Field::Cpu, Field::Ram, Field::Gpu];
+
+    /// its name in the master's history
+    fn name(self) -> &'static str {
+        crate::model::PAST_FIELDS[self as usize]
+    }
+
+    fn raw(self, s: &Sample) -> f32 {
+        match self {
+            Field::Reserved => s.res_cores,
+            Field::Cpu => s.cpu_pct,
+            Field::Ram => s.ram_used_gb,
+            Field::Gpu => s.gpu_pct,
+        }
+    }
+
+    /// A raw value as the row's share (negative: none).
+    fn share(self, v: f32, cores: u32, ram_gb: f64) -> f32 {
+        if v < 0.0 {
+            return -1.0;
+        }
+        match self {
+            Field::Reserved => v / (cores as f32).max(1.0),
+            Field::Cpu | Field::Gpu => v / 100.0,
+            Field::Ram => v / (ram_gb as f32).max(1.0),
+        }
+    }
+}
+
+/// The train's landings: the live side's (the train since the window's start), then those of the
+/// history's stretch it does not hold (`true`: an index into the fleet's marks).
+fn landings(f: &Fleet) -> impl Iterator<Item = (usize, bool, &LandEntry)> {
+    let live: HashSet<u64> = f.land.iter().map(|e| e.id).collect();
+    let past = f.marks.iter().flat_map(|m| m.land.iter().enumerate()).filter(move |(_, e)| !live.contains(&e.id)).map(|(i, e)| (i, true, e));
+    f.land.iter().enumerate().map(|(i, e)| (i, false, e)).chain(past)
+}
+
+/// The bucket runs: the live side's (each bucket's last), then the history's others (`true`).
+fn bucket_runs(f: &Fleet) -> impl Iterator<Item = (usize, bool, &Bucket)> {
+    let live: HashSet<(&str, u64)> = f.buckets.iter().map(|b| (b.name.as_str(), b.started_ms)).collect();
+    let past = f.marks.iter().flat_map(|m| m.buckets.iter().enumerate()).filter(move |(_, b)| !live.contains(&(b.name.as_str(), b.started_ms))).map(|(i, b)| (i, true, b));
+    f.buckets.iter().enumerate().map(|(i, b)| (i, false, b)).chain(past)
+}
+
+fn landing_at(f: &Fleet, i: usize, past: bool) -> Option<&LandEntry> {
+    if past { f.marks.as_ref()?.land.get(i) } else { f.land.get(i) }
+}
+
+fn bucket_at(f: &Fleet, i: usize, past: bool) -> Option<&Bucket> {
+    if past { f.marks.as_ref()?.buckets.get(i) } else { f.buckets.get(i) }
+}
+
+/// A node's measure per column of `g`: from its live samples (each holds until the next), and in
+/// the columns before them from the history the worker fetched (its exact samples the same way,
+/// or the highest of the master's reduced column under the column's middle). O(columns + the
+/// samples in view).
+fn node_cols(f: &Fleet, node: &str, g: &Grid, field: Field, cores: u32, ram_gb: f64) -> Vec<f32> {
+    let v = |s: &Sample| field.share(field.raw(s), cores, ram_gb);
+    let live = f.pressure.get(node);
+    let mut out = match live {
+        Some(s) => columns(s, g.t0, g.per, g.n, f.now_ms, &v),
+        None => vec![-1.0; g.n],
+    };
+    let Some(p) = f.past.as_ref() else { return out };
+    let live_from = live.and_then(|s| s.first()).map_or(f.now_ms, |s| s.t_ms);
+    let last = (g.col(live_from).ceil().max(0.0) as usize).min(g.n);
+    if p.per_ms == 0 {
+        if let Some(s) = p.exact.get(node) {
+            let past = columns(s, g.t0, g.per, last, p.to_ms.min(live_from), &v);
+            for (o, x) in out.iter_mut().zip(past) {
+                *o = o.max(x);
+            }
+        }
+    } else if let Some(c) = p.cols.get(&(node.to_string(), field.name().to_string())) {
+        for (i, o) in out.iter_mut().enumerate().take(last) {
+            let mid = g.t0 + (i as f64 + 0.5) * g.per;
+            if mid < p.from_ms as f64 {
+                continue;
+            }
+            if let Some(Some(m)) = c.max.get(((mid - p.from_ms as f64) / p.per_ms as f64) as usize) {
+                *o = o.max(field.share(*m, cores, ram_gb));
+            }
+        }
+    }
+    out
+}
+
+/// A reduced column of the history under the pointer: each measure's low, high and mean.
+fn past_tip(p: &crate::model::Past, node: &str, t: u64, offset: i64, cores: u32, ram: f64) -> Vec<String> {
+    let j = ((t - p.from_ms) / p.per_ms.max(1)) as usize;
+    let col = |f: Field| {
+        let c = p.cols.get(&(node.to_string(), f.name().to_string()))?;
+        Some((c.min.get(j).copied()??, c.max.get(j).copied()??, c.mean.get(j).copied()??))
+    };
+    let mut v = vec![format!("{node} at {} \u{b7} {} column", clock(p.from_ms + j as u64 * p.per_ms, offset, false), dur(p.per_ms))];
+    let line = |label: &str, f: Field, unit: &dyn Fn(f32) -> String| col(f).map(|(lo, hi, mean)| format!("{label} {}\u{2013}{} (mean {})", unit(lo), unit(hi), unit(mean)));
+    v.extend(line("cpu", Field::Cpu, &|x| format!("{x:.0}%")));
+    v.extend(line("reserved", Field::Reserved, &|x| format!("{x:.0}/{cores} cores")));
+    v.extend(line("RAM used", Field::Ram, &|x| format!("{x:.0}/{ram:.0} GB")));
+    v.extend(line("GPU", Field::Gpu, &|x| format!("{x:.0}%")));
+    if v.len() == 1 {
+        v.push("no samples here".into());
+    }
+    v
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Before a node's live samples its columns come from the history the worker fetched: the
+    /// highest of the reduced column under each column's middle, or exact samples that hold until
+    /// the next; from the live samples' first on, the live ones.
+    #[test]
+    fn the_history_fills_the_columns_before_the_live_samples() {
+        use crate::model::Past;
+        use makepad_devhub::lease::panel::Cols;
+        let m = 1_000_000u64;
+        let live: Vec<Sample> = (0..10).map(|i| Sample { t_ms: 9 * m + i * m / 10, cpu_pct: 80.0, ..Sample::default() }).collect();
+        let g = Grid { t0: 0.0, per: m as f64, x0: 0.0, n: 10 };
+        let mut f = Fleet { now_ms: 10 * m, pressure: HashMap::from([("node-a".to_string(), Arc::new(live))]), ..Fleet::default() };
+        let max: Vec<Option<f32>> = (1..=10).map(|i| Some(i as f32 * 10.0)).collect();
+        let cols = Cols { min: max.clone(), max: max.clone(), mean: max };
+        f.past = Some(Arc::new(Past { from_ms: 0, to_ms: 9 * m, per_ms: m, cols: HashMap::from([(("node-a".into(), "cpu_pct".into()), cols)]), ..Past::default() }));
+        let got = node_cols(&f, "node-a", &g, Field::Cpu, 16, 64.0);
+        let want = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.8];
+        assert!(got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "reduced columns, then the live samples: {got:?}");
+        let exact = vec![Sample { t_ms: 0, cpu_pct: 30.0, ..Sample::default() }, Sample { t_ms: 5 * m, cpu_pct: 60.0, ..Sample::default() }];
+        f.past = Some(Arc::new(Past { from_ms: 0, to_ms: 9 * m, per_ms: 0, exact: HashMap::from([("node-a".to_string(), exact)]), ..Past::default() }));
+        let got = node_cols(&f, "node-a", &g, Field::Cpu, 16, 64.0);
+        let want = [0.3, 0.3, 0.3, 0.3, 0.3, 0.6, 0.6, 0.6, 0.6, 0.8];
+        assert!(got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "exact samples, each until the next: {got:?}");
+    }
 
     /// A pan by a fraction of a pixel or by whole pixels keeps every column's span and value: the
     /// grid only slides (its first column's x), and only a zoom re-bins (11-08: the areas wobbled

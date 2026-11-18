@@ -84,6 +84,9 @@ impl MatchEvent for App {
                 for url in &running.urls {
                     log!("party: guests open {url}");
                 }
+                if let Some(url) = running.urls.first() {
+                    log!("party: the screen for a TV or projector: {url}/screen");
+                }
                 log!("party: certificate SHA-256 {}", running.fingerprint);
                 let join = running.urls.first().cloned().unwrap_or_else(|| format!("port {}, code {}", running.server.port, running.code));
                 wall.set_party(cx, running.party.clone(), join);
@@ -102,6 +105,15 @@ impl AppMain for App {
         makepad_widgets::script_mod(vm);
         screen::wall::script_mod(vm);
         self::script_mod(vm)
+    }
+
+    /// A restart under the JIT waits while it would cost a guest: a take
+    /// being drawn, or a guest asking within the last minutes.
+    fn can_restart(&mut self, _cx: &mut Cx) -> Result<(), String> {
+        match self.running.as_ref().and_then(|running| running.party.restart_waits()) {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {

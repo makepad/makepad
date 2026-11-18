@@ -121,6 +121,22 @@ impl Request<'_> {
         self.head.query_get(key)
     }
 
+    /// Starts a response whose body goes on until the connection closes:
+    /// the handler writes it with [`Request::send`] and answers
+    /// [`streamed`]. For a stream of messages to one phone.
+    pub fn start_stream(&mut self, content_type: &str) -> io::Result<()> {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+        );
+        self.conn.write_chunk(head.as_bytes())
+    }
+
+    /// More of a started stream's body. A phone that stops reading fails
+    /// this within the connection's write timeout.
+    pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.conn.write_chunk(bytes)
+    }
+
     /// The whole body, up to `max` bytes.
     pub fn body(&mut self, max: u64) -> Result<Vec<u8>, Resp> {
         self.conn.read_body_full(self.head, max, 120_000).map_err(body_error)
@@ -198,6 +214,12 @@ fn body_error(error: BodyError) -> Resp {
 
 /// 503 with a Retry-After: the request was not taken, and nothing of what
 /// was held before is lost; the phone page sends it again then.
+/// The answer of a handler that wrote its own response ([`Request::start_stream`]):
+/// nothing more is written, and the connection closes.
+pub fn streamed() -> Resp {
+    Resp::empty(0).closing()
+}
+
 pub fn busy(retry_after_s: u64, why: &str) -> Resp {
     text(503, why).with_header("Retry-After", retry_after_s.max(1).to_string()).closing()
 }
@@ -476,6 +498,10 @@ fn serve_connection(tcp: TcpStream, ip: IpAddr, slot: Slot) {
             }
         };
         let mut response = route(&shared, &mut conn, &mut head, ip);
+        if response.status == 0 {
+            // A stream, written and ended by its handler.
+            return;
+        }
         let keep = conn.finish_request(&mut head) && !response.close && !shared.stop.load(Ordering::Relaxed) && !shared.crowded();
         response.close = !keep;
         if conn.write_resp(head.method == Method::Head, &response).is_err() || response.close {

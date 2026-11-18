@@ -72,7 +72,7 @@ impl CamTest {
         if unlogged > 0 {
             eprintln!("[camtest] ({unlogged} reports not logged: too many at once)");
         }
-        eprintln!("[camtest] {line}");
+        eprintln!("[camtest] {} {line}", crate::worker::clock());
     }
 
     /// One report from `peer`: logged (bounded), or refused for a while when

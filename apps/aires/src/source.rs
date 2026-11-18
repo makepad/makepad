@@ -38,10 +38,26 @@ pub struct AnswerResult {
     pub result: Result<(), String>,
 }
 
+/// What the person's clear of the history did: how many went to the archive, and the open
+/// questions and untaken answers that stayed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cleared {
+    pub cleared: u64,
+    pub open: u64,
+    pub untaken: u64,
+}
+
+/// What the worker sends the master: an answer, or the person's clear.
+enum Job {
+    Answer(Answer),
+    Clear,
+}
+
 #[derive(Default)]
 struct Shared {
     latest: Mutex<Option<Snapshot>>,
     results: Mutex<Vec<AnswerResult>>,
+    cleared: Mutex<Vec<Result<Cleared, String>>>,
 }
 
 impl Shared {
@@ -61,18 +77,32 @@ impl Shared {
 
 pub struct Source {
     shared: Arc<Shared>,
-    answers: mpsc::SyncSender<Answer>,
+    jobs: mpsc::SyncSender<Job>,
 }
 
 impl Source {
     pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
-        let demo = (std::env::var("AIRES_DEMO").as_deref() == Ok("1")).then(demo);
+        let demo = demo_mode().then(demo);
         let shared = Arc::new(Shared::default());
-        let (answers, receive) = mpsc::sync_channel::<Answer>(16);
+        let (jobs, receive) = mpsc::sync_channel::<Job>(16);
         let (out, store) = (shared.clone(), demo.clone());
         spawner.spawn_worker(ThreadOptions::default(), move || {
             let mut connection = Connection::new(&store);
-            while let Ok(answer) = receive.recv() {
+            while let Ok(job) = receive.recv() {
+                let answer = match job {
+                    Job::Answer(answer) => answer,
+                    Job::Clear => {
+                        let result = connection.request("clear {}").and_then(|values| {
+                            let n = |key| values.first().and_then(|v| v.get(key)).and_then(Value::as_u64).ok_or_else(|| "invalid clear response".to_string());
+                            Ok(Cleared { cleared: n("cleared")?, open: n("open")?, untaken: n("untaken")? })
+                        });
+                        // (never sent again: a broken link may have lost only its receipt)
+                        if result.is_err() { connection = Connection::new(&store); }
+                        out.cleared.lock().unwrap().push(result);
+                        SignalToUI::set_ui_signal();
+                        continue;
+                    }
+                };
                 let result = connection.request(&answer.line()).and_then(|values| {
                     if values.len() == 1 && values[0].get("ok").and_then(Value::as_bool) == Some(true) {
                         Ok(())
@@ -91,6 +121,8 @@ impl Source {
         let out = shared.clone();
         spawner.spawn_worker(ThreadOptions::default(), move || {
             let mut last_error = String::new();
+            // the demo's question that arrives while it runs, so the arrival shows
+            let mut arrival = demo.clone();
             loop {
                 let connection = Connection::new(&demo);
                 let mut rev = 0;
@@ -103,6 +135,10 @@ impl Source {
                             rev = next;
                             last_error.clear();
                             out.publish(Snapshot { questions: Some(questions), error: None });
+                            if let Some(store) = arrival.take() {
+                                std::thread::sleep(Duration::from_secs(6));
+                                store.serve(DEMO_ARRIVAL, &demo_judge, &mut Vec::new());
+                            }
                         }
                         Err(error) => break error,
                     }
@@ -115,20 +151,31 @@ impl Source {
                 std::thread::sleep(Duration::from_secs(2));
             }
         }).map_err(|e| format!("follow worker: {e:?}"))?.detach();
-        Ok(Self { shared, answers })
+        Ok(Self { shared, jobs })
     }
 
-    pub fn take(&self) -> (Option<Snapshot>, Vec<AnswerResult>) {
+    pub fn take(&self) -> (Option<Snapshot>, Vec<AnswerResult>, Vec<Result<Cleared, String>>) {
         let latest = self.shared.latest.lock().unwrap().take();
         let results = std::mem::take(&mut *self.shared.results.lock().unwrap());
-        (latest, results)
+        let cleared = std::mem::take(&mut *self.shared.cleared.lock().unwrap());
+        (latest, results, cleared)
     }
 
-    pub fn answer(&self, answer: Answer) -> Result<(), String> {
-        self.answers.try_send(answer).map_err(|e| match e {
+    fn send(&self, job: Job) -> Result<(), String> {
+        self.jobs.try_send(job).map_err(|e| match e {
             mpsc::TrySendError::Full(_) => "busy, try again".into(),
             mpsc::TrySendError::Disconnected(_) => "answer worker stopped".into(),
         })
+    }
+
+    pub fn answer(&self, answer: Answer) -> Result<(), String> {
+        self.send(Job::Answer(answer))
+    }
+
+    /// The person's clear of the history: answered and closed questions main has taken go to
+    /// the archive ([`makepad_devhub::ask`]'s `clear`).
+    pub fn clear(&self) -> Result<(), String> {
+        self.send(Job::Clear)
     }
 }
 
@@ -174,6 +221,14 @@ fn snapshot(values: Vec<Value>) -> Result<(u64, Vec<Question>), String> {
     Ok((rev, questions))
 }
 
+/// `AIRES_DEMO=1`: a demo inbox in memory instead of the master, shown in a window at start; a
+/// new question arrives 6 s after the first snapshot.
+pub fn demo_mode() -> bool {
+    std::env::var("AIRES_DEMO").as_deref() == Ok("1")
+}
+
+const DEMO_ARRIVAL: &str = r#"new {"from":"release","title":"Publish the new inbox today?","why":"The redesign passed its checks.","blocked":"The release notes.","options":["Publish today","Wait for tomorrow's build"],"recommend":"Publish today"}"#;
+
 fn demo_judge() -> Judged {
     Judged { source: Provenance::Tray, chain: "demo".into(), why: String::new() }
 }
@@ -188,11 +243,23 @@ pub fn demo() -> Arc<Asks> {
         r#"answer {"id":"Q2","ask":true,"text":"Can you show that wording before we choose?"}"#,
         r#"new {"from":"layout","title":"Keep the panel narrow?","decided":"Text wraps at the panel width.","options":["Keep it compact","Make it wider"],"recommend":"Keep it compact"}"#,
         r#"answer {"id":"Q3","choice":1,"text":"Keep the longer context behind Show all."}"#,
+        r#"new {"from":"release","title":"Ship the dark icon too?","options":["Ship both","Light only"],"recommend":"Ship both"}"#,
+        r#"answer {"id":"Q4","choice":1}"#,
+        r#"wait {"ids":["Q4"]}"#,
+        r#"new {"from":"layout","title":"Show ages in hours?","options":["Hours","Days"]}"#,
+        r#"close {"id":"Q5"}"#,
     ] {
         let mut out = Vec::new();
         store.serve(line, &demo_judge, &mut out);
         debug_assert!(out.iter().all(|line| !line.contains("\"err\"")), "demo request failed: {out:?}");
     }
+    // an answer from a copy an agent started, refused and kept on the card
+    let refused = || Judged {
+        source: Provenance::Refused,
+        chain: "pid 4321 makepad-app-aires, from 1 launchd".into(),
+        why: "this copy of aires was started by an agent: quit it from its menu-bar icon and open aires from Spotlight".into(),
+    };
+    store.serve(r#"answer {"id":"Q1","choice":2}"#, &refused, &mut Vec::new());
     store
 }
 

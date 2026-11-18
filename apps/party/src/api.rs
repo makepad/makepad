@@ -9,6 +9,9 @@
 //! - `POST photo?keep=...`: one JPEG; wall or keep applies once it is redrawn.
 //! - `POST wish?source=N`: what the guest would like (UTF-8 text); a new take.
 //! - `GET me`: the guest's sources and takes.
+//! - `GET ideas?source=N`: `{"ideas": [...]}`, the vision model's ideas for
+//!   redrawing it (`ideas.rs`; none unless the hub keeps that model
+//!   pinned); the first ask waits for the model.
 //! - `GET frame?source=N&i=K` or `GET frame?take=N&i=K`: one JPEG of theirs.
 //! - `POST keep?source=N&level=me|wall|keep`: wall or keep applies once the
 //!   picture is redrawn.
@@ -36,18 +39,25 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use crate::camtest::CamTest;
+use crate::hub::BoxHub;
 use crate::jpeg;
 use crate::live::{Live, OfferError, Standing};
 use crate::queue::Queue;
-use crate::server::{busy, html, json, limits, slow_down, text, ByteBudget, Handler, RateLimiter, Request};
-use crate::store::{Budget, GuestId, Jpeg, Keep, Persist, Quality, Source, SourceKind, Store, StoreError, TakeState, Who};
+use crate::server::{busy, html, json, limits, slow_down, streamed, text, ByteBudget, Handler, RateLimiter, Request};
+use crate::settings::Settings;
+use crate::store::{Budget, GuestId, IdeasClaim, Jpeg, Keep, Persist, Quality, Source, SourceKind, Store, StoreError, TakeId, TakeState, Who};
 use makepad_bounded_http::{Method, Resp};
 use makepad_strict_json::{self as sj, Value};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use makepad_qr::Qr;
+use std::fmt::Write as _;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 const PAGE: &str = include_str!("../web/phone.html");
+/// The party's screen: what guests put on it, full screen, for a TV or projector.
+const SCREEN: &str = include_str!("../web/screen.html");
 
 /// A loop's upload: 240 frames of a phone page's 512 px JPEGs come to well
 /// under this; anything larger is not the phone page.
@@ -62,17 +72,192 @@ const MAX_WISH_CHARS: usize = 300;
 /// A phone browser's offer is a few KB.
 const MAX_OFFER_BYTES: u64 = 64 * 1024;
 
+/// The store under its lock; a change made through it wakes the phones'
+/// streams once the lock is let go.
+pub struct StoreGuard<'a> {
+    guard: Option<MutexGuard<'a, Store>>,
+    version: u64,
+    changed: &'a Condvar,
+}
+
+impl std::ops::Deref for StoreGuard<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        self.guard.as_ref().expect("a store guard holds its lock until it goes")
+    }
+}
+
+impl std::ops::DerefMut for StoreGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Store {
+        self.guard.as_mut().expect("a store guard holds its lock until it goes")
+    }
+}
+
+impl Drop for StoreGuard<'_> {
+    fn drop(&mut self) {
+        let moved = self.guard.as_ref().is_some_and(|store| store.version != self.version);
+        drop(self.guard.take());
+        if moved {
+            self.changed.notify_all();
+        }
+    }
+}
+
+/// How long after a guest's last request a restart of the app still waits.
+const GUESTS_ABOUT: Duration = Duration::from_secs(3 * 60);
+
 /// The party: its store, the takes waiting for the hub, and live.
 pub struct Party {
     store: Mutex<Store>,
+    /// Woken when a store guard that changed the store goes: a phone's
+    /// stream waits on it for something new to send.
+    changed: Condvar,
     pub queue: Queue,
     pub live: Live,
+    /// When a guest last asked anything, and whether the redraw model or the
+    /// speech model is wanted warm: the keeper waits on `arrived` for it.
+    seen: Mutex<Seen>,
+    arrived: Condvar,
+    /// A guest's quick asks of the hub (their spoken prompt, ideas for
+    /// their loop): a take gives way to them.
+    pub asks: Asks,
+    /// Where guests join (the LAN address first), once the server listens:
+    /// the screen shows it as a code to scan.
+    pub join: OnceLock<String>,
+    /// The host's settings (in memory only unless [`Party::with_settings`]).
+    pub settings: Arc<Settings>,
+}
+
+#[derive(Default)]
+struct Seen {
+    at: Option<Instant>,
+    warm: bool,
+    warm_voice: bool,
+}
+
+/// What the keeper of the models is asked for (see [`Party::next_keep`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Wanted {
+    /// Ready the redraw model: a guest arrived, or started their camera.
+    pub image: bool,
+    /// Ready the speech model: a guest pressed the voice button.
+    pub voice: bool,
+    /// Guests are about: hold the models.
+    pub about: bool,
+}
+
+/// Quick asks a guest waits for on the hub: their spoken prompt turned into
+/// words, the vision model's ideas for their loop. A take being redrawn
+/// gives way between frames while one waits (the hub runs one job at a
+/// time), so the answer comes back in about a second, not after the take.
+#[derive(Default)]
+pub struct Asks {
+    waiting: Mutex<usize>,
+    done: Condvar,
+}
+
+impl Asks {
+    /// One ask from now until the turn is dropped.
+    pub fn begin(&self) -> AskTurn<'_> {
+        *self.waiting.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        AskTurn(self)
+    }
+
+    pub fn waiting(&self) -> bool {
+        *self.waiting.lock().unwrap_or_else(|p| p.into_inner()) > 0
+    }
+
+    /// Blocks (the hub worker thread, never the UI) until no ask waits.
+    pub fn wait_none(&self) {
+        let waiting = self.waiting.lock().unwrap_or_else(|p| p.into_inner());
+        drop(self.done.wait_while(waiting, |n| *n > 0).unwrap_or_else(|p| p.into_inner()));
+    }
+}
+
+pub struct AskTurn<'a>(&'a Asks);
+
+impl Drop for AskTurn<'_> {
+    fn drop(&mut self) {
+        *self.0.waiting.lock().unwrap_or_else(|p| p.into_inner()) -= 1;
+        self.0.done.notify_all();
+    }
 }
 
 impl Party {
     /// `budget`: the bytes of pictures the store may hold and promise.
     pub fn new(kept: PathBuf, budget: Budget) -> Party {
-        Party { store: Mutex::new(Store::new(kept, budget)), queue: Queue::default(), live: Live::default() }
+        Party {
+            store: Mutex::new(Store::new(kept, budget)),
+            changed: Condvar::new(),
+            queue: Queue::default(),
+            live: Live::default(),
+            seen: Mutex::new(Seen::default()),
+            arrived: Condvar::new(),
+            asks: Asks::default(),
+            join: OnceLock::new(),
+            settings: Arc::default(),
+        }
+    }
+
+    /// The party with the host's `settings` (the saved ones, at start).
+    pub fn with_settings(mut self, settings: Settings) -> Party {
+        self.settings = Arc::new(settings);
+        self
+    }
+
+    /// A guest asked something just now. The first after a quiet while
+    /// wants the redraw model warm.
+    pub fn saw_guest(&self) {
+        let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        if !seen.at.is_some_and(|at| at.elapsed() < GUESTS_ABOUT) {
+            seen.warm = true;
+            self.arrived.notify_all();
+        }
+        seen.at = Some(Instant::now());
+    }
+
+    /// A guest is about to ask for a redraw (their camera just started), or
+    /// with `voice` to say a prompt (they pressed the voice button).
+    pub fn want_warm(&self, voice: bool) {
+        let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        if voice {
+            seen.warm_voice = true;
+        } else {
+            seen.warm = true;
+        }
+        self.arrived.notify_all();
+    }
+
+    /// For the keeper of the models: waits until one is wanted warm or
+    /// `timeout` passes (no timeout: until one is wanted), and says which are
+    /// wanted warm now and whether guests are about.
+    pub fn next_keep(&self, timeout: Option<Duration>) -> Wanted {
+        let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        let wanted = |s: &mut Seen| !s.warm && !s.warm_voice;
+        let mut seen = match timeout {
+            Some(timeout) => self.arrived.wait_timeout_while(seen, timeout, wanted).unwrap_or_else(|p| p.into_inner()).0,
+            None => self.arrived.wait_while(seen, wanted).unwrap_or_else(|p| p.into_inner()),
+        };
+        Wanted {
+            image: std::mem::take(&mut seen.warm),
+            voice: std::mem::take(&mut seen.warm_voice),
+            about: seen.at.is_some_and(|at| at.elapsed() < GUESTS_ABOUT),
+        }
+    }
+
+    /// Why a restart of the app would cost guests now, if it would: a take
+    /// being drawn or waiting, or a guest about. A restart starts with an
+    /// empty store (guests' pictures are never on disk unless they keep
+    /// them); a phone sends its loop again, but its redraw starts over.
+    pub fn restart_waits(&self) -> Option<String> {
+        if self.store().busy() {
+            return Some("a take is being redrawn for a guest".into());
+        }
+        let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner()).at;
+        match seen {
+            Some(at) if at.elapsed() < GUESTS_ABOUT => Some(format!("a guest was here {} s ago", at.elapsed().as_secs())),
+            _ => None,
+        }
     }
 
     /// A quarter of the machine's memory: the hub and the screen have the rest.
@@ -82,8 +267,19 @@ impl Party {
 
     /// The store, for a few field updates or a snapshot: never held across
     /// I/O, a decode or a hub call.
-    pub fn store(&self) -> MutexGuard<'_, Store> {
-        self.store.lock().unwrap_or_else(|p| p.into_inner())
+    pub fn store(&self) -> StoreGuard<'_> {
+        let guard = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        let version = guard.version;
+        StoreGuard { guard: Some(guard), version, changed: &self.changed }
+    }
+
+    /// Waits up to `timeout` for the store to move past `version` and
+    /// returns the version it has then. Only for a connection's own thread
+    /// (a phone's stream), never a UI or worker thread.
+    pub fn wait_change(&self, version: u64, timeout: Duration) -> u64 {
+        let guard = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        let (guard, _) = self.changed.wait_timeout_while(guard, timeout, |store| store.version == version).unwrap_or_else(|p| p.into_inner());
+        guard.version
     }
 
     /// Runs disk steps outside the lock and logs what failed.
@@ -107,6 +303,13 @@ pub struct Api {
     reads: RateLimiter<GuestId>,
     /// Bodies read whole at once (party uploads and the camera check's).
     inflight: Arc<ByteBudget>,
+    /// How long a phone's stream stays open once nothing of its guest is
+    /// being redrawn.
+    linger: Duration,
+    /// The box's hub, for voice prompts (none: the party runs without one).
+    hub: Option<BoxHub>,
+    /// How long the screen's stream stays open with nothing new on it.
+    screen_linger: Duration,
 }
 
 impl Api {
@@ -120,12 +323,113 @@ impl Api {
             uploads_by_ip: RateLimiter::new(40.0, 1.0),
             reads: RateLimiter::new(600.0, 60.0),
             inflight,
+            linger: STREAM_LINGER,
+            hub: None,
+            screen_linger: SCREEN_LINGER,
         }
+    }
+
+    /// Voice prompts are turned into words by `hub`.
+    pub fn with_hub(mut self, hub: BoxHub) -> Api {
+        self.hub = Some(hub);
+        self
+    }
+
+    /// A guest's spoken prompt (a WAV file) as words, for the page to put in
+    /// its prompt field. The audio and the words stay in memory, here and
+    /// on the hub, and only their length is logged.
+    fn voice(&self, request: &mut Request<'_>) -> Resp {
+        let Some(hub) = &self.hub else {
+            return text(503, "this party has no hub to hear with");
+        };
+        let wav = match request.body_within(VOICE_MAX, &self.inflight) {
+            Ok(body) => body,
+            Err(resp) => return resp,
+        };
+        let started = Instant::now();
+        let turn = self.party.asks.begin();
+        let heard = hub.transcribe(&wav);
+        drop(turn);
+        let seconds = wav_seconds(&wav);
+        match heard {
+            Ok((words, time)) => {
+                eprintln!(
+                    "[party] {} voice: {seconds:.1} s of speech, {} characters back after {:.2} s (the hub: queued {:.2} s, ran {:.2} s)",
+                    crate::worker::clock(),
+                    words.chars().count(),
+                    started.elapsed().as_secs_f64(),
+                    time.queued.as_secs_f64(),
+                    time.run.as_secs_f64()
+                );
+                json(200, sj::obj(vec![("text", sj::s(words))]).to_json())
+            }
+            Err(e) => {
+                eprintln!("[party] {} voice: {seconds:.1} s of speech not heard: {e}", crate::worker::clock());
+                text(502, "the box could not make out the words")
+            }
+        }
+    }
+
+    /// The vision model's ideas for redrawing one of the guest's sources
+    /// (`source`): `{"ideas": [...]}`, none when the party has no hub, the
+    /// hub does not keep the vision model pinned, or the model could not say. The source's first ask has the vision model look
+    /// at it (a take being redrawn gives way between frames); an ask while
+    /// that runs waits for its answer, and later ones get it at once.
+    fn ideas(&self, request: &Request<'_>, guest: GuestId) -> Result<Resp, Resp> {
+        let source = id(request, "source")?;
+        let answer = |ideas: &[String]| json(200, sj::obj(vec![("ideas", Value::Arr(ideas.iter().map(|idea| sj::s(idea.clone())).collect()))]).to_json());
+        self.party.store().source(Who::Guest(guest), source).map_err(refused)?;
+        let Some(hub) = self.hub.as_ref().filter(|hub| crate::ideas::available(hub)) else { return Ok(answer(&[])) };
+        let waited = Instant::now();
+        loop {
+            let (claim, version) = {
+                let mut store = self.party.store();
+                let claim = store.claim_ideas(Who::Guest(guest), source).map_err(refused)?;
+                (claim, store.version)
+            };
+            match claim {
+                IdeasClaim::Ready(ideas) => return Ok(answer(&ideas)),
+                IdeasClaim::Wait if waited.elapsed() < IDEAS_WAIT => {
+                    self.party.wait_change(version, IDEAS_WAIT - waited.elapsed());
+                }
+                IdeasClaim::Wait => return Ok(answer(&[])),
+                IdeasClaim::Ask(picture) => {
+                    let started = Instant::now();
+                    let turn = self.party.asks.begin();
+                    let said = crate::ideas::ask(hub, &picture);
+                    drop(turn);
+                    let ideas = match said {
+                        Ok(ideas) => {
+                            eprintln!("[party] {} ideas: {} for source {source} after {:.2} s", crate::worker::clock(), ideas.len(), started.elapsed().as_secs_f64());
+                            ideas
+                        }
+                        Err(e) => {
+                            eprintln!("[party] {} ideas for source {source}: {e}", crate::worker::clock());
+                            Vec::new()
+                        }
+                    };
+                    // None the model could not say: the next ask tries again.
+                    self.party.store().set_ideas(source, (!ideas.is_empty()).then(|| ideas.clone()));
+                    return Ok(answer(&ideas));
+                }
+            }
+        }
+    }
+
+    /// A phone's stream ends after `linger` with nothing of its guest being
+    /// redrawn (tests: at once).
+    /// Streams end after `linger` with nothing new: a phone's and the screen's.
+    pub fn with_stream_linger(mut self, linger: Duration) -> Api {
+        self.linger = linger;
+        self.screen_linger = linger;
+        self
     }
 
     fn guest(&self, request: &Request<'_>) -> Result<GuestId, Resp> {
         let token = request.head.authorization.as_deref().and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
-        token.and_then(|t| self.party.store().guest(t)).ok_or_else(|| text(401, "join first"))
+        let guest = token.and_then(|t| self.party.store().guest(t)).ok_or_else(|| text(401, "join first"))?;
+        self.party.saw_guest();
+        Ok(guest)
     }
 
     fn limit<K: std::hash::Hash + Eq + Clone>(limiter: &RateLimiter<K>, key: &K) -> Result<(), Resp> {
@@ -175,6 +479,7 @@ impl Api {
             (source, take, persist)
         };
         self.party.persist(persist);
+        eprintln!("[party] {} take {take}: asked for, with a new picture", crate::worker::clock());
         self.party.queue.push(take);
         Ok(json(200, sj::obj(vec![("source", Value::Int(source as i64)), ("take", Value::Int(take as i64))]).to_json()))
     }
@@ -185,14 +490,194 @@ impl Api {
         let source = id(request, "source")?;
         let wish = clean_wish(request.body(MAX_WISH_BYTES)?)?;
         let take = self.party.store().wish(Who::Guest(guest), source, wish).map_err(refused)?;
+        eprintln!("[party] {} take {take}: asked for, with a wish", crate::worker::clock());
         self.party.queue.push(take);
         Ok(json(200, sj::obj(vec![("take", Value::Int(take as i64))]).to_json()))
     }
 
     fn me(&self, guest: GuestId) -> Resp {
-        let store = self.party.store();
-        let sources: Vec<Value> = store.sources_of(guest).into_iter().map(|s| source_json(&store, s)).collect();
-        json(200, sj::obj(vec![("version", Value::Int(store.version as i64)), ("sources", Value::Arr(sources))]).to_json())
+        json(200, me_json(&self.party.store(), guest))
+    }
+
+    /// One phone's stream: what `me` says whenever it changes, and each frame
+    /// of the take its loop shows as it is redrawn, on one open connection
+    /// (`application/x-party-stream`: messages of [u32 BE length][u8 kind]
+    /// [payload]; kind 1 is `me`'s JSON, kind 2 a frame: [u32 BE take]
+    /// [u16 BE index][JPEG], kind 0 a heartbeat). It ends once nothing of
+    /// the guest has been redrawn for a while, with a goodbye (kind 3); the
+    /// phone opens it again when it asks for something new. `take` and
+    /// `have`: the phone has that take's first `have` frames already.
+    fn stream(&self, request: &mut Request<'_>, guest: GuestId) -> Resp {
+        // Per take shown: the frames sent of it (or the phone has).
+        let mut sent: Vec<(TakeId, usize)> = Vec::new();
+        if let (Some(take), Some(have)) = (request.query("take").and_then(|t| t.parse().ok()), request.query("have").and_then(|h| h.parse().ok())) {
+            sent.push((take, have));
+        }
+        if request.start_stream("application/x-party-stream").is_err() {
+            return streamed();
+        }
+        let mut version = None;
+        let mut quiet: Option<Instant> = None;
+        loop {
+            let (now, state, frames, drawing) = {
+                let store = self.party.store();
+                let now = store.version;
+                let state = (version != Some(now)).then(|| me_json(&store, guest));
+                let (mut frames, mut drawing) = (Vec::new(), false);
+                for source in store.sources_of(guest) {
+                    let takes: Vec<_> = source.takes.iter().filter_map(|t| store.take(*t)).collect();
+                    drawing |= takes.iter().any(|t| matches!(t.state, TakeState::Queued | TakeState::Running));
+                    // What the phone plays: the newest take with frames.
+                    let shown = takes.iter().rev().find(|t| matches!(t.state, TakeState::Running | TakeState::Done) && !t.frames.is_empty());
+                    if let Some(take) = shown {
+                        let from = sent.iter().find(|(id, _)| *id == take.id).map_or(0, |(_, n)| *n);
+                        frames.extend((from..take.frames.len()).filter_map(|i| Some((take.id, i, take.preview(i)?.clone()))));
+                    }
+                }
+                (now, state, frames, drawing)
+            };
+            if let Some(state) = state {
+                if request.send(&stream_message(1, &[state.as_bytes()])).is_err() {
+                    return streamed();
+                }
+                version = Some(now);
+            }
+            for (take, i, jpeg) in frames {
+                let at = [(take as u32).to_be_bytes().as_slice(), (i as u16).to_be_bytes().as_slice()].concat();
+                if request.send(&stream_message(2, &[&at[..], &jpeg[..]])).is_err() {
+                    return streamed();
+                }
+                match sent.iter_mut().find(|(id, _)| *id == take) {
+                    Some(entry) => entry.1 = i + 1,
+                    None => sent.push((take, i + 1)),
+                }
+            }
+            if drawing {
+                quiet = None;
+            } else if quiet.get_or_insert_with(Instant::now).elapsed() >= self.linger {
+                let _ = request.send(&stream_message(3, &[]));
+                return streamed();
+            }
+            let wait = if drawing { STREAM_BEAT } else { STREAM_BEAT.min(self.linger) };
+            if self.party.wait_change(now, wait) == now && request.send(&stream_message(0, &[])).is_err() {
+                return streamed();
+            }
+        }
+    }
+
+    /// The party's screen, pushed as it changes (`screen/stream`, messages as
+    /// on a phone's stream): kind 1 the JSON of what it shows (`take`, `fps`,
+    /// `frames` so far of `total`, `drawing`, and `join`, where guests
+    /// join), kind 2 that take's frames at the size they were drawn, kind 0
+    /// a heartbeat. The newest redraw for the screen shows from its first
+    /// frame; between redraws the wall's loops take turns (see
+    /// [`Store::screen_next`]). After a long while with nothing new it says
+    /// goodbye (kind 3), and the screen opens it again.
+    fn screen_stream(&self, request: &mut Request<'_>) -> Resp {
+        if request.start_stream("application/x-party-stream").is_err() {
+            return streamed();
+        }
+        let (mut shown, mut seen, mut since, mut sent) = (None, 0, Instant::now(), 0usize);
+        let mut said = String::new();
+        let mut news = Instant::now();
+        let (mut live_shown, mut live_sent) = (0u64, Instant::now());
+        loop {
+            // A guest live on the screen has it: their redraw as it comes,
+            // the loops again once their turn is over.
+            let caption = self.party.live.board().filter(|b| matches!(b.standing, Standing::Live { .. })).and_then(|b| b.caption());
+            if let Some(caption) = caption {
+                let state = {
+                    let store = self.party.store();
+                    screen_json(&store, None, self.party.join.get(), Some(&caption))
+                };
+                if state != said {
+                    if request.send(&stream_message(1, &[state.as_bytes()])).is_err() {
+                        return streamed();
+                    }
+                    (said, live_sent) = (state, Instant::now());
+                }
+                news = Instant::now();
+                match self.party.live.frame_after(live_shown, LIVE_LOOK) {
+                    Some(frame) => {
+                        live_shown = frame.count;
+                        if let Some(jpeg) = frame.jpeg() {
+                            if request.send(&stream_message(4, &[&jpeg[..]])).is_err() {
+                                return streamed();
+                            }
+                            live_sent = Instant::now();
+                        }
+                    }
+                    None if live_sent.elapsed() >= STREAM_BEAT => {
+                        if request.send(&stream_message(0, &[])).is_err() {
+                            return streamed();
+                        }
+                        live_sent = Instant::now();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            let (version, state, frames) = {
+                let store = self.party.store();
+                let next = store.screen_next(shown, seen, since.elapsed() >= SCREEN_TURN);
+                if next != shown {
+                    (shown, since, sent) = (next, Instant::now(), 0);
+                }
+                seen = seen.max(next.unwrap_or(0));
+                let take = next.and_then(|t| store.take(t));
+                let frames: Vec<Jpeg> = take.map(|t| t.frames.iter().skip(sent).cloned().collect()).unwrap_or_default();
+                (store.version, screen_json(&store, take, self.party.join.get(), None), frames)
+            };
+            if state != said {
+                if request.send(&stream_message(1, &[state.as_bytes()])).is_err() {
+                    return streamed();
+                }
+                said = state;
+                news = Instant::now();
+            }
+            let take = shown.unwrap_or(0) as u32;
+            for jpeg in frames {
+                let at = [take.to_be_bytes().as_slice(), (sent as u16).to_be_bytes().as_slice()].concat();
+                if request.send(&stream_message(2, &[&at[..], &jpeg[..]])).is_err() {
+                    return streamed();
+                }
+                sent += 1;
+            }
+            if news.elapsed() >= self.screen_linger {
+                let _ = request.send(&stream_message(3, &[]));
+                return streamed();
+            }
+            // Woken by a change, at the end of the shown loop's turn or of the
+            // stream's linger, or for a heartbeat; soon while a guest on the
+            // screen is about to go live.
+            let turn_left = SCREEN_TURN.saturating_sub(since.elapsed());
+            let linger_left = self.screen_linger.saturating_sub(news.elapsed()).max(Duration::from_millis(1));
+            let live_soon = if self.party.live.slots().shown().is_some() { LIVE_LOOK } else { STREAM_BEAT };
+            let wait = if turn_left.is_zero() { STREAM_BEAT } else { STREAM_BEAT.min(turn_left) }.min(linger_left).min(live_soon);
+            if self.party.wait_change(version, wait) == version && request.send(&stream_message(0, &[])).is_err() {
+                return streamed();
+            }
+        }
+    }
+
+    /// The code guests scan to join, as SVG with its quiet zone.
+    fn join_code(&self) -> Resp {
+        let Some(qr) = self.party.join.get().and_then(|url| Qr::encode(url.as_bytes()).ok()) else {
+            return text(404, "the party has no address to join yet");
+        };
+        let side = qr.size + 8;
+        let mut dark = String::new();
+        for y in 0..qr.size {
+            for x in 0..qr.size {
+                if qr.get(x, y) {
+                    let _ = write!(dark, "M{} {}h1v1h-1z", x + 4, y + 4);
+                }
+            }
+        }
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {side} {side}\" shape-rendering=\"crispEdges\"><rect width=\"{side}\" height=\"{side}\" fill=\"#fff\"/><path fill=\"#000\" d=\"{dark}\"/></svg>"
+        );
+        Resp::bytes(200, "image/svg+xml", svg.into_bytes()).with_header("Cache-Control", "no-store".into())
     }
 
     fn frame(&self, request: &Request<'_>, guest: GuestId) -> Result<Resp, Resp> {
@@ -201,7 +686,7 @@ impl Api {
         let frame = if let Some(take) = request.query("take") {
             let take = take.parse().ok().and_then(|t| store.take(t)).ok_or_else(|| text(404, "no such take"))?;
             store.source(Who::Guest(guest), take.source).map_err(not_found)?;
-            take.frames.get(i).cloned()
+            take.preview(i).cloned()
         } else {
             let source = store.source(Who::Guest(guest), id(request, "source")?).map_err(not_found)?;
             source.frames.get(i).cloned()
@@ -234,14 +719,28 @@ impl Api {
     }
 
     /// Where `guest` stands in live, as the page shows it. Asking keeps their place.
+    /// Where `guest` stands; asking keeps their place in line.
     fn live_state(&self, guest: GuestId) -> Resp {
+        json(200, self.live_json(guest, true).0)
+    }
+
+    /// Where `guest` stands for the live slot, as JSON (`available`,
+    /// `waiting`, `state`, `ahead` or `left`, and `screen`), and that
+    /// standing; `seen` keeps their place in line.
+    fn live_json(&self, guest: GuestId, seen: bool) -> (String, Standing) {
         let live = &self.party.live;
-        let (standing, waiting, now) = live.change(|slots, now| {
-            slots.seen(guest, now);
-            (slots.standing(guest), slots.waiting(), now)
+        let (standing, waiting, screen, now) = live.change(|slots, now| {
+            if seen {
+                slots.seen(guest, now);
+            }
+            (slots.standing(guest), slots.waiting(), slots.screen(guest), now)
         });
         let left = |until: f64| Value::Int((until - now).max(0.0).ceil() as i64);
-        let mut fields = vec![("available", Value::Bool(live.available())), ("waiting", Value::Int(waiting as i64))];
+        let mut fields = vec![
+            ("available", Value::Bool(live.available())),
+            ("waiting", Value::Int(waiting as i64)),
+            ("screen", Value::Bool(screen)),
+        ];
         match standing {
             Standing::Out => fields.push(("state", sj::s("out"))),
             Standing::Waiting { ahead } => fields.extend([("state", sj::s("waiting")), ("ahead", Value::Int(ahead as i64))]),
@@ -252,14 +751,65 @@ impl Api {
                 fields.extend(until.map(|until| ("left", left(until))));
             }
         }
-        json(200, sj::obj(fields).to_json())
+        (sj::obj(fields).to_json(), standing)
     }
 
-    fn live_queue(&self, guest: GuestId) -> Resp {
+    fn live_queue(&self, guest: GuestId, screen: bool) -> Resp {
         if self.party.live.available() {
-            self.party.live.change(|slots, now| slots.queue(guest, now));
+            self.party.live.change(|slots, now| {
+                slots.queue(guest, now);
+                slots.set_screen(guest, screen);
+            });
         }
         self.live_state(guest)
+    }
+
+    /// A guest's live turn, pushed (`live/stream`, messages as on the phone's
+    /// stream): kind 1 where they stand, as `GET live` answers, kind 4 the
+    /// newest redrawn frame of their own call (a JPEG) as it comes, kind 0 a
+    /// heartbeat. It ends with a goodbye (kind 3) once they are out of line.
+    /// An open stream does not keep their place: a phone put away can hold
+    /// its connection for minutes, so the page asks `GET live` while shown.
+    fn live_stream(&self, request: &mut Request<'_>, guest: GuestId) -> Resp {
+        if request.start_stream("application/x-party-stream").is_err() {
+            return streamed();
+        }
+        let (mut said, mut shown, mut sent_at) = (String::new(), 0u64, Instant::now());
+        loop {
+            let (state, standing) = self.live_json(guest, false);
+            if state != said {
+                if request.send(&stream_message(1, &[state.as_bytes()])).is_err() {
+                    return streamed();
+                }
+                said = state;
+                sent_at = Instant::now();
+            }
+            if standing == Standing::Out {
+                let _ = request.send(&stream_message(3, &[]));
+                return streamed();
+            }
+            // Their own frames as they come; where they stand at least every
+            // half second (another guest's frames wake nobody else's stream).
+            let theirs = self.party.live.slots().current_guest() == Some(guest);
+            match self.party.live.frame_after(if theirs { shown } else { u64::MAX }, LIVE_LOOK) {
+                Some(frame) => {
+                    shown = frame.count;
+                    if let Some(jpeg) = frame.jpeg() {
+                        if request.send(&stream_message(4, &[&jpeg[..]])).is_err() {
+                            return streamed();
+                        }
+                        sent_at = Instant::now();
+                    }
+                }
+                None if sent_at.elapsed() >= STREAM_BEAT => {
+                    if request.send(&stream_message(0, &[])).is_err() {
+                        return streamed();
+                    }
+                    sent_at = Instant::now();
+                }
+                None => {}
+            }
+        }
     }
 
     fn live_offer(&self, request: &mut Request<'_>, guest: GuestId) -> Result<Resp, Resp> {
@@ -298,6 +848,20 @@ impl Api {
         match (request.method(), route.as_slice()) {
             (Method::Get | Method::Head, []) => return Ok(html(PAGE)),
             (Method::Post, ["join"]) => return self.join(request),
+            // The party's screen: what the guests put on it, for anyone
+            // with the party's address (as the room's screen is).
+            (Method::Get | Method::Head, ["screen"]) => {
+                Self::limit(&self.joins, &request.peer)?;
+                return Ok(html(SCREEN));
+            }
+            (Method::Get, ["screen", "stream"]) => {
+                Self::limit(&self.joins, &request.peer)?;
+                return Ok(self.screen_stream(request));
+            }
+            (Method::Get, ["screen", "join.svg"]) => {
+                Self::limit(&self.joins, &request.peer)?;
+                return Ok(self.join_code());
+            }
             _ => {}
         }
         let guest = self.guest(request)?;
@@ -308,9 +872,27 @@ impl Api {
             (Method::Post, ["keep"]) => self.keep(request, guest),
             (Method::Post, ["delete"]) => self.delete(request, guest),
             (Method::Post, ["leave"]) => Ok(self.leave(guest)),
+            (Method::Post, ["warm"]) => {
+                Self::limit(&self.reads, &guest)?;
+                self.party.want_warm(request.query("for") == Some("voice"));
+                Ok(text(204, ""))
+            }
+            (Method::Get, ["ideas"]) => {
+                Self::limit(&self.reads, &guest)?;
+                self.ideas(request, guest)
+            }
+            (Method::Post, ["voice"]) => {
+                Self::limit(&self.uploads, &guest)?;
+                Self::limit(&self.uploads_by_ip, &request.peer)?;
+                Ok(self.voice(request))
+            }
             (Method::Get, ["me"]) => {
                 Self::limit(&self.reads, &guest)?;
                 Ok(self.me(guest))
+            }
+            (Method::Get, ["stream"]) => {
+                Self::limit(&self.reads, &guest)?;
+                Ok(self.stream(request, guest))
             }
             (Method::Get, ["frame"]) => {
                 Self::limit(&self.reads, &guest)?;
@@ -322,7 +904,17 @@ impl Api {
             }
             (Method::Post, ["live", "queue"]) => {
                 Self::limit(&self.reads, &guest)?;
-                Ok(self.live_queue(guest))
+                Ok(self.live_queue(guest, request.query("screen") != Some("0")))
+            }
+            (Method::Post, ["live", "screen"]) => {
+                Self::limit(&self.reads, &guest)?;
+                let on = request.query("on") != Some("0");
+                self.party.live.change(|slots, _| slots.set_screen(guest, on));
+                Ok(self.live_state(guest))
+            }
+            (Method::Get, ["live", "stream"]) => {
+                Self::limit(&self.reads, &guest)?;
+                Ok(self.live_stream(request, guest))
             }
             (Method::Post, ["live", "offer"]) => self.live_offer(request, guest),
             (Method::Post, ["live", "wish"]) => self.live_wish(request, guest),
@@ -366,6 +958,71 @@ fn refused(error: StoreError) -> Resp {
 
 fn id(request: &Request<'_>, key: &str) -> Result<u64, Resp> {
     request.query(key).and_then(|v| v.parse().ok()).ok_or_else(|| text(400, "which one?"))
+}
+
+/// How long an ask for a source's ideas waits for another ask's answer.
+const IDEAS_WAIT: Duration = Duration::from_secs(60);
+
+/// The largest spoken prompt taken: a minute of 16 kHz 16-bit mono WAV,
+/// what the page sends, is under 2 MB.
+const VOICE_MAX: u64 = 4 << 20;
+
+/// The length of a WAV file's sound, from its header (0 when it has none).
+fn wav_seconds(wav: &[u8]) -> f64 {
+    if wav.len() < 44 || &wav[..4] != b"RIFF" {
+        return 0.0;
+    }
+    let byte_rate = u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]);
+    if byte_rate == 0 { 0.0 } else { (wav.len() - 44) as f64 / byte_rate as f64 }
+}
+
+/// How long the screen shows a finished loop before the wall's next one.
+const SCREEN_TURN: Duration = Duration::from_secs(20);
+/// How long the screen's stream stays open with nothing new on it.
+const SCREEN_LINGER: Duration = Duration::from_secs(600);
+
+/// What the screen shows, as JSON (see [`Api::screen_stream`]).
+fn screen_json(store: &Store, take: Option<&crate::store::Take>, join: Option<&String>, live: Option<&str>) -> String {
+    let source = take.and_then(|t| store.source(Who::Host, t.source).ok());
+    let fps = source.map_or(0, |s| match s.kind {
+        SourceKind::Loop { fps } => fps,
+        SourceKind::Photo => 0,
+    });
+    sj::obj(vec![
+        ("take", take.map_or(Value::Null, |t| Value::Int(t.id as i64))),
+        ("fps", Value::Int(fps as i64)),
+        ("frames", Value::Int(take.map_or(0, |t| t.frames.len()) as i64)),
+        ("total", Value::Int(source.map_or(0, |s| s.frames.len()) as i64)),
+        ("drawing", Value::Bool(take.is_some_and(|t| matches!(t.state, TakeState::Queued | TakeState::Running)))),
+        ("join", join.map_or(Value::Null, |j| sj::s(j.clone()))),
+        ("live", live.map_or(Value::Null, |l| sj::s(l.to_string()))),
+    ])
+    .to_json()
+}
+
+/// How long a live stream waits for a frame before it looks again at where
+/// its guest stands.
+const LIVE_LOOK: Duration = Duration::from_millis(500);
+
+/// How long a phone's stream stays open with nothing of its guest being redrawn.
+const STREAM_LINGER: Duration = Duration::from_secs(10);
+/// A quiet stream's heartbeat: it finds a phone that went away.
+const STREAM_BEAT: Duration = Duration::from_secs(5);
+
+fn stream_message(kind: u8, parts: &[&[u8]]) -> Vec<u8> {
+    let len: usize = parts.iter().map(|p| p.len()).sum();
+    let mut message = Vec::with_capacity(5 + len);
+    message.extend_from_slice(&((len + 1) as u32).to_be_bytes());
+    message.push(kind);
+    for part in parts {
+        message.extend_from_slice(part);
+    }
+    message
+}
+
+fn me_json(store: &Store, guest: GuestId) -> String {
+    let sources: Vec<Value> = store.sources_of(guest).into_iter().map(|s| source_json(store, s)).collect();
+    sj::obj(vec![("version", Value::Int(store.version as i64)), ("sources", Value::Arr(sources))]).to_json()
 }
 
 fn source_json(store: &Store, source: &Source) -> Value {
@@ -443,6 +1100,191 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_stream_carries_its_state_and_the_shown_takes_frames() {
+        let kept = std::env::temp_dir().join(format!("party-api-stream-{}", std::process::id()));
+        let party = Arc::new(Party::new(kept.clone(), Budget::UNLIMITED));
+        let (mut server, dir) = start("abcdefgh", Arc::new(Api::new(party.clone()).with_stream_linger(Duration::ZERO)));
+        let port = server.port;
+        let token = sj::parse(&ask(port, "POST", "join", None, b"").body).unwrap().get("token").and_then(Value::as_str).unwrap().to_string();
+        let photo = sample(8, 6);
+        let sent = ask(port, "POST", "loop?fps=12&keep=me", Some(&token), &pack(&[photo.clone(), photo.clone()]));
+        let take = field(&sent.body, "take");
+        assert_eq!(party.queue.pop(), Some(take));
+        {
+            let mut store = party.store();
+            store.take_running(take).unwrap();
+            // Drawn larger than the phone shows: it gets the preview.
+            store.take_frame(take, Arc::from(sample(16, 12)), Arc::from(photo.clone())).unwrap();
+        }
+        // A take still being redrawn keeps the stream open: here it ends
+        // once the take is done, after its last frame.
+        let party_done = party.clone();
+        let finisher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let mut store = party_done.store();
+            let f: Jpeg = Arc::from(sample(8, 6));
+            store.take_frame(take, f.clone(), f).unwrap();
+            store.take_finished(take, Ok(())).unwrap();
+        });
+        let streamed = ask(port, "GET", "stream", Some(&token), b"");
+        finisher.join().unwrap();
+        assert_eq!(streamed.status, 200, "{}", streamed.head);
+        assert!(streamed.head.contains("application/x-party-stream"), "{}", streamed.head);
+        let (mut states, mut frames, mut kinds) = (Vec::new(), Vec::new(), Vec::new());
+        let mut rest = streamed.body.as_slice();
+        while rest.len() >= 5 {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            let (kind, payload) = (rest[4], &rest[5..4 + len]);
+            kinds.push(kind);
+            match kind {
+                1 => states.push(sj::parse(payload).unwrap()),
+                2 => frames.push((u32::from_be_bytes(payload[..4].try_into().unwrap()) as u64, u16::from_be_bytes(payload[4..6].try_into().unwrap()), payload[6..].to_vec())),
+                _ => {}
+            }
+            rest = &rest[4 + len..];
+        }
+        assert!(rest.is_empty(), "the stream is whole messages");
+        assert_eq!(kinds.last(), Some(&3), "a stream that ends on its own says goodbye");
+        assert_eq!(frames.iter().map(|f| (f.0, f.1)).collect::<Vec<_>>(), vec![(take, 0), (take, 1)], "each redrawn frame once, in order, as it comes");
+        assert_eq!(frames[0].2, photo, "a frame is its preview's JPEG");
+        let last = states.last().expect("the state at least once").to_json();
+        assert!(last.contains("\"done\""), "the last state has the take done: {last}");
+        // A phone that has the first frame already gets only the rest.
+        let again = ask(port, "GET", &format!("stream?take={take}&have=1"), Some(&token), b"");
+        let mut rest = again.body.as_slice();
+        let mut indices = Vec::new();
+        while rest.len() >= 5 {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            if rest[4] == 2 {
+                indices.push(u16::from_be_bytes(rest[9..11].try_into().unwrap()));
+            }
+            rest = &rest[4 + len..];
+        }
+        assert_eq!(indices, vec![1], "only the frames the phone does not have");
+        server.stop();
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(kept);
+    }
+
+    /// A stream's whole messages, (kind, payload), and the bytes after them.
+    fn messages(mut rest: &[u8]) -> (Vec<(u8, Vec<u8>)>, usize) {
+        let mut out = Vec::new();
+        while rest.len() >= 5 {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            if rest.len() < 4 + len {
+                break;
+            }
+            out.push((rest[4], rest[5..4 + len].to_vec()));
+            rest = &rest[4 + len..];
+        }
+        (out, rest.len())
+    }
+
+    /// Reads a stream route until a message of `kind` comes, and hangs up:
+    /// its payload.
+    fn stream_until(port: u16, path: &str, token: Option<&str>, kind: u8) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+        let raw = format!("GET /p/abcdefgh/{path} HTTP/1.1\r\nHost: a\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n");
+        let (mut client, _) = makepad_network::SocketStream::connect_capture("127.0.0.1", &port.to_string()).unwrap();
+        client.write_all(raw.as_bytes()).unwrap();
+        let (mut got, mut buf) = (Vec::new(), vec![0u8; 1 << 16]);
+        loop {
+            let n = client.read(&mut buf).unwrap();
+            assert!(n > 0, "{path} ended before a message of kind {kind}");
+            got.extend_from_slice(&buf[..n]);
+            if let Some(split) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                if let Some((_, payload)) = messages(&got[split + 4..]).0.into_iter().find(|(k, _)| *k == kind) {
+                    return payload;
+                }
+            }
+        }
+    }
+
+    /// The screen gets a redraw put on the wall at the size it was drawn,
+    /// frame by frame, with where guests join; the page and the join code
+    /// need no guest. The phone's page records at the size the box draws a
+    /// loop and plays the size it is sent.
+    #[test]
+    fn the_screen_streams_the_walls_redraws_at_full_size() {
+        assert!(PAGE.contains(&format!("SIDE = {}, SEND_SIDE = {};", crate::worker::PREVIEW_SIDE, crate::worker::LOOP_SIDE)), "the page's sizes are the box's");
+        let kept = std::env::temp_dir().join(format!("party-api-screen-{}", std::process::id()));
+        let party = Arc::new(Party::new(kept.clone(), Budget::UNLIMITED));
+        party.join.set("https://192.0.2.10:8446/p/abcdefgh".into()).unwrap();
+        let (mut server, dir) = start("abcdefgh", Arc::new(Api::new(party.clone()).with_stream_linger(Duration::from_millis(400))));
+        let port = server.port;
+        let token = sj::parse(&ask(port, "POST", "join", None, b"").body).unwrap().get("token").and_then(Value::as_str).unwrap().to_string();
+        let sent = ask(port, "POST", "loop?fps=12&keep=wall", Some(&token), &pack(&[sample(8, 6), sample(8, 6)]));
+        let take = field(&sent.body, "take");
+        assert_eq!(party.queue.pop(), Some(take));
+        let full = sample(16, 12);
+        {
+            let mut store = party.store();
+            store.take_running(take).unwrap();
+            store.take_frame(take, Arc::from(full.clone()), Arc::from(sample(8, 6))).unwrap();
+        }
+        let party_done = party.clone();
+        let finisher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let mut store = party_done.store();
+            let f: Jpeg = Arc::from(sample(16, 12));
+            store.take_frame(take, f.clone(), f).unwrap();
+            store.take_finished(take, Ok(())).unwrap();
+        });
+        let screen = ask(port, "GET", "screen/stream", None, b"");
+        finisher.join().unwrap();
+        assert_eq!(screen.status, 200, "{}", screen.head);
+        let (got, rest) = messages(&screen.body);
+        assert_eq!(rest, 0, "the stream is whole messages");
+        let frames: Vec<_> = got.iter().filter(|(kind, _)| *kind == 2).map(|(_, p)| (u32::from_be_bytes(p[..4].try_into().unwrap()) as u64, u16::from_be_bytes(p[4..6].try_into().unwrap()), p[6..].to_vec())).collect();
+        assert_eq!(frames.iter().map(|f| (f.0, f.1)).collect::<Vec<_>>(), vec![(take, 0), (take, 1)], "each frame once, in order, as it is drawn");
+        assert_eq!(frames[0].2, full, "the screen gets the frame at the size it was drawn");
+        let last = got.iter().rev().find(|(kind, _)| *kind == 1).map(|(_, p)| String::from_utf8_lossy(p).into_owned()).unwrap();
+        for part in [format!("\"take\":{take}"), "\"frames\":2".into(), "\"drawing\":false".into(), "\"join\":\"https://192.0.2.10:8446/p/abcdefgh\"".into()] {
+            assert!(last.contains(&part), "the screen's last state has {part}: {last}");
+        }
+        assert_eq!(got.last().map(|m| m.0), Some(3), "a quiet screen stream says goodbye");
+        let page = ask(port, "GET", "screen", None, b"");
+        assert!(page.status == 200 && page.head.contains("text/html"), "{}", page.head);
+        let code = ask(port, "GET", "screen/join.svg", None, b"");
+        assert!(code.status == 200 && code.body.starts_with(b"<svg"), "{}", code.head);
+        server.stop();
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(kept);
+    }
+
+    #[test]
+    fn a_restart_waits_and_the_model_is_kept_warm_while_guests_are_about() {
+        let party = Party::new(std::env::temp_dir().join(format!("party-api-restart-{}", std::process::id())), Budget::UNLIMITED);
+        assert_eq!(party.restart_waits(), None, "an empty party restarts at once");
+        let keep = |image, voice, about| Wanted { image, voice, about };
+        assert_eq!(party.next_keep(Some(Duration::ZERO)), keep(false, false, false), "nobody about: nothing to keep");
+        party.saw_guest();
+        assert!(party.restart_waits().is_some(), "a guest who just asked holds a restart");
+        assert_eq!(party.next_keep(Some(Duration::ZERO)), keep(true, false, true), "a guest's arrival wants the redraw model warm");
+        party.saw_guest();
+        assert_eq!(party.next_keep(Some(Duration::ZERO)), keep(false, false, true), "a guest already about only keeps it held");
+        party.want_warm(false);
+        assert_eq!(party.next_keep(None), keep(true, false, true), "a camera starting wants it warm again");
+        party.want_warm(true);
+        assert_eq!(party.next_keep(None), keep(false, true, true), "the voice button wants the speech model warm");
+        party.seen.lock().unwrap().at = Instant::now().checked_sub(GUESTS_ABOUT + Duration::from_secs(1));
+        assert_eq!(party.restart_waits(), None, "a guest gone quiet does not");
+        assert_eq!(party.next_keep(Some(Duration::ZERO)), keep(false, false, false), "and the models may go");
+        let turn = party.asks.begin();
+        assert!(party.asks.waiting(), "a voice prompt waits until its words are back");
+        drop(turn);
+        assert!(!party.asks.waiting());
+        party.asks.wait_none();
+        let mut store = party.store();
+        let guest = store.join("a-token".into());
+        let (source, _) = store.add_source(guest, IpAddr::from([127, 0, 0, 1]), SourceKind::Photo, vec![Arc::from(sample(8, 6))], None, Keep::Me).unwrap();
+        store.wish(Who::Guest(guest), source, None).unwrap();
+        drop(store);
+        assert!(party.restart_waits().is_some(), "a take waiting for its redraw holds a restart");
+    }
+
+    #[test]
     fn wall_uploads_and_keep_requests_succeed_but_wait_for_a_finished_take() {
         let kept = std::env::temp_dir().join(format!("party-api-waiting-wall-{}", std::process::id()));
         let party = Arc::new(Party::new(kept.clone(), Budget::UNLIMITED));
@@ -469,7 +1311,8 @@ mod tests {
             let s = store.source(Who::Host, source).unwrap();
             assert_eq!((s.keep, s.wanted), (Keep::Me, Some(Keep::Wall)));
             store.take_running(take).unwrap();
-            store.take_frame(take, Arc::from(photo.clone())).unwrap();
+            let f: Jpeg = Arc::from(photo.clone());
+            store.take_frame(take, f.clone(), f).unwrap();
             assert!(store.wall().is_empty(), "the wall waits for the whole take");
             assert!(store.take_finished(take, Ok(())).unwrap().is_empty());
             let wall = store.wall();
@@ -511,8 +1354,10 @@ mod tests {
         assert_eq!(party.queue.pop(), Some(take), "the loop's first take waits for the hub");
         {
             let mut store = party.store();
-            store.take_frame(take, Arc::from(sample(512, 512))).unwrap();
-            store.take_frame(take, Arc::from(sample(512, 512))).unwrap();
+            let f: Jpeg = Arc::from(sample(512, 512));
+            store.take_frame(take, f.clone(), f).unwrap();
+            let f: Jpeg = Arc::from(sample(512, 512));
+            store.take_frame(take, f.clone(), f).unwrap();
             store.take_finished(take, Ok(())).unwrap();
         }
 
@@ -528,6 +1373,9 @@ mod tests {
         assert!(!jpeg::info(&frame.body).unwrap().had_metadata, "the store holds the frame without its metadata");
         assert_eq!(ask(port, "GET", &format!("frame?source={source}&i=1"), Some(&b), b"").status, 404, "nor its frames");
         assert_eq!(ask(port, "GET", &format!("frame?source={source}&i=2"), Some(&a), b"").status, 404);
+        let ideas = ask(port, "GET", &format!("ideas?source={source}"), Some(&a), b"");
+        assert_eq!((ideas.status, String::from_utf8_lossy(&ideas.body).into_owned()), (200, r#"{"ideas":[]}"#.to_string()), "no hub: no ideas, at once");
+        assert_eq!(ask(port, "GET", &format!("ideas?source={source}"), Some(&b), b"").status, 404, "nor ideas for its loop");
 
         let wish = ask(port, "POST", &format!("wish?source={source}"), Some(&a), "as a painting".as_bytes());
         assert_eq!(party.queue.pop(), Some(field(&wish.body, "take")), "a wish asks for a new take");
@@ -753,6 +1601,17 @@ mod tests {
         let caption = party.live.board().and_then(|board| board.caption()).unwrap_or_default();
         assert!(caption.starts_with("live · ") && caption.ends_with("s left · 1 waiting"), "{caption}");
         assert!(party.live.slots().busy(), "the takes wait meanwhile");
+        // The screen page shows the live redraw, and the guest's own phone
+        // gets it too; "Just me" takes it off every screen.
+        let on_screen = stream_until(port, "screen/stream", None, 4);
+        assert_eq!(&on_screen[..2], [0xff, 0xd8], "the screen gets the live frame as a JPEG");
+        let own = stream_until(port, "live/stream", Some(&a), 4);
+        assert_eq!(&own[..2], [0xff, 0xd8], "the live guest's phone gets their redraw");
+        assert_eq!(state("POST", "live/screen?on=0", &a).get("screen").and_then(Value::as_bool), Some(false));
+        assert!(party.live.board().is_none(), "just me: the wall shows nothing of the call");
+        let off = String::from_utf8(stream_until(port, "screen/stream", None, 1)).unwrap();
+        assert!(off.contains("\"live\":null"), "nor does the screen page: {off}");
+        state("POST", "live/screen?on=1", &a);
 
         assert_eq!(ask(port, "POST", "live/wish", Some(&a), b"a garden of paper lanterns").status, 200);
         until("the wish reaches the redraw", &|| redrawn.lock().unwrap().prompts.last().is_some_and(|p| p.contains("paper lanterns")));

@@ -4,7 +4,10 @@
 //!
 //! `MAKEPAD_TRAY_SELFTEST=1`: the platform shell performs the tray menu's first item itself once
 //! the tray exists (macOS: `performActionForItemAtIndex:`, a `TrayMenu`; Windows: a click on the
-//! icon, a `TrayClick`); the example logs the event it gets and quits.
+//! icon, a `TrayClick`); the example logs the event it gets and quits (`=stay`: and goes on, for a
+//! test that restarts it, tests/restart_process.rs; `=stale`: the first event changes the menu,
+//! whose replaced menu the shell clicks too, and the example quits on that second event,
+//! tests/stale_menu.rs).
 //! `MAKEPAD_NOTIFY_SELFTEST=1`: posts at startup, then logs its `NotificationClick` and quits.
 //! On macOS the shell supplies a synthetic click even when the app runs outside a bundle.
 
@@ -40,6 +43,9 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     enabled: bool,
+    /// `MAKEPAD_TRAY_SELFTEST=stale`: the menu events so far
+    #[rust]
+    stale_events: usize,
 }
 
 /// A ring with a dot, 36x36 (the @2x menu bar size).
@@ -112,7 +118,24 @@ impl AppMain for App {
         match event {
             Event::TrayMenu(e) => {
                 log!("tray: menu item {:?} of tray {:?}", e.item, e.tray);
-                if std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some() {
+                if let Some(how) = std::env::var_os("MAKEPAD_TRAY_SELFTEST") {
+                    if how == "stay" {
+                        log!("tray selftest: TrayMenu {:?} received, staying", e.item);
+                        return;
+                    }
+                    if how == "stale" && self.stale_events == 0 {
+                        // a changed menu replaces this one, and the shell clicks the one replaced
+                        self.stale_events = 1;
+                        self.enabled = !self.enabled;
+                        log!("tray selftest: TrayMenu {:?} received, the menu changes", e.item);
+                        self.set_tray(cx);
+                        return;
+                    }
+                    if how == "stale" {
+                        log!("tray selftest: TrayMenu {:?} from the replaced menu received, quitting", e.item);
+                        cx.quit();
+                        return;
+                    }
                     log!("tray selftest: TrayMenu {:?} received, quitting", e.item);
                     cx.quit();
                     return;

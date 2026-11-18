@@ -4,7 +4,7 @@
 //! in a floating tooltip (redrawn only when the row under the pointer changes).
 
 use crate::fmt::{clock, dur, local_offset_s};
-use crate::model::{Fleet, LONG_WAIT_MS};
+use crate::model::Fleet;
 use crate::float::{draw_float, Float};
 use crate::timeline::{mix, moved_by, DrawBar};
 use makepad_widgets::*;
@@ -130,13 +130,15 @@ impl FleetQueue {
         let v = self.view;
         let (x, w) = (v.pos.x + 10.0, v.size.x - 20.0);
         let q = f.queued();
-        let long = q.iter().filter(|r| f.wait_ms(r) >= LONG_WAIT_MS).count();
+        // (a lane's serial plan counts once, the prebuilds apart: [`Fleet::long_waits`])
+        let lw = f.long_waits();
+        let long = lw.count();
         let ink = self.ink;
         let tw = Self::text(&mut self.draw_bold, cx, x, v.pos.y + 8.0, 80.0, "QUEUE", ink);
         let oldest = q.iter().map(|r| f.wait_ms(r)).max();
         let line = match (q.len(), oldest) {
             (0, _) => "nothing waits".to_string(),
-            (n, Some(o)) => format!("{n} waiting \u{b7} oldest {}{}", dur(o), if long > 0 { format!(" \u{b7} {long} over 10 min") } else { String::new() }),
+            (n, Some(o)) => format!("{n} waiting \u{b7} oldest {}{}{}", dur(o), if long > 0 { format!(" \u{b7} {long} over 10 min") } else { String::new() }, prebuilds_said(lw.prebuilds.len())),
             (n, None) => format!("{n} waiting"),
         };
         let c = if long > 0 { self.bad } else { self.muted };
@@ -155,7 +157,7 @@ impl FleetQueue {
                 continue;
             }
             let wait = f.wait_ms(r);
-            let over = wait >= LONG_WAIT_MS;
+            let over = lw.starved.iter().any(|s| s.id == r.id);
             let row = Rect { pos: dvec2(v.pos.x + 4.0, y + 2.0), size: dvec2(v.size.x - 8.0, ROW_H - 4.0) };
             // rows part by a faint rule, not a fill
             let e = self.edge;
@@ -268,5 +270,14 @@ impl Widget for FleetQueue {
             }
             _ => {}
         }
+    }
+}
+
+/// The prebuilds waiting 10 min or more, said beside the long waits they are no part of.
+pub fn prebuilds_said(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " \u{b7} 1 prebuild over 10 min".into(),
+        n => format!(" \u{b7} {n} prebuilds over 10 min"),
     }
 }

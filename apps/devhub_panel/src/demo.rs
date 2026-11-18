@@ -2,7 +2,10 @@
 //! and a small scheduler run over four hours (three before the start, one after), so the panel
 //! has leases that queue, run, end and pile up behind budgets and timed work, landings, buckets
 //! and pressure. [`Demo::answer`] cuts what a master would answer at `now` out of that run: a
-//! demo panel left open keeps moving for an hour.
+//! demo panel left open keeps moving for an hour. Before the run, [`Demo::history`] answers the
+//! history asks a master would: a month of load (a day's tide and an hour's ripple per node) and
+//! leases every quarter hour, so the timeline scrolls and zooms back through it as it would
+//! through a master's.
 
 use crate::model::{Bucket, Fleet, InboxCounts, InboxEntry, JobBrief, JobDetail, JobPanic, LaneBrief, Link, Merge, Side};
 use makepad_devhub::land::{Entry as LandEntry, St};
@@ -333,6 +336,7 @@ impl Demo {
                         res_ram_gb: ram as f32,
                         gpu_pct: if c.gpus.is_empty() { -1.0 } else if gpu { (60.0 + rng.f() * 35.0) as f32 } else { (2.0 + rng.f() * 6.0) as f32 },
                         gpu_used_gb: if c.gpus.is_empty() { 0.0 } else if gpu { (6.0 + rng.f() * 8.0) as f32 } else { 1.5 },
+                        disk_free_gb: c.disk_free_gb as f32,
                     });
                 }
             }
@@ -389,6 +393,152 @@ impl Demo {
     }
 
     /// What a master would answer to `panel <since>` at `now`.
+    /// The month before the run.
+    pub fn first_ms(&self) -> u64 {
+        self.start_ms - BEFORE_MS - 30 * 86_400_000
+    }
+
+    /// A node's load at `t` before the run: a day's tide and an hour's ripple, at its own phase.
+    fn tide(&self, ni: usize, t: u64) -> Sample {
+        let c = self.nodes[ni].view.caps.clone().unwrap_or_default();
+        let tau = std::f64::consts::TAU;
+        let (day, hour, ph) = ((t % 86_400_000) as f64 / 86_400_000.0 * tau, (t % 3_600_000) as f64 / 3_600_000.0 * tau, ni as f64 * 0.7);
+        let busy = (0.45 + 0.3 * (day + ph).sin() + 0.12 * (hour * 3.0 + ph).sin()).clamp(0.02, 0.98);
+        let gpu = !c.gpus.is_empty();
+        Sample {
+            t_ms: t,
+            cpu_pct: (busy * 100.0) as f32,
+            load1: (busy * c.cores as f64) as f32,
+            ram_used_gb: (c.ram_gb * (0.2 + 0.5 * busy)) as f32,
+            res_cores: (c.cores as f64 * busy * 0.9) as f32,
+            res_ram_gb: (c.ram_gb * 0.6 * busy) as f32,
+            gpu_pct: if gpu { (busy * 60.0) as f32 } else { -1.0 },
+            gpu_used_gb: if gpu { (busy * 12.0) as f32 } else { 0.0 },
+            disk_free_gb: c.disk_free_gb as f32,
+        }
+    }
+
+    /// What a master's history answers to `history`, `exact`, `rows`, `landings` and `buckets`
+    /// (the panel service's asks), for the month before the run; the landings and bucket runs of
+    /// the run itself up to `now` too.
+    pub fn history(&self, line: &str, now: u64) -> Vec<String> {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let arg = |i: usize| w.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+        let (first, run) = (self.first_ms(), self.start_ms - BEFORE_MS);
+        let mut out = Vec::new();
+        let name = |ni: usize| self.nodes[ni].view.name.clone();
+        let num = |v: Option<f32>| v.map_or("null".to_string(), |v| format!("{v:.1}"));
+        match w.first().copied() {
+            Some("history") => {
+                let (from, per, n) = (arg(1), arg(2).max(1), arg(3));
+                let fields: Vec<&str> = w.get(4).map_or(Vec::new(), |f| f.split(',').collect());
+                out.push(format!("{{\"t\":\"hist\",\"from_ms\":{from},\"per_ms\":{per},\"n\":{n},\"level\":1,\"first_ms\":{first}}}"));
+                for ni in 0..self.nodes.len() {
+                    // each column's tide at eight points: its low, high and mean
+                    let cols: Vec<Option<Vec<Sample>>> = (0..n).map(|i| from + i * per).map(|a| (a >= first && a < run).then(|| (0..8).map(|k| self.tide(ni, a + per * k / 8)).collect())).collect();
+                    for f in &fields {
+                        let get = |s: &Sample| match *f {
+                            "res_cores" => s.res_cores,
+                            "cpu_pct" => s.cpu_pct,
+                            "ram_used_gb" => s.ram_used_gb,
+                            "gpu_pct" => s.gpu_pct,
+                            _ => -1.0,
+                        };
+                        let pick = |agg: &dyn Fn(&[f32]) -> f32| cols.iter().map(|c| num(c.as_ref().map(|c| c.iter().map(get).collect::<Vec<f32>>()).filter(|v| v[0] >= 0.0).map(|v| agg(&v)))).collect::<Vec<_>>().join(",");
+                        let (min, max, mean) = (pick(&|v| v.iter().copied().fold(f32::MAX, f32::min)), pick(&|v| v.iter().copied().fold(0.0, f32::max)), pick(&|v| v.iter().sum::<f32>() / v.len() as f32));
+                        out.push(format!("{{\"t\":\"cols\",\"node\":\"{}\",\"field\":\"{f}\",\"min\":[{min}],\"max\":[{max}],\"mean\":[{mean}]}}", name(ni)));
+                    }
+                }
+            }
+            Some("exact") => {
+                let (from, to) = (arg(1).max(first), arg(2).min(run));
+                out.push(format!("{{\"t\":\"exact\",\"from_ms\":{from},\"per_ms\":{},\"n\":0,\"level\":0,\"first_ms\":{first}}}", to.saturating_sub(from)));
+                for ni in 0..self.nodes.len() {
+                    let s: Vec<String> = (from.div_ceil(SAMPLE_MS)..to.div_ceil(SAMPLE_MS)).map(|k| {
+                        let x = self.tide(ni, k * SAMPLE_MS);
+                        format!("[{},{:.1},{:.2},{:.1},{:.1},{:.1},{:.0},{:.1},{:.0}]", x.t_ms, x.cpu_pct, x.load1, x.ram_used_gb, x.res_cores, x.res_ram_gb, x.gpu_pct, x.gpu_used_gb, x.disk_free_gb)
+                    }).collect();
+                    out.push(format!("{{\"t\":\"pressure\",\"node\":\"{}\",\"s\":[{}]}}", name(ni), s.join(",")));
+                }
+            }
+            Some("rows") => {
+                let (from, to) = (arg(1).max(first), arg(2).min(run));
+                let slot = 15 * 60_000;
+                let mut rows = Vec::new();
+                for ni in 0..self.nodes.len() {
+                    let c = self.nodes[ni].view.caps.clone().unwrap_or_default();
+                    for k in from.saturating_sub(slot) / slot..to / slot + 1 {
+                        let mut rng = Rng(k.wrapping_mul(31).wrapping_add(ni as u64 * 7919));
+                        if rng.next() % 3 == 0 {
+                            continue;
+                        }
+                        let asked = k * slot + rng.next() % 300_000;
+                        let granted = asked + 5_000 + rng.next() % 60_000;
+                        let ended = granted + 240_000 + rng.next() % 600_000;
+                        if ended < from || asked > to || ended > run {
+                            continue;
+                        }
+                        let kind = *rng.pick(&["build", "test", "test", "gpu", "ci"]);
+                        rows.push(Row {
+                            id: format!("D{ni}-{k}"),
+                            lane: rng.pick(&["relax", "fabslice", "elec", "devhubq", "landq-tests"]).to_string(),
+                            kind: kind.into(),
+                            state: "ended".into(),
+                            node: name(ni),
+                            asked_ms: asked,
+                            granted_ms: Some(granted),
+                            ended_ms: Some(ended),
+                            how: "released".into(),
+                            cores: (2 + rng.next() % (c.cores.max(4) as u64 / 2)) as f64,
+                            ram_gb: 4.0,
+                            waits: vec![Wait { start_ms: asked, end_ms: granted, blocker: "budget cores".into() }],
+                            ..Row::default()
+                        });
+                    }
+                }
+                out.push(format!("{{\"t\":\"rows\",\"from_ms\":{from},\"per_ms\":{},\"n\":{},\"level\":0,\"first_ms\":null}}", to.saturating_sub(from), rows.len()));
+                out.extend(rows.iter().map(Row::to_json));
+            }
+            Some(word @ ("landings" | "buckets")) => {
+                let (from, to) = (arg(1), arg(2));
+                // the month's: a landing every 6 min slot or so, each with its hot run; fast every 10 min
+                let (slot, ten) = (6 * 60_000, 10 * 60_000);
+                let mut land = Vec::new();
+                let mut runs = Vec::new();
+                let run_json = |name: &str, ok: bool, s: u64, e: u64| format!("{{\"bucket\":\"{name}\",\"ok\":{ok},\"failing\":[{}],\"tip\":{{\"work\":\"7edb4685\",\"main\":\"f095f44c\"}},\"started_ms\":{s},\"ended_ms\":{e}}}", if ok { "" } else { "\"makepad-app-clock\"" });
+                for k in from.max(first).saturating_sub(slot) / slot..to.min(run) / slot + 1 {
+                    let mut rng = Rng(k.wrapping_mul(2862933555777941757).wrapping_add(17));
+                    if rng.next() % 4 == 0 {
+                        continue;
+                    }
+                    let changed = k * slot + rng.next() % slot;
+                    let asked = changed - 30_000 - rng.next() % 90_000;
+                    if changed < from || asked > to || changed >= run {
+                        continue;
+                    }
+                    let (lane, agent) = *rng.pick(&LANES);
+                    let failed = rng.f() < 0.06;
+                    land.push(format!("{{\"id\":{},\"branch\":\"rc-{lane}\",\"state\":\"{}\",\"agent\":\"{agent}\",\"asked_ms\":{asked},\"changed_ms\":{changed}}}", k % 1_000_000, if failed { "failed" } else { "landed" }));
+                    runs.push(run_json("hot", rng.f() > 0.04, changed + 20_000, changed + 75_000));
+                }
+                for k in from.max(first).saturating_sub(ten) / ten..to.min(run) / ten + 1 {
+                    let (s, e) = (k * ten, k * ten + 300_000);
+                    if e >= from && s <= to && e < run {
+                        runs.push(run_json("fast", Rng(k).f() > 0.1, s, e));
+                    }
+                }
+                // the run's own, as far as they came by now
+                land.extend(self.land.iter().filter(|e| e.changed_ms <= now && e.changed_ms >= from && e.asked_ms <= to).map(|e| e.to_json()));
+                runs.extend(self.buckets.iter().filter(|b| b.ended_ms <= now && b.ended_ms >= from && b.started_ms <= to).map(|b| run_json(&b.name, b.ok, b.started_ms, b.ended_ms)));
+                let list = if word == "landings" { land } else { runs };
+                out.push(format!("{{\"t\":\"{word}\",\"from_ms\":{from},\"to_ms\":{to},\"n\":{}}}", list.len()));
+                out.extend(list);
+            }
+            _ => out.push("{\"err\":\"history <from_ms> <per_ms> <n> [field,...] | exact <from_ms> <to_ms> | rows|landings|buckets <from_ms> <to_ms>\"}".into()),
+        }
+        out
+    }
+
     pub fn answer(&self, since: u64, now: u64) -> Answer {
         let rows = self
             .rows

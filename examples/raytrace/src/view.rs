@@ -486,12 +486,16 @@ impl PtView {
                 s.brute = true;
                 ("brute_4spp_exact", SceneInput::cornell_box(false), s, (96, 96), None)
             }
-            // Hybrid primaries: the rasterized hit equals the traced one.
+            // Hybrid primaries: the rasterized hit equals the traced one. The tracer rasterizes
+            // primaries only through a pinhole, so the box's lens is closed here: with a lens the
+            // raster is drawn unjittered while the check jitters its ray.
             7 => {
                 s.debug_mode = 7;
                 s.hybrid_primary = true;
                 s.target_spp = 1;
-                ("gbuffer_primary", SceneInput::cornell_box(false), s, (96, 96), None)
+                let mut scene = SceneInput::cornell_box(false);
+                scene.camera.f_stop = 0.0;
+                ("gbuffer_primary", scene, s, (96, 96), None)
             }
             // Scale geometry and every camera length together, as in the CPU
             // transport_is_invariant_under_scene_scaling fixture.
@@ -696,10 +700,9 @@ impl PtView {
                         }
                     }
                 }
-                // Rasterizer vs ray may disagree along triangle edges; the
-                // barycentric drift is informational (open: a sub-pixel
-                // convention offset between the raster and the ray generator).
-                pass = tri_diff <= w * h / 15;
+                // A sample on an edge shared by two triangles may resolve to either; every other
+                // pixel agrees, barycentrics included.
+                pass = tri_diff + uv_diff <= w * h / 500;
                 line = format!("{name}: {tri_diff} tri flips, {uv_diff} barycentric drifts of {} pixels (raster vs ray)", w * h);
             }
             8 | 9 | 10 => {
