@@ -36,9 +36,12 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   reports [pull] [--dir <dir>]            new change reports from makepad.nl's admin inbox, kept as received in
                                           ~/.intake-quarantine/runner-reports/<id>/ (untrusted: unread until intake takes them)
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)
-  master start                            a master in a session of its own, at this shell's priority; its log
-                                          is master.log in devhub's home. A niced shell is refused (zsh runs
-                                          `&` jobs at +5; restarts keep a level and shown apps inherit it)
+  master start                            on the Mac with its LaunchAgent (nl.makepad.devhub): the master through
+                                          launchd, which starts it again after a crash (the Dock wrapper builds
+                                          it first). Else a master in a session of its own, at this shell's
+                                          priority, which nothing starts again; its log is master.log in
+                                          devhub's home. A niced shell is refused (zsh runs `&` jobs at +5;
+                                          restarts keep a level and shown apps inherit it)
   master who                              the process that answers the control socket (pid=, since_ms=: its
                                           start; an exec keeps the pid); exit 1 when none answers
   log-stamp                               stdin to stdout, each line starting with the UTC time it came in
@@ -66,7 +69,14 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           a conflict or failure is final: hand in again
   land hold <branch> [reason] | unhold <branch> | retry <branch> (its pinned commits again) | drop <branch>
   bucket [status]                        the last 10 post-land bucket runs and attributed lanes
-  bucket run <fast|tests|hot|ci|full>    that bucket's run now, of the tip then (full: every package's tests)
+  bucket run <fast|tests|hot|mac|ci|full> that bucket's run now, of the tip then (full: every package's tests;
+                                          mac: the test targets only a Mac can fail, a package's
+                                          [package.metadata.makepad.macos-tests])
+  history <ask> [--json]                  the master's history of any range, as the panel reads it: `history
+                                          <from_ms> <per_ms> <n> [field,..]` (each node's load reduced to n
+                                          columns), `exact <from_ms> <to_ms>` (every sample), `rows|buckets|
+                                          landings <from_ms> <to_ms>` (the leases, bucket runs, landings of it);
+                                          one JSON line each, then the time the master took
   land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)
   land rule [on | off <why>]              the land rule (gate.rs): off, no landing runs it (each says
                                           `land rule off (<why>): nothing checked`) and the master
@@ -133,6 +143,33 @@ pub(crate) fn retry_master<T>(call: impl FnMut() -> Result<T, String>) -> Result
     })
 }
 
+/// [`retry_master`] for a call with a timeout (`live wait`, `live look`): `call` gets when the first
+/// ask was made (wall ms), which every ask names (`since=`) so that the master counts the timeout
+/// from it, not from each ask again: a `live wait <id> verdict 900` ran 29 min past it through
+/// restarts (11-17). A master still away when the timeout is over ends the call here, with `spent`.
+#[cfg(feature = "checkout")]
+pub(crate) fn retry_master_until<T>(timeout: Duration, call: impl FnMut(u64) -> Result<T, String>, spent: impl Fn() -> String) -> Result<T, String> {
+    asks_until(timeout, proto::wall_ms(), proto::wall_ms, call, spent, || {
+        std::thread::sleep(Duration::from_secs(2));
+        control().is_ok()
+    })
+}
+
+/// [`retry_master_until`] from `since` on the clock `now`, with [`retry_master_wait`]'s `beat`.
+#[cfg(feature = "checkout")]
+pub(crate) fn asks_until<T>(timeout: Duration, since: u64, now: impl Fn() -> u64, mut call: impl FnMut(u64) -> Result<T, String>, spent: impl Fn() -> String, mut beat: impl FnMut() -> bool) -> Result<T, String> {
+    let up = std::cell::Cell::new(true);
+    retry_master_wait(|| {
+        // a master that answers says itself whether the wait is over: what it waited for may be
+        // there by now
+        if !up.get() && now().saturating_sub(since) > timeout.as_millis() as u64 { return Err(spent()); }
+        call(since)
+    }, || {
+        up.set(beat());
+        up.get()
+    })
+}
+
 /// `beat` waits a while and says whether the master answers now. Each change is said once, because
 /// a call that stays open (`job wait`, `test --live`) can run for long after the master is back:
 /// "waiting" as its last line read as a client stuck on a master that had been up for 18 min (11-05).
@@ -184,7 +221,17 @@ pub(crate) fn said_line(l: &str) -> Option<(String, bool)> {
 /// Sends one line to a lines service and collects the answer.
 pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
     if service != "agent-seen" { agent_seen(c); }
-    ask_lines(c, target, service, line).map_err(|e| older(target, service, e))
+    ask_lines(c, target, service, line).map_err(|e| older(target, service, box_link(target, e)))
+}
+
+/// A routed ask's error, saying whose link it was: an ask of another box goes over the master's
+/// socket and the master dials the box, never this process. A lane read the master's failed dial
+/// (`Network is unreachable`) as macOS's Local Network block on its own CLI (11-17).
+pub(crate) fn box_link(target: Option<&str>, e: String) -> String {
+    match target {
+        Some(t) if e.contains("cannot reach fleet hub") => format!("the master cannot reach {t}'s hub now (this command opens no connection of its own; `devhub nodes` shows the box): {e}"),
+        _ => e,
+    }
 }
 
 /// Asks of one node's service, one at a time, on one routed channel ([`ask`] routes each one:
@@ -590,7 +637,7 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
         Ok(()) if had_err => 1,
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("makepad devhub: {e}");
+            eprintln!("makepad devhub: {}", box_link((!local).then_some(machine), e));
             2
         }
     }
@@ -763,6 +810,19 @@ pub fn main(args: &[String]) -> i32 {
         ["land", rest @ ..] => land(&c, rest),
         #[cfg(feature = "checkout")]
         ["bucket", rest @ ..] => bucket(&c, rest),
+        ["history", rest @ ..] if matches!(rest.first(), Some(&("history" | "exact" | "rows" | "buckets" | "landings"))) => {
+            let t = std::time::Instant::now();
+            let line = rest.iter().filter(|w| **w != "--json").copied().collect::<Vec<_>>().join(" ");
+            match ask(&c, None, crate::lease::panel::SERVICE, &line) {
+                Ok(lines) => {
+                    let err = lines.iter().any(|l| l.starts_with("{\"err\""));
+                    for l in &lines { println!("{l}"); }
+                    if !rest.contains(&"--json") { eprintln!("{} lines in {} ms", lines.len(), t.elapsed().as_millis()); }
+                    i32::from(err)
+                }
+                Err(e) => { eprintln!("makepad devhub history: {e}"); 2 }
+            }
+        }
         ["ls", rest @ ..] => ls(&c, rest.first().copied()),
         ["hot", rest @ ..] if rest.is_empty() || *rest == ["--json"] => match ask(&c, None, "hot", "summary") {
             Ok(lines) => {
@@ -1084,7 +1144,7 @@ fn cache_fleet(c: &Client) {
         match (sum, a) {
             (Some(v), _) => {
                 let bytes = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                println!("{n}: {} in {} caches, of it the dev store {} (cap {} GB)", human(bytes("total_bytes")), bytes("caches"), human(bytes("dev_bytes")), crate::lease::relaxgit::DEV_STORE_MB / 1024);
+                println!("{n}: {} in {} caches, of it the dev store {}", human(bytes("total_bytes")), bytes("caches"), human(bytes("dev_bytes")));
             }
             (None, Err(e)) => println!("{n}: {e}"),
             (None, Ok(_)) => println!("{n}: no answer"),
@@ -1127,15 +1187,20 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             continue;
         }
         if let Some(name) = v.get("still_failing").and_then(Value::as_str) {
-            // each with the log of its last look, the failure's own lines in it
+            // each with the log of its last look, the failure's own lines in it; what says the
+            // red may be old comes first, before the landings it is laid to
             let units = match v.get("units") {
                 Some(Value::Obj(units)) => units.iter().map(|(unit, who)| {
                     let log = v.get("logs").and_then(|l| l.get(unit)).and_then(Value::as_str).filter(|l| !l.is_empty()).map_or(String::new(), |l| format!("; log {l}"));
-                    // a later run of another bucket passed it
-                    let stale = v.get("stale").and_then(|l| l.get(unit)).map_or(String::new(), |p| {
-                        format!("; STALE: the {} bucket's run {} ago passed it", text(p, "bucket"), ago(p.get("started_ms").and_then(Value::as_u64).unwrap_or(0)))
-                    });
-                    format!("{unit} ({}{log}{stale})", crate::bucket::still_since(who.as_str().unwrap_or("?")))
+                    let ms = |p: &Value, k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    let mut marks = Vec::new();
+                    // its package changed after the run that said it
+                    if let Some(c) = v.get("changed").and_then(|l| l.get(unit)) {
+                        let more = match ms(c, "n") { 0 | 1 => String::new(), n => format!(", {n} landings in all") };
+                        marks.push(format!("{} changed since that run: {} {} ago{more}", text(c, "package"), text(c, "first"), ago(ms(c, "first_ms"))));
+                    }
+                    let marks = if marks.is_empty() { String::new() } else { format!("[{}] ", marks.join("; ")) };
+                    format!("{unit} {marks}({}{log})", crate::bucket::few(&crate::bucket::still_since(who.as_str().unwrap_or("?")), 3))
                 }).collect::<Vec<_>>().join(", "),
                 _ => String::new(),
             };
@@ -1157,11 +1222,13 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         let still = since(v.get("still"));
         let still = if still.is_empty() { still } else { format!("; not rerun: {still}") };
         println!("{} {tip} {} {failing}{}{still}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
-        // a failing unit's own lines (its errors, the tests a hung one still ran), then its command
+        // a failing unit's own lines (its errors, its tests' panics, the tests a hung one still
+        // ran), then its command
         let errors: &[(String, Value)] = match v.get("errors") { Some(Value::Obj(units)) => units, _ => &[] };
+        let panics: &[(String, Value)] = match v.get("panics") { Some(Value::Obj(units)) => units, _ => &[] };
         if let Some(Value::Obj(units)) = v.get("repro") {
             for (unit, cmd) in units {
-                for l in errors.iter().filter(|(e, _)| crate::bucket::unit_key(e) == *unit).flat_map(|(_, l)| l.as_arr().unwrap_or_default()).filter_map(Value::as_str).take(3) {
+                for l in errors.iter().chain(panics).filter(|(e, _)| crate::bucket::unit_key(e) == *unit).flat_map(|(_, l)| l.as_arr().unwrap_or_default()).filter_map(Value::as_str).take(3) {
                     println!("    {unit}: {l}");
                 }
                 if let Some(cmd) = cmd.as_str() { println!("    {}", crate::bucket::repro_said(unit, cmd)); }
@@ -1481,6 +1548,16 @@ fn master_start() -> i32 {
     let socket = proto::control_socket();
     if let Some(who) = crate::node::who_serves(&socket) {
         return fail(format!("a devhub ({who}) already serves {}", socket.display()));
+    }
+    // through launchd when the Mac has the agent: a master started here is not started again
+    // after a crash (11-17: one stayed down until a person came by)
+    match crate::master::start_by_agent(&socket) {
+        Some(Ok(pid)) => {
+            println!("devhub: master up under {}, pid {pid}; its log is {}", crate::master::AGENT, proto::home().join("master.log").display());
+            return 0;
+        }
+        Some(Err(why)) => return fail(why),
+        None => {}
     }
     if let Err(why) = crate::master::start_level() {
         return fail(why);

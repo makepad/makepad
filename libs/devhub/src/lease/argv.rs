@@ -27,6 +27,29 @@ pub fn changes_toolchain(argv: &[String]) -> Option<String> {
     toolchain_change_in(&argv.join(" "), 2)
 }
 
+/// The targets a run's cargo or rustc builds for (`--target <triple>`, `--target=<triple>`), in its
+/// words or a shell's script word: each needs its std on the box ([`super::Caps::rust_targets`]).
+/// Words after `--` are the program's; a target spec file (`.json`, a path) is no installed target.
+pub fn rust_targets(argv: &[String]) -> Vec<String> {
+    let text = super::loaders::command_of(argv).join(" ");
+    let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '"' | '\'' | '`')).filter(|w| !w.is_empty()).collect();
+    let triple = |t: &str| t.contains('-') && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) && !t.ends_with(".json");
+    let (mut out, mut cargo) = (Vec::<String>::new(), false);
+    for (i, w) in words.iter().enumerate() {
+        let name = w.rsplit(['/', '\\']).next().unwrap_or(w).trim_end_matches(".exe");
+        if matches!(name, "cargo" | "rustc") { cargo = true; continue; }
+        if *w == "--" { cargo = false; continue; }
+        if !cargo { continue; }
+        let t = match w.strip_prefix("--target") {
+            Some("") => words.get(i + 1).copied().unwrap_or(""),
+            Some(v) => v.strip_prefix('=').unwrap_or(""),
+            None => continue,
+        };
+        if triple(t) && !out.iter().any(|o| o == t) { out.push(t.to_string()); }
+    }
+    out
+}
+
 fn toolchain_change_in(text: &str, depth: u32) -> Option<String> {
     let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '"' | '\'' | '`')).filter(|w| !w.is_empty()).collect();
     for (i, w) in words.iter().enumerate() {
@@ -188,6 +211,18 @@ mod tests {
 
     fn words(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A cross-target run names the std it needs: cargo's and rustc's `--target`, in its words or a
+    /// shell's script, never the program's own arguments or a target spec file.
+    #[test]
+    fn a_run_names_the_targets_its_cargo_builds_for() {
+        assert_eq!(rust_targets(&words(&["cargo", "check", "-p", "aihub", "--target", "x86_64-pc-windows-msvc"])), ["x86_64-pc-windows-msvc"]);
+        assert_eq!(rust_targets(&words(&["env", "A=1", "cargo", "build", "--target=wasm32-unknown-unknown", "--target", "aarch64-apple-ios"])), ["wasm32-unknown-unknown", "aarch64-apple-ios"]);
+        assert_eq!(rust_targets(&words(&["sh", "-c", "cd x && /opt/rust/bin/cargo build --release --target aarch64-linux-android"])), ["aarch64-linux-android"]);
+        assert!(rust_targets(&words(&["cargo", "run", "-p", "makepad-run", "--bin", "makepad", "--", "test", "--target", "x86_64-pc-windows-msvc"])).is_empty(), "the program's own arguments");
+        assert!(rust_targets(&words(&["cargo", "build", "--target", "specs/my-target.json"])).is_empty(), "a target spec file");
+        assert!(rust_targets(&words(&["tool", "--target", "x86_64-pc-windows-msvc"])).is_empty() && rust_targets(&words(&["cargo", "test", "-p", "x"])).is_empty());
     }
 
     fn utf16_b64(script: &str) -> String {

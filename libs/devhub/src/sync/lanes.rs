@@ -870,6 +870,12 @@ impl Lanes {
             let h = &unit[*i];
             // (taken before git reads the tree: a change while it runs is heard)
             let mark = if ff_only { self.tree_mark(h) } else { None };
+            // (the move's file events are the bot's, not the lane's activity: `Monitor::own_write`)
+            let watch = (self.watch)();
+            let before = watch.as_ref().map(|m| {
+                let _ = m.settle(&h.wt);
+                m.last_event_ms(&h.wt)
+            });
             // A lane carried over from a retired work chain isn't a fast-forward: its tree moves
             // the same careful way (refusing over a change), then its branch. Git itself moves the
             // checkout (`merge --ff-only`, `move_checked`'s `read-tree -m -u`): a two-way move of
@@ -909,6 +915,9 @@ impl Lanes {
                     }
                 }
                 return out.into_iter().flatten().collect();
+            }
+            if let (Some(m), Some(before)) = (&watch, before) {
+                m.own_write(&h.wt, before);
             }
             moved.push(*i);
         }

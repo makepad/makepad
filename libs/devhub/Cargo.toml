@@ -11,6 +11,9 @@ description = "devhub: observes every JIT on the LAN (events, explorer, full rem
 [package.metadata.makepad]
 test-tree = "its tests walk this checkout's git history and run cargo tree on it"
 
+[package.metadata.makepad.platform-gaps]
+windows = { "lib" = "29 of 915 fail there: slot (12), lane (4), git sync (3), bucket (3), exec (2), five more" }
+
 # `makepad devhub <words>` is this binary (the JIT binary forwards to it through cargo): a devhub change
 # never rebuilds the JIT, and a JIT change never rebuilds devhub
 [[bin]]
@@ -20,6 +23,8 @@ required-features = ["checkout"]
 
 [dependencies]
 relax-base = { workspace = true, optional = true }
+# the JIT store's free-space rule (store_floor), which the disk guard warns by
+relax-session = { workspace = true }
 # CI proofs' digests and doc files (the checkout applier's)
 makepad-ci-merge = { path = "../../tools/ci_merge", optional = true }
 # git reads and writes in process (refs, worktrees, config, history): rounds never spawn git

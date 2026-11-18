@@ -429,8 +429,13 @@ pub fn processes_view(pids: &[u32]) -> String {
 }
 
 /// pid -> (parent, in one of the `leaders`' groups), of this user's live processes.
-#[cfg(target_os = "macos")]
 fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {
+    proc_rows().into_iter().map(|(pid, (ppid, pgid))| (pid, (ppid, leaders.contains(&pgid)))).collect()
+}
+
+/// pid -> (parent, process group), of this user's live processes.
+#[cfg(target_os = "macos")]
+fn proc_rows() -> std::collections::HashMap<u32, (u32, u32)> {
     extern "C" {
         fn proc_listallpids(buffer: *mut core::ffi::c_void, size: i32) -> i32;
         fn getuid() -> u32;
@@ -441,15 +446,15 @@ fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)>
     let mut table = std::collections::HashMap::new();
     for pid in pids.iter().take(n.max(0) as usize).filter(|p| **p > 0).map(|p| *p as u32) {
         if let Some(b) = bsd_info(pid).filter(|b| b.uid == uid && b.status != 5) {
-            table.insert(pid, (b.ppid, leaders.contains(&b.pgid)));
+            table.insert(pid, (b.ppid, b.pgid));
         }
     }
     table
 }
 
-/// pid -> (parent, in one of the `leaders`' groups), of the live processes `/proc` shows.
+/// pid -> (parent, process group), of the live processes `/proc` shows.
 #[cfg(target_os = "linux")]
-fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {
+fn proc_rows() -> std::collections::HashMap<u32, (u32, u32)> {
     let mut table = std::collections::HashMap::new();
     for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
@@ -458,14 +463,81 @@ fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)>
         let f: Vec<&str> = stat[at + 2..].split_whitespace().collect();
         // f[0] = state, f[1] = ppid, f[2] = pgrp
         let (Some(ppid), Some(pgrp)) = (f.get(1).and_then(|p| p.parse::<u32>().ok()), f.get(2).and_then(|p| p.parse::<u32>().ok())) else { continue };
-        if f.first() != Some(&"Z") { table.insert(pid, (ppid, leaders.contains(&pgrp))); }
+        if f.first() != Some(&"Z") { table.insert(pid, (ppid, pgrp)); }
     }
     table
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_table(_leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {
+fn proc_rows() -> std::collections::HashMap<u32, (u32, u32)> {
     std::collections::HashMap::new()
+}
+
+/// For each set of runs (their group leaders, with starts), the process groups their processes
+/// moved into beside the runs' own (a JIT-run test leads one, `set -m` gives each job one, a
+/// spawn may ask for one): each with its leader's start, 0 when its leader was gone already. One
+/// look at the process table for all of them. A lease's end ends these groups too
+/// ([`groups_left`]): a process that left the run's group and its environment's lease mark
+/// outlived its lease once its parent was gone, as two spinning children of a hung live test did
+/// for hours (W11754, 11-17).
+///
+/// `known`: the groups an earlier look found, kept while a process is in one (an orphan its
+/// parent left, which no walk reaches) and its number is still its leader's.
+///
+/// A group that is a session of its own is not one: that is how a process says it outlives what
+/// started it (`setsid`; relax's check server, which serves every lease after it). Nor is the
+/// hub's own group, nor what descends from the hub but through no run.
+pub fn groups_beside(sets: &[(Vec<(u32, u64)>, Vec<(u32, u64)>)]) -> Vec<Vec<(u32, u64)>> {
+    extern "C" {
+        fn getpgrp() -> i32;
+        fn getsid(pid: i32) -> i32;
+    }
+    if sets.iter().all(|(leaders, known)| leaders.is_empty() && known.is_empty()) { return sets.iter().map(|_| Vec::new()).collect(); }
+    let (own, me) = (unsafe { getpgrp() } as u32, std::process::id());
+    let rows = proc_rows();
+    let led_by = |g: u32, start: u64| proc_start(g).is_none_or(|now| start != 0 && now == start);
+    // (every process of a group is in one session)
+    let session = |g: u32| rows.iter().find(|(_, (_, pg))| *pg == g).is_some_and(|(pid, _)| unsafe { getsid(*pid as i32) } == g as i32);
+    sets.iter().map(|(leaders, known)| {
+        let lead: Vec<u32> = leaders.iter().filter(|(pid, start)| *pid != 0 && proc_start(*pid).is_none_or(|s| s == *start)).map(|(pid, _)| *pid).collect();
+        // in a run's group, or descended from one of its processes (a bounded walk, as
+        // [`group_members`]'s)
+        let member = |pid: u32| {
+            let mut p = pid;
+            for _ in 0..64 {
+                match rows.get(&p) {
+                    _ if p == me => return false,
+                    Some((_, g)) if lead.contains(g) => return true,
+                    Some((parent, _)) if *parent != p => p = *parent,
+                    _ => return false,
+                }
+            }
+            false
+        };
+        let found: std::collections::BTreeSet<u32> = if lead.is_empty() { Default::default() } else {
+            rows.iter().filter(|(pid, (_, g))| *g > 1 && *g != own && !lead.contains(g) && member(**pid)).map(|(_, (_, g))| *g).collect()
+        };
+        let mut out: Vec<(u32, u64)> = known.iter().copied().filter(|(g, start)| rows.values().any(|(_, pg)| pg == g) && led_by(*g, *start)).collect();
+        for g in found {
+            if !out.iter().any(|(k, _)| *k == g) && !session(g) {
+                // (a leader not yet reaped still holds its number: its start, too)
+                out.push((g, proc_start(g).unwrap_or(0)));
+            }
+        }
+        out
+    }).collect()
+}
+
+/// The live processes of the groups [`groups_beside`] found, each led from its start (0: its
+/// leader gone then); not this process. A group whose number another process has now (a pid used
+/// again, whose group is another's) has none.
+pub fn groups_left(groups: &[(u32, u64)]) -> Vec<u32> {
+    let still: Vec<u32> = groups.iter().filter(|(g, start)| *g > 1 && !proc_start(*g).is_some_and(|now| *start == 0 || now != *start)).map(|(g, _)| *g).collect();
+    if still.is_empty() { return Vec::new(); }
+    let me = std::process::id();
+    let mut left: Vec<u32> = proc_rows().into_iter().filter(|(pid, (_, g))| *pid != me && still.contains(g)).map(|(pid, _)| pid).collect();
+    left.sort_unstable();
+    left
 }
 
 /// What a scoped run holds now that the kernel cannot reclaim, bytes: its scope's anonymous and

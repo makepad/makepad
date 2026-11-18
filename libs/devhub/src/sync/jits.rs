@@ -71,8 +71,15 @@ pub fn exe_replaced(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p.to_string_lossy().ends_with(" (deleted)"))
 }
 
-/// Where the JIT writes its live-edit records.
+/// Where the JIT writes its live-edit records: its discovery file names it (`live_log`, the run's
+/// `RELAX_LIVE_LOG`: one log per run, whichever of its processes writes it now). A run from before
+/// that field: its environment (Linux), else its pid's own name, which misses once a process
+/// restart behind a restart parent changed the app's pid (macOS has no environment to read).
 pub fn live_log(pid: u32) -> PathBuf {
+    let file = discovery::registry_dir().join(format!("makepad-remote-{pid}.json"));
+    if let Some(p) = std::fs::read_to_string(file).ok().and_then(|t| discovery::parse(&t)).and_then(|a| a.text("live_log")).filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
     if let Some(p) = environ(pid, &crate::run_names::var("LIVE_LOG")).filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }

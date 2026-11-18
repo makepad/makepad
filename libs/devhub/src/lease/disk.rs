@@ -288,7 +288,7 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
         // a running process of that cache holds its live lock (relax store.rs hold_build): never
         // taken, whatever its step (an embedded node's own loader runs from one of these)
         if !crate::jitcache::held_locks(&p).is_empty() {
-            add(Cat::JitCache, p, None, false, "in use: a running process holds its live lock");
+            add(Cat::JitCache, p, None, false, "in use: a running process or a timed series holds its live lock");
             continue;
         }
         add(Cat::JitCache, p, Some(if cur { 5 } else { 2 }), false, if cur { "current JIT cache" } else { "" });
@@ -400,6 +400,22 @@ pub fn remove(p: &Path) -> std::io::Result<()> {
     if m.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) }
 }
 
+/// The share of its volume the JIT keeps free, at most JIT_FREE_MAX_GB (relax-session store_floor):
+/// its cache fills a disk down to that floor by design, evicting the least recently used below it.
+const JIT_FREE_SHARE: f64 = relax_session::store_floor::FREE_SHARE as f64;
+const JIT_FREE_MAX_GB: f64 = (relax_session::store_floor::FREE_MAX >> 30) as f64;
+
+/// How far under the JIT's floor free space goes before a box warns.
+const WARN_MARGIN_GB: f64 = 5.0;
+
+/// Where a box of `total_gb` warns (`disk_warn`): the JIT's floor less a margin, so the warning
+/// says the JIT cannot hold its floor or something else fills the disk; never under devhub's own
+/// floor `floor_gb`, which reclaims. A fixed 50 GB never cleared on a 494 GB box, whose JIT then kept
+/// 49 GB free by design (main, 11-18).
+pub fn warn_gb(total_gb: f64, floor_gb: f64) -> f64 {
+    ((total_gb / JIT_FREE_SHARE).min(JIT_FREE_MAX_GB) - WARN_MARGIN_GB).max(floor_gb)
+}
+
 struct State {
     measured: Option<(Instant, Vec<Item>)>,
     dirty: bool,
@@ -412,19 +428,17 @@ pub struct Guard {
     pub machine: String,
     pub roots: Roots,
     floor: std::sync::atomic::AtomicU64,
-    warn: std::sync::atomic::AtomicU64,
     user_machine: std::sync::atomic::AtomicBool,
     publish: Publish,
     state: Mutex<State>,
 }
 
 impl Guard {
-    pub fn new(machine: &str, roots: Roots, floor_gb: f64, warn_gb: f64, user_machine: bool, publish: Publish) -> Guard {
+    pub fn new(machine: &str, roots: Roots, floor_gb: f64, user_machine: bool, publish: Publish) -> Guard {
         Guard {
             machine: machine.to_string(),
             roots,
             floor: ((floor_gb * GB) as u64).into(),
-            warn: ((warn_gb * GB) as u64).into(),
             user_machine: user_machine.into(),
             publish,
             state: Mutex::new(State { measured: None, dirty: true, below_floor: false, below_warn: false }),
@@ -432,10 +446,9 @@ impl Guard {
     }
 
     /// The master changed the node's lease.conf: floors and the user-machine rule follow.
-    pub fn set_policy(&self, floor_gb: f64, warn_gb: f64, user_machine: bool) {
+    pub fn set_policy(&self, floor_gb: f64, user_machine: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         self.floor.store((floor_gb * GB) as u64, Relaxed);
-        self.warn.store((warn_gb * GB) as u64, Relaxed);
         self.user_machine.store(user_machine, Relaxed);
         self.touch();
     }
@@ -444,8 +457,10 @@ impl Guard {
         self.floor.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// [`warn_gb`] of the work dir's volume (unknown: devhub's floor).
     pub fn warn_at(&self) -> u64 {
-        self.warn.load(std::sync::atomic::Ordering::Relaxed)
+        let total = caps::disk_space(&self.roots.work).map_or(0, |(_, total)| total);
+        (warn_gb(gb(total), gb(self.floor())) * GB) as u64
     }
 
     pub fn user_machine(&self) -> bool {
@@ -489,17 +504,18 @@ impl Guard {
     /// The periodic look: floor / warn crossings, and automatic reclaim below the floor; `quiet`
     /// (a timed lease runs) skips the walk that refreshes what the roots hold.
     pub fn check(&self, live: &dyn Fn() -> Live, quiet: bool) {
-        let free = self.free();
+        let (free, warn) = (self.free(), self.warn_at());
         let (floor_cross, warn_cross) = {
             let mut st = self.state.lock().unwrap();
             let f = free < self.floor() && !st.below_floor;
-            let w = free < self.warn_at() && !st.below_warn;
+            let w = free < warn && !st.below_warn;
             st.below_floor = free < self.floor();
-            st.below_warn = free < self.warn_at();
+            st.below_warn = free < warn;
             (f, w)
         };
         if warn_cross && !floor_cross {
-            self.emit(Sev::Warn, format!("disk_warn: {} has {:.0} GB free, warn at {:.0} GB", self.machine, gb(free), gb(self.warn_at())));
+            self.emit(Sev::Warn, format!("disk_warn: {} has {:.0} GB free, {:.0} GB under the {:.0} GB its JIT keeps free (1/{JIT_FREE_SHARE} of the disk, at most {JIT_FREE_MAX_GB} GB): the JIT cannot hold its floor, or something else fills the disk",
+                self.machine, gb(free), gb(warn) + WARN_MARGIN_GB - gb(free), gb(warn) + WARN_MARGIN_GB));
         }
         if free < self.floor() {
             if floor_cross {
@@ -625,6 +641,16 @@ mod tests {
 
     fn item(cat: Cat, path: &str, gbs: u64, mtime: u64, step: Option<u8>) -> Item {
         Item { cat, path: PathBuf::from(path), bytes: gbs << 30, mtime, step, user_data: false, note: String::new() }
+    }
+
+    /// A box warns under its JIT's floor less a margin, never under its own floor: the JIT filling
+    /// a disk down to its floor is by design (11-18). Its floor is relax's own rule.
+    #[test]
+    fn a_box_warns_under_its_jits_floor() {
+        assert_eq!((warn_gb(494.0, 10.0), warn_gb(2000.0, 10.0), warn_gb(120.0, 10.0)), (15.0, 15.0, 10.0));
+        for gb in [120u64, 494, 2000] {
+            assert_eq!(warn_gb(gb as f64, 0.0), (relax_session::store_floor::free_floor(gb << 30) >> 30) as f64 - WARN_MARGIN_GB, "{gb} GB: relax's floor less the margin");
+        }
     }
 
     #[test]

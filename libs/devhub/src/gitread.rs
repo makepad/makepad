@@ -381,6 +381,46 @@ pub fn files_at(dir: &Path, at: &str) -> Result<std::collections::BTreeMap<Strin
     .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
 }
 
+/// Every (path, object id) a file has had in the history of `tips` (names [`resolve`] takes), each
+/// once: for each commit reachable from a tip, what it changed against its first parent (a root
+/// commit, or one whose parent is past a shallow boundary: its whole tree). Blobs and symlinks, no
+/// submodule. It answers "was this content ever ours at this path" for a reader handed someone
+/// else's tree, without reading a blob.
+pub fn path_blobs(dir: &Path, tips: &[&str]) -> Result<std::collections::BTreeSet<(String, String)>, String> {
+    with(dir, |p, repo| {
+        let (mut trees, mut order) = (HashMap::new(), Vec::new());
+        for tip in tips {
+            let c = resolve(p, repo, tip).ok_or_else(|| format!("{}: no commit {tip}", dir.display()))?;
+            for (id, commit) in repo.log(&c, usize::MAX).map_err(|e| format!("history of {tip}: {e}"))? {
+                if trees.insert(id, commit.tree).is_none() {
+                    order.push((commit.tree, commit.parents.first().copied()));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeSet::new();
+        for (tree, parent) in order {
+            let Some(before) = parent.and_then(|p| trees.get(&p).copied()) else {
+                let files = repo.flatten_tree_with_mode(&tree).map_err(|e| format!("tree {}: {e}", tree.to_hex()))?;
+                out.extend(files.into_iter().filter(|(_, (_, mode))| *mode != 0o160000).map(|(path, (oid, _))| (path, oid.to_hex())));
+                continue;
+            };
+            if before == tree {
+                continue;
+            }
+            for change in repo.diff_trees(&before, &tree).map_err(|e| format!("tree {}: {e}", tree.to_hex()))? {
+                match change {
+                    makepad_git::TreeChange::Added { path, oid, mode } | makepad_git::TreeChange::Modified { path, new_oid: oid, new_mode: mode, .. } if mode != 0o160000 => {
+                        out.insert((path, oid.to_hex()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(out)
+    })
+    .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
+}
+
 /// A reader of the blobs of the repository `dir` is in, its paths and shared repository found
 /// once: [`blob`] finds them for each blob, and a gate-proof check of a landed tree reads
 /// thousands (two of its five seconds after a master restart, 11-06).
@@ -533,6 +573,15 @@ pub fn files_differing(dir: &Path, from: &str, to: &str) -> Option<Vec<String>> 
 /// change came in from that side), to the commit no parent of which has it so. None: `path` is
 /// not in `from`'s tree, or a commit is not known here.
 pub fn last_touch(dir: &Path, from: &str, path: &str) -> Option<String> {
+    last_change(dir, from, path).map(|(commit, subject)| format!("{} {subject}", &commit[..10]))
+}
+
+/// [`last_touch`]'s commit, whole: what a name can resolve (no short ids).
+pub fn last_commit_of(dir: &Path, from: &str, path: &str) -> Option<String> {
+    last_change(dir, from, path).map(|(commit, _)| commit)
+}
+
+fn last_change(dir: &Path, from: &str, path: &str) -> Option<(String, String)> {
     with(dir, |p, repo| {
         let mut at = resolve(p, repo, from)?;
         let mut commit = repo.read_commit(&at).ok()?;
@@ -545,7 +594,7 @@ pub fn last_touch(dir: &Path, from: &str, path: &str) -> Option<String> {
             }
             match same {
                 Some((parent, c)) => (at, commit) = (parent, c),
-                None => return Some(format!("{} {}", &at.to_hex()[..10], commit.message.lines().next().unwrap_or("").trim())),
+                None => return Some((at.to_hex(), commit.message.lines().next().unwrap_or("").trim().to_string())),
             }
         }
     })
@@ -728,6 +777,14 @@ mod tests {
         assert_eq!(super::last_touch(&d, &tip, "tests/common/gone.rs"), None, "not in the tree");
         assert_eq!(super::files_differing(&d, &merged, &tip), Some(vec!["other.rs".to_string()]));
         assert_eq!(super::files_differing(&d, &tip, &tip), Some(Vec::new()));
+        // every version of every path a history holds, each once, through the merge's side
+        let at = |p: &str, r: &str| (p.to_string(), g(&d, &["rev-parse", &format!("{r}:{p}")]));
+        let lane = [at("tests/common/p.rs", &format!("{side}~1")), at("tests/common/p.rs", &side)];
+        let work: std::collections::BTreeSet<_> = lane.iter().cloned().chain([at("other.rs", &merged), at("other.rs", &tip)]).collect();
+        assert_eq!(super::path_blobs(&d, &["work"]), Ok(work.clone()), "work's history");
+        assert_eq!(super::path_blobs(&d, &["rc-lane"]), Ok(lane.into_iter().collect()), "the lane's alone");
+        assert_eq!(super::path_blobs(&d, &["rc-lane", "work"]), Ok(work), "a commit two tips share counts once");
+        assert!(super::path_blobs(&d, &["nope"]).is_err());
         assert_eq!(crate::git_exec::on_this_thread(), before, "a read started git");
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -172,6 +172,7 @@ libs/music_*/*
 libs/soundfont/*
 libs/beat/*
 libs/piano_model/*
+libs/piano_waveguide/*
 libs/synth_panel/*
 libs/video_flow/*
 

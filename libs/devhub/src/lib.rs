@@ -59,6 +59,8 @@ pub mod gitread;
 pub mod nested;
 pub mod jitcache;
 pub mod logstamp;
+#[cfg(unix)]
+pub mod helper;
 mod jit_misses;
 pub mod run_names;
 pub mod state;

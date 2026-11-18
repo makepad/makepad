@@ -438,8 +438,18 @@ pub fn start(ctx: Arc<Ctx>) {
         let (mut master_next, mut master_wait) = (None::<Instant>, MASTER_RETRY);
         // what this master runs as, and so builds and execs into ([`MasterBin`])
         let bin = MasterBin::this();
+        // the known bad build last passed over, said once
+        let mut passed_over = String::new();
         let mut update_master = |good: &str| {
             if master_next.is_some_and(|at| Instant::now() < at) {
+                return false;
+            }
+            // never back onto a build that panicked on its probation or that a rollback left
+            if let Some(why) = bad_build(&ctx.home, good) {
+                if passed_over != good {
+                    passed_over = good.to_string();
+                    event(&ctx, Sev::Info, format!("update: the master does not take {}, a build known bad ({why}): it takes the next landing's", super::short(good)));
+                }
                 return false;
             }
             if restart_master(&ctx, good, "its self-update", false).is_ok() {
@@ -467,6 +477,8 @@ pub fn start(ctx: Arc<Ctx>) {
         let mut app_at = mine.clone();
         *APP_GOOD.lock().unwrap() = mine;
         let mut tips_at = String::new();
+        // the boxes up at the last look (None: no look yet), for [`back_behind`]
+        let mut was_up: Option<BTreeSet<String>> = None;
         // the private checkout's commit the land-rule binary was last looked at for, and its last build try
         let (mut gate_seen, mut gate_try) = (String::new(), None);
         loop {
@@ -530,6 +542,7 @@ pub fn start(ctx: Arc<Ctx>) {
             // each service rolls once its own code settled: the hub's frequent landings never hold
             // back an AI hub whose code is still (11-01: the fleet's AI hubs ran 1 h old code)
             let changed: HashMap<&str, u64> = SERVICES.iter().skip(1).map(|(s, _)| (*s, last_change_ms(&ctx.repo, &work, &closures[*s]))).collect();
+            push_back_behind(&ctx, &tips_at, &busy, &mut was_up);
             // never a tip that did not build (11-02: hubs rolled onto a landing that broke
             // makepad-devhub, which the master's build had refused minutes before)
             for n in ctx.leases.nodes().into_iter().filter(|n| n.up && !matches!(n.role(), crate::lease::Role::Device)) {
@@ -792,8 +805,11 @@ const MASTER_DEADLINE: Duration = Duration::from_secs(3 * 60);
 /// A service's code still this long: its roll starts (one per burst of landings).
 const SETTLE_MS: u64 = 3 * 60 * 1000;
 
-/// How far back the scheduler knows the landings, for how far behind a box is.
-const LANDINGS_KNOWN: Duration = Duration::from_secs(4 * 3600);
+/// How far back the scheduler knows the landings: how far behind a box is, and whether its
+/// deployment holds a queued timed ask's pin (`Sched::lacks_deployment`). A day: a timed ask
+/// waited past four hours on a box whose deployment held its pin, and the four-hour list no
+/// longer named the pin (11-18).
+const LANDINGS_KNOWN: Duration = Duration::from_secs(24 * 3600);
 
 /// The landings since `since` (ms), oldest first: the deployment each left and when.
 fn landed_since(ctx: &Ctx, since: u64) -> Vec<(String, u64)> {
@@ -835,6 +851,57 @@ impl Drop for UpdateWaits<'_> {
 
 /// One node: wait for the deployment code, then ask for its hub's restart (which ends no run). Some: the
 /// deployment its new hub does not build at (the hub runs on; said once per commit).
+/// The boxes back on the network since the last look (`was_up`; up now, a device's tree aside)
+/// whose deployment lacks the tips (`behind`, of its deployment): (name, deployment).
+fn back_behind<'a>(was_up: &BTreeSet<String>, up: &'a [(String, String)], behind: impl Fn(&str) -> bool) -> Vec<&'a (String, String)> {
+    up.iter().filter(|(name, deploy)| !was_up.contains(name) && !deploy.is_empty() && behind(deploy)).collect()
+}
+
+/// A box back on the network whose deployment lacks the tips (`tips`, the pin key of work and the
+/// private main) gets them at once: the auto-sync's boxes by a kick, any other by a push with no
+/// build. Off the auto-sync, a box's deployment moved only with a hub roll or a lease that named
+/// it: the Windows box, away when its push failed, sat 81 h on that deployment until a lease
+/// named it (11-17). Not a box a roll pushes itself (`busy`; the push holds it there too), one
+/// whose deployment a timed ask's pin or a proof holds, a user's WM off the auto-sync (it moves
+/// only to a proven tip), nor any at the first look (a master's start is no reconnect).
+fn push_back_behind(ctx: &Arc<Ctx>, tips: &str, busy: &Arc<Mutex<BTreeSet<String>>>, was_up: &mut Option<BTreeSet<String>>) {
+    let nodes = ctx.leases.nodes();
+    let user_wm = |name: &str| nodes.iter().any(|n| n.name == name && n.role() == crate::lease::Role::UserWm);
+    let up: Vec<(String, String)> = nodes.iter()
+        .filter(|n| n.up && !matches!(n.role(), crate::lease::Role::Device))
+        .filter_map(|n| n.caps.as_ref().map(|c| (n.name.clone(), c.deploy.clone())))
+        .collect();
+    let names: BTreeSet<String> = up.iter().map(|(n, _)| n.clone()).collect();
+    let Some(before) = was_up.replace(names) else { return };
+    if tips.is_empty() { return; }
+    for (node, deploy) in back_behind(&before, &up, |d| !crate::sync::deploy_has(&ctx.repo, d, tips)) {
+        if busy.lock().unwrap().contains(node) || ctx.leases.update_pin(node).is_some() || crate::sync::deploy_held(node).is_some() { continue; }
+        let at = super::short(deploy.split(',').next().unwrap_or(""));
+        if crate::sync::autosync_covers(&ctx.home, node) {
+            event(ctx, Sev::Info, format!("update: {node} is back with its deployment at {at}: the auto-sync moves it to the tips"));
+            crate::sync::kick_autosync(wall_ms());
+            continue;
+        }
+        if user_wm(node) || !busy.lock().unwrap().insert(node.clone()) { continue; }
+        let (ctx, held, node, at) = (ctx.clone(), busy.clone(), node.clone(), at.to_string());
+        let name = node.clone();
+        let busy_push = held.clone();
+        let spawned = std::thread::Builder::new().name("devhub-push-back".into()).spawn(move || {
+            let busy = busy_push;
+            let ctl = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-update");
+            let (code, lines) = crate::sync::push_tree(&ctl, &ctx.repo, &node, None);
+            busy.lock().unwrap().remove(&node);
+            if code == 0 {
+                event(&ctx, Sev::Info, format!("update: {node} is back with its deployment at {at}: pushed to the tips"));
+            } else {
+                let err = lines.iter().rev().find(|l| l.contains("err")).cloned().unwrap_or_default();
+                event(&ctx, Sev::Warn, format!("update: {node} is back with its deployment at {at}: its push to the tips failed: {err}"));
+            }
+        });
+        if spawned.is_err() { held.lock().unwrap().remove(&name); }
+    }
+}
+
 fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &str, drains: Arc<AtomicUsize>, restarts: &dyn Fn()) -> RollEnd {
     let short = super::short(work);
     let ctl = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-update");
@@ -1394,12 +1461,14 @@ pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str, build: bool) -> Resu
     }
     // the build just swapped in, exec'd as it is: a `cargo run` here would wait on the build lock
     // of every other cargo in `target/host` while no master beats
-    let mut cmd = std::process::Command::new(bin.live(&ctx.repo));
+    let mut cmd = std::process::Command::new(exec_image(ctx, bin, &bin.live(&ctx.repo)));
     cmd.args(&args).current_dir(&ctx.repo);
     match &built_at {
         Some(rev) => cmd.env(crate::lease::caps::BUILT_AT, rev),
         None => cmd.env_remove(crate::lease::caps::BUILT_AT),
     };
+    // the new build's probation starts now ([`guard_fresh_build`])
+    cmd.env(RESTARTED_MS, wall_ms().to_string());
     #[cfg(unix)]
     {
         // the dials of the exec's gap queue for the new build instead of being refused
@@ -1698,6 +1767,42 @@ fn swap_in(built: &Path, live: &Path) -> Result<(), String> {
     std::fs::copy(built, &next).and_then(|_| std::fs::rename(&next, live)).map(|_| ()).map_err(|e| format!("swapping {} in at {}: {e}", built.display(), live.display()))
 }
 
+/// The executables' dir of the Dock wrapper's bundle the master app runs from on macOS
+/// (`~/Applications/devhub.app`, which its LaunchAgent starts), when it is there.
+fn app_bundle_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let dir = PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join("Applications/devhub.app/Contents/MacOS");
+    dir.is_dir().then_some(dir)
+}
+
+/// Where the master app's `build` is placed to run from: a copy inside its wrapper's bundle
+/// (`bundle`, [`app_bundle_dir`]), else `build` where it is. A process whose image runs from
+/// outside a bundle has no app identity (LaunchServices: no bundle id), so the menu bar showed
+/// the master's status item as an empty pill without its glyph, and the bundle's Local Network
+/// grant was not its own. That happened from 11-17, once the master started through its
+/// LaunchAgent and no Dock launch lent it the wrapper's identity.
+fn bundled(bin: MasterBin, build: &Path, bundle: Option<&Path>) -> Result<PathBuf, String> {
+    match bundle.filter(|_| bin == MasterBin::App) {
+        Some(dir) => {
+            let at = dir.join(format!("{APP_NAME}{}", std::env::consts::EXE_SUFFIX));
+            swap_in(build, &at)?;
+            Ok(at)
+        }
+        None => Ok(build.to_path_buf()),
+    }
+}
+
+/// The image a master's restart or rollback execs: [`bundled`], or `build` where it is when the
+/// copy fails (said: it starts, without the bundle's identity).
+fn exec_image(ctx: &Arc<Ctx>, bin: MasterBin, build: &Path) -> PathBuf {
+    bundled(bin, build, app_bundle_dir().as_deref()).unwrap_or_else(|e| {
+        event(ctx, Sev::Warn, format!("update: {e}; the master runs {} where it is, without its bundle's identity (its menu-bar item shows no glyph)", build.display()));
+        build.to_path_buf()
+    })
+}
+
 /// The master build a restart replaced, kept for `devhub master rollback` (beside the binary this
 /// master runs as, [`MasterBin::live`]).
 fn prev_binary(repo: &Path) -> PathBuf {
@@ -1734,7 +1839,60 @@ fn keep_running_binary(repo: &Path) -> Result<(), String> {
     }
     let started = started_binary(repo);
     let kept = std::fs::copy(if started.is_file() { &started } else { &exe }, &prev).map(|_| ());
-    kept.map_err(|e| format!("update: keeping {} as {}: {e} (no restart without a build to roll back to)", exe.display(), prev.display()))
+    kept.map_err(|e| format!("update: keeping {} as {}: {e} (no restart without a build to roll back to)", exe.display(), prev.display()))?;
+    // the commit it is of: the build this master runs ([`rev_stamp`])
+    let stamp = rev_stamp(&prev);
+    let _ = std::fs::remove_file(&stamp);
+    if let Err(e) = std::fs::write(&stamp, crate::lease::caps::hub_rev()) {
+        eprintln!("update: {}: {e} (a rollback to it will not know its commit)", stamp.display());
+    }
+    Ok(())
+}
+
+/// The file beside a kept master build naming the commit it is of: a master a rollback execs into
+/// it says that commit as its own (11-17: a rolled-back master took the checkout's HEAD for its
+/// own, and `devhub master restart` refused it as "already on work's tip" while it ran a build two
+/// landings older that panicked).
+fn rev_stamp(bin: &Path) -> PathBuf {
+    let mut name = bin.file_name().unwrap_or_default().to_os_string();
+    name.push(".rev");
+    bin.with_file_name(name)
+}
+
+/// The commit [`rev_stamp`] names for a kept build; empty when it names none.
+fn stamped_rev(bin: &Path) -> String {
+    std::fs::read_to_string(rev_stamp(bin)).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// `master-bad.tsv` in devhub's home: the master builds known bad, a line each (`commit`, wall ms,
+/// why): one that panicked on its probation ([`guard_fresh_build`]) or that a rollback left. A
+/// self-update never takes one again, nor does a probation's way out ([`remedy`]); the next
+/// landing's build is taken. A hand `devhub master restart` may.
+fn bad_path(home: &Path) -> PathBuf {
+    home.join("master-bad.tsv")
+}
+
+fn mark_bad(home: &Path, rev: &str, why: &str) {
+    if rev.is_empty() || bad_build(home, rev).is_some() {
+        return;
+    }
+    let line = format!("{rev}\t{}\t{}\n", wall_ms(), why.replace(['\t', '\n', '\r'], " "));
+    let wrote = std::fs::OpenOptions::new().create(true).append(true).open(bad_path(home)).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    if let Err(e) = wrote {
+        eprintln!("update: {}: {e}", bad_path(home).display());
+    }
+}
+
+/// Why the master build of `rev` is known bad, when it is ([`bad_path`]).
+pub(super) fn bad_build(home: &Path, rev: &str) -> Option<String> {
+    if rev.is_empty() {
+        return None;
+    }
+    let all = std::fs::read_to_string(bad_path(home)).ok()?;
+    all.lines().find_map(|l| {
+        let mut f = l.splitn(3, '\t');
+        (f.next()? == rev).then(|| f.nth(1).unwrap_or_default().to_string())
+    })
 }
 
 /// Execs the master back into the build its last restart replaced ([`prev_binary`]), the same
@@ -1746,10 +1904,19 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
     if !prev.is_file() {
         return Err(format!("update: no previous master build at {} to roll back to", prev.display()));
     }
-    event(ctx, Sev::Warn, format!("update: the master rolls back from {} to its previous build ({by})", super::short(crate::lease::caps::hub_rev())));
+    let (from, back_to) = (crate::lease::caps::hub_rev(), stamped_rev(&prev));
+    if !back_to.is_empty() && back_to == from {
+        return Err(format!("update: the master runs its previous build {} already: there is none older to roll back to (`devhub master restart` builds work's tip)", super::short(from)));
+    }
+    // the build it leaves is not taken again by a self-update: the next landing's is
+    mark_bad(&ctx.home, from, &format!("rolled back from ({by})"));
+    let to = if back_to.is_empty() { "of a commit it does not know".to_string() } else { super::short(&back_to).to_string() };
+    event(ctx, Sev::Warn, format!("update: the master rolls back from {} to its previous build {to} ({by})", super::short(from)));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut cmd = std::process::Command::new(&prev);
-    cmd.args(&args).current_dir(&ctx.repo).env_remove(crate::lease::caps::BUILT_AT);
+    let mut cmd = std::process::Command::new(exec_image(ctx, MasterBin::this(), &prev));
+    // it says the commit it runs (none when unknown: then it takes no self-update until a hand
+    // restart), and is on probation too: a build that panics now as well is left for work's tip
+    cmd.args(&args).current_dir(&ctx.repo).env(crate::lease::caps::BUILT_AT, &back_to).env(RESTARTED_MS, wall_ms().to_string());
     #[cfg(unix)]
     {
         crate::node::keep_control_over_exec(&mut cmd);
@@ -1767,6 +1934,123 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
         let _ = cmd;
         Err("update: roll the master back by hand (no exec on this OS)".to_string())
     }
+}
+
+/// How long a build a restart exec'd into is on probation ([`guard_fresh_build`]).
+const PROBATION: Duration = Duration::from_secs(5 * 60);
+
+/// How often a master on probation that found no build to go to looks at work's tip again.
+const PROBATION_RETRY: Duration = Duration::from_secs(30);
+
+/// The wall ms of the exec that put this master's image on a build: set by [`restart_master`] and
+/// [`rollback_master`].
+const RESTARTED_MS: &str = "DEVHUB_RESTARTED_MS";
+
+/// A master a restart or a rollback exec'd into a build: for [`PROBATION`], a panic on any of its
+/// threads marks that build bad ([`bad_path`]) and moves the master on by itself ([`remedy`]): back
+/// to the build its restart replaced, else onto work's tip built fresh, else onto the next commit
+/// of work once there is one. Each step is said in its log, as an Err event (the inbox) and in a
+/// note for main. 11-17: a self-updated build panicked 5 s in under the scheduler's lock, and the
+/// poisoned lock failed every beat and lease request; the build before it panicked the same way
+/// once restored leases named a box not yet back, and only a build of the tip with the fix (main
+/// stopped the master for launchd's wrapper to build) brought it back.
+pub fn guard_fresh_build(ctx: &Arc<Ctx>) {
+    let Some(at) = std::env::var(RESTARTED_MS).ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+    let Some(left) = PROBATION.checked_sub(Duration::from_millis(wall_ms().saturating_sub(at))) else { return };
+    let c = ctx.clone();
+    on_first_panic(left, move |why| {
+        let me = crate::lease::caps::hub_rev();
+        let by = format!("its build {} panicked {} s after it started: {why}", super::short(me), wall_ms().saturating_sub(at) / 1000);
+        mark_bad(&c.home, me, &by);
+        let tell = |line: String| {
+            if let Err(e) = crate::notes::leave(&c.home, "main", &line) {
+                eprintln!("update: a note for main: {e}");
+            }
+            event(&c, Sev::Err, line);
+        };
+        // a tip whose build failed here is not built again until work moves
+        let mut failed: Option<String> = None;
+        let mut waits = false;
+        loop {
+            let prev = prev_binary(&c.repo);
+            let prev_rev = prev.is_file().then(|| stamped_rev(&prev));
+            let work = crate::gitread::rev(&c.repo, "refs/heads/work");
+            let bad = |rev: &str| failed.as_deref() == Some(rev) || bad_build(&c.home, rev).is_some();
+            match remedy(me, prev_rev.as_deref(), work.as_deref(), &bad) {
+                Remedy::Rollback => {
+                    tell(format!("update: the master rolls back by itself: {by}"));
+                    match rollback_master(&c, &by) {
+                        Ok(_) => return,
+                        Err(e) => tell(format!("update: the master's rollback after its build panicked failed: {e}")),
+                    }
+                }
+                Remedy::Build(work) => {
+                    tell(format!("update: the master builds work's tip {} and restarts on it by itself: {by}", super::short(&work)));
+                    // (a failed build says why itself)
+                    if restart_master(&c, &work, "its probation", true).is_ok() {
+                        return;
+                    }
+                    failed = Some(work);
+                }
+                Remedy::Wait if !waits => {
+                    waits = true;
+                    tell(format!("update: the master stays on its build {}, which panicked ({by}): its previous build and work's tip are known bad or did not build; it restarts by itself on the next commit of work, or `devhub master restart`", super::short(me)));
+                }
+                Remedy::Wait => {}
+            }
+            std::thread::sleep(PROBATION_RETRY);
+        }
+    });
+}
+
+/// Where a master on probation goes once its build `me` panicked ([`guard_fresh_build`]).
+#[derive(Debug, PartialEq)]
+enum Remedy {
+    /// back to the build its restart replaced ([`rollback_master`])
+    Rollback,
+    /// onto work's tip, built first ([`restart_master`])
+    Build(String),
+    /// nowhere yet: both are known bad (`bad`), or the same build
+    Wait,
+}
+
+/// The build the restart replaced (`prev`: its commit, empty when unknown; none when there is no
+/// such build) while that is another one not known bad; else work's tip, when that is another
+/// commit not known bad; else none yet.
+fn remedy(me: &str, prev: Option<&str>, work: Option<&str>, bad: &dyn Fn(&str) -> bool) -> Remedy {
+    if prev.is_some_and(|p| p != me && !bad(p)) {
+        return Remedy::Rollback;
+    }
+    match work {
+        Some(w) if !w.is_empty() && w != me && !bad(w) => Remedy::Build(w.to_string()),
+        _ => Remedy::Wait,
+    }
+}
+
+/// Runs `act` once, on a thread of its own, with the first panic of any thread of this process
+/// within `within` (`thread 'name' panicked at file:line: message`); the panic is said as before.
+fn on_first_panic(within: Duration, act: impl FnOnce(String) + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx = Mutex::new(Some(tx));
+    let until = Instant::now() + within;
+    let said = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        said(info);
+        if Instant::now() >= until {
+            return;
+        }
+        let Some(tx) = tx.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let message = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+        let _ = tx.send(format!("thread '{thread}' panicked at {at}: {message}"));
+    }));
+    // (the act runs apart from the panicking thread, after it let go of what it held)
+    let _ = std::thread::Builder::new().name("devhub-probation".into()).spawn(move || {
+        if let Ok(why) = rx.recv_timeout(within) {
+            act(why);
+        }
+    });
 }
 
 /// Why a cargo build failed: its first error and where it is (`error[E0425]: ... at
@@ -1788,6 +2072,50 @@ pub fn build_failure(o: &std::process::Output) -> String {
 
 #[cfg(test)]
 mod tests {
+    const PANIC_OUT: &str = "DEVHUB_TEST_PANIC_OUT";
+
+    /// The probation role: a thread panics twice within the window; the act writes what it heard.
+    #[test]
+    fn probation_role() {
+        let Some(out) = std::env::var_os(PANIC_OUT) else { return };
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        super::on_first_panic(std::time::Duration::from_secs(60), move |why| { let _ = tx.send(why); });
+        for n in 1..=2 {
+            let _ = std::thread::Builder::new().name("devhub-panicky".into()).spawn(move || panic!("boom {n}")).unwrap().join();
+        }
+        let first = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let again = rx.recv_timeout(std::time::Duration::from_millis(300)).is_ok();
+        std::fs::write(out, format!("{first}\nagain={again}\n")).unwrap();
+    }
+
+    /// A master on probation after its restart hears the first panic of any of its threads, once,
+    /// with the thread and where it panicked: what it rolls back by (11-17: a self-updated build
+    /// panicked under the scheduler's lock, and every lease request failed until a hand rollback).
+    #[test]
+    fn a_build_on_probation_acts_on_its_first_panic_of_any_thread() {
+        let dir = std::env::temp_dir().join(format!("devhub-probation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("heard");
+        let status = crate::testenv::role("orch::roll::tests::probation_role", &dir).env(PANIC_OUT, &out)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
+        let heard = std::fs::read_to_string(&out).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(status.success(), "{status}: {heard}");
+        assert!(heard.starts_with("thread 'devhub-panicky' panicked at ") && heard.contains("roll.rs:") && heard.contains(": boom 1\n"), "{heard}");
+        assert!(heard.ends_with("again=false\n"), "once: {heard}");
+    }
+
+    /// A box back on the network is pushed to the tips when its deployment lacks them; one that
+    /// stayed up, one already there, and one with no deployment yet are not.
+    #[test]
+    fn a_box_back_on_the_network_behind_the_tips_is_pushed() {
+        let was_up: std::collections::BTreeSet<String> = ["stayed".to_string()].into();
+        let up: Vec<(String, String)> = [("stayed", "old"), ("back", "old"), ("current", "tip"), ("fresh", "")].iter().map(|(n, d)| (n.to_string(), d.to_string())).collect();
+        let pushed: Vec<&str> = super::back_behind(&was_up, &up, |d| d != "tip").iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(pushed, vec!["back"]);
+    }
+
     /// A land-rule binary is signed outside the build lock: a signing that waits on the keychain
     /// holds no devhub build (one waited 36 min, and the master took none of three landings, 11-16).
     /// Signed, it takes the built one's place with its stamp and goes live.
@@ -1839,9 +2167,67 @@ mod tests {
         std::fs::write(super::started_binary(&d), b"the build that ran").unwrap();
         super::keep_running_binary(&d).unwrap();
         assert_eq!(std::fs::read(&prev).unwrap(), b"the build that ran");
+        assert_eq!(super::stamped_rev(&prev), crate::lease::caps::hub_rev(), "it names the commit of the build that runs, for a rollback to say");
         super::keep_started_binary(&d).unwrap();
         assert_eq!(std::fs::read(super::started_binary(&d)).unwrap(), std::fs::read(std::env::current_exe().unwrap()).unwrap());
         assert!(super::keep_running_binary(std::path::Path::new("/nonexistent-devhub-repo")).is_err(), "no restart without a build to roll back to");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 11-17: a self-updated build panicked under the scheduler's lock, the build before it the
+    /// same way: each is marked bad, the master goes back once, then onto work's tip built fresh,
+    /// and with nowhere left to go it waits for the next commit of work. A self-update never takes
+    /// a marked build again.
+    #[test]
+    fn a_master_build_that_panics_on_probation_moves_on_and_is_never_taken_again() {
+        use super::Remedy;
+        let home = std::env::temp_dir().join(format!("devhub-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let bad = |rev: &str| super::bad_build(&home, rev).is_some();
+        // the self-update's build "new" panics: back to "old", which is not known bad
+        super::mark_bad(&home, "new", "thread 'a' panicked at\tx.rs:1: boom");
+        assert_eq!(super::bad_build(&home, "new").as_deref(), Some("thread 'a' panicked at x.rs:1: boom"), "the why, kept on one line");
+        assert_eq!(super::remedy("new", Some("old"), Some("new"), &bad), Remedy::Rollback);
+        // "old" panics as well: work's tip "new" is bad, so it waits; a landing moves work to "fix"
+        super::mark_bad(&home, "old", "boom");
+        super::mark_bad(&home, "old", "again");
+        assert_eq!(std::fs::read_to_string(super::bad_path(&home)).unwrap().lines().count(), 2, "a build is marked once");
+        assert_eq!(super::remedy("old", Some("old"), Some("new"), &bad), Remedy::Wait, "never back onto itself or onto a bad tip");
+        assert_eq!(super::remedy("old", Some("old"), Some("fix"), &bad), Remedy::Build("fix".into()));
+        assert_eq!(super::remedy("new", Some("old"), Some("fix"), &bad), Remedy::Build("fix".into()), "a bad previous build is passed over");
+        assert_eq!(super::remedy("fix", Some("old"), Some("fix"), &bad), Remedy::Wait, "a tip that panics too waits for the next");
+        // commits nobody knows are no build of their own and nothing to mark
+        assert_eq!(super::remedy("", Some(""), None, &bad), Remedy::Wait, "an unknown build is not rolled back onto itself");
+        assert_eq!(super::remedy("new", Some(""), None, &bad), Remedy::Rollback, "a previous build of unknown commit is not known bad");
+        assert_eq!(super::remedy("new", None, Some(""), &bad), Remedy::Wait);
+        super::mark_bad(&home, "", "boom");
+        assert_eq!(super::bad_build(&home, ""), None);
+        assert_eq!(super::bad_build(&home, "fix"), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The master app runs from a copy inside its wrapper's bundle (an app identity for its menu-bar
+    /// item, 11-17), a whole binary each time; the CLI, and a Mac without the wrapper, run the build
+    /// where it is.
+    #[test]
+    fn the_master_app_runs_from_inside_its_bundle() {
+        use super::MasterBin;
+        let d = std::env::temp_dir().join(format!("devhub-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let macos = d.join("devhub.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let build = d.join("makepad-app-devhub.prev");
+        std::fs::write(&build, b"build 1").unwrap();
+        let at = super::bundled(MasterBin::App, &build, Some(&macos)).unwrap();
+        assert_eq!(at, macos.join(format!("makepad-app-devhub{}", std::env::consts::EXE_SUFFIX)), "the app's own name, whatever the build's");
+        assert_eq!(std::fs::read(&at).unwrap(), b"build 1");
+        std::fs::write(&build, b"build 2").unwrap();
+        assert_eq!(std::fs::read(super::bundled(MasterBin::App, &build, Some(&macos)).unwrap()).unwrap(), b"build 2", "each restart replaces it");
+        assert_eq!(std::fs::read_dir(&macos).unwrap().count(), 1, "no copy left beside it");
+        assert_eq!(super::bundled(MasterBin::Cli, &build, Some(&macos)).unwrap(), build, "the CLI runs where it is built");
+        assert_eq!(super::bundled(MasterBin::App, &build, None).unwrap(), build, "no wrapper: where it is built");
+        assert!(super::bundled(MasterBin::App, &d.join("missing"), Some(&macos)).is_err(), "a failed copy is said");
         let _ = std::fs::remove_dir_all(&d);
     }
 

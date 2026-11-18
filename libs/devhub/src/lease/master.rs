@@ -28,7 +28,7 @@ pub(super) struct CostRecords {
     jit_peaks: Vec<(Option<String>, f64)>,
     calls: Vec<(String, String, bool, f64)>,
     memory: Vec<(String, String, String, Option<String>, Option<f64>)>,
-    records: Vec<(String, String, String, String, Option<String>, u64, Option<f64>, Option<f64>, Option<u64>, Option<super::prof::Build>)>,
+    records: Vec<(String, String, String, String, Option<String>, u64, Option<f64>, Option<f64>, Option<u64>, Option<super::prof::Build>, Option<CostClass>)>,
     jit_builds: Vec<(String, f64)>,
     /// (class, kind, peak cores) of each released run its box measured ([`Sched::record_peak_cores`])
     cpu_peaks: Vec<(String, String, f64)>,
@@ -122,7 +122,8 @@ impl CostRecords {
                 }
                 let cores = cores.filter(|_| !built || own_build);
                 if let Some(p) = v.get("peak_cores").and_then(super::num).filter(|p| p.is_finite() && *p >= 0.0 && (!built || own_build)) { self.cpu_peaks.push((class.to_string(), kind.to_string(), p)); }
-                self.records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run, build));
+                let cost = v.get("cost").and_then(|c| c.as_str()).and_then(CostClass::parse);
+                self.records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run, build, cost));
             }
         }
     }
@@ -145,9 +146,11 @@ impl CostRecords {
                 sched.record_lane_peak(&os, &lane, &class, &kind, peak);
             }
         }
-        for (class, kind, node, lane, os, wall, peak, cores, run, build) in self.records {
+        for (class, kind, node, lane, os, wall, peak, cores, run, build, cost) in self.records {
             let test = run.zip(build.as_ref()).map(|(run, b)| run.saturating_sub(b.ms));
             sched.record_node_cost(&class, &kind, &node, test.unwrap_or(wall));
+            sched.record_lane_run(&lane, &kind, test.unwrap_or(wall));
+            if let Some(cost) = cost { sched.record_kind_run(&kind, cost, test.unwrap_or(wall)); }
             sched.record_resources(&class, &kind, peak, cores);
             if let Some(os) = os {
                 sched.record_family_peak(&os, &class, &kind, peak);
@@ -210,7 +213,8 @@ struct Marks {
 }
 
 /// The command sent to a hub after its revisions are available there.
-pub(super) fn lease_start_line(l: &Lease, rev: &str, weighed: f64, peak: Option<f64>, threads: Option<u32>) -> String {
+/// `cores`: what its runs are told ([`super::sched::Sched::start_cores`]).
+pub(super) fn lease_start_line(l: &Lease, rev: &str, cores: f64, weighed: f64, peak: Option<f64>, threads: Option<u32>) -> String {
     let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
     let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
     let warms = match l.req.cpu_target.as_deref() { Some(t) => format!("{warms},\"cpu_target\":{}", json_str(t)), None => warms };
@@ -221,7 +225,7 @@ pub(super) fn lease_start_line(l: &Lease, rev: &str, weighed: f64, peak: Option<
     let peak = match l.jit_jobs { Some(jobs) => format!("{peak},\"jit_jobs\":{jobs}"), None => peak };
     // (only to a hub with `live-threads`: [`super::sched::Sched::live_threads`])
     let peak = match threads { Some(n) => format!("{peak},\"threads\":{n}"), None => peak };
-    format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.run_cores(), l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","))
+    format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), cores, l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","))
 }
 
 pub struct LeaseMaster {
@@ -294,6 +298,10 @@ pub struct LeaseMaster {
     detached_said: Mutex<HashMap<String, u64>>,
     /// per (box, JIT id): the turn of its copy there ([`Self::copy_jit`]); the next finds it there
     copying: Mutex<HashMap<(String, String), Arc<Mutex<()>>>>,
+    /// every node's load samples, forever (`samples/`, [`super::history`])
+    history: Mutex<super::history::History>,
+    /// the lease ledger's time index (`leases.idx`): the panel's bars of any range
+    past: super::panel::PastIndex,
 }
 
 /// A lease's `--jit` copied to its box at its grant ([`LeaseMaster::copy_jit`]).
@@ -510,8 +518,12 @@ fn write_desk_links(home: &Path, nodes: &[NodeView]) {
 /// `<home>/heard/<node>`: when a box that stopped answering last answered (ms) and its caps line.
 /// A box off since before the master's restart still counts as what it was: a CI shard only it
 /// takes says "box down: <node> (since ..)", not "none is set up" (one went off 11-07 and every
-/// nightly run after said the second, 11-10).
+/// nightly run after said the second, 11-10). A box no master has heard has its first miss and
+/// [`NEVER_HEARD`] for a line. Either way a new master counts its time down from then
+/// ([`Sched::seed_unheard`]).
 const HEARD: &str = "heard";
+/// The caps line kept for a box no master heard: it parses as no caps ([`LeaseMaster::heard`]).
+const NEVER_HEARD: &str = "-";
 
 fn read_heard(dir: &Path) -> HashMap<String, (u64, String, bool)> {
     std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
@@ -761,6 +773,12 @@ impl LeaseMaster {
             }
         }
         sched.blocked = read_blocked(&home);
+        // the samples of the panel's window come back from the history: a restart shows no gap
+        let mut history = super::history::History::new(home.join("samples"), super::panel::FIELDS.len());
+        for (node, samples) in super::panel::recent(&mut history, now, super::panel::PRESSURE_KEEP_MS) {
+            sched.restore_pressure(&node, samples);
+        }
+        let past = super::panel::PastIndex::new(&home);
         // A restart closes the last sampled interval at its last tick, not at startup.
         let profile_live = home.join("profile.live");
         if let Ok(live) = std::fs::read_to_string(&profile_live) {
@@ -799,6 +817,8 @@ impl LeaseMaster {
             ends_later: Mutex::new(ends_later),
             weighing: Mutex::default(),
             copying: Mutex::default(),
+            history: Mutex::new(history),
+            past,
             restored_own: Mutex::new(restored_own),
             agents_seen: Mutex::new(HashMap::new()),
             detached_said: Mutex::new(HashMap::new()),
@@ -960,6 +980,15 @@ impl LeaseMaster {
     #[cfg(all(test, feature = "checkout"))]
     pub(crate) fn test_sched(&self, f: impl FnOnce(&mut Sched)) {
         f(&mut self.sched.lock().unwrap());
+    }
+
+    /// Whether `pid`, a process of `lease`, still runs on `node` (`lease-pid`): its start (the same
+    /// process as `start` when given), None once it is gone. Err: no answer (the box away, an
+    /// older hub): nothing is known.
+    pub fn lease_pid(&self, node: &str, lease: &str, pid: u32, start: Option<u64>) -> Result<Option<u64>, String> {
+        let v = self.ask1(node, "lease-pid", &format!("lease-pid {lease} {pid}{}", start.map_or(String::new(), |s| format!(" {s}"))))?;
+        let alive = v.get("alive").and_then(|a| a.as_bool()).ok_or_else(|| format!("{node} lease-pid: no alive in its answer"))?;
+        Ok(alive.then(|| v.get("start").and_then(super::num).map_or(0, |s| s as u64)))
     }
 
     pub fn timed_series(&self, dir: &str) -> Option<String> {
@@ -1175,6 +1204,9 @@ impl LeaseMaster {
                     }
                 }
                 Err(e) if e.contains("unknown command") => self.event(Sev::Info, format!("{id} on {node} stalled: JIT {pid} has no capture yet (an older JIT build{stacks})")),
+                // its hub just answered for the lease (its JITs above): a timeout is the JIT's
+                // own silence, though the ask says "link lost" (read as the LAN's, 11-17)
+                Err(e) if e.contains("timed out") => self.event(Sev::Warn, format!("{id} on {node} stalled: JIT {pid} did not answer its capture ({e}); {node}'s hub answered for the lease, so the JIT, not the network{stacks}")),
                 Err(e) => self.event(Sev::Warn, format!("{id} on {node} stalled: JIT {pid}'s capture failed: {e}{stacks}")),
             }
         }
@@ -1479,8 +1511,8 @@ impl LeaseMaster {
                 format!("{{{}}}", sides.join(","))
             }
         };
-        let ((weighed, peak), threads) = { let s = self.sched.lock().unwrap(); (s.ram_weighed(l), s.live_threads(l)) };
-        let line = lease_start_line(l, &rev, weighed, peak, threads);
+        let ((weighed, peak), threads, cores) = { let s = self.sched.lock().unwrap(); (s.ram_weighed(l), s.live_threads(l), s.start_cores(l)) };
+        let line = lease_start_line(l, &rev, cores, weighed, peak, threads);
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -1732,12 +1764,18 @@ impl LeaseMaster {
     }
 
     /// The hosts into the scheduler (with their nodes.conf switches).
+    /// A box unheard since before this master started counts its time down from then (its kept
+    /// [`HEARD`] line), not from this master's start: masters restart within minutes of each
+    /// landing, and a box down 18 h read "not heard for 3m05s" and never reached the check-in's
+    /// list of boxes down over an hour (11-16).
     fn sync_hosts(&self, hosts: &[(String, String)]) {
         let dev = read_dev(&self.home.join("nodes.conf"));
+        let kept: HashMap<String, u64> = self.heard.lock().unwrap().iter().filter(|(_, h)| h.2).map(|(name, h)| (name.clone(), h.0)).collect();
         let mut s = self.sched.lock().unwrap();
         for (name, addr) in hosts {
             let ip = addr.rsplit_once(':').map_or(addr.as_str(), |(h, _)| h);
             s.add_node(name, ip, dev.get(name).copied());
+            if let Some(since) = kept.get(name) { s.seed_unheard(name, *since); }
         }
     }
 
@@ -1835,7 +1873,15 @@ impl LeaseMaster {
                     self.event(Sev::Warn, c.trouble.clone());
                 }
                 let asked = c.dev_req;
-                let up = self.sched.lock().unwrap().set_caps(name, c, now);
+                let (up, sample) = {
+                    let mut s = self.sched.lock().unwrap();
+                    let up = s.set_caps(name, c, now);
+                    (up, s.last_sample(name))
+                };
+                // into the history, outside the scheduler's lock
+                if let Some(say) = sample.and_then(|x| self.history.lock().unwrap().append(name, x.t_ms, &x.vals())) {
+                    self.event(Sev::Warn, say);
+                }
                 // a flip made on the node itself: the master takes it (saved, pushed; the push clears it there)
                 if let Some(want) = asked {
                     if self.sched.lock().unwrap().dev(name) != want {
@@ -1850,7 +1896,7 @@ impl LeaseMaster {
                 }
             }
             None => {
-                self.note_unheard(name);
+                self.note_unheard(name, now);
                 // a box off the network for a minute: its leases end as lost, their holders ask again
                 let lost = {
                     let mut s = self.sched.lock().unwrap();
@@ -1872,10 +1918,12 @@ impl LeaseMaster {
     }
 
     /// Its caps did not answer: its last answer goes to disk, once, for a master that starts
-    /// while the box is still away.
-    fn note_unheard(&self, name: &str) {
+    /// while the box is still away; for a box this master never heard, the time of this first
+    /// miss, unless a master before it kept one.
+    fn note_unheard(&self, name: &str, now: u64) {
         let mut heard = self.heard.lock().unwrap();
-        let Some((ms, line, kept)) = heard.get_mut(name).filter(|h| !h.2) else { return };
+        let (ms, line, kept) = heard.entry(name.to_string()).or_insert_with(|| (now, NEVER_HEARD.to_string(), false));
+        if *kept { return; }
         *kept = true;
         let text = format!("{ms}\n{line}\n");
         drop(heard);
@@ -2356,9 +2404,16 @@ impl LeaseMaster {
             "agent-seen" => match line.trim() {
                 agent if makepad_devhub_conf::valid_name(agent) => {
                     self.agents_seen.lock().unwrap().insert(agent.to_string(), now);
-                    // what devhub learned for it since (a bucket red naming its landing), said once
+                    // what devhub learned for it since (a bucket red naming its landing), said once;
+                    // a red a later run passed in the meantime is not (the ledger is read only for one)
                     let wall = proto::wall_ms();
-                    out.extend(crate::notes::take(&self.home, agent).into_iter().map(|(ms, line)| crate::notes::said(agent, wall.saturating_sub(ms), &line)));
+                    #[cfg(feature = "checkout")]
+                    let rows = std::cell::OnceCell::new();
+                    #[cfg(feature = "checkout")]
+                    let passed = |after: u64, keys: &[String]| crate::bucket::reds_passed_since(rows.get_or_init(|| crate::bucket::recent_rows(&self.home)), after, keys);
+                    #[cfg(not(feature = "checkout"))]
+                    let passed = |_: u64, _: &[String]| false;
+                    out.extend(crate::notes::take_open(&self.home, agent, &passed).into_iter().map(|(ms, line)| crate::notes::said(agent, wall.saturating_sub(ms), &line)));
                     out.push("{}".into());
                 }
                 agent => out.push(err(&format!("agent-seen: {agent:?} is no agent name"))),
@@ -2565,11 +2620,16 @@ impl LeaseMaster {
                 // (`nodes master`: the master's own build first, for `devhub nodes`)
                 if line.split_whitespace().any(|w| w == "master") {
                     let network = self.network.lock().unwrap().clone().unwrap_or_default();
-                    out.push(format!("{{\"master\":{},\"hub\":{},\"up_ms\":{},\"network\":{}}}", json_str(&self.machine), json_str(super::caps::hub_rev()), self.up_ms, json_str(&network)));
+                    let unsupervised = crate::master::unsupervised().unwrap_or_default();
+                    out.push(format!("{{\"master\":{},\"hub\":{},\"up_ms\":{},\"network\":{},\"unsupervised\":{}}}", json_str(&self.machine), json_str(super::caps::hub_rev()), self.up_ms, json_str(&network), json_str(&unsupervised)));
                 }
                 out.extend(self.nodes().iter().map(|n| n.to_json()));
             }
-            super::panel::SERVICE => super::panel::serve(&self.sched, &self.home.join("leases.jsonl"), line, now, out),
+            super::panel::SERVICE => match line.split_whitespace().next() {
+                Some("history" | "exact") => super::panel::serve_history(&self.history, line, out),
+                Some("rows" | "buckets" | "landings") => super::panel::serve_past(&self.past, &self.home, &live_land, line, out),
+                _ => super::panel::serve(&self.sched, &self.home.join("leases.jsonl"), line, now, out),
+            },
             "node-dev" => {
                 let w: Vec<&str> = line.split_whitespace().collect();
                 match w.as_slice() {
@@ -2788,6 +2848,15 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
         ep.register(svc, 1, makepad_remote::lines::service(svc, Arc::new(move |line, out| l.serve(svc, line, out))));
     }
     lm
+}
+
+/// The landing train's live view, which its history holds only as entries leave it (none
+/// without the orchestrator).
+fn live_land() -> Vec<crate::land::Entry> {
+    #[cfg(feature = "checkout")]
+    return crate::orch::ctx().map(|c| c.store.read(|d| d.land.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect())).unwrap_or_default();
+    #[cfg(not(feature = "checkout"))]
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -3162,8 +3231,13 @@ mod tests {
     }
 
     fn master(dir: &Path) -> (Arc<LeaseMaster>, Arc<FakeNode>, Arc<AtomicU64>, Arc<Mutex<Vec<Record>>>) {
+        master_at(dir, 1_000)
+    }
+
+    /// A master whose clock starts at `start`.
+    fn master_at(dir: &Path, start: u64) -> (Arc<LeaseMaster>, Arc<FakeNode>, Arc<AtomicU64>, Arc<Mutex<Vec<Record>>>) {
         let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default(), capture_cause: Default::default() });
-        let clock = Arc::new(AtomicU64::new(1_000));
+        let clock = Arc::new(AtomicU64::new(start));
         let recs = Arc::new(Mutex::new(Vec::new()));
         let (n, c, r) = (node.clone(), clock.clone(), recs.clone());
         let m = Arc::new(LeaseMaster::new(
@@ -3182,6 +3256,55 @@ mod tests {
         let mut out = Vec::new();
         m.serve(svc, line, &mut out);
         out.join("\n")
+    }
+
+    /// Every caps round's sample goes to the master's history: a restarted master's panel window
+    /// holds the samples it had (no gap after a restart), and `history` and `exact` answer any
+    /// range of them, reduced to columns (min, max and mean) and as taken.
+    #[test]
+    fn a_restarted_master_keeps_its_nodes_samples() {
+        use super::super::panel::{Answer, Hist};
+        let dir = std::env::temp_dir().join(format!("devhub-lease-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t0 = 1_800_000_000_000u64 - 1_800_000_000_000 % 120_000;
+        let boxes = [("node-a".to_string(), "192.0.2.89:8797".to_string())];
+        let cpu = |i: u64| (i % 10) as f64 * 10.0;
+        {
+            let (m, node, clock, _) = master_at(&dir, t0);
+            for i in 0..60 {
+                clock.store(t0 + i * 10_000, Ordering::SeqCst);
+                *node.cpu.lock().unwrap() = Some(cpu(i));
+                m.refresh(&boxes);
+            }
+        }
+        let (m, node, clock, _) = master_at(&dir, t0 + 600_000);
+        *node.cpu.lock().unwrap() = Some(cpu(60));
+        m.refresh(&boxes);
+        let lines = |l: &str| serve(&m, "panel", l).lines().map(String::from).collect::<Vec<_>>();
+        let a = Answer::parse(&lines(&t0.to_string())).unwrap();
+        let ring: Vec<(u64, f32)> = a.pressure.iter().find(|(n, _)| n == "node-a").unwrap().1.iter().map(|s| (s.t_ms, s.cpu_pct)).collect();
+        assert_eq!(ring, (0..61).map(|i| (t0 + i * 10_000, cpu(i) as f32)).collect::<Vec<_>>(), "the restarted master's window: the samples it had, then its own");
+        assert!(a.pressure[0].1[0].disk_free_gb > 0.0, "the disk's free space is a sample's field");
+
+        let h = Hist::parse(&lines(&format!("history {t0} 120000 5 cpu_pct"))).unwrap();
+        assert_eq!((h.from_ms, h.per_ms, h.n, h.level, h.first_ms), (t0, 120_000, 5, 1, Some(t0)), "the head");
+        let cols = h.field("node-a", "cpu_pct").expect("node-a's cpu columns");
+        for c in 0..5u64 {
+            let vals: Vec<f32> = (c * 12..c * 12 + 12).map(|i| cpu(i) as f32).collect();
+            let mean = vals.iter().sum::<f32>() / 12.0;
+            let want = (vals.iter().cloned().fold(f32::MAX, f32::min), vals.iter().cloned().fold(0.0, f32::max));
+            assert_eq!((cols.min[c as usize], cols.max[c as usize]), (Some(want.0), Some(want.1)), "column {c}'s min and max");
+            assert!((cols.mean[c as usize].unwrap() - mean).abs() < 0.01, "column {c}'s mean: {:?} vs {mean}", cols.mean[c as usize]);
+        }
+        assert!(h.field("node-a", "ram_used_gb").is_none(), "only the fields asked");
+        assert!(serve(&m, "panel", &format!("history {t0} 120000 5 nope")).contains("no field `nope`"));
+
+        let e = Hist::parse(&lines(&format!("exact {} {}", t0 + 100_000, t0 + 600_001))).unwrap();
+        let got: Vec<(u64, f32)> = e.exact[0].1.iter().map(|s| (s.t_ms, s.cpu_pct)).collect();
+        assert_eq!(got, (10..61).map(|i| (t0 + i * 10_000, cpu(i) as f32)).collect::<Vec<_>>(), "every sample of the range, as taken");
+        drop(clock);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A registered lane's lease from another checkout is refused with the lane's worktree, before
@@ -3902,8 +4025,23 @@ mod tests {
         // its caps go unanswered: what it said last stays on disk, for a master that starts while
         // it is away (a CI shard only it takes says the box is down, not that none is set up)
         m.refresh(&hosts);
-        let (again, _, _, _) = master(&dir);
+        let (again, again_node, again_clock, _) = master(&dir);
         assert!(again.heard("node-a").is_some_and(|(_, c)| c.display.as_deref() == Some("wm:makepad-wm-0")), "a new master knows what the box was");
+        // and counts its time down from its last answer, not from its own start; a box no master
+        // heard, from its first miss
+        let never = vec![("node-b".to_string(), "192.0.2.90".to_string())];
+        m.refresh(&never);
+        let (third, third_node, third_clock, _) = master(&dir);
+        assert!(third.heard("node-b").is_none(), "a box never heard has no caps to say");
+        for (n, c, mm) in [(&again_node, &again_clock, &again), (&third_node, &third_clock, &third)] {
+            n.gone.store(true, Ordering::SeqCst);
+            c.store(2 * 3_600_000, Ordering::SeqCst);
+            mm.refresh(&hosts);
+            mm.refresh(&never);
+        }
+        let unheard = |mm: &Arc<LeaseMaster>, name: &str| mm.sched.lock().unwrap().node_view(2 * 3_600_000).into_iter().find(|n| n.name == name).and_then(|n| n.unheard).map(|u| u.0);
+        assert!(unheard(&again, "node-a").is_some_and(|ms| ms >= 3_600_000), "{:?}", unheard(&again, "node-a"));
+        assert!(unheard(&third, "node-b").is_some_and(|ms| ms >= 3_600_000), "{:?}", unheard(&third, "node-b"));
         // the hub is back: its caps answer, the box is up, the lease gets it
         node.gone.store(false, Ordering::SeqCst);
         *node.trouble.lock().unwrap() = "devhub on node-a could not run for 9 s (1 try): could not start: the user's service manager is down".into();

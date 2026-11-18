@@ -39,7 +39,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           (it runs on); release ends the job `panicked`, its box freed and the parked
                                           process ended with it (10 min with no action release it; a job no longer
                                           paused is refused: `job cancel` ends it)
-  live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
+  live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
         [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--home <archive>]
         [--joins <W id>]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
@@ -54,13 +54,18 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           --joins W<n>: its app joins that session's app (a hidden test WM it reaches
                                           through --env MAKEPAD_WM_SOCKET=<path>): it runs on that session's box, and
                                           that session is never parked or ended idle while this one runs
-  live look <id> [timeout_s]              that one look (before any edit: the app up and drawing); default 300 s
+  live look <id> [timeout_s]              that one look (before any edit: the app up and drawing); default 300 s, counted
+                                          from the first ask through restarts
   live start <pkg> --test [--env K=V ..] [--lib|--bin B|--test T] [-- args...]
                                           warm JIT tests: rerun after each saved edit, including restarts
                                           (--bin without --test runs that bin, not its unit tests)
-  live act <id> <inspect cmd..>           any inspect command in the app (ui, key, click, grab, test hooks, stacks)
+  live act <id> <inspect cmd..>           any inspect command in the app (ui, key, click, grab, test hooks, stacks); a
+                                          master or hub restart that cuts one goes round again if it reads, and a cut
+                                          `session relaunch` is sent again only if an edit still waits for it; any
+                                          other cut act exits 75: whether it reached the app isn't known
   live wait <id> patched|verdict|settled|frame [timeout_s]   the newest edit's patch or test verdict, the JIT idle,
-                                          or a frame drawn; verdict gives save → shipped → patched → tests times
+                                          or a frame drawn; verdict gives save → shipped → patched → tests times; the
+                                          timeout (default 120 s) counts from the first ask through restarts
   live sync <id> | live release <id> | live list [--all] | live <id>
                                           ship changes since the last ship, including deletions; end it (10 min idle; tests 30 min)
   live again <id>                         an ended session (parked: an ask needed the RAM it held idle; a visible one
@@ -671,9 +676,43 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
 fn cut_act<T>(asked: Result<T, String>, id: &str, read: impl FnOnce() -> bool) -> Result<T, String> {
     match asked {
         Err(e) if link_cut(&e) && !e.contains(RAN_NOTHING) && !read() => Err(format!(
-            "{id}: the master or its box's hub restarted during this call, as they do when work lands. That doesn't end a session: `devhub live {id}` shows whether it still runs. Whether this call reached the app isn't known, so it was not sent again: look at the app, then ask again if it didn't"
+            "{id}: the master or its box's hub restarted during this call, as they do when work lands. That doesn't end a session: `devhub live {id}` shows whether it still runs. {UNKNOWN}, so it was not sent again: look at the app, then ask again if it didn't (exit {CUT_EXIT})"
         )),
         asked => asked,
+    }
+}
+
+/// What a cut call's error says when nobody can tell whether it was applied ([`cut_act`]).
+const UNKNOWN: &str = "Whether this call reached the app isn't known";
+
+/// The exit of a call cut by a restart whose effect isn't known ([`cut_act`]): not 1, so a
+/// script stops on it rather than read it as one more failed call. A lane's script went on past
+/// it, and grabbed the code before its relaunch (W11772, 11-17).
+pub(crate) const CUT_EXIT: i32 = 75;
+
+/// One ask of a `live act` that goes on through a cut: a call devhub can look at itself
+/// ([`super::live::RESENT`]) goes again after the cut with [`super::live::RESEND`], and the
+/// master does it only if its effect is not there; any other goes through [`cut_act`]. `resent`
+/// says whether the cut one is being sent again.
+fn act_once<T>(ask: &mut dyn FnMut(bool) -> Result<T, String>, observed: bool, resent: &mut bool, id: &str, read: impl FnOnce() -> bool) -> Result<T, String> {
+    match ask(*resent) {
+        Err(e) if observed && link_cut(&e) && !e.contains(RAN_NOTHING) => {
+            if !*resent { eprintln!("{id}: a restart cut this call: devhub looks whether it was applied, and sends it again if not"); }
+            *resent = true;
+            Err(e)
+        }
+        asked => cut_act(asked, id, read),
+    }
+}
+
+/// A command's exit for `r`: [`CUT_EXIT`] when a cut left unknown whether it was applied.
+fn cut_or_done(r: Result<Value, String>, json: bool, render: &dyn Fn(&Value) -> String) -> i32 {
+    match r {
+        Err(e) if e.contains(UNKNOWN) => {
+            eprintln!("makepad devhub: {e}");
+            CUT_EXIT
+        }
+        r => done(r, json, render),
     }
 }
 
@@ -743,6 +782,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             let mut env = Vec::new();
             let mut home = String::new();
             let mut joins = String::new();
+            let mut avoid = String::new();
             let mut i = 0;
             while i < rest.len() {
                 match (rest[i], rest.get(i + 1)) {
@@ -759,6 +799,11 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     // like a lease's: that box or a wait for it, never another
                     ("--node", Some(n)) if !n.is_empty() && !n.starts_with('-') => {
                         node = n.to_string();
+                        i += 1;
+                    }
+                    // like a lease's: boxes it never takes
+                    ("--avoid", Some(n)) if !n.is_empty() && !n.starts_with('-') => {
+                        avoid = n.to_string();
                         i += 1;
                     }
                     ("--lane", Some(l)) => {
@@ -810,7 +855,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -826,14 +871,15 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), json_str(&avoid), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
         // goes on through a master or hub restart when asking again does nothing twice ([`cut_act`])
-        ["act", id, cmd @ ..] if !cmd.is_empty() => done({
+        ["act", id, cmd @ ..] if !cmd.is_empty() => cut_or_done({
             let line = format!("{lv} act {id} {}", makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>()));
-            let mut reads = None;
-            retry_master(|| cut_act(one(c, "live", &line), id, || *reads.get_or_insert_with(|| only_reads(c, &lv, id, cmd))))
+            let observed = super::live::RESENT.iter().any(|c| *c == cmd);
+            let (mut reads, mut resent) = (None, false);
+            retry_master(|| act_once(&mut |again| one(c, "live", &if again { format!("{line} {}", super::live::RESEND) } else { line.clone() }), observed, &mut resent, id, || *reads.get_or_insert_with(|| only_reads(c, &lv, id, cmd))))
         }, json, &|v| {
             let mut out: String = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().map(|l| format!("{}\n", l.as_str().unwrap_or(""))).collect();
             out.push_str(&format!("({} ms)\n", v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0)));
@@ -842,7 +888,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
         ["look", id] => look(c, &lv, id, "300"),
         ["look", id, timeout] if timeout.parse::<u64>().is_ok() => look(c, &lv, id, timeout),
         // waits, syncs and looks go on through a master restart (the live job outlives it)
-        ["wait", id, "verdict", rest @ ..] => match retry_master(|| one(c, "live", &format!("{lv} wait {id} verdict {}", rest.join(" ")))) {
+        ["wait", id, "verdict", rest @ ..] => match wait_until(c, &lv, id, "verdict", rest) {
             Ok(v) => {
                 let x = crate::state::live_from(&v);
                 if json { println!("{}", v.to_json()); } else {
@@ -859,9 +905,10 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             }
             Err(e) => { eprintln!("makepad devhub: {e}"); 1 }
         },
-        ["wait", id, what, rest @ ..] => done(retry_master(|| one(c, "live", &format!("{lv} wait {id} {what} {}", rest.join(" ")))), json, &|v| format!("{}{}", room_line(v), render(v))),
+        ["wait", id, what, rest @ ..] => done(wait_until(c, &lv, id, what, rest), json, &|v| format!("{}{}", room_line(v), render(v))),
         [verb @ ("sync" | "release"), id] => done(retry_master(|| one(c, "live", &format!("{lv} {verb} {id}"))), json, &flat),
-        ["again", id] => done(one(c, "live", &format!("{lv} again {id}")), json, &flat),
+        // a cut one may have started its session: not sent twice
+        ["again", id] => cut_or_done(cut_act(one(c, "live", &format!("{lv} again {id}")), id, || false), json, &flat),
         ["list", rest @ ..] | ["ls", rest @ ..] => done(one(c, "live", if rest.contains(&"--all") { "live list all" } else { "live list" }), json, &|v| {
             let list = v.as_arr().unwrap_or(&[]);
             if list.is_empty() {
@@ -877,6 +924,13 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
     }
 }
 
+/// `live wait <id> <what> [timeout_s]` through master restarts, its timeout counted from the first
+/// ask ([`crate::cli::retry_master_until`]).
+fn wait_until(c: &Client, lv: &str, id: &str, what: &str, rest: &[&str]) -> Result<Value, String> {
+    let timeout = rest.first().and_then(|t| t.parse::<u64>().ok()).unwrap_or(super::live::WAIT_S);
+    crate::cli::retry_master_until(Duration::from_secs(timeout), |since| one(c, "live", &format!("{lv} wait {id} {what} {timeout} since={since}")), || format!("live wait {id} {what}: not within {timeout} s (the master was not reachable)"))
+}
+
 /// A call's wait for room, from its reply's `room`, as its first line (a look's, a wait's and a
 /// sync's said nothing, 11-06); `live act`'s lines carry it already.
 fn room_line(v: &Value) -> String {
@@ -888,8 +942,10 @@ fn room_line(v: &Value) -> String {
 /// edit's line and the file.
 fn look(c: &Client, lv: &str, id: &str, timeout: &str) -> i32 {
     let fail = |e: String| { eprintln!("makepad devhub live look: {e}"); 1 };
-    // A restart retries the whole look, including a fresh grab, under the new master's hold.
-    let v = match retry_master(|| one(c, "live", &format!("{lv} look {id} {timeout}"))) {
+    // A restart retries the whole look, including a fresh grab, under the new master's hold,
+    // within what is left of its timeout
+    let secs = timeout.parse::<u64>().unwrap_or(300);
+    let v = match crate::cli::retry_master_until(Duration::from_secs(secs), |since| one(c, "live", &format!("{lv} look {id} {secs} since={since}")), || format!("{id}: no look within {secs} s (the master was not reachable)")) {
         Ok(v) => v,
         Err(e) => return fail(e),
     };
@@ -1418,6 +1474,68 @@ mod tests {
         assert_eq!(run(vec![Err("no devhub master at /x".to_string()), Ok(7)], false), (Ok(7), 2, 0));
         // what the master answers stands
         assert_eq!(run(vec![Err("W1: parked".to_string())], true), (Err("W1: parked".to_string()), 1, 0));
+    }
+
+    /// A relaunch cut by a restart goes again after it, marked so the master does it only if an
+    /// edit still waits for it, and stays marked if the resend is cut too; any other act cut that
+    /// way exits 75, which a script stops on (W11772's went on past exit 1, 11-17).
+    /// A `live wait` cut by master restarts keeps its first ask's deadline: each ask again names
+    /// when the first was made and the master waits only what is left (a `verdict 900` ran 29 min
+    /// past it, 11-17). A master that answers past it still says what it has; one still away then
+    /// ends the call here.
+    #[test]
+    fn a_wait_cut_by_restarts_keeps_its_first_asks_deadline() {
+        use std::cell::{Cell, RefCell};
+        let clock = Cell::new(1_000_000u64);
+        let left = RefCell::new(Vec::new());
+        let spent = || "live wait W1 verdict: not within 900 s (the master was not reachable)".to_string();
+        // the master waits 10 min, a restart cuts it; asked again, 5 min more and another cut, and
+        // the master stays away past the 15 min
+        let (mut asks, mut beats) = (0, [true, false].into_iter());
+        let got: Result<(), String> = crate::cli::asks_until(Duration::from_secs(900), clock.get(), || clock.get(), |since| {
+            asks += 1;
+            let arg = format!("verdict 900 since={since}");
+            let (what, timeout, l, asked) = crate::orch::live::wait_args(&arg, clock.get());
+            assert_eq!((what, timeout, asked), ("verdict", Duration::from_secs(900), 1_000_000));
+            left.borrow_mut().push(l.as_secs());
+            clock.set(clock.get() + if asks == 1 { 600_000 } else { l.as_millis() as u64 + 1 });
+            Err("link lost: the master restarted".to_string())
+        }, spent, || beats.next().unwrap());
+        assert_eq!((got, asks, left.take()), (Err(spent()), 2, vec![900, 300]), "asked for the rest, then ended here");
+        // a master back past the deadline is asked: what it waited for may be there
+        let (start, mut first) = (clock.get(), true);
+        let got = crate::cli::asks_until(Duration::from_secs(900), start, || clock.get(), |since| {
+            let (_, _, l, _) = crate::orch::live::wait_args(&format!("verdict 900 since={since}"), clock.get());
+            if std::mem::take(&mut first) {
+                clock.set(start + 901_000);
+                return Err("the hub connection ended".to_string());
+            }
+            Ok(l)
+        }, spent, || true);
+        assert_eq!(got, Ok(Duration::ZERO), "the master answered with nothing left to wait");
+        // an old client names no first ask: the whole timeout; a since ahead of the clock is no ask
+        assert_eq!(crate::orch::live::wait_args("frame", 5_000).1, Duration::from_secs(crate::orch::live::WAIT_S));
+        assert_eq!(crate::orch::live::wait_args("verdict 60 since=9000", 5_000).2, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_cut_relaunch_is_sent_again_marked_and_another_cut_act_exits_75() {
+        let cut = "link lost: connection closed by the peer".to_string();
+        let run = |answers: Vec<Result<Value, String>>, observed: bool| {
+            let (mut left, mut sent, mut resent) = (answers.into_iter(), Vec::new(), false);
+            let got = crate::cli::retry_master_wait(|| act_once(&mut |again| { sent.push(again); left.next().unwrap() }, observed, &mut resent, "W1", || false), || true);
+            (got, sent)
+        };
+        let ok = || Ok(Value::Null);
+        assert_eq!(run(vec![Err(cut.clone()), ok()], true), (ok(), vec![false, true]), "sent again, marked");
+        assert_eq!(run(vec![Err(cut.clone()), Err(format!("{cut}: {RAN_NOTHING}")), ok()], true).1, vec![false, true, true], "the resend's own cut keeps the mark");
+        assert_eq!(run(vec![Err(format!("{cut}: {RAN_NOTHING}")), ok()], true).1, vec![false, false], "a cut while it waited for room did nothing: sent as it was");
+        let (got, sent) = run(vec![Err(cut.clone())], false);
+        assert_eq!(sent, vec![false], "another act is not sent twice");
+        let e = got.clone().unwrap_err();
+        assert!(e.contains(UNKNOWN) && e.contains("exit 75"), "{e}");
+        assert_eq!(cut_or_done(got, false, &|_| String::new()), CUT_EXIT);
+        assert_eq!(cut_or_done(Err("W1: parked".into()), false, &|_| String::new()), 1, "an answer's error stays 1");
     }
 
     /// The app's manifest says what reads; what it doesn't list or a word it can't find doesn't.

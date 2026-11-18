@@ -241,6 +241,11 @@ pub struct Krate {
     /// `[package.metadata.makepad.native-tests]` (`lib`, `bin:<name>`, `test:<name>`); the tests
     /// bucket gives each a unit of its own and `devhub test` routes a run of one to cargo
     pub native_tests: BTreeMap<String, String>,
+    /// the platforms it was checked on, each with the targets that do not build or pass there and
+    /// why: its `[package.metadata.makepad.platform-gaps]` (`windows = { "test:modules" = ".." }`;
+    /// `build` for the whole package, `{}` for none). Only plain cargo work of a package checked
+    /// on Windows, selecting none of its gaps, goes to a Windows box ([`crate::lease::native::on_windows`]).
+    pub platform_gaps: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 fn dir_of(path: &str) -> &str {
@@ -301,7 +306,9 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
     let test_tree = doc.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(Toml::as_str).map(str::to_string);
     let native_tests = doc.get_path(&["package", "metadata", "makepad", "native-tests"]).and_then(Toml::as_table)
         .map(|t| t.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()).unwrap_or_default();
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests })
+    let platform_gaps = doc.get_path(&["package", "metadata", "makepad", "platform-gaps"]).and_then(Toml::as_table)
+        .map(|t| t.iter().filter_map(|(os, gaps)| Some((os.clone(), gaps.as_table()?.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()))).collect()).unwrap_or_default();
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests, platform_gaps })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {
@@ -419,7 +426,7 @@ fn workspace_dirs(tree: &Tree) -> Vec<String> {
 }
 
 /// The dirs of a crate's path dependencies (every kind, every target) that are crates of the tree.
-fn path_deps(tree: &Tree, dir: &str) -> Vec<String> {
+pub(crate) fn path_deps(tree: &Tree, dir: &str) -> Vec<String> {
     tree.read(&join(dir, "Cargo.toml")).and_then(|t| parse_toml(&t).ok()).map_or(Vec::new(), |doc| path_deps_of(tree, dir, &doc))
 }
 
@@ -1518,6 +1525,15 @@ fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64
         // a patch reaches the O1 code a warm start placed from the startup image: the code holding
         // an unguarded copy of the patched body is built again
         ("live:warm-image-patch", screen, linux, false, exit, vec!["python3", "tools/run/fixture/warm_image_patch.py"], 3.0),
+        // starts that alternate between two startup sets converge on one startup manifest and
+        // image, and then write neither again (each rewrote both for its own start); after a
+        // struct's layout changes, the slots the union carries get code for the new layout (they
+        // kept the old layout's key under the new sources' stamp)
+        ("live:warm-image-union", screen, linux, false, exit, vec!["python3", "tools/run/fixture/warm_image_union.py"], 40.0),
+        // the same carry across two crates: a dependency's generic closures that move the app's
+        // struct by value, and app code the first start on the new source built fresh, meet no
+        // code of the struct's old layout (11-17: a strand's schedule closures over an app's struct)
+        ("live:warm-manifest-layout", screen, linux, false, exit, vec!["python3", "tools/run/fixture/warm_manifest_layout.py"], 30.0),
         // a landing devhub holds back in a show's JIT waits, and the person's own saves apply live
         // meanwhile
         ("live:landing-hold", screen, linux, false, exit, vec!["python3", "tools/run/fixture/landing_hold.py"], 9.0),
@@ -1848,6 +1864,20 @@ fn test_files(tree: &Tree, k: &Krate, target: &str) -> Option<Vec<String>> {
     Some(std::iter::once(root).chain(tree.files.iter().filter(|f| f.starts_with(&sub)).filter(rs).cloned()).collect())
 }
 
+/// The source files of `package`'s test target `test` (an integration target's own file first), or
+/// with None every `.rs` file of its `src` (a lib's or a binary's unit tests). None: no such
+/// package in the tree, or its target's files are not known.
+pub(crate) fn target_files(tree: &Tree, package: &str, test: Option<&str>) -> Option<Vec<String>> {
+    let k = workspace_crates(tree).into_iter().find(|k| k.package == package)?;
+    match test {
+        Some(t) => test_files(tree, &k, t),
+        None => {
+            let src = join(&k.dir, "src/");
+            Some(tree.files.iter().filter(|f| f.starts_with(&src) && f.ends_with(".rs")).cloned().collect())
+        }
+    }
+}
+
 /// The features a plain build of the crate has: `default` and what it turns on.
 fn default_features(tree: &Tree, k: &Krate) -> BTreeSet<String> {
     let doc = tree.read(&join(&k.dir, "Cargo.toml")).and_then(|t| parse_toml(&t).ok());
@@ -2141,6 +2171,9 @@ struct Pool {
     state: Vec<CiShard>,
     /// a shard's lease is being asked for on that box
     reserved: Vec<Option<String>>,
+    /// the boxes whose worker would take a shard but holds back while lane work is queued there
+    /// (a sweep goes behind lanes): the run waits its turn there
+    waits_turn: Vec<String>,
     stopped: bool,
     /// the lease priority of the run's shards
     prio: i32,
@@ -2189,6 +2222,16 @@ impl Pool {
     /// The shards of this run that failed on `node` and passed on another box.
     fn failed_only_on(&self, node: &str) -> usize {
         self.state.iter().filter(|s| s.state == "ok" && s.failed_on == node && s.kept.is_empty()).count()
+    }
+
+    /// Whether the run gets on: a shard runs, a worker asks a box for one (queued there, held back
+    /// behind lane work included), or a worker that would take one waits its turn behind lane work
+    /// ([`Pool::waits_turn`]). A run waits its turn for as long as that takes and is never ended
+    /// for queueing: it ends as stalled only when nothing ran, asked or waited for [`STALLED`].
+    /// With one Linux box, every leg waited 14 min behind lane asks there (11-18), and a longer
+    /// queue would have ended the run.
+    fn getting_on(&self) -> bool {
+        !self.waits_turn.is_empty() || (0..self.shards.len()).any(|i| self.reserved[i].is_some() || self.state[i].state == "run")
     }
 
     /// Whether `node` is out of the run.
@@ -2522,7 +2565,8 @@ fn arm_plan(tree: &Tree, shards: &mut Vec<Shard>, arm: &super::arm::Decision) ->
 
 /// Resume all existing runs in their own slots before accepting requests.
 pub fn start(ctx: &Arc<Ctx>) {
-    let runs = ctx.store.read(|d| d.ci.run.iter().chain(d.ci.sweep_run.iter()).cloned().collect::<Vec<_>>());
+    // (a leg's probe goes on when its bucket's bisect thread asks it again: [`leg_probe`])
+    let runs = ctx.store.read(|d| d.ci.run.iter().chain(d.ci.sweep_run.iter()).filter(|r| !r.id.ends_with(PROBE_RUN)).cloned().collect::<Vec<_>>());
     let mut slots = Vec::new();
     for run in runs {
         let (held, slot) = std::sync::mpsc::channel();
@@ -2532,7 +2576,7 @@ pub fn start(ctx: &Arc<Ctx>) {
             // a run stopped before the restart only finishes what runs (nothing new starts)
             run_stop(run.sweep).store(run.stopping, std::sync::atomic::Ordering::SeqCst);
             let _ = held.send(());
-            let _ = gate_held(one, &c, &run.pair, run.dry, run.sweep, !run.checkout.is_empty(), run.own_tests);
+            let _ = gate_held(one, &c, &run.pair, run.dry, run.sweep, !run.checkout.is_empty(), run.own_tests, None);
         });
         slots.push(slot);
     }
@@ -2664,22 +2708,70 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
                 Some(judged) => judged,
                 None => {
                     run_stop(false).store(false, std::sync::atomic::Ordering::SeqCst);
-                    gate_held(one, &ctx, tip, false, false, false, false)
+                    gate_held(one, &ctx, tip, false, false, false, false, None)
                 }
             }
         };
-        let mut outcome = bucket_outcome(verdict, &legs, log);
-        let summary = &mut outcome.summary;
-        let mut text = format!("CI {}: {summary}\n", tip.short());
-        for leg in &legs {
-            text.push_str(&format!("{} {}: {} ({})\n", leg.state, leg.name, leg.summary, leg.log));
-            for error in &leg.errors { text.push_str(&format!("{error}\n")); }
-        }
-        if let Err(e) = std::fs::write(log, text) {
-            summary.push_str(&format!("; log: {e}"));
-        }
-        outcome
+        bucket_log(tip, verdict, &legs, log)
     })
+}
+
+/// The CI bucket's run (or a leg's probe) as its log says it: the verdict, then each leg's line, its
+/// first error lines and its verdict as the bucket reads a unit's (GATEUNIT): a row's passed legs
+/// close their reds, and a failed one's errors are its own lines (their files name who touched them).
+/// A leg the arm64 classification skipped did not run, and passes nothing.
+fn bucket_log(tip: &Pair, verdict: Verdict, legs: &[crate::state::Leg], log: &Path) -> crate::bucket::Outcome {
+    let mut outcome = bucket_outcome(verdict, legs, log);
+    let summary = &mut outcome.summary;
+    let mut text = format!("CI {}: {summary}\n", tip.short());
+    for leg in legs {
+        text.push_str(&format!("{} {}: {} ({})\n", leg.state, leg.name, leg.summary, leg.log));
+        for error in &leg.errors { text.push_str(&format!("{error}\n")); }
+        let ran = leg.state == "fail" || (leg.state == "ok" && !leg.summary.starts_with(ARM_SKIPPED));
+        if ran { text.push_str(&format!("GATEUNIT {} {}\n", leg.state, leg.name)); }
+    }
+    if let Err(e) = std::fs::write(log, text) {
+        summary.push_str(&format!("; log: {e}"));
+    }
+    outcome
+}
+
+/// What a leg the arm64 classification skipped says ([`arm_plan`]).
+const ARM_SKIPPED: &str = "arm64: skipped (";
+
+/// The suffix of a leg probe's run id ([`leg_probe`]).
+const PROBE_RUN: &str = "-probe";
+
+/// Why a probe's leg runs, in its log.
+const PROBE_WHY: &str = "probe: once more at the tip it failed at";
+
+/// The CI bucket's probe of one red leg at its red tip: the leg alone, in the rolling slot as a dry
+/// run (no inbox line of its own, and never the bucket's verdict: [`rolling`]), with the rotation
+/// of the run it failed in, whatever proof or classification would keep it. A leg no plan at the
+/// tip has gets no verdict. The bucket asks it once per new red: a red the leg does not repeat goes
+/// to its owner as flaky, never to a landing (the smoke reds went to nobody, 11-17).
+pub fn leg_probe(repo: PathBuf) -> crate::bucket::Probe {
+    Arc::new(move |leg, _base, tip_pin, log| {
+        let tip = tip_pin.pair();
+        let Some(ctx) = super::ctx() else {
+            return crate::bucket::Outcome { ok: false, failing: Vec::new(), log: log.display().to_string(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
+        };
+        let ctx = calling_ctx(ctx, repo.clone());
+        while !RESUMED.load(std::sync::atomic::Ordering::Acquire) { std::thread::sleep(Duration::from_millis(200)); }
+        let (verdict, legs) = {
+            let one = run_slot(false).lock().unwrap_or_else(|e| e.into_inner());
+            run_stop(false).store(false, std::sync::atomic::Ordering::SeqCst);
+            gate_held(one, &ctx, &tip, true, false, false, false, Some(leg))
+        };
+        bucket_log(&tip, verdict, &legs, log)
+    })
+}
+
+/// The shard of leg `id` in every plan of `tree` (a run's, its live replays, a sweep's and its
+/// tests'), at `rotation` (which replay app, which Windows tests).
+pub(crate) fn leg_shard(tree: &Tree, id: &str, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64) -> Option<Shard> {
+    plan(tree, timing, rotation).into_iter().chain(live_replays(tree, timing, rotation)).find(|s| s.id == id)
+        .or_else(|| sweep_plan(tree, timing, rotation).into_iter().chain(test_shards(tree, timing)).find(|s| s.id == id))
 }
 
 /// The CI bucket's run: [`ci`], then the tests of the crates that changed ([`own_tests_after`]),
@@ -2714,7 +2806,7 @@ fn bucket_outcome(verdict: Verdict, legs: &[crate::state::Leg], log: &Path) -> c
 fn gate_for(ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
     let one = run_slot(sweep).lock().unwrap_or_else(|e| e.into_inner());
     run_stop(sweep).store(false, std::sync::atomic::Ordering::SeqCst);
-    gate_held(one, ctx, pair, dry, sweep, calling, false)
+    gate_held(one, ctx, pair, dry, sweep, calling, false, None)
 }
 
 /// What the own-units run goes for next, and whether its thread is up.
@@ -2747,7 +2839,7 @@ fn own_tests_after(ctx: &Arc<Ctx>, tip: &Pair) {
         };
         let Some(tip) = tip else { return };
         run_stop(true).store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = gate_held(one, &ctx, &tip, true, true, false, true);
+        let _ = gate_held(one, &ctx, &tip, true, true, false, true, None);
     });
     if spawned.is_err() {
         OWN_TESTS.lock().unwrap_or_else(|e| e.into_inner()).going = false;
@@ -2790,7 +2882,8 @@ fn prune_runs(ctx: &Ctx) {
 }
 
 /// Runs the shards of `pair` with its slot held through proof publication.
-fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool, own: bool) -> (Verdict, Vec<crate::state::Leg>) {
+/// `only`: a leg's probe ([`leg_probe`]): that leg alone, run whatever would keep it.
+fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool, own: bool, only: Option<&str>) -> (Verdict, Vec<crate::state::Leg>) {
     let checkout = if calling { ctx.repo.to_string_lossy().into_owned() } else { String::new() };
     let prior_lock = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.pair == *pair && r.dry == dry && r.sweep == sweep && r.own_tests == own && Path::new(&r.checkout) == Path::new(&checkout)).map(|r| ctx.logs("ci").join(&r.id).join("Cargo.lock")));
     let lock = prior_lock.and_then(|p| std::fs::read_to_string(p).ok()).or_else(|| std::fs::read_to_string(ctx.repo.join("Cargo.lock")).ok());
@@ -2810,12 +2903,14 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         Some(r) => r.rotation,
         // (the rotation is the smoke scripts': an own-units run has none, and leaves it where it is)
         None if own => ctx.store.read(|d| d.ci.rotation),
+        // (a probe's: the run's that failed at its pair)
+        None if only.is_some() => ctx.store.read(|d| d.ci.runs.iter().rev().find(|r| rolling(r) && r.pair == *pair).map_or(d.ci.rotation, |r| r.rotation)),
         None => match ctx.store.update(|d| { d.ci.rotation += 1; d.ci.rotation }) {
             Ok(rotation) => rotation,
             Err(e) => { ctx.store.event("ci", Sev::Err, e, None); return (Verdict::Incomplete, Vec::new()); }
         },
     };
-    let id = going.as_ref().map_or_else(|| format!("{}-{rotation}{}", stamp(wall_ms()), if own { "-own" } else { "" }), |r| r.id.clone());
+    let id = going.as_ref().map_or_else(|| format!("{}-{rotation}{}", stamp(wall_ms()), if own { "-own" } else if only.is_some() { PROBE_RUN } else { "" }), |r| r.id.clone());
     let dir = ctx.logs("ci").join(&id);
     let _ = std::fs::create_dir_all(&dir);
     prune_runs(ctx);
@@ -2847,6 +2942,14 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     if own {
         shards.retain(|s| s.id.starts_with("test:") && matches!(s.os, Os::Linux | Os::Any));
     }
+    if let Some(leg) = only {
+        shards = leg_shard(&tree, leg, &timing_of, rotation).into_iter().collect();
+        if shards.is_empty() {
+            let _ = std::fs::remove_dir_all(&dir);
+            let why = format!("no plan at {} has it", pair.short());
+            return (Verdict::Incomplete, vec![crate::state::Leg { name: leg.to_string(), state: crate::state::NOT_RUN.into(), summary: why, ..Default::default() }]);
+        }
+    }
     let units: Vec<Unit> = shards.iter().flat_map(units_of).collect();
     let digests = match Digests::with_lock(&tree, &units, lock) {
         Ok(d) => d,
@@ -2867,10 +2970,12 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     }
     let mut why_lines = Vec::new();
     let mut urgency: BTreeMap<String, Urgency> = BTreeMap::new();
-    let classified = arm_plan(&tree, &mut shards, &arm);
+    let classified = if only.is_some() { Vec::new() } else { arm_plan(&tree, &mut shards, &arm) };
     ctx.store.event("ci", Sev::Info, format!("ci {}: {}", pair.short(), arm.summary), None);
     let _ = std::fs::write(dir.join("arm64.log"), format!("{}\n", arm.summary));
-    if !sweep {
+    if let Some(leg) = only {
+        why_lines.push((leg.to_string(), PROBE_WHY.into()));
+    } else if !sweep {
         let bs = boxes(ctx);
         let was: BTreeSet<String> = going.as_ref().map(|r| r.shards.iter().map(|s| s.id.clone()).collect()).unwrap_or_default();
         let (apps, others): (Vec<Shard>, Vec<Shard>) = shards.into_iter().partition(|s| s.id.starts_with("smoke:"));
@@ -3020,7 +3125,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     let word = if going.is_some() { "goes on" } else { "started" };
     ctx.store.event("ci", Sev::Info, format!("ci {} {word}: {n} shards, {kept} kept, {} on their boxes (run {id})", pair.short(), back.len()), None);
     let urgency = shards.iter().map(|s| urgency.get(&s.id).copied().unwrap_or_default()).collect();
-    let pool = Arc::new((Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
+    let pool = Arc::new((Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, reserved: vec![None; n], shards, state, waits_turn: Vec::new(), stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
     let master_t0 = Instant::now();
     let mut nothing_left: Option<Instant> = None;
     let mut last_ran = Instant::now();
@@ -3089,12 +3194,12 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                     g.state[i].summary = line;
                 }
             }
-            let busy = (0..g.shards.len()).any(|i| g.reserved[i].is_some() || g.state[i].state == "run");
-            if g.state.iter().any(|s| s.state == "run") {
+            let busy = g.getting_on();
+            if busy {
                 last_ran = Instant::now();
             } else if last_ran.elapsed() >= STALLED {
                 let asks: Vec<String> = g.state.iter().filter(|s| s.summary.starts_with(QUEUED)).map(|s| format!("{}: {}", s.id, s.summary)).take(4).collect();
-                let stall = format!("stalled, no shard got a box in {} min", STALLED.as_secs() / 60);
+                let stall = format!("stalled, no shard ran or asked for a box in {} min", STALLED.as_secs() / 60);
                 ctx.store.event("ci", Sev::Err, format!("ci {}: {stall}: {}", pair.short(), asks.join("; ")), None);
                 stop_why = format!("the run {stall}");
                 g.stopped = true;
@@ -3281,7 +3386,8 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         }
     }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     let line = format!(
-        "ci {}{upto} {word}: {n} shards, {fleet}{}{}{}; critical path {crit}; slowest {}; {}",
+        "ci {}{}{upto} {word}: {n} shards, {fleet}{}{}{}; critical path {crit}; slowest {}; {}",
+        if only.is_some() { "probe " } else { "" },
         pair.short(),
         if failed.is_empty() { String::new() } else { format!("; failed {}", failed.join(" ")) },
         if not_run == 0 { String::new() } else { format!("; {not_run} did not run") },
@@ -3316,6 +3422,11 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
             let mut g = p.lock().unwrap();
             if g.all_done() || g.stopped {
                 return;
+            }
+            let waits = lanes_first && box_up(ctx, &b.node) && g.next_for(&b).is_some();
+            g.waits_turn.retain(|node| *node != b.node);
+            if waits {
+                g.waits_turn.push(b.node.clone());
             }
             if !lanes_first && idle_until.is_none_or(|t| Instant::now() >= t) && box_up(ctx, &b.node) {
                 if let Some(i) = g.next_for(&b) {
@@ -3585,18 +3696,24 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         }
         let started = Instant::now();
         match judge_deferred(&ctx.repo, &grabs, Path::new(&log_path)) {
-            Ok(n) => summary.push_str(&format!("; judged on the master: {n} grabs")),
-            Err(e) => {
+            Judged::Pass(n) => summary.push_str(&format!("; judged on the master: {n} grabs")),
+            Judged::Miss(e) => {
                 state = "fail";
                 summary = format!("vision judge on the master: {e}");
+            }
+            Judged::NoVerdict(e) => {
+                state = "incomplete";
+                summary = format!("{JUDGE_FAULT}: {e}");
             }
         }
         secs += started.elapsed().as_secs_f64();
     }
-    if state == "fail" && summary.starts_with("vision judge on the master:") {
+    let judge_fault = summary.starts_with(JUDGE_FAULT);
+    if (state == "fail" && summary.starts_with("vision judge on the master:")) || judge_fault {
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+            let tag = if judge_fault { "CI-NO-VERDICT" } else { "CIERR" };
             for line in summary.lines().filter(|l| !l.trim().is_empty()) {
-                let _ = writeln!(f, "CIERR {line}");
+                let _ = writeln!(f, "{tag} {line}");
             }
         }
     }
@@ -3657,7 +3774,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         cv.notify_all();
         return false;
     }
-    if state == "incomplete" && g.state[i].lost.iter().map(|(_, k)| *k).sum::<u32>() < 2 * LOST_TRIES {
+    if state == "incomplete" && !judge_fault && g.state[i].lost.iter().map(|(_, k)| *k).sum::<u32>() < 2 * LOST_TRIES {
         // a lost lease: the shard is asked again (twice on one box, then elsewhere)
         // an unfit box is not asked again; a lost lease is, once
         let n = if summary.starts_with("unfit:") { LOST_TRIES } else { 1 };
@@ -3870,32 +3987,59 @@ fn judge_saved(repo: &Path, dirs: &[&str]) -> Result<String, String> {
 }
 
 /// Runs only on a shard worker, with its lease released and no pool lock held.
-fn judge_deferred(repo: &Path, grabs: &[DeferredGrab], log: &Path) -> Result<usize, String> {
-    let mut f = std::fs::OpenOptions::new().append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
+/// What a shard's judged grabs say: all passed (how many), a question answered otherwise than
+/// expected (the app's failure), or no verdict: the judge's fault, not the app's (a reply it
+/// cannot read, a grab it could not judge, the judge itself out of reach).
+enum Judged { Pass(usize), Miss(String), NoVerdict(String) }
+
+/// A shard's summary when its judge gave no verdict ([`Judged::NoVerdict`]): no failure of its
+/// app, and it is not asked again.
+const JUDGE_FAULT: &str = "no verdict, the vision judge's fault (not the app's)";
+
+fn judge_deferred(repo: &Path, grabs: &[DeferredGrab], log: &Path) -> Judged {
     let pairs: Vec<_> = grabs.iter().map(|g| (g.image.clone(), g.prompt_path.clone())).collect();
-    let verdicts = run_judge(repo, &pairs).map_err(|why| format!("{}: {why}", grabs[0].step))?;
-    let mut failed = Vec::new();
+    match run_judge(repo, &pairs) {
+        Ok(verdicts) => grabs_judged(grabs, verdicts, log),
+        Err(why) => Judged::NoVerdict(format!("{}: {why}", grabs[0].step)),
+    }
+}
+
+/// The verdicts of a shard's grabs, said in its log ([`judge_deferred`]). A reply that leaves a
+/// question unanswered is no verdict: one that listed dozens of a window's labels for its second
+/// question ran out of tokens before its third, and failed an app that came up (apps/finance, 11-16).
+fn grabs_judged(grabs: &[DeferredGrab], verdicts: Vec<JudgeLine>, log: &Path) -> Judged {
+    let mut f = match std::fs::OpenOptions::new().append(true).open(log) {
+        Ok(f) => f,
+        Err(e) => return Judged::NoVerdict(format!("{}: {e}", log.display())),
+    };
+    let (mut missed, mut faults) = (Vec::new(), Vec::new());
     for (grab, verdict) in grabs.iter().zip(verdicts) {
         match &verdict.err {
             None => {
-                writeln!(f, "CI-JUDGE {} on {} in {:.1} s", grab.step, verdict.hub, verdict.secs).map_err(|e| e.to_string())?;
+                let _ = writeln!(f, "CI-JUDGE {} on {} in {:.1} s", grab.step, verdict.hub, verdict.secs);
                 for line in verdict.raw.lines() {
-                    writeln!(f, "  {line}").map_err(|e| e.to_string())?;
+                    let _ = writeln!(f, "  {line}");
                 }
                 let evidence = grab.image.with_extension("verdict.json");
-                std::fs::write(&evidence, &verdict.json).map_err(|e| format!("{}: {}: {e}", grab.step, evidence.display()))?;
-                if !verdict.yes {
-                    failed.push(format!("{}: {}", grab.step, failure(&verdict)));
+                if let Err(e) = std::fs::write(&evidence, &verdict.json) {
+                    faults.push(format!("{}: {}: {e}", grab.step, evidence.display()));
+                }
+                if verdict.parse_error {
+                    faults.push(format!("{}: {}", grab.step, failure(&verdict)));
+                } else if !verdict.yes {
+                    missed.push(format!("{}: {}", grab.step, failure(&verdict)));
                 }
             }
-            Some(e) => failed.push(format!("{}: {e}", grab.step)),
+            Some(e) => faults.push(format!("{}: {e}", grab.step)),
         }
     }
-    if failed.is_empty() {
-        writeln!(f, "judged on the master: {} grabs", grabs.len()).map_err(|e| e.to_string())?;
-        Ok(grabs.len())
+    if !missed.is_empty() {
+        Judged::Miss(missed.join("\n"))
+    } else if !faults.is_empty() {
+        Judged::NoVerdict(faults.join("\n"))
     } else {
-        Err(failed.join("\n"))
+        let _ = writeln!(f, "judged on the master: {} grabs", grabs.len());
+        Judged::Pass(grabs.len())
     }
 }
 
@@ -4479,7 +4623,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 };
                 SWEEP_STOP.store(false, std::sync::atomic::Ordering::SeqCst);
                 let _ = held.send(true);
-                let _ = gate_held(one, &c, &p, true, true, false, false);
+                let _ = gate_held(one, &c, &p, true, true, false, false, None);
             }).map_err(|e| format!("sweep: {e}"))?;
             if !slot.recv().map_err(|e| format!("sweep: {e}"))? {
                 return Err("a sweep is going (makepad ci stop --sweep)".into());
@@ -4653,6 +4797,35 @@ pub fn cli(args: &[&str]) -> Option<i32> {
 mod tests {
     use super::*;
 
+    /// A reply that leaves a question unanswered, or a grab the judge could not judge, is no
+    /// verdict: the judge's fault, never the app's. A question answered otherwise than expected
+    /// fails the app, whatever else the judge missed.
+    #[test]
+    fn a_judge_reply_that_leaves_a_question_unanswered_is_no_verdict() {
+        let dir = std::env::temp_dir().join(format!("devhub-ci-judged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("shard.log");
+        std::fs::write(&log, "").unwrap();
+        let grab = |n: u32| DeferredGrab { step: format!("apps/x / grab {n}"), image: dir.join(format!("{n}.png")), prompt_path: dir.join(format!("{n}.txt")) };
+        let line = |n: u32, yes: bool, parse_error: bool, why: &str| parse_judge_line(&format!(r#"{{"image":"{}","yes":{yes},"raw":"1: NO - grey","seconds":1,"hub":"box-a","parse_error":{parse_error},"why":"{why}"}}"#, dir.join(format!("{n}.png")).display())).unwrap();
+        let unanswered = || line(1, false, true, "question 3 unanswered (YES or NO)");
+        match grabs_judged(&[grab(1)], vec![unanswered()], &log) {
+            Judged::NoVerdict(why) => assert!(why.starts_with("apps/x / grab 1: vision parse failed: question 3 unanswered"), "{why}"),
+            _ => panic!("an unanswered question is no verdict"),
+        }
+        let unjudged = parse_judge_line(&format!(r#"{{"image":"{}","err":"the hub dropped the call"}}"#, dir.join("2.png").display())).unwrap();
+        assert!(matches!(grabs_judged(&[grab(2)], vec![unjudged], &log), Judged::NoVerdict(why) if why == "apps/x / grab 2: the hub dropped the call"));
+        match grabs_judged(&[grab(1), grab(2)], vec![unanswered(), line(2, false, false, "toolbar missing")], &log) {
+            Judged::Miss(why) => assert_eq!(why, "apps/x / grab 2: toolbar missing"),
+            _ => panic!("a miss fails the app"),
+        }
+        assert!(matches!(grabs_judged(&[grab(1), grab(2)], vec![line(1, true, false, ""), line(2, true, false, "")], &log), Judged::Pass(2)));
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(said.contains("CI-JUDGE apps/x / grab 1 on box-a in 1.0 s") && said.ends_with("judged on the master: 2 grabs\n"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn judge_lines_keep_verdicts_and_report_errors() {
         let pass = r#"{"image":"01.png","yes":true,"raw":"1: YES - a toolbar","seconds":1.5,"hub":"box-a","parse_error":false,"why":""}"#;
@@ -4770,7 +4943,7 @@ mod tests {
         }
         let mut pool = Pool {
             tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: vec![CiShard { id: "gate".into(), state: "ok".into(), ..Default::default() }],
-            reserved: Vec::new(), stopped: false, prio: PRIO, urgency: Vec::new(), overdue: Vec::new(), run_id: "gate".into(), sweep: false, leg: None,
+            reserved: Vec::new(), waits_turn: Vec::new(), stopped: false, prio: PRIO, urgency: Vec::new(), overdue: Vec::new(), run_id: "gate".into(), sweep: false, leg: None,
         };
         let sweep = ci.sweep_run.clone();
         publish(&mut ci, &pool);
@@ -5201,9 +5374,17 @@ shared = { workspace = true }
         let shards = vec![shard("wtest:a", Os::Windows, 60.0), shard("test:deps", Os::Linux, 300.0), shard("test:own", Os::Linux, 20.0), shard("test:new", Os::Linux, 10.0)];
         let n = shards.len();
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
+        assert!(!p.getting_on(), "nothing runs or asks yet");
         // the Windows shard is stuck in its box's queue
         assert_eq!(p.next_for(&win), Some(0));
+        p.reserved[0] = Some("w".into());
+        p.state[0].summary = format!("{QUEUED}w: held back: lane work waits for a box this could take");
+        assert!(p.getting_on(), "a shard queued behind lane work waits its turn: no stall");
+        p.reserved[0] = None;
+        p.waits_turn.push("w".into());
+        assert!(p.getting_on(), "a sweep's box that holds back for lane work waits its turn: no stall");
+        p.waits_turn.clear();
         p.reserved[0] = Some("w".into());
         p.state[0].state = "run".into();
         p.state[0].node = "w".into();
@@ -5259,7 +5440,7 @@ shared = { workspace = true }
         let shard = |id: &str, est: f64| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
         let shards = vec![shard("whole", 300.0), shard("small", 20.0)];
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 2], stopped: false, prio: 0, urgency: vec![Urgency::Deps; 2], overdue: vec![false; 2], run_id: "r".into(), sweep: false, leg: None };
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 2], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; 2], overdue: vec![false; 2], run_id: "r".into(), sweep: false, leg: None };
         assert_eq!(p.next_for(&lin), Some(0), "the longest first");
         p.state[0].spans.push(CiSpan { node: "l".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 });
         assert_eq!(p.next_for(&lin), Some(1), "its ask gave up: the other goes");
@@ -5344,7 +5525,7 @@ shared = { workspace = true }
         let boxes = [bx("a", Os::Linux), bx("b", Os::Linux), bx("m", Os::Macos)];
         let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Any, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         let n = BOX_OUT + 1;
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
         // the same OS only, never the box that failed it (an `Any` shard failing on Linux says
         // nothing about a Mac)
         assert!(p.second_box(0, "a", &boxes, "exit 1", vec!["error: x".into()]));
@@ -5730,7 +5911,7 @@ shared = { workspace = true }
         let shard = |id: &str, dir: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est: 1.0, dirs: Some(vec![dir.into()]), whole: false, cores: None };
         let (a, gone) = (shard("wtest:a", "libs/a"), shard("wtest:gone", "libs/gone"));
         // (a sweep's pool: its legs share the leg tree it found)
-        let sweep = || Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
+        let sweep = || Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), waits_turn: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
         let pool = sweep();
         let leg = sweep_leg(&ctx, &old, &dir, &a, &pool).expect("a leg of a sweep behind the rolling run takes its pair");
         assert_eq!(leg.pair, new);

@@ -187,6 +187,10 @@ fn next_state(state: State, message: Option<&Msg>) -> Result<State, String> {
         ("user", "answer") => Ok(State::Answered),
         ("user", "ask") => Ok(State::Waiting),
         ("main", "reply") => Ok(if state == State::Waiting { State::Open } else { state }),
+        // main's reply that gives the turn back whatever the state: an answer that was a question
+        // (`ask reply --reopen`) left the reply under the answered ones, where the user did not
+        // find it (Q27, Q28, 11-18)
+        ("main", "reopen") => Ok(State::Open),
         _ => Err("unknown message author or kind".into()),
     }
 }
@@ -203,6 +207,31 @@ pub struct Asks {
 struct St {
     qs: Vec<Question>,
     rev: u64,
+    /// The highest id given, a cleared question's too: ids count on after a clear
+    last_id: u64,
+    /// The changes of the questions cleared to the archive: the revision rebuilt at open
+    /// counts them, so it never goes back
+    cleared: u64,
+}
+
+/// A question's durable changes: its filing, its messages and refusals, its close.
+fn changes(q: &Question) -> u64 {
+    1 + q.thread.len() as u64 + q.refused.len() as u64 + u64::from(q.state == State::Closed)
+}
+
+/// A user message main has not taken yet (`ask wait`): a clear keeps its question.
+pub fn untaken(q: &Question) -> bool {
+    q.thread.iter().any(|m| m.by == "user" && !m.taken)
+}
+
+/// What a clear left in aires' list and why, as a sentence's end: `` or `; 2 open and 1 answer
+/// main has not taken stay`.
+pub fn kept_words(open: u64, untaken: u64) -> String {
+    let mut parts = Vec::new();
+    if open > 0 { parts.push(format!("{open} open")); }
+    if untaken > 0 { parts.push(format!("{untaken} {} main has not taken", if untaken == 1 { "answer" } else { "answers" })); }
+    if parts.is_empty() { return String::new(); }
+    format!("; {} {}", parts.join(" and "), if open + untaken == 1 { "stays" } else { "stay" })
 }
 
 impl St {
@@ -218,8 +247,14 @@ impl St {
     }
 
     fn replay(&mut self, v: &Value) {
+        if field(v, "op") == Some("cleared") {
+            self.last_id = self.last_id.max(v.get("last_id").and_then(Value::as_u64).unwrap_or(0));
+            self.cleared = self.cleared.max(v.get("changes").and_then(Value::as_u64).unwrap_or(0));
+            return;
+        }
         if field(v, "op") == Some("q") {
             if let Some(q) = v.get("q").and_then(Question::from_value) {
+                self.last_id = self.last_id.max(id_number(&q.id));
                 if let Some(i) = self.qs.iter().position(|old| old.id == q.id) { self.qs[i] = q; }
                 else { self.qs.push(q); }
             }
@@ -264,24 +299,52 @@ impl Asks {
         // Reconstruct the revision from durable changes so compaction does not reset followers;
         // revisions start at 1 (a follow at 0 gets the list at once, so an empty store at 0 would
         // answer its follower at once, again and again).
-        st.rev = 1 + st.qs.iter().map(|q| 1 + q.thread.len() as u64 + q.refused.len() as u64 + u64::from(q.state == State::Closed)).sum::<u64>();
+        st.rev = 1 + st.cleared + st.qs.iter().map(changes).sum::<u64>();
         let asks = Arc::new(Self { path: Some(path), machine: machine.into(), publish: Some(publish), st: Mutex::new(st), changed: Condvar::new() });
         asks.compact().unwrap_or_else(|e| panic!("cannot compact questions: {e}"));
         asks
     }
 
     fn compact(&self) -> std::io::Result<()> {
+        self.rewrite(&self.st.lock().unwrap())
+    }
+
+    /// The store as one line per question, and first, once a clear moved some to the archive,
+    /// the id count and changes they took along.
+    fn rewrite(&self, st: &St) -> std::io::Result<()> {
         let Some(path) = &self.path else { return Ok(()) };
         if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) { std::fs::create_dir_all(dir)?; }
         let mut tmp = path.as_os_str().to_os_string();
         tmp.push(".new");
         let tmp = PathBuf::from(tmp);
         let mut f = std::fs::File::create(&tmp)?;
-        for q in &self.st.lock().unwrap().qs {
+        let highest = st.qs.iter().map(|q| id_number(&q.id)).max().unwrap_or(0);
+        if st.cleared > 0 || st.last_id > highest {
+            writeln!(f, "{}", obj(vec![("op", s("cleared")), ("last_id", number(st.last_id)), ("changes", number(st.cleared))]).to_json())?;
+        }
+        for q in &st.qs {
             writeln!(f, "{}", obj(vec![("op", s("q")), ("q", q.to_value())]).to_json())?;
         }
         f.sync_data()?;
         std::fs::rename(tmp, path)
+    }
+
+    /// Where a clear keeps the questions it takes from the list: beside the store
+    /// (`ask-archive.jsonl`), one line each, the question whole with when it was cleared.
+    fn archive(&self) -> Option<PathBuf> {
+        let path = self.path.as_ref()?;
+        let stem = path.file_stem()?.to_str()?;
+        Some(path.with_file_name(format!("{stem}-archive.jsonl")))
+    }
+
+    /// An archived question by its id (its last line: a clear cut short by a crash may have
+    /// archived it once before), and when it was cleared.
+    fn archived(&self, id: &str) -> Option<(Question, u64)> {
+        let text = std::fs::read(self.archive()?).ok()?;
+        text.split(|b| *b == b'\n').filter_map(|line| parse(line).ok()).filter_map(|v| {
+            let q = v.get("q").and_then(Question::from_value)?;
+            (q.id == id).then(|| (q, v.get("cleared_ms").and_then(Value::as_u64).unwrap_or(0)))
+        }).last()
     }
 
     fn append(&self, v: Value) -> Result<(), String> {
@@ -314,13 +377,14 @@ impl Asks {
         let mut st = self.st.lock().unwrap();
         match verb {
             "new" => {
-                let n = st.qs.iter().map(|q| id_number(&q.id)).max().unwrap_or(0).checked_add(1).ok_or("question id overflow")?;
+                let n = st.qs.iter().map(|q| id_number(&q.id)).fold(st.last_id, u64::max).checked_add(1).ok_or("question id overflow")?;
                 let mut q = new_question(&v)?;
                 q.id = format!("Q{n}");
                 q.created_ms = wall_ms();
                 self.append(obj(vec![("op", s("q")), ("q", q.to_value())]))?;
                 let line = format!("ask: {} from {}: {}", q.id, q.from, q.title);
                 out.push(obj(vec![("id", s(&q.id))]).to_json());
+                st.last_id = n;
                 st.qs.push(q);
                 self.changed(&mut st);
                 drop(st);
@@ -330,14 +394,65 @@ impl Asks {
                 let open = flag(&v, "open")?;
                 for q in st.ordered().into_iter().filter(|q| !open || q.state.group() == 0) { out.push(q.summary().to_json()); }
             }
-            "show" => out.push(st.qs[st.index(&v)?].to_value().to_json()),
+            "show" => match st.index(&v) {
+                Ok(i) => out.push(st.qs[i].to_value().to_json()),
+                // a cleared question is in the archive, whole
+                Err(e) => {
+                    let (q, cleared_ms) = field(&v, "id").and_then(|id| self.archived(id)).ok_or(e)?;
+                    let Value::Obj(mut fields) = q.to_value() else { unreachable!("a question is an object") };
+                    fields.push(("cleared_ms".into(), number(cleared_ms)));
+                    out.push(Value::Obj(fields).to_json());
+                }
+            },
+            // The user's: answered and closed questions main has taken every message of leave the
+            // list for the archive. Open ones and untaken answers stay. `dry`: the counts alone.
+            "clear" => {
+                let dry = flag(&v, "dry")?;
+                let gone = |q: &Question| q.state.group() != 0 && !untaken(q);
+                let n = st.qs.iter().filter(|q| gone(q)).count() as u64;
+                let open = st.qs.iter().filter(|q| q.state.group() == 0).count() as u64;
+                let kept = st.qs.iter().filter(|q| q.state.group() != 0 && untaken(q)).count() as u64;
+                let said = obj(vec![("cleared", number(n)), ("open", number(open)), ("untaken", number(kept))]).to_json();
+                if dry || n == 0 {
+                    out.push(said);
+                    return Ok(());
+                }
+                let judged = judge();
+                if judged.source == Source::Refused {
+                    drop(st);
+                    self.publish(Sev::Warn, format!("ask: a clear of the list was refused: {} ({})", judged.why, judged.chain));
+                    return Err(format!("refused: {}", judged.why));
+                }
+                let at = wall_ms();
+                if let Some(archive) = self.archive() {
+                    let lines: String = st.qs.iter().filter(|q| gone(q)).map(|q| obj(vec![("op", s("q")), ("q", q.to_value()), ("cleared_ms", number(at))]).to_json() + "\n").collect();
+                    let write = || -> std::io::Result<()> {
+                        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&archive)?;
+                        f.write_all(lines.as_bytes())?;
+                        f.sync_data()
+                    };
+                    write().map_err(|e| format!("cannot archive questions at {}: {e}", archive.display()))?;
+                }
+                let (cleared, kept_qs): (Vec<Question>, Vec<Question>) = std::mem::take(&mut st.qs).into_iter().partition(|q| gone(q));
+                st.last_id = cleared.iter().chain(&kept_qs).map(|q| id_number(&q.id)).fold(st.last_id, u64::max);
+                // (and the clear: the revision rebuilt at open is the one followers saw last)
+                st.cleared += cleared.iter().map(changes).sum::<u64>() + 1;
+                st.qs = kept_qs;
+                // (archived first: a crash before this leaves them in both, the list's copy shown)
+                self.rewrite(&st).map_err(|e| format!("cannot save questions: {e}"))?;
+                self.changed(&mut st);
+                drop(st);
+                out.push(said);
+                self.publish(Sev::Info, format!("ask: the user cleared {n} answered and closed questions to the archive ({}){}", judged.source.word(), kept_words(open, kept)));
+            }
             "answer" | "reply" => {
                 let i = st.index(&v)?;
                 let q = &st.qs[i];
                 if q.state == State::Closed { return Err(format!("{} is closed", q.id)); }
                 let mut m = if verb == "answer" { answer_message(&v, Some(q.options.len()))? } else {
                     let text = required(&v, "text")?;
-                    Msg { seq: 0, at_ms: 0, by: "main".into(), kind: "reply".into(), choice: None, decide: false,
+                    let kind = if flag(&v, "reopen")? { "reopen" } else { "reply" };
+                    Msg { seq: 0, at_ms: 0, by: "main".into(), kind: kind.into(), choice: None, decide: false,
                         text, source: "main".into(), chain: String::new(), taken: false }
                 };
                 m.seq = u32::try_from(q.thread.len()).ok().and_then(|n| n.checked_add(1)).ok_or("message sequence overflow")?;
@@ -361,7 +476,11 @@ impl Asks {
                 }
                 m.at_ms = wall_ms();
                 self.append(obj(vec![("op", s("msg")), ("id", s(&id)), ("m", m.to_value())]))?;
-                let line = (verb == "answer").then(|| format!("ask: {id} {} ({})", if m.kind == "ask" { "asked a follow-up" } else { "answered" }, m.source));
+                let line = match (verb, m.kind.as_str()) {
+                    ("answer", kind) => Some(format!("ask: {id} {} ({})", if kind == "ask" { "asked a follow-up" } else { "answered" }, m.source)),
+                    (_, "reopen") => Some(format!("ask: main reopened {id} with a reply: the user's turn again")),
+                    _ => None,
+                };
                 out.push(obj(vec![("ok", Value::Bool(true)), ("seq", number(m.seq as u64))]).to_json());
                 st.qs[i].state = state;
                 st.qs[i].thread.push(m);
@@ -403,7 +522,7 @@ impl Asks {
                         }
                         return Ok(());
                     }
-                    st = self.changed.wait_timeout(st, Duration::from_secs(60)).unwrap().0;
+                    st = self.changed.wait_timeout(st, RECHECK).unwrap().0;
                 }
             }
             "follow" => {
@@ -416,10 +535,10 @@ impl Asks {
                         out.extend(st.ordered().into_iter().map(|q| q.to_value().to_json()));
                         return Ok(());
                     }
-                    st = self.changed.wait_timeout(st, Duration::from_secs(60)).unwrap().0;
+                    st = self.changed.wait_timeout(st, RECHECK).unwrap().0;
                 }
             }
-            _ => return Err("ask new | list | show | answer | reply | close | wait | follow".into()),
+            _ => return Err("ask new | list | show | answer | reply | close | clear | wait | follow".into()),
         }
         Ok(())
     }
@@ -471,6 +590,10 @@ pub fn register(ep: &makepad_remote::endpoint::Endpoint, asks: Arc<Asks>) {
     })));
 }
 
+/// How long a `wait` or `follow` sleeps before it looks again unwoken: whether its client is
+/// gone. A change wakes it at once ([`Asks::changed`]).
+const RECHECK: Duration = Duration::from_secs(60);
+
 pub const HELP: &str = "  ask new --from <who> --title <t>         file a question for the user (DEVHUB_AGENT=main only)
                                           [--decided <t>] [--why <t>] [--option <t>]... [--recommend <t>]
                                           [--blocked <t>] [--context <t> | --context-file <path>]
@@ -479,8 +602,14 @@ pub const HELP: &str = "  ask new --from <who> --title <t>         file a questi
   ask answer <id> [--choice <n> | --decide] [--text <t>] [--ask]
                                           the user's answer, typed at a terminal or pressed in aires;
                                           refused in an agent's environment. --ask asks a follow-up
-  ask reply <id> <text...>                main's reply to the user's follow-up
+  ask reply <id> [--reopen] <text...>     main's reply to the user's follow-up; --reopen (DEVHUB_AGENT=main
+                                          only) gives the question back to the user whatever its state
+                                          (an answer that was a question), unless it is closed
   ask close <id>                          close a question, keeping its thread
+  ask clear                               the user's, after a confirm: answered and closed questions
+                                          leave aires' list for the archive beside the store, where
+                                          `ask show` still finds them; open questions and answers
+                                          main has not taken stay. Refused in an agent's environment
   ask wait (--any | <id>...) [--json]     wait for untaken user messages and take them, oldest first";
 
 fn argument<'a>(args: &[&'a str], i: &mut usize) -> Result<&'a str, String> {
@@ -568,6 +697,12 @@ fn cli_request(a: &[&str]) -> Result<(String, bool), String> {
         ["show", id, rest @ ..] if rest.is_empty() || *rest == ["--json"] => {
             Ok((format!("show {}", obj(vec![("id", s(*id))]).to_json()), !rest.is_empty()))
         }
+        ["reply", id, "--reopen", words @ ..] if !words.is_empty() && !words.join(" ").trim().is_empty() => {
+            if std::env::var("DEVHUB_AGENT").as_deref() != Ok("main") {
+                return Err("only main reopens a question (DEVHUB_AGENT=main); a lane sends its reply to main".into());
+            }
+            Ok((format!("reply {}", obj(vec![("id", s(*id)), ("text", s(words.join(" "))), ("reopen", Value::Bool(true))]).to_json()), false))
+        }
         ["reply", id, words @ ..] if !words.is_empty() && !words.join(" ").trim().is_empty() => {
             Ok((format!("reply {}", obj(vec![("id", s(*id)), ("text", s(words.join(" ")))]).to_json()), false))
         }
@@ -592,7 +727,47 @@ fn cli_request(a: &[&str]) -> Result<(String, bool), String> {
     }
 }
 
+/// `ask clear`: the user's, at a terminal. It says what would go and what stays, and clears
+/// once they say yes.
+fn clear_cli() -> i32 {
+    if let Err(e) = crate::cli::user_at_terminal() {
+        eprintln!("makepad devhub ask clear: {e}");
+        return 2;
+    }
+    let request = |line: &str| -> Result<(u64, u64, u64), String> {
+        let c = crate::cli::control()?;
+        let lines = crate::cli::ask(&c, None, "ask", line)?;
+        let v = parse(lines.first().ok_or("no response")?.as_bytes()).map_err(|e| format!("invalid response: {e}"))?;
+        if let Some(e) = field(&v, "err") { return Err(e.to_string()); }
+        let n = |key| v.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Ok((n("cleared"), n("open"), n("untaken")))
+    };
+    let (n, open, untaken) = match request(r#"clear {"dry":true}"#) {
+        Ok(counts) => counts,
+        Err(e) => { eprintln!("makepad devhub ask clear: {e}"); return 2; }
+    };
+    if n == 0 {
+        println!("nothing to clear{}", kept_words(open, untaken));
+        return 0;
+    }
+    print!("clear {n} answered and closed question(s) from aires' list to the archive{}? [y/N] ", kept_words(open, untaken));
+    let _ = std::io::stdout().flush();
+    let mut yes = String::new();
+    if std::io::stdin().read_line(&mut yes).is_err() || !matches!(yes.trim(), "y" | "Y" | "yes") {
+        println!("not cleared");
+        return 1;
+    }
+    match request("clear {}") {
+        Ok((n, open, untaken)) => {
+            println!("cleared {n}{}; `ask show <id>` finds them in the archive", kept_words(open, untaken));
+            0
+        }
+        Err(e) => { eprintln!("makepad devhub ask clear: {e}"); 1 }
+    }
+}
+
 pub fn cli(a: &[&str]) -> i32 {
+    if a == ["clear"] { return clear_cli(); }
     let (line, json) = match cli_request(a) {
         Ok(r) => r,
         Err(e) => { eprintln!("makepad devhub ask: {e}"); return 2; }
@@ -626,7 +801,10 @@ pub fn cli(a: &[&str]) -> i32 {
                     if refused > 0 { println!("  ({refused} refused answer attempts)"); }
                 }
                 "show" => match Question::from_value(&v) {
-                    Some(q) => print!("{}", card(&q)),
+                    Some(q) => {
+                        print!("{}", card(&q));
+                        if let Some(at) = v.get("cleared_ms").and_then(Value::as_u64) { println!("cleared from the list to the archive at {} UTC", time(at)); }
+                    }
                     None => { eprintln!("makepad devhub ask: invalid question response"); return 2; }
                 },
                 "wait" => println!("{} {} from the user, source={} ({}): {}", field(&v, "id").unwrap_or(""),
@@ -720,7 +898,7 @@ mod tests {
             started.send(()).unwrap();
             tx.send(call(&asks, &line)).unwrap();
         });
-        ready.recv_timeout(Duration::from_millis(100)).expect("worker starts");
+        ready.recv().expect("worker starts");
         (thread, rx)
     }
 
@@ -756,17 +934,27 @@ mod tests {
         let replay = Asks::open(path.clone(), "", publish.clone());
         assert_eq!(state(&replay), State::Open, "replay applies main's reply transition");
         drop(replay);
+        // an answer that was a question: a plain reply leaves it answered, a reopen gives it back
+        call(&asks, r#"answer {"id":"Q1","text":"Is that after the merge?"}"#);
+        call(&asks, r#"reply {"id":"Q1","text":"Yes, after it"}"#);
+        assert_eq!(state(&asks), State::Answered, "a plain reply keeps an answered question answered");
+        call(&asks, r#"reply {"id":"Q1","text":"Yes, after it: which do you pick?","reopen":true}"#);
+        assert_eq!(state(&asks), State::Open, "a reopen gives the turn back to the user");
+        assert_eq!(question(&asks, "Q1").thread.last().map(|m| (m.by.as_str(), m.kind.as_str())), Some(("main", "reopen")));
+        let replay = Asks::open(path.clone(), "", publish.clone());
+        assert_eq!(state(&replay), State::Open, "replay applies the reopen transition");
+        drop(replay);
         let mut out = Vec::new();
         asks.serve(r#"answer {"id":"Q1","text":"Forged"}"#, &refused, &mut out);
         let rev = asks.st.lock().unwrap().rev;
         let delivery = call(&asks, r#"wait {"ids":["Q1"]}"#);
-        assert_eq!(delivery.len(), 5, "wait takes all user messages, never main's replies");
+        assert_eq!(delivery.len(), 6, "wait takes all user messages, never main's replies");
         assert_eq!(field(&delivery[0], "choice_text"), Some("Land it"), "wait includes the option's text");
         assert_eq!(asks.st.lock().unwrap().rev, rev, "taking does not change the tray revision");
         call(&asks, r#"close {"id":"Q1"}"#);
         assert_eq!(state(&asks), State::Closed, "close is final");
         let before = question(&asks, "Q1");
-        for line in [r#"answer {"id":"Q1","text":"Too late"}"#, r#"reply {"id":"Q1","text":"Too late"}"#] {
+        for line in [r#"answer {"id":"Q1","text":"Too late"}"#, r#"reply {"id":"Q1","text":"Too late"}"#, r#"reply {"id":"Q1","text":"Too late","reopen":true}"#] {
             let mut out = Vec::new();
             asks.serve(line, &|| panic!("closed questions are rejected before judging"), &mut out);
             assert!(field(&parse(out[0].as_bytes()).unwrap(), "err").is_some(), "messages after close fail");
@@ -804,6 +992,52 @@ mod tests {
         assert_eq!(compacted.st.lock().unwrap().qs, saved, "compacted question snapshots round trip");
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3, "compaction writes one line per question");
         drop(compacted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The user's clear: answered and closed questions main took every message of go to the archive
+    /// beside the store; open ones and answers main has not taken stay; an agent's is refused;
+    /// `show` finds an archived question whole; ids count on, across a restart too.
+    #[test]
+    fn clear_archives_the_taken_and_keeps_open_and_untaken() {
+        let dir = std::env::temp_dir().join(format!("devhub-ask-clear-{}", std::process::id()));
+        let path = dir.join("ask.jsonl");
+        let publish: Publish = Arc::new(|_| {});
+        let asks = Asks::open(path.clone(), "", publish.clone());
+        for _ in 0..4 { call(&asks, NEW); }
+        call(&asks, r#"answer {"id":"Q2","choice":1}"#);
+        call(&asks, r#"wait {"ids":["Q2"]}"#);
+        call(&asks, r#"answer {"id":"Q3","text":"Wait for review"}"#);
+        call(&asks, r#"close {"id":"Q4"}"#);
+        let ids = |asks: &Asks| call(asks, "list {}").iter().map(|v| field(v, "id").unwrap().to_string()).collect::<Vec<_>>();
+        let counts = |v: &Value| ["cleared", "open", "untaken"].map(|k| v.get(k).and_then(Value::as_u64).unwrap());
+        assert_eq!(counts(&call(&asks, r#"clear {"dry":true}"#)[0]), [2, 1, 1], "Q2 (taken) and Q4 (closed) go; Q1 is open, Q3's answer untaken");
+        assert_eq!(ids(&asks), ["Q1", "Q3", "Q2", "Q4"], "a dry run changes nothing");
+        let mut out = Vec::new();
+        asks.serve("clear {}", &refused, &mut out);
+        assert!(field(&parse(out[0].as_bytes()).unwrap(), "err").is_some_and(|e| e.starts_with("refused")), "an agent's clear is refused");
+        assert_eq!(ids(&asks), ["Q1", "Q3", "Q2", "Q4"], "and changes nothing");
+        let before = question(&asks, "Q2");
+        assert_eq!(counts(&call(&asks, "clear {}")[0]), [2, 1, 1]);
+        assert_eq!(ids(&asks), ["Q1", "Q3"], "the open question and the untaken answer stay");
+        let archived = call(&asks, r#"show {"id":"Q2"}"#);
+        assert_eq!(Question::from_value(&archived[0]), Some(before), "show finds an archived question whole");
+        assert!(archived[0].get("cleared_ms").and_then(Value::as_u64).is_some_and(|at| at > 0), "and says when it was cleared");
+        assert_eq!(std::fs::read_to_string(dir.join("ask-archive.jsonl")).unwrap().lines().count(), 2, "the archive is beside the store");
+        assert_eq!(field(&call(&asks, NEW)[0], "id"), Some("Q5"), "the next id follows the highest ever given, Q4 archived");
+        call(&asks, r#"answer {"id":"Q5","decide":true}"#);
+        call(&asks, r#"wait {"ids":["Q5"]}"#);
+        assert_eq!(counts(&call(&asks, "clear {}")[0]), [1, 1, 1], "the newest question, answered and taken, goes too");
+        let rev = asks.st.lock().unwrap().rev;
+        assert_eq!(counts(&call(&asks, "clear {}")[0]), [0, 1, 1], "nothing more to clear");
+        assert_eq!(asks.st.lock().unwrap().rev, rev, "and nothing changed");
+        drop(asks);
+        let again = Asks::open(path.clone(), "", publish);
+        assert_eq!(again.st.lock().unwrap().rev, rev, "the revision rebuilt at open counts the cleared questions");
+        assert_eq!(ids(&again), ["Q1", "Q3"]);
+        assert!(question(&again, "Q4").state == State::Closed, "the archive outlives a restart");
+        assert_eq!(field(&call(&again, NEW)[0], "id"), Some("Q6"), "ids count on after a restart, the highest archived");
+        drop(again);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -854,7 +1088,8 @@ mod tests {
         let (worker, rx) = blocked_call(&asks, r#"wait {"any":true}"#.into());
         assert!(matches!(rx.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout)), "wait blocks before an answer");
         call(&asks, r#"answer {"id":"Q1","choice":2,"text":"Until reviewed"}"#);
-        let out = rx.recv_timeout(Duration::from_millis(100)).expect("answer wakes wait");
+        // the change wakes it, not the recheck: a box under load took over 100 ms (11-16)
+        let out = rx.recv_timeout(RECHECK / 2).expect("answer wakes wait");
         worker.join().unwrap();
         assert_eq!(out.len(), 1, "wait returns the one untaken message");
         assert_eq!(field(&out[0], "source"), Some("tray"), "wait includes source");
@@ -865,7 +1100,7 @@ mod tests {
         call(&asks, NEW);
         assert!(matches!(rx.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout)), "new questions alone do not satisfy wait");
         call(&asks, r#"answer {"id":"Q2","ask":true,"text":"Why now?"}"#);
-        let out = rx.recv_timeout(Duration::from_millis(100)).expect("another question's answer releases any wait");
+        let out = rx.recv_timeout(RECHECK / 2).expect("another question's answer releases any wait");
         worker.join().unwrap();
         assert_eq!(out.len(), 1, "second wait does not redeliver the first answer");
         assert_eq!(field(&out[0], "id"), Some("Q2"), "any includes questions created while waiting");
@@ -882,7 +1117,7 @@ mod tests {
         let (worker, rx) = blocked_call(&asks, format!("follow {{\"rev\":{rev}}}"));
         assert!(matches!(rx.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout)), "follow waits at the current revision");
         call(&asks, r#"reply {"id":"Q2","text":"The review is complete"}"#);
-        let out = rx.recv_timeout(Duration::from_millis(100)).expect("reply wakes follow");
+        let out = rx.recv_timeout(RECHECK / 2).expect("reply wakes follow");
         worker.join().unwrap();
         assert_eq!(out[0].get("rev").and_then(Value::as_u64), Some(rev + 1), "follow reports the new revision");
         assert_eq!(Question::from_value(&out[1]).unwrap().state, State::Open, "follow snapshot includes the transition");

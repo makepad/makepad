@@ -199,7 +199,8 @@ fn target_platform(triple: &str) -> (String, String) {
 
 /// Whether the JIT runs on this platform: a JIT leg verifies it.
 fn jit_runs(os: &str, arch: &str) -> bool {
-    crate::orch::verify::legs(true).iter().any(|leg| {
+    // (a gating leg: a report-only one is on its way to verifying)
+    crate::orch::verify::legs(true).iter().filter(|leg| !leg.report_only).any(|leg| {
         let needs = super::sched::parse_needs(&leg.needs);
         needs.iter().any(|(k, v)| k == "os" && v.eq_ignore_ascii_case(os)) && needs.iter().any(|(k, v)| k == "arch" && arch_word(v) == arch)
     })
@@ -246,6 +247,77 @@ fn pair_of(repo_dir: &Path, rev: &str) -> Result<crate::state::Pair, String> {
     }
     let o = crate::git_exec::command().args(["rev-parse", "HEAD"]).current_dir(repo_dir).output().map_err(|e| format!("git: {e}"))?;
     Ok(crate::state::Pair::new(String::from_utf8_lossy(&o.stdout).trim(), ""))
+}
+
+/// Whether a Windows box takes a lease's command ([`super::sched::Req::windows`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum OnWindows {
+    /// a plain cargo build, check, clippy or test of packages checked there, none of their gaps
+    Runs,
+    /// not such a command, or a package not checked there: no Windows box takes it unless named
+    Not,
+    /// a package's gap there, with why ([`crate::orch::ci::Krate::platform_gaps`])
+    Gap(String),
+}
+
+/// Whether a Windows box runs `cmd`: plain argv (a Windows run is never a shell's), `cargo build`,
+/// `check`, `clippy` or `test` of packages it names with `-p`, each checked on Windows (`gaps`:
+/// its platform-gaps' `windows` table, None when it has none) and selecting none of its gaps.
+/// A build or check selects its lib and bins unless it names targets; a test, every target. The
+/// workspace, another manifest or a `--target` is not checked anywhere: it stays off Windows.
+pub fn on_windows(cmd: &[String], gaps: &dyn Fn(&str) -> Option<std::collections::BTreeMap<String, String>>) -> OnWindows {
+    let Some(first) = cmd.first() else { return OnWindows::Not };
+    let program = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    if program != "cargo" && program != "cargo.exe" { return OnWindows::Not; }
+    let mut words = cmd[1..].iter().map(String::as_str).skip_while(|w| w.starts_with('+') || matches!(*w, "-q" | "--quiet" | "-v" | "-vv" | "--locked" | "--frozen" | "--offline"));
+    let verb = match words.next() {
+        Some("build" | "b") => "build",
+        Some("check" | "c") => "check",
+        Some("clippy") => "clippy",
+        Some("test" | "t") => "test",
+        _ => return OnWindows::Not,
+    };
+    let (mut pkgs, mut select) = (Vec::new(), Vec::new());
+    while let Some(w) = words.next() {
+        match w {
+            "--" => break,
+            "--workspace" | "--all" | "--manifest-path" | "--target" | "--examples" | "--benches" | "--example" | "--bench" | "-Z" => return OnWindows::Not,
+            w if w.starts_with("--manifest-path=") || w.starts_with("--target=") || w.starts_with("-Z") => return OnWindows::Not,
+            "-p" | "--package" => match words.next() { Some(p) => pkgs.push(p.to_string()), None => return OnWindows::Not },
+            "--lib" | "--bins" | "--tests" | "--all-targets" => select.push(w[2..].to_string()),
+            "--bin" | "--test" => match words.next() { Some(name) => select.push(format!("{}:{name}", &w[2..])), None => return OnWindows::Not },
+            w => {
+                if let Some(p) = w.strip_prefix("--package=").or_else(|| w.strip_prefix("-p").filter(|p| !p.is_empty())) { pkgs.push(p.to_string()); }
+                else if let Some((kind, name)) = w.strip_prefix("--bin=").map(|n| ("bin", n)).or_else(|| w.strip_prefix("--test=").map(|n| ("test", n))) { select.push(format!("{kind}:{name}")); }
+            }
+        }
+    }
+    if pkgs.is_empty() { return OnWindows::Not; }
+    if verb != "test" && select.is_empty() { select = vec!["lib".into(), "bins".into()]; }
+    for pkg in &pkgs {
+        let Some(gaps) = gaps(pkg) else { return OnWindows::Not };
+        if let Some(why) = gaps.get("build") { return OnWindows::Gap(format!("{pkg} does not build on Windows: {why}")); }
+        if let Some((target, why)) = crate::jit_misses::native_selected(&gaps, &select).first() {
+            return OnWindows::Gap(format!("{pkg} {target} on Windows: {why}"));
+        }
+    }
+    OnWindows::Runs
+}
+
+/// [`on_windows`] for `cmd` in the lane's tree at `rev` (its pin, else the worktree's HEAD),
+/// with the line to print when a gap keeps it off Windows.
+pub fn windows_verdict(repo_dir: &Path, rev: &str, cmd: &[String]) -> (bool, String) {
+    // (the tree is read only for a cargo command that could run there)
+    let pair = std::cell::OnceCell::new();
+    let verdict = on_windows(cmd, &|pkg| {
+        let pair = pair.get_or_init(|| pair_of(repo_dir, rev).ok()).as_ref()?;
+        crate::jit_misses::test_package(repo_dir, pair, pkg).ok().and_then(|mut p| p.platform_gaps.remove("windows"))
+    });
+    match verdict {
+        OnWindows::Runs => (true, String::new()),
+        OnWindows::Not => (false, String::new()),
+        OnWindows::Gap(why) => (false, format!("devhub: no Windows box takes it: {why} (its Cargo.toml's platform-gaps)")),
+    }
 }
 
 /// The rule (master only). Ok: the command may run, with a line to print (empty: nothing gated);
@@ -352,7 +424,9 @@ pub fn serve(home: &Path, line: &str, now: u64, nodes: &[NodeView], route: &dyn 
     let (os, arch) = platform(&super::sched::parse_needs(&s("needs")), &s("node"), nodes);
     let ask = Ask { lane: &lane, agent: &agent, kind, cmd: &cmd, repo_dir: &repo_dir, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &class, route, os: &os, arch: &arch };
     let note = check(home, &ask, now)?;
-    Ok(format!("{{\"note\":{}}}", json_str(&note)))
+    let (windows, gap) = windows_verdict(&repo_dir, &rev, &cmd);
+    let note = [note, gap].into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join("\n");
+    Ok(format!("{{\"note\":{},\"windows\":{windows}}}", json_str(&note)))
 }
 
 #[cfg(test)]
@@ -362,6 +436,31 @@ mod tests {
     fn argv(s: &str) -> Vec<String> { s.split(' ').map(str::to_string).collect() }
 
     fn built(pkg: &str, verb: &'static str, target: &str) -> Built { Built { pkg: pkg.into(), verb, target: target.into(), select: Vec::new() } }
+
+    /// A Windows box runs plain cargo builds, checks and tests of packages checked there, unless
+    /// they select a gap: a package never checked, a shell, a JIT run, the workspace or another
+    /// target stay off it. A build or check selects the lib and bins; a test every target.
+    #[test]
+    fn windows_runs_plain_cargo_work_of_checked_packages_without_their_gaps() {
+        let gaps = |pkg: &str| match pkg {
+            "clean" => Some(std::collections::BTreeMap::new()),
+            "gappy" => Some([("test:modules".to_string(), "no sandbox there yet".to_string())].into()),
+            "broken" => Some([("build".to_string(), "its Unix-only deps".to_string())].into()),
+            _ => None,
+        };
+        let on = |cmd: &str| on_windows(&argv(cmd), &gaps);
+        assert_eq!(on("cargo test --release -p clean --no-fail-fast"), OnWindows::Runs);
+        assert_eq!(on("cargo check -p gappy"), OnWindows::Runs, "a check selects the lib and bins");
+        assert_eq!(on("cargo test --release -p gappy --lib"), OnWindows::Runs);
+        assert_eq!(on("cargo test --release -p gappy"), OnWindows::Gap("gappy test:modules on Windows: no sandbox there yet".into()));
+        assert_eq!(on("cargo test -p gappy --test modules"), OnWindows::Gap("gappy test:modules on Windows: no sandbox there yet".into()));
+        assert_eq!(on("cargo check -p gappy --all-targets"), OnWindows::Gap("gappy test:modules on Windows: no sandbox there yet".into()));
+        assert_eq!(on("cargo build -p broken --lib"), OnWindows::Gap("broken does not build on Windows: its Unix-only deps".into()));
+        assert_eq!(on("cargo test -p clean -p unchecked"), OnWindows::Not, "a package never checked there");
+        for not in ["cargo test", "cargo test --workspace", "cargo run -p clean", "cargo check -p clean --target wasm32-unknown-unknown", "bash -c cargo", "env A=1 cargo test -p clean", "cargo"] {
+            assert_eq!(on(not), OnWindows::Not, "{not}");
+        }
+    }
 
     #[test]
     fn refused_unless_a_miss_a_route_a_reason_or_no_jit() {

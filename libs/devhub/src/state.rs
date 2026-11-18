@@ -766,6 +766,15 @@ impl Show {
 
 // ---- live jobs ----
 
+/// A live session's run silent this long says how long, in its status and its caller's (a hung
+/// one is seen as one: W11754 read "still running: tests" 52 min with no line since its 4th test).
+pub const QUIET_SAID_MS: u64 = 60_000;
+
+/// `N min` (or `N s` under a minute).
+pub fn ago(ms: u64) -> String {
+    if ms >= 60_000 { format!("{} min", ms / 60_000) } else { format!("{} s", ms / 1000) }
+}
+
 /// A long-running app on a box that edits patch into (`devhub live`).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Live {
@@ -803,6 +812,11 @@ pub struct Live {
     /// `--node`: the box it runs on, or waits for (empty: any that fits); with `joins`, that
     /// session's box
     pub pin: String,
+    /// `--avoid`: the boxes it never takes, comma-separated (empty: none)
+    pub avoid: String,
+    /// `--series` and `--pin-why`: why it names its box (`pin`), as a lease's
+    pub series: String,
+    pub pin_why: String,
     /// `--joins W<n>`: the session of its lane whose app this one's app joins (a hidden test WM a
     /// visible app joins through `MAKEPAD_WM_SOCKET`): it runs on that session's box, and that
     /// session is never parked or ended idle while this one is active
@@ -810,8 +824,12 @@ pub struct Live {
     pub visible: bool,
     pub lease: String,
     pub node: String,
-    /// the app's JIT on the box
+    /// the app's JIT on the box: its newest announce's pid, which a process restart behind a
+    /// restart parent changes
     pub pid: u32,
+    /// the run's own process, when the app runs behind a restart parent (its announce's `run`):
+    /// the pid that stays while the app's process restarts; 0 when its announce named none
+    pub run_pid: u32,
     /// the run in its lease (a new master follows it from there)
     pub run_n: u64,
     pub run_log_start: u64,
@@ -821,6 +839,10 @@ pub struct Live {
     /// the name of the run it asked for last: a new master that finds no run of it asks again
     /// under it (`Held::run_asked` in orch::leg)
     pub ask: String,
+    /// The run `ask` comes after: `run_n` when it was asked. A new master whose `run_n` is still
+    /// this one follows the next run or asks again under `ask` (a relaunch's new run asked, not
+    /// yet noted: it followed the old run and started a second ask beside the first, 11-17).
+    pub ask_after: u64,
     /// Content last shipped, including whiteouts (`-`).
     pub sources: std::collections::BTreeMap<String, String>,
     /// `starting`, `running`, `paused` (a parked panic), then `ended`, `failed`
@@ -905,7 +927,9 @@ const OTHER_WARNINGS_SHOWN: usize = 10;
 /// A live patch that ended in a JIT error: the typed verdict line, else the raw error.
 pub fn jit_error_verdict(p: &LivePatch) -> String {
     if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &p.reason) { return format!("{}{}\n", p.jit_notice, verdict.line()); }
-    format!("{}JIT error, not your change: {}\n", p.jit_notice, p.jit_error)
+    // what the JIT failed at, when the notice above does not say it already
+    let why = if p.reason.is_empty() || p.jit_notice.contains(p.reason.as_str()) { p.jit_error.to_string() } else { format!("{} (event {})", p.reason, p.jit_error) };
+    format!("{}JIT error, not your change: {why}\n", p.jit_notice)
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -929,6 +953,9 @@ pub struct LivePatch {
     /// what it waited behind (`queued_ms`): the previous edit, by when it was saved and its group
     pub behind: String,
     pub shipped_ms: u64,
+    /// The JIT's installed patch count just before the ship (its `live` answer's `patches`): one
+    /// more after it is this edit installed, whether or not its verdict event came.
+    pub patches_at_ship: Option<u64>,
     /// Patch state, including `recovering` and terminal `jit_error`.
     pub outcome: String,
     pub outcome_ms: u64,
@@ -1184,6 +1211,8 @@ pub struct Job {
     pub whole: bool,
     /// a hand-in's gate run ([`crate::lease::sched::Req::hand_in`])
     pub hand_in: bool,
+    /// a Windows box runs it ([`crate::lease::sched::Req::windows`])
+    pub windows: bool,
     pub class: String,
     pub priority: String,
     pub loader: String,
@@ -1742,7 +1771,7 @@ pub fn live_value(x: &Live) -> Value {
 
 fn live_state_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("patches_at_ship", p.patches_at_ship.map_or(Value::Null, int)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice))])
     });
     obj(vec![
         ("id", s(&x.id)),
@@ -1750,6 +1779,7 @@ fn live_state_value(x: &Live) -> Value {
         ("run_log_start", int(x.run_log_start)),
         ("jit_restart", x.jit_restart.as_ref().map_or(Value::Null, |(key, why)| obj(vec![("key", s(key)), ("why", s(why))]))),
         ("ask", s(&x.ask)),
+        ("ask_after", int(x.ask_after)),
         ("sources", Value::Obj(x.sources.iter().map(|(k, v)| (k.clone(), s(v))).collect())),
         ("app", s(&x.app)),
         ("test", Value::Bool(x.test)),
@@ -1773,11 +1803,15 @@ fn live_state_value(x: &Live) -> Value {
         ("rev", s(&x.rev)),
         ("needs", s(&x.needs)),
         ("pin", s(&x.pin)),
+        ("avoid", s(&x.avoid)),
+        ("series", s(&x.series)),
+        ("pin_why", s(&x.pin_why)),
         ("joins", s(&x.joins)),
         ("visible", Value::Bool(x.visible)),
         ("lease", s(&x.lease)),
         ("node", s(&x.node)),
         ("pid", int(x.pid as u64)),
+        ("run_pid", int(x.run_pid as u64)),
         ("state", s(&x.state)),
         ("started_ms", int(x.started_ms)),
         ("touched_ms", int(x.touched_ms)),
@@ -1811,6 +1845,7 @@ fn live_state_from(v: &Value) -> Live {
         run_log_start: uint(o, "run_log_start"),
         jit_restart: v.get("jit_restart").filter(|r| !r.is_null()).map(|r| (text(Some(r), "key"), text(Some(r), "why"))),
         ask: text(o, "ask"),
+        ask_after: uint(o, "ask_after"),
         sources: match v.get("sources") { Some(Value::Obj(fields)) => fields.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(), _ => Default::default() },
         app: text(o, "app"),
         test: flag(o, "test", false),
@@ -1837,17 +1872,21 @@ fn live_state_from(v: &Value) -> Live {
         rev: text(o, "rev"),
         needs: text(o, "needs"),
         pin: text(o, "pin"),
+        avoid: text(o, "avoid"),
+        series: text(o, "series"),
+        pin_why: text(o, "pin_why"),
         joins: text(o, "joins"),
         visible: flag(o, "visible", false),
         lease: text(o, "lease"),
         node: text(o, "node"),
         pid: uint(o, "pid") as u32,
+        run_pid: uint(o, "run_pid") as u32,
         state: text(o, "state"),
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         left_ms: uint(o, "left_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), reason: String::new() }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), patches_at_ship: p.get("patches_at_ship").and_then(Value::as_u64), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), reason: String::new() }),
         restart_since_ms: uint(o, "restart_since_ms"),
         restart_saves: uint(o, "restart_saves"),
         restart_why: text(o, "restart_why"),
@@ -1935,6 +1974,7 @@ pub fn job_value(j: &Job) -> Value {
         ("ram_gb", j.ram_gb.map_or(Value::Null, Value::F64)),
         ("whole", Value::Bool(j.whole)),
         ("hand_in", Value::Bool(j.hand_in)),
+        ("windows", Value::Bool(j.windows)),
         ("class", s(&j.class)),
         ("priority", s(&j.priority)),
         ("loader", s(&j.loader)),
@@ -2000,6 +2040,7 @@ pub fn job_from(v: &Value) -> Job {
         ram_gb: v.get("ram_gb").and_then(crate::lease::num),
         whole: flag(o, "whole", false),
         hand_in: flag(o, "hand_in", false),
+        windows: flag(o, "windows", false),
         class: text(o, "class"),
         priority: text(o, "priority"),
         loader: text(o, "loader"),
@@ -2370,11 +2411,24 @@ impl Store {
 
     /// Publishes an event and returns its stream sequence.
     pub fn event_seq(&self, kind: &str, sev: Sev, line: String, detail: Option<String>) -> u64 {
+        self.event_on("", kind, sev, line, detail)
+    }
+
+    /// [`Self::event`] about a box other than this hub's (a live session's on its box; empty:
+    /// this hub's). Its id stays this hub's, which filed it, and unique among its records.
+    pub fn event_on(&self, machine: &str, kind: &str, sev: Sev, line: String, detail: Option<String>) -> u64 {
         let p = self.publish.lock().unwrap().clone();
         p.map_or(0, |p| {
-            let machine = self.machine.lock().unwrap().clone();
-            p(hub_record(&machine, "", 0, kind, sev, line, detail.unwrap_or_default()))
+            let mut r = hub_record(&self.machine.lock().unwrap().clone(), "", 0, kind, sev, line, detail.unwrap_or_default());
+            if !machine.is_empty() { r.machine = machine.to_string(); }
+            p(r)
         })
+    }
+
+    /// A record made elsewhere (a hot-ledger record, with its node, app and pid) on the stream.
+    pub fn publish_record(&self, r: Record) -> u64 {
+        let p = self.publish.lock().unwrap().clone();
+        p.map_or(0, |p| p(r))
     }
 
     /// Wakes every waiter (a CLI asked for something).
@@ -2408,6 +2462,23 @@ mod tests {
     }
     impl Drop for Scratch {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    /// A record about a session on another box names that box; its id stays the filing hub's.
+    /// Two Fab edits on pool boxes read as the user's Fab on the Mac (11-16).
+    #[test]
+    fn a_record_about_another_box_names_it_and_keeps_its_hubs_id() {
+        let dir = Scratch::new("event-on");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let into = seen.clone();
+        let store = Store::open(&dir.0, "master", Arc::new(move |r: Record| { into.lock().unwrap().push(r); 1 })).unwrap();
+        store.event_on("node-b", "live", Sev::Info, "live W1: 1 file(s) patched".into(), None);
+        store.event("verify", Sev::Info, "verify: ok".into(), None);
+        let seen = seen.lock().unwrap();
+        let live = seen.iter().find(|r| r.kind == "live").expect("the live record");
+        assert_eq!(live.machine, "node-b", "names the session's box");
+        assert!(live.id.starts_with("master.hub."), "its id is the filing hub's: {}", live.id);
+        assert_eq!(seen.iter().find(|r| r.kind == "verify").map(|r| r.machine.as_str()), Some("master"), "the hub's own stays its own");
     }
 
     #[test]

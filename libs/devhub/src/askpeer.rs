@@ -123,7 +123,11 @@ pub fn judge_chain(chain: &[Seen], tray: &str) -> Judged {
     Judged { source, chain: line, why: String::new() }
 }
 
-/// The asker `pid` and its parents up to launchd / init, as the OS reports them now.
+/// The asker `pid` and its parents up to launchd / init, as the OS reports them now: it ends at
+/// pid 1, or at the first parent the OS does not show this user. On macOS that is any process of
+/// another user (launchd itself, `login` under a Terminal shell, `sshd`); their environment is not
+/// readable either. Its test asserted the chain reached launchd, which macOS never shows a user:
+/// it failed on every Mac (11-17).
 pub fn chain_of(pid: u32) -> Vec<Seen> {
     let mut chain: Vec<Seen> = Vec::new();
     let mut at = pid;
@@ -285,6 +289,11 @@ mod tests {
     fn this_process_reads_as_itself() {
         let chain = chain_of(std::process::id());
         assert_eq!(chain.first().map(|p| p.pid), Some(std::process::id()), "the asker is first");
-        assert!(chain.last().is_some_and(|p| p.pid <= 1 || p.ppid == 0), "the chain ends at launchd / init: {chain:?}");
+        for w in chain.windows(2) {
+            assert_eq!(w[1].pid, w[0].ppid, "each process is the one before's parent: {chain:?}");
+        }
+        // at launchd / init, or at the first parent the OS does not show this user
+        let last = chain.last().unwrap();
+        assert!(last.pid <= 1 || last.ppid == 0 || makepad_remote::procs::process(last.ppid).is_none(), "the chain stops only where the OS shows no parent: {chain:?}");
     }
 }

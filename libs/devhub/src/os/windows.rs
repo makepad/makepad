@@ -468,6 +468,16 @@ pub fn group_pids(_pid: u32, _start: u64, hold: &Hold) -> Vec<u32> {
     job_pids(hold)
 }
 
+/// None here: a run's job holds every process it starts, wherever it goes, and ends with it.
+pub fn groups_beside(sets: &[(Vec<(u32, u64)>, Vec<(u32, u64)>)]) -> Vec<Vec<(u32, u64)>> {
+    sets.iter().map(|_| Vec::new()).collect()
+}
+
+/// (No groups beside a run's job: [`groups_beside`].)
+pub fn groups_left(_groups: &[(u32, u64)]) -> Vec<u32> {
+    Vec::new()
+}
+
 /// (No thread view here: the processes alone.)
 pub fn processes_view(pids: &[u32]) -> String {
     pids.iter().map(|p| format!("pid {p}\n")).collect()

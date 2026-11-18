@@ -80,6 +80,159 @@ pub(crate) fn start_level() -> Result<Option<String>, String> {
     niced_start(crate::os::own_nice(), restart, pid)
 }
 
+/// The per-user LaunchAgent that keeps the Mac's master up: launchd starts the Dock wrapper at
+/// login and again 30 s after any failed exit (the app's "Open at login",
+/// apps/devhub/src/installed.rs). A master started any other way is not started again after a
+/// crash: one died of a stack overflow and stayed down until a person came by (11-17).
+pub const AGENT: &str = "nl.makepad.devhub";
+
+/// Where the agent's plist goes when the master is the agent's: on the Mac, in the default home
+/// (a test's `MAKEPAD_HOME` master never is); `MAKEPAD_LAUNCH_AGENTS_DIR` as for the app's.
+fn agent_plist() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") || std::env::var_os("MAKEPAD_HOME").is_some_and(|h| !h.is_empty()) {
+        return None;
+    }
+    let dir = match std::env::var_os("MAKEPAD_LAUNCH_AGENTS_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join("Library/LaunchAgents"),
+    };
+    Some(dir.join(format!("{AGENT}.plist")))
+}
+
+/// Whether this process runs under the agent: launchd names its job in each process it starts
+/// (`XPC_SERVICE_NAME`), and the wrapper's exec into the app and each self-update's exec in
+/// place keep it.
+fn under_agent() -> bool {
+    std::env::var("XPC_SERVICE_NAME").is_ok_and(|s| s == AGENT)
+}
+
+/// Why nothing starts this master again after a crash (`devhub nodes` says it); None when launchd
+/// does, or when the master is no agent's (not a Mac, a test's home).
+pub fn unsupervised() -> Option<String> {
+    unsupervised_why(under_agent(), agent_plist()?.is_file())
+}
+
+fn unsupervised_why(under: bool, installed: bool) -> Option<String> {
+    match (under, installed) {
+        (true, _) => None,
+        (false, false) => Some(format!("no LaunchAgent {AGENT}: nothing starts the master again after a crash (its menu's Open at login makes it)")),
+        (false, true) => Some(format!("started outside its LaunchAgent {AGENT}: nothing starts it again after a crash (Quit it from its menu, then `makepad devhub master start` starts it through launchd)")),
+    }
+}
+
+/// The agent's job as `launchctl print` tells it.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Default, PartialEq)]
+struct Job {
+    running: bool,
+    pid: Option<u32>,
+    /// the starts launchd counted since it loaded the job
+    runs: u64,
+    last_exit: Option<i64>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn job_of(text: &str) -> Job {
+    let mut job = Job::default();
+    // (the job's own fields sit one tab in, its endpoints' and sockets' deeper)
+    for line in text.lines().filter_map(|l| l.strip_prefix('\t')).filter(|l| !l.starts_with('\t')) {
+        match line.split_once(" = ") {
+            Some(("state", v)) => job.running = v == "running",
+            Some(("pid", v)) => job.pid = v.parse().ok(),
+            Some(("runs", v)) => job.runs = v.parse().unwrap_or(0),
+            Some(("last exit code", v)) => job.last_exit = v.parse().ok(),
+            _ => {}
+        }
+    }
+    job
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl(args: &[&str]) -> Result<(bool, String), String> {
+    let out = std::process::Command::new("/bin/launchctl").args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("launchctl: {e}"))?;
+    Ok((out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))))
+}
+
+/// launchd's domain of this user's GUI session, where the agent loads.
+#[cfg(target_os = "macos")]
+fn gui_domain() -> String {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: getuid has no preconditions
+    format!("gui/{}", unsafe { getuid() })
+}
+
+/// The agent's job; None when launchd has not loaded it.
+#[cfg(target_os = "macos")]
+fn job() -> Result<Option<Job>, String> {
+    let (loaded, text) = launchctl(&["print", &format!("{}/{AGENT}", gui_domain())])?;
+    Ok(loaded.then(|| job_of(&text)))
+}
+
+/// Starts the master through the agent: loads it (its RunAtLoad starts it), kicks it when loaded
+/// and idle, and leaves it be when its copy runs already. Returns the starts launchd had counted
+/// before this one.
+#[cfg(target_os = "macos")]
+fn kick_agent(plist: &std::path::Path) -> Result<u64, String> {
+    let (before, (ok, text)) = match job()? {
+        Some(job) if job.running => return Ok(job.runs.saturating_sub(1)),
+        Some(job) => (job.runs, launchctl(&["kickstart", &format!("{}/{AGENT}", gui_domain())])?),
+        None => (0, launchctl(&["bootstrap", &gui_domain(), &plist.display().to_string()])?),
+    };
+    if !ok {
+        return Err(format!("launchctl could not start {AGENT}: {}", text.trim()));
+    }
+    Ok(before)
+}
+
+/// A master about to start outside its agent (the Dock, a shell) hands its start to launchd, so
+/// that a crash is started again: true when it did, and this copy ends. False: it starts here
+/// (not the Mac, a test's home, no agent installed, or this is the agent's copy).
+pub fn hand_to_agent() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(plist) = agent_plist().filter(|p| p.is_file()) {
+        // (launchd's own copy, should its name ever be missing: the job's pid is this one)
+        if under_agent() || job()?.is_some_and(|j| j.pid == Some(std::process::id())) {
+            return Ok(false);
+        }
+        kick_agent(&plist)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// `master start` through the agent, when there is one ([`hand_to_agent`]'s cases): launchd runs
+/// the Dock wrapper, which builds the app first, so this waits for the control socket and says
+/// why when launchd's start ended without it. None: no agent, the caller starts the master.
+pub fn start_by_agent(socket: &std::path::Path) -> Option<Result<u32, String>> {
+    #[cfg(target_os = "macos")]
+    if let Some(plist) = agent_plist().filter(|p| p.is_file()) {
+        return Some((|| {
+            let before = kick_agent(&plist)?;
+            let mut looked = Instant::now();
+            loop {
+                if let Some(who) = crate::node::who_serves(socket) {
+                    return Ok(who.pid);
+                }
+                if looked.elapsed() >= Duration::from_secs(2) {
+                    looked = Instant::now();
+                    if let Some(job) = job()?.filter(|j| !j.running && j.runs > before) {
+                        return Err(match job.last_exit {
+                            Some(0) => format!("{AGENT}'s master ended cleanly at its start (a second master, or a Quit)"),
+                            Some(code) => format!("{AGENT}'s start failed (exit {code}; launchd tries again in 30 s): see master.log in devhub's home and the Dock wrapper's build log"),
+                            None => format!("{AGENT}'s start ended without a master"),
+                        });
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })());
+    }
+    let _ = socket;
+    None
+}
+
 /// The running master's pid (`~/.makepad/devhub/master.pid`): what a switch-over stops it by.
 pub fn pid_file() -> PathBuf {
     proto::home().join("master.pid")
@@ -312,21 +465,23 @@ impl Master {
             let run = crate::bucket::tests(repo.clone(), home.clone(), proofs.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
+            // (a red's bisect runs its unit alone at its red tip first, then at the landings since
+            // its last pass: one landing is told, or the test's owner should it pass there)
             crate::bucket::spawn("tests", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, |_| None, None);
+            }), run, |_| None, Some(crate::bucket::tests_probe(repo.clone(), proofs.clone())));
             // every package's tests, no proof reused: once a day at 17:00 on this Mac's clock, done
             // before the daily push review (19:13) reads its red list; early once no lane's ask
             // queued a minute for 20 min (12 h after its last start at the soonest: its 17:00
             // run on a busy fleet held boxes against lane work, 11-16); and on demand
-            let run = crate::bucket::full(repo.clone(), home.clone(), proofs);
+            let run = crate::bucket::full(repo.clone(), home.clone(), proofs.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(17), quiet_queue: Some(Duration::from_secs(20 * 60)) };
             crate::bucket::spawn(crate::bucket::FULL, timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, |_| None, None);
+            }), run, |_| None, Some(crate::bucket::tests_probe(repo.clone(), proofs)));
             let run = crate::bucket::hot(repo.clone(), home.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing::after(Duration::ZERO, Duration::ZERO);
@@ -334,18 +489,29 @@ impl Master {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None, None);
+            // the test targets only a Mac can fail, on a Mac after the landings that reach them:
+            // batched as the tests bucket's (a minute's quiet, 10 min at most), the Mac being shared
+            let run = crate::bucket::mac(repo.clone(), home.clone());
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
+            crate::bucket::spawn("mac", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run, |_| None, None);
             let run = crate::orch::ci::regression(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             // once a night, 02:00 on this Mac's clock, of the tip then (user, 11-05)
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2), quiet_queue: None };
+            // each new red leg runs once more at its tip: flaky goes to its owner (main, 11-18)
+            let probe = Some(crate::orch::ci::leg_probe(repo.clone()));
             crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run, crate::orch::ci::last_rolling, None);
+            }), run, crate::orch::ci::last_rolling, probe);
             ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |line, out| {
                 match line.split_whitespace().skip_while(|w| *w == "bucket").collect::<Vec<_>>()[..] {
                     ["run", name] => out.push(crate::bucket::kick(&home, name)),
-                    _ => out.extend(crate::bucket::status(&home)),
+                    _ => out.extend(crate::bucket::status(&home, &crate::orch::ctx().map(|c| crate::bucket::landed(&c.store)).unwrap_or_default())),
                 }
             })));
         }
@@ -570,6 +736,22 @@ fn inbox_cmd(ib: &Mutex<Inbox>, line: &str, out: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A master knows whether launchd starts it again after a crash: under its agent it is quiet;
+    /// started outside it, or with no agent installed, `devhub nodes` says so and how to fix it.
+    /// launchd's job reads from `launchctl print`'s own fields, not its endpoints' deeper ones.
+    #[test]
+    fn a_master_says_when_nothing_starts_it_again_after_a_crash() {
+        assert_eq!(unsupervised_why(true, true), None);
+        assert_eq!(unsupervised_why(true, false), None);
+        let outside = unsupervised_why(false, true).unwrap();
+        assert!(outside.contains("outside its LaunchAgent") && outside.contains("`makepad devhub master start`"), "{outside}");
+        assert!(unsupervised_why(false, false).unwrap().contains("no LaunchAgent"));
+        let text = "gui/501/nl.makepad.devhub = {\n\tactive count = 2\n\tstate = running\n\tprogram = /x/devhub\n\truns = 6\n\tpid = 95853\n\tlast exit code = -6\n\tendpoints = {\n\t\tstate = active\n\t}\n}\n";
+        assert_eq!(job_of(text), Job { running: true, pid: Some(95853), runs: 6, last_exit: Some(-6) });
+        let idle = job_of("x = {\n\tstate = not running\n\truns = 7\n\tlast exit code = (never exited)\n}\n");
+        assert_eq!(idle, Job { running: false, pid: None, runs: 7, last_exit: None });
+    }
 
     #[test]
     fn a_fresh_master_refuses_a_nice_level_and_a_restart_names_the_way_back() {

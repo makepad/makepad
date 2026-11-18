@@ -3,7 +3,8 @@
 //! local/dock-launchers.sh: the master's own build of this app in its target dir,
 //! `makepad_devhub::orch::roll::build_master_app`'s command, then that binary, so the master runs
 //! the landed code natively) at login, and again whenever it exits with an error (a crash, a failed
-//! build; Quit exits cleanly and stays quit, and so does a second master, which refuses to start).
+//! build, a stop by pid: a signal's exit has an error code; Quit exits cleanly and stays quit, and
+//! so does a second master, which refuses to start).
 //! It is offered only when that wrapper exists. The running master's pid is
 //! `~/.makepad/devhub/master.pid` (`MAKEPAD_HOME` honoured), whatever runs it.
 

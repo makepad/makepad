@@ -325,19 +325,66 @@ fn keep_over_exec(cmd: &mut std::process::Command, fd: i32) {
     }
 }
 
-/// Execs `cmd` in place of this process, the control listener ([`keep_control_over_exec`]) and
-/// the log's stamper ([`crate::logstamp::keep_over_exec`]) kept over it. Returns only when the
-/// exec failed, with its error: the hooks ran in this process, so close-on-exec is set again and
-/// no child this image starts inherits the listener or the log.
+/// Execs `cmd` in place of this process, the control listener ([`keep_control_over_exec`]), the
+/// log's stamper ([`crate::logstamp::keep_over_exec`]) and [`keep_fds`]'s descriptors kept over
+/// it. Returns only when the exec failed, with its error: the hooks ran in this process, so
+/// close-on-exec is set again and no child this image starts inherits the listener, the log or
+/// those descriptors.
 #[cfg(unix)]
 pub fn exec(cmd: &mut std::process::Command) -> std::io::Error {
     crate::logstamp::keep_over_exec(cmd);
+    let kept = keep_kept_fds(cmd);
     let hooks = EXEC_HOOKS.get();
     if let Some((before, _)) = hooks { before(); }
     let e = exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed));
     if let Some((_, failed)) = hooks { failed(); }
     crate::logstamp::exec_failed();
+    for fd in kept {
+        let _ = close_on_exec(fd, true);
+    }
     e
+}
+
+/// Descriptors kept over [`exec`] besides the control listener and the log's: each with the
+/// environment variable that tells the new image where they are ([`keep_fds`]); `None`: the
+/// variable is cleared.
+#[cfg(unix)]
+static KEPT_FDS: std::sync::Mutex<Vec<(&'static str, Option<(String, Vec<i32>)>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Keeps `fds` open over this process's [`exec`] in place, with `env=value` in the new image's
+/// environment (a helper process's pipes, [`crate::helper`]); `None` keeps nothing under `env` and
+/// clears it.
+#[cfg(unix)]
+pub fn keep_fds(env: &'static str, kept: Option<(String, Vec<i32>)>) {
+    let mut all = KEPT_FDS.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(e, _)| *e != env);
+    all.push((env, kept));
+}
+
+/// [`keep_fds`]'s descriptors and variables on `cmd`: close-on-exec off at the exec itself, as
+/// the control listener's. Returns the descriptors, to close on exec again should it fail.
+#[cfg(unix)]
+fn keep_kept_fds(cmd: &mut std::process::Command) -> Vec<i32> {
+    use std::os::unix::process::CommandExt;
+    let all = KEPT_FDS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut fds = Vec::new();
+    for (env, kept) in all {
+        match kept {
+            Some((value, kept)) => {
+                cmd.env(env, value);
+                fds.extend(kept);
+            }
+            None => {
+                cmd.env_remove(env);
+            }
+        }
+    }
+    let open = fds.clone();
+    // SAFETY: close_on_exec is fcntl only
+    unsafe {
+        cmd.pre_exec(move || open.iter().try_for_each(|&fd| close_on_exec(fd, false)));
+    }
+    fds
 }
 
 /// What the app hosting this process lets go before an exec in place, and takes back when it

@@ -6,9 +6,14 @@
 //! and from the ledger only for the part of the window the scheduler no longer holds, read
 //! backwards from the ledger's end (a panel that keeps asking from its last answer never reads
 //! it). Pressure samples are what the node's caps said every [`super::master`] caps round, with
-//! the scheduler's reservation on the box at that moment; they live in the scheduler's memory
-//! for [`PRESSURE_KEEP_MS`].
+//! the scheduler's reservation on the box at that moment; the scheduler keeps the last
+//! [`PRESSURE_KEEP_MS`] of them in memory (a restarted master reads them back), and the master's
+//! history ([`super::history`]) keeps every one, forever: `history` answers any range of it
+//! reduced to columns, `exact` every sample of a range ([`serve_history`]). The leases, bucket
+//! runs and landings of any range come from time indexes over the master's logs ([`serve_past`]:
+//! `rows`, `buckets`, `landings`).
 
+use super::history::{read_lines, History, TimeIndex};
 use super::sched::{Lease, NodeView, Sched, State};
 use super::{num, Cost, Kind};
 use makepad_remote::json_str;
@@ -20,8 +25,15 @@ use std::sync::Mutex;
 
 pub const SERVICE: &str = "panel";
 
-/// How long each node's pressure samples are kept: the panel's widest window.
+/// How long the scheduler keeps each node's pressure samples in memory: the `panel` answer's
+/// window (what is older is in the history).
 pub const PRESSURE_KEEP_MS: u64 = 3 * 3_600_000;
+
+/// A sample's fields as the history stores them, in [`Sample::vals`]'s order.
+pub const FIELDS: [&str; 8] = ["cpu_pct", "load1", "ram_used_gb", "res_cores", "res_ram_gb", "gpu_pct", "gpu_used_gb", "disk_free_gb"];
+
+/// The most columns one `history` ask takes (the panel asks a few thousand at most).
+pub const MAX_COLS: u64 = 65_536;
 
 /// The ledger is appended at each lease's end, so it is in end order but for leases whose
 /// ending raced; its backwards read stops this far past the window's start.
@@ -41,6 +53,8 @@ pub struct Sample {
     /// the busiest GPU's use in percent and the VRAM used on all GPUs (negative: no GPU)
     pub gpu_pct: f32,
     pub gpu_used_gb: f32,
+    /// the disk the box's work goes to: GB free
+    pub disk_free_gb: f32,
 }
 
 impl Sample {
@@ -55,17 +69,28 @@ impl Sample {
             res_ram_gb: reserved.ram_gb as f32,
             gpu_pct,
             gpu_used_gb: c.gpu_busy.iter().map(|(_, m)| *m as f32).sum(),
+            disk_free_gb: if c.disk_total_gb > 0.0 { c.disk_free_gb as f32 } else { -1.0 },
         }
     }
 
+    /// The fields, in [`FIELDS`]' order.
+    pub fn vals(&self) -> [f32; 8] {
+        [self.cpu_pct, self.load1, self.ram_used_gb, self.res_cores, self.res_ram_gb, self.gpu_pct, self.gpu_used_gb, self.disk_free_gb]
+    }
+
+    pub fn of_vals(t_ms: u64, v: &[f32]) -> Sample {
+        let f = |i: usize| v.get(i).copied().unwrap_or(-1.0);
+        Sample { t_ms, cpu_pct: f(0), load1: f(1), ram_used_gb: f(2), res_cores: f(3), res_ram_gb: f(4), gpu_pct: f(5), gpu_used_gb: f(6), disk_free_gb: f(7) }
+    }
+
     fn json(&self) -> String {
-        format!("[{},{:.1},{:.2},{:.1},{:.1},{:.1},{:.0},{:.1}]", self.t_ms, self.cpu_pct, self.load1, self.ram_used_gb, self.res_cores, self.res_ram_gb, self.gpu_pct, self.gpu_used_gb)
+        format!("[{},{:.1},{:.2},{:.1},{:.1},{:.1},{:.0},{:.1},{:.0}]", self.t_ms, self.cpu_pct, self.load1, self.ram_used_gb, self.res_cores, self.res_ram_gb, self.gpu_pct, self.gpu_used_gb, self.disk_free_gb)
     }
 
     fn parse(v: &Value) -> Option<Sample> {
         let a = v.as_arr()?;
         let f = |i: usize| a.get(i).and_then(num).unwrap_or(-1.0) as f32;
-        Some(Sample { t_ms: a.first().and_then(num)? as u64, cpu_pct: f(1), load1: f(2), ram_used_gb: f(3), res_cores: f(4), res_ram_gb: f(5), gpu_pct: f(6), gpu_used_gb: f(7) })
+        Some(Sample { t_ms: a.first().and_then(num)? as u64, cpu_pct: f(1), load1: f(2), ram_used_gb: f(3), res_cores: f(4), res_ram_gb: f(5), gpu_pct: f(6), gpu_used_gb: f(7), disk_free_gb: f(8) })
     }
 }
 
@@ -124,6 +149,9 @@ pub struct Row {
     /// the holder's last beat, for a lease that expires without one (None: ended, or watched by
     /// its holder's pid instead)
     pub beat_ms: Option<u64>,
+    /// queued behind its own lane's lease and nothing else: that lease ([`Sched::own_wait`];
+    /// empty: none)
+    pub own_wait: String,
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -173,6 +201,7 @@ impl Row {
             live: l.req.live,
             stalled: false,
             beat_ms: (l.req.holder.is_none() && l.ended_ms.is_none()).then_some(l.beat_ms),
+            own_wait: String::new(),
         }
     }
 
@@ -219,6 +248,7 @@ impl Row {
             live: req.and_then(|r| r.get("live")).and_then(Value::as_bool).unwrap_or(false),
             stalled: false,
             beat_ms: None,
+            own_wait: String::new(),
         })
     }
 
@@ -226,7 +256,7 @@ impl Row {
         let opt = |o: Option<u64>| o.map_or("null".to_string(), |v| v.to_string());
         let waits: Vec<String> = self.waits.iter().map(|w| format!("[{},{},{}]", w.start_ms, w.end_ms, json_str(&w.blocker))).collect();
         format!(
-            "{{\"t\":\"lease\",\"id\":{},\"lane\":{},\"agent\":{},\"kind\":{},\"state\":{},\"node\":{},\"asked_ms\":{},\"granted_ms\":{},\"ended_ms\":{},\"how\":{},\"reason\":{},\"pos\":{},\"eta_ms\":{},\"priority\":{},\"cost\":{},\"cost_source\":{},\"measured_ms\":{},\"cores\":{},\"ram_gb\":{},\"gpus\":{},\"whole\":{},\"src\":{},\"class\":{},\"running\":{},\"disk_mb\":{},\"waits\":[{}],\"live\":{},\"stalled\":{},\"beat_ms\":{}}}",
+            "{{\"t\":\"lease\",\"id\":{},\"lane\":{},\"agent\":{},\"kind\":{},\"state\":{},\"node\":{},\"asked_ms\":{},\"granted_ms\":{},\"ended_ms\":{},\"how\":{},\"reason\":{},\"pos\":{},\"eta_ms\":{},\"priority\":{},\"cost\":{},\"cost_source\":{},\"measured_ms\":{},\"cores\":{},\"ram_gb\":{},\"gpus\":{},\"whole\":{},\"src\":{},\"class\":{},\"running\":{},\"disk_mb\":{},\"waits\":[{}],\"live\":{},\"stalled\":{},\"beat_ms\":{},\"own_wait\":{}}}",
             json_str(&self.id),
             json_str(&self.lane),
             json_str(&self.agent),
@@ -255,7 +285,8 @@ impl Row {
             waits.join(","),
             self.live,
             self.stalled,
-            opt(self.beat_ms)
+            opt(self.beat_ms),
+            json_str(&self.own_wait)
         )
     }
 
@@ -295,6 +326,7 @@ impl Row {
             live: v.get("live").and_then(Value::as_bool).unwrap_or(false),
             stalled: v.get("stalled").and_then(Value::as_bool).unwrap_or(false),
             beat_ms: ms(v, "beat_ms"),
+            own_wait: st("own_wait"),
         })
     }
 }
@@ -360,7 +392,7 @@ pub fn serve(sched: &Mutex<Sched>, ledger: &Path, line: &str, now: u64, out: &mu
     let since = since.clamp(now.saturating_sub(PRESSURE_KEEP_MS), now);
     let (nodes, mut rows, pressure, kept_from) = {
         let s = sched.lock().unwrap();
-        let row = |l: &Lease| Row { live: s.is_live_job(l), stalled: s.is_stalled(&l.id), ..Row::of_lease(l) };
+        let row = |l: &Lease| Row { live: s.is_live_job(l), stalled: s.is_stalled(&l.id), own_wait: s.own_wait(l).unwrap_or_default(), ..Row::of_lease(l) };
         let mut rows: Vec<Row> = s.view().iter().map(row).collect();
         rows.extend(s.recent_ended(usize::MAX).iter().filter(|l| l.ended_ms.unwrap_or(0) >= since).map(row));
         // the scheduler holds the leases that ended since the master started, up to a bound:
@@ -427,6 +459,264 @@ pub fn ledger_rows(path: &Path, since: u64, skip: &HashSet<String>) -> Result<Ve
         }
     }
     Ok(rows)
+}
+
+/// A field's columns in a `history` answer: each column's min, max and mean (None: no sample).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cols {
+    pub min: Vec<Option<f32>>,
+    pub max: Vec<Option<f32>>,
+    pub mean: Vec<Option<f32>>,
+}
+
+/// The answer to `history` or `exact`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Hist {
+    pub from_ms: u64,
+    /// `history`: the column width and count, and the level the columns were read from;
+    /// `exact`: 0, the range's length in ms, 0
+    pub per_ms: u64,
+    pub n: u64,
+    pub level: usize,
+    /// the oldest sample of any node (None: an empty history)
+    pub first_ms: Option<u64>,
+    /// per node and field (`history`)
+    pub cols: Vec<(String, String, Cols)>,
+    /// per node, its samples (`exact`)
+    pub exact: Vec<(String, Vec<Sample>)>,
+    /// the leases that ran in the range (`rows`)
+    pub rows: Vec<Row>,
+}
+
+impl Hist {
+    pub fn parse(lines: &[String]) -> Result<Hist, String> {
+        let mut h = Hist::default();
+        let mut head = false;
+        for l in lines {
+            let v = makepad_strict_json::parse(l.as_bytes()).map_err(|_| "history: a bad line".to_string())?;
+            if let Some(e) = v.get("err").and_then(Value::as_str) {
+                return Err(e.to_string());
+            }
+            let arr = |k: &str| -> Vec<Option<f32>> { v.get(k).and_then(Value::as_arr).unwrap_or(&[]).iter().map(|x| num(x).map(|x| x as f32)).collect() };
+            match s(&v, "t") {
+                "hist" | "exact" | "rows" => {
+                    head = true;
+                    h.from_ms = ms(&v, "from_ms").unwrap_or(0);
+                    h.per_ms = ms(&v, "per_ms").unwrap_or(0);
+                    h.n = ms(&v, "n").unwrap_or(0);
+                    h.level = ms(&v, "level").unwrap_or(0) as usize;
+                    h.first_ms = ms(&v, "first_ms");
+                }
+                "cols" => h.cols.push((s(&v, "node").to_string(), s(&v, "field").to_string(), Cols { min: arr("min"), max: arr("max"), mean: arr("mean") })),
+                "pressure" => h.exact.push((s(&v, "node").to_string(), v.get("s").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Sample::parse).collect())),
+                "lease" => h.rows.extend(Row::parse(&v)),
+                _ => {}
+            }
+        }
+        if !head {
+            return Err("history: no head line".into());
+        }
+        Ok(h)
+    }
+
+    /// A node's field's columns.
+    pub fn field(&self, node: &str, field: &str) -> Option<&Cols> {
+        self.cols.iter().find(|(n, f, _)| n == node && f == field).map(|(_, _, c)| c)
+    }
+}
+
+/// A column value as the answer writes it: whole numbers bare, else two decimals.
+fn col_num(v: Option<f32>) -> String {
+    match v {
+        None => "null".into(),
+        Some(v) if v == v.round() => format!("{v:.0}"),
+        Some(v) => format!("{v:.2}"),
+    }
+}
+
+/// `history <from_ms> <per_ms> <n> [field,...]`: every node's samples from the master's history
+/// reduced to `n` columns of `per_ms` from `from_ms`, per field asked ([`FIELDS`]; all when none
+/// is named) each column's min, max and mean. `exact <from_ms> <to_ms>`: every sample of the
+/// range as taken, in the `panel` answer's pressure lines. Both heads say the oldest sample.
+/// The cost is the columns', not the history's ([`super::history`]).
+pub fn serve_history(history: &Mutex<History>, line: &str, out: &mut Vec<String>) {
+    let w: Vec<&str> = line.split_whitespace().collect();
+    let arg = |i: usize| w.get(i).and_then(|x| x.parse::<u64>().ok());
+    let err = |out: &mut Vec<String>, e: &str| out.push(format!("{{\"err\":{}}}", json_str(e)));
+    let mut h = history.lock().unwrap();
+    let names = h.names();
+    let first = names.iter().filter_map(|n| h.span(n).ok().flatten()).map(|(a, _)| a).min();
+    let first = first.map_or("null".to_string(), |t| t.to_string());
+    match w.first().copied() {
+        Some("history") => {
+            let (Some(from), Some(per), Some(n)) = (arg(1), arg(2).filter(|p| *p > 0), arg(3)) else {
+                return err(out, "history <from_ms> <per_ms> <n> [field,...]");
+            };
+            if n > MAX_COLS {
+                return err(out, &format!("history: {n} columns: at most {MAX_COLS} an ask (ask in parts)"));
+            }
+            let mut fields = Vec::new();
+            for f in w.get(4).map_or(Vec::new(), |f| f.split(',').collect()) {
+                match FIELDS.iter().position(|x| *x == f) {
+                    Some(i) => fields.push(i),
+                    None => return err(out, &format!("history: no field `{f}` (the fields: {})", FIELDS.join(","))),
+                }
+            }
+            if fields.is_empty() {
+                fields = (0..FIELDS.len()).collect();
+            }
+            out.push(format!("{{\"t\":\"hist\",\"from_ms\":{from},\"per_ms\":{per},\"n\":{n},\"level\":{},\"first_ms\":{first}}}", super::history::level_for(per)));
+            for node in &names {
+                let cols = match h.reduced(node, from, per, n as usize) {
+                    Ok((_, c)) => c,
+                    Err(e) => return err(out, &format!("history: {e}")),
+                };
+                for &i in &fields {
+                    let list = |f: &dyn Fn(&super::history::Bucket) -> Option<f32>| cols.iter().map(|c| col_num(f(c))).collect::<Vec<_>>().join(",");
+                    let (min, max, mean) = (list(&|c| (c.n[i] > 0).then(|| c.min[i])), list(&|c| (c.n[i] > 0).then(|| c.max[i])), list(&|c| c.mean(i)));
+                    out.push(format!("{{\"t\":\"cols\",\"node\":{},\"field\":\"{}\",\"min\":[{min}],\"max\":[{max}],\"mean\":[{mean}]}}", json_str(node), FIELDS[i]));
+                }
+            }
+        }
+        Some("exact") => {
+            let (Some(from), Some(to)) = (arg(1), arg(2)) else {
+                return err(out, "exact <from_ms> <to_ms>");
+            };
+            out.push(format!("{{\"t\":\"exact\",\"from_ms\":{from},\"per_ms\":{},\"n\":0,\"level\":0,\"first_ms\":{first}}}", to.saturating_sub(from)));
+            for node in &names {
+                match h.exact(node, from, to) {
+                    Ok(v) => {
+                        let s: Vec<String> = v.iter().map(|(t, x)| Sample::of_vals(*t, x).json()).collect();
+                        out.push(format!("{{\"t\":\"pressure\",\"node\":{},\"s\":[{}]}}", json_str(node), s.join(",")));
+                    }
+                    Err(e) => return err(out, &format!("exact: {e}")),
+                }
+            }
+        }
+        _ => err(out, "history <from_ms> <per_ms> <n> [field,...] | exact <from_ms> <to_ms>"),
+    }
+}
+
+/// `rows <from_ms> <to_ms>`: every lease of the ledger that ran in the range (asked by its end,
+/// ended at or after its start), found through the ledger's time index: the panel's bars for a
+/// stretch before its window. Its cost is the range's leases, not the ledger's length.
+/// The master's time indexes over its logs, beside them in its home: the lease ledger's, the
+/// bucket ledger's and the landing train's history's ([`TimeIndex`]).
+pub struct PastIndex {
+    pub leases: Mutex<TimeIndex>,
+    pub buckets: Mutex<TimeIndex>,
+    pub landings: Mutex<TimeIndex>,
+}
+
+impl PastIndex {
+    pub fn new(home: &Path) -> PastIndex {
+        PastIndex {
+            leases: Mutex::new(TimeIndex::leases(home.join("leases.idx"))),
+            buckets: Mutex::new(TimeIndex::buckets(home.join("buckets.idx"))),
+            landings: Mutex::new(TimeIndex::landings(home.join("landings.idx"))),
+        }
+    }
+}
+
+/// `rows <from_ms> <to_ms>`, `buckets <from_ms> <to_ms>` and `landings <from_ms> <to_ms>`: the
+/// leases, bucket runs and landings of a range, from the logs in `home` through their indexes.
+/// `live` is the landing train's live view, which its history does not hold yet.
+pub fn serve_past(index: &PastIndex, home: &Path, live: &dyn Fn() -> Vec<crate::land::Entry>, line: &str, out: &mut Vec<String>) {
+    match line.split_whitespace().next() {
+        Some("buckets") => serve_buckets(&index.buckets, &home.join("buckets.jsonl"), line, out),
+        Some("landings") => serve_landings(&index.landings, &home.join("history.jsonl"), &live(), line, out),
+        _ => serve_rows(&index.leases, &home.join("leases.jsonl"), line, out),
+    }
+}
+
+/// A range's ask (`<word> <from_ms> <to_ms>`), its lines' byte ranges in `log` and the lines, or
+/// the error line said.
+fn past_lines(index: &Mutex<TimeIndex>, log: &Path, line: &str, out: &mut Vec<String>) -> Option<(u64, u64, Vec<Vec<u8>>)> {
+    let w: Vec<&str> = line.split_whitespace().collect();
+    let arg = |i: usize| w.get(i).and_then(|x| x.parse::<u64>().ok());
+    let word = w.first().copied().unwrap_or("rows");
+    let (Some(from), Some(to)) = (arg(1), arg(2)) else {
+        out.push(format!("{{\"err\":{}}}", json_str(&format!("{word} <from_ms> <to_ms>"))));
+        return None;
+    };
+    let lines = index.lock().unwrap().lines(log, from, to).and_then(|r| read_lines(log, &r));
+    match lines {
+        Ok(lines) => Some((from, to, lines)),
+        Err(e) => {
+            out.push(format!("{{\"err\":{}}}", json_str(&format!("{word}: {}: {e}", log.display()))));
+            None
+        }
+    }
+}
+
+/// The bucket runs that ran in a range, each as its name, verdict, failing units, tip and times
+/// (a row's errors and landings stay in the ledger).
+pub fn serve_buckets(index: &Mutex<TimeIndex>, ledger: &Path, line: &str, out: &mut Vec<String>) {
+    let Some((from, to, lines)) = past_lines(index, ledger, line, out) else { return };
+    let runs: Vec<String> = lines
+        .iter()
+        .filter_map(|l| {
+            let v = makepad_strict_json::parse_depth(l, 16).ok()?;
+            let text = |v: &Value, k: &str| json_str(v.get(k).and_then(Value::as_str).unwrap_or(""));
+            let failing: Vec<String> = v.get("failing").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(json_str).collect();
+            let tip = v.get("tip").map_or("null".to_string(), |t| format!("{{\"work\":{},\"main\":{}}}", text(t, "work"), text(t, "main")));
+            Some(format!(
+                "{{\"bucket\":{},\"ok\":{},\"failing\":[{}],\"tip\":{tip},\"started_ms\":{},\"ended_ms\":{}}}",
+                json_str(v.get("bucket")?.as_str()?),
+                v.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                failing.join(","),
+                v.get("started_ms").and_then(Value::as_u64)?,
+                v.get("ended_ms").and_then(Value::as_u64).unwrap_or(0)
+            ))
+        })
+        .collect();
+    out.push(format!("{{\"t\":\"buckets\",\"from_ms\":{from},\"to_ms\":{to},\"n\":{}}}", runs.len()));
+    out.extend(runs);
+}
+
+/// The landings handed in or changed in a range: the train's history's (an entry as it left the
+/// live view) and its live view's (`live`), the live one winning; each without its detail lines
+/// and package lists (an entry's tip has its own ask).
+pub fn serve_landings(index: &Mutex<TimeIndex>, history: &Path, live: &[crate::land::Entry], line: &str, out: &mut Vec<String>) {
+    let Some((from, to, lines)) = past_lines(index, history, line, out) else { return };
+    let mut by_id: std::collections::BTreeMap<u64, crate::land::Entry> = std::collections::BTreeMap::new();
+    for l in &lines {
+        let Some(e) = makepad_strict_json::parse_depth(l, 16).ok().and_then(|v| crate::land::Entry::parse(&v.get("record")?.to_json())) else { continue };
+        by_id.insert(e.id, e);
+    }
+    for e in live.iter().filter(|e| e.changed_ms >= from && e.asked_ms <= to) {
+        by_id.insert(e.id, e.clone());
+    }
+    out.push(format!("{{\"t\":\"landings\",\"from_ms\":{from},\"to_ms\":{to},\"n\":{}}}", by_id.len()));
+    out.extend(by_id.into_values().map(|mut e| {
+        (e.detail, e.touched, e.wide, e.set) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        e.to_json()
+    }));
+}
+
+pub fn serve_rows(index: &Mutex<TimeIndex>, ledger: &Path, line: &str, out: &mut Vec<String>) {
+    let Some((from, to, lines)) = past_lines(index, ledger, line, out) else { return };
+    // a lease's newest line wins
+    let mut rows: Vec<Row> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in &lines {
+        let Some(r) = makepad_strict_json::parse(line).ok().as_ref().and_then(Row::of_ledger) else { continue };
+        match at.get(&r.id) {
+            Some(&i) => rows[i] = r,
+            None => {
+                at.insert(r.id.clone(), rows.len());
+                rows.push(r);
+            }
+        }
+    }
+    out.push(format!("{{\"t\":\"rows\",\"from_ms\":{from},\"per_ms\":{},\"n\":{},\"level\":0,\"first_ms\":null}}", to.saturating_sub(from), rows.len()));
+    out.extend(rows.iter().map(Row::to_json));
+}
+
+/// The samples of the last `keep_ms` before `now` from the history, per node: what a restarted
+/// master's scheduler holds again.
+pub fn recent(history: &mut History, now: u64, keep_ms: u64) -> Vec<(String, Vec<Sample>)> {
+    history.names().into_iter().filter_map(|n| Some((n.clone(), history.exact(&n, now.saturating_sub(keep_ms), now.saturating_add(1)).ok()?.iter().map(|(t, v)| Sample::of_vals(*t, v)).collect()))).collect()
 }
 
 #[cfg(test)]
@@ -528,6 +818,89 @@ mod tests {
         let b = Answer::parse(&again).unwrap();
         assert!(b.rows.iter().all(|r| r.lane != "lane-a"), "nothing of the ledger past the asked time");
         assert!(b.pressure.iter().all(|(_, s)| s.is_empty()), "no sample since then");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `rows` answers the ledger's leases that ran in a range before the panel's window, through
+    /// the ledger's time index: those inside it and one that began in it and ended a day later
+    /// (a live session), none outside it; the lines appended since the last ask too; and a lost
+    /// index is built again with the same answer.
+    #[test]
+    fn rows_of_a_past_range_come_from_the_ledgers_index() {
+        let dir = std::env::temp_dir().join(format!("devhub-panel-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ledger, idx) = (dir.join("leases.jsonl"), dir.join("leases.idx"));
+        let (t0, min) = (1_800_000_000_000u64, 60_000u64);
+        let line = |id: &str, asked: u64, ended: u64| format!("{{\"id\":\"{id}\",\"lane\":\"lane-a\",\"kind\":\"build\",\"node\":\"node-a\",\"asked_ms\":{asked},\"granted_ms\":{asked},\"ended_ms\":{ended},\"how\":\"released\"}}\n");
+        // a day of leases, one every 10 min for 5 min, then one asked at 3 h that ended at 30 h
+        let mut text: String = (0..144).map(|i| line(&format!("L{i}"), t0 + i * 10 * min, t0 + (i * 10 + 5) * min)).collect();
+        text += &line("LONG", t0 + 180 * min, t0 + 1800 * min);
+        std::fs::write(&ledger, &text).unwrap();
+        let ask = |index: &Mutex<TimeIndex>| {
+            let mut out = Vec::new();
+            serve_rows(index, &ledger, &format!("rows {} {}", t0 + 120 * min, t0 + 240 * min), &mut out);
+            let mut ids: Vec<String> = Hist::parse(&out).unwrap().rows.into_iter().map(|r| r.id).collect();
+            ids.sort();
+            ids
+        };
+        let mut want: Vec<String> = (12..=24).map(|i| format!("L{i}")).chain(["LONG".to_string()]).collect();
+        want.sort();
+        let index = Mutex::new(TimeIndex::leases(idx.clone()));
+        assert_eq!(ask(&index), want, "the leases that ran in 2 h to 4 h, the long one among them");
+        assert_eq!(std::fs::metadata(&idx).unwrap().len(), 16 + 145 * 32, "a record a ledger line");
+        // a lease that ended after the last ask, asked in the range
+        std::io::Write::write_all(&mut std::fs::OpenOptions::new().append(true).open(&ledger).unwrap(), line("LATE", t0 + 200 * min, t0 + 3000 * min).as_bytes()).unwrap();
+        want.push("LATE".into());
+        want.sort();
+        assert_eq!(ask(&index), want, "the lines appended since are indexed at the next ask");
+        // a lost index: built again from the ledger
+        drop(index);
+        std::fs::remove_file(&idx).unwrap();
+        assert_eq!(ask(&Mutex::new(TimeIndex::leases(idx.clone()))), want, "a rebuilt index answers the same");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `buckets` and `landings` answer a range's bucket runs and landings through their indexes:
+    /// the bucket ledger's rows in it (a full run that began before it among them), and the land
+    /// section's entries of the state history, its other sections' lines passed over, the train's
+    /// live view winning over the history for an entry both hold (11-17).
+    #[test]
+    fn buckets_and_landings_of_a_range_come_from_their_indexes() {
+        let dir = std::env::temp_dir().join(format!("devhub-panel-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (t0, min) = (1_800_000_000_000u64, 60_000u64);
+        let run = |name: &str, s: u64, e: u64, ok: bool| format!("{{\"bucket\":\"{name}\",\"base\":null,\"tip\":{{\"work\":\"a1\",\"main\":\"b1\"}},\"started_ms\":{},\"ended_ms\":{},\"ok\":{ok},\"failing\":[{}],\"errors\":{{}},\"landings\":[{{\"id\":1,\"land_to_verdict_ms\":5}}]}}\n", t0 + s * min, t0 + e * min, if ok { "" } else { "\"test p\"" });
+        let text: String = (0..30).map(|i| run("fast", i * 10, i * 10 + 5, i != 13)).chain([run("full", 100, 300, false)]).collect();
+        std::fs::write(dir.join("buckets.jsonl"), text).unwrap();
+        let land = |id: u64, asked: u64, changed: u64, state: &str| format!("{{\"revision\":{id},\"section\":\"land\",\"record\":{{\"id\":{id},\"branch\":\"rc-l{id}\",\"state\":\"{state}\",\"asked_ms\":{},\"changed_ms\":{},\"detail\":[\"a long check log\"],\"touched\":[\"pkg\"]}}}}\n", t0 + asked * min, t0 + changed * min);
+        let other = |rev: u64| format!("{{\"revision\":{rev},\"section\":\"lives\",\"record\":{{\"id\":\"W{rev}\",\"asked_ms\":{},\"changed_ms\":{}}}}}\n", t0 + 140 * min, t0 + 150 * min);
+        let text: String = (0..30).map(|i| land(i, i * 10, i * 10 + 3, if i == 14 { "failed" } else { "landed" }) + &other(1000 + i)).collect();
+        std::fs::write(dir.join("history.jsonl"), text).unwrap();
+        let index = PastIndex::new(&dir);
+        let live = || {
+            let mut e = crate::land::Entry::parse(&format!("{{\"id\":14,\"branch\":\"rc-l14\",\"state\":\"landed\",\"asked_ms\":{},\"changed_ms\":{}}}", t0 + 140 * min, t0 + 149 * min)).unwrap();
+            e.agent = "LIVE".into();
+            vec![e]
+        };
+        let ask = |line: &str| {
+            let mut out = Vec::new();
+            serve_past(&index, &dir, &live, line, &mut out);
+            out
+        };
+        let (from, to) = (t0 + 120 * min, t0 + 160 * min);
+        let runs = ask(&format!("buckets {from} {to}"));
+        let names: Vec<(String, u64)> = runs[1..].iter().map(|l| makepad_strict_json::parse(l.as_bytes()).unwrap()).map(|v| (v.get("bucket").and_then(Value::as_str).unwrap().to_string(), (v.get("started_ms").and_then(Value::as_u64).unwrap() - t0) / min)).collect();
+        assert_eq!(names, [("fast", 120), ("fast", 130), ("fast", 140), ("fast", 150), ("fast", 160), ("full", 100)].map(|(n, s)| (n.to_string(), s)), "the runs that met 2 h to 2 h 40, the full run begun before it among them");
+        assert!(runs[1..].iter().all(|l| !l.contains("errors") && !l.contains("landings")) && runs[2].contains("\"failing\":[\"test p\"]"), "a run's name, verdict, failing units, tip and times only: {runs:?}");
+        let got = ask(&format!("landings {from} {to}"));
+        let entries: Vec<crate::land::Entry> = got[1..].iter().map(|l| crate::land::Entry::parse(l).unwrap()).collect();
+        assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>(), [12, 13, 14, 15, 16], "the land section's entries in the range; the other sections' lines passed over");
+        let live_one = entries.iter().find(|e| e.id == 14).unwrap();
+        assert_eq!((live_one.agent.as_str(), live_one.state.as_str()), ("LIVE", "landed"), "the live view wins over the history");
+        assert!(entries.iter().all(|e| e.detail.is_empty() && e.touched.is_empty()), "no detail lines or package lists");
+        assert!(ask("landings soon").iter().any(|l| l.contains("landings <from_ms> <to_ms>")), "a bad ask says its form");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

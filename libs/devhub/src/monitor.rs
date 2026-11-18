@@ -198,6 +198,19 @@ impl Monitor {
         self.inner.lock().unwrap().trees.get(&t).map_or(0, |t| t.last_ms)
     }
 
+    /// The tree's file events since its last event at `before` were this process's own write (the
+    /// merge bot moving a lane onto its tip), not its owner's activity: once they are heard
+    /// ([`Self::settle`]) its last event time goes back to `before`. 11-17: the bot's fast-forward
+    /// of every landed lane at each landing read as the lanes' activity, and their node dirs never
+    /// reached the cleanup's 30 quiet minutes on a night of landings.
+    pub fn own_write(&self, tree: &Path, before: u64) {
+        let _ = self.settle(tree);
+        let t = tree.canonicalize().unwrap_or_else(|_| tree.to_path_buf());
+        if let Some(t) = self.inner.lock().unwrap().trees.get_mut(&t) {
+            t.last_ms = t.last_ms.min(before);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_last_event_ms(&self, tree: &Path, at: u64) {
         let root = tree.canonicalize().unwrap();
@@ -446,6 +459,19 @@ mod tests {
         m.settle(&tree).unwrap();
         let after = m.dirty(&tree).unwrap().changed;
         assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        // this process's own write (the merge bot moving a landed lane) is no activity of the
+        // tree's owner; the owner's next write is (11-17)
+        let quiet = m.last_event_ms(&tree);
+        assert!(quiet > 0, "the writes above were heard");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(tree.join("bot.rs"), "u").unwrap();
+        m.own_write(&tree, quiet);
+        assert_eq!(m.last_event_ms(&tree), quiet, "the bot's write left the last activity as it was");
+        assert!(m.dirty(&tree).unwrap().changed.contains(&"bot.rs".to_string()), "its file is heard all the same");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(tree.join("agent.rs"), "u").unwrap();
+        m.settle(&tree).unwrap();
+        assert!(m.last_event_ms(&tree) > quiet, "the owner's write is activity");
         assert!(!std::fs::read_dir(&base).unwrap().flatten().chain(std::fs::read_dir(&tree).unwrap().flatten()).any(|e| e.file_name().to_string_lossy().starts_with(COOKIE_PREFIX)), "no cookie stays");
         let _ = std::fs::remove_dir_all(&base);
     }

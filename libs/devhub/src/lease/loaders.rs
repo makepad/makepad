@@ -822,24 +822,36 @@ fn cargo_cause(text: &str) -> Option<String> {
     (!causes.is_empty()).then(|| causes[causes.len().saturating_sub(2)..].join(": "))
 }
 
-/// Cargo's build of the dev tree as it stands, published to `dst`.
+/// Cargo's build of the dev tree as it stands, published to `dst`. An input newer than the binary
+/// cargo left is one cargo never saw: the loader's build script (tools/run/build.rs, build_stamp.rs)
+/// hashes every Rust file of its packages into RELAX_PROVENANCE but watches only the files it hashed
+/// before, so a file added outside a watched folder reruns nothing. The loader's package is built
+/// again from clean, its script hashing the file, and only an input that changed under that build
+/// too is refused: a fixture #6007 added beside the agree cases left every dev JIT of its tip
+/// refused on every box, each build a no-op (11-17).
 #[cfg(feature = "checkout")]
 fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], id: &str, dst: &Path, build: &OverlayBuild<'_>, active: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
-    let mut cmd = if build.niced {
-        let mut cmd = super::caps::rust_command("nice");
-        cmd.args(["-n", "19", "cargo"]);
+    let cargo = |args: &[&str]| {
+        let mut cmd = if build.niced {
+            let mut cmd = super::caps::rust_command("nice");
+            cmd.args(["-n", "19", "cargo"]);
+            cmd
+        } else { super::caps::rust_command("cargo") };
+        cmd.args(args).current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_INCREMENTAL", "0").env("CARGO_NET_OFFLINE", "true");
+        for k in ["VFS", "EDITS", "WORKSPACE"].iter().map(|v| crate::run_names::var(v)) { cmd.env_remove(k); }
         cmd
-    } else { super::caps::rust_command("cargo") };
-    cmd.args(["build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "-j", &build.jobs.max(1).to_string()])
-        .current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_INCREMENTAL", "0").env("CARGO_NET_OFFLINE", "true");
-    for k in ["VFS", "EDITS", "WORKSPACE"].iter().map(|v| crate::run_names::var(v)) { cmd.env_remove(k); }
-    (build.say)(&format!("devhub: building the dev JIT {id} at {}", pin.short()));
-    let (status, log) = (build.run)(id, &cmd, active)?;
-    if !status.success() {
+    };
+    let jobs = build.jobs.max(1).to_string();
+    let run = |what: &str, args: &[&str]| -> Result<(), String> {
+        let (status, log) = (build.run)(id, &cargo(args), active)?;
+        if status.success() { return Ok(()); }
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         let tail = text.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-        return Err(format!("dev JIT cargo failed ({status}){}:\n{tail}", cargo_cause(&text).map_or(String::new(), |c| format!(": {c}"))));
-    }
+        Err(format!("dev JIT {what} failed ({status}){}:\n{tail}", cargo_cause(&text).map_or(String::new(), |c| format!(": {c}"))))
+    };
+    let compile = || run("cargo", &["build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "-j", &jobs]);
+    (build.say)(&format!("devhub: building the dev JIT {id} at {}", pin.short()));
+    compile()?;
     let dep_info = target.join("host/makepad.d");
     let dep = std::fs::read_to_string(&dep_info).map_err(|e| format!("{}: {e}", dep_info.display()))?;
     let index = listed(&git(root, &LISTING)?);
@@ -848,8 +860,16 @@ fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], i
         eprintln!("devhub: dev JIT {id} at {}: dep-info names {} file(s) outside its inputs (not an error): {}{}", pin.short(), outside.len(), outside[..outside.len().min(5)].join(", "), if outside.len() > 5 { " ..." } else { "" });
     }
     let binary = built_binary(target);
-    let built = std::fs::metadata(&binary).and_then(|m| m.modified()).map_err(|e| format!("{}: {e}", binary.display()))?;
-    if let Some(p) = inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t > built)) { return Err(format!("dev JIT: {p} changed after the build")); }
+    let newer = || -> Result<Option<&String>, String> {
+        let built = std::fs::metadata(&binary).and_then(|m| m.modified()).map_err(|e| format!("{}: {e}", binary.display()))?;
+        Ok(inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t > built)))
+    };
+    if let Some(p) = newer()? {
+        (build.say)(&format!("devhub: dev JIT {id}: {p} is newer than the binary cargo left (a file its watches never saw): the loader's package builds again from clean"));
+        run("cargo clean", &["clean", "--profile", "host", "-p", "makepad-run"])?;
+        compile()?;
+        if let Some(p) = newer()? { return Err(format!("dev JIT: {p} changed after the build")); }
+    }
     publish_binary(&binary, dst, &|staged, dst| {
         active()?;
         std::fs::rename(staged, dst).map_err(|e| format!("{}: {e}", dst.display()))
@@ -1313,6 +1333,85 @@ mod tests {
             clear_dead_locks(&root).unwrap();
             assert!(!lock.exists(), "{name}: old");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A file added where the loader's build script hashes but watches nothing (#6007's new agree
+    /// case beside the others): cargo builds nothing, and the binary is older than the file. The
+    /// loader's package builds again from clean and publishes; a file written under that build too
+    /// is still refused, after one clean.
+    #[test]
+    fn an_input_cargo_never_saw_builds_the_loader_again_from_clean() {
+        use std::cell::RefCell;
+        let d = std::env::temp_dir().join(format!("devhub-unseen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (root, target) = (d.join("tree"), d.join("target"));
+        std::fs::create_dir_all(root.join("tools/run/src")).unwrap();
+        std::fs::create_dir_all(target.join("host")).unwrap();
+        let g = |a: &[&str]| {
+            let o = std::process::Command::new("git").args(a).current_dir(&root).output().unwrap();
+            assert!(o.status.success(), "{a:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        g(&["init", "-q"]);
+        std::fs::write(root.join("tools/run/src/main.rs"), "fn main() {}").unwrap();
+        g(&["add", "-A"]);
+        // cargo as its fingerprints have it: a build makes the binary only when there is none (no
+        // file it watches changed), `clean -p makepad-run` takes it away; `under` is a file
+        // something writes while each build runs
+        let (bin, log) = (built_binary(&target), d.join("cargo.log"));
+        let calls = RefCell::new(Vec::<String>::new());
+        let under = RefCell::new(None::<PathBuf>);
+        let later = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let run = |_: &str, cmd: &std::process::Command, _: &dyn Fn() -> Result<(), String>| -> Result<(std::process::ExitStatus, PathBuf), String> {
+            let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            calls.borrow_mut().push(args[0].clone());
+            match args[0].as_str() {
+                "build" => {
+                    if !bin.exists() {
+                        std::fs::write(&bin, calls.borrow().len().to_string()).unwrap();
+                        std::fs::write(target.join("host/makepad.d"), format!("{}: {}\n", bin.display(), root.join("tools/run/src/main.rs").display())).unwrap();
+                    }
+                    if let Some(p) = &*under.borrow() { later(); std::fs::write(p, "written under the build").unwrap(); }
+                }
+                "clean" => {
+                    assert!(args.iter().any(|a| a == "makepad-run"), "{args:?}");
+                    std::fs::remove_file(&bin).unwrap();
+                }
+                other => panic!("cargo {other}"),
+            }
+            Ok((std::process::ExitStatus::default(), log.clone()))
+        };
+        let said = RefCell::new(Vec::<String>::new());
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let build = OverlayBuild { jobs: 4, niced: false, run: &run, cancelled: &cancelled, say: &|l: &str| said.borrow_mut().push(l.to_string()), pending: &|_: &str| {}, warn: &|_: &str| {}, active: &|| Ok(()), sandboxed: false };
+        let pin = super::super::Pin::at(&"a".repeat(40));
+        let tree = |inputs: &[&str], id: &str| {
+            calls.borrow_mut().clear();
+            let inputs: Vec<String> = inputs.iter().map(|p| p.to_string()).collect();
+            build_tree(&root, &target, &pin, &inputs, id, &d.join(id), &build, &|| Ok(()))
+        };
+        let read = |id: &str| std::fs::read_to_string(d.join(id)).ok();
+
+        tree(&["tools/run/src/main.rs"], "k1").unwrap();
+        assert_eq!((calls.borrow().clone(), read("k1").as_deref()), (vec!["build".to_string()], Some("1")));
+
+        // the new fixture: an input of the key that no watch of cargo's covers
+        later();
+        let added = "tools/run/fixture/agree/accept/higher_ranked_closure.rs";
+        std::fs::create_dir_all(root.join(added).parent().unwrap()).unwrap();
+        std::fs::write(root.join(added), "fn main() {}").unwrap();
+        g(&["add", "-A"]);
+        let inputs = ["tools/run/src/main.rs", added];
+        tree(&inputs, "k2").unwrap();
+        assert_eq!(calls.borrow().clone(), ["build", "clean", "build"], "cargo built nothing, so the loader built again from clean");
+        assert_eq!((read("k2").as_deref(), read("k1").as_deref()), (Some("3"), Some("1")), "the new binary published; the earlier publish kept");
+        assert!(said.borrow().iter().any(|l| l.contains(added) && l.contains("again from clean")), "{:?}", said.borrow());
+
+        // a file that changes under every build is no binary of it
+        *under.borrow_mut() = Some(root.join(added));
+        let refused = tree(&inputs, "k3").unwrap_err();
+        assert!(refused.contains(added) && refused.contains("changed after the build"), "{refused}");
+        assert_eq!((calls.borrow().clone(), read("k3")), (vec!["build".to_string(), "clean".into(), "build".into()], None), "one clean, then refused");
         let _ = std::fs::remove_dir_all(&d);
     }
 

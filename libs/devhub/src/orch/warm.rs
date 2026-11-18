@@ -653,6 +653,36 @@ fn waited_out(s: &Spare, running: bool, now: u64, value_ms: u64) -> bool {
     running && s.progress.lease.is_none() && s.progress.state == "waiting" && now.saturating_sub(s.progress.started_ms) > value_ms
 }
 
+/// The landed tips a lane's commits are looked for in: work, and the private checkout's main.
+struct Tips {
+    work: Option<String>,
+    main: Option<String>,
+}
+
+impl Tips {
+    fn read(repo: &std::path::Path) -> Tips {
+        Tips { work: crate::gitread::rev(repo, "refs/heads/work"), main: crate::gitread::rev(&repo.join("apps/commercial"), "refs/heads/main") }
+    }
+
+    /// Every commit a lease's `rev` names (`branch@sha`, then `commercial=branch@sha`) is in its
+    /// repository's tip; false for a rev that names none, or a tip not read.
+    fn hold(&self, repo: &std::path::Path, rev: &str) -> bool {
+        let mut any = false;
+        for part in rev.split(',').filter(|p| !p.is_empty()) {
+            let (dir, tip, part) = match part.strip_prefix("commercial=") {
+                Some(p) => (repo.join("apps/commercial"), &self.main, p),
+                None => (repo.to_path_buf(), &self.work, part),
+            };
+            let (Some(tip), Some((_, sha))) = (tip, part.rsplit_once('@')) else { return false };
+            if sha.is_empty() || !crate::gitread::is_ancestor(&dir, sha, tip) {
+                return false;
+            }
+            any = true;
+        }
+        any
+    }
+}
+
 /// Only agent lanes receive spares, excluding devhub's own job lanes.
 fn agent_lane(lane: &str) -> bool {
     !matches!(lane, crate::lease::sched::CI_LANE | crate::lease::sched::LANDING_LANE)
@@ -662,12 +692,18 @@ fn agent_lane(lane: &str) -> bool {
 fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity: &Activity, now: u64) {
     // Check branches once per tick, before taking SPARES (refs read in-process).
     let mut done = BTreeMap::new();
+    let tips = Tips::read(&ctx.repo);
+    let mut landed = BTreeMap::new();
     let needing: BTreeMap<_, _> = activity.lanes.iter().filter_map(|(lane, l)| {
         if !agent_lane(lane) { return None; }
         let first = l.rev.split(',').next().unwrap_or("");
         if let Some((branch, _)) = first.split_once('@') {
             if !matches!(branch, "" | "work" | "main") && *done.entry(branch).or_insert_with(|| crate::gitread::rev(&ctx.repo, &format!("refs/heads/{branch}")).is_none()) { return None; }
         }
+        // a lane whose newest lease ran commits the tips hold has landed: its build is the tip's,
+        // which the boxes' prebuilds warm (11-17: two landed lanes' warm legs waited 10-12 min at
+        // a box, at the head of the queue)
+        if *landed.entry(l.rev.as_str()).or_insert_with(|| tips.hold(&ctx.repo, &l.rev)) { return None; }
         // (a lane in a nested repository names that repository's commit: the root cannot build it)
         if crate::gitread::lacks_commit(&ctx.repo, first.rsplit('@').next().unwrap_or("")) { return None; }
         let group = nodes.iter().find(|n| n.name == l.node)?.caps.as_ref()?;
@@ -1400,6 +1436,44 @@ fn state_parse(v: &Value) -> Option<(Option<Plan>, Spares, Vec<Run>)> {
 #[cfg(test)]
 mod tests {
     use super::{Key, Listed, Node, Package, Plan, Progress, Role, Src};
+
+    /// A lane whose newest lease ran commits work (and the private main) hold has landed, and
+    /// gets no warm leg: its build is the tip's (11-17: two landed lanes' legs waited 10-12 min).
+    /// A lane commit work lacks, either half's, keeps it warm.
+    #[test]
+    fn a_landed_lanes_commits_are_in_the_tips_and_a_live_lanes_are_not() {
+        let d = std::env::temp_dir().join(format!("devhub-warm-landed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let com = d.join("apps/commercial");
+        std::fs::create_dir_all(&com).unwrap();
+        let g = |dir: &std::path::Path, args: &[&str]| {
+            let o = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let commit = |dir: &std::path::Path, m: &str| {
+            g(dir, &["commit", "-q", "--allow-empty", "-m", m]);
+            g(dir, &["rev-parse", "HEAD"])
+        };
+        g(&d, &["init", "-q", "-b", "work"]);
+        g(&com, &["init", "-q", "-b", "main"]);
+        let (landed, private) = (commit(&d, "lane 1"), commit(&com, "lane 1 private"));
+        commit(&d, "after");
+        g(&d, &["checkout", "-q", "-b", "rc-x"]);
+        let ahead = commit(&d, "lane 2, not landed");
+        g(&com, &["checkout", "-q", "-b", "rc-x"]);
+        let private_ahead = commit(&com, "lane 2 private");
+        let tips = super::Tips::read(&d);
+        assert!(tips.hold(&d, &format!("rc-x@{landed}")), "landed");
+        assert!(tips.hold(&d, &format!("rc-x@{landed},commercial=rc-x@{private}")), "landed in both halves");
+        assert!(!tips.hold(&d, &format!("rc-x@{ahead}")), "a commit work lacks");
+        assert!(!tips.hold(&d, &format!("rc-x@{landed},commercial=rc-x@{private_ahead}")), "the private half not landed");
+        let unknown = format!("rc-x@{}", "0".repeat(40));
+        for rev in ["", "rc-x", "rc-x@", unknown.as_str()] {
+            assert!(!tips.hold(&d, rev), "{rev:?} names no commit the tips hold");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn the_warm_state_survives_its_round_trip() {

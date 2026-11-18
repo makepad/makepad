@@ -106,6 +106,8 @@ pub fn start(ep: &makepad_remote::Endpoint, machine: &str, leases: Arc<LeaseMast
     let lanes = store.clone();
     leases.set_lane_trees(Arc::new(move |lane: &str| lanes.read(|d| d.lanes.iter().rev().find(|l| l.name == lane && l.state == "live").map(|l| l.path.clone()))));
     let ctx = Arc::new(Ctx { store, leases, machine: machine.to_string(), repo, home: crate::proto::home(), monitor });
+    // a build a self-update exec'd into rolls back by itself should it panic in its first minutes
+    roll::guard_fresh_build(&ctx);
     for svc in SERVICES {
         let c = ctx.clone();
         ep.register(svc, 1, makepad_remote::lines::service(svc, Arc::new(move |line, out| serve(&c, svc, line, out))));
@@ -327,9 +329,11 @@ fn serve(ctx: &Arc<Ctx>, svc: &str, line: &str, out: &mut Vec<String>) {
         // builds work's tip and answers how that went: the exec follows the answer, a failed
         // build keeps this master running (and is in the inbox too). On the tip already (its
         // self-update came first) it says so: an exec onto the same build only drops what runs
-        // through it (a job's JIT build twice in 2 min, 11-02).
+        // through it (a job's JIT build twice in 2 min, 11-02); unless that build is known bad (it
+        // panicked), when a fresh start of it is what is left. `hub_rev` is the build it runs, a
+        // rolled-back one's too (`roll::rollback_master`).
         "master" if line.trim() == "master restart" => git(&ctx.repo, &["rev-parse", "refs/heads/work"])
-            .and_then(|work| if work == crate::lease::caps::hub_rev() { Ok(format!("the master already runs work's tip {}: nothing to restart", short(&work))) } else { roll::restart_master(ctx, &work, "`devhub master restart`", true) })
+            .and_then(|work| if work == crate::lease::caps::hub_rev() && roll::bad_build(&ctx.home, &work).is_none() { Ok(format!("the master already runs work's tip {}: nothing to restart", short(&work))) } else { roll::restart_master(ctx, &work, "`devhub master restart`", true) })
             .map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
         "master" if line.trim() == "master rollback" => roll::rollback_master(ctx, "`devhub master rollback`").map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
         "state" => {

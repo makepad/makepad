@@ -1,0 +1,229 @@
+//! The master's menu-bar item on the Mac, shown by a helper process: this app's own executable
+//! with [`FLAG`], a child of the master that never execs ([`makepad_devhub::helper`]). macOS 27
+//! takes no status item from a process that exec'd: the master's self-updates exec in place, and
+//! after the first one its item was an empty pill (MenuBarAgent keeps the first image "pending
+//! exit" by pid and cancels every later image's connection, 11-17). Each image of the master takes
+//! the same helper on, hands it the glyph and the menu, and hears the items chosen in it.
+
+use makepad_strict_json::{obj, s, Value};
+use makepad_widgets::*;
+use std::sync::{Arc, Mutex};
+
+/// The argument that makes this binary the menu-bar item's helper.
+pub const FLAG: &str = "--menu-bar-item";
+
+/// What carries the helper over the master's exec ([`makepad_devhub::helper::Spec::env`]).
+#[cfg(target_os = "macos")]
+const ENV: &str = "DEVHUB_MENU_ITEM";
+
+/// The master's side: its helper, and the items chosen in its menu not taken yet.
+pub struct ItemLink {
+    #[cfg(target_os = "macos")]
+    helper: makepad_devhub::helper::Helper,
+    chosen: Arc<Mutex<Vec<LiveId>>>,
+}
+
+impl ItemLink {
+    /// The helper the master's last image left it, else a new one (the Mac only: elsewhere the
+    /// master sets its tray itself).
+    pub fn start() -> Option<ItemLink> {
+        #[cfg(target_os = "macos")]
+        {
+            let chosen: Arc<Mutex<Vec<LiveId>>> = Arc::default();
+            let c = chosen.clone();
+            let helper = makepad_devhub::helper::Helper::start(makepad_devhub::helper::Spec {
+                env: ENV,
+                version: image_id(),
+                // (the bundle's executable when the master runs from it, as its self-update and its
+                // LaunchAgent start it: the item has the app's identity)
+                command: Box::new(|| {
+                    let exe = std::env::current_exe().map_err(|e| format!("its executable: {e}"))?;
+                    let mut cmd = std::process::Command::new(exe);
+                    cmd.arg(FLAG).env_remove("MAKEPAD_DEVHUB_OPEN");
+                    Ok(cmd)
+                }),
+                answer: Box::new(move |line| match chosen_item(&line) {
+                    Some(item) => {
+                        c.lock().unwrap().push(item);
+                        makepad_widgets::makepad_platform::thread::SignalToUI::set_ui_signal();
+                    }
+                    None => eprintln!("devhub: the menu-bar item's helper said {line:?}"),
+                }),
+                say: Box::new(|line| eprintln!("devhub: the menu-bar item: {line}")),
+                pause: std::time::Duration::from_secs(2),
+            });
+            Some(ItemLink { helper, chosen })
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
+    /// Shows `icon` in the menu bar: the helper gets it, or the newest state after it should it
+    /// fall behind. Never waits.
+    pub fn show(&self, icon: &TrayIcon) {
+        #[cfg(target_os = "macos")]
+        self.helper.send(encode(icon));
+        #[cfg(not(target_os = "macos"))]
+        let _ = icon;
+    }
+
+    /// The items chosen in the menu since the last call.
+    pub fn chosen(&self) -> Vec<LiveId> {
+        std::mem::take(&mut *self.chosen.lock().unwrap())
+    }
+}
+
+/// The linker's id of this executable (its LC_UUID: it changes with the code, not with a copy or a
+/// signature), as hex: a self-update to other code replaces the helper too.
+#[cfg(target_os = "macos")]
+fn image_id() -> String {
+    extern "C" {
+        fn _dyld_get_image_header(index: u32) -> *const u8;
+    }
+    // SAFETY: dyld's image 0 is the main executable, its mach_header_64 mapped with its load commands
+    unsafe {
+        let h = _dyld_get_image_header(0);
+        let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32);
+        if !h.is_null() && rd(h) == 0xfeed_facf {
+            let mut c = h.add(32);
+            for _ in 0..rd(h.add(16)) {
+                // LC_UUID
+                if rd(c) == 0x1b {
+                    return std::slice::from_raw_parts(c.add(8), 16).iter().map(|b| format!("{b:02x}")).collect();
+                }
+                c = c.add(rd(c.add(4)) as usize);
+            }
+        }
+    }
+    "unknown".into()
+}
+
+/// The helper's side: the newest state its master sent, and where its answers go.
+pub struct Host {
+    latest: Arc<Mutex<Option<String>>>,
+    #[cfg(unix)]
+    answers: Mutex<std::fs::File>,
+    #[cfg(unix)]
+    _lock: std::fs::File,
+}
+
+impl Host {
+    /// Takes the one helper's lock (another helper running: Err), keeps stdout for the answers
+    /// (anything else written there goes to the log), and reads the master's states until its
+    /// pipe ends, when the helper ends too.
+    #[cfg(unix)]
+    pub fn start() -> Result<Host, String> {
+        use std::io::BufRead;
+        use std::os::fd::AsFd;
+        extern "C" {
+            fn flock(fd: i32, op: i32) -> i32;
+            fn dup2(from: i32, to: i32) -> i32;
+        }
+        const LOCK_EX: i32 = 2;
+        const LOCK_NB: i32 = 4;
+        let path = makepad_devhub::proto::home().join("menu-item.lock");
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // SAFETY: flock on a descriptor this function owns
+        if unsafe { flock(std::os::fd::AsRawFd::as_raw_fd(&lock), LOCK_EX | LOCK_NB) } != 0 {
+            return Err(format!("another menu-bar item helper holds {}", path.display()));
+        }
+        let answers = std::io::stdout().as_fd().try_clone_to_owned().map_err(|e| format!("its answers: {e}"))?;
+        // SAFETY: descriptors only: stray output goes to the log, never into the answers
+        unsafe { dup2(2, 1) };
+        let latest: Arc<Mutex<Option<String>>> = Arc::default();
+        let l = latest.clone();
+        std::thread::Builder::new().name("devhub-menu-item".into()).spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if line.is_empty() { continue; }
+                *l.lock().unwrap() = Some(line);
+                makepad_widgets::makepad_platform::thread::SignalToUI::set_ui_signal();
+            }
+            // the master ended (or let it go): so does its item
+            std::process::exit(0);
+        }).map_err(|e| format!("its reader: {e}"))?;
+        Ok(Host { latest, answers: Mutex::new(std::fs::File::from(answers)), _lock: lock })
+    }
+
+    #[cfg(not(unix))]
+    pub fn start() -> Result<Host, String> {
+        Err("the menu-bar item's helper runs on the Mac only".into())
+    }
+
+    /// The newest state the master sent, shown as tray `id`.
+    pub fn apply(&self, cx: &mut Cx, id: LiveId) {
+        let Some(line) = self.latest.lock().unwrap().take() else { return };
+        match decode(&line, id) {
+            Some(icon) => cx.set_tray(icon),
+            None => eprintln!("devhub: the menu-bar item: no state in {line:?}"),
+        }
+    }
+
+    /// An item chosen in the menu, for the master.
+    pub fn chose(&self, item: LiveId) {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            let line = obj(vec![("item", s(item.0.to_string()))]).to_json();
+            let mut out = self.answers.lock().unwrap();
+            let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+        }
+        #[cfg(not(unix))]
+        let _ = item;
+    }
+}
+
+/// `icon` as one line for the helper: its glyph's alpha in hex, its menu items.
+#[cfg(any(target_os = "macos", test))]
+pub fn encode(icon: &TrayIcon) -> String {
+    let alpha: String = icon.image.alpha.iter().map(|b| format!("{b:02x}")).collect();
+    let menu = icon.menu.iter().map(|m| match m {
+        TrayMenuItem::Item { id, label, enabled, checked } => obj(vec![("id", s(id.0.to_string())), ("label", s(label.as_str())),
+            ("enabled", Value::Bool(*enabled)), ("checked", checked.map_or(Value::Null, Value::Bool))]),
+        TrayMenuItem::Line => obj(vec![("line", Value::Bool(true))]),
+    }).collect();
+    obj(vec![("w", Value::Int(icon.image.width as i64)), ("h", Value::Int(icon.image.height as i64)), ("alpha", s(alpha)),
+        ("tooltip", s(icon.tooltip.as_str())), ("dropdown", Value::Bool(icon.dropdown)), ("menu", Value::Arr(menu))]).to_json()
+}
+
+/// [`encode`]'s line as tray `id`.
+pub fn decode(line: &str, id: LiveId) -> Option<TrayIcon> {
+    let v = makepad_strict_json::parse(line.as_bytes()).ok()?;
+    let hex = v.get("alpha")?.as_str()?;
+    let alpha = (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?;
+    let menu = v.get("menu")?.as_arr()?.iter().map(|m| {
+        if m.get("line").and_then(Value::as_bool) == Some(true) {
+            return Some(TrayMenuItem::Line);
+        }
+        Some(TrayMenuItem::Item { id: LiveId(m.get("id")?.as_str()?.parse().ok()?), label: m.get("label")?.as_str()?.to_string(),
+            enabled: m.get("enabled")?.as_bool()?, checked: m.get("checked").and_then(Value::as_bool) })
+    }).collect::<Option<Vec<_>>>()?;
+    Some(TrayIcon { id, image: TrayImage { width: v.get("w")?.as_u64()? as u32, height: v.get("h")?.as_u64()? as u32, alpha },
+        tooltip: v.get("tooltip")?.as_str()?.to_string(), menu, dropdown: v.get("dropdown")?.as_bool()? })
+}
+
+/// The item a helper's answer names.
+#[cfg(any(target_os = "macos", test))]
+fn chosen_item(line: &str) -> Option<LiveId> {
+    Some(LiveId(makepad_strict_json::parse(line.as_bytes()).ok()?.get("item")?.as_str()?.parse().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The glyph and the whole menu cross the pipe to the helper as they were; a chosen item
+    /// comes back by its id.
+    #[test]
+    fn the_menu_bar_item_crosses_to_its_helper_whole() {
+        let id = LiveId(7);
+        let icon = TrayIcon { id, image: TrayImage { width: 2, height: 2, alpha: vec![0, 255, 16, 1] }, tooltip: String::new(), dropdown: false,
+            menu: vec![TrayMenuItem::Item { id: LiveId(u64::MAX - 3), label: "Dev on a \u{b7} \"in use\"\n".into(), enabled: false, checked: None },
+                TrayMenuItem::Line, TrayMenuItem::check(LiveId(9), "Pause landing", true)] };
+        let line = encode(&icon);
+        assert!(!line.contains('\n'), "one line: {line}");
+        assert_eq!(decode(&line, id), Some(icon));
+        assert_eq!(decode("{\"w\":2}", id), None, "a state with parts missing shows nothing");
+        assert_eq!(chosen_item(&obj(vec![("item", s((u64::MAX - 3).to_string()))]).to_json()), Some(LiveId(u64::MAX - 3)));
+    }
+}

@@ -147,7 +147,8 @@ fn commit_rows(groups: &Groups, set: &[(usize, String)]) -> String {
             let stat = &groups.stats[*at];
             let areas: Vec<String> = groups.areas(*at).iter().map(|a| json_str(a)).collect();
             let credits: Vec<String> = groups.contributors.get(*at).filter(|c| !c.is_empty()).map(|c| json_str(c.trim_start_matches("Contributors: "))).into_iter().collect();
-            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}],\"contributors\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","), credits.join(","))
+            let coauthors: Vec<String> = groups.coauthors.get(*at).map_or(&[][..], Vec::as_slice).iter().map(|l| json_str(l)).collect();
+            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}],\"contributors\":[{}],\"coauthors\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","), credits.join(","), coauthors.join(","))
         })
         .collect();
     rows.join(",")
@@ -227,6 +228,67 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     Ok(format!("{{\"pushed\":true,\"commit\":{},\"origin_was\":{},\"tip\":{},\"files\":{files},\"commits\":[{commits}]}}", json_str(&last), json_str(&origin), json_str(&sha)))
 }
 
+/// The pushed commit that carries local work commit `local` (a full sha not on origin/work
+/// itself), as the push that sent it gave it its credits: of the oldest push on origin/work whose
+/// tip holds it, the area commit of the first block holding a file it changed (for a merge, what it
+/// brought in over its first parent), or the set's last when none does ([`group::coauthor_lines`]).
+/// The pushes origin/work stands on come from the ledger, each standing on the one before
+/// (`origin_was`), the chain a push reads its `since` from. None: no push of that chain carried it,
+/// or origin/work is no push of the ledger (`devhub promote` re-pointed it). An ancestry it cannot
+/// tell (a tip it cannot read) and a blocks file whose titles repeat (an area commit is found by
+/// its title) are errors, never a guess. Intake's post gate names this commit in a close of a local
+/// sha and checks it as it would the sha itself: on origin/work, and for a port, carrying the
+/// author's credit line.
+pub fn carrier(repo: &std::path::Path, pushes: &[Pushed], local: &str) -> Result<Option<String>, String> {
+    let origin = git(repo, &["rev-parse", "refs/remotes/origin/work"])?;
+    let mut chain: Vec<&Pushed> = Vec::new();
+    let mut at = origin.as_str();
+    while let Some(p) = pushes.iter().rev().find(|p| p.commit == at && !chain.iter().any(|c| c.commit == at)) {
+        chain.push(p);
+        at = p.origin_was.as_str();
+    }
+    // newest first: the oldest whose tip holds it, the one before it read and found without it
+    let mut push = None;
+    for p in chain {
+        if !ancestor(repo, local, &p.pair.work)? {
+            break;
+        }
+        push = Some(p);
+    }
+    let Some(push) = push else { return Ok(None) };
+    let log = git(repo, &["log", "--first-parent", "--reverse", "--format=%H %s", &format!("{}..{}", push.origin_was, push.commit)])?;
+    let set: Vec<(&str, &str)> = log.lines().filter_map(|l| l.split_once(' ')).collect();
+    let blocks = group::parse_blocks(&git(repo, &["show", &format!("{}:{}", push.pair.work, group::BLOCKS_FILE)])?);
+    if let Some(title) = title_twice(&blocks) {
+        return Err(format!("push carrier: {} at {} names block `{title}` twice: an area commit is found by its title", group::BLOCKS_FILE, super::short(&push.pair.work)));
+    }
+    let parents = git(repo, &["log", "-1", "--format=%P", local])?;
+    let files = match parents.split_whitespace().collect::<Vec<_>>()[..] {
+        [first, _, ..] => git(repo, &["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", first, local])?,
+        _ => git(repo, &["-c", "core.quotePath=false", "log", "-1", "--format=", "--name-only", local])?,
+    };
+    let first = if blocks.is_empty() { None } else { files.lines().filter(|f| !f.trim().is_empty()).filter_map(|f| set.iter().position(|(_, title)| *title == blocks[group::block_of(&blocks, f)].title)).min() };
+    Ok(first.or(set.len().checked_sub(1)).map(|n| set[n].0.to_string()))
+}
+
+/// A block title the blocks file gives twice.
+fn title_twice(blocks: &[group::Block]) -> Option<&str> {
+    let mut titles: Vec<&str> = blocks.iter().map(|b| b.title.as_str()).collect();
+    titles.sort_unstable();
+    titles.windows(2).find(|w| w[0] == w[1]).map(|w| w[0])
+}
+
+/// `a` is `b` or one of its ancestors: an error, not "no", when either does not read as a commit or
+/// the walk fails ([`is_ancestor`] reads those as "no").
+fn ancestor(repo: &std::path::Path, a: &str, b: &str) -> Result<bool, String> {
+    crate::gitread::with(repo, |p, r| {
+        let a = crate::gitread::resolve(p, r, a).ok_or_else(|| format!("push carrier: {a} reads as no commit"))?;
+        let b = crate::gitread::resolve(p, r, b).ok_or_else(|| format!("push carrier: {b} reads as no commit"))?;
+        makepad_git::is_ancestor(r, a, b).map_err(|e| format!("push carrier: is {} in {}: {e}", a.to_hex(), b.to_hex()))
+    })
+    .unwrap_or_else(|| Err(format!("push carrier: {}: no repository", repo.display())))
+}
+
 /// `push {"remap":"<file>"}`: after a rewrite of origin's public history the ledger's public names
 /// follow it. The file has one `<old> <new>` line per rewritten commit (the rewrite's commit map);
 /// each entry's `commit` and `origin_was` found there takes its new name. Refused, nothing changed,
@@ -298,6 +360,87 @@ mod tests {
         assert_eq!(public_parent(&dir, "origin/main").unwrap(), public);
         assert!(public_parent(&dir, "local").unwrap_err().contains("private"));
         assert!(public_parent(&dir, &private).is_err(), "a raw private oid is also refused");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A push's area commits carry the person co-authors and the intake's `Contributors:` line of
+    /// what they squash, and a local commit resolves to the area commit that carries it: of the
+    /// oldest push of origin's chain whose tip holds it, the first block holding its files; none
+    /// before a push sent it, none through a push origin/work does not stand on, and none once
+    /// origin/work is no push of the ledger. A merge goes by what it brought in, a change that came
+    /// and went by the set's last commit; a tip it cannot read and a title the blocks file repeats
+    /// are errors.
+    #[test]
+    fn a_local_commit_resolves_to_the_pushed_commit_that_carries_its_credit() {
+        let dir = std::env::temp_dir().join(format!("devhub-carrier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [vec!["init", "-q"], vec!["config", "user.name", "t"], vec!["config", "user.email", "t@t"]] {
+            git(&dir, &args).unwrap();
+        }
+        let commit = |files: &[(&str, &str)], message: &str| {
+            for (path, text) in files {
+                let p = dir.join(path);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, text).unwrap();
+            }
+            git(&dir, &["add", "-A"]).unwrap();
+            git(&dir, &["commit", "-q", "-m", message]).unwrap();
+            git(&dir, &["rev-parse", "HEAD"]).unwrap()
+        };
+        let push = |since: &str, origin: &str, tip: &str| {
+            let mut groups = Groups::between(&dir, origin, tip).unwrap();
+            groups.credit(&dir, since).unwrap();
+            let set = groups.build(&dir, &[], &|_, _| None, &|_| None).unwrap();
+            let last = set.last().unwrap().1.clone();
+            git(&dir, &["update-ref", "refs/remotes/origin/work", &last]).unwrap();
+            (commit_rows(&groups, &set), set.into_iter().map(|(_, sha)| sha).collect::<Vec<_>>(), Pushed { pair: Pair::new(tip, ""), commit: last, origin_was: origin.to_string(), at_ms: 0, files: 0 })
+        };
+        let base = commit(&[(group::BLOCKS_FILE, "block First\nlibs/a/*\nblock Second\nlibs/b/*\nblock Rest\n*\n"), ("libs/a/x.rs", "1\n"), ("libs/b/y.rs", "1\n")], "base");
+        git(&dir, &["update-ref", "refs/remotes/origin/work", &base]).unwrap();
+        let credit = "Co-Authored-By: octo-cat <1+octo-cat@users.noreply.github.com>";
+        let port = commit(&[("libs/b/y.rs", "2\n"), ("README.md", "r\n")], &format!("a port\n\nIntake: makepad#7\n{credit}\nCo-Authored-By: Some One <one@example.net>\n"));
+        let ours = commit(&[("libs/a/x.rs", "2\n")], "ours");
+        let (rows, first, p1) = push(&base, &base, &ours);
+        assert_eq!(first.len(), 3, "First, Second and Rest");
+        let message = git(&dir, &["log", "-1", "--format=%B", &first[1]]).unwrap();
+        assert!(message.lines().any(|l| l == credit) && message.lines().any(|l| l == "Contributors: octo-cat (#7)"), "the port's area commit credits its author: {message}");
+        assert!(!message.contains("example.net"), "no other address of a person is pushed");
+        assert!(rows.contains(&format!("\"coauthors\":[{}]", json_str(credit))), "the dry run lists it: {rows}");
+        let mut pushes = vec![p1.clone()];
+        assert_eq!(carrier(&dir, &pushes, &port).unwrap().as_deref(), Some(first[1].as_str()), "the first block holding its files");
+        assert_eq!(carrier(&dir, &pushes, &ours).unwrap().as_deref(), Some(first[0].as_str()));
+        let later = commit(&[("libs/a/x.rs", "3\n")], "later");
+        assert_eq!(carrier(&dir, &pushes, &later).unwrap(), None, "not pushed yet");
+        // a push that origin/work does not stand on (it was replaced), then the one that it does
+        pushes.push(Pushed { pair: Pair::new(&later, ""), commit: "e".repeat(40), origin_was: p1.commit.clone(), at_ms: 0, files: 0 });
+        let (_, second, p2) = push(&ours, &p1.commit, &later);
+        let after_second = p2.commit.clone();
+        pushes.push(p2);
+        assert_eq!(carrier(&dir, &pushes, &port).unwrap().as_deref(), Some(first[1].as_str()), "the push that first sent it, not a later one");
+        assert_eq!(carrier(&dir, &pushes, &later).unwrap().as_deref(), Some(second[0].as_str()));
+        // a merge that brings in libs/a, a change of libs/b beside it, and one in Rest that came and went
+        git(&dir, &["checkout", "-q", "-b", "lane"]).unwrap();
+        commit(&[("libs/a/x.rs", "4\n")], "on the lane");
+        git(&dir, &["checkout", "-q", "-"]).unwrap();
+        commit(&[("libs/b/y.rs", "3\n")], "b again");
+        let came = commit(&[("libs/c/z.txt", "z\n")], "came");
+        std::fs::remove_file(dir.join("libs/c/z.txt")).unwrap();
+        commit(&[], "went");
+        git(&dir, &["merge", "-q", "--no-ff", "-m", "Merge lane", "lane"]).unwrap();
+        let merge = git(&dir, &["rev-parse", "HEAD"]).unwrap();
+        let (_, third, p3) = push(&later, &after_second, &merge);
+        pushes.push(p3);
+        assert_eq!(third.len(), 2, "First and Second; Rest is unchanged");
+        assert_eq!(carrier(&dir, &pushes, &merge).unwrap().as_deref(), Some(third[0].as_str()), "a merge: the block of what it brought in");
+        assert_eq!(carrier(&dir, &pushes, &came).unwrap().as_deref(), Some(third[1].as_str()), "only a block the set does not hold: its last commit");
+        let mut unreadable = pushes.clone();
+        unreadable[0].pair.work = "0".repeat(40);
+        assert!(carrier(&dir, &unreadable, &port).is_err(), "an older tip it cannot read: an error, never a newer push's commit");
+        assert_eq!(title_twice(&group::parse_blocks("block A\nx/*\nblock B\ny/*\nblock A\n*\n")), Some("A"));
+        assert_eq!(title_twice(&group::parse_blocks("block A\nx/*\nblock B\n*\n")), None);
+        git(&dir, &["update-ref", "refs/remotes/origin/work", &base]).unwrap();
+        assert_eq!(carrier(&dir, &pushes, &port).unwrap(), None, "origin/work is no push of the ledger");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

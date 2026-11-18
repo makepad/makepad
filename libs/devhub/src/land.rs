@@ -348,6 +348,28 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     crate::gitread::is_ancestor(dir, a, b)
 }
 
+/// Whether `tree`, a lane's worktree of one repository, sits on a detached HEAD holding commits
+/// its lane branch `branch` lacks, said as the rest of a refusal: a hand-in of the branch would
+/// land without them. A lane's script switched its commercial worktree to the branch's own
+/// commit, the lane committed there, and its hand-in landed nothing without a word (#6597, 11-18).
+fn detached_off(tree: &Path, branch: &str) -> Option<String> {
+    if branch.is_empty() || branch == "-" || !tree.join(".git").exists() || git(tree, &["symbolic-ref", "-q", "HEAD"]).0 {
+        return None;
+    }
+    let (ok, head) = git(tree, &["rev-parse", "--verify", "-q", "HEAD"]);
+    if !ok { return None }
+    let (ok, n) = git(tree, &["rev-list", "--count", &format!("refs/heads/{branch}..{head}")]);
+    let n = n.parse::<u64>().ok().filter(|n| ok && *n > 0)?;
+    let (held, them) = if n == 1 { ("1 commit".to_string(), "it") } else { (format!("{n} commits"), "them") };
+    let on = tree.display();
+    let fix = if rev(tree, &format!("refs/heads/{branch}")).is_some_and(|b| is_ancestor(tree, &b, &head)) {
+        format!("`git -C {on} checkout -B {branch}` puts {them} on the branch")
+    } else {
+        format!("merge {them} into {branch} (`git -C {on} checkout {branch} && git merge {head:.10}`)")
+    };
+    Some(format!("{on} is on a detached HEAD at {head:.10} holding {held} its branch {branch} lacks, and a hand-in of {branch} would land without {them}; {fix}, then hand in again"))
+}
+
 /// Where a branch left a retired work chain (`refs/heads/work-old-*`, kept when work moves onto
 /// main's squashed tip): its merge base with that chain, when `tip` doesn't hold it. Such a branch
 /// carries its own changes over as one commit on the tip, so the old history stays out of work.
@@ -628,6 +650,7 @@ pub fn failure_lines(log: &str) -> Vec<String> {
             || l.starts_with("why ")
             || l.starts_with("GATE ")
             || l.starts_with("GATEUNIT ")
+            || l.starts_with("GATESTEP ")
             || l.starts_with("GATEOUT ")
             || l.starts_with("GATEPROOF ")
             || l.starts_with("NODEGATE-")
@@ -993,6 +1016,17 @@ impl Train {
             ["-", _, cb] => lanes.iter().rev().find(|l| l.cbranch == *cb),
             _ => None,
         };
+        // either worktree of the lane on a detached HEAD holding commits its branch lacks: a
+        // hand-in of the branch lands without them ([`detached_off`])
+        let owner = lane.or_else(|| lanes.iter().rev().find(|l| (branch != "-" && l.branch == branch) || (!cb.is_empty() && l.cbranch == cb)));
+        if let Some(l) = owner {
+            let tree = Path::new(&l.path);
+            for (dir, b, repo_name) in [(tree.to_path_buf(), &l.branch, "makepad"), (tree.join("apps/commercial"), &l.cbranch, "commercial")] {
+                if let Some(why) = detached_off(&dir, b) {
+                    return Err(format!("lane {}'s {repo_name} worktree {why}", l.name));
+                }
+            }
+        }
         let lane_cwt;
         if let Some(lane) = lane {
             let commercial = self.repo.join("apps/commercial");
@@ -1554,6 +1588,8 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
 mod tests {
     use super::*;
 
+    // the pair a hand-in names (only the unix tests, which run git, hand one in)
+    #[cfg(unix)]
     const CHECKED: &str = "checked=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[cfg(unix)]
@@ -2277,10 +2313,11 @@ mod tests {
     }
 
     /// A lane with unlanded work on both halves must name both, even if its worktree is gone.
-    /// A half already in its target does not force a paired hand-in.
+    /// A half already in its target does not force a paired hand-in. A lane worktree on a
+    /// detached HEAD holding commits its branch lacks refuses the lane's hand-ins, either half.
     #[cfg(unix)]
     #[test]
-    fn a_one_half_hand_in_with_the_other_half_unlanded_is_refused() {
+    fn a_hand_in_that_would_leave_lane_commits_behind_is_refused() {
         let d = std::env::temp_dir().join(format!("devhub-land-one-half-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let (r, home) = (d.join("repo"), d.join("home"));
@@ -2350,6 +2387,31 @@ mod tests {
         let e = t.st.lock().unwrap()[1].clone();
         assert_eq!((e.state, e.ms), (St::Queued, next), "the new makepad half must be queued");
         assert!(e.cwt.is_empty() && e.cbranch.is_empty() && e.cs.is_empty(), "the omitted commercial half must stay out of the entry");
+        // the commercial worktree switched to its branch's commit and committed on there: a
+        // hand-in of the branch landed nothing without a word (#6597, 11-18)
+        t.store().update(|d| d.lanes[0].path = r.display().to_string()).unwrap();
+        g(&c, &["checkout", "-q", "--detach", "rc-half-c"]);
+        let off = commit(&c, "off", "off\n", "made on a detached HEAD");
+        for line in ["add rc-half".to_string(), format!("add rc-half {} rc-half-c", c.display())] {
+            let refused = ask(&line);
+            assert!(refused[0].contains("\"err\"") && refused[0].contains(&format!("lane half's commercial worktree {} is on a detached HEAD at {off:.10} holding 1 commit its branch rc-half-c lacks", c.display())), "`{line}` must be refused, naming the detached half: {refused:?}");
+            assert!(refused[0].contains(&format!("`git -C {} checkout -B rc-half-c` puts it on the branch", c.display())), "the refusal must say how to put the commit on the branch: {refused:?}");
+        }
+        g(&c, &["checkout", "-q", "-B", "rc-half-c"]);
+        // the makepad half the same, one that also lost a commit its branch has since taken
+        g(&r, &["checkout", "-q", "--detach", "rc-half"]);
+        let moff = commit(&r, "moff", "moff\n", "made on a detached HEAD");
+        g(&r, &["branch", "-q", "-f", "rc-half", "work"]);
+        let both_cmd = format!("add rc-half {} rc-half-c", c.display());
+        let refused = ask(&both_cmd);
+        assert!(refused[0].contains("\"err\"") && refused[0].contains(&format!("lane half's makepad worktree {} is on a detached HEAD at {moff:.10} holding 2 commits its branch rc-half lacks", r.display())), "the detached makepad half must refuse the hand-in: {refused:?}");
+        assert!(refused[0].contains(&format!("merge them into rc-half (`git -C {} checkout rc-half && git merge {moff:.10}`)", r.display())), "a branch that is not behind the detached commits must be told to merge them: {refused:?}");
+        assert_eq!(t.st.lock().unwrap().len(), 2, "the refused hand-ins must queue nothing");
+        // a detached HEAD at a commit its branch holds leaves nothing behind
+        g(&r, &["checkout", "-q", "-B", "rc-half", &moff]);
+        g(&r, &["checkout", "-q", "--detach", "rc-half"]);
+        let added = ask(&both_cmd);
+        assert!(added[0].contains("\"id\":3"), "a detached HEAD its branch holds must not refuse the hand-in: {added:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

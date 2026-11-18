@@ -219,6 +219,11 @@ pub(crate) struct TestPackage {
     /// the test targets that run under cargo, never the JIT, each with why: its
     /// `[package.metadata.makepad.native-tests]` ([`native_selected`])
     pub native: std::collections::BTreeMap<String, String>,
+    /// it depends on makepad-test: its tests run apps side by side, as many as their cores hold
+    /// (`devhub test` asks [`crate::lease::APP_TESTS_CORES`] for them by default)
+    pub app_tests: bool,
+    /// the platforms it was checked on and its gaps there ([`crate::orch::ci::Krate::platform_gaps`])
+    pub platform_gaps: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 /// The declared native targets (`native`, as its Cargo.toml names them: `lib`, `bin:<name>`,
@@ -317,11 +322,13 @@ pub(crate) fn tree_line(pkg: &str, why: &str) -> String {
 
 #[cfg(feature = "checkout")]
 fn package_of(tree: &crate::orch::ci::Tree, pkg: &str) -> TestPackage {
-    use crate::orch::ci::{jit_own_dirs, krate, package_dirs};
-    let Some(dir) = package_dirs(tree).remove(pkg) else { return TestPackage::default() };
+    use crate::orch::ci::{jit_own_dirs, krate, package_dirs, path_deps};
+    let mut dirs = package_dirs(tree);
+    let Some(dir) = dirs.remove(pkg) else { return TestPackage::default() };
     let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
-    let (tree_why, native) = krate(tree, &manifest).map_or((None, Default::default()), |k| (k.test_tree, k.native_tests));
-    TestPackage { own: jit_own_dirs(tree).contains(&dir), tree: tree_why, native }
+    let (tree_why, native, platform_gaps) = krate(tree, &manifest).map_or((None, Default::default(), Default::default()), |k| (k.test_tree, k.native_tests, k.platform_gaps));
+    let app_tests = dirs.get(crate::lease::APP_TESTS_PACKAGE).is_some_and(|test| path_deps(tree, &dir).contains(test));
+    TestPackage { own: jit_own_dirs(tree).contains(&dir), tree: tree_why, native, app_tests, platform_gaps }
 }
 
 /// The packages the JIT binary is built from.
@@ -839,13 +846,21 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             ("apps/commercial/loose/Cargo.toml", "[package]\nname = \"loose\"\n"),
             ("libs/a/Cargo.toml", "[package]\nname = \"a\"\n[package.metadata.makepad]\ntest-tree = \"its tests read the history\"\n"),
             ("libs/a/inner/Cargo.toml", "[package]\nname = \"a-inner\"\n"),
-            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n[package.metadata.makepad.native-tests]\n\"test:spawns\" = \"its runner is its own binary\"\n"),
+            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n[package.metadata.makepad.native-tests]\n\"test:spawns\" = \"its runner is its own binary\"\n[package.metadata.makepad.platform-gaps]\nwindows = { \"test:spawns\" = \"no fork there\" }\nmacos = {}\n[dev-dependencies]\nmakepad-test = { path = \"../makepad_test\" }\n"),
+            ("libs/makepad_test/Cargo.toml", "[package]\nname = \"makepad-test\"\n"),
             ("libs/own/Cargo.toml", "[package]\nname = \"own\"\n[workspace]\n"),
         ]);
         let (a, b) = (super::package_of(&t, "a"), super::package_of(&t, "b"));
         assert_eq!((a.own, a.tree.as_deref(), a.native.len()), (false, Some("its tests read the history"), 0));
         assert_eq!((b.tree, b.native.into_iter().collect::<Vec<_>>()), (None, vec![("test:spawns".to_string(), "its runner is its own binary".to_string())]));
         assert_eq!(super::package_of(&t, "c"), super::TestPackage::default());
+        // the platforms it was checked on, each with its gaps there
+        let gaps = super::package_of(&t, "b").platform_gaps;
+        assert_eq!(gaps.get("windows").map(|g| g.iter().collect::<Vec<_>>()), Some(vec![(&"test:spawns".to_string(), &"no fork there".to_string())]));
+        assert_eq!(gaps.get("macos").map(|g| g.len()), Some(0), "checked, no gaps");
+        assert!(a.platform_gaps.is_empty(), "never checked anywhere");
+        // a package that depends on makepad-test runs apps in its tests (`devhub test` asks cores for them)
+        assert_eq!((a.app_tests, super::package_of(&t, "b").app_tests), (false, true));
         // the package's default run, `--tests` and `--test spawns` run the declared target; `--lib`,
         // `--bins` and another test do not
         let native = std::collections::BTreeMap::from([("test:spawns".to_string(), "why".to_string())]);

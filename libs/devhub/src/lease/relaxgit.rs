@@ -195,14 +195,8 @@ pub fn prepare(work: &Path, lane: &str, lease: &str, pin: &Pin) -> Result<Vec<(S
     let state = work.join("dev/lane").join(lane);
     std::fs::create_dir_all(state.join("run")).map_err(|e| layer("makepad", &pin.makepad, "run directory", e))?;
     std::fs::write(state.join("overlay-pin"), pin.key()).map_err(|e| layer("makepad", &pin.makepad, "pin record", e))?;
-    Ok(vec![("RELAX_HOME".into(), work.join("dev/run-home").to_string_lossy().into_owned()), ("RELAX_CACHE_MAX".into(), DEV_STORE_MB.to_string()), ("RELAX_VFS".into(), mounts), ("RELAX_WORKSPACE".into(), root.to_string_lossy().into_owned()), ("RELAX_EDITS".into(), edits.to_string_lossy().into_owned())])
+    Ok(vec![("RELAX_HOME".into(), work.join("dev/run-home").to_string_lossy().into_owned()), ("RELAX_VFS".into(), mounts), ("RELAX_WORKSPACE".into(), root.to_string_lossy().into_owned()), ("RELAX_EDITS".into(), edits.to_string_lossy().into_owned())])
 }
-
-/// What the dev store may hold (MB). Every overlay lease of a box shares it, across the JIT builds
-/// the box keeps and each with its own stores (one build's whole set: up to 6.5 GB), so the single
-/// app's default cap evicted what the session before had just stored: the next one started cold
-/// (Fab 12 s against 2 s, 11-04). A low disk takes it back first (disk.rs).
-pub const DEV_STORE_MB: u64 = super::jitstore::KEEP as u64 * 8 * 1024;
 
 pub fn pin(work: &Path, lane: &str) -> Result<Pin, String> {
     let text = std::fs::read_to_string(work.join("dev/lane").join(lane).join("overlay-pin")).map_err(io)?;

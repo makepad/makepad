@@ -253,6 +253,9 @@ impl Sync {
         if let Some(timed) = timed_here() {
             return out.push(err_line(&format!("waits: {timed} runs here: the deployment moves after it")));
         }
+        if HUB_BUILDING.load(std::sync::atomic::Ordering::SeqCst) {
+            return out.push(err_line("waits: its hub builds its next self from the checkout: the deployment moves after it"));
+        }
         let moves = order_repos(o);
         // the commits this apply builds the box's JIT of: a gate of exactly them waits for it
         if self.conf.jit_app().is_some() && o.get("build") != Some("off") {
@@ -690,8 +693,8 @@ impl Sync {
         let why = why.to_string();
         let spawned = std::thread::Builder::new().name("devhub-wm-restart-wait".into()).spawn(move || {
             loop {
-                // (a WM on another wire drains its box meanwhile, [`wm_drain`]: the restart follows the
-                // last lease's end; one that still hosts every app restarts in the next gap)
+                // (its box drains meanwhile, [`wm_drain`]: the restart follows the last lease's end,
+                // at this look; a person's reason holds it with the box at work)
                 std::thread::sleep(Duration::from_secs(10));
                 if !restart_blockers().is_empty() {
                     continue;
@@ -867,6 +870,39 @@ impl Sync {
 /// An apply (its tree's move, its build) runs on this node.
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The hub builds its next self from the checkout ([`hub_build_begin`]): an apply waits for it.
+static HUB_BUILDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The hub's own build of the checkout, marked while it runs: unless an apply runs, it starts
+/// and no apply moves the checkout under it until the mark ends with the guard. An apply moved a
+/// box's checkout under its hub's build, which compiled the newer main.rs against the library
+/// it had compiled before and said the commit it named does not build (11-17). None: an apply
+/// runs, and the build waits for it.
+pub fn hub_build_begin() -> Option<HubBuilding> {
+    begin_beside(&HUB_BUILDING, &APPLYING).then_some(HubBuilding)
+}
+
+/// Marks `mine` unless `other` is marked: each side marks first and looks after, so of two that
+/// start together one always sees the other ([`hub_build_begin`], the apply's check).
+fn begin_beside(mine: &std::sync::atomic::AtomicBool, other: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    mine.store(true, SeqCst);
+    if other.load(SeqCst) {
+        mine.store(false, SeqCst);
+        return false;
+    }
+    true
+}
+
+/// [`hub_build_begin`]'s mark; it ends when this drops.
+pub struct HubBuilding;
+
+impl Drop for HubBuilding {
+    fn drop(&mut self) {
+        HUB_BUILDING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The running apply moved files of the checkout the box's apps run from.
 static MOVED_IN_APPLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1028,31 +1064,33 @@ pub fn wm_drain() -> String {
     if crate::lease::exec::user_watching() {
         people.push("a Desk Link viewer shows this node".into());
     }
-    #[cfg(target_os = "linux")]
-    let wire = crate::lease::caps::other_wire().is_some();
-    #[cfg(not(target_os = "linux"))]
-    let wire = false;
-    drain_said(&people, &crate::lease::exec::on_the_wm(), &apps_on_the_wm(), wire)
+    drain_said(&people, &crate::lease::exec::on_the_wm(), &apps_on_the_wm())
 }
 
 /// A waiting WM restart's drain: what it waits on (`leases`, and the apps it would end: app, pid,
-/// whether a lease runs it) when only leases hold it; empty when a person's reason does (`people`:
-/// at the box, unsaved work, a viewer) or an app no lease runs (a person's): those it waits for
-/// with the box at work, never drained for.
+/// whether a lease runs it) when only leases hold it, and while nothing does until its next look
+/// restarts it (the gap, which a new lease would close again); empty when a person's reason holds
+/// it (`people`: at the box, unsaved work, a viewer) or an app no lease runs (a person's): those it
+/// waits for with the box at work, never drained for.
 ///
-/// Only a WM on another hosted wire than the box's build (`wire`) is drained for: no app starts
-/// under it, so the screen work the drain keeps off could not run there anyway. A WM whose binary
-/// was only replaced still hosts every app; drained for, a box kept every new screen lease off
-/// while a lane's open-ended screen session held its restart: the Source Library lanes' screens
-/// waited on two boxes for one session that had no end (11-07). It restarts in a gap instead.
-fn drain_said(people: &[String], leases: &[String], apps: &[(String, u32, bool)], wire: bool) -> String {
-    if !wire || !people.is_empty() || apps.iter().any(|(_, _, leased)| !leased) {
+/// Every waiting restart drains, whatever it restarts for. A restart waited for a gap that never
+/// came on a busy box: a node's WM restart, which brings up the AI hub a party waited on, waited
+/// from 17:46Z on one lease after another while the master granted the box five new window leases
+/// (live tests, a hot bucket run, a landing's gate), and a second box's did the same (11-17). The
+/// leases there run to their end; new screen and gui work goes to another box or waits, and an
+/// open-ended session there (a visible live session) holds the box's screen work until it ends.
+fn drain_said(people: &[String], leases: &[String], apps: &[(String, u32, bool)]) -> String {
+    if !people.is_empty() || apps.iter().any(|(_, _, leased)| !leased) {
         return String::new();
     }
     let mut on: Vec<String> = leases.to_vec();
     on.extend(apps.iter().map(|(app, pid, _)| format!("{app} (pid {pid}) of a lease")));
+    if on.is_empty() { return DRAIN_GAP.to_string(); }
     on.join("; ")
 }
+
+/// A drain's line in the gap: nothing holds the restart, and its next look runs it.
+const DRAIN_GAP: &str = "nothing now: it restarts at its next look, within 10 s";
 
 /// Why an `auto` sync restarts the WM: this build replaced its binary, or an earlier one did and
 /// the WM still runs the old one. A waiting restart lives in the hub that waits, and goes with it
@@ -1136,6 +1174,19 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
 
 #[cfg(test)]
 mod tests {
+
+    /// A hub's own build and an apply never overlap: each marks itself and then looks at the
+    /// other, so of two that start together one always sees the other and waits.
+    #[test]
+    fn a_hub_build_and_an_apply_of_its_checkout_exclude_each_other() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (build, apply) = (AtomicBool::new(false), AtomicBool::new(false));
+        assert!(super::begin_beside(&build, &apply), "nothing applies: the build starts");
+        assert!(!super::begin_beside(&apply, &build) && !apply.load(SeqCst), "an apply waits for the build, unmarked");
+        build.store(false, SeqCst);
+        assert!(super::begin_beside(&apply, &build), "the build ended: the apply runs");
+        assert!(!super::begin_beside(&build, &apply) && !build.load(SeqCst), "a build waits for the apply");
+    }
     use super::*;
 
     /// A deferred waiter and an order that queued behind an apply both asked for a WM restart at
@@ -1194,11 +1245,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A waiting WM restart drains its box only when leases alone hold it and its WM speaks another
-    /// wire: a person at it, unsaved work, a viewer, an app no lease runs, or a WM that still hosts
-    /// every app keep the box at work while it waits.
+    /// A waiting WM restart drains its box when leases alone hold it, whatever it restarts for, and
+    /// on through the gap until it runs: a person at it, unsaved work, a viewer or an app no lease
+    /// runs keep the box at work while it waits.
     #[test]
-    fn a_wm_restart_drains_only_for_leases() {
+    fn a_wm_restart_drains_for_leases_and_never_for_a_person() {
         // whose app it waits for: a lease's and a person's, or one nothing names; not an
         // agent's no lease runs, nor a leftover (11-13)
         use crate::lease::exec::AppLease;
@@ -1211,13 +1262,12 @@ mod tests {
         assert_eq!(super::opened_said(None, false), "not opened through the WM: a shell started it");
         let leases = vec!["screen lease L7 of lane-s (its windows)".to_string()];
         let leased = vec![("makepad-sqlite".to_string(), 41, true)];
-        assert_eq!(super::drain_said(&[], &leases, &leased, true), "screen lease L7 of lane-s (its windows); makepad-sqlite (pid 41) of a lease");
-        assert_eq!(super::drain_said(&[], &leases, &[], true), "screen lease L7 of lane-s (its windows)");
-        assert_eq!(super::drain_said(&[], &leases, &leased, false), "", "a WM on the build's wire hosts every app: no drain");
-        assert_eq!(super::drain_said(&["a user is at the node".into()], &leases, &leased, true), "", "a person: no drain");
+        assert_eq!(super::drain_said(&[], &leases, &leased), "screen lease L7 of lane-s (its windows); makepad-sqlite (pid 41) of a lease", "a restart for any reason drains while leases hold it");
+        assert_eq!(super::drain_said(&[], &leases, &[]), "screen lease L7 of lane-s (its windows)");
+        assert_eq!(super::drain_said(&["a user is at the node".into()], &leases, &leased), "", "a person: no drain");
         let mine = vec![("makepad-fab".to_string(), 42, false), leased[0].clone()];
-        assert_eq!(super::drain_said(&[], &leases, &mine, true), "", "a person's app: no drain");
-        assert_eq!(super::drain_said(&[], &[], &[], true), "", "nothing holds it: it restarts now");
+        assert_eq!(super::drain_said(&[], &leases, &mine), "", "a person's app: no drain");
+        assert_eq!(super::drain_said(&[], &[], &[]), super::DRAIN_GAP, "nothing holds it: it drains on until its next look restarts it");
     }
 
     /// An `auto` sync restarts a WM whose binary this build replaced, or an earlier one did (its

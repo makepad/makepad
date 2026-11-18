@@ -44,11 +44,20 @@ pub struct LegDef {
     /// its verdict is reported, never the run's: a failure or a missing verdict is an event and the
     /// leg's state, and the run counts it as passed (a leg on its way to gating)
     pub report_only: bool,
+    /// its command prints no marker line (a plain argv, as a Windows box runs one): its exit code
+    /// is the verdict ([`exit_verdict`])
+    pub exit_verdict: bool,
 }
 
 impl LegDef {
     pub fn new(name: &str, kind: Kind, needs: &str, marker: &str, argv: &[&str]) -> LegDef {
-        LegDef { name: name.into(), kind, needs: needs.into(), marker: marker.into(), argv: argv.iter().map(|a| a.to_string()).collect(), node: None, report_only: false }
+        LegDef { name: name.into(), kind, needs: needs.into(), marker: marker.into(), argv: argv.iter().map(|a| a.to_string()).collect(), node: None, report_only: false, exit_verdict: false }
+    }
+
+    /// The leg's exit code is its verdict: a command without a shell to print a marker line.
+    pub fn exit_decides(mut self) -> LegDef {
+        self.exit_verdict = true;
+        self
     }
 
     /// The leg reports its verdict without deciding the run's (`report_only`).
@@ -76,6 +85,11 @@ pub(crate) fn legs(arm: bool) -> Vec<LegDef> {
         // Mac: diff_fast's nocodegen tier, agree.sh, app boots. Report-only until the Macs'
         // toolchains agree (agree's rustc-side q_object_default_type_relative on rustc 1.97)
         LegDef::new("nocodegen", Kind::Test, "arch=arm64,os=macos,rustc=1.97", "NOCODEGEN", &["bash", "tools/run/fixture/nocodegen_leg.sh"]).report_only(),
+        // the JIT's Windows leg: the codegen and backend crates' tests (the arm64 leg's cargo step) on a
+        // Windows x64 box, as plain argv; the exit code is the verdict. Report-only until the Windows
+        // box has passed it for a while (a gating leg makes devhub route JIT work there: lease/native.rs
+        // jit_runs counts only gating legs)
+        LegDef::new("windows", Kind::Test, "arch=x64,os=windows", "WINJIT", &["cargo", "test", "--release", "-p", "relax-codegen", "-p", "relax-backend", "--no-fail-fast"]).exit_decides().report_only(),
     ];
     legs.retain(|d| arm || !d.needs.contains("arch=arm64,os=macos"));
     legs
@@ -107,6 +121,18 @@ pub fn leg_verdict(_name: &str, marker: &str, text: &str, exit: Option<i32>) -> 
         Some(_) => Verdict::Incomplete,
     };
     (v, summary)
+}
+
+/// The verdict of a leg whose command prints no marker line: a marker line still decides when one is
+/// there, else the exit code (0 passes, another code fails, none: the run's exit was lost).
+pub fn exit_verdict(marker: &str, text: &str, exit: Option<i32>) -> (Verdict, String) {
+    let said = leg_verdict("", marker, text, exit);
+    if text.lines().any(|l| l.starts_with(&format!("{marker}-"))) { return said; }
+    match exit {
+        Some(0) => (Verdict::Ok, format!("{marker}-OK exit 0")),
+        Some(c) => (Verdict::Fail, format!("{marker}-FAIL exit {c}")),
+        None => (Verdict::Incomplete, "no verdict (exit lost)".to_string()),
+    }
 }
 
 /// The first-parent commits after `base` up to `tip`, oldest first.
@@ -743,7 +769,7 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
         break (r, exit);
     };
     let text = std::fs::read_to_string(log).unwrap_or_default();
-    let (v, mut summary) = leg_verdict(name, marker, &text, exit);
+    let (v, mut summary) = if def.exit_verdict { exit_verdict(marker, &text, exit) } else { leg_verdict(name, marker, &text, exit) };
     if let Err(e) = r {
         summary = format!("{summary}; {e}");
         if super::leg::exit_lost(&e) && lost.len() > 1 { summary = format!("{summary} (its exit was lost on all {} runs)", lost.len()); }
@@ -860,6 +886,16 @@ mod tests {
 
     /// A leg whose verdict is a time runs where nothing else does: a timed lease (a bench box,
     /// exclusive); the shared legs take none of its steps, and the three halves are full's steps.
+    #[test]
+    fn the_windows_leg_is_plain_argv_decided_by_its_exit_and_reports_only() {
+        let leg = legs(false).into_iter().find(|d| d.needs.contains("os=windows")).expect("a Windows leg");
+        assert!(leg.exit_verdict && leg.report_only && leg.argv[0] == "cargo", "{leg:?}");
+        assert_eq!(exit_verdict("WINJIT", "test result: ok\n", Some(0)), (Verdict::Ok, "WINJIT-OK exit 0".to_string()));
+        assert_eq!(exit_verdict("WINJIT", "x\n", Some(101)), (Verdict::Fail, "WINJIT-FAIL exit 101".to_string()));
+        assert_eq!(exit_verdict("WINJIT", "", None).0, Verdict::Incomplete);
+        assert_eq!(exit_verdict("WINJIT", "WINJIT-FAIL: x\n", Some(0)).0, Verdict::Fail, "a marker line still decides");
+    }
+
     #[test]
     fn the_legs_whose_verdicts_are_times_run_timed() {
         let defs = legs(false);

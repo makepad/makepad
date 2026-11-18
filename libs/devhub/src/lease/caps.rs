@@ -3,7 +3,7 @@
 //!
 //! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device` (`bench`: the
 //! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; CI only with `slots.ci`),
-//! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off|spare` (`spare`: a pool box that takes a timed lease
+//! `disk_floor_gb` (its warning follows the JIT's floor: [`super::disk::warn_gb`]), `timed = on|off|spare` (`spare`: a pool box that takes a timed lease
 //! while the bench boxes that meet it are taken by timed work), `spec = <text>`, `work = <dir>` (default
 //! [`WORK_DIR`] in home), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
 //! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
@@ -21,7 +21,6 @@ pub struct LeaseConf {
     /// explicit `slots.<kind>` lines; the rest come from [`LeaseConf::slots`]'s defaults
     pub slots: Vec<(Kind, u32)>,
     pub disk_floor_gb: f64,
-    pub disk_warn_gb: f64,
     pub timed: bool,
     /// `timed = spare`: a pool box that takes timed work while the bench boxes are taken by it
     pub timed_spare: bool,
@@ -64,7 +63,6 @@ impl LeaseConf {
             role: Role::Pool,
             slots: Vec::new(),
             disk_floor_gb: 25.0,
-            disk_warn_gb: 50.0,
             timed: true,
             timed_spare: false,
             spec: String::new(),
@@ -81,7 +79,6 @@ impl LeaseConf {
             match k {
                 "role" => c.role = Role::parse(v).unwrap_or(c.role),
                 "disk_floor_gb" => c.disk_floor_gb = v.parse().unwrap_or(c.disk_floor_gb),
-                "disk_warn_gb" => c.disk_warn_gb = v.parse().unwrap_or(c.disk_warn_gb),
                 "timed" => (c.timed, c.timed_spare) = (v != "off", v == "spare"),
                 "spec" => c.spec = v.to_string(),
                 "work" => c.work = v.strip_prefix("~/").map_or_else(|| PathBuf::from(v), |r| home.join(r)),
@@ -114,7 +111,7 @@ pub fn settable(key: &str, value: &str) -> Result<(), String> {
     let num = || value.parse::<f64>().map(|_| ()).map_err(|_| format!("{key} takes a number"));
     match key {
         "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|hot|suite|bench|user-wm|device".to_string()),
-        "disk_floor_gb" | "disk_warn_gb" => num(),
+        "disk_floor_gb" => num(),
         "native_trees" => value.parse::<u32>().map(|_| ()).map_err(|_| "native_trees takes a count".to_string()),
         "timed" => matches!(value, "on" | "off" | "spare").then_some(()).ok_or_else(|| "timed = on|off|spare".to_string()),
         "spec" => (!value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_graphic())).then_some(()).ok_or_else(|| "spec: one word".to_string()),
@@ -122,7 +119,7 @@ pub fn settable(key: &str, value: &str) -> Result<(), String> {
         "user_idle_min" => value.parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).map(|_| ()).ok_or_else(|| "user_idle_min: whole minutes, 1..1440".to_string()),
         k => match k.strip_prefix("slots.").and_then(Kind::parse) {
             Some(_) => value.parse::<u32>().map(|_| ()).map_err(|_| format!("{key} takes a count")),
-            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, native_trees, disk_floor_gb, disk_warn_gb, timed, spec, cpus.shared, cpus.timed, user_idle_min)")),
+            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, native_trees, disk_floor_gb, timed, spec, cpus.shared, cpus.timed, user_idle_min)")),
         },
     }
 }
@@ -219,6 +216,34 @@ pub fn rustc_version() -> String {
     fresh.unwrap_or_else(|| read_rustc().release)
 }
 
+static TARGETS: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> = std::sync::Mutex::new(None);
+
+/// The targets whose std the toolchain a lease's run finds has ([`rust_command`]): the host's and
+/// what `rustup target add` installed. A probe only: installing one is the user's call. Read
+/// again when 5 min old, so an added target reaches the box's report without a hub restart.
+pub fn rust_targets() -> Vec<String> {
+    let mut t = TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, v)) = t.as_ref().filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(300)) {
+        return v.clone();
+    }
+    let sysroot = rust_command("rustc").args(["--print", "sysroot"]).stdin(std::process::Stdio::null()).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty());
+    let v = sysroot.map(|s| installed_targets(Path::new(&s))).unwrap_or_default();
+    *t = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+/// The targets of a sysroot that hold a std: `lib/rustlib/<target>/lib/libcore-*.rlib` (its other
+/// entries, `src`, `etc` and the component lists, hold none).
+fn installed_targets(sysroot: &Path) -> Vec<String> {
+    let has_core = |dir: &Path| std::fs::read_dir(dir.join("lib")).into_iter().flatten().flatten()
+        .any(|f| f.file_name().to_str().is_some_and(|n| n.starts_with("libcore-") && n.ends_with(".rlib")));
+    let mut v: Vec<String> = std::fs::read_dir(sysroot.join("lib").join("rustlib")).into_iter().flatten().flatten()
+        .filter(|e| has_core(&e.path())).filter_map(|e| e.file_name().to_str().map(str::to_string)).collect();
+    v.sort();
+    v
+}
+
 /// The same live WM display reported in caps, without reprobing the hardware/toolchain.
 #[cfg(target_os = "linux")]
 pub(super) fn display() -> Option<String> {
@@ -267,7 +292,7 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.spec = conf.spec.clone();
     c.slots = conf.slots(c.gpus.len() as u32);
     c.disk_floor_gb = conf.disk_floor_gb;
-    c.disk_warn_gb = conf.disk_warn_gb;
+    c.disk_warn_gb = super::disk::warn_gb(c.disk_total_gb, conf.disk_floor_gb);
     c.timed = conf.timed;
     c.timed_spare = conf.timed_spare;
     c.apply = apply.to_string();
@@ -277,6 +302,7 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.sick = sick();
     c.clocksource = clocksource();
     c.rustc = rustc_version();
+    c.rust_targets = rust_targets();
     c.features = super::FEATURES.iter().map(|f| f.to_string()).collect();
     c.services = services();
     c.hub_building = super::exec::hub_building();
@@ -1160,6 +1186,23 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+    /// A box says the targets its toolchain holds a std for: the target directories of its sysroot
+    /// with a libcore, not the sources, tools or a directory left without one.
+    #[test]
+    fn a_box_reports_the_targets_its_sysroot_holds_a_std_for() {
+        let root = std::env::temp_dir().join(format!("devhub-sysroot-{}-{}", std::process::id(), crate::proto::wall_ms()));
+        let rustlib = root.join("lib").join("rustlib");
+        for (dir, file) in [("x86_64-unknown-linux-gnu/lib", "libcore-0a1b.rlib"), ("wasm32-unknown-unknown/lib", "libcore-2c3d.rlib"), ("aarch64-apple-ios/lib", "libstd-4e5f.rlib"), ("src/rust/library/core", "lib.rs"), ("etc", "gdb_load_rust_pretty_printers.py")] {
+            std::fs::create_dir_all(rustlib.join(dir)).unwrap();
+            std::fs::write(rustlib.join(dir).join(file), b"").unwrap();
+        }
+        std::fs::write(rustlib.join("components"), b"rustc\n").unwrap();
+        let got = super::installed_targets(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(got, ["wasm32-unknown-unknown", "x86_64-unknown-linux-gnu"]);
+        assert!(super::installed_targets(&root).is_empty(), "no sysroot: none");
+    }
+
     /// A WM is asked the way an app is: one that speaks a common version hosts apps whatever its
     /// wire fingerprint, as an app admitted at that version states the WM's own at its hub.
     #[cfg(target_os = "linux")]
@@ -1297,10 +1340,16 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_measures_cpu_use_and_memory_pressure() {
+        // the kernel publishes the counters about once a second, and a measure within the same
+        // period answers the last value: none yet, so a second measure 300 ms on failed (11-17)
         let _ = os::hardware();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let c = os::hardware();
-        let p = c.cpu_pct.expect("a second measure has the CPU use");
+        let t0 = std::time::Instant::now();
+        let c = loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let c = os::hardware();
+            if c.cpu_pct.is_some() || t0.elapsed() > std::time::Duration::from_secs(3) { break c; }
+        };
+        let p = c.cpu_pct.expect("a measure once the counters moved has the CPU use");
         assert!((0.0..=100.0).contains(&p), "{p}");
         assert!(matches!(c.mem_pressure, 1 | 2 | 4), "{}", c.mem_pressure);
     }
@@ -1372,7 +1421,7 @@ mod tests {
     fn lease_conf() {
         let home = Path::new("/home/me");
         let d = LeaseConf::parse("", home);
-        assert_eq!((d.role, d.disk_floor_gb, d.disk_warn_gb, d.timed), (Role::Pool, 25.0, 50.0, true));
+        assert_eq!((d.role, d.disk_floor_gb, d.timed), (Role::Pool, 25.0, true));
         assert_eq!(d.work, home.join(WORK_DIR));
         assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 0)]);
         let c = LeaseConf::parse("# a node's conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = CPU-A+GPU-A  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);

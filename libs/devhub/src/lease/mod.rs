@@ -28,6 +28,7 @@ pub mod client;
 pub mod jit;
 pub mod disk;
 pub mod exec;
+pub mod history;
 pub mod master;
 pub mod offline;
 #[cfg(feature = "checkout")]
@@ -51,6 +52,61 @@ pub const WARM_LANE_PREFIX: &str = "warm-";
 
 /// The master's per-box dev JIT prebuild of the landed tip: lane-priority, one per box.
 pub const PREBUILD_LANE_PREFIX: &str = "prebuild-";
+
+/// A queue wait a person counts as long ([`long_waits`]).
+pub const LONG_WAIT_MS: u64 = 10 * 60_000;
+
+/// The leases queued [`LONG_WAIT_MS`] or more as every count a person reads takes them: the
+/// panel's queue and needs, `devhub queue --long`. A check-in counted a sweep's serial jobs as 14
+/// of 15 starved leases while boxes idled, and a box's prebuild beside a live session among them
+/// (11-17).
+#[derive(Debug, PartialEq)]
+pub struct LongWaits<T> {
+    /// waits on another lane, cores, RAM or a hold: starvation, each its own
+    pub starved: Vec<T>,
+    /// per lane, its leases queued behind its own lease in its tree ([`sched::Sched::own_wait`]):
+    /// the lane's serial plan, one line
+    pub serial: Vec<(String, Vec<T>)>,
+    /// the boxes' prebuilds ([`PREBUILD_LANE_PREFIX`]) and the lanes' warm legs
+    /// ([`WARM_LANE_PREFIX`]): speculative warm-ups, a line of their own, never starvation (a box
+    /// where one never fits stays in sight there; two lanes' warm legs read as starved, 11-17)
+    pub prebuilds: Vec<T>,
+}
+
+impl<T> LongWaits<T> {
+    /// What a person counts as waiting long: each starved lease, and a lane's serial plan once.
+    pub fn count(&self) -> usize {
+        self.starved.len() + self.serial.len()
+    }
+}
+
+/// [`LongWaits`] of the `queued` leases, in their order: `waited_ms` how long one has waited,
+/// `lane` its lane, `own` whether it waits only on its own lane's lease.
+pub fn long_waits<T: Copy>(queued: impl IntoIterator<Item = T>, waited_ms: impl Fn(T) -> u64, lane: impl Fn(T) -> String, own: impl Fn(T) -> bool) -> LongWaits<T> {
+    let mut w = LongWaits { starved: Vec::new(), serial: Vec::new(), prebuilds: Vec::new() };
+    for l in queued.into_iter().filter(|l| waited_ms(*l) >= LONG_WAIT_MS) {
+        let name = lane(l);
+        if name.starts_with(PREBUILD_LANE_PREFIX) || name.starts_with(WARM_LANE_PREFIX) {
+            w.prebuilds.push(l);
+        } else if own(l) {
+            match w.serial.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, ls)) => ls.push(l),
+                None => w.serial.push((name, vec![l])),
+            }
+        } else {
+            w.starved.push(l);
+        }
+    }
+    w
+}
+
+/// The cores `devhub test` asks by default for a package that depends on makepad-test, whose
+/// tests run apps side by side, a third as many as the cores they are told: four at once. Its
+/// class's measure then charges it ([`sched::Req::cores_default`]); `--cores` asks otherwise.
+pub const APP_TESTS_CORES: f64 = 12.0;
+
+/// The package whose dependents' tests run apps ([`APP_TESTS_CORES`]).
+pub const APP_TESTS_PACKAGE: &str = "makepad-test";
 
 /// The folder in a lease's tmp where its runs put the logs worth keeping (`DEVHUB_KEEP`: a failed
 /// step's, tools/run/fixture/keep_logs.sh): the holder copies it next to its own log before the
@@ -212,11 +268,14 @@ pub fn run_class(lane: &str, kind: Kind, argv: &[String]) -> String {
             // ([`base_class`]: the suite's measure until the filter has its own). One class held
             // a Fab bin's one-test runs (1-2 min, 2-10 GB) with its whole suite at 4 threads (15-18
             // min, 28 GB): a run of one test asked 33.5 GB, and waited 12 min for it (L774136, 11-10)
-            if args.first().is_some_and(|s| s == "test") {
-                let rest: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "--").collect();
-                let filter = filter_key(&rest);
-                if let Some(last) = words.last_mut().filter(|_| !filter.is_empty()) { *last = format!("{last}?{filter}"); }
-            }
+            // and a run's app arguments, which choose its work, apart from its bare run ([`app_args_key`])
+            let rest: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "--").collect();
+            let key = match args.first().map(String::as_str) {
+                Some("test") => filter_key(&rest),
+                Some("run") => app_args_key(&rest),
+                _ => String::new(),
+            };
+            if let Some(last) = words.last_mut().filter(|_| !key.is_empty()) { *last = format!("{last}?{key}"); }
             (words, None)
         }
         // an `env [-u K] K=V ..` prefix only sets the run's environment: the class is its command
@@ -271,6 +330,17 @@ pub(crate) fn filter_key(args: &[&str]) -> String {
     out.join(",")
 }
 
+/// A JIT run's app arguments (its words after `--`) as one class word: `run <pkg>?<args>` is
+/// measured apart from the bare run, whose measure it falls back to ([`base_class`]). Flags say
+/// nothing of the work (`--remote`) and stay out; a path counts by its last part. One class held
+/// every variant of an example, peaks of 1-3 GB: it asked 3.4 GB for a `board-acc` run over a 2 s
+/// window, which grew to 19.8 GB on a 16 GB Mac and swapped there for over an hour (L1325540, 11-18).
+pub(crate) fn app_args_key(args: &[&str]) -> String {
+    args.iter().skip_while(|a| **a == "--").filter(|a| !a.starts_with('-'))
+        .map(|a| a.rsplit(['/', '\\']).next().unwrap_or(a).split_whitespace().collect::<Vec<_>>().join("_"))
+        .filter(|a| !a.is_empty()).collect::<Vec<_>>().join(",")
+}
+
 /// The JIT's flags that take a value (the value is no package).
 /// The profile of every JIT test run devhub drives (`devhub test`, --live, the warm prebuild, CI's
 /// JIT shards, the land gate's and the tests bucket's units): release with cargo test's checks, debug
@@ -283,8 +353,8 @@ const JIT_VALUE_FLAGS: &[&str] = &["--profile", "--report-to", "--run-dir", "--c
 
 /// What a JIT command runs, from its arguments (before any `--`): its subcommand, its package (the
 /// first word that is no flag and no flag's value, or `-p`'s), and the test, bin or example it
-/// names (`--lib`, `--tests` too). Its test filters ([`run_class`] adds them) and app arguments are
-/// no part of it.
+/// names (`--lib`, `--tests` too). Its test filters and a run's app arguments ([`run_class`] adds
+/// them) are no part of it.
 fn jit_class_words(args: &[String]) -> Vec<String> {
     let mut it = args.iter().take_while(|a| *a != "--");
     let Some(sub) = it.next() else { return Vec::new() };
@@ -490,6 +560,7 @@ pub struct Caps {
     /// slots per kind from the node's lease.conf (kind, n)
     pub slots: Vec<(Kind, u32)>,
     pub disk_floor_gb: f64,
+    /// where its disk warns: the JIT's floor less a margin ([`disk::warn_gb`])
     pub disk_warn_gb: f64,
     pub timed: bool,
     /// a pool box that takes timed work while the bench boxes that meet it are taken by it
@@ -545,6 +616,9 @@ pub struct Caps {
     pub stalls: Vec<String>,
     /// the node's rustc (`1.97.1`; empty: not known)
     pub rustc: String,
+    /// the targets its toolchain holds a std for (`x86_64-pc-windows-msvc`; [`caps::rust_targets`]):
+    /// a run that builds for one goes only where it is. Empty: a hub from before the report.
+    pub rust_targets: Vec<String>,
     /// the facilities the hub has ([`FEATURES`]); empty: a hub from before feature reports
     pub features: Vec<String>,
     /// Optional per-box dev JIT store report.
@@ -772,7 +846,7 @@ impl Caps {
             self.hub_rss_mb,
             self.hub_heap_mb,
             self.features.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
-            format!(",\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}]", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
+            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
                 self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
                 self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(",")),
             self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
@@ -836,6 +910,7 @@ impl Caps {
             wm_dark: s("wm_dark"),
             wm_drain: s("wm_drain"),
             rustc: s("rustc"),
+            rust_targets: v.get("rust_targets").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             features: v.get("features").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             jit_store: v.get("jit_store").filter(|v| !v.is_null()).map(|v| std::sync::Arc::new(jitstore::Snapshot::parse(v))),
             services: match v.get("services") {
@@ -1141,7 +1216,12 @@ mod tests {
         assert_eq!(base_class(&cargo(&["test", "makepad-baz", "--lib", "--", "--exact", "a::b"])), cargo(&["test", "makepad-baz", "--lib", "--", "--nocapture"]), "the suite's class");
         assert_eq!(cargo(&["test", "makepad-baz"]), "test makepad test makepad-baz");
         assert_eq!(cargo(&["test", "-p", "makepad-foo", "--test", "it", "--features", "gpu"]), "test makepad test makepad-foo --test it");
-        assert_eq!(cargo(&["run", "--report-to", "/s/calculator.report", "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]), "test makepad run makepad-app-calculator");
+        assert_eq!(cargo(&["run", "--report-to", "/s/calculator.report", "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]), "test makepad run makepad-app-calculator", "an app's flags choose no work");
+        // a run's app arguments choose its work: measured apart, the bare run's measure till then
+        let variant = cargo(&["run", "--unattended", "fab-elec-mcu-cosim", "--example", "realtime", "--", "board-acc", "2.0", "100", "--out", "/t/x.wav"]);
+        assert_eq!(variant, "test makepad run fab-elec-mcu-cosim --example realtime?board-acc,2.0,100,x.wav");
+        assert_ne!(variant, cargo(&["run", "fab-elec-mcu-cosim", "--example", "realtime", "--", "board-acc", "0.05", "100", "--out", "/t/x.wav"]), "another window, another class");
+        assert_eq!(base_class(&variant), cargo(&["run", "fab-elec-mcu-cosim", "--example", "realtime"]), "the bare run's class");
         assert_eq!(run_class("lane", Kind::Build, &argv(&["env", "FOO_MUTE=1", "makepad", "check", "makepad-bar"])), "build makepad check makepad-bar", "lanes share what names its package");
         assert_eq!(run_class("lane", Kind::Build, &argv(&["makepad", "--version"])), "build makepad --version");
         assert_ne!(cargo(&["test", "makepad-baz"]), cargo(&["run", "makepad-app-foo"]), "a CI shard and a session are measured apart");
@@ -1214,6 +1294,7 @@ mod tests {
             hub_building: true,
             prewarming: true,
             rustc: "1.97.1".into(),
+            rust_targets: vec!["aarch64-apple-darwin".into(), "x86_64-pc-windows-msvc".into()],
             hub_rev: "b".repeat(40),
             hub_rss_mb: 3_840,
             hub_heap_mb: 410,

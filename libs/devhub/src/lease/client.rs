@@ -60,7 +60,7 @@ fn timed_boxes(leases: &[Value]) -> Vec<String> {
 
 pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<name>=<branch>[@sha]]...]
         [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--ram-floor-gb N] [--whole]
-        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
+        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>] [--yields]
         [--input NAME=<archive> ..] [--for <node>] [--exit-to <file>] [--run-since MS] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate ci;
                                           ci: its own tree and target, beside ordinary work, never timed or user boxes;
@@ -84,7 +84,11 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           when a timed run is past twice its estimate while a timed ask waits on its
                                           box, or runs over 10 min while one of 10 min or less waits there (it says
                                           who); a timed series or bench checks it between steps and, once
-                                          it exists, stops after the current step with its partial results and releases
+                                          it exists, stops after the current step with its partial results and releases.
+                                          --yields: the cmd reads $DEVHUB_YIELD between its steps and, once it exists, ends
+                                          at its step's end, its holder asking again for the rest; a bench box is lent it
+                                          between timed series whatever its length (other runs: 10 min at most by estimate),
+                                          and its file appears as timed work comes for the box
   run <lane> <kind> [--node N [--series S|--pin-why R]|--needs ..] [--rev R] [--with-uncommitted] [--tree] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
@@ -200,6 +204,11 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
   stats calls                             the last day's live calls as their boxes metered them, per
                                           class: launches and calls, peak cores p50/p90/max, mean, wall
   queue | leases [--all]                  live and waiting leases, positions and reasons
+  queue --long                            the leases queued 10 min or more (a check-in's starvation list),
+                                          counted as the panel counts them: a lane's leases behind its
+                                          own lease in its tree (its serial plan) one line per lane, the
+                                          boxes' prebuilds and lanes' warm legs on a line of their own,
+                                          never counted
   why-queued <lease>                     each candidate box's start blocker and reservation expiry
   replay take <from> <to> <out-dir>        export replay inputs on the master (UTC YYYY-MM-DDTHH:MM:SSZ)
   replay run <dir> <from> <to>             simulate scheduler waits offline from exported inputs
@@ -597,6 +606,7 @@ const FLAG_FIELDS: &[(&[&str], &str)] = &[
     (&["--avoid", "box-a,box-b"], "avoid"),
     (&["--run-since", "5"], "run_ms"),
     (&["--whole"], "whole"),
+    (&["--yields"], "yields"),
 ];
 
 /// The flags shared by `lease` and `run`.
@@ -621,6 +631,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             }
             "--tree" => { tree = true; i += 1; continue; }
             "--whole" => { req.whole = true; i += 1; continue; }
+            "--yields" => { req.yields = true; i += 1; continue; }
             "--cost" => { req.cost = CostClass::parse(val(i)?).ok_or("--cost is small, medium or large")?; req.cost_asked = true; }
             "--est-min" => req.est_min = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0).ok_or("--est-min is a nonnegative number")?),
             "--rounds" => req.rounds = Some(val(i)?.parse::<u32>().ok().filter(|n| *n >= 1).ok_or("--rounds is a positive whole number")?),
@@ -676,6 +687,8 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
     req.exec_profile = super::argv::ExecProfile::of(&cmd);
+    // its cargo's `--target`s: only a box holding their std takes it ([`super::argv::rust_targets`])
+    req.targets = super::argv::rust_targets(&cmd);
     // a run that changes the box's toolchain has the box to itself ([`super::argv::changes_toolchain`])
     if let Some(what) = super::argv::changes_toolchain(&cmd).filter(|_| !req.whole) {
         eprintln!("makepad devhub: `{what}` changes its box's toolchain: the lease takes the box whole");
@@ -1058,8 +1071,9 @@ fn adopt_body(o: &Opts, cwd: &str) -> Option<String> {
 }
 
 /// The JIT-first gate (lease/native.rs) for a command the lane runs here: prints its hint;
-/// Err(2) when the master refuses the native build.
-fn native_gate(c: &Client, o: &Opts) -> Result<(), i32> {
+/// Err(2) when the master refuses the native build. Its answer also says whether a Windows box
+/// takes the command ([`super::sched::Req::windows`]).
+fn native_gate(c: &Client, o: &mut Opts) -> Result<(), i32> {
     if o.cmd.is_empty() { return Ok(()); }
     let (top, rel) = lane_root().unwrap_or_else(|| (PathBuf::new(), ".".into()));
     let root = o.req.repo_dir.clone().unwrap_or_else(|| top.to_string_lossy().into_owned());
@@ -1072,6 +1086,7 @@ fn native_gate(c: &Client, o: &Opts) -> Result<(), i32> {
         Ok(v) => {
             let note = s(&v, "note");
             if !note.is_empty() { eprintln!("{note}"); }
+            o.req.windows = v.get("windows").and_then(|w| w.as_bool()).unwrap_or(false);
             Ok(())
         }
         Err(e) => {
@@ -1582,7 +1597,7 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
     }
     if let Some(note) = rounds_note(&o.req) { eprintln!("makepad devhub run: {note}"); }
     let exit_to = o.exit_to.clone();
-    let code = match native_gate(&c, &o) {
+    let code = match native_gate(&c, &mut o) {
         Ok(()) => run_worktree(o, uncommitted, None),
         Err(code) => code,
     };
@@ -2073,9 +2088,6 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if live && native { return Err("--native cannot be combined with --live".into()); }
         // (--cost and --est-min are the live job's hints, as everywhere: refused, two lanes lost a
         // run each to a flag AGENTS.md asks of every run, 11-16)
-        if live && o.req.node.is_some() {
-            return Err("--live uses hot-box routing; omit --node".into());
-        }
         let mut suite = if live && matches!(target.as_deref(), None | Some(ALL_TESTS)) {
             #[cfg(feature = "checkout")]
             { Some(live_targets(&root, pkg, &select.iter().map(|s| s.to_string()).collect::<Vec<_>>())?) }
@@ -2129,6 +2141,12 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
                 eprintln!("devhub test: {}: cargo, as its Cargo.toml's native-tests says: {}{rest}", o.req.class, declared.join("; "));
                 native = true;
             }
+            // its tests run apps side by side, as many as the cores they are told hold: told
+            // APP_TESTS_CORES unless it asks, and charged its class's measure (Req::cores_default).
+            // A live session's calls are charged their own peaks.
+            if p.app_tests && o.req.cores.is_none() && !live {
+                (o.req.cores, o.req.cores_default) = (Some(super::APP_TESTS_CORES), true);
+            }
             p.own
         };
         // Iteration always uses the JIT (a whole package's live run too); measured routing is only
@@ -2180,7 +2198,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     // checked without their tests too
     let (lane, commits_only) = (o.req.lane.clone(), o.commits_only);
     if native {
-        if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &o)) { return code; }
+        if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &mut o)) { return code; }
         let rev = o.req.rev.clone().unwrap_or_default();
         let code = run_worktree(o, false, Some(pkg));
         return if code == 0 && !asked_native && !whole { pre_land_checks(&lane, &rev, commits_only) } else { code };
@@ -2746,7 +2764,7 @@ fn check_run(lane: &str, rev: &str, commits_only: bool, run: &crate::jit_misses:
     let name = format!("check of {named}");
     let code = if run.own {
         o.tree = true;
-        if let Err(code) = native_gate(&c, &o) { return (code, format!("check {named}: the master refused its cargo check\n")); }
+        if let Err(code) = native_gate(&c, &mut o) { return (code, format!("check {named}: the master refused its cargo check\n")); }
         run_worktree_into(&mut o, false, Some(&name), &mut out).0
     } else if shadow {
         shadow_test(&c, &mut o, &name, &mut out).0
@@ -2896,14 +2914,17 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, out: &mut dyn 
         let loader = o.req.loader.clone().unwrap_or_default();
         let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
         let sandbox = if offline { ",\"offline\":true" } else { "" };
-        let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"priority\":{},\"loader\":{},\"cost\":{},\"est_min\":{},\"class\":{},\"also\":[{}],\"test_args\":[{}]{sandbox}}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(o.req.cost.as_str()), o.req.est_min.map_or("null".to_string(), |m| m.to_string()), makepad_remote::json_str(&o.req.class), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(makepad_remote::json_str).collect::<Vec<_>>().join(","), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
+        // placed as a lease is: --node (with --series/--pin-why), --needs, --avoid
+        let placement = format!(",\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{}", makepad_remote::json_str(o.req.node.as_deref().unwrap_or("")), makepad_remote::json_str(&o.req.avoid.join(",")), makepad_remote::json_str(o.req.series.as_deref().unwrap_or("")), makepad_remote::json_str(o.req.pin_why.as_deref().unwrap_or("")));
+        let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{}{placement},\"priority\":{},\"loader\":{},\"cost\":{},\"est_min\":{},\"class\":{},\"also\":[{}],\"test_args\":[{}]{sandbox}}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(o.req.cost.as_str()), o.req.est_min.map_or("null".to_string(), |m| m.to_string()), makepad_remote::json_str(&o.req.class), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(makepad_remote::json_str).collect::<Vec<_>>().join(","), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
         let selected = if args.last().is_some_and(|a| a == "--") { &args[..args.len() - 1] } else { args };
         // the session, and what devhub tells its owner of it (its call far past its measure)
-        let status = || -> Option<(crate::state::Live, Option<String>)> {
+        // (and how long its run has been silent)
+        let status = || -> Option<(crate::state::Live, Option<String>, Option<u64>)> {
             let v = one(&c, "live", "live list").ok()?;
-            v.as_arr()?.iter().map(|v| (crate::state::live_from(v), v.get("word").and_then(Value::as_str).map(str::to_string))).find(|(x, _)| x.test && x.offline == offline && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
+            v.as_arr()?.iter().map(|v| (crate::state::live_from(v), v.get("word").and_then(Value::as_str).map(str::to_string), v.get("quiet_ms").and_then(Value::as_u64))).find(|(x, _, _)| x.test && x.offline == offline && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
         };
-        let measured_ms = status().and_then(|(x, _)| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
+        let measured_ms = status().and_then(|(x, _, _)| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
         let mut notice_after = Duration::from_millis(measured_ms.saturating_add(120_000));
         let mut told = String::new();
         let v = live_retry(out, |out| {
@@ -2925,7 +2946,7 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, out: &mut dyn 
                     Err(false) => return Err("the hub connection ended".into()),
                 }
                 if started.elapsed() > notice_after {
-                    let (x, word) = status().map_or((None, None), |(x, w)| (Some(x), w));
+                    let (x, word, quiet) = status().map_or((None, None, None), |(x, w, q)| (Some(x), w, q));
                     let phase = match x.as_ref() {
                         None => "waiting for a live job",
                         Some(x) if x.state != "running" => x.state.as_str(),
@@ -2940,7 +2961,9 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, out: &mut dyn 
                     };
                     // a session placed again says so while it waits for its box
                     let note = x.as_ref().filter(|x| x.state == "starting" && !x.note.is_empty()).map_or(String::new(), |x| format!(": {}", x.note));
-                    let _ = writeln!(out, "still running: {phase}{note} ({} min)", started.elapsed().as_secs() / 60);
+                    // a run silent past a minute says since when: a hung one is seen as one
+                    let silent = quiet.filter(|ms| *ms >= crate::state::QUIET_SAID_MS).map_or(String::new(), |ms| format!("; last output {} ago", crate::state::ago(ms)));
+                    let _ = writeln!(out, "still running: {phase}{note} ({} min{silent})", started.elapsed().as_secs() / 60);
                     if let Some(word) = word.filter(|w| *w != told) {
                         let _ = writeln!(out, "devhub: {word}");
                         told = word;
@@ -3194,37 +3217,7 @@ fn queue(c: &Client, all: bool, only: Option<&str>) -> i32 {
         }
     }
     for v in &leases {
-        let v = v.clone();
-        let node = s(&v, "node");
-        let at = if node.is_empty() { String::new() } else { format!("@{node}") };
-        let tail = match s(&v, "state").as_str() {
-            "queued" if n(&v, "pos") < 1.0 => format!("queued, not ranked yet, waiting {} s", n(&v, "wait_s")),
-            "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta_of(&v)),
-            "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
-            st => {
-                let info = v.get("info").filter(|i| !i.is_null());
-                let run = info.map(|i| s(i, "running")).filter(|r| !r.is_empty()).map_or(String::new(), |r| format!(" running `{r}`"));
-                let ram = info.and_then(|i| i.get("held_mb")).and_then(super::num).map_or(String::new(), |m| format!(" ram {:.1} GB", m / 1024.0));
-                let cores = s(&v, "cores_now");
-                let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
-                let agent = s(&v, "agent");
-                let past = n(&v, "past_budget");
-                let why = s(&v, "grant_why");
-                let why = if why.is_empty() { why } else { format!(" ({why})") };
-                format!(
-                    "{st} {}s ago{why}, beat {}s ago{}{run}{ram}{cores}{disk}{}{}",
-                    n(&v, "granted_s"),
-                    n(&v, "beat_s"),
-                    if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
-                    if past > 0.0 { format!(" past the box's budget by {past} cores (background work yields)") } else { String::new() },
-                    v.get("start").map(|x| format!(" work={}", s(x, "work"))).unwrap_or_default()
-                )
-            }
-        };
-        let jit = s(&v, "jit");
-        let loader = s(&v, "loader");
-        let target = if loader.is_empty() { jit } else { loader };
-        println!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target);
+        println!("{}", queue_row(v));
     }
     let timed = if only.is_some() { Vec::new() } else { timed_boxes(&leases) };
     if !timed.is_empty() {
@@ -3232,6 +3225,77 @@ fn queue(c: &Client, all: bool, only: Option<&str>) -> i32 {
         for line in timed { println!("{line}"); }
     }
     0
+}
+
+/// One lease's line of `queue`.
+fn queue_row(v: &Value) -> String {
+    let node = s(&v, "node");
+    let at = if node.is_empty() { String::new() } else { format!("@{node}") };
+    let tail = match s(&v, "state").as_str() {
+        "queued" if n(&v, "pos") < 1.0 => format!("queued, not ranked yet, waiting {} s", n(&v, "wait_s")),
+        "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta_of(&v)),
+        "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
+        st => {
+            let info = v.get("info").filter(|i| !i.is_null());
+            let run = info.map(|i| s(i, "running")).filter(|r| !r.is_empty()).map_or(String::new(), |r| format!(" running `{r}`"));
+            let ram = info.and_then(|i| i.get("held_mb")).and_then(super::num).map_or(String::new(), |m| format!(" ram {:.1} GB", m / 1024.0));
+            let cores = s(&v, "cores_now");
+            let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
+            let agent = s(&v, "agent");
+            let past = n(&v, "past_budget");
+            let why = s(&v, "grant_why");
+            let why = if why.is_empty() { why } else { format!(" ({why})") };
+            format!(
+                "{st} {}s ago{why}, beat {}s ago{}{run}{ram}{cores}{disk}{}{}",
+                n(&v, "granted_s"),
+                n(&v, "beat_s"),
+                if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
+                if past > 0.0 { format!(" past the box's budget by {past} cores (background work yields)") } else { String::new() },
+                v.get("start").map(|x| format!(" work={}", s(x, "work"))).unwrap_or_default()
+            )
+        }
+    };
+    let jit = s(&v, "jit");
+    let loader = s(&v, "loader");
+    let target = if loader.is_empty() { jit } else { loader };
+    format!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target)
+}
+
+/// `queue --long`: the leases queued 10 min or more, a check-in's starvation list. A lane's
+/// leases that wait only on their own lane's lease (its tree's one lease at a time: its serial
+/// plan, [`super::sched::Sched::own_wait`]) fold into one line per lane.
+fn long_waits(c: &Client) -> i32 {
+    match ask(c, None, "leases", "leases") {
+        Ok(lines) => {
+            for line in long_wait_lines(&lines.iter().filter_map(|l| json(l)).collect::<Vec<_>>()) { println!("{line}"); }
+            0
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// [`long_waits`]' lines, folded as every count a person reads ([`super::long_waits`]): the
+/// count, each long wait on another lane, cores, RAM or a hold as `queue` lists it, per lane its
+/// leases behind its own lease with the soonest of their expected starts, and the boxes'
+/// prebuilds on a line of their own. A sweep's 14 jobs queued one at a time behind their own
+/// lease read as 14 of 15 starved leases while three boxes idled (11-17).
+fn long_wait_lines(leases: &[Value]) -> Vec<String> {
+    let w = super::long_waits(leases.iter().filter(|v| s(v, "state") == "queued"), |v| n(v, "wait_s") as u64 * 1000, |v| s(v, "lane"), |v| !s(v, "own_wait").is_empty());
+    if w.count() == 0 && w.prebuilds.is_empty() { return Vec::new(); }
+    let plans = match w.serial.len() { 0 => String::new(), 1 => ", a lane's serial plan counted once".into(), n => format!(", {n} lanes' serial plans counted once each") };
+    let mut out = vec![format!("{} waiting over 10 min ({} starved{plans})", w.count(), w.starved.len())];
+    out.extend(w.starved.iter().map(|v| queue_row(v)));
+    for (lane, ls) in &w.serial {
+        let holders: std::collections::BTreeSet<String> = ls.iter().map(|v| s(v, "own_wait")).collect();
+        let next = ls.iter().filter(|v| !v.get("eta_late").and_then(Value::as_bool).unwrap_or(false)).map(|v| n(v, "eta_ms") as u64).filter(|ms| *ms > 0).min();
+        let next = next.map_or("next start not known".to_string(), |ms| format!("next in ~{} min", eta_min(ms)));
+        out.push(format!("{lane}: {} queued behind its own {} (serial in its tree), {next}", ls.len(), holders.into_iter().collect::<Vec<_>>().join(", ")));
+    }
+    if !w.prebuilds.is_empty() {
+        let each: Vec<String> = w.prebuilds.iter().map(|v| format!("{} {} {} min ({})", s(v, "id"), s(v, "lane"), n(v, "wait_s") as u64 / 60, s(v, "reason"))).collect();
+        out.push(format!("prebuilds and warm legs waiting (warm-ups, no starvation): {}", each.join("; ")));
+    }
+    out
 }
 
 fn nodes(c: &Client) -> i32 {
@@ -3243,6 +3307,10 @@ fn nodes(c: &Client) -> i32 {
                 if v.get("master").is_some() {
                     let (up, hub) = (crate::proto::wall_ms().saturating_sub(n(&v, "up_ms") as u64), s(&v, "hub"));
                     println!("{:<8} {:<8} hub {} (this build up {})", s(&v, "master"), "master", &hub[..hub.len().min(10)], super::sched::dur(up));
+                    let unsupervised = s(&v, "unsupervised");
+                    if !unsupervised.is_empty() {
+                        println!("{:<8} {:<8} warning: {unsupervised}", "", "");
+                    }
                     let network = s(&v, "network");
                     if !network.is_empty() {
                         println!("{:<8} {:<8} {network}", "", "");
@@ -3599,6 +3667,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             }
             Err(e) => fail(e),
         },
+        ["queue" | "leases", rest @ ..] if rest.contains(&"--long") => long_waits(&c),
         ["queue" | "leases", rest @ ..] => queue(&c, rest.contains(&"--all"), None),
         ["lease", id, "show"] | ["lease", "show", id] => queue(&c, true, Some(id)),
         ["why-queued", id] => match ask(&c, None, "why-queued", id) {
@@ -3783,6 +3852,23 @@ mod restart_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The long waits list starvation lease by lease; a lane's leases behind its own lease fold
+    /// into one line with their soonest expected start, counted once; the prebuilds go on a line
+    /// of their own, uncounted; waits under 10 min are not listed.
+    #[test]
+    fn long_waits_fold_a_lanes_own_serial_plan() {
+        let lease = |id: &str, lane: &str, wait: u64, own: &str, eta: u64| json(&format!("{{\"id\":\"{id}\",\"lane\":\"{lane}\",\"kind\":\"test\",\"state\":\"queued\",\"pos\":1,\"reason\":\"r\",\"wait_s\":{wait},\"eta_ms\":{eta},\"own_wait\":{}}}", if own.is_empty() { "null".to_string() } else { format!("\"{own}\"") })).unwrap();
+        let leases = [lease("L2", "sweep", 900, "L1", 240_000), lease("L3", "sweep", 900, "L1", 0), lease("L4", "sweep", 700, "L1", 600_000), lease("L5", "sweep", 60, "L1", 0), lease("L6", "other", 1200, "", 0), lease("L7", "late", 30, "", 0), lease("L8", "prebuild-node-b", 1560, "", 0), lease("L9", "warm-rc-x", 660, "", 0)];
+        let lines = long_wait_lines(&leases);
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines[0], "2 waiting over 10 min (1 starved, a lane's serial plan counted once)");
+        assert!(lines[1].starts_with("L6") && lines[1].contains("in queue (r) waiting 1200 s"), "{lines:?}");
+        assert_eq!(lines[2], "sweep: 3 queued behind its own L1 (serial in its tree), next in ~4 min");
+        assert_eq!(lines[3], "prebuilds and warm legs waiting (warm-ups, no starvation): L8 prebuild-node-b 26 min (r); L9 warm-rc-x 11 min (r)", "a lane's warm leg is no starved lease");
+        assert!(long_wait_lines(&[lease("L3", "sweep", 900, "L1", 0)])[1].ends_with("next start not known"));
+        assert!(long_wait_lines(&[lease("L5", "sweep", 60, "L1", 0)]).is_empty(), "nothing long: nothing said");
+    }
 
     /// A devhub flag among the test binary's words is refused before any run: `--rev` after `--`
     /// reached the binary and was recorded as a JIT miss (M98, 11-16). The binary's own flags pass.

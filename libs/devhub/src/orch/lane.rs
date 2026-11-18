@@ -1738,6 +1738,28 @@ pub(crate) fn down_nodes(nodes: &[crate::lease::sched::NodeView]) -> Vec<String>
     rows
 }
 
+/// How many asks one lane has queued at once before the check-in lists it ([`deep_queues`]).
+const DEEP_QUEUE: usize = 10;
+
+/// For the manager's check-in (`lane quiet`): the lanes with [`DEEP_QUEUE`] or more asks queued at
+/// once, the most first, with how long the oldest has waited. Lane caps run them a few at a time,
+/// but the queue view and its starvation lines fill with them: a lane and its edit lane had 22
+/// test asks queued at once (11-16). `queued`: each queued ask's lane and when it asked.
+pub(crate) fn deep_queues<'a>(queued: impl Iterator<Item = (&'a str, u64)>, now: u64) -> Vec<String> {
+    let mut by: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+    for (lane, asked) in queued {
+        let e = by.entry(lane).or_insert((0, asked));
+        e.0 += 1;
+        e.1 = e.1.min(asked);
+    }
+    let mut deep: Vec<(&str, (usize, u64))> = by.into_iter().filter(|(_, (n, _))| *n >= DEEP_QUEUE).collect();
+    if deep.is_empty() { return Vec::new(); }
+    deep.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(b.0)));
+    let mut rows = vec![format!("lanes with {DEEP_QUEUE} or more asks queued at once (ask them to batch: one `devhub test` with several filters, or one `job submit --batch`):")];
+    rows.extend(deep.into_iter().map(|(lane, (n, oldest))| format!("  {lane}: {n} queued, the oldest {} min", now.saturating_sub(oldest) / 60_000)));
+    rows
+}
+
 fn quiet(ctx: &Ctx) -> Result<String, String> {
     let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.ended_ms == 0).cloned().collect());
     let ended = ended_runs(ctx, &lanes);
@@ -1758,6 +1780,8 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
     rows.extend(super::live::restarts_pending(ctx, now));
     rows.extend(slow_now(ctx, now));
     rows.extend(down_nodes(&ctx.leases.nodes()));
+    let view = ctx.leases.view();
+    rows.extend(deep_queues(view.iter().filter(|l| l.state == crate::lease::sched::State::Queued).map(|l| (l.req.lane.as_str(), l.asked_ms)), now));
     let offers = offered(ctx, &lanes, &ended, &busy, now);
     let waiting: Vec<LaneRec> = lanes.iter().filter(|l| l.parked.is_empty() && !offers.iter().any(|o| o.name == l.name)).cloned().collect();
     rows.extend(quiet_lanes(&waiting, &ended, &busy, &landed, now));
@@ -2171,6 +2195,19 @@ mod tests {
     use super::*;
     use crate::lease::master::LeaseMaster;
     use crate::state::Store;
+
+    /// A lane with ten or more asks queued is listed, the most first, with its oldest's wait; one
+    /// with fewer is not.
+    #[test]
+    fn the_check_in_lists_a_lane_with_many_asks_queued() {
+        let mut queued: Vec<(&str, u64)> = (0..12).map(|i| ("elang", i * 60_000)).collect();
+        queued.extend((0..10).map(|i| ("elangedit", 5 * 60_000 + i)));
+        queued.extend((0..9).map(|i| ("eroute", i)));
+        let rows = deep_queues(queued.into_iter(), 20 * 60_000);
+        assert_eq!(rows[1..], ["  elang: 12 queued, the oldest 20 min".to_string(), "  elangedit: 10 queued, the oldest 15 min".to_string()]);
+        assert!(rows[0].starts_with("lanes with 10 or more asks queued at once"), "{}", rows[0]);
+        assert!(deep_queues([("eroute", 0u64); 9].into_iter(), 0).is_empty(), "nine is no deep queue");
+    }
 
     /// A node unheard past an hour is listed with how long and why; one heard, or unheard for
     /// less, is not, and with none down there is no row at all.

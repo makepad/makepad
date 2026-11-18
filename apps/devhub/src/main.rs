@@ -35,6 +35,7 @@ use makepad_devhub_conf::tray_glyph as glyph;
 mod graph;
 mod installed;
 mod live;
+mod menu_item;
 mod taskview;
 mod view;
 
@@ -114,6 +115,10 @@ const DEV_BASE: u64 = 0x6465_7600_0000;
 const NODE_DROPDOWN_W: f64 = 560.0;
 /// the live view's redraw rate while it shows
 const LIVE_HZ: f64 = 30.0;
+
+/// The master's exit code when a signal ended it (128 + SIGTERM): not a clean exit, so its login
+/// item starts it again.
+const SIGNALLED_EXIT: i32 = 143;
 
 fn log_line(line: &str) {
     use std::io::Write;
@@ -306,6 +311,16 @@ fn size_jit_cache(m: &MasterCore, machine: String, app: Option<String>) {
     });
 }
 
+/// A menu item's name for the log.
+fn item_name(item: LiveId) -> String {
+    match item {
+        id if id == PANEL => "open panel".into(),
+        id if id == OPEN => "open devhub".into(),
+        id if id == QUIT => "quit".into(),
+        id => format!("{id}"),
+    }
+}
+
 /// The devhub panel (apps/devhub_panel: every box's leases and load on one time axis, the queue,
 /// the landing strip), the master's menu's "Open panel": a show on the Mac (`devhub show
 /// makepad-app-devhub-panel`), so it is the latest landed panel under the JIT in a process of its
@@ -340,6 +355,9 @@ fn start_master() -> Result<MasterCore, String> {
     let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
     let master = Master::start(&name, makepad_devhub_conf::HITCH_MS, trust(&name), Arc::new(|_r| {}))?;
     log_line(&format!("devhub: master {name} up; control {}", proto::control_socket().display()));
+    if let Some(why) = makepad_devhub::master::unsupervised() {
+        log_line(&format!("devhub: {why}"));
+    }
     let looking = Arc::new(AtomicBool::new(false));
     let snapshot = Arc::new(Mutex::new(Snapshot::default()));
     let (m, l, s) = (master.clone(), looking.clone(), snapshot.clone());
@@ -400,7 +418,19 @@ fn start_core() -> Result<Option<Core>, String> {
         Some(p) => Ok(start_node(p)?.map(Core::Node)),
         // the master is the Mac's: on Windows devhub is always a node (its logon task's tray)
         None if cfg!(windows) => Ok(start_node(proto::home().join("node.conf"))?.map(Core::Node)),
-        None => Ok(Some(Core::Master(start_master()?))),
+        None => {
+            // started outside its LaunchAgent (the Dock, a shell): launchd starts the master, so
+            // that a crash is started again (11-17: one stayed down until a person came by)
+            match makepad_devhub::master::hand_to_agent() {
+                Ok(true) => {
+                    log_line(&format!("devhub: the master starts under {}", makepad_devhub::master::AGENT));
+                    return Ok(None);
+                }
+                Ok(false) => {}
+                Err(e) => log_line(&format!("devhub: {e}; the master starts here, and nothing starts it again after a crash")),
+            }
+            Ok(Some(Core::Master(start_master()?)))
+        }
     }
 }
 
@@ -441,6 +471,12 @@ pub struct App {
     /// a JIT row's Profile: the pid to attach the profile window to, taken after the action
     #[rust]
     profile_req: Option<u32>,
+    /// the master's menu-bar item on the Mac, shown by its helper process ([`menu_item`])
+    #[rust]
+    item_link: Option<menu_item::ItemLink>,
+    /// this process as that helper (`--menu-bar-item`): it shows the item, nothing else
+    #[rust]
+    item_host: Option<menu_item::Host>,
 }
 
 impl App {
@@ -539,7 +575,11 @@ impl App {
             }
             menu.push(TrayMenuItem::item(QUIT, "Quit devhub"));
             // no tooltip: AppKit shows a status item's changed tooltip wherever the pointer is
-            cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: String::new(), menu, dropdown: glance.is_none() });
+            let icon = TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: String::new(), menu, dropdown: glance.is_none() };
+            match &self.item_link {
+                Some(link) => link.show(&icon),
+                None => cx.set_tray(icon),
+            }
         }
         if let Some(Core::Node(n)) = &self.core {
             if self.node_drop.is_open() {
@@ -684,6 +724,79 @@ impl App {
         }
         cx.remove_tray(TRAY);
         cx.quit();
+    }
+
+    /// An item chosen in the master's menu-bar menu (its own tray's, or its helper's); true when
+    /// it quit.
+    fn tray_item(&mut self, cx: &mut Cx, item: LiveId) -> bool {
+        match item {
+            id if id == QUIT => {
+                self.quit(cx);
+                return true;
+            }
+            id if id == LOGIN => {
+                let on = !self.login.unwrap_or(false);
+                match installed::set_login(on) {
+                    Ok(()) => log_line(&format!("devhub: open at login {}", if on { "on" } else { "off" })),
+                    Err(e) => log_line(&format!("devhub: open at login: {e}")),
+                }
+                self.login = installed::login();
+                self.refresh(cx);
+            }
+            id if id.0 >= DEV_BASE && id.0 < DEV_BASE + 4096 => {
+                let i = (id.0 - DEV_BASE) as usize;
+                if let (Some(Core::Master(m)), Some(name)) = (&self.core, self.dev_nodes.get(i)) {
+                    let on = !m.master.leases.nodes().iter().any(|n| &n.name == name && n.dev);
+                    if let Err(e) = m.master.leases.set_dev(name, on) {
+                        log_line(&format!("devhub: dev {name}: {e}"));
+                    }
+                }
+                self.refresh(cx);
+            }
+            id if id == DEVSW => {
+                makepad_devhub::lease::exec::request_dev(!makepad_devhub::lease::exec::writes_allowed());
+                self.refresh(cx);
+            }
+            id if id == PAUSE => {
+                if let Some(Core::Master(m)) = &self.core {
+                    let resume = m.master.land.paused().is_some();
+                    if let Err(e) = m.master.land.set_paused(if resume { None } else { Some("from the menu bar") }) {
+                        log_line(&format!("devhub: land pause: {e}"));
+                    }
+                }
+                self.refresh(cx);
+            }
+            id if id == VERIFY => {
+                // the newest landed pair, queued for the verifier (it says so on the feed)
+                if let Some(ctx) = makepad_devhub::orch::ctx() {
+                    if let Err(e) = makepad_devhub::orch::verify::serve(ctx, "verify kick") {
+                        log_line(&format!("devhub: verify kick: {e}"));
+                    }
+                }
+                self.refresh(cx);
+            }
+            id if id == SEEN => {
+                self.act(DevhubAction::SeenAll);
+                self.refresh(cx);
+            }
+            id if id == PROFILE => self.open_profile(cx, None),
+            id if id == PANEL => open_panel(),
+            id if id == OPEN => {
+                self.window_shown = true;
+                self.set_looking();
+                cx.show_in_dock(true);
+                self.ui.window(cx, ids!(main_window)).show(cx);
+                self.refresh(cx);
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Whether the app lives in the menu bar or tray (its own, or its helper's): a closed window
+    /// then hides, and the app outlives its last one.
+    fn in_tray(&self, cx: &Cx) -> bool {
+        cx.has_tray() || self.item_link.is_some()
     }
 
     fn quit_from_view(&mut self, cx: &mut Cx) {
@@ -846,6 +959,18 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        // the master's menu-bar item's helper: the item, and nothing of the master
+        if std::env::args().any(|a| a == menu_item::FLAG) {
+            match menu_item::Host::start() {
+                Ok(host) => self.item_host = Some(host),
+                Err(e) => {
+                    log_line(&format!("devhub: menu-bar item: {e}; this helper ends"));
+                    std::process::exit(0);
+                }
+            }
+            cx.show_in_dock(false);
+            return;
+        }
         match start_core() {
             Ok(core) => self.core = core,
             Err(e) => {
@@ -864,6 +989,10 @@ impl MatchEvent for App {
             let _ = std::fs::write(proto::home().join("node.pid"), format!("{}\n", std::process::id()));
         }
         self.login = installed::login();
+        // the master's menu-bar item is its helper's on the Mac: an exec'd process gets none
+        if matches!(self.core, Some(Core::Master(_))) {
+            self.item_link = menu_item::ItemLink::start();
+        }
         self.state.tab = Tab::Fleet;
         self.state.view = "jit";
         self.timer = cx.start_interval(0.5);
@@ -941,73 +1070,48 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // the menu-bar item's helper: the master's newest state, and the items chosen in it
+        if let Some(host) = &self.item_host {
+            match event {
+                Event::Signal => host.apply(cx, TRAY),
+                Event::TrayMenu(e) if e.tray == TRAY => host.chose(e.item),
+                _ => {}
+            }
+            return;
+        }
         match event {
             // SIGTERM to a node (the WM that replaces it, a service stop): its hub finishes the
             // lease start in flight and exits itself, refusing new ones
             Event::QuitRequested(e) if e.reason == QuitReason::Signal && matches!(self.core, Some(Core::Node(_))) => {
                 if makepad_devhub::lease::exec::drain_and_exit() { e.handle(); }
             }
+            // SIGTERM to the master (a stop by pid) exits with an error code: its login item
+            // (`installed`: KeepAlive unless it exits cleanly) starts it again through the Dock
+            // wrapper, which builds the tip first. Quit in its menu exits cleanly and stays quit.
+            // 11-17: a master stopped by pid to take the tip quit cleanly and stayed down until a
+            // hand `master start`.
+            Event::QuitRequested(e) if e.reason == QuitReason::Signal && matches!(self.core, Some(Core::Master(_))) => {
+                log_line(&format!("devhub: the master quits on a signal with exit code {SIGNALLED_EXIT}: its login item starts it again (Quit in its menu stays quit)"));
+                std::process::exit(SIGNALLED_EXIT);
+            }
             Event::Timer(t) if self.timer.is_timer(t).is_some() => self.refresh(cx),
             Event::Timer(t) if self.live_on && self.live_timer.is_timer(t).is_some() => self.redraw_live(cx),
-            Event::TrayMenu(e) if e.tray == TRAY => match e.item {
-                id if id == QUIT => return self.quit(cx),
-                id if id == LOGIN => {
-                    let on = !self.login.unwrap_or(false);
-                    match installed::set_login(on) {
-                        Ok(()) => log_line(&format!("devhub: open at login {}", if on { "on" } else { "off" })),
-                        Err(e) => log_line(&format!("devhub: open at login: {e}")),
+            Event::TrayMenu(e) if e.tray == TRAY => {
+                if self.tray_item(cx, e.item) {
+                    return;
+                }
+            }
+            Event::Signal => {
+                let chosen = self.item_link.as_ref().map(|l| l.chosen()).unwrap_or_default();
+                for item in chosen {
+                    // (a choice in the helper's menu is seen in the log)
+                    log_line(&format!("devhub: the menu-bar item: {} chosen", item_name(item)));
+                    if self.tray_item(cx, item) {
+                        return;
                     }
-                    self.login = installed::login();
-                    self.refresh(cx);
                 }
-                id if id.0 >= DEV_BASE && id.0 < DEV_BASE + 4096 => {
-                    let i = (id.0 - DEV_BASE) as usize;
-                    if let (Some(Core::Master(m)), Some(name)) = (&self.core, self.dev_nodes.get(i)) {
-                        let on = !m.master.leases.nodes().iter().any(|n| &n.name == name && n.dev);
-                        if let Err(e) = m.master.leases.set_dev(name, on) {
-                            log_line(&format!("devhub: dev {name}: {e}"));
-                        }
-                    }
-                    self.refresh(cx);
-                }
-                id if id == DEVSW => {
-                    makepad_devhub::lease::exec::request_dev(!makepad_devhub::lease::exec::writes_allowed());
-                    self.refresh(cx);
-                }
-                id if id == PAUSE => {
-                    if let Some(Core::Master(m)) = &self.core {
-                        let resume = m.master.land.paused().is_some();
-                        if let Err(e) = m.master.land.set_paused(if resume { None } else { Some("from the menu bar") }) {
-                            log_line(&format!("devhub: land pause: {e}"));
-                        }
-                    }
-                    self.refresh(cx);
-                }
-                id if id == VERIFY => {
-                    // the newest landed pair, queued for the verifier (it says so on the feed)
-                    if let Some(ctx) = makepad_devhub::orch::ctx() {
-                        if let Err(e) = makepad_devhub::orch::verify::serve(ctx, "verify kick") {
-                            log_line(&format!("devhub: verify kick: {e}"));
-                        }
-                    }
-                    self.refresh(cx);
-                }
-                id if id == SEEN => {
-                    self.act(DevhubAction::SeenAll);
-                    self.refresh(cx);
-                }
-                id if id == PROFILE => self.open_profile(cx, None),
-                id if id == PANEL => open_panel(),
-                id if id == OPEN => {
-                    self.window_shown = true;
-                    self.set_looking();
-                    cx.show_in_dock(true);
-                    self.ui.window(cx, ids!(main_window)).show(cx);
-                    self.refresh(cx);
-                }
-                _ => {}
-            },
-            Event::WindowCloseRequested(e) if cx.has_tray() && self.ui.window(cx, ids!(profile_window)).window_id() == Some(e.window_id) => {
+            }
+            Event::WindowCloseRequested(e) if self.in_tray(cx) && self.ui.window(cx, ids!(profile_window)).window_id() == Some(e.window_id) => {
                 // the profile window only hides; its sessions end with it
                 e.accept_close.set(false);
                 self.ui.window(cx, ids!(profile_window)).set_visible(cx, false);
@@ -1015,7 +1119,7 @@ impl AppMain for App {
                     p.detach(cx);
                 }
             }
-            Event::WindowCloseRequested(e) if cx.has_tray() => {
+            Event::WindowCloseRequested(e) if self.in_tray(cx) => {
                 e.accept_close.set(false);
                 self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
                 self.window_shown = false;

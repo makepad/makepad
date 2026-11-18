@@ -1271,6 +1271,7 @@ fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
     r.ram_gb = j.ram_gb;
     r.whole |= j.whole;
     r.hand_in = j.hand_in;
+    r.windows = j.windows;
     r.holder = j.holder;
     r.series = (!j.series.is_empty()).then(|| j.series.clone());
 }
@@ -1367,7 +1368,9 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
         let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
         if !note.is_empty() { notes.push(note); }
-        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, hand_in, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), series: s(r, "series"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
+        let (windows, gap) = crate::lease::native::windows_verdict(&tree, &rev, &cmd);
+        if !gap.is_empty() { notes.push(format!("job {}: {gap}", i + 1)); }
+        jobs.push(Job { cwd, holder, shadow, windows, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, hand_in, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), series: s(r, "series"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
     }
     for (i, j) in jobs.iter().enumerate() {
         let mut req = crate::lease::sched::Req::new(&j.lane, Kind::parse(&j.kind).unwrap());
@@ -1662,9 +1665,9 @@ mod tests {
             Ok(vec![crate::lease::Caps { arch: "x86_64".into(), os: os.into(), cores: 16, ram_gb: 64.0, timed: true, ..Default::default() }.to_json()])
         }), Arc::new(|_| {}), Arc::new(|| 1), None, true));
         c.leases.refresh(&[("node-a".into(), "192.0.2.1".into()), ("node-m".into(), "192.0.2.2".into())]);
-        let pinned = req("true", &[]).replace("\"cmd\":", "\"node\":\"node-m\",\"cmd\":");
-        let error = submit_line(&c, "", true, &[pinned]).unwrap_err();
-        assert!(error.contains("no box could ever take it: a Mac: the Macs take only work that requires macOS"), "{error}");
+        let windows = req("true", &[]).replace("\"needs\":\"arch=x64\"", "\"needs\":\"arch=x64,os=windows\"");
+        let error = submit_line(&c, "", true, &[windows]).unwrap_err();
+        assert!(error.contains("no box could ever take it") && error.contains("needs os=windows"), "{error}");
         assert_eq!(c.store.read(|d| (d.jobs.len(), d.jobs_next)), (0, 0), "nothing is written");
         assert!(submit_line(&c, "", true, &[req("true", &[])]).is_ok(), "unpinned, a Linux box takes it");
         std::fs::remove_dir_all(&c.home).unwrap();
