@@ -70,6 +70,7 @@ use crate::keys::{FIRST_KEY, LAST_KEY, NUM_KEYS};
 use crate::modal::{detect_path, run_modes, KernelPath, MAX_CHUNK};
 use crate::params::{PianoPreset, Voicing};
 use crate::simd::*;
+use crate::{StopFade, SILENCE};
 use crate::{Instrument, Piano, PianoEvent, TimedEvent};
 use makepad_ai_loader::formats::onnx::{OnnxAttribute, OnnxModel};
 
@@ -641,6 +642,10 @@ pub struct LearnedPiano {
     /// (the mechanisms voicing scales do not exist in this synthesis).
     voicing: Voicing,
     global_sample: u64,
+    /// An AllSoundOff's fade, and the size of the last output sample (whether
+    /// anything still sounds).
+    stop: StopFade,
+    out_peak: f32,
     path: KernelPath,
     // Chunk scratch.
     zero_in: [f32; MAX_CHUNK],
@@ -690,6 +695,8 @@ impl LearnedPiano {
             tone_treble_db: 0.0,
             voicing: Voicing::default(),
             global_sample: 0,
+            stop: StopFade::new(sample_rate),
+            out_peak: 0.0,
             path: detect_path(),
             zero_in: [0.0; MAX_CHUNK],
             nn_l: [0.0; MAX_CHUNK],
@@ -848,6 +855,13 @@ impl LearnedPiano {
     // --- events / render --------------------------------------------------
 
     fn apply_event(&mut self, ev: &PianoEvent) {
+        if self.stop.active() {
+            if !self.stop.hold(*ev) {
+                self.end_fade();
+                self.apply_event(ev);
+            }
+            return;
+        }
         match *ev {
             PianoEvent::NoteOn { key, velocity } => {
                 if velocity == 0 {
@@ -878,11 +892,39 @@ impl LearnedPiano {
                 self.soft = on;
             }
             PianoEvent::AllSoundOff => {
-                for s in &mut self.slots {
-                    s.silence();
+                if self.out_peak > SILENCE {
+                    self.stop.start();
+                } else {
+                    self.silence();
                 }
-                self.er.reset();
-                self.reverb.reset();
+            }
+        }
+    }
+
+    /// Silence at once, the pedals left as they are, the output stage too
+    /// (after a fade it is silent; what its filters held would click).
+    fn silence(&mut self) {
+        for s in &mut self.slots {
+            s.silence();
+        }
+        self.er.reset();
+        self.reverb.reset();
+        self.tone.reset();
+        self.eq.reset();
+        self.dc_l.reset();
+        self.dc_r.reset();
+        self.out_peak = 0.0;
+    }
+
+    /// The fade is over: silence, then what came during it, in order.
+    fn end_fade(&mut self) {
+        let (events, count) = self.stop.take();
+        self.silence();
+        for event in &events[..count] {
+            if *event == PianoEvent::AllSoundOff {
+                self.silence();
+            } else {
+                self.apply_event(event);
             }
         }
     }
@@ -1145,10 +1187,15 @@ impl LearnedPiano {
             }
             let next_ev = events.get(ev).map(|e| (e.offset as usize).min(len)).unwrap_or(len);
             let room = MAX_CHUNK - (self.global_sample % MAX_CHUNK as u64) as usize;
-            let n = (len - pos).min(next_ev - pos).min(room);
+            let n = self.stop.limit((len - pos).min(next_ev - pos).min(room));
             // Split borrows: render_chunk writes out through &mut self.
             let (l, r) = (&mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
             self.render_chunk(n, l, r);
+            if self.stop.active() && self.stop.ramp(l, r) {
+                self.end_fade();
+            } else if let (Some(l), Some(r)) = (l.last(), r.last()) {
+                self.out_peak = l.abs().max(r.abs());
+            }
             pos += n;
             self.global_sample += n as u64;
         }
@@ -1169,6 +1216,8 @@ impl LearnedPiano {
         self.dc_l.reset();
         self.dc_r.reset();
         self.global_sample = 0;
+        self.stop.clear();
+        self.out_peak = 0.0;
     }
 }
 

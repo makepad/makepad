@@ -1,0 +1,14 @@
+[package]
+name = "makepad-piano-waveguide"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Physically modelled grand piano: stiff-string digital waveguides, a nonlinear felt hammer inside the string loop, unisons coupled at a resistive bridge, a modal soundboard. No dependencies"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+
+[dev-dependencies]
+# The probe's scoreboard measures both pianos in one process.
+makepad-piano-model = { path = "../piano_model" }

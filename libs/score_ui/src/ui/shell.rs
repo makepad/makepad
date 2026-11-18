@@ -302,6 +302,19 @@ script_mod! {
                         inst_0_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
                         inst_1 := ScoreMenuRow{text: ""}
                         inst_1_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
+                        inst_2 := ScoreMenuRow{text: ""}
+                        inst_2_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
+                        inst_au_header := ScoreSection{visible: false ScoreLabelDim{text: "Audio Units on this Mac"}}
+                        inst_3 := ScoreMenuRow{visible: false text: ""}
+                        inst_3_desc := ScoreLabelWrap{visible: false text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
+                        inst_4 := ScoreMenuRow{visible: false text: ""}
+                        inst_4_desc := ScoreLabelWrap{visible: false text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
+                        inst_5 := ScoreMenuRow{visible: false text: ""}
+                        inst_5_desc := ScoreLabelWrap{visible: false text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
+                        inst_6 := ScoreMenuRow{visible: false text: ""}
+                        inst_6_desc := ScoreLabelWrap{visible: false text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
+                        inst_7 := ScoreMenuRow{visible: false text: ""}
+                        inst_7_desc := ScoreLabelWrap{visible: false text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 7}}
                         ScoreDivider{}
 
                         // Brightness: one treble shelf over whichever
@@ -1177,8 +1190,7 @@ impl ScoreShell {
     }
 
     /// The whole sound panel: two instruments, brightness, and the room.
-    /// Everything on it reaches the sounding instrument — there is nothing
-    /// here that only some of the instruments answer to.
+    /// Audio Units keep their own voicing and room, as their rows explain.
     fn sync_sound_panel(&mut self, cx: &mut Cx2d, state: &ScoreAppState) {
         let sound = &state.sound;
 
@@ -1186,6 +1198,7 @@ impl ScoreShell {
         // is ticked. More rows than instruments simply stay hidden, so adding
         // an instrument back is a row in a table plus a slot in the script.
         let entries = sound::instrument_list();
+        self.view.view(cx, ids!(inst_au_header)).set_visible(cx, !sound::audio_units().is_empty());
         let selected = state.selected_instrument();
         for (slot, row) in INSTRUMENT_ROWS.iter().enumerate() {
             let entry = entries.get(slot);
@@ -1227,6 +1240,7 @@ impl ScoreShell {
         self.view.label(cx, ids!(sound_hint)).set_text(
             cx,
             match state.ui.sound_focus {
+                _ if sound.engine == sound::ScoreEngine::AudioUnit => "This Audio Unit keeps its own voicing, so Brightness does not reach it; the Room and Reverb do.",
                 Some(param) => param.hint(),
                 None => "Both controls reach the sounding instrument straight away, and \
                          switching instrument dissolves rather than cuts — so either is \
@@ -1405,8 +1419,8 @@ const ABOUT_SLOTS: usize = 7;
 /// The script has no loops, so the slots are declared and `instrument_list`
 /// fills as many as it needs. Two instruments ship; kept honest by
 /// `every_declared_row_matches_the_list_it_shows`.
-const INSTRUMENT_ROWS: &[&[LiveId]] = ids_array!(inst_0, inst_1,);
-const INSTRUMENT_DESCRIPTIONS: &[&[LiveId]] = ids_array!(inst_0_desc, inst_1_desc,);
+const INSTRUMENT_ROWS: &[&[LiveId]] = ids_array!(inst_0, inst_1, inst_2, inst_3, inst_4, inst_5, inst_6, inst_7,);
+const INSTRUMENT_DESCRIPTIONS: &[&[LiveId]] = ids_array!(inst_0_desc, inst_1_desc, inst_2_desc, inst_3_desc, inst_4_desc, inst_5_desc, inst_6_desc, inst_7_desc,);
 
 /// One slider per [`SoundParam`], in `SoundParam::ALL` order.
 const SOUND_SLIDERS: &[&[LiveId]] = ids_array!(sl_brightness, sl_reverb,);
@@ -2170,7 +2184,11 @@ mod tests {
         // Every shipped instrument must have a slot: the panel has no loop
         // to grow one, so an instrument added to the table without a row in
         // the script would simply not be listed.
-        assert_eq!(INSTRUMENT_ROWS.len(), crate::sound::instrument_list().len());
+        // Installed Audio Units fill the slots after ours; drawing and clicks
+        // look entries up by slot, so a longer system list is simply cut off.
+        assert!(INSTRUMENT_ROWS.len() >= sound::OUR_INSTRUMENTS);
+        // The script puts the Audio Unit header after our own rows.
+        assert_eq!(sound::OUR_INSTRUMENTS, 3);
         assert_eq!(INSTRUMENT_ROWS.len(), INSTRUMENT_DESCRIPTIONS.len());
         assert_eq!(LIBRARY_ROWS.len(), crate::state::LIBRARY_PAGE);
         assert_eq!(KEYMAP_SLOTS, KEYMAP_ROWS.len());

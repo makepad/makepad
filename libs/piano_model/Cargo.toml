@@ -9,3 +9,7 @@ repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
 makepad-ai-loader = { path = "../ai/loader" }
+
+[dev-dependencies]
+# The side-by-side example renders through an installed Audio Unit (macOS).
+makepad-audio-unit-host = { path = "../audio_unit_host" }

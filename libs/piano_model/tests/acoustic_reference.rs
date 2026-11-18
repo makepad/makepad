@@ -315,6 +315,39 @@ fn default_follows_the_reference_touch() {
 }
 
 #[test]
+fn keys_between_measured_keys_keep_their_neighbours_level() {
+    // The table measures every third key, and a fitted gain holds the
+    // inverse of the model's own response at THAT key's partial
+    // frequencies. Interpolating the gains themselves put the keys in
+    // between far off the line through their measured neighbours (A#1,
+    // E2, G2 and A#3 came out 6-9 dB above it); the targets carry over
+    // instead (calibration::resolve).
+    let level = |key: u8| {
+        let mut piano = Piano::new(FS);
+        piano.set_reverb_mix(0.0);
+        piano.set_early_reflection_level(0.0);
+        piano.set_soft_clip(false);
+        let (l, r) = render(&mut piano, &[ev(0.0, PianoEvent::NoteOn { key, velocity: 68 })], (1.1 * FS as f64) as usize, 256);
+        let offset = onset(&l, &r);
+        let n = FS as usize;
+        10.0 * (energy(&l[offset..offset + n], &r[offset..offset + n]) / n as f64).log10()
+    };
+    let mut report = Vec::new();
+    let mut worst: f64 = 0.0;
+    for (lo, hi) in [(33u8, 36u8), (39, 42), (42, 45), (57, 60)] {
+        let (a, b) = (level(lo), level(hi));
+        for key in lo + 1..hi {
+            let line = a + (b - a) * (key - lo) as f64 / (hi - lo) as f64;
+            let off = level(key) - line;
+            worst = worst.max(off.abs());
+            report.push(format!("MIDI {key}: {off:+.2} dB off the line through MIDI {lo} and {hi}"));
+        }
+    }
+    println!("{}", report.join("\n"));
+    assert!(worst <= 2.0, "keys between measured keys off their neighbours' level:\n{}", report.join("\n"));
+}
+
+#[test]
 fn reference_fixture_is_complete_and_attributed() {
     let (rows, limits) = fixture();
     assert_eq!(limits, [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.15, 8.0, 8.0, 8.0]);

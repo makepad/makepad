@@ -104,7 +104,7 @@ impl Piano {
                 }
                 let next_ev = events.get(ev).map(|e| (e.offset as usize).min(len)).unwrap_or(len);
                 let room = MAX_CHUNK - (core.global_sample % MAX_CHUNK as u64) as usize;
-                let n = (len - pos).min(next_ev - pos).min(room);
+                let n = core.chunk_limit((len - pos).min(next_ev - pos).min(room));
                 chunk_n.store(n, Ordering::Release);
                 barrier.wait(); // release workers into the chunk
                 barrier.wait(); // wait for them to finish it
@@ -112,6 +112,7 @@ impl Piano {
                     // SAFETY: workers are parked again.
                     let voices = unsafe { std::slice::from_raw_parts_mut(voices_ptr.0, n_voices) };
                     core.finish_chunk(keys, voices, n, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
+                    core.after_chunk(keys, voices, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
                 }
                 pos += n;
                 core.global_sample += n as u64;

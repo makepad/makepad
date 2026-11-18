@@ -3,6 +3,8 @@
 //!
 //! - [`PianoInstrument`]: the physically modelled grand
 //!   (`makepad-piano-model`). Presets: "Concert Grand" (the default).
+//!   "Waveguide Grand" is a second, independent model
+//!   ([`crate::waveguide_piano`], `makepad-piano-waveguide`).
 //! - [`PhysDrums`]: the modelled drum kit (`makepad-drumkit-phys`), no files.
 //! - [`SampledDrums`]: the Salamander sample kit (`makepad-drumkit`), from a
 //!   directory of the kit's WAVs.
@@ -22,6 +24,7 @@
 use crate::instrument::{Control, Instrument};
 use crate::ironfish::{FilterKind, Ironfish, IronfishPatch, OscillatorKind};
 use crate::recipe::Recipe;
+use crate::waveguide_piano::WaveguideInstrument;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -44,11 +47,11 @@ pub struct PianoInstrument {
 impl PianoInstrument {
     /// Preset names accepted by [`PianoInstrument::new`] (case-insensitive).
     pub fn preset_names() -> impl Iterator<Item = &'static str> {
-        PIANO_PRESETS.iter().map(|p| p.name)
+        PIANO_PRESETS.iter().map(|p| p.name).chain([WaveguideInstrument::PRESET])
     }
 
     pub fn has_preset(name: &str) -> bool {
-        PIANO_PRESETS.iter().any(|p| p.name.eq_ignore_ascii_case(name))
+        Self::preset_names().any(|p| p.eq_ignore_ascii_case(name))
     }
 
     /// The modelled grand; an unknown or missing preset name is the default.
@@ -562,7 +565,10 @@ pub fn build(kind: &InstrumentKind, rate: f32) -> Result<Box<dyn Instrument>, St
                     return Err(format!("unknown piano preset '{p}' (have: {})", names.join(", ")));
                 }
             }
-            Box::new(PianoInstrument::new(rate, preset.as_deref()))
+            match preset.as_deref() {
+                Some(p) if p.eq_ignore_ascii_case(WaveguideInstrument::PRESET) => Box::new(WaveguideInstrument::new(rate)),
+                p => Box::new(PianoInstrument::new(rate, p)),
+            }
         }
         InstrumentKind::Drums => Box::new(PhysDrums::new(rate)),
         InstrumentKind::SampledDrums { dir } => Box::new(SampledDrums::load(rate, dir)?),

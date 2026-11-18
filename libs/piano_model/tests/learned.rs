@@ -41,6 +41,33 @@ fn sec(at: f64) -> u64 {
     (at * FS as f64) as u64
 }
 
+/// A stop never clicks, on either engine: a loud chord stopped at 0.3 s
+/// keeps the output's sharpness (its largest second difference) over the
+/// 50 ms after the stop under what the chord had in the 50 ms before, and
+/// a note sent with the stop sounds once the stop's 8 ms fade is over.
+#[test]
+fn a_stop_fades_on_every_engine() {
+    fn check<I: Instrument>(name: &str, new: impl Fn() -> I) {
+        let chord: Vec<(u64, PianoEvent)> = [36u8, 48, 55, 60, 64, 79].iter().map(|&key| (0, PianoEvent::NoteOn { key, velocity: 110 })).collect();
+        let stop = [chord, vec![(sec(0.3), PianoEvent::AllSoundOff)]].concat();
+        let (l, r) = render(&mut new(), &stop, sec(0.4) as usize, 480);
+        let span = |x: &[f32], t0: f64, t1: f64| x[sec(t0) as usize..sec(t1) as usize].to_vec();
+        let sharp = |t0: f64, t1: f64| {
+            [&l, &r].iter().map(|x| span(x, t0, t1).windows(3).map(|w| (w[2] - 2.0 * w[1] + w[0]).abs() as f64).fold(0.0, f64::max)).fold(0.0, f64::max)
+        };
+        // From two samples before the stop, so that a cut at it is seen.
+        let (before, after) = (sharp(0.25, 0.3), sharp(0.3 - 2.0 / FS as f64, 0.35));
+        let with_note = [stop, vec![(sec(0.3), PianoEvent::NoteOn { key: 72, velocity: 80 })]].concat();
+        let (l, _) = render(&mut new(), &with_note, sec(0.6) as usize, 480);
+        let (chord, note) = (rms(&span(&l, 0.2, 0.3)), rms(&span(&l, 0.35, 0.5)));
+        println!("{name}: sharpness {after:.4} after the stop, {before:.4} before; the note after it {:+.1} dB re the chord", db(note) - db(chord));
+        assert!(after <= before, "{name}: the stop clicks (sharpness {after:.4} after it, {before:.4} before)");
+        assert!(note > 0.02 * chord, "{name}: the note sent with the stop does not sound");
+    }
+    check("physical", || Piano::new(FS));
+    check("learned", || LearnedPiano::new(FS));
+}
+
 #[test]
 fn net_parses_and_outputs_are_sane() {
     let p = LearnedPiano::new(FS);

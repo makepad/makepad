@@ -166,6 +166,21 @@ design_params! {
     /// have; the calibrated curve reproduces the measured per-note
     /// knees, so it stands.
     bridge_couple_taper = 2.6,
+    /// Unison drain (keys.rs): the long bridge's mean conductance, s/kg,
+    /// as the plain-wire unisons' in-phase motion meets it. A locked
+    /// partial's prompt loses at least n_strings * 2 f0 Z * unison_y per
+    /// second, whatever valley of the lattice it sits in. Measured piano
+    /// bridges run 1e-4..1e-3 s/kg through the middle; 4.4e-4 puts the
+    /// fundamentals of A4 and C5 at the 28 and 34 dB/s of the recordings'
+    /// first second. 0 = off.
+    unison_y = 4.4e-4,
+    /// The drain fades out over the 0.03 of the compass above this point
+    /// (C5). Above it the table's fundamentals carry decay scales fitted
+    /// note by note, which would multiply it, and the recording's C6
+    /// fundamental reads 20 dB/s over 0.1-1 s where the drain alone gives
+    /// 50: either the top unisons are not locked or their prompt is over
+    /// before that window opens, and the fixture cannot say which.
+    unison_top_t = 0.59,
     /// Wound-bass decay law (keys.rs, weight 1 up to bass_law_t0, fading
     /// to 0 at bass_law_t1), measured 2026-09-29 as two-stage fits of every
     /// partial of the Salamander A0..D#3 recordings (10 s, native layers):
@@ -209,6 +224,24 @@ design_params! {
     /// (amplitude) into the horizontal polarisation, which decays nearly
     /// intrinsically and becomes the aftersound.
     pol_drive = 0.3,
+    /// Aftersound of the plain-wire middle: factor on the horizontal drive
+    /// share of partials 2 and up, fading with frequency as
+    /// 1 / (1 + (f / pol_drive_upper_hz)^2), ramped in from A2 to C3 and
+    /// out again from pol_drive_upper_t over the next 0.12 of the compass.
+    /// With one drive share for every partial the sustained middle fell
+    /// back onto its fundamental: at 1-2 s the fundamental sat 9-10 dB
+    /// further above partials 2-6 at C4 than in the recordings, 2-7 dB at
+    /// A4 and 4-7 dB at C5, and C4's 0.5-2 kHz share of that window was
+    /// 4-6 dB short. A string's fundamental meets the bridge where it
+    /// moves most, so its vertical motion drains fastest and leaves the
+    /// least behind; the partials above it keep more of their aftersound
+    /// (Weinreich 1977). At 3.2: C4 +0.3..+1.4 dB, A4 -2.4..+2.9, C5
+    /// +2.8..+5.5 on that ratio, and C4's late 0.5-2 kHz share within
+    /// 1.1 dB. The frequency corner keeps the lift off the 2-8 kHz band,
+    /// whose decay already runs slower than the recordings' at C5.
+    pol_drive_upper = 3.2,
+    pol_drive_upper_hz = 1500.0,
+    pol_drive_upper_t = 0.53,
     /// Horizontal radiation share through the bridge relative to
     /// vertical (the bridge's second admittance direction; a real bridge
     /// wants the full 2x2 admittance matrix — this is its second
@@ -237,6 +270,17 @@ design_params! {
     /// vertical coupling loss (imperfect bridge cancellation).
     anti_gain = 0.18,
     anti_couple = 0.015,
+    /// Unison locking (keys::lock_unisons): a partial keeps its full
+    /// anti-phase share while its mistuning (rad/s) is over anti_lock times
+    /// its bridge loss (1/s), and loses it as the square of that ratio
+    /// below. 1 is the two-string value; 0 turns locking off.
+    anti_lock = 0.5,
+    /// How far the aftersound's radiation stands apart from the prompt's
+    /// (keys::spread_aftersound): the share (amplitude, 0..1) of each
+    /// horizontal and anti-phase mode that reaches the two listening points
+    /// in the pattern orthogonal to the prompt's. 0 = the aftersound is a
+    /// scaled copy of the prompt in both channels.
+    after_spread = 0.7,
     // --- strike comb -----------------------------------------------------
     /// floor under |sin(n pi x0/L)|: finite hammer width, moving contact
     /// point and non-rigid termination keep real comb nulls shallow

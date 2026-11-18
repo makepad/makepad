@@ -10,10 +10,20 @@ formats). Rust tests reuse only the existing dependency-free FFT and regression.
 
 `Piano::new` and the physical presets now use the measured modal calibration:
 30 native pitch anchors, three velocity knots (28, 68, 112), and corrections
-for all 240 possible string partials. Pitch and velocity interpolate gain in
-dB; decay corrections interpolate in log space. The table changes string
+for all 240 possible string partials. Velocity interpolates gain in dB. A key
+between two measured keys takes their fitted TARGETS, not their corrections:
+per fitted partial, the radiated level the model predicts plus the fitted
+gain, and the fitted decay rate of each string mode, interpolated in pitch
+(`calibration::resolve`; entries the fit left at a row's fill value still
+interpolate plainly, gain in dB and decay scale in log space). The table changes string
 excitation and decay while retaining the hammer, soundboard, pedals and room.
 `Piano::new_uncalibrated` preserves the raw instrument for comparisons.
+
+`examples/probe.rs` prints what a voicing change is judged by, with no files
+and no NumPy: the fixture's metrics against the reference, level per band and
+per partial, a scan of every key with its key-to-key roughness, passages
+through the preset path and the render cost. Sections are its arguments
+(`ref bands partials scan passage cpu`; all of them when there are none).
 
 `acoustic_reference.rs` gates the stock instrument ABSOLUTELY against the
 Salamander Grand Piano V3 metrics (Alexander Holm, CC BY 3.0) in

@@ -1,11 +1,12 @@
 //! The whole piano sound as one value.
 //!
-//! The sound panel offers two instruments and two controls, and this is what
-//! they edit: one plain `Copy` struct. The UI changes it,
+//! The sound panel offers our instruments, installed Audio Units, a room and
+//! two controls. They edit one plain `Copy` struct. The UI changes it,
 //! [`crate::playback::PlaybackBridge::set_sound`] publishes it into the
-//! shared cell, and the audio thread applies it with the setters
-//! `makepad_piano_model` documents. Nothing here allocates and nothing here
-//! touches the synth.
+//! shared cell, and the audio thread applies it: the voicing with the
+//! instrument's own setters, the room to the one reverb on the instrument
+//! bus that every instrument plays into dry. Audio Units keep their own
+//! voicing; discovery allocates once, and nothing here touches the synth.
 //!
 //! There used to be twenty-one physical presets, six electric ones, seven
 //! voicing sliders and a five-control EQ. The mechanisms they drove are all
@@ -13,6 +14,7 @@
 //! simply does not offer them, because one good piano beats thirty choices.
 
 use crate::playback::RoomSettings;
+use std::sync::OnceLock;
 use makepad_piano_model::{
     fx::ReverbPreset, learned::EngineKind, PianoPreset, Voicing, PIANO_PRESETS,
 };
@@ -32,6 +34,11 @@ pub enum ScoreEngine {
     Hybrid,
     /// The trained network on its own — the electric voice.
     Learned,
+    /// An installed Audio Unit instrument, played as the plug-in sets itself up.
+    AudioUnit,
+    /// The waveguide grand (`makepad-piano-waveguide`): a second, independent
+    /// physical model.
+    Waveguide,
 }
 
 impl ScoreEngine {
@@ -41,12 +48,30 @@ impl ScoreEngine {
         match self {
             Self::Physical | Self::Hybrid => EngineKind::Physical,
             Self::Learned => EngineKind::Learned,
+            // Audio Units and the waveguide grand never use the piano-model constructor.
+            Self::AudioUnit | Self::Waveguide => EngineKind::Physical,
+        }
+    }
+
+    /// The engine's level beside the others', as a gain on its output after
+    /// its own limiter and ahead of the bus's (see `playback`). Each engine is
+    /// calibrated on its own terms. The waveguide grand keeps 10.7 dB of
+    /// headroom under its limiter for a touch that spans 18 dB; the Concert
+    /// Grand's limiter rides its loud end instead, so the waveguide's mezzo
+    /// forte came out 11.6 dB under it. +6 dB puts it 5.6 dB under, and the
+    /// bus limiter takes its loud chords to where the Concert Grand's own
+    /// limiter puts that grand's.
+    pub fn trim(self) -> f32 {
+        match self {
+            // +6 dB
+            Self::Waveguide => 1.995,
+            Self::Physical | Self::Hybrid | Self::Learned | Self::AudioUnit => 1.0,
         }
     }
 }
 
-/// The engines an instrument can name. Hybrid is deliberately absent; see
-/// [`ScoreEngine`].
+/// Our offered piano engines. Hybrid is withdrawn; Audio Units have a
+/// separate system list that may be empty.
 pub const ENGINES: [ScoreEngine; 2] = [ScoreEngine::Physical, ScoreEngine::Learned];
 
 /// One instrument in the list.
@@ -61,6 +86,10 @@ pub enum InstrumentId {
     Acoustic(usize),
     /// A learned electric voice: index into [`LEARNED_PRESETS`].
     Electric(usize),
+    /// An installed instrument: index into [`audio_units`].
+    AudioUnit(usize),
+    /// A waveguide instrument: index into [`WAVEGUIDE_PRESETS`].
+    Waveguide(usize),
 }
 
 impl InstrumentId {
@@ -69,6 +98,8 @@ impl InstrumentId {
         match self {
             Self::Acoustic(_) => ScoreEngine::Physical,
             Self::Electric(_) => ScoreEngine::Learned,
+            Self::AudioUnit(_) => ScoreEngine::AudioUnit,
+            Self::Waveguide(_) => ScoreEngine::Waveguide,
         }
     }
 }
@@ -80,9 +111,34 @@ pub struct InstrumentEntry {
     pub description: &'static str,
 }
 
+/// An installed Audio Unit and the labels borrowed by the Sound panel.
+pub struct AudioUnitEntry {
+    pub info: makepad_audio_unit_host::ComponentInfo,
+    pub name: String,
+    pub description: String,
+}
+
+/// Discover once, in system order. Off macOS the list is empty.
+pub fn audio_units() -> &'static [AudioUnitEntry] {
+    static UNITS: OnceLock<Vec<AudioUnitEntry>> = OnceLock::new();
+    UNITS.get_or_init(|| {
+        makepad_audio_unit_host::instruments()
+            .into_iter()
+            .map(|info| {
+                let name = info.short_name().to_string();
+                let manufacturer = info.name.split_once(": ").map_or("this Mac", |(maker, _)| maker);
+                let description = format!(
+                    "Audio Unit by {manufacturer} · its own sound, in the room set below; Brightness does not reach it"
+                );
+                AudioUnitEntry { info, name, description }
+            })
+            .collect()
+    })
+}
+
 /// Every instrument the application can play, in one flat list.
 pub fn instrument_list() -> Vec<InstrumentEntry> {
-    let mut out = Vec::with_capacity(PIANO_PRESETS.len() + LEARNED_PRESETS.len());
+    let mut out = Vec::with_capacity(OUR_INSTRUMENTS + audio_units().len());
     for (index, preset) in PIANO_PRESETS.iter().enumerate() {
         out.push(InstrumentEntry {
             id: InstrumentId::Acoustic(index),
@@ -95,6 +151,20 @@ pub fn instrument_list() -> Vec<InstrumentEntry> {
             id: InstrumentId::Electric(index),
             name: preset.name,
             description: preset.description,
+        });
+    }
+    for (index, preset) in WAVEGUIDE_PRESETS.iter().enumerate() {
+        out.push(InstrumentEntry {
+            id: InstrumentId::Waveguide(index),
+            name: preset.name,
+            description: preset.description,
+        });
+    }
+    for (index, unit) in audio_units().iter().enumerate() {
+        out.push(InstrumentEntry {
+            id: InstrumentId::AudioUnit(index),
+            name: &unit.name,
+            description: &unit.description,
         });
     }
     out
@@ -113,6 +183,20 @@ pub const LEARNED_PRESETS: &[ElectricPreset] = &[ElectricPreset {
     reverb_mix: 0.18,
     is_default: true,
 }];
+
+/// The waveguide family: one instrument, the grand as it is built.
+pub const WAVEGUIDE_PRESETS: &[WaveguidePreset] = &[WaveguidePreset {
+    name: makepad_piano_waveguide::PRESET_NAME,
+    description: "A second grand from first principles — waveguide strings, a felt hammer in the string, one bridge, a modal board",
+}];
+
+pub struct WaveguidePreset {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// How many instruments of our own the list opens with, before any Audio Unit.
+pub const OUR_INSTRUMENTS: usize = PIANO_PRESETS.len() + LEARNED_PRESETS.len() + WAVEGUIDE_PRESETS.len();
 
 /// One entry of the electric family: a room over the one learned voice.
 pub struct ElectricPreset {
@@ -201,6 +285,7 @@ impl Default for SoundSettings {
 /// Which of the engine's instruments the app starts on.
 pub fn default_preset_index(engine: ScoreEngine) -> usize {
     match engine {
+        ScoreEngine::AudioUnit | ScoreEngine::Waveguide => Some(0),
         ScoreEngine::Learned => LEARNED_PRESETS.iter().position(|p| p.is_default),
         _ => PIANO_PRESETS.iter().position(|p| p.is_default),
     }
@@ -210,6 +295,8 @@ pub fn default_preset_index(engine: ScoreEngine) -> usize {
 /// How many instruments this engine ships.
 pub fn preset_count(engine: ScoreEngine) -> usize {
     match engine {
+        ScoreEngine::AudioUnit => audio_units().len(),
+        ScoreEngine::Waveguide => WAVEGUIDE_PRESETS.len(),
         ScoreEngine::Learned => LEARNED_PRESETS.len(),
         _ => PIANO_PRESETS.len(),
     }
@@ -218,6 +305,8 @@ pub fn preset_count(engine: ScoreEngine) -> usize {
 /// The line under an instrument's name in the panel.
 pub fn preset_description(engine: ScoreEngine, index: usize) -> &'static str {
     match engine {
+        ScoreEngine::AudioUnit => audio_units().get(index).map_or("", |unit| unit.description.as_str()),
+        ScoreEngine::Waveguide => WAVEGUIDE_PRESETS[index.min(WAVEGUIDE_PRESETS.len() - 1)].description,
         ScoreEngine::Learned => LEARNED_PRESETS[index.min(LEARNED_PRESETS.len() - 1)].description,
         _ => PIANO_PRESETS[index.min(PIANO_PRESETS.len() - 1)].description,
     }
@@ -227,6 +316,7 @@ pub fn preset_description(engine: ScoreEngine, index: usize) -> &'static str {
 /// physical design, so it is built from the shipped one and ignores it.
 pub fn build_preset(engine: ScoreEngine, index: usize) -> &'static PianoPreset {
     match engine {
+        ScoreEngine::AudioUnit | ScoreEngine::Waveguide => &PIANO_PRESETS[default_preset_index(ScoreEngine::Physical)],
         ScoreEngine::Learned => &PIANO_PRESETS[0],
         _ => &PIANO_PRESETS[index.min(PIANO_PRESETS.len() - 1)],
     }
@@ -237,6 +327,8 @@ pub fn build_preset(engine: ScoreEngine, index: usize) -> &'static PianoPreset {
 /// instrument; an unknown name simply has no index.
 pub fn preset_index_by_name(engine: ScoreEngine, name: &str) -> Option<usize> {
     match engine {
+        ScoreEngine::AudioUnit => audio_units().iter().position(|unit| unit.info.name == name),
+        ScoreEngine::Waveguide => WAVEGUIDE_PRESETS.iter().position(|p| p.name == name),
         ScoreEngine::Learned => LEARNED_PRESETS.iter().position(|p| p.name == name),
         _ => PIANO_PRESETS.iter().position(|p| p.name == name),
     }
@@ -245,6 +337,8 @@ pub fn preset_index_by_name(engine: ScoreEngine, name: &str) -> Option<usize> {
 /// An instrument's name.
 pub fn preset_name(engine: ScoreEngine, index: usize) -> &'static str {
     match engine {
+        ScoreEngine::AudioUnit => audio_units().get(index).map_or("", |unit| unit.info.name.as_str()),
+        ScoreEngine::Waveguide => WAVEGUIDE_PRESETS[index.min(WAVEGUIDE_PRESETS.len() - 1)].name,
         ScoreEngine::Learned => LEARNED_PRESETS[index.min(LEARNED_PRESETS.len() - 1)].name,
         _ => PIANO_PRESETS[index.min(PIANO_PRESETS.len() - 1)].name,
     }
@@ -257,6 +351,10 @@ impl SoundSettings {
     /// instruments — the engineer's, not the instrument's — so changing
     /// instrument does not silently undo it.
     pub fn apply_preset(&mut self, index: usize) {
+        if self.engine == ScoreEngine::AudioUnit {
+            self.preset = index;
+            return;
+        }
         let index = index.min(preset_count(self.engine).saturating_sub(1));
         self.preset = index;
         self.early_reflections = DEFAULT_EARLY;
@@ -297,14 +395,15 @@ impl SoundSettings {
 
 /// One continuous control of the sound panel.
 ///
-/// Two of them. Every variant is backed by a documented
-/// `makepad_piano_model` setter, so a slider that exists is a slider that
-/// reaches the audio thread — and both of these reach BOTH engines.
+/// Two of them, and both reach the audio thread for every instrument of
+/// ours: Brightness through each engine's own treble shelf, Reverb through
+/// the one room on the instrument bus (which Audio Units play into too).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoundParam {
     /// One treble shelf at [`BRIGHTNESS_HZ`]: `set_eq_shelf`.
     Brightness,
-    /// Tail send on top of the dry instrument: `set_reverb_mix`.
+    /// The room's tail on top of the dry instrument: the instrument bus's
+    /// one reverb, in the room the panel picks.
     Reverb,
 }
 
@@ -434,20 +533,48 @@ mod tests {
         assert_eq!(settings.master_gain, 1.0);
     }
 
-    /// The whole model: two instruments, each naming the engine that plays
-    /// it, each with something to say about itself.
+    /// Our two instruments precede the system list, with stable identities.
     #[test]
-    fn the_list_is_two_instruments() {
+    fn the_list_is_our_instruments_followed_by_audio_units() {
         let list = instrument_list();
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), OUR_INSTRUMENTS + audio_units().len());
+        for (index, unit) in audio_units().iter().enumerate() {
+            let entry = &list[OUR_INSTRUMENTS + index];
+            assert_eq!(entry.id, InstrumentId::AudioUnit(index));
+            assert_eq!(entry.id.engine(), ScoreEngine::AudioUnit);
+            assert_eq!(entry.name, unit.info.short_name());
+            assert_eq!(entry.description, unit.description);
+            assert_eq!(preset_name(ScoreEngine::AudioUnit, index), unit.info.name);
+            assert_eq!(preset_index_by_name(ScoreEngine::AudioUnit, &unit.info.name), Some(index));
+        }
         assert_eq!(list[0].id, InstrumentId::Acoustic(0));
         assert_eq!(list[0].id.engine(), ScoreEngine::Physical);
         assert_eq!(list[1].id, InstrumentId::Electric(0));
         assert_eq!(list[1].id.engine(), ScoreEngine::Learned);
+        assert_eq!(list[2].id, InstrumentId::Waveguide(0));
+        assert_eq!(list[2].id.engine(), ScoreEngine::Waveguide);
+        assert_eq!(list[2].name, "Waveguide Grand");
+        assert_eq!(preset_index_by_name(ScoreEngine::Waveguide, list[2].name), Some(0));
         for entry in &list {
             assert!(!entry.name.is_empty());
             assert!(!entry.description.is_empty());
         }
+    }
+
+    #[test]
+    fn audio_unit_helpers_accept_an_empty_list_and_missing_indices() {
+        let engine = ScoreEngine::AudioUnit;
+        let past = audio_units().len();
+        assert_eq!(preset_count(engine), past);
+        assert_eq!(default_preset_index(engine), 0);
+        assert_eq!(preset_name(engine, past), "");
+        assert_eq!(preset_description(engine, past), "");
+        assert_eq!(preset_index_by_name(engine, "Missing instrument for preferences test"), None);
+        assert!(std::ptr::eq(build_preset(engine, past), build_preset(ScoreEngine::Physical, default_preset_index(ScoreEngine::Physical))));
+        let mut settings = SoundSettings { engine, ..SoundSettings::default() };
+        let before = settings;
+        settings.apply_preset(past);
+        assert_eq!(settings, SoundSettings { preset: past, ..before });
     }
 
     /// Preferences store a name, so a list that grows or is reordered never
@@ -567,6 +694,7 @@ mod engine_truth {
         let engine = id.engine();
         let index = match id {
             InstrumentId::Acoustic(index) | InstrumentId::Electric(index) => index,
+            InstrumentId::AudioUnit(_) | InstrumentId::Waveguide(_) => panic!("this test measures the piano_model voices"),
         };
         let mut settings = SoundSettings {
             engine,
@@ -574,10 +702,10 @@ mod engine_truth {
         };
         settings.apply_preset(index);
         tweak(&mut settings);
+        // Built dry, as the app builds it: the room is the bus's.
         let mut piano = build_for_test(engine, build_preset(engine, index));
+        piano.set_reverb_mix(0.0);
         piano.set_voicing(settings.voicing);
-        piano.set_reverb_preset(settings.room.preset);
-        piano.set_reverb_mix(settings.room.mix);
         piano.set_eq_shelf(settings.eq_shelf_db, settings.eq_shelf_hz);
         piano.set_eq_bell(settings.eq_bell_hz, settings.eq_bell_db, settings.eq_bell_q);
         piano.set_tone(settings.tone_bass_db, settings.tone_treble_db);
@@ -630,11 +758,19 @@ mod engine_truth {
     /// `apply_sound`), and require the two to be BIT-IDENTICAL. Any control
     /// whose default is not a true no-op — a shelf that filters at 0 dB, a
     /// tone stage that is not bypassed flat, a gain that is not unity —
-    /// fails here rather than in someone's ears.
+    /// fails here rather than in someone's ears. The instrument is compared
+    /// dry, the way the app builds it; its shipped room is the one the
+    /// default settings put on the instrument bus.
     #[test]
     fn the_default_settings_are_the_bare_instrument() {
         let settings = SoundSettings::default();
         assert_eq!(settings.engine, ScoreEngine::Physical);
+        let shipped = build_preset(ScoreEngine::Physical, settings.preset);
+        assert_eq!(
+            (settings.room.preset, settings.room.mix),
+            (shipped.room, shipped.reverb_mix),
+            "the default room is not the one the instrument shipped in"
+        );
         let events = [TimedEvent {
             offset: 0,
             event: PianoEvent::NoteOn {
@@ -643,22 +779,16 @@ mod engine_truth {
             },
         }];
 
-        // The instrument as `makepad_piano_model` builds it, untouched.
-        let mut bare = makepad_piano_model::Piano::new_with_preset(
-            RATE,
-            build_preset(ScoreEngine::Physical, settings.preset),
-        );
+        // The instrument as `makepad_piano_model` builds it, dry.
+        let mut bare = makepad_piano_model::Piano::new_with_preset(RATE, shipped);
+        bare.set_reverb_mix(0.0);
         let (mut bl, mut br) = (vec![0.0f32; TAIL], vec![0.0f32; TAIL]);
         bare.process(&events, &mut bl, &mut br);
 
         // The same instrument with the app's default settings published onto
         // it, in the order the audio thread applies them.
-        let mut played = makepad_piano_model::Piano::new_with_preset(
-            RATE,
-            build_preset(ScoreEngine::Physical, settings.preset),
-        );
-        played.set_reverb_preset(settings.room.preset);
-        played.set_reverb_mix(settings.room.mix);
+        let mut played = makepad_piano_model::Piano::new_with_preset(RATE, shipped);
+        played.set_reverb_mix(0.0);
         played.set_perspective(settings.room.perspective);
         played.set_early_reflection_level(settings.early_reflections);
         played.set_voicing(settings.voicing);
@@ -676,8 +806,8 @@ mod engine_truth {
     /// The two instruments are two instruments, not one name twice.
     #[test]
     fn the_two_instruments_are_audibly_different() {
-        let acoustic = voice(InstrumentId::Acoustic(0), |s| s.room.mix = 0.0);
-        let electric = voice(InstrumentId::Electric(0), |s| s.room.mix = 0.0);
+        let acoustic = voice(InstrumentId::Acoustic(0), |_| {});
+        let electric = voice(InstrumentId::Electric(0), |_| {});
         assert!(peak_difference(&acoustic, &electric) > 1.0e-3);
     }
 }

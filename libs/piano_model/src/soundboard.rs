@@ -31,6 +31,7 @@
 // board's own modes bloom over tens of milliseconds underneath, which is
 // the "body" of a large instrument.
 
+use crate::keys::C64;
 use crate::modal::{pad8, run_modes_stereo, KernelPath, MAX_CHUNK};
 use crate::params::DesignParams;
 
@@ -261,6 +262,23 @@ impl RadFilter {
         self.top
     }
 
+    /// Steady-state response at `w` radians per sample (construction-time
+    /// analysis; the audio path never calls it).
+    pub(crate) fn response(&self, w: f64) -> C64 {
+        let one = C64::new(1.0, 0.0);
+        let z1 = C64::expj(-w);
+        let z2 = C64::expj(-2.0 * w);
+        let b = &self.body;
+        let mut h = one.scale(b.b0 as f64).add(z1.scale(b.b1 as f64)).add(z2.scale(b.b2 as f64))
+            .div(one.add(z1.scale(b.a1 as f64)).add(z2.scale(b.a2 as f64)));
+        for hp in &self.hp {
+            let a = hp.a as f64;
+            h = h.mul(one.sub(z1).scale(a).div(one.sub(z1.scale(a))));
+        }
+        let c = self.top_c as f64;
+        h.mul(one.scale(c).div(one.sub(z1.scale(1.0 - c))))
+    }
+
     pub(crate) fn reset(&mut self) {
         for h in &mut self.hp {
             h.x1 = 0.0;
@@ -428,6 +446,33 @@ impl Soundboard {
                 r,
             );
         }
+    }
+
+    /// Steady-state response of the modal bank, bridge region `reg` to the
+    /// (left, right) listening points, at `w` radians per sample. The
+    /// kernel injects into Im(z) and rotates by C = cr + j ci each sample,
+    /// so a real sinusoid leaves the phasors a = j g / (1 - C e^-jw) and
+    /// b = -j g / (1 - conj(C) e^-jw): Re(z) follows (a + b) / 2 and Im(z)
+    /// (a - b) / 2j. Construction-time analysis only.
+    pub(crate) fn response(&self, reg: usize, w: f64) -> (C64, C64) {
+        let one = C64::new(1.0, 0.0);
+        let z1 = C64::expj(-w);
+        let (mut l, mut r) = (C64::new(0.0, 0.0), C64::new(0.0, 0.0));
+        let np = self.n_padded;
+        for i in reg * np..(reg + 1) * np {
+            let g = self.gin[i] as f64;
+            if g == 0.0 || (self.cr[i] == 0.0 && self.ci[i] == 0.0) {
+                continue;
+            }
+            let c = C64::new(self.cr[i] as f64, self.ci[i] as f64);
+            let a = C64::new(0.0, g).div(one.sub(c.mul(z1)));
+            let b = C64::new(0.0, -g).div(one.sub(c.conj().mul(z1)));
+            let re = a.add(b).scale(0.5);
+            let im = a.sub(b).mul(C64::new(0.0, -0.5));
+            l = l.add(im.scale(self.gout_l[i] as f64));
+            r = r.add(im.scale(self.gout_ri[i] as f64)).add(re.scale(self.gout_rr[i] as f64));
+        }
+        (l, r)
     }
 
     pub fn reset(&mut self) {

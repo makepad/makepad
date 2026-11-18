@@ -301,6 +301,88 @@ pub fn run_modes_c(
     }
 }
 
+/// `run_modes_c` with two more complex taps per mode, accumulated into
+/// `side_l` and `side_r`: the aftersound's own radiation (see
+/// keys::spread_aftersound).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn run_modes_c3(
+    path: KernelPath,
+    zr: &mut [f32],
+    zi: &mut [f32],
+    cr: &[f32],
+    ci: &[f32],
+    gin: &[f32],
+    gout_im: &[f32],
+    gout_re: &[f32],
+    side: [&[f32]; 4],
+    input: &[f32],
+    in_gain: f32,
+    acc: &mut [f32],
+    side_l: &mut [f32],
+    side_r: &mut [f32],
+) {
+    debug_assert!(input.len() <= MAX_CHUNK && acc.len() >= input.len());
+    debug_assert!(side_l.len() >= input.len() && side_r.len() >= input.len());
+    debug_assert!(zr.len() % 8 == 0);
+    let [l_im, l_re, r_im, r_re] = side;
+    match path {
+        KernelPath::Scalar => {
+            let n = input.len();
+            for m in 0..zr.len() {
+                let (crm, cim, ginm) = (cr[m], ci[m], gin[m]);
+                let (gim, grm) = (gout_im[m], gout_re[m]);
+                let (mut r, mut i) = (zr[m], zi[m]);
+                for k in 0..n {
+                    let t = crm * r - cim * i + ginm * (in_gain * input[k]);
+                    i = cim * r + crm * i;
+                    r = t;
+                    acc[k] += gim * i + grm * r;
+                    side_l[k] += l_im[m] * i + l_re[m] * r;
+                    side_r[k] += r_im[m] * i + r_re[m] * r;
+                }
+                zr[m] = r;
+                zi[m] = i;
+            }
+        }
+        _ => {
+            let n = input.len();
+            let mut vacc = [zero_v4(); MAX_CHUNK];
+            let mut vl = [zero_v4(); MAX_CHUNK];
+            let mut vr = [zero_v4(); MAX_CHUNK];
+            let mut m = 0;
+            while m < zr.len() {
+                let mut zrv = load_v4(&zr[m..]);
+                let mut ziv = load_v4(&zi[m..]);
+                let crv = load_v4(&cr[m..]);
+                let civ = load_v4(&ci[m..]);
+                let ginv = load_v4(&gin[m..]);
+                let gimv = load_v4(&gout_im[m..]);
+                let grev = load_v4(&gout_re[m..]);
+                let (liv, lrv) = (load_v4(&l_im[m..]), load_v4(&l_re[m..]));
+                let (riv, rrv) = (load_v4(&r_im[m..]), load_v4(&r_re[m..]));
+                for k in 0..n {
+                    let f = splat_v4(in_gain * input[k]);
+                    let t = fma_v4(ginv, f, sub_v4(mul_v4(crv, zrv), mul_v4(civ, ziv)));
+                    ziv = fma_v4(civ, zrv, mul_v4(crv, ziv));
+                    zrv = t;
+                    vacc[k] = fma_v4(grev, zrv, fma_v4(gimv, ziv, vacc[k]));
+                    vl[k] = fma_v4(lrv, zrv, fma_v4(liv, ziv, vl[k]));
+                    vr[k] = fma_v4(rrv, zrv, fma_v4(riv, ziv, vr[k]));
+                }
+                store_v4(&mut zr[m..], zrv);
+                store_v4(&mut zi[m..], ziv);
+                m += 4;
+            }
+            for k in 0..n {
+                acc[k] += hsum_v4(vacc[k]);
+                side_l[k] += hsum_v4(vl[k]);
+                side_r[k] += hsum_v4(vr[k]);
+            }
+        }
+    }
+}
+
 /// Stereo-tap variant used by the soundboard. The left tap reads Im(z);
 /// the right tap reads a per-mode MIX of both quadratures,
 ///     R_m = gri_m * Im(z) + grr_m * Re(z),

@@ -11,7 +11,7 @@ default = []
 # The heavy instruments (modelled piano, drum kits, SoundFont player) behind
 # one flag, so a DSP-only user (Stage's audio_dsp re-export) builds none of
 # them.
-instruments = ["dep:makepad-piano-model", "dep:makepad-drumkit", "dep:makepad-drumkit-phys", "dep:makepad-soundfont"]
+instruments = ["dep:makepad-piano-model", "dep:makepad-piano-waveguide", "dep:makepad-drumkit", "dep:makepad-drumkit-phys", "dep:makepad-soundfont"]
 
 [dependencies]
 makepad-base64 = { path = "../base64" }
@@ -19,6 +19,7 @@ makepad-zstd-decode = { path = "../zstd_decode" }
 # Formula modulators compile to AIR and run on its interpreter / native back end.
 makepad-script-compute = { path = "../../platform/script/compute" }
 makepad-piano-model = { path = "../piano_model", optional = true }
+makepad-piano-waveguide = { path = "../piano_waveguide", optional = true }
 makepad-drumkit = { path = "../drumkit", optional = true }
 makepad-drumkit-phys = { path = "../drumkit_phys", optional = true }
 makepad-soundfont = { path = "../soundfont", optional = true }

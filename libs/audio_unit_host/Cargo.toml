@@ -1,0 +1,11 @@
+[package]
+name = "makepad-audio-unit-host"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Host a macOS Audio Unit instrument (AUv2 music device): find it, instantiate it, send it MIDI and pull its audio offline or live. Empty off macOS"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-lock-free = { path = "../lock_free" }

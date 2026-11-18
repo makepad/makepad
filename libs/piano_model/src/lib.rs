@@ -44,6 +44,8 @@ pub mod modal;
 pub mod params;
 mod hammer;
 pub mod keys;
+#[doc(hidden)]
+pub mod unison;
 mod voice;
 mod sympathetic;
 mod soundboard;
@@ -146,7 +148,16 @@ pub trait Instrument {
 /// fortissimo note peaked at 0.9-1.3 FS, so the limiter (ceiling 0.72) took
 /// 2-5 dB off every forte: the top of the dynamic range flattened exactly
 /// where the touch had been restored. Mezzo material lands ~3 dB lower.
-const MASTER_GAIN: f32 = 0.26;
+/// 0.34 (2026-11-16): the keys between the calibration's measured keys
+/// had been 3 dB too loud on average (single keys 6-9 dB, see
+/// calibration::resolve), and the 0.26 operating point was set with them
+/// in the mix. With every key on its measured neighbours' level the same
+/// material came out 3.2 dB quieter (power mean over A0..C6 at mezzo), so
+/// the master takes 2.3 dB of that back: mezzo material keeps its level
+/// within 1 dB, and a single fortissimo note of a measured key peaks at
+/// 1.0-1.3 FS before the limiter where the loudest keys in between used
+/// to reach 2.0.
+const MASTER_GAIN: f32 = 0.34;
 
 /// A voice whose 64-sample bridge-force energy stays below this for ~16 ms
 /// is put to sleep (and its state zeroed, keeping wake-ups deterministic).
@@ -177,6 +188,93 @@ const PEDAL_FULL_LIFT: f32 = 0.75;
 /// ends of the attack_body axis sit at comparable loudness.
 const CASE_GAIN: f32 = 6.0;
 const CASE_LP_HZ: f64 = 700.0;
+/// How long an AllSoundOff takes to silence the instrument, s.
+const FADE_SECS: f64 = 0.008;
+/// Events held during that fade; more end the fade at once.
+const DEFERRED: usize = 64;
+/// An output this small (-180 dBFS) with no voice sounding is silence: an
+/// AllSoundOff then needs no fade.
+pub(crate) const SILENCE: f32 = 1e-9;
+
+/// The fade an AllSoundOff starts, so that the sound stops on a short slope
+/// rather than a cliff, and the events that come during it, played when it
+/// ends. Each engine silences itself at the end and replays the events.
+#[derive(Clone)]
+pub(crate) struct StopFade {
+    /// Samples left of the fade (0: none), and its length.
+    left: u32,
+    len: u32,
+    deferred: [PianoEvent; DEFERRED],
+    count: usize,
+}
+
+impl StopFade {
+    pub(crate) fn new(sample_rate: f32) -> Self {
+        Self { left: 0, len: ((FADE_SECS * sample_rate as f64) as u32).max(1), deferred: [PianoEvent::AllSoundOff; DEFERRED], count: 0 }
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.left > 0
+    }
+
+    pub(crate) fn start(&mut self) {
+        self.left = self.len;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.left = 0;
+        self.count = 0;
+    }
+
+    /// How much of `n` samples the next chunk may take: a fade ends on a
+    /// chunk's edge.
+    pub(crate) fn limit(&self, n: usize) -> usize {
+        if self.left > 0 {
+            n.min(self.left as usize)
+        } else {
+            n
+        }
+    }
+
+    /// Hold an event that came during the fade. A pedal that moves again
+    /// before anything else came replaces its earlier move. False when the
+    /// queue is full: the engine then ends the fade first.
+    pub(crate) fn hold(&mut self, event: PianoEvent) -> bool {
+        use PianoEvent::*;
+        if let Some(last) = self.deferred[..self.count].last_mut() {
+            if matches!((&*last, &event), (Sustain { .. }, Sustain { .. }) | (Sostenuto { .. }, Sostenuto { .. }) | (SoftPedal { .. }, SoftPedal { .. })) {
+                *last = event;
+                return true;
+            }
+        }
+        if self.count == DEFERRED {
+            return false;
+        }
+        self.deferred[self.count] = event;
+        self.count += 1;
+        true
+    }
+
+    /// The fade over one chunk of output, a raised cosine from full level to
+    /// none: true when it ended on the chunk's last sample.
+    pub(crate) fn ramp(&mut self, out_l: &mut [f32], out_r: &mut [f32]) -> bool {
+        let step = std::f32::consts::PI / self.len as f32;
+        for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+            self.left -= 1;
+            let gain = 0.5 - 0.5 * (step * self.left as f32).cos();
+            *l *= gain;
+            *r *= gain;
+        }
+        self.left == 0
+    }
+
+    /// The fade is over: the events held, in order.
+    pub(crate) fn take(&mut self) -> ([PianoEvent; DEFERRED], usize) {
+        let held = (self.deferred, self.count);
+        self.clear();
+        held
+    }
+}
 
 /// Bridge region for a key index: the bass bridge carries the wound
 /// strings (single and double unisons), then the long bridge in thirds.
@@ -251,6 +349,10 @@ pub(crate) struct EngineCore {
     tone_bass_db: f32,
     tone_treble_db: f32,
     pub(crate) global_sample: u64,
+    /// An AllSoundOff's fade.
+    stop: StopFade,
+    /// The size of the last output sample: whether anything still sounds.
+    out_peak: f32,
     pub(crate) path: KernelPath,
     // diagnostic path scaling (1.0 in normal use; see debug_set_path_gains)
     dbg_board_modal: f32,
@@ -265,6 +367,9 @@ pub(crate) struct EngineCore {
     board_r: [f32; MAX_CHUNK],
     dir_l: [f32; MAX_CHUNK],
     dir_r: [f32; MAX_CHUNK],
+    /// the voices' aftersound taps (keys::spread_aftersound)
+    side_l: [f32; MAX_CHUNK],
+    side_r: [f32; MAX_CHUNK],
     case_l: [f32; MAX_CHUNK],
     case_r: [f32; MAX_CHUNK],
     case_lp: [f32; 4],
@@ -345,13 +450,35 @@ impl Piano {
         assert!((8000.0..=192_000.0).contains(&sample_rate), "unsupported sample rate {sample_rate}");
         let fs = sample_rate as f64;
         let mut keys: Vec<KeyDesign> = (FIRST_KEY..=LAST_KEY).map(|k| build_key(k, fs, dp)).collect();
-        let voices: Vec<Voice> = keys.iter_mut().enumerate().map(|(i, k)| {
-            let note = calibration::for_key(notes, FIRST_KEY + i as u8);
-            if let Some(note) = &note {
-                note.apply_decay(k);
-            }
-            Voice::new(i, k, note)
-        }).collect();
+        let board = Soundboard::new(fs, dp);
+        let tilt = RadFilter::new(fs, dp);
+        // How strongly a bridge-force partial of key `idx` at `f` Hz reaches
+        // the listener (amplitude, mean power of the two channels): the
+        // board's modes from the key's bridge region plus the instant
+        // paths, as finish_chunk sums them. The calibration needs it to
+        // carry its fitted levels from the measured keys to the keys in
+        // between (see calibration::resolve).
+        // (left, right, the instant path's own response)
+        let paths = |idx: usize, f: f64| -> (keys::C64, keys::C64, keys::C64) {
+            let w = core::f64::consts::TAU * f / fs;
+            let reg = key_region(idx);
+            let (ml, mr) = board.response(reg, w);
+            let direct = tilt.response(w);
+            let ang = (keys::key_pan(idx) as f64 + 1.0) * core::f64::consts::FRAC_PI_4;
+            let dl = dp.direct_string * ang.cos() + board.direct as f64 * board.dir_pl[reg] as f64;
+            let dr = dp.direct_string * ang.sin() + board.direct as f64 * board.dir_pr[reg] as f64;
+            (ml.add(direct.scale(dl)), mr.add(direct.scale(dr)), direct)
+        };
+        let radiation = |idx: usize, f: f64| -> f64 {
+            let (l, r, _) = paths(idx, f);
+            (0.5 * (l.abs2() + r.abs2())).sqrt()
+        };
+        let resolved = calibration::resolve(notes, &mut keys, fs, &radiation);
+        for (idx, key) in keys.iter_mut().enumerate() {
+            keys::spread_aftersound(key, fs, &|f| paths(idx, f));
+        }
+        let voices: Vec<Voice> =
+            keys.iter().zip(resolved).enumerate().map(|(i, (k, note))| Voice::new(i, k, note)).collect();
         let sym: Vec<SymBank> = keys.iter().map(SymBank::new).collect();
         // Duplex / aliquot scale: the non-speaking string segments behind
         // the bridge, a shared bank of lightly damped resonators across the
@@ -388,7 +515,7 @@ impl Piano {
         let core = EngineCore {
             sample_rate,
             sym,
-            board: Soundboard::new(fs, dp),
+            board,
             er: EarlyReflections::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             tone: Tone::new(sample_rate),
@@ -425,6 +552,8 @@ impl Piano {
             tone_bass_db: 0.0,
             tone_treble_db: 0.0,
             global_sample: 0,
+            stop: StopFade::new(sample_rate),
+            out_peak: 0.0,
             path: detect_path(),
             dbg_board_modal: 1.0,
             dbg_direct: 1.0,
@@ -435,13 +564,15 @@ impl Piano {
             board_r: [0.0; MAX_CHUNK],
             dir_l: [0.0; MAX_CHUNK],
             dir_r: [0.0; MAX_CHUNK],
+            side_l: [0.0; MAX_CHUNK],
+            side_r: [0.0; MAX_CHUNK],
             case_l: [0.0; MAX_CHUNK],
             case_r: [0.0; MAX_CHUNK],
             case_lp: [0.0; 4],
             case_lp_c: (1.0 - (-core::f64::consts::TAU * CASE_LP_HZ / sample_rate as f64).exp()) as f32,
 
-            dir_tilt_l: RadFilter::new(fs, dp),
-            dir_tilt_r: RadFilter::new(fs, dp),
+            dir_tilt_l: tilt,
+            dir_tilt_r: tilt,
         };
         Self { keys, core, voices }
     }
@@ -638,13 +769,14 @@ impl Piano {
             }
             let next_ev = events.get(ev).map(|e| (e.offset as usize).min(len)).unwrap_or(len);
             let room = MAX_CHUNK - (core.global_sample % MAX_CHUNK as u64) as usize;
-            let n = (len - pos).min(next_ev - pos).min(room);
+            let n = core.chunk_limit((len - pos).min(next_ev - pos).min(room));
             for v in voices.iter_mut() {
                 if v.active {
                     v.render(&keys[v.key_idx], core.path, n);
                 }
             }
             core.finish_chunk(keys, voices, n, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
+            core.after_chunk(keys, voices, &mut out_l[pos..pos + n], &mut out_r[pos..pos + n]);
             pos += n;
             core.global_sample += n as u64;
         }
@@ -778,6 +910,13 @@ impl Piano {
                     if g.is_finite() && g >= 0.0 {
                         k.gout[idx] *= g;
                         k.gout_re[idx] *= g;
+                        if osc > 0 && m < keys::SIDE_MODES {
+                            let j = (osc - 1) * keys::SIDE_MODES + m;
+                            k.side_l_im[j] *= g;
+                            k.side_l_re[j] *= g;
+                            k.side_r_im[j] *= g;
+                            k.side_r_re[j] *= g;
+                        }
                     }
                 }
                 if let Some(&s) = sigma_scale.get(m) {
@@ -797,6 +936,26 @@ impl Piano {
         let v = &mut self.voices[i];
         let eng = v.eng;
         v.rebuild(k, eng);
+    }
+
+    /// Steady-state radiation of a bridge-force sinusoid at `f` Hz from
+    /// `key`'s strings, as amplitudes (mean power of the two channels):
+    /// (the board's modes alone, the instant paths alone, both together).
+    /// Diagnostics only.
+    #[doc(hidden)]
+    pub fn radiation_debug(&self, key: u8, f: f64) -> (f64, f64, f64) {
+        let idx = (key.clamp(FIRST_KEY, LAST_KEY) - FIRST_KEY) as usize;
+        let w = core::f64::consts::TAU * f / self.core.sample_rate as f64;
+        let reg = key_region(idx);
+        let board = &self.core.board;
+        let (ml, mr) = board.response(reg, w);
+        let direct = self.core.dir_tilt_l.response(w);
+        let ang = (keys::key_pan(idx) as f64 + 1.0) * core::f64::consts::FRAC_PI_4;
+        let ds = self.core.direct_string as f64;
+        let dl = direct.scale(ds * ang.cos() + board.direct as f64 * board.dir_pl[reg] as f64);
+        let dr = direct.scale(ds * ang.sin() + board.direct as f64 * board.dir_pr[reg] as f64);
+        let mean = |l: keys::C64, r: keys::C64| (0.5 * (l.abs2() + r.abs2())).sqrt();
+        (mean(ml, mr), mean(dl, dr), mean(ml.add(dl), mr.add(dr)))
     }
 
     /// Read-only view of the per-key design tables (diagnostics/verification:
@@ -848,6 +1007,8 @@ impl Piano {
         self.core.sustain = 0.0;
         self.core.soft = false;
         self.core.global_sample = 0;
+        self.core.stop.clear();
+        self.core.out_peak = 0.0;
     }
 }
 
@@ -867,6 +1028,9 @@ impl Instrument for Piano {
 
 impl EngineCore {
     pub(crate) fn apply_event(&mut self, keys: &[KeyDesign], voices: &mut [Voice], ev: &PianoEvent) {
+        if self.stop.active() {
+            return self.defer(keys, voices, *ev);
+        }
         match *ev {
             PianoEvent::NoteOn { key, velocity } => {
                 if velocity == 0 {
@@ -900,20 +1064,81 @@ impl EngineCore {
                 self.soft = on;
             }
             PianoEvent::AllSoundOff => {
-                for v in voices.iter_mut() {
-                    v.silence();
-                    v.held = false;
-                    v.sost_held = false;
+                if voices.iter().any(|v| v.active) || self.out_peak > SILENCE {
+                    self.stop.start();
+                } else {
+                    self.silence(voices);
                 }
-                for s in &mut self.sym {
-                    s.clear();
-                }
-                self.dup_zr.fill(0.0);
-                self.dup_zi.fill(0.0);
-                self.board.reset();
-                self.er.reset();
-                self.reverb.reset();
             }
+        }
+    }
+
+    /// Silence at once, the pedals left as they are.
+    fn silence(&mut self, voices: &mut [Voice]) {
+        for v in voices.iter_mut() {
+            v.silence();
+            v.held = false;
+            v.sost_held = false;
+        }
+        for s in &mut self.sym {
+            s.clear();
+        }
+        self.dup_zr.fill(0.0);
+        self.dup_zi.fill(0.0);
+        self.board.reset();
+        self.er.reset();
+        self.reverb.reset();
+        // The output stage too: after a fade it is silent, and what its
+        // filters still held would come back at full level, a click.
+        self.tone.reset();
+        self.eq.reset();
+        self.dc_l.reset();
+        self.dc_r.reset();
+        self.dir_tilt_l.reset();
+        self.dir_tilt_r.reset();
+        self.case_lp = [0.0; 4];
+        self.out_peak = 0.0;
+    }
+
+    /// Hold an event that came during a fade.
+    fn defer(&mut self, keys: &[KeyDesign], voices: &mut [Voice], event: PianoEvent) {
+        if !self.stop.hold(event) {
+            self.end_fade(keys, voices);
+            self.apply_event(keys, voices, &event);
+        }
+    }
+
+    /// The fade is over: silence, then what came during it, in order.
+    fn end_fade(&mut self, keys: &[KeyDesign], voices: &mut [Voice]) {
+        let (events, count) = self.stop.take();
+        self.silence(voices);
+        for event in &events[..count] {
+            // Nothing has sounded since the fade: another AllSoundOff in the
+            // queue silences at once.
+            if *event == PianoEvent::AllSoundOff {
+                self.silence(voices);
+            } else {
+                self.apply_event(keys, voices, event);
+            }
+        }
+    }
+
+    /// How much of `n` samples the next chunk may take: a fade ends on a
+    /// chunk's edge.
+    pub(crate) fn chunk_limit(&self, n: usize) -> usize {
+        self.stop.limit(n)
+    }
+
+    /// After a chunk is out: the AllSoundOff fade over it (a raised cosine
+    /// from full level to none, ending the fade on its last sample), and
+    /// whether it still sounded at its end.
+    pub(crate) fn after_chunk(&mut self, keys: &[KeyDesign], voices: &mut [Voice], out_l: &mut [f32], out_r: &mut [f32]) {
+        if self.stop.active() && self.stop.ramp(out_l, out_r) {
+            self.end_fade(keys, voices);
+            return;
+        }
+        if let (Some(l), Some(r)) = (out_l.last(), out_r.last()) {
+            self.out_peak = l.abs().max(r.abs());
         }
     }
 
@@ -1012,6 +1237,8 @@ impl EngineCore {
             self.bus[k] = 0.0;
             self.sym_out[k] = 0.0;
             self.dir_l[k] = 0.0;
+            self.side_l[k] = 0.0;
+            self.side_r[k] = 0.0;
             self.dir_r[k] = 0.0;
             self.case_l[k] = 0.0;
             self.case_r[k] = 0.0;
@@ -1042,6 +1269,13 @@ impl EngineCore {
                 let r = key_region(v.key_idx);
                 if self.pan_sign >= 0.0 { r } else { BOARD_REGIONS - 1 - r }
             };
+            // the taps were laid out for the player's side; the audience
+            // hears the board mirrored
+            let (sl, sr) = if self.pan_sign >= 0.0 { (&v.side_l, &v.side_r) } else { (&v.side_r, &v.side_l) };
+            for k in 0..n {
+                self.side_l[k] += sl[k];
+                self.side_r[k] += sr[k];
+            }
             let mut p = v.power;
             for k in 0..n {
                 let a = v.acc[k];
@@ -1129,8 +1363,8 @@ impl EngineCore {
                 xl += self.board.dir_pl[reg] * x;
                 xr += self.board.dir_pr[reg] * x;
             }
-            self.dir_l[k] = xl;
-            self.dir_r[k] = xr;
+            self.dir_l[k] = xl + self.side_l[k];
+            self.dir_r[k] = xr + self.side_r[k];
         }
         for k in 0..n {
             let dsl = self.dir_tilt_l.process(self.dir_l[k]);

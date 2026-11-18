@@ -7,12 +7,12 @@
 
 use crate::calibration::{CalibrationNote, CALIBRATION_PARTIALS};
 use crate::hammer::Hammer;
-use crate::keys::{velocity_to_speed, KeyDesign, PH_MODES, PH_PARENTS};
+use crate::keys::{velocity_to_speed, KeyDesign, PH_MODES, PH_PARENTS, SIDE_MODES};
 
 /// Row stride of the parent-slope scratch: parents plus a zero tail wide
 /// enough for the 4-wide read at m + 5 from the last parent.
 const PH_Q_STRIDE: usize = PH_PARENTS + PH_MODES;
-use crate::modal::{run_modes_c, KernelPath, MAX_CHUNK};
+use crate::modal::{run_modes_c, run_modes_c3, KernelPath, MAX_CHUNK};
 use crate::simd::{fma_v4, hsum_v4, load_v4, mul_v4, splat_v4, store_v4, sub_v4, zero_v4};
 use crate::params::Voicing;
 
@@ -209,6 +209,10 @@ pub struct Voice {
     /// or its output residues. Allocated once, rebuilt only at note-on.
     eff_gin: Vec<f32>,
     pub acc: [f32; MAX_CHUNK],
+    /// The aftersound's own radiation, left and right (instant-path
+    /// domain; see keys::spread_aftersound).
+    pub side_l: [f32; MAX_CHUNK],
+    pub side_r: [f32; MAX_CHUNK],
     pub noise_buf: [f32; MAX_CHUNK],
     /// Structure-borne case noise (key-bottom thump, action click, damper
     /// felt): radiated by the CASE, not driven through the bridge into the
@@ -277,6 +281,8 @@ impl Voice {
             calibration,
             eff_gin: key.gin.clone(),
             acc: [0.0; MAX_CHUNK],
+            side_l: [0.0; MAX_CHUNK],
+            side_r: [0.0; MAX_CHUNK],
             noise_buf: [0.0; MAX_CHUNK],
             case_buf: [0.0; MAX_CHUNK],
             force: [0.0; MAX_CHUNK],
@@ -477,6 +483,8 @@ impl Voice {
         debug_assert!(n <= MAX_CHUNK);
         for k in 0..n {
             self.acc[k] = 0.0;
+            self.side_l[k] = 0.0;
+            self.side_r[k] = 0.0;
             self.noise_buf[k] = 0.0;
             self.case_buf[k] = 0.0;
         }
@@ -539,8 +547,34 @@ impl Voice {
             }
         }
         for osc in 0..key.n_osc {
-            let a = osc * mp;
+            let mut a = osc * mp;
             let b = a + mp;
+            if osc > 0 && key.side_modes > 0 {
+                // the low partials of the aftersound modes also feed
+                // their own taps
+                let (s, e) = ((osc - 1) * SIDE_MODES, a + key.side_modes);
+                let t = s..s + key.side_modes;
+                run_modes_c3(
+                    path,
+                    &mut self.zr[a..e],
+                    &mut self.zi[a..e],
+                    &self.eff_cr[a..e],
+                    &self.eff_ci[a..e],
+                    &gin[a..e],
+                    &key.gout[a..e],
+                    &key.gout_re[a..e],
+                    [&key.side_l_im[t.clone()], &key.side_l_re[t.clone()], &key.side_r_im[t.clone()], &key.side_r_re[t]],
+                    &self.force[..n],
+                    self.osc_gain[osc],
+                    &mut self.acc[..n],
+                    &mut self.side_l[..n],
+                    &mut self.side_r[..n],
+                );
+                a = e;
+                if a == b {
+                    continue;
+                }
+            }
             run_modes_c(
                 path,
                 &mut self.zr[a..b],

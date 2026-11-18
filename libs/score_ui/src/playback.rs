@@ -1,6 +1,6 @@
 //! Audio-clock-master playback bridge. UI gestures are converted to
 //! `score_play` messages; the audio callback owns the realtime engine and a
-//! physically modelled piano. The SoundFont sampler serves the metronome
+//! piano voice or installed Audio Unit. The SoundFont sampler serves the metronome
 //! click.
 //!
 //! The UI builds each engine (for a plan and the device's rate) and sends it,
@@ -9,7 +9,9 @@
 //! never allocates or frees. A command the ring has no room for is held here,
 //! reported, and sent first on a later frame: nothing the user did is lost.
 
-use crate::sound::SoundSettings;
+use crate::sound::{audio_units, SoundSettings};
+use makepad_audio_unit_host::{Instrument, MidiMessage};
+use makepad_widgets_core::makepad_platform::thread::{Class, TaskHandle, TaskPool};
 use makepad_score::model::{EventKind, Rational, Score};
 use makepad_score_play::{
     Articulation as PlayArticulation, AtomicAudioClock, AudioClockSnapshot, AudioMessage,
@@ -20,7 +22,7 @@ use makepad_score_play::{
 };
 use crate::sound::ScoreEngine;
 use makepad_piano_model::{
-    fx::{Perspective, ReverbPreset},
+    fx::{soft_clip, Limiter, Perspective, Reverb, ReverbPreset},
     learned::PianoEngine,
     Piano,
     PianoEvent, PianoPreset, TimedEvent as PianoTimedEvent, Voicing,
@@ -33,7 +35,7 @@ use std::{
     collections::VecDeque,
     sync::{
         atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -43,19 +45,21 @@ const PART_CAPACITY: usize = 32;
 const VOICE_CAPACITY: usize = 96;
 const EVENT_CAPACITY: usize = 64;
 const SCRATCH_FRAMES: usize = 2048;
+/// A callback's worth of frames for an instrument's warm-up.
+const WARM_UP_FRAMES: usize = 512;
 const PLAN_RATE: u32 = 48_000;
 /// Peak-meter fall-back, per frame. Full scale to silence in about a third of
 /// a second — slow enough to read, fast enough to follow a phrase.
 const PEAK_FALL_PER_FRAME: f32 = 1.0 / 16_384.0;
 /// How long a replaced instrument keeps sounding while it fades out. Swapping
-/// the piano mid-phrase would otherwise cut every ringing string and the room
-/// tail dead on one sample, which is a click; ~40 ms of fade is inaudible.
+/// the piano mid-phrase would otherwise cut every ringing string dead on one
+/// sample, which is a click; ~40 ms of fade is inaudible.
 const INSTRUMENT_FADE_FRAMES: u32 = 2048;
 
-/// The room the piano is heard in. One part of [`SoundSettings`]; it reaches
-/// the audio thread through the same shared cell as everything else there —
-/// plain atomics, no lock, no allocation, applied at the top of a render
-/// block.
+/// The room every instrument is heard in. One part of [`SoundSettings`]; it
+/// reaches the audio thread through the same shared cell as everything else
+/// there — plain atomics, no lock, no allocation, applied at the top of a
+/// render block — and is played by the one [`Room`] on the instrument bus.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RoomSettings {
     pub preset: ReverbPreset,
@@ -104,6 +108,113 @@ fn preset_from_index(index: u32) -> ReverbPreset {
     REVERB_PRESETS
         .get(index as usize)
         .map_or(ReverbPreset::Studio, |(preset, _)| *preset)
+}
+
+/// The one room of the Sound panel: a reverb on the instrument bus, after
+/// whatever instrument is playing (and the one fading out under it), driven
+/// by the panel's room and Reverb amount. Every instrument of ours is built
+/// dry ([`build_engine`]), so this is the only room anything is heard in.
+///
+/// Its delay lines are allocated here, on the UI thread, with the backend;
+/// on the audio thread a room change only recomputes eight decay gains, and
+/// a block only runs the network — or nothing, once its tail has died away
+/// and no sound comes in.
+struct Room {
+    reverb: Reverb,
+    /// The tail's level on top of the dry instrument; 0 bypasses the room.
+    mix: f32,
+    /// Spans in a row with nothing above [`ROOM_SILENCE`] coming out.
+    quiet_spans: u32,
+    /// Frames left of the fade that takes away the tail of a place the
+    /// transport left (0: none), and its length.
+    fade_left: u32,
+    fade_len: u32,
+}
+
+/// A room put out this little (-180 dBFS) for [`ROOM_QUIET_SPANS`] spans in
+/// a row is emptied and sleeps until sound comes in again, so a tail never
+/// decays into denormals and an idle score costs the callback nothing.
+const ROOM_SILENCE: f32 = 1.0e-9;
+const ROOM_QUIET_SPANS: u32 = 32;
+/// How long the room takes to fade out the tail of a place the transport
+/// jumped away from, s: long enough not to click, short enough that the old
+/// place's tail never smears over the new one.
+const ROOM_FADE_SECS: f32 = 0.03;
+
+impl Room {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            reverb: Reverb::new(sample_rate),
+            mix: 0.0,
+            quiet_spans: ROOM_QUIET_SPANS,
+            fade_left: 0,
+            fade_len: ((ROOM_FADE_SECS * sample_rate) as u32).max(1),
+        }
+    }
+
+    fn apply(&mut self, room: &RoomSettings) {
+        self.reverb.set_preset(room.preset);
+        let mix = if room.mix.is_finite() { room.mix.clamp(0.0, RoomSettings::MIX_MAX) } else { 0.0 };
+        // A bypassed room stops listening; empty it so turning it back up
+        // never replays a tail from before.
+        if mix == 0.0 && self.mix > 0.0 {
+            self.clear();
+        }
+        self.mix = mix;
+    }
+
+    /// Silence, at once.
+    fn clear(&mut self) {
+        self.reverb.reset();
+        self.quiet_spans = ROOM_QUIET_SPANS;
+        self.fade_left = 0;
+    }
+
+    /// The transport jumped: the tail of the place it left fades out over
+    /// [`ROOM_FADE_SECS`] and the room is emptied after, so nothing is cut.
+    /// (A stop needs nothing: the tail rings out the way it would in a hall.)
+    fn fade_out(&mut self) {
+        if self.mix == 0.0 || self.quiet_spans >= ROOM_QUIET_SPANS {
+            self.clear();
+        } else if self.fade_left == 0 {
+            self.fade_left = self.fade_len;
+        }
+    }
+
+    /// The instrument plus its tail, in place. With the room bypassed the
+    /// instrument passes untouched. The knee after it is the bus's.
+    fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        if self.mix == 0.0 {
+            return;
+        }
+        let peak = |left: &[f32], right: &[f32]| left.iter().chain(right).fold(0.0_f32, |peak, x| peak.max(x.abs()));
+        if self.quiet_spans >= ROOM_QUIET_SPANS && !(peak(left, right) >= ROOM_SILENCE) {
+            return;
+        }
+        let step = std::f32::consts::PI / self.fade_len as f32;
+        for (left, right) in left.iter_mut().zip(right.iter_mut()) {
+            let (wet_left, wet_right) = self.reverb.process(*left, *right);
+            let mut mix = self.mix;
+            if self.fade_left > 0 {
+                // A raised cosine from the full tail to none.
+                self.fade_left -= 1;
+                mix *= 0.5 - 0.5 * (step * self.fade_left as f32).cos();
+                if self.fade_left == 0 {
+                    self.reverb.reset();
+                }
+            }
+            *left += mix * wet_left;
+            *right += mix * wet_right;
+        }
+        if peak(left, right) >= ROOM_SILENCE {
+            self.quiet_spans = 0;
+        } else {
+            self.quiet_spans += 1;
+            if self.quiet_spans == ROOM_QUIET_SPANS {
+                self.clear();
+            }
+        }
+    }
 }
 
 /// Everything that shapes the piano, as plain atomics. UI writes, audio thread
@@ -208,6 +319,182 @@ impl SharedSound {
     }
 }
 
+/// A voice is constructed away from the callback and has one owner at a time.
+enum Voice {
+    Piano(PianoEngine),
+    AudioUnit(AuVoice),
+    Waveguide(makepad_piano_waveguide::WaveguidePiano),
+}
+
+/// The same event for the waveguide grand, which has its own event type.
+fn waveguide_event(event: PianoTimedEvent) -> makepad_piano_waveguide::TimedEvent {
+    use makepad_piano_waveguide::PianoEvent as W;
+    makepad_piano_waveguide::TimedEvent {
+        offset: event.offset,
+        event: match event.event {
+            PianoEvent::NoteOn { key, velocity } => W::NoteOn { key, velocity },
+            PianoEvent::NoteOff { key } => W::NoteOff { key },
+            PianoEvent::Sustain { value } => W::Sustain { value },
+            PianoEvent::SoftPedal { on } => W::SoftPedal { on },
+            PianoEvent::Sostenuto { on } => W::Sostenuto { on },
+            PianoEvent::AllSoundOff => W::AllSoundOff,
+        },
+    }
+}
+
+struct AuVoice {
+    unit: Instrument,
+    gain: f32,
+}
+
+/// Channel zero, with MIDI's velocity-zero note-off convention preserved.
+fn midi_for(event: PianoEvent) -> [Option<MidiMessage>; 3] {
+    let message = match event {
+        PianoEvent::NoteOn { key, velocity } => MidiMessage::note_on(0, key, velocity),
+        PianoEvent::NoteOff { key } => MidiMessage::note_off(0, key),
+        PianoEvent::Sustain { value } => MidiMessage::control(0, 64, (value.clamp(0.0, 1.0) * 127.0).round() as u8),
+        PianoEvent::SoftPedal { on } => MidiMessage::control(0, 67, if on { 127 } else { 0 }),
+        PianoEvent::Sostenuto { on } => MidiMessage::control(0, 66, if on { 127 } else { 0 }),
+        PianoEvent::AllSoundOff => return [
+            Some(MidiMessage::control(0, 64, 0)),
+            Some(MidiMessage::control(0, 120, 0)),
+            Some(MidiMessage::control(0, 123, 0)),
+        ],
+    };
+    [Some(message), None, None]
+}
+
+impl Voice {
+    fn process(&mut self, events: &[PianoTimedEvent], left: &mut [f32], right: &mut [f32]) {
+        match self {
+            Self::Piano(piano) => piano.process(events, left, right),
+            Self::Waveguide(piano) => {
+                // Converted on the stack, 64 at a time; a block with more
+                // events than that takes the rest at its end.
+                let silent = makepad_piano_waveguide::TimedEvent { offset: 0, event: makepad_piano_waveguide::PianoEvent::Sustain { value: 0.0 } };
+                let mut converted = [silent; 64];
+                let (first, rest) = events.split_at(events.len().min(converted.len()));
+                for (to, from) in converted.iter_mut().zip(first) {
+                    *to = waveguide_event(*from);
+                }
+                piano.process(&converted[..first.len()], left, right);
+                for chunk in rest.chunks(converted.len()) {
+                    for (to, from) in converted.iter_mut().zip(chunk) {
+                        *to = waveguide_event(*from);
+                    }
+                    piano.process(&converted[..chunk.len()], &mut [], &mut []);
+                }
+            }
+            Self::AudioUnit(voice) => {
+                for event in events {
+                    for message in midi_for(event.event).into_iter().flatten() {
+                        let _ = voice.unit.midi(message, event.offset);
+                    }
+                }
+                if voice.unit.render(left, right).is_err() {
+                    left.fill(0.0);
+                    right.fill(0.0);
+                }
+                for sample in left.iter_mut().chain(right.iter_mut()) {
+                    *sample *= voice.gain;
+                }
+            }
+        }
+        let trim = self.trim();
+        if trim != 1.0 {
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample *= trim;
+            }
+        }
+    }
+
+    /// Plays a mezzo-forte note with the pedal down through one callback's
+    /// worth of frames and silences it again, on the thread that built the
+    /// instrument: the audio thread's first callback then runs code that has
+    /// run before. Under a JIT a path compiles on its first run, and a fresh
+    /// waveguide grand's first callback took 106 % of its 11.6 ms budget
+    /// (every later one at most 41 %); warmed up, it takes 34 %. Our own
+    /// engines only: an Audio Unit
+    /// is handed over as it loaded.
+    fn warm_up(&mut self) {
+        if matches!(self, Self::AudioUnit(_)) {
+            return;
+        }
+        let (mut left, mut right) = (vec![0.0f32; WARM_UP_FRAMES], vec![0.0f32; WARM_UP_FRAMES]);
+        let events = [
+            PianoTimedEvent { offset: 0, event: PianoEvent::Sustain { value: 1.0 } },
+            PianoTimedEvent { offset: 0, event: PianoEvent::NoteOn { key: 60, velocity: 64 } },
+        ];
+        self.process(&events, &mut left, &mut right);
+        match self {
+            Self::Waveguide(piano) => piano.reset(),
+            Self::Piano(piano) => piano.reset(),
+            Self::AudioUnit(_) => {}
+        }
+    }
+
+    /// [`ScoreEngine::trim`] of the engine this voice plays: its level
+    /// beside the others', after its own limiter.
+    fn trim(&self) -> f32 {
+        match self {
+            Self::Waveguide(_) => ScoreEngine::Waveguide.trim(),
+            Self::AudioUnit(_) => ScoreEngine::AudioUnit.trim(),
+            Self::Piano(PianoEngine::Learned(_)) => ScoreEngine::Learned.trim(),
+            Self::Piano(PianoEngine::Physical(_)) => ScoreEngine::Physical.trim(),
+        }
+    }
+
+    /// The instrument's own controls. The room is not one of them: every
+    /// voice plays dry into the bus's [`Room`]. AU voicing and EQ belong to
+    /// the plug-in; only the output trim is ours.
+    fn apply_sound(&mut self, sound: &SoundSettings) {
+        match self {
+            Self::AudioUnit(voice) => voice.gain = sound.master_gain,
+            // Brightness is the same treble shelf.
+            Self::Waveguide(piano) => {
+                piano.set_brightness(sound.eq_shelf_db, sound.eq_shelf_hz);
+                piano.set_master_gain(sound.master_gain);
+            }
+            Self::Piano(piano) => {
+                // The listening position places the modal piano's image and
+                // its lid reflections; the room around it is the bus's.
+                piano.set_perspective(sound.room.perspective);
+                piano.set_early_reflection_level(sound.early_reflections);
+                piano.set_voicing(sound.voicing);
+                piano.set_eq_shelf(sound.eq_shelf_db, sound.eq_shelf_hz);
+                piano.set_eq_bell(sound.eq_bell_hz, sound.eq_bell_db, sound.eq_bell_q);
+                piano.set_tone(sound.tone_bass_db, sound.tone_treble_db);
+                piano.set_master_gain(sound.master_gain);
+            }
+        }
+    }
+}
+
+fn build_audio_unit(index: usize, rate: f32) -> Result<Box<Voice>, String> {
+    let entry = audio_units().get(index).ok_or("Audio Unit is no longer installed")?;
+    Instrument::new(&entry.info.description, rate as f64, SCRATCH_FRAMES as u32)
+        .map(|unit| Box::new(Voice::AudioUnit(AuVoice { unit, gain: 1.0 })))
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InstrumentLoad {
+    Loaded(usize),
+    Failed(usize, String),
+    /// One of our own instruments, built on the pool, is now sounding.
+    Built(ScoreEngine, usize),
+    /// Its build did not finish; the instrument before it still sounds.
+    Unbuilt(ScoreEngine, usize, String),
+}
+
+struct AudioUnitLoad {
+    request: u64,
+    index: usize,
+    /// `None` for an Audio Unit, the engine for an instrument of ours.
+    built: Option<ScoreEngine>,
+    task: TaskHandle<Result<Box<Voice>, String>>,
+}
+
 /// Build the instrument the application asked for.
 ///
 /// Hybrid is the one that is not simply a `PianoEngine::new`: it is the
@@ -215,14 +502,33 @@ impl SharedSound {
 /// applied across all 88 keys before it ever renders a block. That costs
 /// 3.6 ms, which is why it belongs here on the UI thread alongside the
 /// design rebuilds rather than anywhere near the callback.
-fn build_engine(engine: ScoreEngine, rate: f32, preset: &PianoPreset) -> PianoEngine {
-    match engine {
-        ScoreEngine::Hybrid => {
-            let mut piano = Piano::new_with_preset(rate, preset);
-            crate::hybrid::apply_targets(&mut piano);
-            PianoEngine::Physical(Box::new(piano))
-        }
-        other => PianoEngine::new(other.kind(), rate, preset),
+///
+/// Each is built DRY: the engines ship with rooms of their own, and here
+/// those are switched off for good, because the room is the bus's [`Room`]
+/// and an instrument with a second room inside would be heard in two.
+fn build_engine(engine: ScoreEngine, rate: f32, preset: &PianoPreset) -> Box<Voice> {
+    let mut voice = construct_engine(engine, rate, preset);
+    voice.warm_up();
+    Box::new(voice)
+}
+
+/// [`build_engine`] without the warm-up.
+fn construct_engine(engine: ScoreEngine, rate: f32, preset: &PianoPreset) -> Voice {
+    if engine == ScoreEngine::Waveguide {
+        let mut piano = makepad_piano_waveguide::WaveguidePiano::new(rate);
+        piano.set_room_mix(0.0);
+        Voice::Waveguide(piano)
+    } else {
+        let mut piano = match engine {
+            ScoreEngine::Hybrid => {
+                let mut piano = Piano::new_with_preset(rate, preset);
+                crate::hybrid::apply_targets(&mut piano);
+                PianoEngine::Physical(Box::new(piano))
+            }
+            other => PianoEngine::new(other.kind(), rate, preset),
+        };
+        piano.set_reverb_mix(0.0);
+        Voice::Piano(piano)
     }
 }
 
@@ -234,30 +540,33 @@ fn build_engine(engine: ScoreEngine, rate: f32, preset: &PianoPreset) -> PianoEn
 /// instrument, and a different ENGINE is a different instrument too. Both
 /// allocate to build — `Piano::new_with_preset` builds 88 key designs and
 /// their modal banks, `LearnedPiano::new` parses the network and precomputes
-/// all 88 key designs. So the UI thread builds either one and passes
-/// ownership through `incoming`; the audio thread
+/// all 88 key designs. The UI builds those voices; the task pool builds Audio
+/// Units. Ownership passes through `incoming`; the audio thread
 /// takes it, and passes the instrument it replaced back through `retired` for
-/// the UI thread to drop. Neither slot ever holds more than one instrument:
+/// the UI thread to dispose (Audio Units go to the pool). Neither slot ever
+/// holds more than one instrument:
 /// the audio side refuses to take a new one while it still owes the old one
 /// back, and the UI side refuses to offer one until the previous handoff has
 /// completed. Nothing is allocated, freed, or waited on inside the callback.
 #[derive(Debug, Default)]
 struct InstrumentHandoff {
-    incoming: AtomicPtr<PianoEngine>,
-    retired: AtomicPtr<PianoEngine>,
+    incoming: AtomicPtr<Voice>,
+    retired: AtomicPtr<Voice>,
+    /// UI-owned count of accepted offers not yet reclaimed or withdrawn.
+    outstanding: AtomicU32,
 }
 
-// The instrument is built on the UI thread and played on the audio thread.
+// A constructed voice can move from the UI or a worker to the audio thread.
 const _: () = {
     const fn assert_send<T: Send>() {}
-    assert_send::<PianoEngine>();
+    assert_send::<Voice>();
 };
 
 impl InstrumentHandoff {
     /// UI thread: offer a freshly built instrument. Handed back when the
     /// previous swap has not finished, so the caller can simply try again on
     /// the next frame with whatever the user has landed on by then.
-    fn offer(&self, piano: Box<PianoEngine>) -> Option<Box<PianoEngine>> {
+    fn offer(&self, piano: Box<Voice>) -> Option<Box<Voice>> {
         if !self.retired.load(Ordering::Acquire).is_null() {
             return Some(piano);
         }
@@ -268,7 +577,10 @@ impl InstrumentHandoff {
             Ordering::Release,
             Ordering::Relaxed,
         ) {
-            Ok(_) => None,
+            Ok(_) => {
+                self.outstanding.fetch_add(1, Ordering::Relaxed);
+                None
+            }
             // Safety: the exchange failed, so the pointer was never published
             // and this thread still owns it exclusively.
             Err(_) => Some(unsafe { Box::from_raw(raw) }),
@@ -277,16 +589,29 @@ impl InstrumentHandoff {
 
     /// UI thread: take back the instrument the audio thread replaced, so it is
     /// dropped here rather than in the callback.
-    fn reclaim(&self) -> Option<Box<PianoEngine>> {
+    fn reclaim(&self) -> Option<Box<Voice>> {
         let raw = self.retired.swap(ptr::null_mut(), Ordering::Acquire);
         // Safety: the audio thread published this pointer with Release and
         // never touches it again.
-        (!raw.is_null()).then(|| unsafe { Box::from_raw(raw) })
+        (!raw.is_null()).then(|| {
+            self.outstanding.fetch_sub(1, Ordering::Relaxed);
+            unsafe { Box::from_raw(raw) }
+        })
+    }
+
+    /// UI thread: revoke a superseded offer if audio has not adopted it yet.
+    fn withdraw(&self) -> Option<Box<Voice>> {
+        let raw = self.incoming.swap(ptr::null_mut(), Ordering::Acquire);
+        (!raw.is_null()).then(|| {
+            self.outstanding.fetch_sub(1, Ordering::Relaxed);
+            // Safety: the atomic swap gave us exclusive ownership.
+            unsafe { Box::from_raw(raw) }
+        })
     }
 
     /// Audio thread: adopt an offered instrument, but only while the previous
     /// one has already been handed back.
-    fn take(&self) -> Option<Box<PianoEngine>> {
+    fn take(&self) -> Option<Box<Voice>> {
         if !self.retired.load(Ordering::Relaxed).is_null() {
             return None;
         }
@@ -299,7 +624,7 @@ impl InstrumentHandoff {
     /// Audio thread: give a replaced instrument back to be dropped. Never
     /// frees anything here — the slot is guaranteed empty because `take` only
     /// hands an instrument over while it is.
-    fn retire(&self, piano: Box<PianoEngine>) {
+    fn retire(&self, piano: Box<Voice>) {
         let previous = self.retired.swap(Box::into_raw(piano), Ordering::Release);
         debug_assert!(previous.is_null(), "the retired slot was not empty");
     }
@@ -358,7 +683,15 @@ pub struct PlaybackBridge {
     sound: Arc<SharedSound>,
     instrument: Arc<InstrumentHandoff>,
     /// A rebuilt instrument waiting for the audio thread to have room for it.
-    pending_instrument: Option<Box<PianoEngine>>,
+    pending_instrument: Option<Box<Voice>>,
+    pending_audio_unit: Option<usize>,
+    pending_built: Option<(ScoreEngine, usize)>,
+    pool: Option<TaskPool>,
+    load_request: u64,
+    loads: Vec<AudioUnitLoad>,
+    load_outcome: Option<InstrumentLoad>,
+    /// Kept for retry if the pool refuses a disposal during shutdown.
+    deferred_disposals: Vec<Box<Voice>>,
     /// What the instrument is actually putting out, written by the audio
     /// thread once per rendered span. One relaxed store; read for display.
     peak: Arc<AtomicU32>,
@@ -415,6 +748,13 @@ impl PlaybackBridge {
             },
             instrument: Arc::new(InstrumentHandoff::default()),
             pending_instrument: None,
+            pending_audio_unit: None,
+            pending_built: None,
+            pool: None,
+            load_request: 0,
+            loads: Vec::new(),
+            load_outcome: None,
+            deferred_disposals: Vec::new(),
             peak: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -460,21 +800,137 @@ impl PlaybackBridge {
     /// the one it replaces — so switching engine mid-phrase is a dissolve,
     /// not a cut, and never a panic.
     pub fn rebuild_instrument(&mut self, engine: ScoreEngine, preset: &PianoPreset) {
+        self.begin_instrument_request();
         let rate = self.device_rate().unwrap_or(PLAN_RATE as f32).clamp(8_000.0, 192_000.0);
-        // Latest request wins: an older pending build is simply dropped here.
-        self.pending_instrument = Some(Box::new(build_engine(engine, rate, preset)));
-        self.service_instrument();
+        self.pending_instrument = Some(build_engine(engine, rate, preset));
+        let _ = self.service_instrument();
     }
 
-    /// Drop whatever the audio thread handed back and retry a pending
-    /// handoff. Called once a frame; costs two relaxed loads when idle.
-    pub fn service_instrument(&mut self) {
-        drop(self.instrument.reclaim());
-        if let Some(piano) = self.pending_instrument.take() {
-            self.pending_instrument = self.instrument.offer(piano);
+    fn begin_instrument_request(&mut self) {
+        self.load_request = self.load_request.wrapping_add(1);
+        self.load_outcome = None;
+        self.pending_audio_unit = None;
+        self.pending_built = None;
+        if let Some(old) = self.pending_instrument.take() {
+            self.dispose_voice(old);
+        }
+        if let Some(old) = self.instrument.withdraw() {
+            self.dispose_voice(old);
         }
     }
 
+    /// Plug-in construction can take seconds. Poll the pool's result on later
+    /// frames; retain older handles so their results are disposed off the UI.
+    pub fn rebuild_audio_unit(&mut self, index: usize) {
+        self.begin_instrument_request();
+        let rate = self.device_rate().unwrap_or(PLAN_RATE as f32);
+        if let Some(pool) = &self.pool {
+            match pool.submit(Class::Interactive, move || build_audio_unit(index, rate)) {
+                Ok(task) => self.loads.push(AudioUnitLoad { request: self.load_request, index, built: None, task }),
+                Err(error) => self.load_outcome = Some(InstrumentLoad::Failed(index, error.to_string())),
+            }
+        } else {
+            // Tests and callers before audio installation have no runtime pool.
+            self.accept_audio_unit(index, build_audio_unit(index, rate));
+        }
+    }
+
+    /// Build one of our instruments whose construction is long (the
+    /// waveguide grand designs 88 keys) on the task pool. The instrument
+    /// that sounds now keeps sounding until the new one is ready; then the
+    /// usual handoff crossfades to it. `service` reports the outcome.
+    pub fn rebuild_instrument_on_pool(&mut self, engine: ScoreEngine, index: usize, preset: &'static PianoPreset) {
+        self.begin_instrument_request();
+        let rate = self.device_rate().unwrap_or(PLAN_RATE as f32).clamp(8_000.0, 192_000.0);
+        if let Some(pool) = &self.pool {
+            match pool.submit(Class::Interactive, move || Ok(build_engine(engine, rate, preset))) {
+                Ok(task) => self.loads.push(AudioUnitLoad { request: self.load_request, index, built: Some(engine), task }),
+                Err(error) => self.load_outcome = Some(InstrumentLoad::Unbuilt(engine, index, error.to_string())),
+            }
+        } else {
+            // Tests and callers before audio installation have no runtime pool.
+            self.pending_instrument = Some(build_engine(engine, rate, preset));
+            self.pending_built = Some((engine, index));
+        }
+    }
+
+    fn accept_audio_unit(&mut self, index: usize, result: Result<Box<Voice>, String>) {
+        match result {
+            Ok(voice) => {
+                self.pending_instrument = Some(voice);
+                self.pending_audio_unit = Some(index);
+            }
+            Err(error) => self.load_outcome = Some(InstrumentLoad::Failed(index, error)),
+        }
+    }
+
+    fn dispose_voice(&mut self, voice: Box<Voice>) {
+        let Some(pool) = &self.pool else { return drop(voice) };
+        if matches!(&*voice, Voice::Piano(_) | Voice::Waveguide(_)) {
+            return drop(voice);
+        }
+        // The mutex protects only an ownership transfer. Neither thread holds
+        // it while unloading the plug-in, and a refused submit retains ownership.
+        let pending = Arc::new(Mutex::new(Some(voice)));
+        let work = pending.clone();
+        match pool.submit(Class::Interactive, move || {
+            let voice = work.lock().unwrap_or_else(|p| p.into_inner()).take();
+            drop(voice);
+        }) {
+            Ok(task) => task.detach(),
+            Err(error) => {
+                log!("score audio unit disposal deferred: {error}");
+                if let Some(voice) = pending.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                    self.deferred_disposals.push(voice);
+                }
+            }
+        }
+    }
+
+    /// Reclaim replaced voices and poll construction without waiting. Only the
+    /// latest request may reach the callback or report an outcome to the UI.
+    pub fn service_instrument(&mut self) -> Option<InstrumentLoad> {
+        let deferred = std::mem::take(&mut self.deferred_disposals);
+        for voice in deferred {
+            self.dispose_voice(voice);
+        }
+        if let Some(old) = self.instrument.reclaim() {
+            self.dispose_voice(old);
+        }
+        let mut at = 0;
+        while at < self.loads.len() {
+            let Some(result) = self.loads[at].task.try_take() else {
+                at += 1;
+                continue;
+            };
+            let load = self.loads.swap_remove(at);
+            let result = result.map_err(|error| error.to_string()).and_then(|result| result);
+            if load.request == self.load_request {
+                match (load.built, result) {
+                    (None, result) => self.accept_audio_unit(load.index, result),
+                    (Some(engine), Ok(voice)) => {
+                        self.pending_instrument = Some(voice);
+                        self.pending_built = Some((engine, load.index));
+                    }
+                    (Some(engine), Err(error)) => self.load_outcome = Some(InstrumentLoad::Unbuilt(engine, load.index, error)),
+                }
+            } else if let Ok(voice) = result {
+                self.dispose_voice(voice);
+            }
+        }
+        if let Some(voice) = self.pending_instrument.take() {
+            self.pending_instrument = self.instrument.offer(voice);
+            if self.pending_instrument.is_none() {
+                if let Some(index) = self.pending_audio_unit.take() {
+                    self.load_outcome = Some(InstrumentLoad::Loaded(index));
+                }
+                if let Some((engine, index)) = self.pending_built.take() {
+                    self.load_outcome = Some(InstrumentLoad::Built(engine, index));
+                }
+            }
+        }
+        self.load_outcome.take()
+    }
 
     /// A new plan goes to the callback with a fresh engine (the transport
     /// stops, as a new score should), ahead of anything still held.
@@ -486,16 +942,23 @@ impl PlaybackBridge {
 
     /// Once a frame: the instrument handoff, then the commands still held and
     /// the engines the callback gave back.
-    pub fn service(&mut self) {
-        self.service_instrument();
+    pub fn service(&mut self) -> Option<InstrumentLoad> {
+        let outcome = self.service_instrument();
         self.flush();
+        outcome
     }
 
     /// Commands are waiting for room in the ring: keep frames coming so they
     /// go as soon as the callback drains it.
-    /// Only once a callback has run: before that there is no device to wait for.
+    /// Instrument loads also need frames until they report, and a handoff
+    /// until the callback has given the replaced instrument back; the handoff
+    /// only once a device runs, since nothing takes it before then.
     pub fn holds_commands(&self) -> bool {
-        !self.held.is_empty() && !self.plan_unsent
+        let handoff = self.pending_instrument.is_some() || self.instrument.outstanding.load(Ordering::Relaxed) != 0;
+        (!self.held.is_empty() && !self.plan_unsent)
+            || !self.loads.is_empty()
+            || self.load_outcome.is_some()
+            || (handoff && self.device_rate().is_some())
     }
 
     /// Send what is held, in order, as far as the ring has room. An engine for
@@ -712,6 +1175,7 @@ impl PlaybackBridge {
     /// Installs callback zero, once. Plans and engines reach it through the
     /// command ring (see `flush`).
     pub fn install_audio_output(&mut self, cx: &mut Cx) {
+        self.pool = Some(cx.task_pool());
         let Some(mut audio) = self.audio.take() else { return };
         cx.audio_output(0, move |info, output| audio.render(info, output));
     }
@@ -755,7 +1219,10 @@ impl AudioSide {
             }
             let Some(command) = self.commands.pop() else { return };
             match command {
-                ToAudio::Playing(next) => {
+                ToAudio::Playing(mut next) => {
+                    if let Some(old) = &mut self.playing {
+                        next.engine.backend_mut().carry_instrument_from(old.engine.backend_mut());
+                    }
                     if let Some(old) = self.playing.replace(next) {
                         if let Err(old) = self.retired.push(old) {
                             // Unreachable: the retire ring holds more than the
@@ -837,9 +1304,16 @@ struct SamplerBackend {
     sound_revision: u32,
     instrument: Arc<InstrumentHandoff>,
     peak: Arc<AtomicU32>,
-    piano: Box<PianoEngine>,
+    piano: Box<Voice>,
     /// The instrument a rebuild replaced, still ringing itself out.
-    fading: Option<Box<PianoEngine>>,
+    fading: Option<Box<Voice>>,
+    /// One gain riding the instrument bus ahead of the room: the Concert
+    /// Grand's own limiter, so that grand, already ridden to its ceiling,
+    /// passes it untouched, and an engine trimmed up (`ScoreEngine::trim`)
+    /// is held to the same level, room on or off.
+    limiter: Limiter,
+    /// The room both of them are heard in.
+    room: Room,
     fade_frames_left: u32,
     fade_left: [f32; SCRATCH_FRAMES],
     fade_right: [f32; SCRATCH_FRAMES],
@@ -872,13 +1346,15 @@ impl SamplerBackend {
             sound_revision: 0,
             instrument,
             peak,
-            piano: Box::new(build_engine(
+            piano: build_engine(
                 ScoreEngine::Physical,
                 sample_rate,
                 &makepad_piano_model::PIANO_PRESETS
                     [crate::sound::default_preset_index(ScoreEngine::Physical)],
-            )),
+            ),
             fading: None,
+            limiter: Limiter::new(sample_rate),
+            room: Room::new(sample_rate),
             fade_frames_left: 0,
             fade_left: [0.0; SCRATCH_FRAMES],
             fade_right: [0.0; SCRATCH_FRAMES],
@@ -935,16 +1411,22 @@ impl SamplerBackend {
     /// safe between `process()` calls: plain scalars and coefficient updates,
     /// no allocation and no table rebuild.
     fn apply_sound(&mut self, sound: SoundSettings) {
-        let piano = &mut self.piano;
-        piano.set_reverb_preset(sound.room.preset);
-        piano.set_reverb_mix(sound.room.mix);
-        piano.set_perspective(sound.room.perspective);
-        piano.set_early_reflection_level(sound.early_reflections);
-        piano.set_voicing(sound.voicing);
-        piano.set_eq_shelf(sound.eq_shelf_db, sound.eq_shelf_hz);
-        piano.set_eq_bell(sound.eq_bell_hz, sound.eq_bell_db, sound.eq_bell_q);
-        piano.set_tone(sound.tone_bass_db, sound.tone_treble_db);
-        piano.set_master_gain(sound.master_gain);
+        self.piano.apply_sound(&sound);
+        self.room.apply(&sound.room);
+    }
+
+    /// A new score/tempo plan keeps the selected instrument, including any
+    /// crossfade in progress. Only pointers/scalars move on the callback.
+    fn carry_instrument_from(&mut self, old: &mut Self) {
+        std::mem::swap(&mut self.piano, &mut old.piano);
+        std::mem::swap(&mut self.fading, &mut old.fading);
+        std::mem::swap(&mut self.fade_frames_left, &mut old.fade_frames_left);
+        // The room holds the published settings the revision below vouches for.
+        std::mem::swap(&mut self.room, &mut old.room);
+        std::mem::swap(&mut self.limiter, &mut old.limiter);
+        self.sound_revision = old.sound_revision;
+        self.queue_piano(PianoEvent::AllSoundOff);
+        self.room.fade_out();
     }
 
     /// Adopt an instrument the UI rebuilt for a preset that changes the
@@ -961,7 +1443,7 @@ impl SamplerBackend {
         };
         self.fading = Some(std::mem::replace(&mut self.piano, fresh));
         self.fade_frames_left = INSTRUMENT_FADE_FRAMES;
-        // The rebuild carries the preset's own voicing and room; re-apply the
+        // The rebuild carries the preset's own voicing; re-apply the
         // published sound so anything the user nudged off the preset survives.
         // Revision zero means nothing has been published at all — the cell is
         // still all zeros, and writing that over a built instrument would
@@ -990,7 +1472,8 @@ impl SamplerBackend {
         self.peak.store(peak.min(16.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// Mix the outgoing instrument's tail under the new one.
+    /// Mix the outgoing instrument's tail under the new one, on the
+    /// instrument bus ahead of the room.
     fn render_fade(&mut self, count: usize) {
         let Some(mut fading) = self.fading.take() else {
             return;
@@ -1000,8 +1483,8 @@ impl SamplerBackend {
         for index in 0..count {
             let left = self.fade_frames_left.saturating_sub(index as u32) as f32;
             let gain = (left / span).clamp(0.0, 1.0);
-            self.scratch_left[index] += self.fade_left[index] * gain;
-            self.scratch_right[index] += self.fade_right[index] * gain;
+            self.piano_left[index] += self.fade_left[index] * gain;
+            self.piano_right[index] += self.fade_right[index] * gain;
         }
         self.fade_frames_left = self.fade_frames_left.saturating_sub(count as u32);
         if self.fade_frames_left == 0 {
@@ -1058,6 +1541,9 @@ impl SynthBackend for SamplerBackend {
             SynthEventKind::AllNotesOff { .. } | SynthEventKind::TransportReset { .. } => {
                 self.piano_keys_len = 0;
                 self.queue_piano(PianoEvent::AllSoundOff);
+                if matches!(event.kind, SynthEventKind::TransportReset { .. }) {
+                    self.room.fade_out();
+                }
                 self.queue(SamplerEvent::AllNotesOff)
             }
             SynthEventKind::Pedal { value, .. } => {
@@ -1098,11 +1584,30 @@ impl SynthBackend for SamplerBackend {
                 &mut self.piano_left[..count],
                 &mut self.piano_right[..count],
             );
+            if self.fading.is_some() {
+                for index in 0..count {
+                    let gain = 1.0 - self.fade_frames_left.saturating_sub(index as u32) as f32 / INSTRUMENT_FADE_FRAMES as f32;
+                    self.piano_left[index] *= gain;
+                    self.piano_right[index] *= gain;
+                }
+            }
+            self.render_fade(count);
+            // The instrument bus: the limiter, the room (which hears the
+            // instruments, not the metronome), then the knee, room on or off,
+            // so a transient's first millisecond past the limiter and a long
+            // tail under a loud chord bend toward full scale instead of
+            // clipping.
+            for (left, right) in self.piano_left[..count].iter_mut().zip(self.piano_right[..count].iter_mut()) {
+                (*left, *right) = self.limiter.process(*left, *right);
+            }
+            self.room.process(&mut self.piano_left[..count], &mut self.piano_right[..count]);
+            for sample in self.piano_left[..count].iter_mut().chain(self.piano_right[..count].iter_mut()) {
+                *sample = soft_clip(*sample);
+            }
             for index in 0..count {
                 self.scratch_left[index] += self.piano_left[index];
                 self.scratch_right[index] += self.piano_right[index];
             }
-            self.render_fade(count);
             self.meter(count);
             if first {
                 self.pending_len = 0;
@@ -1410,12 +1915,12 @@ mod tests {
                 bridge.rebuild_plan(document.score(), 108.0, false);
             }
             audio_block(&mut audio, &mut output, n);
-            bridge.service();
+            let _ = bridge.service();
             n += 1;
         }
         for _ in 0..4 {
             audio_block(&mut audio, &mut output, n);
-            bridge.service();
+            let _ = bridge.service();
             n += 1;
         }
 
@@ -1430,7 +1935,7 @@ mod tests {
         // The replaced engine came back and was dropped here, plan and all.
         assert_eq!(Arc::strong_count(&first_plan), 1, "the old engine was not handed back");
     }
-    use makepad_piano_model::{Piano, PIANO_PRESETS};
+    use makepad_piano_model::PIANO_PRESETS;
     use makepad_score::model::{Id, Measure};
     use makepad_score_play::PlaybackState;
 
@@ -1487,6 +1992,159 @@ mod tests {
         assert_eq!(plan.end_sample(), plan.score_quarter_to_sample(end_quarter));
     }
 
+    fn piano(voice: &Voice) -> &PianoEngine {
+        let Voice::Piano(piano) = voice else { panic!("expected our piano") };
+        piano
+    }
+
+    #[test]
+    fn every_piano_event_maps_to_channel_zero_midi() {
+        let single = |event, status, data1, data2| {
+            assert_eq!(midi_for(event), [Some(MidiMessage { status, data1, data2 }), None, None]);
+        };
+        single(PianoEvent::NoteOn { key: 60, velocity: 96 }, 0x90, 60, 96);
+        single(PianoEvent::NoteOn { key: 60, velocity: 0 }, 0x90, 60, 0);
+        single(PianoEvent::NoteOff { key: 60 }, 0x80, 60, 0);
+        for (value, expected) in [(0.0, 0), (0.5, 64), (1.0, 127), (-1.0, 0), (2.0, 127)] {
+            single(PianoEvent::Sustain { value }, 0xb0, 64, expected);
+        }
+        for on in [false, true] {
+            single(PianoEvent::SoftPedal { on }, 0xb0, 67, if on { 127 } else { 0 });
+            single(PianoEvent::Sostenuto { on }, 0xb0, 66, if on { 127 } else { 0 });
+        }
+        assert_eq!(midi_for(PianoEvent::AllSoundOff), [
+            Some(MidiMessage { status: 0xb0, data1: 64, data2: 0 }),
+            Some(MidiMessage { status: 0xb0, data1: 120, data2: 0 }),
+            Some(MidiMessage { status: 0xb0, data1: 123, data2: 0 }),
+        ]);
+    }
+
+    /// A warmed-up instrument plays exactly as it was built: the note it
+    /// played on its building thread leaves no sound behind and no pedal
+    /// down (a silent block, then a note let go after 20 ms).
+    #[test]
+    fn a_warmed_up_instrument_plays_as_built() {
+        for engine in [ScoreEngine::Waveguide, ScoreEngine::Physical] {
+            let play = |voice: &mut Voice| -> Vec<f32> {
+                let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
+                let mut out = Vec::new();
+                for block in 0..12 {
+                    let events: &[PianoTimedEvent] = match block {
+                        1 => &[PianoTimedEvent { offset: 0, event: PianoEvent::NoteOn { key: 67, velocity: 80 } }],
+                        5 => &[PianoTimedEvent { offset: 0, event: PianoEvent::NoteOff { key: 67 } }],
+                        _ => &[],
+                    };
+                    voice.process(events, &mut left, &mut right);
+                    out.extend(left.iter().chain(&right));
+                }
+                out
+            };
+            let warm = play(&mut build_engine(engine, PLAN_RATE as f32, &PIANO_PRESETS[0]));
+            let cold = play(&mut construct_engine(engine, PLAN_RATE as f32, &PIANO_PRESETS[0]));
+            let first = warm.iter().zip(&cold).position(|(a, b)| a != b);
+            assert!(first.is_none(), "{engine:?} after its warm-up differs from one built cold from sample {first:?}");
+        }
+    }
+
+    /// The waveguide grand is a voice like the others: built by the same
+    /// function, played by the same events, shaped by the same two controls.
+    #[test]
+    fn the_waveguide_grand_plays_the_same_events_and_controls() {
+        let mut voice = build_engine(ScoreEngine::Waveguide, PLAN_RATE as f32, &PIANO_PRESETS[0]);
+        assert!(matches!(&*voice, Voice::Waveguide(_)));
+        let level = |voice: &mut Voice, events: &[PianoTimedEvent], blocks: usize| {
+            let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
+            let mut sum = 0.0f64;
+            for block in 0..blocks {
+                voice.process(if block == 0 { events } else { &[] }, &mut left, &mut right);
+                assert!(left.iter().chain(&right).all(|x| x.is_finite()));
+                sum += left.iter().chain(&right).map(|&x| (x as f64).powi(2)).sum::<f64>();
+            }
+            (sum / (blocks * 512) as f64).sqrt()
+        };
+        let on = |key| PianoTimedEvent { offset: 0, event: PianoEvent::NoteOn { key, velocity: 100 } };
+        let plain = level(&mut voice, &[on(60)], 40);
+        assert!(plain > 0.005, "middle C sounds: {plain}");
+        // More events than one conversion buffer holds: none is lost.
+        let mut burst = vec![PianoTimedEvent { offset: 0, event: PianoEvent::AllSoundOff }];
+        burst.extend((0..70).map(|_| PianoTimedEvent { offset: 0, event: PianoEvent::Sustain { value: 1.0 } }));
+        burst.push(on(72));
+        level(&mut voice, &burst, 1);
+        assert!(level(&mut voice, &[], 20) > 0.002, "the note after the burst sounds");
+        // Master gain reaches it.
+        level(&mut voice, &[PianoTimedEvent { offset: 0, event: PianoEvent::AllSoundOff }], 1);
+        let mut sound = SoundSettings::default();
+        sound.master_gain = 0.25;
+        voice.apply_sound(&sound);
+        let quiet = level(&mut voice, &[PianoTimedEvent { offset: 0, event: PianoEvent::Sustain { value: 0.0 } }, on(60)], 40);
+        assert!(quiet < 0.5 * plain && quiet > 0.1 * plain, "a quarter of the gain: {quiet} vs {plain}");
+    }
+
+    /// A long build is a request like an Audio Unit's: it reports when its
+    /// instrument is handed over, and a newer request supersedes it.
+    #[test]
+    fn a_pool_built_instrument_reports_once_it_is_handed_over() {
+        let document = crate::ScoreDocument::demo().unwrap();
+        let mut bridge = PlaybackBridge::new(document.score(), 108.0, false);
+        // Each of our engines takes this path, the modal piano included.
+        for engine in [ScoreEngine::Waveguide, ScoreEngine::Physical, ScoreEngine::Learned, ScoreEngine::Hybrid] {
+            bridge.rebuild_instrument_on_pool(engine, 0, &PIANO_PRESETS[0]);
+            let built = bridge.pending_instrument.as_deref().map(|voice| match voice {
+                Voice::Piano(piano) => piano.kind() == engine.kind(),
+                Voice::Waveguide(_) => engine == ScoreEngine::Waveguide,
+                Voice::AudioUnit(_) => false,
+            });
+            assert_eq!(built, Some(true), "{engine:?} builds its own voice");
+            assert_eq!(bridge.service_instrument(), Some(InstrumentLoad::Built(engine, 0)));
+            assert_eq!(bridge.service_instrument(), None, "reported once");
+        }
+        // Superseded before it is serviced: only the newer one is reported.
+        bridge.rebuild_instrument_on_pool(ScoreEngine::Waveguide, 0, &PIANO_PRESETS[0]);
+        bridge.rebuild_instrument(ScoreEngine::Physical, &PIANO_PRESETS[0]);
+        assert_eq!(bridge.service_instrument(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_system_audio_unit_plays_and_releases_piano_events() {
+        let index = audio_units().iter().position(|entry| entry.info.description == makepad_audio_unit_host::ComponentDescription::DLS_SYNTH)
+            .expect("the General MIDI synth ships with macOS");
+        let mut sound = SoundSettings::default();
+        sound.master_gain = 0.5;
+        // One note, then 1.5 s later (with or without all sound off) the
+        // loudest sample of the last block. The voices stop at once; the
+        // synth's own reverb tail needs that long to fall well below them.
+        let play = |release: bool| -> (f32, f32) {
+            let mut voice = build_audio_unit(index, PLAN_RATE as f32).expect("load the system synth");
+            voice.apply_sound(&sound);
+            let Voice::AudioUnit(unit) = &*voice else { panic!("expected an Audio Unit") };
+            assert_eq!(unit.gain, 0.5);
+            let (mut left, mut right) = ([0.0; SCRATCH_FRAMES], [0.0; SCRATCH_FRAMES]);
+            let block_peak = |left: &[f32], right: &[f32]| {
+                assert!(left.iter().chain(right).all(|sample| sample.is_finite()), "the synth output must be finite");
+                left.iter().chain(right).fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+            };
+            voice.process(&[PianoTimedEvent { offset: 0, event: PianoEvent::NoteOn { key: 60, velocity: 100 } }], &mut left, &mut right);
+            let mut note = block_peak(&left, &right);
+            for _ in 0..4 {
+                voice.process(&[], &mut left, &mut right);
+                note = note.max(block_peak(&left, &right));
+            }
+            let events: &[PianoTimedEvent] = if release { &[PianoTimedEvent { offset: 0, event: PianoEvent::AllSoundOff }] } else { &[] };
+            voice.process(events, &mut left, &mut right);
+            for _ in 0..PLAN_RATE as usize * 3 / SCRATCH_FRAMES / 2 {
+                voice.process(&[], &mut left, &mut right);
+            }
+            (note, block_peak(&left, &right))
+        };
+        let (note, held) = play(false);
+        let (_, released) = play(true);
+        assert!(note > 1.0e-3, "the synth must sound the note: {note}");
+        // A held note keeps its level; a released one is down to the reverb
+        // tail, about 20 dB under it on the system synth.
+        assert!(released < 0.25 * held, "all sound off must release the synth: {released} against {held} held");
+    }
+
     fn test_backend(sound: Arc<SharedSound>) -> SamplerBackend {
         SamplerBackend::new(
             PLAN_RATE as f32,
@@ -1535,20 +2193,23 @@ mod tests {
         let adopted = backend.sound_revision;
         assert!(adopted > 0);
         // Not just adopted: actually applied to the instrument.
-        assert_eq!(backend.piano.voicing(), wanted.voicing);
-        assert_eq!(backend.piano.reverb_mix(), wanted.room.mix);
-        assert_eq!(backend.piano.perspective(), wanted.room.perspective);
-        assert_eq!(backend.piano.early_reflection_level(), wanted.early_reflections);
-        assert_eq!(backend.piano.eq_shelf(), (wanted.eq_shelf_db, wanted.eq_shelf_hz));
+        assert_eq!(piano(&backend.piano).voicing(), wanted.voicing);
+        // The room is the bus's, and the instrument under it stays dry.
+        assert_eq!(backend.room.mix, wanted.room.mix);
+        assert_eq!(backend.room.reverb.params(), wanted.room.preset.params());
+        assert_eq!(piano(&backend.piano).reverb_mix(), 0.0);
+        assert_eq!(piano(&backend.piano).perspective(), wanted.room.perspective);
+        assert_eq!(piano(&backend.piano).early_reflection_level(), wanted.early_reflections);
+        assert_eq!(piano(&backend.piano).eq_shelf(), (wanted.eq_shelf_db, wanted.eq_shelf_hz));
         assert_eq!(
-            backend.piano.eq_bell(),
+            piano(&backend.piano).eq_bell(),
             (wanted.eq_bell_hz, wanted.eq_bell_db, wanted.eq_bell_q)
         );
         assert_eq!(
-            backend.piano.tone(),
+            piano(&backend.piano).tone(),
             (wanted.tone_bass_db, wanted.tone_treble_db)
         );
-        assert_eq!(backend.piano.master_gain(), wanted.master_gain);
+        assert_eq!(piano(&backend.piano).master_gain(), wanted.master_gain);
 
         // No further work while nothing moves.
         backend.render_range(&mut channels, 0..64);
@@ -1556,7 +2217,7 @@ mod tests {
         shared.publish(SoundSettings::default());
         backend.render_range(&mut channels, 0..64);
         assert!(backend.sound_revision > adopted);
-        assert_eq!(backend.piano.voicing(), SoundSettings::default().voicing);
+        assert_eq!(piano(&backend.piano).voicing(), SoundSettings::default().voicing);
     }
 
     /// A rebuild preset is a different instrument. It is built on this thread,
@@ -1582,17 +2243,15 @@ mod tests {
         );
         shared.publish(electric);
         assert!(handoff
-            .offer(Box::new(build_engine(
+            .offer(build_engine(
                 ScoreEngine::Learned,
                 PLAN_RATE as f32,
                 &PIANO_PRESETS[0],
-            )))
+            ))
             .is_none());
         // A second offer while the first is in flight comes straight back.
         assert!(handoff
-            .offer(Box::new(PianoEngine::Physical(Box::new(Piano::new(
-                PLAN_RATE as f32,
-            )))))
+            .offer(build_engine(ScoreEngine::Physical, PLAN_RATE as f32, &PIANO_PRESETS[0]))
             .is_some());
 
         let mut left = vec![0.0_f32; 512];
@@ -1604,8 +2263,10 @@ mod tests {
         // The swap happened and the outgoing instrument is fading, not gone.
         assert!(backend.fading.is_some());
         assert!(handoff.reclaim().is_none(), "nothing is handed back mid-fade");
-        assert_eq!(backend.piano.kind(), makepad_piano_model::learned::EngineKind::Learned);
-        assert_eq!(backend.piano.reverb_mix(), electric.room.mix);
+        assert_eq!(piano(&backend.piano).kind(), makepad_piano_model::learned::EngineKind::Learned);
+        // It arrives dry, in the room the published sound sets.
+        assert_eq!(piano(&backend.piano).reverb_mix(), 0.0);
+        assert_eq!(backend.room.mix, electric.room.mix);
 
         // Render the fade out.
         for _ in 0..8 {
@@ -1665,9 +2326,7 @@ mod tests {
         assert!(f32::from_bits(meter.load(Ordering::Relaxed)) > 1.0e-4);
 
         assert!(handoff
-            .offer(Box::new(PianoEngine::Physical(Box::new(Piano::new(
-                PLAN_RATE as f32,
-            )))))
+            .offer(build_engine(ScoreEngine::Physical, PLAN_RATE as f32, &PIANO_PRESETS[0]))
             .is_none());
         left.fill(0.0);
         right.fill(0.0);
@@ -1683,6 +2342,227 @@ mod tests {
         // And the first sample of the block is continuous with the last of the
         // previous one: no step, which is what a click is.
         assert!(left[0].abs() < 1.0, "the swap produced a full-scale step");
+    }
+
+    /// The Sound panel's room and Reverb amount reach what the instrument
+    /// puts out, whichever instrument it is: one short note, released, and
+    /// the energy of its tail (0.15 to 0.35 s after the release) rendered
+    /// through the audio thread's own path with the panel's settings
+    /// published as the UI publishes them. Checked on the waveguide grand and
+    /// on the modal piano.
+    #[test]
+    fn the_panel_room_reaches_the_tail_of_every_instrument() {
+        const RATE: usize = PLAN_RATE as usize;
+        const BLOCK: usize = 512;
+        let timing = SynthEventTiming {
+            block_offset: 0,
+            device_sample: 0,
+            timeline_sample: Some(0),
+            timeline_rate_q32: 1 << 32,
+        };
+        let event = |kind| SynthEvent { source: makepad_score_play::EventSource::Playback, kind };
+        let db = |over: f64, under: f64| 10.0 * (over / under.max(1e-30)).log10();
+        let mut heard = Vec::new();
+        // The backend starts on the modal piano; the waveguide grand then
+        // takes its place, the way an instrument change hands it over.
+        let shared = Arc::new(SharedSound::default());
+        let mut backend = test_backend(shared.clone());
+        for engine in [ScoreEngine::Physical, ScoreEngine::Waveguide] {
+            if engine == ScoreEngine::Waveguide {
+                backend.piano = build_engine(engine, PLAN_RATE as f32, &PIANO_PRESETS[0]);
+            }
+            // (energy while held, energy of the tail) of one note.
+            let mut note = |room: ReverbPreset, amount: f32| -> (f64, f64) {
+                let (mut left, mut right) = (vec![0.0_f32; BLOCK], vec![0.0_f32; BLOCK]);
+                // A jump empties the room of the last note's tail.
+                backend.dispatch(event(SynthEventKind::TransportReset { crossfade_frames: 0 }), timing);
+                for _ in 0..RATE / 20 / BLOCK + 1 {
+                    let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+                    backend.render_range(&mut channels, 0..BLOCK);
+                }
+                // What the panel's two room controls do to the settings.
+                let mut sound = SoundSettings { engine, ..SoundSettings::default() };
+                sound.room.preset = room;
+                crate::sound::SoundParam::Reverb.set(&mut sound, amount);
+                shared.publish(sound);
+                backend.dispatch(event(SynthEventKind::NoteOn { note_id: 1, key: 60, velocity: 52_000, part: 0, attack: 32_768 }), timing);
+                let (mut held, mut tail) = (0.0_f64, 0.0_f64);
+                // 50 ms held, then 0.35 s after the release.
+                let release = RATE * 5 / 100 / BLOCK;
+                for block in 0..(RATE * 40 / 100) / BLOCK {
+                    if block == release {
+                        backend.dispatch(event(SynthEventKind::NoteOff { note_id: 1, part: 0, release: 32_768 }), timing);
+                    }
+                    left.fill(0.0);
+                    right.fill(0.0);
+                    let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+                    backend.render_range(&mut channels, 0..BLOCK);
+                    assert!(left.iter().chain(&right).all(|x| x.is_finite()));
+                    let energy = left.iter().chain(&right).map(|&x| (x as f64).powi(2)).sum::<f64>();
+                    if block < release {
+                        held += energy;
+                    } else if block * BLOCK >= RATE * 20 / 100 {
+                        tail += energy;
+                    }
+                }
+                (held, tail)
+            };
+            let (held, dry) = note(ReverbPreset::Cathedral, 0.0);
+            let (_, cathedral) = note(ReverbPreset::Cathedral, 0.3);
+            let (_, practice) = note(ReverbPreset::PracticeRoom, 0.3);
+            eprintln!(
+                "{engine:?}: tail dry {:+.1} dB re the held note; at 30% cathedral {:+.1} dB, practice room {:+.1} dB",
+                db(dry, held),
+                db(cathedral, held),
+                db(practice, held)
+            );
+            heard.push((engine, dry, cathedral, practice));
+        }
+        for (engine, dry, cathedral, practice) in heard {
+            assert!(dry > 0.0, "{engine:?}: the released note leaves something to hear");
+            assert!(
+                db(cathedral, dry) > 10.0,
+                "{engine:?}: Reverb at 30% must add a tail ({:+.1} dB over dry)",
+                db(cathedral, dry)
+            );
+            assert!(
+                db(cathedral, practice) > 6.0,
+                "{engine:?}: the room choice must reach the tail (cathedral {:+.1} dB over the practice room)",
+                db(cathedral, practice)
+            );
+        }
+    }
+
+    /// A stop leaves the room's tail ringing, the way a hall does, and a jump
+    /// fades it out within a few blocks; neither cuts it. A chord in a wet
+    /// cathedral, stopped at 0.3 s and jumped at 0.6 s: after the stop the
+    /// tail still sounds (0.05 to 0.15 s after), after the jump nothing does
+    /// (0.05 to 0.15 s after), and at neither does the output's sharpness
+    /// (its largest second difference) rise above what the 50 ms before had.
+    /// On the waveguide grand, whose own stop is a fade.
+    #[test]
+    fn a_wet_room_rings_out_on_stop_and_fades_on_a_jump() {
+        const RATE: usize = PLAN_RATE as usize;
+        const BLOCK: usize = 512;
+        let timing = SynthEventTiming { block_offset: 0, device_sample: 0, timeline_sample: Some(0), timeline_rate_q32: 1 << 32 };
+        let event = |kind| SynthEvent { source: makepad_score_play::EventSource::Playback, kind };
+        let shared = Arc::new(SharedSound::default());
+        let mut sound = SoundSettings { engine: ScoreEngine::Waveguide, ..SoundSettings::default() };
+        sound.room.preset = ReverbPreset::Cathedral;
+        crate::sound::SoundParam::Reverb.set(&mut sound, 0.5);
+        shared.publish(sound);
+        let mut backend = test_backend(shared);
+        backend.piano = build_engine(ScoreEngine::Waveguide, PLAN_RATE as f32, &PIANO_PRESETS[0]);
+        for (id, key) in [48, 60, 64, 67, 72].into_iter().enumerate() {
+            backend.dispatch(event(SynthEventKind::NoteOn { note_id: id as u64 + 1, key, velocity: 58_000, part: 0, attack: 32_768 }), timing);
+        }
+        let (stop, jump, end) = (RATE * 3 / 10 / BLOCK, RATE * 6 / 10 / BLOCK, RATE * 9 / 10 / BLOCK);
+        let mut out = Vec::new();
+        let (mut left, mut right) = (vec![0.0_f32; BLOCK], vec![0.0_f32; BLOCK]);
+        for block in 0..end {
+            if block == stop {
+                backend.dispatch(event(SynthEventKind::AllNotesOff { source: makepad_score_play::EventSource::Playback, release_frames: 0 }), timing);
+            }
+            if block == jump {
+                backend.dispatch(event(SynthEventKind::TransportReset { crossfade_frames: 0 }), timing);
+            }
+            left.fill(0.0);
+            right.fill(0.0);
+            let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+            backend.render_range(&mut channels, 0..BLOCK);
+            out.extend(left.iter().zip(&right).map(|(&l, &r)| [l, r]));
+        }
+        let span = |from: usize, secs: f64| from * BLOCK..from * BLOCK + (secs * RATE as f64) as usize;
+        let energy = |range: std::ops::Range<usize>| out[range].iter().map(|f| f.iter().map(|&x| (x as f64).powi(2)).sum::<f64>()).sum::<f64>();
+        let sharp = |range: std::ops::Range<usize>| (range.start.max(2)..range.end).map(|i| (0..2).map(|c| (out[i][c] - 2.0 * out[i - 1][c] + out[i - 2][c]).abs()).fold(0.0_f32, f32::max)).fold(0.0_f32, f32::max);
+        let before = |at: usize| (at * BLOCK - RATE / 20)..at * BLOCK;
+        let after = |at: usize, from: f64, to: f64| at * BLOCK + (from * RATE as f64) as usize..at * BLOCK + (to * RATE as f64) as usize;
+        let held = energy(before(stop));
+        let ringing = energy(after(stop, 0.05, 0.15));
+        let left_over = energy(after(jump, 0.05, 0.15));
+        let db = |e: f64| 10.0 * (e / held).max(1e-30).log10();
+        eprintln!(
+            "stop: tail {:+.1} dB re the chord, sharpness {:.4} after / {:.4} before; jump: {:+.1} dB left, sharpness {:.4} / {:.4}",
+            db(ringing),
+            sharp(span(stop, 0.02)),
+            sharp(before(stop)),
+            db(left_over),
+            sharp(span(jump, 0.04)),
+            sharp(before(jump))
+        );
+        assert!(db(ringing) > -30.0, "a stop must leave the room's tail ringing ({:+.1} dB re the chord)", db(ringing));
+        assert!(sharp(span(stop, 0.02)) <= sharp(before(stop)), "a stop clicks");
+        assert!(db(left_over) < -120.0, "a jump must take the old tail away ({:+.1} dB left)", db(left_over));
+        assert!(sharp(span(jump, 0.04)) <= sharp(before(jump)), "a jump clicks");
+    }
+
+    /// The engines sit side by side on Score's bus. Each is calibrated on
+    /// its own terms: the waveguide grand keeps 10.7 dB of headroom under its
+    /// limiter for a touch that spans 18 dB, while the Concert Grand's own
+    /// limiter rides its loud end. Through the bus, a mezzo-forte chord of the
+    /// waveguide sits some 5.6 dB under the Concert Grand's (it was 11.6), a
+    /// v110 chord of it leaves no hotter than the Concert Grand's leaves that
+    /// grand's own limiter, room on or off, and a v127 one never reaches full
+    /// scale. The bus does not touch the Concert Grand's mezzo forte.
+    #[test]
+    fn the_engines_sit_side_by_side_on_the_bus() {
+        const BLOCK: usize = 512;
+        const KEYS: [u8; 7] = [48, 52, 55, 60, 64, 67, 72];
+        let blocks = PLAN_RATE as usize * 3 / 5 / BLOCK;
+        let timing = SynthEventTiming { block_offset: 0, device_sample: 0, timeline_sample: Some(0), timeline_rate_q32: 1 << 32 };
+        let preset = |engine| &PIANO_PRESETS[crate::sound::default_preset_index(engine)];
+        // Through the bus: the backend Score plays with.
+        let bus = |engine: ScoreEngine, velocity: u8, mix: f32| -> Vec<f32> {
+            let shared = Arc::new(SharedSound::default());
+            let mut sound = SoundSettings { engine, ..SoundSettings::default() };
+            sound.room.mix = mix;
+            shared.publish(sound);
+            let mut backend = test_backend(shared);
+            backend.piano = build_engine(engine, PLAN_RATE as f32, preset(engine));
+            let velocity = (velocity as u32 * 65_535).div_ceil(127) as u16;
+            for (id, key) in KEYS.into_iter().enumerate() {
+                let kind = SynthEventKind::NoteOn { note_id: id as u64 + 1, key, velocity, part: 0, attack: 32_768 };
+                backend.dispatch(SynthEvent { source: makepad_score_play::EventSource::Playback, kind }, timing);
+            }
+            let (mut left, mut right, mut out) = (vec![0.0_f32; BLOCK], vec![0.0_f32; BLOCK], Vec::new());
+            for _ in 0..blocks {
+                left.fill(0.0);
+                right.fill(0.0);
+                backend.render_range(&mut [&mut left[..], &mut right[..]], 0..BLOCK);
+                out.extend(left.iter().chain(&right));
+            }
+            out
+        };
+        // The instrument alone, as its own limiter leaves it.
+        let alone = |engine: ScoreEngine, velocity: u8| -> Vec<f32> {
+            let mut voice = build_engine(engine, PLAN_RATE as f32, preset(engine));
+            voice.apply_sound(&SoundSettings { engine, ..SoundSettings::default() });
+            let events: Vec<PianoTimedEvent> = KEYS.iter().map(|&key| PianoTimedEvent { offset: 0, event: PianoEvent::NoteOn { key, velocity } }).collect();
+            let (mut left, mut right, mut out) = (vec![0.0_f32; BLOCK], vec![0.0_f32; BLOCK], Vec::new());
+            for block in 0..blocks {
+                voice.process(if block == 0 { &events } else { &[] }, &mut left, &mut right);
+                out.extend(left.iter().chain(&right));
+            }
+            out
+        };
+        let rms = |x: &[f32]| 10.0 * (x.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / x.len() as f64).log10();
+        let peak = |x: &[f32]| 20.0 * x.iter().fold(0.0_f32, |m, &v| m.max(v.abs())).log10();
+        let over = |x: &[f32]| 100.0 * x.iter().filter(|v| v.abs() > 0.78).count() as f64 / x.len() as f64;
+        let grand_mf = bus(ScoreEngine::Physical, 67, 0.0);
+        let mf = rms(&bus(ScoreEngine::Waveguide, 67, 0.0)) - rms(&grand_mf);
+        let grand = alone(ScoreEngine::Physical, 110);
+        let (loud, wet, loudest) = (bus(ScoreEngine::Waveguide, 110, 0.0), bus(ScoreEngine::Waveguide, 110, 0.25), bus(ScoreEngine::Waveguide, 127, 0.0));
+        let untouched = rms(&grand_mf) - rms(&alone(ScoreEngine::Physical, 67));
+        eprintln!(
+            "v67 waveguide {mf:+.2} dB re the Concert Grand (bus changes the grand's by {untouched:+.3} dB); v110 peak / over the knee: Concert Grand alone {:+.2} dBFS {:.3} %, waveguide room off {:+.2} {:.3} %, room on {:+.2} {:.3} %; v127 room off {:+.2} {:.3} %",
+            peak(&grand), over(&grand), peak(&loud), over(&loud), peak(&wet), over(&wet), peak(&loudest), over(&loudest)
+        );
+        assert!((-8.0..-3.0).contains(&mf), "a v67 chord of the waveguide grand sits {mf:+.1} dB against the Concert Grand's");
+        assert!(untouched.abs() < 0.1, "the bus moves the Concert Grand's v67 chord by {untouched:+.2} dB");
+        for (x, room) in [(&loud, "off"), (&wet, "on")] {
+            assert!(peak(x) <= peak(&grand) + 0.3 && over(x) <= over(&grand) + 0.01, "a v110 chord of the waveguide grand, room {room}: {:+.2} dBFS, {:.3} % over the knee; the Concert Grand's {:+.2} dBFS, {:.3} %", peak(x), over(x), peak(&grand), over(&grand));
+        }
+        assert!(peak(&loudest) < 0.0, "a v127 chord of the waveguide grand, room off, reaches {:+.2} dBFS", peak(&loudest));
     }
 
     #[test]

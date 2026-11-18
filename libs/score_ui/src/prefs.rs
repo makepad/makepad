@@ -83,6 +83,8 @@ impl Default for ScorePrefs {
 pub const ENGINE_PHYSICAL: &str = "physical";
 pub const ENGINE_HYBRID: &str = "hybrid";
 pub const ENGINE_LEARNED: &str = "learned";
+pub const ENGINE_AUDIO_UNIT: &str = "audio_unit";
+pub const ENGINE_WAVEGUIDE: &str = "waveguide";
 
 /// The stored engine name.
 pub fn engine_name(engine: ScoreEngine) -> &'static str {
@@ -90,6 +92,8 @@ pub fn engine_name(engine: ScoreEngine) -> &'static str {
         ScoreEngine::Physical => ENGINE_PHYSICAL,
         ScoreEngine::Hybrid => ENGINE_HYBRID,
         ScoreEngine::Learned => ENGINE_LEARNED,
+        ScoreEngine::AudioUnit => ENGINE_AUDIO_UNIT,
+        ScoreEngine::Waveguide => ENGINE_WAVEGUIDE,
     }
 }
 
@@ -102,6 +106,12 @@ impl ScorePrefs {
     /// longer see or change, so anything unrecognised — or no longer
     /// offered — falls back to the physical model.
     pub fn engine(&self) -> ScoreEngine {
+        if self.engine == ENGINE_AUDIO_UNIT {
+            return ScoreEngine::AudioUnit;
+        }
+        if self.engine == ENGINE_WAVEGUIDE {
+            return ScoreEngine::Waveguide;
+        }
         let stored = match self.engine.as_str() {
             ENGINE_LEARNED => ScoreEngine::Learned,
             ENGINE_HYBRID => ScoreEngine::Hybrid,
@@ -112,6 +122,15 @@ impl ScorePrefs {
         } else {
             ScoreEngine::Physical
         }
+    }
+
+    /// Resolve a stored name before constructing a voice. Missing plug-ins
+    /// fall back to the same physical piano as an unknown shipped name.
+    pub fn instrument_selection(&self) -> (ScoreEngine, usize) {
+        let engine = self.engine();
+        crate::sound::preset_index_by_name(engine, &self.instrument)
+            .map(|index| (engine, index))
+            .unwrap_or_else(|| (ScoreEngine::Physical, crate::sound::default_preset_index(ScoreEngine::Physical)))
     }
 
     /// The stored preferences, or the defaults when nothing is stored yet.
@@ -342,6 +361,31 @@ mod tests {
         let mut withdrawn = ScorePrefs::default();
         withdrawn.engine = ENGINE_HYBRID.to_string();
         assert_eq!(withdrawn.engine(), ScoreEngine::Physical);
+    }
+
+    #[test]
+    fn audio_unit_preferences_round_trip_and_missing_instruments_fall_back() {
+        let mut prefs = ScorePrefs {
+            engine: engine_name(ScoreEngine::AudioUnit).into(),
+            instrument: "Missing instrument for preferences test".into(),
+            ..ScorePrefs::default()
+        };
+        let text = prefs.to_text();
+        prefs.engine = text.lines().find_map(|line| line.strip_prefix("engine = ")).unwrap().into();
+        assert_eq!(prefs.engine(), ScoreEngine::AudioUnit);
+        assert_eq!(prefs.instrument_selection(), (ScoreEngine::Physical, crate::sound::default_preset_index(ScoreEngine::Physical)));
+        for (index, unit) in crate::sound::audio_units().iter().enumerate() {
+            prefs.instrument = unit.info.name.clone();
+            assert_eq!(prefs.instrument_selection(), (ScoreEngine::AudioUnit, index));
+        }
+    }
+
+    #[test]
+    fn the_waveguide_grand_survives_a_restart() {
+        let mut prefs = ScorePrefs { engine: engine_name(ScoreEngine::Waveguide).into(), instrument: "Waveguide Grand".into(), ..ScorePrefs::default() };
+        let text = prefs.to_text();
+        prefs.engine = text.lines().find_map(|line| line.strip_prefix("engine = ")).unwrap().into();
+        assert_eq!(prefs.instrument_selection(), (ScoreEngine::Waveguide, 0));
     }
 
     #[test]

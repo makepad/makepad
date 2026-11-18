@@ -46,5 +46,7 @@ pub mod tandem;
 pub mod svf;
 pub mod vehicle;
 pub mod wav;
+#[cfg(feature = "instruments")]
+pub mod waveguide_piano;
 
 pub use instrument::{Control, Instrument};

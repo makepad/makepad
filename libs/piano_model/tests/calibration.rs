@@ -183,11 +183,15 @@ fn invalid_tables_are_rejected_at_construction() {
 fn decay_changes_only_radii_including_sympathetic_modes() {
     let mut max_raw = 0.0f64;
     let mut max_calibrated = (0.0f64, String::new());
+    // Unison locking off: with it a partial's decay also decides how its
+    // unison shares the blow (keys::lock_unisons), by design.
+    let mut design = makepad_piano_model::DesignParams::default();
+    assert!(design.set("anti_lock", 0.0));
     for fs in SAMPLE_RATES {
-        let raw = Piano::new_uncalibrated(fs);
+        let raw = Piano::new_with_params(fs, &design);
         assert_eq!(raw.keys_debug().len(), 88);
         for decay_scale in [0.1, 0.25, 1.0, 4.0] {
-            let piano = Piano::new_with_calibration(fs, &[note(21, [0.0; 3], decay_scale)]);
+            let piano = Piano::new_with_params_calibrated(fs, &design, &[note(21, [0.0; 3], decay_scale)]);
             assert_eq!(piano.keys_debug().len(), 88);
             for (key, (a, b)) in (21..=108).zip(raw.keys_debug().iter().zip(piano.keys_debug())) {
                 assert_eq!(a.gin, b.gin);

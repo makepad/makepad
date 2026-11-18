@@ -6,7 +6,7 @@ use crate::{
     action::*,
     document::{DocumentError, DragTarget, NoteDrag, PartUiState, ScoreDocument},
     library::MusicLibrary,
-    playback::PlaybackBridge,
+    playback::{InstrumentLoad, PlaybackBridge},
     prefs::ScorePrefs,
     sound::{self, SoundParam, SoundSettings},
 };
@@ -331,7 +331,7 @@ pub struct ScoreAppState {
 impl Default for ScoreAppState {
     fn default() -> Self {
         let document = ScoreDocument::default();
-        let prefs = ScorePrefs::load();
+        let mut prefs = ScorePrefs::load();
         let mut practice = PracticeState::default();
         practice.metronome = prefs.metronome;
         practice.count_in = prefs.count_in;
@@ -342,10 +342,11 @@ impl Default for ScoreAppState {
         // A name that is no longer in the shipped list falls back rather than
         // resolving to whatever now sits at that index.
         let mut sound = SoundSettings::default();
-        sound.engine = prefs.engine();
-        if let Some(preset) = sound::preset_index_by_name(sound.engine, &prefs.instrument) {
-            sound.apply_preset(preset);
-        }
+        let (engine, preset) = prefs.instrument_selection();
+        sound.engine = engine;
+        sound.apply_preset(preset);
+        prefs.engine = crate::prefs::engine_name(engine).into();
+        prefs.instrument = sound::preset_name(engine, preset).into();
         // The two exposed controls outlive the session too; they are applied
         // after the instrument, which supplies the room they sit on.
         if let Some(room) = crate::prefs::reverb_preset_by_name(&prefs.room) {
@@ -617,11 +618,12 @@ impl ScoreAppState {
         self.instrument_rate = Some(rate);
         // The learned engine has to be built whatever the preset: unlike the
         // physical model there is no "default instrument" already standing.
-        if self.sound.engine != ScoreEngine::Physical {
-            self.playback.rebuild_instrument(
-                self.sound.engine,
-                sound::build_preset(self.sound.engine, self.sound.preset),
-            );
+        if self.sound.engine == ScoreEngine::AudioUnit {
+            self.playback.rebuild_audio_unit(self.sound.preset);
+            self.ui.status = format!("Loading {}…", sound::preset_name(self.sound.engine, self.sound.preset));
+        } else if self.sound.engine != ScoreEngine::Physical {
+            self.playback.rebuild_instrument_on_pool(self.sound.engine, self.sound.preset, sound::build_preset(self.sound.engine, self.sound.preset));
+            self.ui.status = format!("Loading {}…", sound::preset_name(self.sound.engine, self.sound.preset));
         }
     }
 
@@ -772,7 +774,26 @@ impl ScoreAppState {
         // Hand over any instrument a rebuild preset asked for and any held
         // transport command, and drop what the audio thread finished with.
         // A few relaxed loads when idle.
-        self.playback.service();
+        if let Some(outcome) = self.playback.service() {
+            match outcome {
+                InstrumentLoad::Loaded(index) => {
+                    self.ui.status = format!("{} · Audio Unit", sound::preset_name(ScoreEngine::AudioUnit, index));
+                }
+                InstrumentLoad::Built(engine, index) => {
+                    self.ui.status = format!("{} · {}", sound::preset_name(engine, index), sound::preset_description(engine, index));
+                }
+                InstrumentLoad::Unbuilt(engine, index, error) => {
+                    let name = sound::preset_name(engine, index);
+                    self.select_instrument(InstrumentId::Acoustic(sound::default_preset_index(ScoreEngine::Physical)));
+                    self.ui.status = format!("Could not build {name}: {error}");
+                }
+                InstrumentLoad::Failed(index, error) => {
+                    let name = sound::preset_name(ScoreEngine::AudioUnit, index);
+                    self.select_instrument(InstrumentId::Acoustic(sound::default_preset_index(ScoreEngine::Physical)));
+                    self.ui.status = format!("Could not load {name}: {error}");
+                }
+            }
+        }
         self.settle_instrument();
         self.settle_hover_audition();
         self.playback
@@ -942,6 +963,8 @@ impl ScoreAppState {
     pub fn selected_instrument(&self) -> InstrumentId {
         match self.sound.engine {
             ScoreEngine::Learned => InstrumentId::Electric(self.sound.preset),
+            ScoreEngine::AudioUnit => InstrumentId::AudioUnit(self.sound.preset),
+            ScoreEngine::Waveguide => InstrumentId::Waveguide(self.sound.preset),
             _ => InstrumentId::Acoustic(self.sound.preset),
         }
     }
@@ -949,7 +972,7 @@ impl ScoreAppState {
     /// Pick an instrument. Routing to the right synthesis is this function's
     /// job, not the reader's: that is the whole point of one flat list.
     pub fn select_instrument(&mut self, id: InstrumentId) {
-        let (InstrumentId::Acoustic(index) | InstrumentId::Electric(index)) = id;
+        let (InstrumentId::Acoustic(index) | InstrumentId::Electric(index) | InstrumentId::AudioUnit(index) | InstrumentId::Waveguide(index)) = id;
         let engine = id.engine();
         self.sound.engine = engine;
         self.sound.apply_preset(index);
@@ -960,18 +983,21 @@ impl ScoreAppState {
         // leaves the other one installed and still sounding, so the list moves
         // and the ear does not. The handoff is crossfaded, so switching
         // mid-phrase dissolves rather than cuts.
-        self.playback
-            .rebuild_instrument(engine, sound::build_preset(engine, index));
+        self.instrument_rate = self.playback.device_rate();
+        if engine == ScoreEngine::AudioUnit {
+            self.playback.rebuild_audio_unit(index);
+        } else {
+            // Every instrument of ours is long to build (88 key designs, a
+            // network to parse), so none is built on this thread.
+            self.playback.rebuild_instrument_on_pool(engine, index, sound::build_preset(engine, index));
+        }
         self.publish_sound();
         // The instrument is a choice, so it outlives the session.
         self.prefs.engine = crate::prefs::engine_name(engine).to_string();
         self.prefs.instrument = sound::preset_name(engine, index).to_string();
         self.prefs.save();
-        self.ui.status = format!(
-            "{} · {}",
-            sound::preset_name(engine, index),
-            sound::preset_description(engine, index)
-        );
+        // `service` replaces this with the instrument's own line once it sounds.
+        self.ui.status = format!("Loading {}…", sound::preset_name(engine, index));
     }
 
     /// Store the two exposed controls, so the room and the voicing the reader

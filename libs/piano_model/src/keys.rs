@@ -59,12 +59,25 @@ pub const TOP_DAMPED_KEY: u8 = 88; // E6 is the last dampered key here
 pub const PH_MODES: usize = 8;
 /// Transverse partials whose modal products drive the longitudinal bank.
 pub const PH_PARENTS: usize = 32;
+/// Most low partials per key whose aftersound has its own radiation taps
+/// (`spread_aftersound`).
+pub const SIDE_MODES: usize = 16;
+/// The taps reach up to this frequency: above it a partial's prompt is over
+/// in a few tenths of a second and its neighbours are close.
+const SIDE_HZ: f64 = 2000.0;
 
 pub struct KeyDesign {
     pub f0: f32,
     pub b_coeff: f32,
     pub n_strings: usize,
     pub n_osc: usize,
+    /// Mistuning of the anti-phase unison mode against the in-phase line,
+    /// as a fraction of the partial's frequency (0 on single strings).
+    pub unison_detune: f64,
+    /// params::anti_lock, read by `lock_unisons`.
+    pub anti_lock: f64,
+    /// params::after_spread, read by `spread_aftersound`.
+    pub after_spread: f64,
     pub modes_per_osc: usize,        // real modes per oscillator
     pub modes_padded: usize,         // padded to 8
     pub total_modes: usize,          // n_osc * modes_padded
@@ -81,6 +94,9 @@ pub struct KeyDesign {
     /// Hammer-speed compression exponent for this key (see params::vel_q_*):
     /// speed' = speed_pivot * (speed/speed_pivot)^speed_q at note-on.
     pub speed_q: f64,
+    /// Corner time of the mezzo-forte force pulse the voicing estimate
+    /// uses: the pulse spectrum is ~ 1 / (1 + (2 f pulse_tau)^2).
+    pub pulse_tau: f64,
     /// The mezzo-forte pivot the compression turns about (= DesignParams
     /// v_mf, the point the compass-evenness calibration was done at).
     pub speed_pivot: f64,
@@ -119,6 +135,16 @@ pub struct KeyDesign {
     /// Re(z) tap of the complex residue (see the normal-mode reduction in
     /// build_key and modal::run_modes_c); zero for uncoupled modes.
     pub gout_re: Vec<f32>,
+    /// Low partials (a multiple of 8) of the slots after VERT that carry
+    /// the taps below; 0 until `spread_aftersound` has run.
+    pub side_modes: usize,
+    /// The aftersound's own taps to the left and right outputs, complex
+    /// like gout/gout_re (`_im` reads Im(z), `_re` reads Re(z)): slot-major
+    /// over the slots after VERT, SIDE_MODES entries each.
+    pub side_l_im: Vec<f32>,
+    pub side_l_re: Vec<f32>,
+    pub side_r_im: Vec<f32>,
+    pub side_r_re: Vec<f32>,
     // Longitudinal / phantom bank (all length PH_MODES; ph_gain 0 = off):
     pub ph_cr: Vec<f32>,
     pub ph_ci: Vec<f32>,
@@ -167,34 +193,42 @@ fn kj(idx: usize, s: u32) -> f64 {
     (x >> 8) as f64 * (2.0 / 16_777_216.0) - 1.0
 }
 
-/// Minimal complex arithmetic for the construction-time eigen reduction.
-#[derive(Clone, Copy)]
-struct C64 {
-    re: f64,
-    im: f64,
+/// Minimal complex arithmetic for construction-time work (the eigen
+/// reduction here, the radiation response in soundboard.rs).
+#[derive(Clone, Copy, Debug)]
+pub struct C64 {
+    pub re: f64,
+    pub im: f64,
 }
 
 impl C64 {
-    fn new(re: f64, im: f64) -> Self {
+    pub(crate) fn new(re: f64, im: f64) -> Self {
         Self { re, im }
     }
-    fn add(self, o: Self) -> Self {
+    /// e^(j phase)
+    pub(crate) fn expj(phase: f64) -> Self {
+        Self::new(phase.cos(), phase.sin())
+    }
+    pub(crate) fn conj(self) -> Self {
+        Self::new(self.re, -self.im)
+    }
+    pub(crate) fn add(self, o: Self) -> Self {
         Self::new(self.re + o.re, self.im + o.im)
     }
-    fn sub(self, o: Self) -> Self {
+    pub(crate) fn sub(self, o: Self) -> Self {
         Self::new(self.re - o.re, self.im - o.im)
     }
-    fn mul(self, o: Self) -> Self {
+    pub(crate) fn mul(self, o: Self) -> Self {
         Self::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
     }
-    fn div(self, o: Self) -> Self {
+    pub(crate) fn div(self, o: Self) -> Self {
         let d = (o.re * o.re + o.im * o.im).max(1e-30);
         Self::new(
             (self.re * o.re + self.im * o.im) / d,
             (self.im * o.re - self.re * o.im) / d,
         )
     }
-    fn scale(self, k: f64) -> Self {
+    pub(crate) fn scale(self, k: f64) -> Self {
         Self::new(self.re * k, self.im * k)
     }
     fn csqrt(self) -> Self {
@@ -203,7 +237,7 @@ impl C64 {
         let im = ((r - self.re) * 0.5).max(0.0).sqrt();
         Self::new(re, if self.im >= 0.0 { im } else { -im })
     }
-    fn abs2(self) -> f64 {
+    pub(crate) fn abs2(self) -> f64 {
         self.re * self.re + self.im * self.im
     }
 }
@@ -254,6 +288,51 @@ fn measured_scale(key: u8) -> (f64, f64) {
     let lo = MEASURED_SCALE[i - 1];
     let w = (key - lo.0) as f64 / (hi.0 - lo.0) as f64;
     ((hi.1.ln() * w + lo.1.ln() * (1.0 - w)).exp(), lo.2 + (hi.2 - lo.2) * w)
+}
+
+/// The two polarisations of one string on the bridge, in the frame rotating
+/// at the partial: the eigenmodes of the complex-symmetric
+/// [[d_v, gx], [gx, d_h]], where d_v and d_h hold each polarisation's loss,
+/// bridge coupling and offset, `gv` is the vertical coupling with its
+/// reactive part, the horizontal one is `couple` of it, and
+/// gx = -cross sqrt(gv gh) is the bridge-rocking term. The cross term
+/// carries the admittance PHASE: a real cross term keeps the eigenvectors
+/// essentially real and the residues collapse back to sine-only, the
+/// invariant-mixture failure this reduction exists to fix.
+///
+/// Returns each mode's eigenvalue and residue, the vertical-dominated mode
+/// first. The residue is R = (v.e)(e.u)/(e.e) for the blow u = [1, drive]
+/// read as v = [1, rad]; it is 1 for the pure vertical mode.
+pub(crate) fn polarisation_pair(d_v: C64, d_h: C64, gv: C64, couple: f64, cross: f64, drive: f64, rad: f64) -> [(C64, C64); 2] {
+    let gh = gv.scale(couple);
+    let gx = gv.mul(gh).csqrt().scale(-cross);
+    let g_x = cross * (gv.re * (gv.re * couple)).sqrt();
+    let mean = d_v.add(d_h).scale(0.5);
+    let half = d_v.sub(d_h).scale(0.5);
+    let disc = half.mul(half).add(gx.mul(gx)).csqrt();
+    let mut lam = [mean.add(disc), mean.sub(disc)];
+    // order so slot 0 is the vertical-dominated mode
+    if lam[0].sub(d_v).abs2() > lam[1].sub(d_v).abs2() {
+        lam.swap(0, 1);
+    }
+    core::array::from_fn(|slot| {
+        let l = lam[slot];
+        // eigenvector e = [-Gx, l - d_v] resp. pure modes when the cross
+        // term vanishes
+        let (e0, e1) = if g_x < 1e-9 {
+            if slot == 0 {
+                (C64::new(1.0, 0.0), C64::new(0.0, 0.0))
+            } else {
+                (C64::new(0.0, 0.0), C64::new(1.0, 0.0))
+            }
+        } else {
+            (gx, l.sub(d_v))
+        };
+        let num_v = e0.add(e1.scale(rad));
+        let num_u = e0.add(e1.scale(drive));
+        let den = e0.mul(e0).add(e1.mul(e1));
+        (l, num_v.mul(num_u).div(den))
+    })
 }
 
 pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
@@ -483,6 +562,10 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     let mut gin = vec![0.0f32; total_modes];
     let mut gout = vec![0.0f32; total_modes];
     let mut gout_re = vec![0.0f32; total_modes];
+    // per partial: what the locked unison's drain adds to the prompt's
+    // output (see the unison drain below); applied after the voicing trim
+    let mut uni_lift = vec![1.0f64; modes_per_osc];
+    let uni_w = 1.0 - ((t - p.unison_top_t) / 0.03).clamp(0.0, 1.0);
 
     let dt = 1.0 / sample_rate;
     let cents = 5.7779e-4; // fractional frequency per cent, small-angle
@@ -518,20 +601,46 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         let g_bass = p.bass_couple * (p.bridge_couple_floor + (1.0 - p.bridge_couple_floor) * y_re.min(2.5))
             / (1.0 + (fn_hz / p.bass_couple_hz).powi(2))
             + p.bass_couple_lo / (1.0 + (fn_hz / p.bass_couple_lo_hz).powi(4));
-        let g_v = (1.0 - bass_w) * couple_amt * shape + bass_w * g_bass; // vertical coupling loss (1/s)
+        // Unison drain (Weinreich 1977). One string loses 2 f0 Z Re Y of
+        // its amplitude per second to a bridge of conductance Re Y: Z Re Y
+        // at each of its 2 f0 reflections there. The strings of a unison
+        // that move in phase push the bridge together, and that motion
+        // drains as many times faster as there are strings; it holds
+        // together while the strings' mistuning at this partial (rad/s) is
+        // under the drain itself. The mistuning grows with the partial
+        // number and the drain does not, so this is the fundamental's law:
+        // by the second partial about a third of it is left, by the third
+        // a tenth. The lattice above is a proxy for the conductance's
+        // peaks and valleys and its compass taper was set on the bass; in
+        // the plain-wire middle it left a fundamental that sits between
+        // two of its peaks with almost no bridge loss at all, 10-12 dB/s
+        // at F#4, A4 and C5 beside 23-33 at C4 and D#4, where the
+        // recordings' fundamentals fall 25, 28 and 34 dB/s at C4, A4 and C5
+        // and stand no plateau. A real board's modes overlap there, and
+        // its valleys do not reach down to nothing: the in-phase drain at
+        // the mean conductance (params::unison_y) is the least a locked
+        // partial loses.
+        let g_lat = couple_amt * shape;
+        let g_uni = if n_strings > 1 && uni_w > 0.0 {
+            let full = n_strings as f64 * 2.0 * f0 * z_char * p.unison_y;
+            let x = core::f64::consts::TAU * fn_hz * detune_cents * cents / full.max(1e-9);
+            uni_w * full / (1.0 + x.powi(4))
+        } else {
+            0.0
+        };
+        // the lattice alone: what the reactive pull below and the level
+        // the calibration's gains stand for were set with
+        let g_v_lat = (1.0 - bass_w) * g_lat + bass_w * g_bass;
+        let g_v = (1.0 - bass_w) * g_lat.max(g_uni) + bass_w * g_bass; // vertical coupling loss (1/s)
         let sig_intr = (1.0 - bass_w) * sig_intr + bass_w * sig_after;
         // reactive part: the bridge pulls a coupled partial's frequency.
         // Clamped to +-4 cents so the dispersion law stays recognisably a
         // piano's (strong drains on a real instrument wobble, they do not
         // transpose).
-        let pull = (g_v * (y_im / y_re.max(0.05)).clamp(-1.2, 1.2))
+        // The mean conductance is a resistance: only the lattice pulls.
+        let pull = (g_v_lat * (y_im / y_re.max(0.05)).clamp(-1.2, 1.2))
             .clamp(-fn_hz * 4.0 * cents * core::f64::consts::TAU, fn_hz * 4.0 * cents * core::f64::consts::TAU);
         let g_h = g_v * p.pol_couple;
-        // 2x2 eigen, rotating frame at fn_hz. The cross (bridge-rocking)
-        // term carries the admittance PHASE: a real cross term keeps the
-        // eigenvectors essentially real and the residues collapse back to
-        // sine-only — the invariant-mixture failure this reduction exists
-        // to fix.
         let d_v = C64::new(-sig_intr - g_v, -pull);
         let dw_pol = core::f64::consts::TAU * fn_hz * (pol_det_cents * cents);
         // pol_sig slows the aftersound only where the measured corpus
@@ -543,18 +652,15 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         // the wound-bass law's intrinsic loss already IS the aftersound
         let pol_sig_t = (1.0 - bass_w) * pol_sig_t + bass_w;
         let d_h = C64::new(-sig_intr * pol_sig_t - g_h, dw_pol);
-        let gv_c = C64::new(g_v, pull);
-        let gh_c = gv_c.scale(p.pol_couple);
-        let gx = gv_c.mul(gh_c).csqrt().scale(-p.pol_cross);
-        let g_x = p.pol_cross * (g_v * g_h).sqrt();
-        let mean = d_v.add(d_h).scale(0.5);
-        let half = d_v.sub(d_h).scale(0.5);
-        let disc = half.mul(half).add(gx.mul(gx)).csqrt();
-        let mut lam = [mean.add(disc), mean.sub(disc)];
-        // order so slot 0 is the vertical-dominated mode
-        if lam[0].sub(d_v).abs2() > lam[1].sub(d_v).abs2() {
-            lam.swap(0, 1);
-        }
+        // The polarisation leakage varies per partial on a real string
+        // (termination asymmetry is frequency-dependent): the reference
+        // fits show the prompt/aftersound amplitude split swinging tens of
+        // dB partial to partial, so the drive share carries a bounded
+        // deterministic jitter.
+        let mid_w = ((idx as f64 - 24.0) / 3.0).clamp(0.0, 1.0) * (1.0 - ((t - p.pol_drive_upper_t) / 0.12).clamp(0.0, 1.0));
+        let mid_mul = if n == 1 { 1.0 } else { 1.0 + mid_w * (p.pol_drive_upper - 1.0) / (1.0 + (fn_hz / p.pol_drive_upper_hz).powi(2)) };
+        let pd = ((1.0 - bass_w) * p.pol_drive + bass_w * p.bass_pol_drive) * (1.0 + 0.6 * kj(idx * 31 + n, 12)) * mid_mul;
+        let pair = polarisation_pair(d_v, d_h, C64::new(g_v, pull), p.pol_couple, p.pol_cross, pd, p.pol_rad);
         // strike comb (shared by all slots of this partial)
         let scomb = (nf * core::f64::consts::PI * strike_pos).sin();
         let filled = (scomb * scomb + p.comb_fill * p.comb_fill).sqrt();
@@ -562,34 +668,22 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         let sign = if n % 2 == 1 { 1.0 } else { -1.0 };
         let base = sign * tension * nf / (mu * length * length * fn_hz * sample_rate);
         let sigma_d = ((45.0 + fn_hz / 35.0) * damper_strength).min(2000.0);
-        for (slot, l) in lam.iter().enumerate() {
-            // eigenvector e = [-Gx, l - d_v] resp. pure modes when the
-            // cross term vanishes
-            let (e0, e1) = if g_x < 1e-9 {
-                if slot == 0 {
-                    (C64::new(1.0, 0.0), C64::new(0.0, 0.0))
-                } else {
-                    (C64::new(0.0, 0.0), C64::new(1.0, 0.0))
-                }
-            } else {
-                (gx, l.sub(d_v))
-            };
-            // residue R = (v.e)(e.u)/(e.e) with u = [1, pol_drive],
-            // v = [1, pol_rad]; equals 1 for the pure vertical mode.
-            // The polarisation leakage varies per partial on a real
-            // string (termination asymmetry is frequency-dependent):
-            // the reference fits show the prompt/aftersound amplitude
-            // split swinging tens of dB partial to partial, so the
-            // drive share carries a bounded deterministic jitter.
-            let pd = ((1.0 - bass_w) * p.pol_drive + bass_w * p.bass_pol_drive) * (1.0 + 0.6 * kj(idx * 31 + n, 12));
-            let num_v = e0.add(e1.scale(p.pol_rad));
-            let num_u = e0.add(e1.scale(pd));
-            let den = e0.mul(e0).add(e1.mul(e1));
-            let rres = num_v.mul(num_u).div(den);
+        for (slot, (l, rres)) in pair.iter().enumerate() {
             // floor 0.1/s (0.9 dB/s, the slowest aftersound the recordings
             // show): with the calibration's 0.1 decay exponent any slower
             // pole rounds to |C| >= 1 in f32 at 192 kHz
             let sig = (-l.re).clamp(0.1, 400.0);
+            if slot == 0 && g_v > g_v_lat {
+                // A bridge that takes the string's energy faster radiates
+                // it faster; it does not radiate less of it. The prompt
+                // keeps the energy it gave the first `window` seconds at
+                // the lattice's rate, which is the level the measured
+                // keys' gains were fitted to.
+                let window = crate::calibration::LEVEL_WINDOW.1;
+                let seen = |s: f64| (1.0 - (-2.0 * s * window).exp()) / (2.0 * s * window);
+                let before = (sig - (g_v - g_v_lat)).max(0.1);
+                uni_lift[n - 1] = (seen(before) / seen(sig)).sqrt();
+            }
             let r = (-sig * dt).exp();
             let th = core::f64::consts::TAU * fn_hz * dt + l.im * dt;
             let m = slot * modes_padded + (n - 1);
@@ -658,6 +752,10 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     }
     for g in gout_re.iter_mut() {
         *g *= trim;
+    }
+    for (m, lift) in uni_lift.iter().enumerate() {
+        gout[m] = (gout[m] as f64 * lift) as f32;
+        gout_re[m] = (gout_re[m] as f64 * lift) as f32;
     }
 
     // Phantom audibility is a WOUND-string phenomenon; on plain wire the
@@ -781,6 +879,14 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         b_coeff: b_coeff as f32,
         n_strings,
         n_osc,
+        unison_detune: if n_osc == 3 { detune_cents * cents } else { 0.0 },
+        anti_lock: p.anti_lock,
+        after_spread: p.after_spread,
+        side_modes: 0,
+        side_l_im: vec![0.0; (n_osc - 1) * SIDE_MODES],
+        side_l_re: vec![0.0; (n_osc - 1) * SIDE_MODES],
+        side_r_im: vec![0.0; (n_osc - 1) * SIDE_MODES],
+        side_r_re: vec![0.0; (n_osc - 1) * SIDE_MODES],
         modes_per_osc,
         modes_padded,
         total_modes,
@@ -795,9 +901,10 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         z_total,
         t1_seconds,
         speed_q,
+        pulse_tau: tau,
         speed_pivot: p.v_mf,
         undamped,
-        pan: (-0.55 + 1.1 * t) as f32,
+        pan: key_pan(idx),
         rough_depth: p.rough_depth as f32,
         img_fc_mul: p.img_fc_mul,
         img_g_base: p.img_g_base,
@@ -844,6 +951,159 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         sym_gin,
         sym_gout,
     }
+}
+
+/// Unison locking (Weinreich, JASA 1977). The strings of a unison share one
+/// bridge. A partial whose bridge loss is large against its mistuning locks
+/// its strings together: they swing in phase, the hammer's blow goes almost
+/// wholly into that bridge-pumping motion, and only (mistuning / loss)^2 of
+/// it is left in the anti-phase motion that outlasts it. A partial the
+/// bridge barely drains, or one whose strings are far apart, keeps its
+/// strings independent and its full aftersound. So the anti-phase mode's
+/// output is scaled per partial by x^2 / sqrt(1 + x^4), x = mistuning (rad/s)
+/// over anti_lock times the in-phase mode's extra decay rate (1/s): x^2 when
+/// locked, 1 when free.
+///
+/// The fixed share this replaces gave every partial the same aftersound, 15
+/// dB under its prompt. Low partials of the tenor and bass, which the bridge
+/// drains at 15-60 dB/s and whose strings are a fraction of a hertz apart,
+/// then fell fast and held on a plateau: C3's fundamental stood 15 dB over
+/// its partials 2-6 at 1-2 s against the recording, where it falls in one
+/// stage.
+///
+/// What the anti-phase mode gives up goes to the in-phase mode: the blow
+/// sets the strings' sum, and the two modes share it. The prompt rates were
+/// fitted with the fixed plateau in place, so a locked partial's rate had
+/// been pushed up to make room for it; the energy the partial radiates over
+/// `window` seconds from the strike is what the fit matched, and it is
+/// kept: the in-phase mode slows until the pair radiates what it did, one
+/// slower stage for a fast one and a plateau.
+///
+/// Runs once per key, after the calibration's decay scales: the rates that
+/// decide the lock are the ones the key ends up with.
+pub(crate) fn lock_unisons(key: &mut KeyDesign, sample_rate: f64, window: f64) {
+    if key.n_osc != 3 || key.anti_lock <= 0.0 {
+        return;
+    }
+    let sigma = |cr: f32, ci: f32| -((cr as f64).hypot(ci as f64)).ln() * sample_rate;
+    // mean over the window of exp(-2 s t)
+    let seen = |s: f64| {
+        let u = 2.0 * s * window;
+        if u < 1e-9 { 1.0 } else { (1.0 - (-u).exp()) / u }
+    };
+    for m in 0..key.modes_per_osc {
+        let a = 2 * key.modes_padded + m;
+        let vert = (key.gout[m] as f64).hypot(key.gout_re[m] as f64);
+        let anti = (key.gout[a] as f64).abs();
+        if anti == 0.0 || vert == 0.0 {
+            continue;
+        }
+        let n = (m + 1) as f64;
+        let f = n * key.f0 as f64 * (1.0 + key.b_coeff as f64 * n * n).sqrt();
+        let (fitted, after) = (sigma(key.cr_sus[m], key.ci_sus[m]), sigma(key.cr_sus[a], key.ci_sus[a]));
+        if fitted <= after {
+            continue;
+        }
+        // mean power over the window of the two modes sounding together
+        // (they start in phase and are a fraction of a hertz apart)
+        let power = |v: f64, sv: f64, w: f64| v * v * seen(sv) + w * w * seen(after) + 2.0 * v * w * seen(0.5 * (sv + after));
+        let total = power(vert, fitted, anti);
+        let detune = core::f64::consts::TAU * f * key.unison_detune;
+        // The lock depends on the rate and the rate on the lock; both
+        // settle in a few rounds (a slower prompt only loosens the lock).
+        let (mut prompt, mut keep) = (fitted, 1.0);
+        for _ in 0..6 {
+            let x2 = (detune / (key.anti_lock * (prompt - after).max(1e-9))).powi(2);
+            keep = x2 / (1.0 + x2 * x2).sqrt();
+            let (v, w) = (vert + (1.0 - keep) * anti, keep * anti);
+            let (mut lo, mut hi) = (after, fitted);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if power(v, mid, w) > total { lo = mid } else { hi = mid }
+            }
+            prompt = 0.5 * (lo + hi);
+        }
+        let radius = (key.cr_sus[m] as f64).hypot(key.ci_sus[m] as f64);
+        let factor = (-prompt / sample_rate).exp() / radius;
+        key.cr_sus[m] = (key.cr_sus[m] as f64 * factor) as f32;
+        key.ci_sus[m] = (key.ci_sus[m] as f64 * factor) as f32;
+        let lift = 1.0 + (1.0 - keep) * anti / vert;
+        key.gout[m] = (key.gout[m] as f64 * lift) as f32;
+        key.gout_re[m] = (key.gout_re[m] as f64 * lift) as f32;
+        key.gout[a] = (key.gout[a] as f64 * keep) as f32;
+    }
+}
+
+/// The aftersound radiates in its own pattern. The prompt is the strings
+/// moving up and down together: they push the bridge into the board. The
+/// aftersound is what the bridge does not drain: the strings' horizontal
+/// motion and their anti-phase motion, which push the bridge sideways and
+/// rock it. The board answers that with another mixture of its modes, so at
+/// two listening points the aftersound is not a scaled copy of the prompt.
+///
+/// With one path for all three string modes it was: where a partial's
+/// prompt fell to the level of its aftersound the two met with the same
+/// phase in both channels, and since the aftersound sits a fraction of a
+/// hertz off the prompt that phase was near opposite for most partials of
+/// the middle. Partial n of C4 fell 10-25 dB into a hole about 3/n seconds
+/// after the strike and came back 6-12 dB, in both channels at once: a comb
+/// of holes sweeping down through every note, and at C4 a fundamental that
+/// read 42 dB/s over its first second where the recording falls a steady 25.
+///
+/// So each slow mode keeps cos(a) of its output on the prompt's path and
+/// sends sin(a) = `after_spread` in the pattern orthogonal to it: where the
+/// prompt reaches the two points as (L, R), that share arrives as
+/// (-conj R, conj L). Its level, the mean power of the two channels, is
+/// what it was. The interference between prompt and aftersound is cos(a) of
+/// what it was in that mean, and where one channel dips the other fills.
+///
+/// `paths(f)` gives the prompt's steady-state path at `f` Hz to the left
+/// and right outputs and the response of the instant path, which the taps
+/// are fed into. Runs once per key, after the calibration: the calibration
+/// counts each mode's level, and this leaves it alone.
+pub(crate) fn spread_aftersound(key: &mut KeyDesign, sample_rate: f64, paths: &dyn Fn(f64) -> (C64, C64, C64)) {
+    let s = key.after_spread.clamp(0.0, 1.0);
+    if s == 0.0 {
+        return;
+    }
+    let c = (1.0 - s * s).sqrt();
+    let mut modes = 0;
+    for m in 0..key.modes_per_osc.min(SIDE_MODES) {
+        let n = (m + 1) as f64;
+        if n * key.f0 as f64 * (1.0 + key.b_coeff as f64 * n * n).sqrt() > SIDE_HZ && m >= 8 {
+            break;
+        }
+        modes = m + 1;
+    }
+    key.side_modes = pad8(modes).min(key.modes_padded).min(SIDE_MODES);
+    for slot in 1..key.n_osc {
+        for m in 0..modes {
+            let i = slot * key.modes_padded + m;
+            let j = (slot - 1) * SIDE_MODES + m;
+            let res = C64::new(key.gout[i] as f64, key.gout_re[i] as f64);
+            let f = (key.ci_sus[i] as f64).atan2(key.cr_sus[i] as f64) * sample_rate / core::f64::consts::TAU;
+            if res.abs2() == 0.0 || f <= 0.0 {
+                continue;
+            }
+            let (l, r, instant) = paths(f);
+            if instant.abs2() < 1e-12 * (l.abs2() + r.abs2()) || instant.abs2() == 0.0 {
+                continue; // nothing to carry the taps: the mode stays as it is
+            }
+            let wl = r.conj().mul(res).div(instant).scale(-s);
+            let wr = l.conj().mul(res).div(instant).scale(s);
+            key.side_l_im[j] = wl.re as f32;
+            key.side_l_re[j] = wl.im as f32;
+            key.side_r_im[j] = wr.re as f32;
+            key.side_r_re[j] = wr.im as f32;
+            key.gout[i] = (res.re * c) as f32;
+            key.gout_re[i] = (res.im * c) as f32;
+        }
+    }
+}
+
+/// Player-perspective pan of key index `idx` (bass left).
+pub(crate) fn key_pan(idx: usize) -> f32 {
+    (-0.55 + 1.1 * (idx as f64 / 87.0)) as f32
 }
 
 /// MIDI velocity (1..=127) to hammer speed in m/s: ~0.3 m/s pianissimo to
