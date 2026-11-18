@@ -1325,7 +1325,7 @@ impl Cx {
                 mapping.hal_code.hash(&mut h);
                 mapping.hal_pick_code.hash(&mut h);
                 (mapping.color_format as u32).hash(&mut h);
-                (mapping.blend_op == DrawShaderBlendOp::Max).hash(&mut h);
+                (mapping.blend_op as u32).hash(&mut h);
                 mapping.precise_math.hash(&mut h);
                 h.finish()
             };
@@ -1378,8 +1378,11 @@ impl Cx {
             let desc = PipelineDesc {
                 storage_push_size: mapping.storage_push_size,
                 color_formats: [pipeline_color_format(mapping.color_format), 0, 0, 0],
-                blend: (if mapping.blend_op == DrawShaderBlendOp::Max { pipeline_blend::MAX } else { 0 })
-                    | (if mapping.color_format.blends() { 0 } else { pipeline_blend::RAW }),
+                blend: (match mapping.blend_op {
+                    DrawShaderBlendOp::Over => 0,
+                    DrawShaderBlendOp::Max => pipeline_blend::MAX,
+                    DrawShaderBlendOp::Add => pipeline_blend::ADD,
+                }) | (if mapping.color_format.blends() || mapping.blend_op == DrawShaderBlendOp::Add { 0 } else { pipeline_blend::RAW }),
                 flags: if mapping.precise_math { pipeline_flags::PRECISE } else { 0 },
                 outputs: mapping.fragment_outputs as u32,
                 shader: index as u32,

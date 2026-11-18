@@ -803,7 +803,7 @@ impl Gpu for Metal {
             self.kept_ns = crate::clock_ns();
             s.stats.pipelines_taken += 1;
         }
-        let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc, taken);
+        let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc, s.string(blob.desc.name).unwrap_or("unnamed"), taken);
         let stats = crate::gpu_prof::source_stats(source).into();
         let prof_source = crate::gpu_prof::keep_sources().then(|| state.source.clone());
         self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: ready, stats, source: prof_source });

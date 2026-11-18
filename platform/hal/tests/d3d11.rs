@@ -428,3 +428,79 @@ fn two_views_draw_side_by_side_in_one_pass() {
     assert_eq!((stats.skipped_draws, stats.bad_args, stats.draws), (0, 0, 1), "the draw was drawn, once, and the views were taken");
     assert!(hal.close(sid));
 }
+
+/// HDR addition includes alpha; a raw pipeline and a non-blending draw still replace texels.
+#[test]
+fn rgba16f_add_and_raw_writes() {
+    let (hal, info) = open();
+    let sid = info.session;
+    const TARGET: Id = Id::new(30, 1);
+    const VERTICES: Id = Id::new(30, 1);
+    const INDICES: Id = Id::new(31, 1);
+    const ADD: Id = Id::new(30, 1);
+    const RAW: Id = Id::new(31, 1);
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(TARGET, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA16F, 2, 2, [1, 1], Attr::default());
+    let vertices: Vec<u8> = [-1.0f32, -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0].into_iter().flat_map(f32::to_le_bytes).collect();
+    let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3].into_iter().flat_map(u16::to_le_bytes).collect();
+    w.buffer_create(VERTICES, buffer_kind::VERTEX, vertices.len() as u64, Attr::default());
+    w.buffer_update(VERTICES, 0, &vertices);
+    w.buffer_create(INDICES, buffer_kind::INDEX, indices.len() as u64, Attr::default());
+    w.buffer_update(INDICES, 0, &indices);
+    let source = payload(PASS_COLOR_HLSL);
+    let none = pipeline_binding::NONE;
+    for (id, blend) in [(ADD, pipeline_blend::ADD), (RAW, pipeline_blend::RAW)] {
+        let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, color_formats: [format::RGBA16F, 0, 0, 0], blend, instance_stride: 0, ..Default::default() },
+            &source, &[none, 1, none, none, none, 0], &[16, 0, 3, 4]);
+        w.pipeline_create(id, dialect::HLSL, Attr::default(), &blob);
+    }
+    hal.submit(&w.buf());
+    let mut ready = [false; 2];
+    until(&hal, sid, |e| {
+        if let HalEvent::PipelineReady { pipeline } = e {
+            if pipeline == ADD { ready[0] = true; }
+            if pipeline == RAW { ready[1] = true; }
+        }
+        ready.iter().all(|v| *v)
+    });
+    // Half encodings of (3.75, 0.75, 4.125, 2.0) and (2.25, 0.5, 0.125, 1.0).
+    let sum = [0x4380u16, 0x3a00, 0x4420, 0x4000];
+    let second = [0x4080u16, 0x3800, 0x3000, 0x3c00];
+    for (case, (pipeline, flags, want)) in [(ADD, Draw::BLEND, sum), (RAW, Draw::BLEND, second), (ADD, 0, second)].into_iter().enumerate() {
+        let frame = case as u64 + 1;
+        w.clear();
+        w.frame_begin(frame, FrameMeta::default());
+        for (i, color) in [[1.5f32, 0.25, 4.0, 1.0], [2.25, 0.5, 0.125, 1.0]].iter().enumerate() {
+            let mut pass = pass(TARGET, 2, 2, [0.0; 4]);
+            if i != 0 { pass.load[0] = pass_load::LOAD; }
+            pass.uniforms = w.keep(&color[..]);
+            w.pass(pass);
+            let inst = Inst::inline(Slice::EMPTY, 1);
+            w.draw(Draw { pipeline, vb: VERTICES, ib: INDICES, index: [0, 6], inst, flags,
+                scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
+        }
+        w.frame_end(TARGET, target::TEXTURE);
+        hal.submit(&w.buf());
+        frame_done(&hal, sid, frame);
+        w.clear();
+        w.texture_readback(TARGET, frame as u32, [0, 0, 2, 2]);
+        hal.submit(&w.buf());
+        until(&hal, sid, |e| {
+            let HalEvent::Readback { req, status, lease, .. } = e else { return false };
+            if req != frame as u32 { return false; }
+            // SAFETY: this process pumped the event and takes its lease once.
+            let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
+            assert_eq!(status, readback::NATIVE, "float readback preserves HDR values");
+            assert_eq!(pixels.len(), 2 * 2 * 8);
+            for (channel, bytes) in pixels.chunks_exact(2).enumerate() {
+                let got = u16::from_le_bytes([bytes[0], bytes[1]]);
+                assert!(got.abs_diff(want[channel % 4]) <= 1, "case {case}, channel {channel}: half {got:#06x}, expected {:#06x} within one half ULP", want[channel % 4]);
+            }
+            true
+        });
+    }
+    let stats = hal.with_world(|world| world.session(sid).unwrap().stats);
+    assert_eq!(stats.bad_args, 0);
+    assert_eq!(stats.skipped_draws, 0, "all six quads were drawn");
+    assert!(hal.close(sid));
+}

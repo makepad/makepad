@@ -2,7 +2,7 @@ use crate::{
     cx::Cx,
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderInputs},
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderBlendOp, DrawShaderColorFormat, DrawShaderInputs},
     draw_vars::DRAW_CALL_TEXTURE_SLOTS,
     makepad_math::*,
     makepad_wasm_bridge::*,
@@ -701,8 +701,9 @@ impl Cx {
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     depth_test_greater: draw_call.options.depth_test_greater,
-                    alpha_blend: draw_call.options.alpha_blend && sh.mapping.color_format.blends(),
-                    blend_max: sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
+                    alpha_blend: draw_call.options.alpha_blend && (sh.mapping.color_format.blends() || sh.mapping.blend_op == DrawShaderBlendOp::Add),
+                    blend_max: sh.mapping.blend_op == DrawShaderBlendOp::Max,
+                    blend_add: sh.mapping.blend_op == DrawShaderBlendOp::Add,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
                     pass_uniforms_gen_lo: pass_uniforms_gen as u32,
@@ -1204,10 +1205,15 @@ impl Cx {
                 crate::log!("{}\n{}", vertex, pixel);
             }
 
-            let mut pipeline_id = self.draw_shaders.shaders[draw_shader_id].pipeline_id;
+            let shader = &self.draw_shaders.shaders[draw_shader_id];
+            let color_format = shader.mapping.color_format;
+            let blend_op = shader.mapping.blend_op;
+            let outputs = shader.mapping.fragment_outputs as u32;
+            let shader_name = shader.debug_id.to_string();
+            let mut pipeline_id = shader.pipeline_id;
             if pipeline_id.is_none() {
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.in_vertex == vertex && ds.in_pixel == pixel {
+                    if ds.in_vertex == vertex && ds.in_pixel == pixel && ds.color_format == color_format && ds.blend_op == blend_op {
                         pipeline_id = Some(index);
                         break;
                     }
@@ -1215,10 +1221,21 @@ impl Cx {
             }
 
             if pipeline_id.is_none() {
-                let shp = CxOsDrawShader::new(vertex, pixel);
+                let shp = CxOsDrawShader::new(vertex, pixel, color_format, blend_op);
                 let shader_id = self.draw_shaders.os_shaders.len();
                 self.os.from_wasm(FromWasmCompileWebGLShader {
                     shader_id,
+                    shader_name,
+                    color_format: match color_format {
+                        DrawShaderColorFormat::Rf32 => 1,
+                        DrawShaderColorFormat::Rgba32F => 2,
+                        DrawShaderColorFormat::Rgba16F => 3,
+                        DrawShaderColorFormat::Rf16 => 4,
+                        DrawShaderColorFormat::Ru8 => 5,
+                        DrawShaderColorFormat::Bgra8Unorm | DrawShaderColorFormat::Bgra8NoBlend => 0,
+                    },
+                    blend_add: blend_op == DrawShaderBlendOp::Add,
+                    outputs,
                     vertex: shp.vertex.clone(),
                     pixel: shp.pixel.clone(),
                     geometry_slots,
@@ -1268,7 +1285,7 @@ impl Cx {
 }
 
 impl CxOsDrawShader {
-    pub fn new(in_vertex: String, in_pixel: String) -> Self {
+    pub fn new(in_vertex: String, in_pixel: String, color_format: DrawShaderColorFormat, blend_op: DrawShaderBlendOp) -> Self {
         let vertex = format!(
             "#version 300 es
 #define VIEW_ID 0
@@ -1306,6 +1323,8 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
             in_pixel,
             vertex,
             pixel,
+            color_format,
+            blend_op,
         }
     }
 }
@@ -1346,6 +1365,8 @@ pub struct CxOsDrawCall {
 
 #[derive(Clone)]
 pub struct CxOsDrawShader {
+    pub color_format: DrawShaderColorFormat,
+    pub blend_op: DrawShaderBlendOp,
     pub in_vertex: String,
     pub in_pixel: String,
     pub vertex: String,

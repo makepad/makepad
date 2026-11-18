@@ -306,9 +306,13 @@ impl PlainWebSocket {
             Ok(l) => l,
             Err(err) => return failed(&rx_sender, err),
         };
+        // The reader waits for input on the TCP socket under the TLS stream,
+        // without its lock, and takes the lock only to read what arrived: a
+        // send never waits on an idle read. A stream with no such handle (a
+        // platform socket with none) reads under the lock with a timeout and
+        // steps aside between reads for the writer.
+        let waiter = stream.try_clone_tcp().ok();
         let shared = std::sync::Arc::new(std::sync::Mutex::new(stream));
-        // The writer raises this while it wants the lock; the reader steps
-        // aside between reads so outgoing frames never starve.
         let write_wanted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (sender, receiver) = channel();
         let writer = shared.clone();
@@ -346,9 +350,26 @@ impl PlainWebSocket {
                 parse_incoming(&mut web_socket, &reply_sender, &rx_sender, &mut done, &leftover);
             }
             let mut buffer = vec![0u8; 65535];
+            let mut probe = [0u8; 1];
             while !done {
-                while write_wanted.load(std::sync::atomic::Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_micros(100));
+                match &waiter {
+                    Some(tcp) => {
+                        let buffered = reader.lock().map_or(0, |s| s.buffered());
+                        if buffered == 0 {
+                            // Data or the end of the stream: read it below. The
+                            // socket's read timeout bounds the wait.
+                            match tcp.peek(&mut probe) {
+                                Ok(_) => {}
+                                Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => continue,
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                    None => {
+                        while write_wanted.load(std::sync::atomic::Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_micros(100));
+                        }
+                    }
                 }
                 let result = match reader.lock() {
                     Ok(mut s) => s.read(&mut buffer),

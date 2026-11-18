@@ -340,6 +340,11 @@ pub struct FromWasmSpreadFirstDraws {
 #[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
     pub shader_id: usize,
+    pub shader_name: String,
+    /// Same format codes as WColorTarget, for capability checks at compilation.
+    pub color_format: u32,
+    pub blend_add: bool,
+    pub outputs: u32,
     pub vertex: String,
     pub pixel: String,
     pub geometry_slots: usize,
@@ -571,6 +576,8 @@ pub struct FromWasmDrawCall {
     pub alpha_blend: bool,
     /// The shader's `blend_op: @Max`: blend by per-channel max.
     pub blend_max: bool,
+    /// The shader's `blend_op: @Add`: ONE/ONE/ADD, alpha included.
+    pub blend_add: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
     pub pass_uniforms_gen_lo: u32,

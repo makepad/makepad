@@ -1415,20 +1415,44 @@ export class WasmWebGL extends WasmWebBrowser {
     }, 0);
   }
 
+  // WColorTarget codes: 1=R32F, 2=RGBA32F, 3=RGBA16F, 4=R16F.
+  add_blend_error(format) {
+    if (format >= 1 && format <= 4 && !this.ext_color_buffer_float) {
+      return "blend_op: @Add on a float target requires EXT_color_buffer_float";
+    }
+    if ((format === 1 || format === 2) && !this.ext_float_blend) {
+      return "blend_op: @Add on a 32-bit float target requires EXT_float_blend";
+    }
+    return null;
+  }
+
   fail_webgl_shader(shader, stage, info_log) {
+    if (shader.compile_failed) return;
     let gl = this.gl;
     console.error(
-      "webgl.compile_fail." + stage + " " + shader.shader_id + " " + info_log,
+      `webgl.compile_fail.${stage} shader ${shader.shader_name || shader.shader_id} (${shader.shader_id}): ${info_log}`,
     );
-    gl.deleteShader(shader.vsh);
-    gl.deleteShader(shader.fsh);
-    gl.deleteProgram(shader.program);
+    if (shader.vsh) gl.deleteShader(shader.vsh);
+    if (shader.fsh) gl.deleteShader(shader.fsh);
+    if (shader.program) gl.deleteProgram(shader.program);
+    for (const buffer of [shader.pass_uniform_buf, shader.draw_list_uniform_buf, shader.live_uniform_buf]) {
+      if (buffer) gl.deleteBuffer(buffer);
+    }
+    for (const entry of shader.custom_uniform_buffers || []) {
+      if (entry && entry.buffer) gl.deleteBuffer(entry.buffer);
+    }
+    shader.compile_failed = true;
     this.draw_shaders[shader.shader_id] = { compile_failed: true };
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
-    this.webgl_shader_batch_failed_count++;
-    this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 0 });
-    this.schedule_webgl_shader_summary();
+    if (!shader.linked) {
+      this.webgl_shader_batch_failed_count++;
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 0 });
+      this.schedule_webgl_shader_summary();
+    } else if (shader.first_draw_waiting) {
+      shader.first_draw_waiting = false;
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 1 });
+    }
   }
 
   finish_webgl_shader(shader) {
@@ -1479,6 +1503,10 @@ export class WasmWebGL extends WasmWebBrowser {
     } catch (_error) {
     }
     const finished_shader = {
+      shader_id: shader.shader_id,
+      shader_name: shader.shader_name,
+      outputs: shader.outputs,
+      linked: true,
       vertex: shader.vertex,
       pixel: shader.pixel,
       geom_attribs:
@@ -1637,6 +1665,11 @@ export class WasmWebGL extends WasmWebBrowser {
       this.webgl_shader_timeline_start = started_at;
     }
     this.webgl_shader_batch_program_count++;
+    const blend_error = args.blend_add && this.add_blend_error(args.color_format);
+    if (blend_error) {
+      this.fail_webgl_shader(args, "blend", blend_error);
+      return;
+    }
 
     let vsh = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(vsh, args.vertex);
@@ -1659,6 +1692,8 @@ export class WasmWebGL extends WasmWebBrowser {
 
     let shader = {
       shader_id: args.shader_id,
+      shader_name: args.shader_name,
+      outputs: args.outputs,
       vertex: args.vertex,
       pixel: args.pixel,
       geometry_slots: args.geometry_slots,
@@ -2449,7 +2484,8 @@ export class WasmWebGL extends WasmWebBrowser {
     });
 
     let shader = this.draw_shaders[args.shader_id];
-    if (!shader || shader.compile_failed) {
+    if (shader && shader.compile_failed) return;
+    if (!shader) {
       this.report_missing_shader_once(
         "FromWasmAllocVao",
         args.shader_id,
@@ -2539,9 +2575,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmDrawCall(args) {
-    if (this.render_target_rejected) {
-      return;
-    }
     var gl = this.gl;
     if (
       !args ||
@@ -2562,7 +2595,8 @@ export class WasmWebGL extends WasmWebBrowser {
     if (shader && shader.pending) {
       return;
     }
-    if (!shader || shader.compile_failed) {
+    if (shader && shader.compile_failed) return;
+    if (!shader) {
       this.report_missing_shader_once(
         "FromWasmDrawCall",
         args.shader_id,
@@ -2570,6 +2604,19 @@ export class WasmWebGL extends WasmWebBrowser {
       );
       return;
     }
+
+    if (args.alpha_blend && args.blend_add) {
+      const targets = this.render_color_targets;
+      for (let i = 0; targets && i < targets.length; i++) {
+        if (!((shader.outputs || 1) & (1 << i))) continue;
+        const reason = this.add_blend_error(targets[i] && targets[i].format);
+        if (reason) {
+          this.fail_webgl_shader(shader, "blend", reason);
+          return;
+        }
+      }
+    }
+    if (this.render_target_rejected) return;
 
     let vao = this.vaos[args.vao_id];
     if (!vao) {
@@ -2635,10 +2682,13 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.depthMask(!!args.depth_write);
       gl.depthFunc(args.depth_test_greater ? gl.GREATER : gl.LEQUAL);
       // Blending is the pass default (FromWasmSetDefaultDepthAndBlendMode);
-      // only an alpha_blend=false call turns it off, and restores it in the
-      // finally block, so the default path issues no extra GL calls.
+      // Add/Max override that state, and alpha_blend=false turns it off.
+      // The finally block restores Over; its default path needs no extra calls.
       if (!args.alpha_blend) {
         gl.disable(gl.BLEND);
+      } else if (args.blend_add) {
+        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
       } else if (args.blend_max) {
         gl.blendEquationSeparate(gl.MAX, gl.MAX);
       }
@@ -2823,8 +2873,9 @@ export class WasmWebGL extends WasmWebBrowser {
           gl.enable(gl.BLEND);
         } catch (_error) {
         }
-      } else if (args.blend_max) {
+      } else if (args.blend_add || args.blend_max) {
         try {
+          if (args.blend_add) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
           gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
         } catch (_error) {
         }
@@ -3133,6 +3184,7 @@ export class WasmWebGL extends WasmWebBrowser {
       this.reject_render_target("missing color/depth target metadata", args);
       return;
     }
+    this.render_color_targets = args.color_targets;
     const render_targets = args.color_targets.slice();
     if (args.depth_target.attached) {
       render_targets.push(args.depth_target);
@@ -3622,6 +3674,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginRenderCanvas(args) {
+    this.render_color_targets = undefined;
     this.reset_active_render_target_textures();
     this.render_target_rejected = false;
     let gl = this.gl;
@@ -4244,6 +4297,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // Forgets every object of a lost context: the restored one starts empty.
   reset_webgl_objects() {
+    this.render_color_targets = undefined;
     this.draw_shaders = [];
     this.array_buffers = [];
     this.instance_data_textures = new Map();
@@ -4356,11 +4410,11 @@ export class WasmWebGL extends WasmWebBrowser {
       "KHR_parallel_shader_compile",
     );
 
-    // Float color targets (RenderRf32): WebGL2 needs this extension for
-    // R32F to be color-renderable. Requested up front so a missing GPU
-    // capability is one hard, greppable error instead of a silent black
-    // texture deep in a bake.
+    // WebGL2 needs EXT_color_buffer_float to render/blend half-float targets;
+    // blending 32-bit floats also needs EXT_float_blend. Enable both once
+    // per context; Add reports missing support through its shader failure path.
     this.ext_color_buffer_float = gl.getExtension("EXT_color_buffer_float");
+    this.ext_float_blend = gl.getExtension("EXT_float_blend");
     if (!this.ext_color_buffer_float) {
       console.error(
         "makepad: EXT_color_buffer_float unavailable — float render targets (GPU lightmap bake) will not work on this device",
@@ -4377,7 +4431,7 @@ export class WasmWebGL extends WasmWebBrowser {
       min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       float_color_targets: !!this.ext_color_buffer_float,
-      max_texture_size: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+      max_texture_size: this.webgl_limits.max_texture_size,
       vendor: gl.getParameter(gl.VENDOR) || "unknown",
       renderer: gl.getParameter(gl.RENDERER) || "unknown",
     };

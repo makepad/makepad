@@ -15,6 +15,9 @@
 //! `MAKEPAD_TRAY_SELFTEST_DELAY=<s>`, default 20) the menu item with that label is chosen that
 //! long after, through its own target, as a click on it would. `MAKEPAD_TRAY_SELFTEST_CLICKS=<s>,..`
 //! replaces the immediate click by the button's own action fired at those delays.
+//! `MAKEPAD_TRAY_SELFTEST=stale`: besides, when the menu is first replaced, an item of the menu it
+//! replaced is chosen as a click on it would (`performActionForItemAtIndex:`), as a person does
+//! who opened the menu before an update came: it answers as `TrayMenu` like any other.
 
 use super::app::app;
 use super::window::Win;
@@ -39,6 +42,8 @@ struct Tray {
     /// tooltip) and the area
     track_target: ObjcId,
     track_area: ObjcId,
+    /// a menu of this tray's was replaced (`MAKEPAD_TRAY_SELFTEST=stale` clicks the first one)
+    replaced: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -83,7 +88,7 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, flags: u32, alpha: &[u8], t
             let bar: ObjcId = msg_send![class!(NSStatusBar), systemStatusBar];
             let item: ObjcId = msg_send![bar, statusItemWithLength: VARIABLE_LENGTH];
             let () = msg_send![item, retain];
-            TRAYS.with_borrow_mut(|t| t.push(Tray { sid, id, item, menu: nil, targets: Vec::new(), click_target: nil, shown: Shown::default(), track_target: nil, track_area: nil }));
+            TRAYS.with_borrow_mut(|t| t.push(Tray { sid, id, item, menu: nil, targets: Vec::new(), click_target: nil, shown: Shown::default(), track_target: nil, track_area: nil, replaced: false }));
         }
         let item = TRAYS.with_borrow(|t| t.iter().find(|t| t.sid == sid && t.id == id).map(|t| t.item)).unwrap_or(nil);
         if item == nil {
@@ -174,11 +179,22 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, flags: u32, alpha: &[u8], t
             if !changed {
                 return None;
             }
-            Some((std::mem::replace(&mut t.menu, menu), std::mem::replace(&mut t.targets, targets), std::mem::replace(&mut t.click_target, click_target)))
+            let first_replaced = t.menu != nil && !t.replaced;
+            t.replaced |= t.menu != nil;
+            Some((std::mem::replace(&mut t.menu, menu), std::mem::replace(&mut t.targets, targets), std::mem::replace(&mut t.click_target, click_target), first_replaced))
         });
-        if let Some((old_menu, old_targets, old_click)) = old {
+        if let Some((old_menu, old_targets, old_click, first_replaced)) = old {
+            // (the selftest's late click holds the replaced menu as an open one is held)
+            let stale = first_replaced && selftest_stale();
+            if stale {
+                let () = msg_send![old_menu, retain];
+            }
             release(old_menu, &old_targets);
             release(nil, &[old_click]);
+            if stale {
+                selftest_replaced(old_menu);
+                let () = msg_send![old_menu, release];
+            }
         }
         if !changed {
             return;
@@ -383,6 +399,11 @@ fn selftest_on() -> bool {
     relax_api::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some()
 }
 
+/// `MAKEPAD_TRAY_SELFTEST=stale` (for a tray's first replaced menu: `Tray::replaced`).
+fn selftest_stale() -> bool {
+    relax_api::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some_and(|v| v == "stale")
+}
+
 fn destroy(tray: Tray) {
     unsafe {
         let bar: ObjcId = msg_send![class!(NSStatusBar), systemStatusBar];
@@ -433,6 +454,11 @@ unsafe fn build_menu(sid: u32, tray: u64, items: &[(MenuItem, String)]) -> (Objc
         (*target).set_ivar("tray_u64", tray as usize);
         (*target).set_ivar("item_u64", item.cmd as usize);
         let () = msg_send![entry, setTarget: target];
+        // the item keeps its target for as long as it lives (an item's target is weak): a menu
+        // that was open when an update replaced it still answers its clicks. Released with the
+        // tray's targets, an open menu's clicks went nowhere: the devhub master's menu, updated
+        // every few seconds, answered none (11-17)
+        let () = msg_send![entry, setRepresentedObject: target];
         targets.push(target);
     }
     (menu, targets)
@@ -502,6 +528,22 @@ unsafe fn selftest_clicks(target: ObjcId, button: ObjcId) -> bool {
         let () = msg_send![target, performSelector: sel!(trayClick:) withObject: button afterDelay: delay];
     }
     true
+}
+
+/// `MAKEPAD_TRAY_SELFTEST=stale`: the first enabled item of `menu`, a menu just replaced, chosen
+/// as a click on it would.
+unsafe fn selftest_replaced(menu: ObjcId) {
+    let count: i64 = msg_send![menu, numberOfItems];
+    for index in 0..count {
+        let entry: ObjcId = msg_send![menu, itemAtIndex: index];
+        let separator: BOOL = msg_send![entry, isSeparatorItem];
+        let enabled: BOOL = msg_send![entry, isEnabled];
+        if separator == NO && enabled != NO {
+            eprintln!("tray selftest: performing menu item {index} of the replaced menu");
+            let () = msg_send![menu, performActionForItemAtIndex: index];
+            return;
+        }
+    }
 }
 
 /// `MAKEPAD_TRAY_SELFTEST_ITEM`: the item with that label is chosen after the delay.

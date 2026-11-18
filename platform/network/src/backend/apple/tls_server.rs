@@ -266,6 +266,13 @@ impl ServerStream {
         self.0.tcp()
     }
 
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        self.0.buffered()
+    }
+
     pub fn shutdown(&mut self) {
         self.0.shutdown();
     }

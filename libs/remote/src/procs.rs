@@ -90,6 +90,21 @@ pub fn said(pid: u32) -> String {
     text
 }
 
+/// `root` and every process under it, root first.
+pub fn tree(root: u32) -> Vec<u32> {
+    let mut out = vec![root];
+    if let Ok(procs) = list_processes() {
+        collect_descendants(&procs, root, &mut out);
+    }
+    out
+}
+
+/// The CPU time `pid` has run, its user and system time, in ns: None once it is gone, or where
+/// the platform cannot say.
+pub fn cpu_ns(pid: u32) -> Option<u64> {
+    cpu_ns_impl(pid)
+}
+
 fn collect_descendants(procs: &[Proc], parent: u32, out: &mut Vec<u32>) {
     for proc in procs {
         if proc.ppid == parent && proc.pid != parent {
@@ -135,6 +150,7 @@ mod win {
         fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut std::ffi::c_void;
         fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
         fn GetExitCodeProcess(process: *mut std::ffi::c_void, exit_code: *mut u32) -> i32;
+        fn GetProcessTimes(process: *mut std::ffi::c_void, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
         fn CloseHandle(object: *mut std::ffi::c_void) -> i32;
     }
 
@@ -184,6 +200,21 @@ mod win {
         }
     }
 
+    /// Kernel and user time, FILETIMEs of 100 ns (read as u64: same size, and 4-aligned is
+    /// enough for the call).
+    pub fn cpu_ns(pid: u32) -> Option<u64> {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+            let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(handle);
+            (ok != 0).then(|| (kernel + user) * 100)
+        }
+    }
+
     pub fn alive(pid: u32) -> bool {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -213,6 +244,52 @@ fn is_alive_impl(pid: u32) -> bool {
 #[cfg(windows)]
 fn process_impl(pid: u32) -> Option<Proc> {
     win::list().ok()?.into_iter().find(|p| p.pid == pid)
+}
+#[cfg(windows)]
+fn cpu_ns_impl(pid: u32) -> Option<u64> {
+    win::cpu_ns(pid)
+}
+
+/// `struct proc_taskinfo` (96 bytes): `pti_total_user` at 16, `pti_total_system` at 24, in Mach
+/// time units the timebase turns into ns (on Apple silicon a unit is not a ns).
+#[cfg(target_os = "macos")]
+fn cpu_ns_impl(pid: u32) -> Option<u64> {
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    extern "C" {
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    const PROC_PIDTASKINFO: i32 = 4;
+    let mut buf = [0u8; 96];
+    let n = unsafe { proc_pidinfo(i32::try_from(pid).ok()?, PROC_PIDTASKINFO, 0, buf.as_mut_ptr(), buf.len() as i32) };
+    if n != buf.len() as i32 {
+        return None;
+    }
+    let field = |at: usize| u64::from_ne_bytes(buf[at..at + 8].try_into().unwrap());
+    let mut tb = Timebase { numer: 1, denom: 1 };
+    unsafe { mach_timebase_info(&mut tb) };
+    Some(((field(16) + field(24)) as u128 * tb.numer as u128 / tb.denom.max(1) as u128) as u64)
+}
+
+/// `utime` and `stime` of `/proc/<pid>/stat` (its 14th and 15th fields), in clock ticks of
+/// USER_HZ, which is 100 on every Linux ABI.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn cpu_ns_impl(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // after `pid (comm)` the fields start at the 3rd (state): utime is the 12th of them
+    let mut fields = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().skip(11);
+    let utime: u64 = fields.next()?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some((utime + stime) * 10_000_000)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+fn cpu_ns_impl(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// `proc_pidinfo`'s `struct proc_bsdinfo` (136 bytes) of `pid`, None once it is gone.

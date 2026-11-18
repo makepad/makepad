@@ -31,7 +31,10 @@ pub struct PipeState {
     written: u8,
     /// `blend_op: @Max`: blending pipelines take the per-channel max
     blend_max: bool,
-    /// whether the pipeline's own layout blends at all (BGRA8, not a raw-write data pass)
+    /// `blend_op: @Add`: ONE/ONE/ADD, including float attachments.
+    blend_add: bool,
+    name: String,
+    /// whether the declared layout opts into blending (BGRA8 or Add, never RAW)
     can_blend: bool,
     /// the fragment stage can discard: a layout without colour attachments still runs it
     discards: bool,
@@ -100,24 +103,25 @@ fn blendable(format: MTLPixelFormat) -> bool {
 }
 
 /// The blend every blendable colour target uses: premultiplied over, or per-channel max for a
-/// `blend_op: @Max` shader (factors are ignored by the max operation).
-unsafe fn set_over_blend(color_attachment: ObjcId, max: bool) {
+/// `blend_op: @Max` shader, or ONE/ONE/ADD for `blend_op: @Add`.
+unsafe fn set_blend(color_attachment: ObjcId, max: bool, add: bool) {
     let op = if max { MTLBlendOperation::Max } else { MTLBlendOperation::Add };
+    let dest = if add { MTLBlendFactor::One } else { MTLBlendFactor::OneMinusSourceAlpha };
     let () = msg_send![color_attachment, setBlendingEnabled: YES];
     let () = msg_send![color_attachment, setRgbBlendOperation: op];
     let () = msg_send![color_attachment, setAlphaBlendOperation: op];
     let () = msg_send![color_attachment, setSourceRGBBlendFactor: MTLBlendFactor::One];
     let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
-    let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
-    let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+    let () = msg_send![color_attachment, setDestinationRGBBlendFactor: dest];
+    let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: dest];
 }
 
 /// Describes a pipeline's colour attachments for a pass whose attachments have `formats`: each
 /// gets its own pixel format and blend state. An attachment the shader does not write gets an
 /// empty write mask, so drawing ordinary one-output items into an MRT pass leaves the other
-/// attachments intact; a written, blendable one gets the over blend when `blend`; everything
-/// else writes raw.
-unsafe fn describe_attachments(descriptor: ObjcId, formats: &[MTLPixelFormat], written: u8, blend: bool, max: bool) {
+/// attachments intact. Written targets use the selected blend when `blend`; Over/Max keep
+/// their format eligibility, while Add asks Metal to validate blending for every written target.
+unsafe fn describe_attachments(descriptor: ObjcId, formats: &[MTLPixelFormat], written: u8, blend: bool, max: bool, add: bool) {
     let color_attachments: ObjcId = msg_send![descriptor, colorAttachments];
     for (index, format) in formats.iter().enumerate() {
         let attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: index as u64];
@@ -125,8 +129,9 @@ unsafe fn describe_attachments(descriptor: ObjcId, formats: &[MTLPixelFormat], w
         if index >= 8 || written & (1 << index) == 0 {
             let () = msg_send![attachment, setBlendingEnabled: NO];
             let () = msg_send![attachment, setWriteMask: 0u64];
-        } else if blend && blendable(*format) {
-            set_over_blend(attachment, max);
+        } else if blend && (add || blendable(*format)) {
+            // Metal validates Add support when it builds the pipeline state.
+            set_blend(attachment, max, add);
         } else {
             let () = msg_send![attachment, setBlendingEnabled: NO];
         }
@@ -153,6 +158,7 @@ impl PipeState {
     }
 
     fn failure(&self, error: String) {
+        let error = format!("shader `{}`: {error}", self.name);
         let _ = self.blend.set(Err(error.clone()));
         let _ = self.solid.set(Err(error.clone()));
         if !self.failed.swap(true, Ordering::AcqRel) {
@@ -165,9 +171,9 @@ impl PipeState {
             let ok = matches!(self.solid.get(), Some(Ok(_))) && matches!(self.blend.get(), Some(Ok(_)));
             if ok {
                 self.mailbox.push(Done::PipelineReady { sid: self.sid, id: self.id, incarnation: self.incarnation.clone() });
-            } else if !self.failed.swap(true, Ordering::AcqRel) {
+            } else {
                 let log = [self.solid.get(), self.blend.get()].into_iter().flatten().find_map(|r| r.as_ref().err().cloned()).unwrap_or_default();
-                self.mailbox.push(Done::PipelineFailed { sid: self.sid, id: self.id, incarnation: self.incarnation.clone(), log });
+                self.failure(log);
             }
         }
     }
@@ -176,6 +182,7 @@ impl PipeState {
     /// never waits. A target layout of its own is built from the retained functions on first use
     /// and the draw is skipped until it is ready.
     pub fn select(self: &Arc<Self>, dev: &Device, formats: &[MTLPixelFormat], blend: bool, samples: u8) -> Select {
+        if self.failed.load(Ordering::Acquire) { return Select::Failed; }
         let want_blend = blend && self.can_blend;
         if samples <= 1 && formats == self.declared.as_slice() {
             return match if want_blend { self.blend.get() } else { self.solid.get() } {
@@ -239,7 +246,7 @@ impl PipeState {
             if !variant.formats.is_empty() || self.discards {
                 let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment.as_id()];
             }
-            describe_attachments(descriptor.as_id(), &variant.formats, self.written, variant.blend, self.blend_max);
+            describe_attachments(descriptor.as_id(), &variant.formats, self.written, variant.blend, self.blend_max, self.blend_add);
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
             if variant.samples > 1 {
                 let () = msg_send![descriptor.as_id(), setRasterSampleCount: variant.samples as u64];
@@ -249,9 +256,16 @@ impl PipeState {
         let completion = objc_block!(move |pipeline: ObjcId, error: ObjcId| {
             let result = match NonNull::new(pipeline) {
                 Some(p) => Ok(RcObjcId::from_unowned(p)),
-                None => Err(describe_error(error, "Metal returned no pipeline")),
+                None => Err(if state.blend_add && variant.blend {
+                    format!("blend_op: @Add requires Metal color attachment blending for {:?}: {}", variant.formats, describe_error(error, "Metal returned no pipeline"))
+                } else { describe_error(error, "Metal returned no pipeline") }),
             };
             if let Err(e) = &result {
+                if state.blend_add {
+                    state.failure(e.clone());
+                    let _ = variant.pipeline.set(result);
+                    return;
+                }
                 eprintln!("[metal] pipeline variant {:?} at {} samples: {e}", variant.formats, variant.samples);
             }
             let _ = variant.pipeline.set(result);
@@ -274,7 +288,7 @@ pub enum Select {
 /// backend reads; `PipelineReady` / `PipelineFailed` arrive through the mailbox. With `taken`
 /// (the states of an identical pipeline, [`Compiled::is`]) nothing compiles: the state is ready
 /// as it returns and no message follows.
-pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::font::FrameProgress>, source: &str, desc: &PipelineDesc, taken: Option<Compiled>) -> Arc<PipeState> {
+pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::font::FrameProgress>, source: &str, desc: &PipelineDesc, name: &str, taken: Option<Compiled>) -> Arc<PipeState> {
     let declared = mtl_format(desc.color_formats[0]).unwrap_or(MTLPixelFormat::BGRA8Unorm);
     let raw = desc.blend & pipeline_blend::RAW != 0;
     let state = Arc::new(PipeState {
@@ -284,7 +298,9 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         variants: Mutex::new(Vec::new()),
         written: desc.outputs as u8,
         blend_max: desc.blend & pipeline_blend::MAX != 0,
-        can_blend: declared == MTLPixelFormat::BGRA8Unorm && !raw,
+        blend_add: desc.blend & pipeline_blend::ADD != 0,
+        name: name.to_owned(),
+        can_blend: (declared == MTLPixelFormat::BGRA8Unorm || desc.blend & pipeline_blend::ADD != 0) && !raw,
         discards: source.contains("discard_fragment"),
         // RGBA8 is format zero, so the output mask determines the attachment span.
         declared: desc.color_formats.iter().copied().take((u32::BITS - desc.outputs.leading_zeros()) as usize).filter_map(mtl_format).collect(),
@@ -397,8 +413,8 @@ fn compile(device: RcObjcId, ready: Arc<PipeState>, precise: bool) {
                     for (index, format) in ready.declared.iter().enumerate() {
                         let attachment: ObjcId = msg_send![attachments, objectAtIndexedSubscript: index as u64];
                         let () = msg_send![attachment, setPixelFormat: *format];
-                        if blend && ready.can_blend && blendable(*format) && ready.written & (1 << index) != 0 {
-                            set_over_blend(attachment, ready.blend_max);
+                        if blend && ready.can_blend && (ready.blend_add || blendable(*format)) && ready.written & (1 << index) != 0 {
+                            set_blend(attachment, ready.blend_max, ready.blend_add);
                         } else {
                             let () = msg_send![attachment, setBlendingEnabled: NO];
                         }
@@ -409,7 +425,9 @@ fn compile(device: RcObjcId, ready: Arc<PipeState>, precise: bool) {
                 let completion = objc_block!(move |pipeline: ObjcId, error: ObjcId| {
                     let result = match NonNull::new(pipeline) {
                         Some(p) => Ok(RcObjcId::from_unowned(p)),
-                        None => Err(describe_error(error, "Metal returned no pipeline")),
+                        None => Err(if ready.blend_add && blend {
+                            format!("blend_op: @Add requires Metal color attachment blending for {:?}: {}", ready.declared, describe_error(error, "Metal returned no pipeline"))
+                        } else { describe_error(error, "Metal returned no pipeline") }),
                     };
                     let _ = if blend { ready.blend.set(result) } else { ready.solid.set(result) };
                     ready.settle();

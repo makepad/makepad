@@ -10,7 +10,7 @@ use std::ptr;
 
 use crate::backend::linux::socket_stream::{
     init_openssl, ERR_error_string_n, ERR_get_error, SSL_CTX_free, SSL_CTX_new, SSL_free,
-    SSL_get_error, SSL_new, SSL_read, SSL_set_fd, SSL_shutdown, SSL_write, SSL, SSL_CTX, SSL_METHOD,
+    SSL_get_error, SSL_new, SSL_pending, SSL_read, SSL_set_fd, SSL_shutdown, SSL_write, SSL, SSL_CTX, SSL_METHOD,
 };
 use crate::tls::x509;
 
@@ -270,6 +270,13 @@ unsafe impl Send for ServerStream {}
 impl ServerStream {
     pub fn tcp(&self) -> &TcpStream {
         &self.tcp
+    }
+
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        unsafe { SSL_pending(self.ssl) }.max(0) as usize
     }
 
     pub fn shutdown(&mut self) {

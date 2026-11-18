@@ -59,6 +59,7 @@ impl PipeSrc {
             && self.bindings == o.bindings
             && self.layout == o.layout
             && self.storage == o.storage
+            && self.desc.color_formats == o.desc.color_formats
             && (self.desc.blend, self.desc.flags, self.desc.instance_stride, self.desc.outputs) == (o.desc.blend, o.desc.flags, o.desc.instance_stride, o.desc.outputs)
     }
     /// The program map's key (collisions are told apart by `same_program`).
@@ -68,6 +69,7 @@ impl PipeSrc {
         self.code.hash(&mut h);
         self.bindings.hash(&mut h);
         self.layout.hash(&mut h);
+        self.desc.color_formats.hash(&mut h);
         (self.desc.blend, self.desc.flags, self.desc.instance_stride, self.desc.outputs).hash(&mut h);
         h.finish()
     }
@@ -77,19 +79,26 @@ impl PipeSrc {
 pub struct PipeState {
     pub src: Arc<PipeSrc>,
     pub program: OnceLock<Result<Arc<Program>, String>>,
+    failure: OnceLock<String>,
     /// bumped when `program` is set (the backend announces Ready / Failed once per change)
     pub epoch: AtomicU64,
 }
 
 impl PipeState {
     pub fn new(src: Arc<PipeSrc>) -> Arc<Self> {
-        Arc::new(Self { src, program: OnceLock::new(), epoch: AtomicU64::new(0) })
+        Arc::new(Self { src, program: OnceLock::new(), failure: OnceLock::new(), epoch: AtomicU64::new(0) })
     }
     pub fn ready(&self) -> Option<&Arc<Program>> {
+        if self.failure.get().is_some() { return None; }
         self.program.get().and_then(|r| r.as_ref().ok())
     }
     pub fn failure(&self) -> Option<&str> {
-        self.program.get().and_then(|r| r.as_ref().err()).map(|s| s.as_str())
+        self.failure.get().or_else(|| self.program.get().and_then(|r| r.as_ref().err())).map(|s| s.as_str())
+    }
+    pub fn fail(&self, reason: String) {
+        if self.failure.set(format!("shader `{}`: {reason}", self.src.name)).is_ok() {
+            self.epoch.fetch_add(1, Ordering::Release);
+        }
     }
     /// It failed for want of memory (an `E_OUTOFMEMORY` in its error), so it may build once there's room.
     pub fn out_of_memory(&self) -> bool {
@@ -325,6 +334,13 @@ pub fn build_compute(dev: &Device, hlsl: &str, precise: bool, name: &str) -> Res
 
 /// Compiles and creates a pipeline (any thread: no immediate-context work).
 pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Vec<u32>, vertex_layout: Vec<u32>, storage: Vec<StorageBinding>, name: &str) -> Result<Arc<Program>, String> {
+    if desc.blend & (pipeline_blend::ADD | pipeline_blend::RAW) == pipeline_blend::ADD {
+        for (i, f) in desc.color_formats.iter().enumerate() {
+            if desc.outputs & (1 << i) != 0 && dev.blendable & (1u64.checked_shl(*f).unwrap_or(0)) == 0 {
+                return Err(format!("shader `{name}`: blend_op: @Add requires D3D11_FORMAT_SUPPORT_BLENDABLE for target format {f}"));
+            }
+        }
+    }
     let hlsl = &code.source;
     let precise = desc.flags & pipeline_flags::PRECISE != 0;
     dump(hlsl);

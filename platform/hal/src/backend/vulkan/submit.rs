@@ -76,6 +76,31 @@ fn out_of_memory(e: vk::Result) -> bool {
 /// A driver call answered VK_ERROR_DEVICE_LOST (as formatted by `device::error`).
 pub(super) fn lost_error(e: &str) -> bool { e.contains("ERROR_DEVICE_LOST") }
 
+/// Counts what `Swapchain::show` answered (profiled).
+fn count(shown: &Result<Shown, String>) {
+    crate::profile::count(match shown {
+        Ok(Shown::Presented) => "vk show: presented",
+        Ok(Shown::Dropped) => "vk show: dropped",
+        Ok(Shown::NotReady) => "vk show: no free image (retried)",
+        Err(_) => "vk show: error",
+    });
+}
+
+/// How a frame's show ended, as its outcome and whether it was presented; `None` when no
+/// swapchain image was free (it may try again).
+fn ended(shown: Result<Shown, String>) -> Option<(Outcome, bool)> {
+    match shown {
+        Ok(Shown::Presented) => Some((Outcome::Ran, true)),
+        Ok(Shown::Dropped) => Some((Outcome::Ran, false)),
+        Ok(Shown::NotReady) => None,
+        // the frame ran; only its presentation failed (lost only if the driver says so)
+        Err(e) => {
+            eprintln!("[hal-vulkan] present: {e}");
+            Some((if lost_error(&e) { Outcome::Lost } else { Outcome::Ran }, false))
+        }
+    }
+}
+
 /// How often a frame that found no free swapchain image tries again, and how many tries it gets
 /// (about one second) before it completes unshown.
 const SHOW_RETRY: std::time::Duration = std::time::Duration::from_millis(8);
@@ -650,6 +675,7 @@ impl Batch {
             eprintln!("[hal-vulkan] upload arenas: no spare was ready, a submit made {} ({} KB) in {:.2} ms",
                 self.grew.0, self.grew.1 >> 10, self.grew.2 as f64 / 1e6);
         }
+        #[cfg(not(target_os = "android"))]
         let later = submit.later();
         #[cfg(target_os = "linux")]
         let mut published: Vec<(Arc<super::share::sync::Timeline>, u64)> = Vec::new();
@@ -752,6 +778,9 @@ impl Batch {
                     // A frame of this window still waiting for an image is superseded by this one.
                     let waiting = lock(&present.chain.pending).take();
                     if let Some(waiting) = waiting { waiting(true); }
+                    #[cfg(target_os = "android")]
+                    self.hand_to_presenter(present, complete, mailbox);
+                    #[cfg(not(target_os = "android"))]
                     self.show(present, SHOW_TRIES, later, complete, mailbox);
                 }
                 _ => self.deliver(outcome, true, complete, mailbox),
@@ -791,27 +820,17 @@ impl Batch {
     /// image it waits on this worker, retried every SHOW_RETRY, without reporting the frame:
     /// its FrameDone follows the present (or the frame's end: superseded by a newer frame,
     /// swapchain replaced, worker closing, SHOW_TRIES exhausted -- then it is not presented).
+    #[cfg(not(target_os = "android"))]
     fn show(self, present: Present, tries: u32, later: super::device::Later, complete: Arc<Worker>, mailbox: Mailbox) {
         // (profiled: the acquire, copy and present of one frame on the submit worker)
         let at = if crate::profile::on() { crate::clock_ns() } else { 0 };
         let shown = present.chain.show(&present.image);
         if at != 0 { crate::profile::since(crate::profile::Metric::ToPresent, at); }
-        crate::profile::count(match &shown {
-            Ok(Shown::Presented) => "vk show: presented",
-            Ok(Shown::Dropped) => "vk show: dropped",
-            Ok(Shown::NotReady) => "vk show: no free image (retried)",
-            Err(_) => "vk show: error",
-        });
-        match shown {
-            Ok(Shown::Presented) => self.deliver(Outcome::Ran, true, complete, mailbox),
-            Ok(Shown::Dropped) => self.deliver(Outcome::Ran, false, complete, mailbox),
-            // the frame ran; only its presentation failed (lost only if the driver says so)
-            Err(e) => {
-                eprintln!("[hal-vulkan] present: {e}");
-                self.deliver(if lost_error(&e) { Outcome::Lost } else { Outcome::Ran }, false, complete, mailbox)
-            }
-            Ok(Shown::NotReady) if tries <= 1 => self.deliver(Outcome::Ran, false, complete, mailbox),
-            Ok(Shown::NotReady) => {
+        count(&shown);
+        match ended(shown) {
+            Some((outcome, shown)) => self.deliver(outcome, shown, complete, mailbox),
+            None if tries <= 1 => self.deliver(Outcome::Ran, false, complete, mailbox),
+            None => {
                 let chain = present.chain.clone();
                 let frame = present.frame;
                 let retry_list = later.clone();
@@ -824,6 +843,44 @@ impl Batch {
                     if let Some(waiting) = waiting {
                         waiting(closing || chain.latest.load(Ordering::Acquire) != frame);
                     }
+                })));
+            }
+        }
+    }
+
+    /// Android: the frame goes to the present worker (`Present::presenter`), which shows it
+    /// (`Swapchain::show` waits there for the frame's copy into the image, so this worker never
+    /// waits for the GPU).
+    #[cfg(target_os = "android")]
+    fn hand_to_presenter(self, present: Present, complete: Arc<Worker>, mailbox: Mailbox) {
+        present.chain.queued.store(present.frame, Ordering::Release);
+        let presenter = present.presenter.clone();
+        presenter.push(move || self.present_frame(present, SHOW_TRIES, complete, mailbox));
+    }
+
+    /// Present worker (Android): shows the frame, unless a frame handed on after it superseded
+    /// it (it completes unshown, so a present worker that fell behind shows the newest frame
+    /// next). With no free image it tries again SHOW_RETRY later, as a timed job of this worker,
+    /// so a newer frame handed on meanwhile is not held up by it.
+    #[cfg(target_os = "android")]
+    fn present_frame(self, present: Present, tries: u32, complete: Arc<Worker>, mailbox: Mailbox) {
+        if present.chain.queued.load(Ordering::Acquire) != present.frame {
+            crate::profile::count("vk show: superseded");
+            return self.deliver(Outcome::Ran, false, complete, mailbox);
+        }
+        // (profiled: the acquire, copy, its wait and the present of one frame)
+        let at = if crate::profile::on() { crate::clock_ns() } else { 0 };
+        let shown = present.chain.show(&present.image);
+        if at != 0 { crate::profile::since(crate::profile::Metric::ToPresent, at); }
+        count(&shown);
+        match ended(shown) {
+            Some((outcome, shown)) => self.deliver(outcome, shown, complete, mailbox),
+            None if tries <= 1 => self.deliver(Outcome::Ran, false, complete, mailbox),
+            None => {
+                let later = present.presenter.later();
+                lock(&later).push((std::time::Instant::now() + SHOW_RETRY, Box::new(move |closing: bool| {
+                    if closing { self.deliver(Outcome::Ran, false, complete, mailbox); }
+                    else { self.present_frame(present, tries - 1, complete, mailbox); }
                 })));
             }
         }

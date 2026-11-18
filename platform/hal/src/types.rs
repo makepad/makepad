@@ -1529,6 +1529,10 @@ pub mod pipeline_blend {
     pub const MAX: u32 = 1;
     /// a raw-write data pass: never blends, alpha is payload
     pub const RAW: u32 = 2;
+    /// per-channel src + dst, alpha included (ONE/ONE/ADD), on any blendable
+    /// target, including floats; still requires Draw::BLEND and no RAW bit.
+    /// An unsupported target fails the pipeline instead of drawing raw.
+    pub const ADD: u32 = 4;
 }
 
 /// Texture and buffer indices from here up are the HAL's: the render target of an embedded window

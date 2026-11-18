@@ -145,6 +145,7 @@ pub(crate) struct SecureTransportStream {
 #[link(name = "Security", kind = "framework")]
 extern "C" {
     fn SSLSetEnabledCiphers(context: SSLContextRef, ciphers: *const u16, count: usize) -> OSStatus;
+    fn SSLGetBufferedReadSize(context: SSLContextRef, buffer_size: *mut usize) -> OSStatus;
 }
 
 /// kTLSProtocol12: the floor for the pinned and server paths.
@@ -364,6 +365,22 @@ impl SecureTransportStream {
         })
     }
 
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub(crate) fn buffered(&self) -> usize {
+        // shutdown() released the context: nothing may touch it again.
+        if self.is_closed {
+            return 0;
+        }
+        let mut size = 0usize;
+        if unsafe { SSLGetBufferedReadSize(self.ssl_context, &mut size) } == SSL_OK {
+            size
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn tcp(&self) -> &TcpStream {
         &self.tcp_stream
     }
@@ -578,6 +595,16 @@ impl SocketStream {
         match self {
             SocketStream::Plain(stream) => stream.try_clone(),
             SocketStream::Tls(stream) => stream.tcp_stream.try_clone(),
+        }
+    }
+
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        match self {
+            SocketStream::Plain(_) => 0,
+            SocketStream::Tls(stream) => stream.buffered(),
         }
     }
 }

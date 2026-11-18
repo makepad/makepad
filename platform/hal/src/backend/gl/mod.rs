@@ -82,8 +82,18 @@ pub(crate) struct PipeState {
     code: GlslPipeline,
     desc: PipelineDesc,
     linked: OnceLock<Result<Linked, String>>,
+    failure: OnceLock<String>,
+    name: String,
     epoch: AtomicU64,
     queue: Queue,
+}
+
+impl PipeState {
+    fn fail(&self, reason: String) {
+        if self.failure.set(format!("shader `{}`: {reason}", self.name)).is_ok() {
+            self.epoch.fetch_add(1, Ordering::Release);
+        }
+    }
 }
 
 impl Drop for PipeState {
@@ -296,6 +306,11 @@ impl GlBackend {
             if !pipe.announced {
                 pipe.announced = true;
                 s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
+            }
+            if let Some(log) = pipe.state.failure.get() {
+                eprintln!("[hal-gl] pipeline {id:?} failed: {log}");
+                world.to_session(*sid, |q| q.pipeline_failed(id, log.as_bytes()));
+                continue;
             }
             match pipe.state.linked.get() {
                 Some(Err(e)) => {
@@ -553,8 +568,9 @@ impl Gpu for GlBackend {
         }
         let mut key = blob.code.to_vec();
         for v in [blob.desc.blend, blob.desc.instance_stride, blob.desc.outputs] { key.extend_from_slice(&v.to_le_bytes()); }
+        for f in blob.desc.color_formats { key.extend_from_slice(&f.to_le_bytes()); }
         let state = self.programs.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
-            let state = Arc::new(PipeState { key: self.key(), code, desc: blob.desc, linked: OnceLock::new(), epoch: AtomicU64::new(0), queue: self.queue.clone() });
+            let state = Arc::new(PipeState { key: self.key(), code, desc: blob.desc, linked: OnceLock::new(), failure: OnceLock::new(), name: s.string(blob.desc.name).unwrap_or("unnamed").to_owned(), epoch: AtomicU64::new(0), queue: self.queue.clone() });
             let job = state.clone();
             self.queue.push(move |r| r.compile(&job));
             self.programs.insert(key, Arc::downgrade(&state));

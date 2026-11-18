@@ -7,7 +7,7 @@ use crate::spirv::SpirvPipeline;
 use crate::types::*;
 use makepad_vulkan::vk;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) const ABSENT: u32 = u32::MAX;
@@ -158,6 +158,7 @@ impl Drop for RenderPass { fn drop(&mut self) { unsafe { self.dev.raw.destroy_re
 pub(super) struct Program {
     pub dev: Arc<Device>,
     pub desc: PipelineDesc,
+    pub name: String,
     pub code: SpirvPipeline,
     pub bindings: Vec<u32>,
     pub storage: Vec<StorageBinding>,
@@ -185,10 +186,15 @@ pub(super) struct Program {
 
 impl Program {
     /// `video`: the samplers of its video slots (`None`: an ordinary image's for each).
-    pub fn new(dev: Arc<Device>, desc: PipelineDesc, code: SpirvPipeline, bindings: Vec<u32>, vertex_stride: u32, storage: Vec<StorageBinding>, video: Option<&[VideoSampler]>) -> Result<Arc<Self>, String> {
+    pub fn new(dev: Arc<Device>, desc: PipelineDesc, code: SpirvPipeline, bindings: Vec<u32>, vertex_stride: u32, storage: Vec<StorageBinding>, video: Option<&[VideoSampler]>, name: &str) -> Result<Arc<Self>, String> {
         if bindings.len() < pipeline_binding::BUFFERS || bindings.len() > pipeline_binding::BUFFERS + 4
             || bindings[pipeline_binding::TEXTURES] as usize != code.textures.len() || vertex_stride % 4 != 0 {
             return Err("SPIR-V pipeline binding/layout mismatch".into());
+        }
+        if desc.blend & (pipeline_blend::ADD | pipeline_blend::RAW) == pipeline_blend::ADD {
+            for (i, f) in desc.color_formats.iter().enumerate() {
+                if desc.outputs & (1 << i) != 0 { require_add_blend(&dev, *f, name)?; }
+            }
         }
         let slots = code.textures.iter().filter(|t| **t == VIDEO_SHAPE).count();
         let video = match video {
@@ -197,7 +203,7 @@ impl Program {
             None if slots == 0 => Vec::new(),
             None => vec![dev.video_sampler(0, None)?; slots],
         };
-        let mut out = Self { dev, desc, code, bindings, storage, vertex_stride, layout: vk::PipelineLayout::null(),
+        let mut out = Self { dev, desc, name: name.to_owned(), code, bindings, storage, vertex_stride, layout: vk::PipelineLayout::null(),
             descriptors: vk::DescriptorSetLayout::null(), serial: super::sets::serial(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(), video,
             vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
             xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
@@ -346,6 +352,7 @@ pub fn refused_pipeline() -> Option<&'static str> { REFUSED.get().map(String::as
 /// replaced a lost one). `key` names identical creates, which share one program.
 pub(super) struct Source {
     pub desc: PipelineDesc,
+    pub name: String,
     pub code: SpirvPipeline,
     pub bindings: Vec<u32>,
     pub storage: Vec<StorageBinding>,
@@ -367,6 +374,8 @@ pub(super) struct State {
     video: Mutex<HashMap<Vec<VideoSampler>, Result<Arc<Program>, String>>>,
     video_variants: Mutex<HashMap<(Vec<VideoSampler>, VariantKey), Result<Arc<Pipeline>, String>>>,
     pub epoch: AtomicU64,
+    /// An Add variant failed: do not retry another layout or silently draw raw.
+    blend_failed: AtomicBool,
     /// the sessions whose pipelines wait for this program while it compiles (programs are shared
     /// by shader content, so every session that created a pipeline with it is told); `None` once
     /// the compile has answered
@@ -378,7 +387,7 @@ pub(super) struct State {
 impl State {
     pub fn new(src: Arc<Source>) -> Arc<Self> {
         Arc::new(Self { src, program: OnceLock::new(), variants: Mutex::new(HashMap::new()), video: Mutex::new(HashMap::new()), video_variants: Mutex::new(HashMap::new()),
-            epoch: AtomicU64::new(0), waiters: Mutex::new(Some(Vec::new())), rank: super::Compilers::rank(super::compile_rank::DRAW) })
+            epoch: AtomicU64::new(0), blend_failed: AtomicBool::new(false), waiters: Mutex::new(Some(Vec::new())), rank: super::Compilers::rank(super::compile_rank::DRAW) })
     }
 
     /// Session `sid` has a pipeline on this program: its pump is woken when the compile answers.
@@ -408,19 +417,22 @@ impl State {
         let raw = program.desc.blend & pipeline_blend::RAW != 0;
         if raw && !matches!(colors[0], format::RGBA16F | format::RGBA32F | format::R32F) { return; }
         let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1, depth_kept: true, ms_kept: false };
-        // a data target (R32F depth/shadow values, ids) is drawn without blending
-        let blends = !raw && matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
+        // data targets are drawn raw unless the shader explicitly requests Add
+        let blends = !raw && (program.desc.blend & pipeline_blend::ADD != 0 || matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F));
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
         let made = RenderPass::new(program.dev.clone(), key).and_then(|pass| create_variant(program.clone(), &pass, flags));
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not this pipeline's failure: the first draw that needs it tries again
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return; }
+        let failed = made.is_err();
         lock(&self.variants).insert(VariantKey::new(program, key, flags), made);
+        if failed && self.src.desc.blend & pipeline_blend::ADD != 0 { self.blend_failed.store(true, Ordering::Release); }
     }
 
     /// Whether a draw into a pass of `key` with `flags` would compile its pipeline now: the
     /// program is built and that variant is not.
     pub fn lacks(&self, key: PassKey, flags: u32) -> bool {
+        if self.blend_failed.load(Ordering::Acquire) { return false; }
         let Some(Ok(program)) = self.program.get() else { return false };
         !lock(&self.variants).contains_key(&VariantKey::new(program, key, flags))
     }
@@ -428,6 +440,7 @@ impl State {
     pub fn failure(&self) -> Option<String> {
         if let Some(Err(e)) = self.program.get() { return Some(e.clone()); }
         lock(&self.variants).values().find_map(|made| made.as_ref().err().cloned())
+            .or_else(|| lock(&self.video_variants).values().find_map(|made| made.as_ref().err().cloned()))
     }
 
     /// The pipeline for a draw into `pass` with `flags`. One the program was not built with is
@@ -435,6 +448,7 @@ impl State {
     /// rather than showing without the draw. None while the program itself compiles (the app
     /// paints again at PipelineReady) or when the pipeline failed.
     pub fn select(&self, pass: &RenderPass, flags: u32) -> Option<Arc<Pipeline>> {
+        if self.blend_failed.load(Ordering::Acquire) { return None; }
         let program = self.program.get()?.as_ref().ok()?.clone();
         let key = VariantKey::new(&program, pass.key, flags);
         if let Some(made) = lock(&self.variants).get(&key) { return made.as_ref().ok().cloned(); }
@@ -442,7 +456,13 @@ impl State {
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not kept: the next draw tries again (the frame skips it meanwhile)
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
-        lock(&self.variants).entry(key).or_insert(made).as_ref().ok().cloned()
+        let failed = made.is_err();
+        let result = lock(&self.variants).entry(key).or_insert(made).as_ref().ok().cloned();
+        // an Add variant that cannot blend fails the whole pipeline, announced once
+        if failed && self.src.desc.blend & pipeline_blend::ADD != 0 && !self.blend_failed.swap(true, Ordering::AcqRel) {
+            self.epoch.fetch_add(1, Ordering::Release);
+        }
+        result
     }
 }
 
@@ -451,12 +471,13 @@ impl State {
     /// samplers: the program made with those samplers (compiled here, at the first draw that
     /// needs it, as an unknown pass variant is) and its pipeline for `pass` and `flags`.
     pub fn select_video(&self, pass: &RenderPass, flags: u32, video: &[VideoSampler]) -> Option<Arc<Pipeline>> {
+        if self.blend_failed.load(Ordering::Acquire) { return None; }
         let base = self.program.get()?.as_ref().ok()?.clone();
         if base.video == video { return self.select(pass, flags); }
         let program = {
             let mut programs = lock(&self.video);
             programs.entry(video.to_vec()).or_insert_with(|| {
-                let made = Program::new(base.dev.clone(), self.src.desc, self.src.code.clone(), self.src.bindings.clone(), self.src.stride, self.src.storage.clone(), Some(video));
+                let made = Program::new(base.dev.clone(), self.src.desc, self.src.code.clone(), self.src.bindings.clone(), self.src.stride, self.src.storage.clone(), Some(video), &self.src.name);
                 if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline: {e}"); }
                 made
             }).as_ref().ok()?.clone()
@@ -466,12 +487,31 @@ impl State {
         let made = create_variant(program, pass, flags);
         if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline variant: {e}"); note_refusal(e); }
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
-        lock(&self.video_variants).entry(key).or_insert(made).as_ref().ok().cloned()
+        let failed = made.is_err();
+        let result = lock(&self.video_variants).entry(key).or_insert(made).as_ref().ok().cloned();
+        // an Add variant that cannot blend fails the whole pipeline, announced once
+        if failed && self.src.desc.blend & pipeline_blend::ADD != 0 && !self.blend_failed.swap(true, Ordering::AcqRel) {
+            self.epoch.fetch_add(1, Ordering::Release);
+        }
+        result
     }
+}
+
+fn require_add_blend(dev: &Device, format: u32, name: &str) -> Result<(), String> {
+    if !dev.formats.get(format as usize).is_some_and(|p| p.optimal_tiling_features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND)) {
+        return Err(format!("shader `{name}`: blend_op: @Add requires VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT for target format {format}"));
+    }
+    Ok(())
 }
 
 fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Result<Arc<Pipeline>, String> {
     let dev = &program.dev;
+    let add = program.desc.blend & pipeline_blend::ADD != 0;
+    if add && program.desc.blend & pipeline_blend::RAW == 0 && flags & Draw::BLEND != 0 {
+        for (i, f) in pass.key.colors.iter().enumerate() {
+            if *f != ABSENT && program.desc.outputs & (1 << i) != 0 { require_add_blend(dev, *f, &program.name)?; }
+        }
+    }
     // a multiview pass runs the multiview stages (each view's matrices by view index)
     let (vertex_module, fragment_module) = if pass.key.views > 1 {
         if program.xr_vertex == vk::ShaderModule::null() { return Err("the shader has no multiview stages for a multiview pass".into()); }
@@ -503,9 +543,10 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
         let writes = program.desc.outputs & (1 << i) != 0 && pass.key.colors[i] != ABSENT;
         let blend = writes && flags & Draw::BLEND != 0 && program.desc.blend & pipeline_blend::RAW == 0 && pass.key.colors[i] != format::R32UINT;
         let op = if program.desc.blend & pipeline_blend::MAX != 0 { vk::BlendOp::MAX } else { vk::BlendOp::ADD };
+        let dest = if add { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA };
         vk::PipelineColorBlendAttachmentState::default().blend_enable(blend)
-            .src_color_blend_factor(vk::BlendFactor::ONE).dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA).color_blend_op(op)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE).dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA).alpha_blend_op(op)
+            .src_color_blend_factor(vk::BlendFactor::ONE).dst_color_blend_factor(dest).color_blend_op(op)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE).dst_alpha_blend_factor(dest).alpha_blend_op(op)
             .color_write_mask(if writes { vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B | vk::ColorComponentFlags::A } else { vk::ColorComponentFlags::empty() })
     }).collect();
     if dev.features.independent_blend == vk::FALSE && attachments.windows(2).any(|a| a[0].blend_enable != a[1].blend_enable || a[0].color_write_mask != a[1].color_write_mask) {

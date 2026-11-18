@@ -69,8 +69,8 @@ pub struct App {
     pub socket: String,
     pub started_ms: u64,
     pub caps: Vec<String>,
-    /// Windows: the thin parent this run stands behind (restart_parent.rs in the JIT), whose pid is
-    /// the one whoever started the run holds, and the one that stays when the run restarts
+    /// Windows, macOS: the thin parent this run stands behind (restart_parent.rs in the JIT), whose
+    /// pid is the one whoever started the run holds, and the one that stays when the run restarts
     pub restart_parent: Option<u32>,
     /// every top-level field as (key, raw JSON value), the host's extra fields included
     pub fields: Vec<(String, String)>,

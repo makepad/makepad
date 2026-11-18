@@ -281,18 +281,18 @@ pub(crate) fn stop_encoder() {
     encoder().lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
-/// 2x2 box-filter a raw readback in place of the job's pixels (same
-/// channel order and origin, tightly packed); the sink's scale doubles
-/// so the requested output size is kept where it still can be.
-pub fn halve_grab(job: &mut EncodeJob) -> bool {
-    let (w, h, stride) = (job.width as usize, job.height as usize, job.stride);
-    if stride < w * 4 || job.pixels.len() < stride * h {
-        return false;
+/// 2x2 box filter of 4-byte pixels in rows of `stride` bytes (any channel order, rows in memory
+/// order), tightly packed; an odd last row or column is dropped. The one downscale step of a
+/// grab: the queue's halving ([`halve_grab`]) and the encoder's ([`encode_grab`]) are this, so
+/// a frame comes out the same whichever of them halved it. None when the pixels are too few.
+fn halve_pixels(pixels: &[u8], w: usize, h: usize, stride: usize) -> Option<Vec<u8>> {
+    if w < 2 || h < 2 || stride < w * 4 || pixels.len() < stride * h {
+        return None;
     }
     let (w2, h2) = (w / 2, h / 2);
     let mut out = vec![0u8; w2 * h2 * 4];
     for y in 0..h2 {
-        let (r0, r1) = (&job.pixels[2 * y * stride..], &job.pixels[(2 * y + 1) * stride..]);
+        let (r0, r1) = (&pixels[2 * y * stride..], &pixels[(2 * y + 1) * stride..]);
         for x in 0..w2 {
             for c in 0..4 {
                 let i = 8 * x + c;
@@ -301,10 +301,21 @@ pub fn halve_grab(job: &mut EncodeJob) -> bool {
             }
         }
     }
+    Some(out)
+}
+
+/// 2x2 box-filter a raw readback in place of the job's pixels (same
+/// channel order and origin, tightly packed); the sink's scale doubles
+/// so the requested output size is kept where it still can be.
+pub fn halve_grab(job: &mut EncodeJob) -> bool {
+    let (w, h) = (job.width as usize, job.height as usize);
+    let Some(out) = halve_pixels(&job.pixels, w, h, job.stride) else {
+        return false;
+    };
     job.pixels = crate::HostBuf::from_vec(out);
-    job.width = w2 as u32;
-    job.height = h2 as u32;
-    job.stride = w2 * 4;
+    job.width = (w / 2) as u32;
+    job.height = (h / 2) as u32;
+    job.stride = (w / 2) * 4;
     job.sink.scale = (job.sink.scale * 2.0).min(1.0);
     true
 }
@@ -1578,8 +1589,17 @@ pub fn encode_grab(job: &EncodeJob) -> Result<(u32, u32, Vec<u8>), String> {
     if width == 0 || height == 0 || job.pixels.is_empty() {
         return Err("grab backend returned no pixels".into());
     }
-    let target_w = ((width as f64) * job.sink.scale).round().max(1.0) as usize;
-    let target_h = ((height as f64) * job.sink.scale).round().max(1.0) as usize;
+    // Every 2x of downscale is a 2x2 box filter (`halve_pixels`), the rest a point sample. The
+    // queue may have taken some of those halvings already (`halve_grab`, over the pixel budget);
+    // this takes the ones left, so a frame comes out the same however deep the queue was. A
+    // gseq at scale=0.5 point-sampled its first frames and box-filtered the ones behind a
+    // backlog: its unchanged text flipped between two looks, frame to frame (2026-11-17).
+    let (mut halvings, mut scale, mut w, mut h) = (0, job.sink.scale, width, height);
+    while scale <= 0.5 && w >= 2 && h >= 2 {
+        (halvings, scale, w, h) = (halvings + 1, (scale * 2.0).min(1.0), w / 2, h / 2);
+    }
+    let target_w = ((w as f64) * scale).round().max(1.0) as usize;
+    let target_h = ((h as f64) * scale).round().max(1.0) as usize;
     let target_bytes = target_w
         .checked_mul(target_h)
         .and_then(|area| area.checked_mul(4))
@@ -1615,18 +1635,26 @@ pub fn encode_grab(job: &EncodeJob) -> Result<(u32, u32, Vec<u8>), String> {
     {
         return Err("grab readback has invalid dimensions or stride".into());
     }
-    // Sample first, then convert only the retained pixels. In particular,
+    let (mut halved, mut stride) = (Vec::new(), stride);
+    for i in 0..halvings {
+        let (hw, hh) = (width >> i, height >> i);
+        let next = if i == 0 { halve_pixels(pixels, hw, hh, stride) } else { halve_pixels(&halved, hw, hh, stride) };
+        halved = next.ok_or("grab readback has invalid dimensions or stride")?;
+        stride = (hw / 2) * 4;
+    }
+    let pixels: &[u8] = if halvings == 0 { pixels } else { &halved };
+    // Filter and sample first, then convert only the retained pixels. In particular,
     // scale=0.5 encodes one quarter as many pixels, with no full-size PNG.
     let mut out = vec![0u8; target_bytes];
     for y in 0..target_h {
-        let src_y = y * height / target_h;
+        let src_y = y * h / target_h;
         let src_y = if origin == GrabOrigin::BottomLeft {
-            height - 1 - src_y
+            h - 1 - src_y
         } else {
             src_y
         };
         for x in 0..target_w {
-            let src = src_y * stride + (x * width / target_w) * 4;
+            let src = src_y * stride + (x * w / target_w) * 4;
             let dst = (y * target_w + x) * 4;
             out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
             if order == GrabOrder::Bgra {
@@ -2272,5 +2300,58 @@ mod tests {
         }
         GRAB_BYTES.fetch_sub(MAX_GRAB_BYTES, Ordering::Relaxed);
         assert_eq!(sizes, vec![Ok((32, 16)), Ok((64, 32))], "each grab arrives at its requested size, none refused");
+    }
+
+    /// A gseq at scale=0.5 point-sampled frames the queue had not halved, so unchanged text
+    /// flipped between two looks (2026-11-17).
+    #[test]
+    fn a_grabs_pixels_do_not_depend_on_queue_halving() {
+        start_encoder().unwrap();
+        let stride = 67 * 4 + 12;
+        let mut pixels = vec![0u8; stride * 35];
+        for y in 0..35 {
+            for x in 0..67 {
+                for c in 0..4 {
+                    pixels[y * stride + x * 4 + c] = ((x * 37 + y * 101 + c * 59) ^ (x * y)) as u8;
+                }
+            }
+        }
+        let mut grabs = Vec::new();
+        for i in 0..2 {
+            let (tx, rx) = sync_channel(1);
+            PENDING_GRABS.fetch_add(1, Ordering::Relaxed);
+            let sink = GrabSink {
+                id: GRAB_ID_BASE + (1 << 40) + 2 + i as u64,
+                window: None,
+                requested_at: Instant::now(),
+                scale: 0.25,
+                raw_output: true,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                tx,
+            };
+            if i == 0 { GRAB_BYTES.fetch_add(MAX_GRAB_BYTES, Ordering::Relaxed); }
+            submit_encode(
+                EncodeJob {
+                    sink,
+                    width: 67,
+                    height: 35,
+                    pixels: crate::HostBuf::from_vec(pixels.clone()),
+                    stride,
+                    order: GrabOrder::Bgra,
+                    origin: GrabOrigin::BottomLeft,
+                    capture_ms: 0.0,
+                    backend_png: false,
+                    bytes: None,
+                },
+                true,
+            );
+            let grabbed = rx.recv_timeout(Duration::from_secs(10));
+            if i == 0 { GRAB_BYTES.fetch_sub(MAX_GRAB_BYTES, Ordering::Relaxed); }
+            grabs.push(grabbed.expect("the grab is answered").expect("the grab succeeds"));
+        }
+        let size = "a grab's size does not depend on whether the queue halved it";
+        assert_eq!((grabs[0].width, grabs[0].height), (16, 8), "{size}");
+        assert_eq!((grabs[1].width, grabs[1].height), (16, 8), "{size}");
+        assert_eq!(grabs[0].data, grabs[1].data, "a grab's pixels do not depend on whether the queue halved it");
     }
 }

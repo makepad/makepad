@@ -72,8 +72,8 @@ pub(super) struct DrawJob {
     pub instances: Option<Instances>,
     pub stride: u32,
     pub ranges: Vec<[u32; 2]>,
-    /// Some(max) = blended with MAX instead of ADD
-    pub blend: Option<bool>,
+    /// Some(bits) = blended with the pipeline_blend operation
+    pub blend: Option<u32>,
     pub depth_write: bool,
     pub depth_greater: bool,
     pub cull: bool,
@@ -444,6 +444,7 @@ impl GlBackend {
             return Ok(None);
         };
         // still compiling, or failed: the app paints again when it hears PipelineReady
+        if program.failure.get().is_some() { return Ok(None); }
         let Some(Ok(linked)) = program.linked.get() else { return Ok(None) };
         let sid = s.id;
         let buffer = |me: &Self, id: Id| me.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map(|b| b.obj.clone());
@@ -546,6 +547,12 @@ impl GlBackend {
         let mut blendable = false;
         for (i, c) in colors {
             if !written(*i) { continue; }
+            if d.flags & Draw::BLEND != 0 && !raw && program.desc.blend & pipeline_blend::ADD != 0 {
+                if let Some(reason) = super::program::add_blend_error(c.desc.format, self.caps.float_blend) {
+                    program.fail(reason);
+                    return Ok(None);
+                }
+            }
             draw_buffers |= 1 << i;
             blendable |= match c.desc.format {
                 format::BGRA8 | format::RGBA8 | format::RGBA16F | format::RG16F | format::R16F | format::R8 | format::RG8 => true,
@@ -553,7 +560,7 @@ impl GlBackend {
                 _ => false,
             };
         }
-        let blend = (d.flags & Draw::BLEND != 0 && !raw && blendable).then_some(program.desc.blend & pipeline_blend::MAX != 0);
+        let blend = (d.flags & Draw::BLEND != 0 && !raw && blendable).then_some(program.desc.blend & (pipeline_blend::MAX | pipeline_blend::ADD));
         let scissor = if d.scissor.iter().any(|n| n.is_nan()) {
             [0, 0, target_size[0] as i32, target_size[1] as i32]
         } else {
@@ -603,7 +610,7 @@ impl GlBackend {
 struct Bound {
     program: GLuint,
     draw_buffers: Option<u32>,
-    blend: Option<Option<bool>>,
+    blend: Option<Option<u32>>,
     depth_write: Option<bool>,
     depth_greater: Option<bool>,
     cull: Option<bool>,
@@ -765,9 +772,11 @@ impl Renderer {
             }
             if bound.blend != Some(d.blend) {
                 match d.blend {
-                    Some(max) => {
+                    Some(bits) => {
                         (gl.glEnable)(sys::BLEND);
-                        let op = if max { sys::MAX } else { sys::FUNC_ADD };
+                        let op = if bits & pipeline_blend::MAX != 0 { sys::MAX } else { sys::FUNC_ADD };
+                        let dest = if bits & pipeline_blend::ADD != 0 { sys::ONE } else { sys::ONE_MINUS_SRC_ALPHA };
+                        (gl.glBlendFuncSeparate)(sys::ONE, dest, sys::ONE, dest);
                         (gl.glBlendEquationSeparate)(op, op);
                     }
                     None => (gl.glDisable)(sys::BLEND),

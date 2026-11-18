@@ -65,6 +65,13 @@ impl SocketStream {
         self.inner.try_clone_tcp()
     }
 
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        self.inner.buffered()
+    }
+
     pub fn shutdown(&mut self) {
         self.inner.shutdown();
     }
@@ -151,6 +158,13 @@ impl SocketStream {
         self.inner.try_clone_tcp()
     }
 
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        self.inner.buffered()
+    }
+
     pub fn shutdown(&mut self) {
         self.inner.shutdown();
     }
@@ -232,9 +246,17 @@ impl SocketStream {
         self.inner.set_write_timeout(timeout)
     }
 
-    /// A handle on the TCP socket under the stream (to wait for input on it): none here.
+    /// A handle on the TCP socket under the stream (to wait for input on it):
+    /// a pinned (Schannel) connection's; a WinRT socket has none.
     pub fn try_clone_tcp(&self) -> io::Result<std::net::TcpStream> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "no TCP socket handle on this platform"))
+        self.inner.try_clone_tcp()
+    }
+
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        self.inner.buffered()
     }
 
     pub fn shutdown(&mut self) {
@@ -324,6 +346,13 @@ impl SocketStream {
         Err(io::Error::new(io::ErrorKind::Unsupported, "no TCP socket handle on this platform"))
     }
 
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero. None here: no handle to wait on, so a reader only reads.
+    pub fn buffered(&self) -> usize {
+        0
+    }
+
     pub fn shutdown(&mut self) {
         self.inner.shutdown();
     }
@@ -400,6 +429,13 @@ impl SocketStream {
     /// A handle on the TCP socket under the stream (to wait for input on it): none here.
     pub fn try_clone_tcp(&self) -> io::Result<std::net::TcpStream> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "no TCP socket handle on this platform"))
+    }
+
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero. None here: no handle to wait on, so a reader only reads.
+    pub fn buffered(&self) -> usize {
+        0
     }
 
     pub fn shutdown(&mut self) {}

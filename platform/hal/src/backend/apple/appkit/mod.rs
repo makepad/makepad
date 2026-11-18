@@ -36,7 +36,7 @@ mod window;
 
 pub use app::{end_unseen_activity, host_dark, resume_unseen_activity, run_main_loop, stop_main_loop, stop_main_loop_with};
 pub(crate) use app::ask_terminate;
-/// The exec restart's stacking handover (restack.rs).
+/// A process restart's stacking handover (restack.rs).
 pub use restack::handover as restack_handover;
 /// `crate::set_menu_bar_app`.
 pub static MENU_BAR_APP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

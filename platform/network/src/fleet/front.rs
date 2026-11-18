@@ -33,10 +33,10 @@ const MAX_HEAD: usize = 16 * 1024;
 const HEAD_DEADLINE: Duration = Duration::from_secs(15);
 const TLS_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE: Duration = Duration::from_secs(10 * 60);
-const POLL: Duration = Duration::from_millis(5);
-/// The poll while bytes moved within [`BUSY`].
-const BUSY_POLL: Duration = Duration::from_millis(1);
-const BUSY: Duration = Duration::from_millis(250);
+/// How often a quiet side of a connection looks at the idle limit and at
+/// the other side having ended. Bytes never wait on it: each side wakes on
+/// its own input.
+const WAKE: Duration = Duration::from_millis(250);
 const MAX_FAILURES: usize = 5;
 const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const BAN: Duration = Duration::from_secs(15 * 60);
@@ -209,15 +209,15 @@ pub fn start_front(config: FrontConfig) -> io::Result<FrontHandle> {
                 let limits = limits.clone();
                 let _ = std::thread::Builder::new().name(format!("fleet-{}-conn", config.label)).spawn(move || {
                     let _slot = slot;
-                    match serve(&config, tcp, peer) {
-                        Ok(()) => {}
-                        Err(Refusal::Auth(why)) => {
-                            audit(config.label, &peer, &format!("auth refused: {why}"));
-                            if limits.fail(ip) {
-                                audit(config.label, &peer, &format!("banned for {} s", BAN.as_secs()));
-                            }
+                    let count = |why: &str| {
+                        audit(config.label, &peer, &format!("auth refused: {why}"));
+                        if limits.fail(ip) {
+                            audit(config.label, &peer, &format!("banned for {} s", BAN.as_secs()));
                         }
-                        Err(Refusal::Quiet) => {}
+                    };
+                    match serve(&config, tcp, peer, &count) {
+                        Ok(()) | Err(Refusal::Quiet) => {}
+                        Err(Refusal::Auth(why)) => count(&why),
                         Err(Refusal::Other(why)) => audit(config.label, &peer, &why),
                     }
                 });
@@ -233,7 +233,8 @@ pub fn normalize(ip: IpAddr) -> IpAddr {
 enum Refusal {
     /// Counts toward a ban.
     Auth(String),
-    /// Port probes and disconnects: nothing to say.
+    /// Nothing more to record: port probes, disconnects, or a refused
+    /// credential already counted before its answer.
     Quiet,
     Other(String),
 }
@@ -337,7 +338,10 @@ impl ParsedHead {
     }
 }
 
-fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), Refusal> {
+/// `count`: records a refused credential toward a ban. A refusal the client
+/// hears is counted before it is answered, so its next try already meets
+/// the ban.
+fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr, count: &dyn Fn(&str)) -> Result<(), Refusal> {
     // Responses go out as the inner server writes them (a websocket frame's
     // header and payload are separate writes): no Nagle wait between them.
     let _ = tcp.set_nodelay(true);
@@ -380,18 +384,20 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         return Err(Refusal::Other("malformed request head".into()));
     };
     let Some(authorization) = parsed.authorization.as_deref() else {
+        count("no credential");
         respond(&mut tls, 401, "a fleet credential is required");
-        return Err(Refusal::Auth("no credential".into()));
+        return Err(Refusal::Quiet);
     };
     let cred = match config.verifier.check(authorization, peer.ip(), now_secs()) {
         Ok(c) => c,
         Err(e) => {
-            respond(&mut tls, 401, "credential refused");
             // Who it claims to be (the id and role are not secret; the proof
             // is never logged), so a refusal names its client.
             let claimed = authorization.trim().strip_prefix("MKID ").map(|v| v.split('.').skip(1).take(2).collect::<Vec<_>>().join(".")).unwrap_or_default();
             let claimed: String = claimed.chars().filter(|c| c.is_ascii_graphic()).take(80).collect();
-            return Err(Refusal::Auth(format!("{e} (claims {claimed:?}, {} {})", parsed.method, parsed.path.chars().take(80).collect::<String>())));
+            count(&format!("{e} (claims {claimed:?}, {} {})", parsed.method, parsed.path.chars().take(80).collect::<String>()));
+            respond(&mut tls, 401, "credential refused");
+            return Err(Refusal::Quiet);
         }
     };
     if !(config.policy)(&cred, &parsed.method, &parsed.path) {
@@ -406,67 +412,110 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         .write_all(&parsed.rewrite(&config.front_secret, &config.inner_headers, &cred))
         .and_then(|_| inner.write_all(&rest))
         .map_err(|e| Refusal::Other(format!("inner write: {e}")))?;
-    pump(&mut tls, &mut inner);
-    let _ = inner.shutdown(Shutdown::Both);
-    tls.shutdown();
+    pump(tls, inner);
     Ok(())
 }
 
 /// Copies both ways until the inner side closes (the response is done) or
-/// nothing moves for [`IDLE`]. One thread: the TLS object cannot be split,
-/// so both directions are polled with short timeouts.
-fn pump(tls: &mut TlsStream, inner: &mut TcpStream) {
-    // Both sides are polled with timed reads, so a byte waits up to one poll
-    // on each side: 1 ms while the connection is busy (a kernel stream
-    // pushing tiles, a submit), POLL once it has been quiet for a moment.
-    let mut poll = POLL;
-    let _ = tls.set_read_timeout(Some(poll));
-    let _ = inner.set_read_timeout(Some(poll));
-    let mut a = vec![0u8; 64 * 1024];
-    let mut b = vec![0u8; 64 * 1024];
-    let mut last = Instant::now();
-    let mut client_open = true;
-    loop {
-        let mut moved = false;
-        if client_open {
-            match tls.read(&mut a) {
-                Ok(0) => {
-                    client_open = false;
-                    let _ = inner.shutdown(Shutdown::Write);
-                }
-                Ok(n) => {
-                    if inner.write_all(&a[..n]).is_err() {
-                        return;
+/// nothing moves for [`IDLE`], then closes both. The TLS object cannot be
+/// split, so the two directions share it under a lock, held only to read
+/// what has arrived or to write what the inner side sent: the client's input
+/// is waited for on its TCP socket (`peek`) without the lock, and the inner
+/// side's on this thread's own handle of it, on a thread of its own. Nothing
+/// waits on a poll timeout.
+fn pump(tls: TlsStream, inner: TcpStream) {
+    let (Ok(client), Ok(inner_back)) = (tls.try_clone_tcp(), inner.try_clone()) else {
+        let mut tls = tls;
+        let _ = inner.shutdown(Shutdown::Both);
+        tls.shutdown();
+        return;
+    };
+    // One socket under both handles: this is the TLS stream's timeout too.
+    let _ = client.set_read_timeout(Some(WAKE));
+    let _ = inner.set_read_timeout(Some(WAKE));
+    let tls = Arc::new(Mutex::new(tls));
+    let start = Instant::now();
+    let moved_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let moved = move |at: &std::sync::atomic::AtomicU64| at.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    let idle = move |at: &std::sync::atomic::AtomicU64| (start.elapsed().as_millis() as u64).saturating_sub(at.load(Ordering::Relaxed)) > IDLE.as_millis() as u64;
+    let ended = Arc::new(AtomicBool::new(false));
+
+    // Inner to client.
+    let back = {
+        let (tls, moved_ms, ended) = (tls.clone(), moved_ms.clone(), ended.clone());
+        let client = client.try_clone();
+        let mut inner = inner_back;
+        std::thread::spawn(move || {
+            let mut b = vec![0u8; 64 * 1024];
+            loop {
+                match inner.read(&mut b) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if locked(&tls).write_all(&b[..n]).is_err() {
+                            break;
+                        }
+                        moved(&moved_ms);
                     }
-                    moved = true;
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
+                        if ended.load(Ordering::Relaxed) || idle(&moved_ms) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
                 }
-                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
-                Err(_) => client_open = false,
+            }
+            ended.store(true, Ordering::Relaxed);
+            // Wakes the client side's wait.
+            if let Ok(client) = client {
+                let _ = client.shutdown(Shutdown::Read);
+            }
+        })
+    };
+
+    // Client to inner.
+    let mut inner = inner;
+    let mut a = vec![0u8; 64 * 1024];
+    let mut probe = [0u8; 1];
+    while !ended.load(Ordering::Relaxed) {
+        if locked(&tls).buffered() == 0 {
+            match client.peek(&mut probe) {
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
+                    if idle(&moved_ms) {
+                        ended.store(true, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                Err(_) => break,
+            }
+            if ended.load(Ordering::Relaxed) {
+                break;
             }
         }
-        match inner.read(&mut b) {
-            Ok(0) => return,
+        let read = locked(&tls).read(&mut a);
+        match read {
+            // The client sent all it will; the response goes on.
+            Ok(0) => {
+                let _ = inner.shutdown(Shutdown::Write);
+                break;
+            }
             Ok(n) => {
-                if tls.write_all(&b[..n]).is_err() {
-                    return;
+                if inner.write_all(&a[..n]).is_err() {
+                    break;
                 }
-                moved = true;
+                moved(&moved_ms);
             }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
-            Err(_) => return,
-        }
-        if moved {
-            last = Instant::now();
-        } else if last.elapsed() > IDLE {
-            return;
-        }
-        let want = if last.elapsed() < BUSY { BUSY_POLL } else { POLL };
-        if want != poll {
-            poll = want;
-            let _ = tls.set_read_timeout(Some(poll));
-            let _ = inner.set_read_timeout(Some(poll));
+            Err(_) => break,
         }
     }
+    let _ = back.join();
+    let _ = inner.shutdown(Shutdown::Both);
+    locked(&tls).shutdown();
+}
+
+fn locked(tls: &Mutex<TlsStream>) -> std::sync::MutexGuard<'_, TlsStream> {
+    tls.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Inner-server side: the caller of a request, when it came through a front

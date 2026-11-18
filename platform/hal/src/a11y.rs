@@ -270,6 +270,31 @@ pub(crate) fn wait_snapshot(hal: &Hal, seq: u32, timeout: Duration) {
     hal.sig.notify(&[]);
 }
 
+/// Consumer threads only, after [`hold_in`] returned `seq`: waits until every session's tree is
+/// its app's as of this call. A hold that turned the builder on waits for its activation
+/// ([`wait_snapshot`]). Over a builder already on (another consumer's, such as the OS adapter
+/// while the desktop's accessibility bus is on), the mirror holds each session's last frame,
+/// which misses what an event since changed with no frame yet: a window title set as a
+/// worker answered, read by a client the moment it heard that answer. So each session with
+/// a tree is asked for a snapshot acknowledgement. A tree that is still its app's answers at
+/// once, with no frame (the platform's `Cx::a11y_lookup`); any other answers after the
+/// frame that brings it up to date.
+pub(crate) fn wait_current(hal: &Hal, seq: u32, timeout: Duration) {
+    if seq != 0 {
+        return wait_snapshot(hal, seq, timeout);
+    }
+    let mut state = lock(&hal.state);
+    let (seq, sessions) = request_lookup_locked(&mut state, "");
+    drop(state);
+    hal.sig.notify(&sessions);
+    let windows = with_mirror(|m| {
+        m.trees.keys().copied().filter(|key| sessions.contains(&((*key >> 32) as u32))).collect::<Vec<_>>()
+    });
+    hal.wait_until(timeout, |_| {
+        with_mirror(|m| windows.iter().all(|key| m.tree(*key).is_none_or(|t| t.lookup_seq >= seq)))
+    });
+}
+
 /// A request's hold, released on success and on every early return.
 pub(crate) struct SnapshotHold<'a> {
     hal: &'a Hal,
@@ -279,7 +304,7 @@ impl<'a> SnapshotHold<'a> {
     pub(crate) fn new(hal: &'a Hal, bit: u32, timeout: Duration) -> Self {
         let seq = hold_in(hal, bit);
         let hold = Self { hal, bit };
-        wait_snapshot(hal, seq, timeout);
+        wait_current(hal, seq, timeout);
         hold
     }
 }
@@ -422,7 +447,7 @@ pub(crate) struct Native;
 impl remote::Backend for Native {
     fn activate(&self, timeout: Duration) {
         let seq = hold_in(Hal::global(), consumer::REMOTE);
-        wait_snapshot(Hal::global(), seq, timeout);
+        wait_current(Hal::global(), seq, timeout);
     }
     fn deactivate(&self) {
         release_in(Hal::global(), consumer::REMOTE);
@@ -654,6 +679,66 @@ mod tests {
         assert_eq!(consumers() & bit, 0, "the last release disables the consumer");
         release_in(&hal, bit);
         assert_eq!(consumers() & bit, 0, "an unmatched release cannot underflow the count");
+    }
+
+    /// A snapshot read over a builder another consumer keeps on (the OS adapter while the
+    /// desktop's accessibility bus is on, as on a Linux node) asks the app whether its tree is
+    /// still current and reads the answer, never the last frame's tree as it stood: a client
+    /// that heard the app set its title (a worker's answer) reads that title.
+    #[test]
+    fn a_snapshot_over_a_builder_already_on_reads_the_tree_the_app_acknowledges() {
+        use crate::{EventStore, HalEvent};
+        let hal = Hal::new();
+        let sid = hal.open(&OpenReq { backend: backend_id::HEADLESS, ..Default::default() }).session;
+        let window = Id::new(0, 1);
+        let titled = |name: &str| {
+            let update = TreeUpdate {
+                full: true,
+                root: NodeId(1),
+                nodes: vec![Node { id: NodeId(1), role: Role::Window, name: name.to_string(), ..Default::default() }],
+                ..Default::default()
+            };
+            let mut bytes = Vec::new();
+            makepad_a11y::wire::encode_update(&update, &mut bytes);
+            bytes
+        };
+        let mut writer = CmdWriter::new(sid);
+        writer.window_create(window, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 100.0, 100.0], false);
+        writer.a11y_update(window, &titled("Fab"));
+        hal.submit(&writer.buf());
+        request_consumer_in(&hal, consumer::HOST, true);
+        let key = window_key(sid, window.index);
+        let (asked, read) = std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                let _hold = SnapshotHold::new(&hal, consumer::REMOTE, Duration::from_secs(2));
+                with_tree(key, |t| t.nodes[&NodeId(1)].name.clone())
+            });
+            // The app: hears the lookup, draws the title its worker set and acknowledges.
+            let mut store = EventStore::new(sid, 64, 4096);
+            let asked = loop {
+                let mut buf = store.buf();
+                let count = hal.pump(0, &mut buf);
+                let seq = store.reader(count, buf.arena_len).find_map(|(_, event)| match event {
+                    HalEvent::A11yLookup { seq, query } if query.is_empty() => Some(seq),
+                    _ => None,
+                });
+                if seq.is_some() || reader.is_finished() {
+                    break seq;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            if let Some(seq) = asked {
+                writer.clear();
+                writer.a11y_update(window, &titled("Untitled · Fab"));
+                writer.a11y_lookup_done(seq);
+                hal.submit(&writer.buf());
+            }
+            (asked, reader.join().unwrap())
+        });
+        request_consumer_in(&hal, consumer::HOST, false);
+        assert!(hal.close(sid));
+        assert!(asked.is_some(), "the read asks the app for a snapshot acknowledgement");
+        assert_eq!(read.as_deref(), Some("Untitled · Fab"), "the read sees the tree the app acknowledged, not the last frame's");
     }
 
     #[test]

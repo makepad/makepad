@@ -222,6 +222,24 @@ impl SocketStream {
     }
 }
 
+impl SocketStream {
+    /// The TCP socket under a pinned (Schannel) connection, to wait for input
+    /// on; a WinRT socket has none.
+    pub fn try_clone_tcp(&self) -> io::Result<std::net::TcpStream> {
+        match self.schannel.as_ref() {
+            Some(s) => s.tcp().try_clone(),
+            None => Err(io::Error::new(io::ErrorKind::Unsupported, "no TCP socket handle under a WinRT socket")),
+        }
+    }
+
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        self.schannel.as_ref().map_or(0, |s| s.buffered())
+    }
+}
+
 impl Drop for SocketStream {
     fn drop(&mut self) {
         self.shutdown();

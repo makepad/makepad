@@ -176,6 +176,11 @@ pub(super) struct Swapchain {
     retired: AtomicBool,
     /// The newest frame queued for presentation here (set when the frame is encoded).
     pub latest: AtomicU64,
+    /// Android: the newest frame handed to the present worker (`Batch::hand_to_presenter`). A
+    /// frame there that is not this one was superseded and is not shown; `latest` cannot say
+    /// so, since the next frame is encoded before the present worker reaches this one.
+    #[cfg(target_os = "android")]
+    pub queued: AtomicU64,
     /// A frame that found no free image, waiting on the queue worker for its next try
     /// (`Batch::show`). Only the queue worker takes or fills it.
     pub pending: Mutex<Option<super::device::LaterJob>>,
@@ -204,6 +209,9 @@ pub(super) struct Present {
     /// The frame's window target, left in TRANSFER_SRC_OPTIMAL by the frame's command buffer.
     pub image: Arc<super::Image>,
     pub frame: u64,
+    /// Android: the worker that shows it (`Batch::hand_to_presenter`).
+    #[cfg(target_os = "android")]
+    pub presenter: Arc<Worker>,
 }
 
 pub(super) enum Shown {
@@ -223,9 +231,14 @@ impl Swapchain {
     /// that the compositor released a buffer only while it may wait in vkAcquireNextImageKHR
     /// (it reads its event queue there). With 0, after the third present every acquire was
     /// NOT_READY/TIMEOUT and every later frame was dropped (a node, weston, video at ~0 fps shown).
+    ///
+    /// On Android this runs on the present worker instead, and the present waits on the CPU for
+    /// the copy into the image to finish: some Android drivers showed the image before the copy
+    /// that its present waits on (by semaphore) had run, a black frame. The host lock is let go
+    /// during that wait, so a rebuild of this window's chain is not held up by the GPU.
     pub fn show(&self, image: &super::Image) -> Result<Shown, String> {
         if self.retired.load(Ordering::Acquire) || self.dirty.load(Ordering::Acquire) { return Ok(Shown::Dropped); }
-        let _host = lock(&self.host);
+        let host = lock(&self.host);
         let available = Semaphore::new(self.dev.clone()).map_err(|e| format!("acquire semaphore key={:?}: {e}", self.key))?;
         let result = unsafe { self.dev.raw.acquire_next_image(self.raw, acquire_wait_ns(), available.raw, vk::Fence::null()) };
         if log_enabled() && !self.logged_acquire.load(Ordering::Relaxed) && !self.logged_acquire.swap(true, Ordering::Relaxed) {
@@ -288,7 +301,18 @@ impl Swapchain {
             dev.queue_submit(self.dev.queue, &[info], b.fence).map_err(|e| format!("blit submit: {e:?}"))?;
         }
         b.available = Some(available); // waited on by that copy: kept until its fence is waited
+        #[cfg(target_os = "android")]
+        let copied = b.fence;
         drop(blits);
+        // Only the present worker shows on Android, so nothing else resets this fence meanwhile.
+        #[cfg(target_os = "android")]
+        let _host = {
+            drop(host);
+            self.wait_copied(copied)?;
+            lock(&self.host)
+        };
+        #[cfg(not(target_os = "android"))]
+        let _host = host;
         let waits = [self.ready[index as usize].raw];
         let chains = [self.raw];
         let indices = [index];
@@ -297,6 +321,16 @@ impl Swapchain {
             unsafe { self.dev.raw.queue_present(self.dev.queue, &vk::PresentInfoKHR::default()
                 .wait_semaphores(&waits).swapchains(&chains).image_indices(&indices)) }
         };
+        // A chain is retired on the queue worker, whose queue drain (`Windows::retire`) covers
+        // the presents made before it. This present was made on the present worker and may come
+        // after that drain, so it drains the queue itself before the chain can be destroyed.
+        #[cfg(target_os = "android")]
+        if self.retired.load(Ordering::Acquire) {
+            let _queue = lock(&self.dev.queue_lock);
+            if let Err(e) = unsafe { self.dev.raw.queue_wait_idle(self.dev.queue) } {
+                eprintln!("[hal-vulkan] present on retired swapchain key={:?}: vkQueueWaitIdle failed: {e:?}", self.key);
+            }
+        }
         if result.is_ok() && log_enabled() && !self.logged_present.load(Ordering::Relaxed)
             && !self.logged_present.swap(true, Ordering::Relaxed) {
             eprintln!("[hal-vulkan] first frame presented key={:?} generation={} swapchain={:?} image={index} size={:?} (vkQueuePresentKHR succeeded)",
@@ -319,6 +353,21 @@ impl Swapchain {
                 self.dirty.store(true, Ordering::Release); Ok(Shown::Dropped)
             }
             Err(e) => Err(format!("vkQueuePresentKHR key={:?}: {e:?}", self.key)),
+        }
+    }
+
+    /// Android (`show`): waits for the copy into the acquired image, in slices so that a lost
+    /// device ends the wait (as ERROR_DEVICE_LOST) instead of holding the present worker.
+    #[cfg(target_os = "android")]
+    fn wait_copied(&self, fence: vk::Fence) -> Result<(), String> {
+        const SLICE_NS: u64 = 250_000_000;
+        loop {
+            match unsafe { self.dev.raw.wait_for_fences(&[fence], true, SLICE_NS) } {
+                Ok(()) => return Ok(()),
+                Err(vk::Result::TIMEOUT) if !self.dev.lost.load(Ordering::Acquire) => {}
+                Err(vk::Result::TIMEOUT) => return Err(format!("blit wait key={:?}: ERROR_DEVICE_LOST", self.key)),
+                Err(e) => return Err(format!("blit wait key={:?}: {e:?}", self.key)),
+            }
         }
     }
 }
@@ -467,7 +516,8 @@ impl Windows {
         let mut out = Swapchain { dev, surface, raw, images: Vec::new(), ready: Vec::new(), size: [extent.width, extent.height],
             host: Mutex::new(()), key, logged_acquire: AtomicBool::new(false), logged_present: AtomicBool::new(false), generation, requested, transparent, dirty: AtomicBool::new(false), lost: AtomicBool::new(false),
             compositor_rotates: pre_transform != caps.current_transform,
-            retired: AtomicBool::new(false), latest: AtomicU64::new(0), pending: Mutex::new(None), blits: Mutex::new(Vec::new()) };
+            retired: AtomicBool::new(false), latest: AtomicU64::new(0), #[cfg(target_os = "android")] queued: AtomicU64::new(0),
+            pending: Mutex::new(None), blits: Mutex::new(Vec::new()) };
         out.images = unsafe { out.dev.raw.get_swapchain_images(raw) }.map_err(|e| format!("vkGetSwapchainImagesKHR: {e:?}"))?;
         if out.images.is_empty() { return Err("vkGetSwapchainImagesKHR returned no images".into()); }
         for _ in &out.images {

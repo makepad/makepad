@@ -33,19 +33,13 @@ pub struct CxDrawShaderOptions {
     pub depth_write: bool,
     /// Strict greater-than depth test for occluded-surface overlays; default is less-equal.
     pub depth_test_greater: bool,
-    /// Premultiplied source-over blending for this draw call. `false` makes a
-    /// fragment replace the destination, alpha included. Only a shader that
-    /// declares the default BGRA8 colour format blends: every other declared
-    /// format ([`DrawShaderColorFormat::blends`]) writes raw on every backend,
-    /// whatever this flag says. Honoured per draw call: Metal binds a second
-    /// pipeline state with blending disabled, D3D11 binds a blend state with
-    /// BlendEnable off, Vulkan keys its pipeline on the flag, GL and WebGL
-    /// toggle GL_BLEND around the call. With `true` a BGRA8-declared shader
-    /// blends into the target its pass gives it: BGRA8 and RGBA16F on every
-    /// backend, RGBA32F and R32F only where the device blends 32-bit floats
-    /// (Vulkan, GL with float blending; Metal and D3D11 write them raw).
-    /// Shaders declared with `alpha_blend: false` must output alpha 1.0 or
-    /// intend a raw write.
+    /// Enable the shader's [`DrawShaderBlendOp`] for this draw call. `false`
+    /// replaces the destination, alpha included. Formats other than default
+    /// BGRA8 write raw unless the shader declares `blend_op: @Add` (see
+    /// [`DrawShaderColorFormat::blends`]). Add requires a blendable target;
+    /// unsupported targets fail the pipeline instead of writing raw.
+    /// Honoured per draw call through the HAL's `Draw::BLEND` flag, or the
+    /// WebGL blend state. Over/Max retain their backend-specific eligibility.
     pub alpha_blend: bool,
     pub backface_culling: bool,
     /// How many times a second a shader that animates from `draw_pass.time` needs its pass repainted,
@@ -839,56 +833,59 @@ pub struct DrawShaderUniformBufferInput {
 
 /// The pixel format of the color attachment a shader renders into. Backends
 /// that bake the target format into their pipeline state (Metal, D3D,
-/// Vulkan) read this when building the pipeline; GL-family backends ignore
-/// it (the FBO's texture format decides). Declared in the shader DSL as
+/// Vulkan) read this when building the pipeline; GL-family backends render
+/// to the FBO's format but still use this declaration for blend eligibility
+/// and Add capability checks. Declared in the shader DSL as
 /// `color_format: @Rf32`; the default is the swapchain's BGRA8.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub enum DrawShaderColorFormat {
     #[default]
     Bgra8Unorm,
-    /// BGRA8 with blending DISABLED: raw component writes for data passes
+    /// BGRA8 with raw component writes unless `blend_op: @Add`, for data passes
     /// whose alpha channel is payload, not opacity (an SDF byte, a coverage
     /// flag). Under the default premultiplied-over pipeline dst alpha can
     /// only ever grow (`a_out = a_src + a_dst·(1-a_src)`), so alpha-as-data
     /// is unwritable without this. Declared as `color_format: @Bgra8NoBlend`.
     Bgra8NoBlend,
     /// Single-channel 32-bit float (pairs with `TextureFormat::RenderRf32`).
-    /// Blending is disabled on such pipelines — float blending is not
-    /// universally supported and the consumers are data passes.
+    /// Writes raw unless `blend_op: @Add`; Add requires device float blending.
     Rf32,
     /// Four-channel 16-bit float (pairs with `TextureFormat::RenderRGBAf16`).
-    /// Blending disabled — simulation/data passes write whole texels.
+    /// Writes raw unless `blend_op: @Add`; data passes write whole texels.
     /// Declared as `color_format: @Rgba16F`.
     Rgba16F,
     /// Four-channel 32-bit float (pairs with `TextureFormat::RenderRGBAf32`):
     /// the GPU-simulation state format (particle pos/vel, fluid fields).
-    /// Blending disabled — simulation/data passes write whole texels.
+    /// Writes raw unless `blend_op: @Add`; Add requires device float blending.
     /// Declared as `color_format: @Rgba32F`.
     Rgba32F,
     /// Single-channel 16-bit float (pairs with `TextureFormat::RenderRf16`):
-    /// a filterable data copy. Blending disabled. Declared as
+    /// a filterable data copy. Writes raw unless `blend_op: @Add`. Declared as
     /// `color_format: @Rf16`.
     Rf16,
     /// Single-channel 8-bit unorm (pairs with `TextureFormat::RenderRu8`):
     /// small per-texel data such as slot ids written as `id / 255`.
-    /// Blending disabled. Declared as `color_format: @Ru8`.
+    /// Writes raw unless `blend_op: @Add`. Declared as `color_format: @Ru8`.
     Ru8,
 }
 
 impl DrawShaderColorFormat {
-    /// Whether a shader declaring this format blends at all: only the default
-    /// BGRA8 does. Every other format is a raw write on every backend (no
-    /// framebuffer blending; alpha is payload), whatever `alpha_blend` says.
+    /// Whether this format blends with Over/Max: only default BGRA8 does.
+    /// Other declared formats write raw unless `blend_op: @Add`, which opts
+    /// into blending wherever the target supports it. Every op still needs
+    /// `alpha_blend` (`Draw::BLEND`) enabled on the draw call.
     pub fn blends(self) -> bool {
         self == Self::Bgra8Unorm
     }
 }
 
 /// How a blending pipeline combines a fragment with the target. Declared in
-/// the shader DSL as `blend_op: @Max`; the default is premultiplied over.
+/// the shader DSL as `blend_op: @Max` or `blend_op: @Add`; the default is
+/// premultiplied over. Add also enables blending for float-declared shaders,
+/// where supported; an unsupported target fails the pipeline.
 /// Baked into the shader's pipelines on every backend (a per-shader
-/// property, like `color_format`); `alpha_blend: false` draw calls still
-/// write raw.
+/// property, like `color_format`); blending still requires `alpha_blend`
+/// (`Draw::BLEND`). Calls with blending disabled write raw.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub enum DrawShaderBlendOp {
     /// `src + dst * (1 - src.a)` (premultiplied source-over; additive when
@@ -898,6 +895,8 @@ pub enum DrawShaderBlendOp {
     /// Per-channel `max(src, dst)`: overlapping glows and lines keep the
     /// brightest value instead of summing.
     Max,
+    /// Per-channel `src + dst`, alpha included (ONE/ONE/ADD).
+    Add,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -1258,6 +1257,7 @@ impl CxDrawShaderMapping {
         let precise_math = heap.value(source.as_object(), id!(precise_math).into(), NoTrap).as_bool() == Some(true);
         let blend_op = match heap.value(source.as_object(), id!(blend_op).into(), NoTrap).as_id() {
             Some(id) if id == id!(Max) => DrawShaderBlendOp::Max,
+            Some(id) if id == id!(Add) => DrawShaderBlendOp::Add,
             _ => DrawShaderBlendOp::Over,
         };
         let fragment_outputs = desc.io().iter().fold(0u8, |mask, io| match io.kind().fragment_output() {

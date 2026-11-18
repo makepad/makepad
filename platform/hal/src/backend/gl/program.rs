@@ -10,6 +10,7 @@ use super::render::Renderer;
 use super::sys::{self, GLenum, GLint, GLuint};
 use super::{Linked, PipeState};
 use crate::glsl::GlslPipeline;
+use crate::types::{format, pipeline_blend};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -125,6 +126,15 @@ pub(super) fn link_error(gl: &sys::Gl, program: GLuint, shaders: [GLuint; 2]) ->
 
 impl Renderer {
     pub fn compile(&mut self, state: &Arc<PipeState>) {
+        if state.desc.blend & (pipeline_blend::ADD | pipeline_blend::RAW) == pipeline_blend::ADD {
+            for (i, f) in state.desc.color_formats.iter().enumerate() {
+                if state.desc.outputs & (1 << i) == 0 { continue; }
+                if let Some(reason) = add_blend_error(*f, self.caps.float_blend) {
+                    self.linked(state, Err(format!("shader `{}`: {reason}", state.name)));
+                    return;
+                }
+            }
+        }
         let key = Key::of(&state.code.vertex, &state.code.fragment);
         #[cfg(target_os = "android")]
         if self.compile_on_worker(state, key) { return; }
@@ -309,4 +319,14 @@ fn is_integer_input(gl: &sys::Gl, program: GLuint, name: &str) -> bool {
         }
     }
     false
+}
+
+/// Add never falls back to a raw write on an attachment the context cannot blend.
+pub(super) fn add_blend_error(format: u32, float_blend: bool) -> Option<String> {
+    match format {
+        format::BGRA8 | format::RGBA8 | format::RGBA16F | format::RG16F | format::R16F | format::R8 | format::RG8 => None,
+        format::RGBA32F | format::R32F if float_blend => None,
+        format::RGBA32F | format::R32F => Some("blend_op: @Add on a 32-bit float target requires GL_EXT_float_blend".into()),
+        _ => Some(format!("blend_op: @Add requires color attachment blending for target format {format}")),
+    }
 }

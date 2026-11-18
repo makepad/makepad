@@ -165,7 +165,7 @@ pub struct States {
     pub raster: [ID3D11RasterizerState; 2],
     /// No test; LessEqual with/without writes; Greater with/without writes.
     pub depth: [ID3D11DepthStencilState; 5],
-    /// blend states by (per-attachment mode bits, max): made on first use
+    /// blend states by (per-attachment mode bits, operation): made on first use
     pub blend: Mutex<HashMap<u32, ID3D11BlendState>>,
 }
 
@@ -356,17 +356,17 @@ impl Device {
         false
     }
 
-    /// The blend state of a draw: bit `2i` of `modes` enables the over-blend on attachment `i`,
+    /// The blend state of a draw: bit `2i` of `modes` enables blending on attachment `i`,
     /// bit `2i+1` writes it at all (an output the shader does not write keeps its pixels).
-    pub fn blend_state(&self, modes: u32, max: bool) -> Option<ID3D11BlendState> {
-        let key = modes | (max as u32) << 31;
+    pub fn blend_state(&self, modes: u32, max: bool, add: bool) -> Option<ID3D11BlendState> {
+        let key = modes | (max as u32) << 31 | (add as u32) << 30;
         let mut cache = lock(&self.states.blend);
         if let Some(b) = cache.get(&key) {
             return Some(b.clone());
         }
         let mut desc = D3D11_BLEND_DESC { AlphaToCoverageEnable: b(false), IndependentBlendEnable: b(true), ..Default::default() };
         let op = if max { D3D11_BLEND_OP_MAX } else { D3D11_BLEND_OP_ADD };
-        let dest = if max { D3D11_BLEND_ONE } else { D3D11_BLEND_INV_SRC_ALPHA };
+        let dest = if max || add { D3D11_BLEND_ONE } else { D3D11_BLEND_INV_SRC_ALPHA };
         for (i, rt) in desc.RenderTarget.iter_mut().enumerate() {
             let blend = modes & (1 << (2 * i)) != 0;
             let write = modes & (1 << (2 * i + 1)) != 0;

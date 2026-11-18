@@ -63,6 +63,7 @@ unsafe extern "C" {
     pub(crate) fn SSL_connect(ssl: *mut SSL) -> c_int;
     pub(crate) fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
     pub(crate) fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
+    pub(crate) fn SSL_pending(ssl: *const SSL) -> c_int;
     pub(crate) fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
     pub(crate) fn SSL_shutdown(ssl: *mut SSL) -> c_int;
     pub(crate) fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
@@ -130,6 +131,13 @@ pub(crate) struct OpenSslStream {
 unsafe impl Send for OpenSslStream {}
 
 impl OpenSslStream {
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub(crate) fn buffered(&self) -> usize {
+        unsafe { SSL_pending(self.ssl) }.max(0) as usize
+    }
+
     fn connect(tcp_stream: TcpStream, host: &str, verify_peer: bool) -> io::Result<Self> {
         Self::connect_until(tcp_stream, host, verify_peer, None, None)
     }
@@ -562,6 +570,16 @@ impl SocketStream {
         match self {
             SocketStream::Plain(stream) => stream.try_clone(),
             SocketStream::Tls(stream) => stream.tcp_stream.try_clone(),
+        }
+    }
+
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    pub fn buffered(&self) -> usize {
+        match self {
+            SocketStream::Plain(_) => 0,
+            SocketStream::Tls(stream) => stream.buffered(),
         }
     }
 }

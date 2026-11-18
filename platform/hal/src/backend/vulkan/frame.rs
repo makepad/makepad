@@ -617,8 +617,9 @@ impl Vulkan {
                         }
                     } else { match self.windows.swapchain(&self.dev, key, [image.desc.w, image.desc.h], self.queue.as_ref().unwrap()) {
                         Ok((offscreen, chain)) => {
-                            // The queue worker acquires, copies and presents (Batch::show); a
-                            // frame that gets no image there is not reported as presented.
+                            // The queue worker acquires, copies and presents (Batch::show; on
+                            // Android the present worker, Batch::hand_to_presenter); a frame
+                            // that gets no image there is not reported as presented.
                             presented = offscreen || chain.is_some();
                             if let Some(chain) = chain {
                                 // the window target is drawn into again next frame: a frame tap
@@ -632,7 +633,8 @@ impl Vulkan {
                                 image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
                                 batch.images.push(image.clone());
                                 chain.latest.store(packet.frame, std::sync::atomic::Ordering::Release);
-                                batch.present = Some(super::surface::Present { chain, image, frame: packet.frame });
+                                batch.present = Some(super::surface::Present { chain, image, frame: packet.frame,
+                                    #[cfg(target_os = "android")] presenter: self.present.clone() });
                             }
                         }
                         Err(e) => { eprintln!("[hal-vulkan] surface: {e}"); s.bad(); }

@@ -152,6 +152,10 @@ pub struct Vulkan {
     mailbox: Mailbox,
     queue: Option<Worker>,
     complete: Arc<Worker>,
+    /// Android: shows window frames (`Batch::hand_to_presenter`), so the submit worker never
+    /// waits there for a frame's copy into its swapchain image.
+    #[cfg(target_os = "android")]
+    present: Arc<Worker>,
     compiler: Compilers,
     /// The newest pipeline (`Device::pipeline_made_ns`) a save of the pipeline cache was queued
     /// after, so the next save waits for another pipeline.
@@ -267,6 +271,7 @@ impl Vulkan {
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
+            #[cfg(target_os = "android")] present: Arc::new(Worker::new("makepad-vulkan-present")?),
             compiler: Compilers::new(), pipeline_cache_queued_ns: 0, pressure: Default::default(),
             instance_extensions, lost_posted: false, retry_ns: 0, reset_failures: 0, simulate: false,
             simulate_at_ns: super::simulated_loss_at() })
@@ -720,15 +725,18 @@ impl Backend for Vulkan {
     /// The process ends next: exit() runs the driver's exit handlers (NVIDIA's EGL teardown
     /// unloads its core), and a worker still in a driver call faulted inside it (a SIGSEGV in
     /// `submit_until_room` at a SIGTERM mid-frame; on makepad-vulkan-compile at a quit during
-    /// boot). What was recorded is submitted, every swapchain retires, and the three workers
-    /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
-    /// which hand completions on); the completions (fence waits, frees) -- each joined.
+    /// boot). What was recorded is submitted, every swapchain retires, and the workers stop in
+    /// dependency order -- compiles; the queue (its submits, presents and retirements, which
+    /// hand completions on); on Android the presents (which hand completions on); the
+    /// completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
         self.dev.save_pipeline_cache();
         self.flush();
         if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
         self.compiler.stop();
         if let Some(queue) = self.queue.as_ref() { queue.stop(); }
+        #[cfg(target_os = "android")]
+        self.present.stop();
         self.complete.stop();
     }
     fn retire(&mut self, world: &mut World) {
@@ -757,7 +765,7 @@ impl Vulkan {
             // again: a program never fails for want of memory
             let mut tries = 0u64;
             let program = loop {
-                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride, src.storage.clone(), None) {
+                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride, src.storage.clone(), None, &src.name) {
                     Err(e) if pipeline::out_of_memory(&e) && !dev.lost.load(Ordering::Acquire) => {
                         if tries == 0 { eprintln!("[hal-vulkan] pipeline: {e}; waiting for GPU memory"); }
                         tries += 1;
@@ -823,17 +831,28 @@ impl exec::DeviceReset for Vulkan {
         // once), its workers answer every batch (readbacks and picks as failed, frames as
         // finished) and run out; those answers are delivered before the tables are emptied.
         self.flush();
+        // every new worker is made before any old one is replaced, so a failure leaves them all
         let queue = Worker::new("makepad-vulkan-submit")?;
         let complete = Arc::new(Worker::new("makepad-vulkan-complete")?);
+        #[cfg(target_os = "android")]
+        let present = Arc::new(Worker::new("makepad-vulkan-present")?);
         let compiler = Compilers::new();
         let old_queue = self.queue.replace(queue).expect("live submit worker");
         let old_complete = std::mem::replace(&mut self.complete, complete);
+        #[cfg(target_os = "android")]
+        let old_present = std::mem::replace(&mut self.present, present);
         let old_compiler = std::mem::replace(&mut self.compiler, compiler);
         self.windows.clear(&old_queue);
         let limit = std::time::Duration::from_secs(2);
-        if !(old_compiler.settle(limit) && old_queue.settle(limit) && old_complete.settle(limit)) {
+        // in the order work flows: the queue hands presents on, presents hand completions on
+        let settled = old_compiler.settle(limit) && old_queue.settle(limit);
+        #[cfg(target_os = "android")]
+        let settled = settled && old_present.settle(limit);
+        if !(settled && old_complete.settle(limit)) {
             eprintln!("[hal-vulkan] device reset: the old device's work still runs after {limit:?}; its answers come later");
         }
+        #[cfg(target_os = "android")]
+        drop(old_present);
         drop((old_queue, old_complete, old_compiler));
         self.drain(world);
         #[cfg(target_os = "linux")]
@@ -1116,11 +1135,12 @@ impl Gpu for Vulkan {
         key.extend_from_slice(&(blob.bindings.len() as u64).to_le_bytes());
         key.extend_from_slice(&(blob.vertex_layout.len() as u64).to_le_bytes());
         for v in blob.bindings.iter().chain(blob.vertex_layout.iter()).copied().chain([blob.desc.blend, blob.desc.instance_stride, blob.desc.outputs]) { key.extend_from_slice(&v.to_le_bytes()); }
+        for f in blob.desc.color_formats { key.extend_from_slice(&f.to_le_bytes()); }
         let state = match self.programs.get(&key).and_then(Weak::upgrade) {
             Some(state) => state,
             None => {
                 let stride = blob.vertex_layout.first().copied().unwrap_or(0);
-                let state = State::new(Arc::new(pipeline::Source { desc: blob.desc, code, bindings: blob.bindings.clone(), storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), stride, key: key.clone() }));
+                let state = State::new(Arc::new(pipeline::Source { desc: blob.desc, name: s.string(blob.desc.name).unwrap_or("unnamed").to_owned(), code, bindings: blob.bindings.clone(), storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), stride, key: key.clone() }));
                 // registered before the compile is queued, so its answer cannot be missed
                 state.wait(s.id);
                 self.compile(&state);

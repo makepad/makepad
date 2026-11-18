@@ -1078,19 +1078,28 @@ impl D3d11 {
 
         // fixed function: per-attachment blend/write, depth, cull, scissor
         let raw = program.desc.blend & pipeline_blend::RAW != 0;
+        let add = program.desc.blend & pipeline_blend::ADD != 0;
         let mut modes = 0u32;
         for (i, c) in colors {
             let written = program.desc.outputs & (1 << i) != 0 || (program.desc.outputs == 0 && *i == 0);
             if !written {
                 continue;
             }
+            if d.flags & Draw::BLEND != 0 && !raw && add && self.dev.blendable & (1 << c.desc.format) == 0 {
+                state.fail(format!("blend_op: @Add requires D3D11_FORMAT_SUPPORT_BLENDABLE for target format {}", c.desc.format));
+                return Ok(None);
+            }
             modes |= 1 << (2 * i + 1);
             if d.flags & Draw::BLEND != 0 && !raw && self.dev.blendable & (1 << c.desc.format) != 0
-                && matches!(c.desc.format, format::BGRA8 | format::RGBA8 | format::RGBA16F) {
+                && (add || matches!(c.desc.format, format::BGRA8 | format::RGBA8 | format::RGBA16F)) {
                 modes |= 1 << (2 * i);
             }
         }
-        let blend = self.dev.blend_state(modes, program.desc.blend & pipeline_blend::MAX != 0);
+        let blend = self.dev.blend_state(modes, program.desc.blend & pipeline_blend::MAX != 0, add);
+        if add && !raw && d.flags & Draw::BLEND != 0 && blend.is_none() {
+            state.fail("blend_op: @Add could not create a D3D11 blend state".into());
+            return Ok(None);
+        }
         let depth_state = if depth.is_none() { 0 } else { (if d.flags & Draw::DEPTH_WRITE != 0 { 1 } else { 2 }) + if d.flags & Draw::DEPTH_GREATER != 0 { 2 } else { 0 } };
         let cull = if d.flags & Draw::CULL != 0 { 1 } else { 0 };
         let draw_scissor = (!d.scissor.iter().any(|n| n.is_nan())).then_some(d.scissor);

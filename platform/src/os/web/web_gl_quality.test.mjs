@@ -32,9 +32,13 @@ class MockWasmBridge {
 
 const web_source = readFileSync(new URL("./web.js", import.meta.url), "utf8")
   .replace(/^import .*wasm_bridge\.js"\n/, "")
+  .replace(/^import .*a11y\.js"\n/m, "")
   .replace(/^export /gm, "");
+// The accessibility tree is not under test here: the browser constructs it only when a11y is on.
+class MockA11y {}
 const load_web = new Function(
   "WasmBridge",
+  "MakepadA11y",
   "window",
   "document",
   "navigator",
@@ -51,6 +55,7 @@ const load_web = new Function(
 );
 const web = load_web(
   MockWasmBridge,
+  MockA11y,
   web_window,
   web_document,
   web_window.navigator,
@@ -1153,4 +1158,83 @@ test("context loss ends readback polling without touching lost GL", () => {
   assert.equal(subject.readback_reserved_bytes, 0);
   assert.deepEqual(gl_calls, { wait: 0, lost: 0, delete: 0 });
   assert.equal(wasm_calls, 0);
+});
+
+function blend_subject() {
+  const draws = [];
+  const state = { enabled: false, factors: [], equation: [] };
+  const gl = {
+    BLEND: 1, DEPTH_TEST: 2, CULL_FACE: 3, ONE: 4, ONE_MINUS_SRC_ALPHA: 5,
+    FUNC_ADD: 6, MAX: 7, LEQUAL: 8, CCW: 9, TRIANGLES: 10,
+    enable(cap) { if (cap === this.BLEND) state.enabled = true; },
+    disable(cap) { if (cap === this.BLEND) state.enabled = false; },
+    blendFunc(src, dst) { state.factors = [src, dst, src, dst]; },
+    blendFuncSeparate(...factors) { state.factors = factors; },
+    blendEquationSeparate(...equation) { state.equation = equation; },
+    depthFunc() {}, depthMask() {}, useProgram() {}, frontFace() {}, bindVertexArray() {},
+    deleteShader() {}, deleteProgram() {}, deleteBuffer() {},
+    drawElementsInstanced() { draws.push({ ...state }); },
+  };
+  const buffer = {};
+  const shader = { shader_id: 1, shader_name: "hdr_accumulation", outputs: 1, linked: true, program: {}, version: 1, texture_locs: [] };
+  const subject = Object.assign(Object.create(web_gl.WasmWebGL.prototype), {
+    gl, draw_shaders: [undefined, shader],
+    vaos: [undefined, { shader_id: 1, shader_version: 1, ready: true, gl_vao: {}, geometry_gl_buf: buffer, instance_gl_buf: buffer, index_gl_buf: buffer }],
+    ext_color_buffer_float: {}, ext_float_blend: {}, render_color_targets: [{ format: 3 }],
+    pending_webgl_shader_count: 0, webgl_shader_batch_failed_count: 0, webgl_shader_batch_program_count: 0,
+    to_wasm: { ToWasmWebGLShadersDone() {} },
+    schedule_webgl_shader_summary() {},
+    preflight_webgl_draw() {
+      return { ok: true, geometry_buffer: { gl_buf: buffer }, instance_buffer: { gl_buf: buffer }, index_buffer: { gl_buf: buffer, index_type: 0 }, indices: 6, instances: 1 };
+    },
+    upload_uniform_buffer_from_ptr() {}, bind_uniform_block() {},
+  });
+  subject.FromWasmSetDefaultDepthAndBlendMode();
+  return { subject, gl, state, draws };
+}
+
+test("Add blends color and alpha with ONE/ONE and restores Over after the draw", () => {
+  const { subject, gl, state, draws } = blend_subject();
+  const args = { shader_id: 1, vao_id: 1, alpha_blend: true };
+  subject.FromWasmDrawCall({ ...args, blend_add: true });
+  assert.deepEqual(draws[0], { enabled: true, factors: [gl.ONE, gl.ONE, gl.ONE, gl.ONE], equation: [gl.FUNC_ADD, gl.FUNC_ADD] });
+  const over = [gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA];
+  assert.deepEqual(state.factors, over);
+  subject.FromWasmDrawCall({ ...args, blend_max: true });
+  subject.FromWasmDrawCall(args);
+  subject.FromWasmDrawCall({ ...args, blend_add: true, alpha_blend: false });
+  assert.deepEqual(draws[1], { enabled: true, factors: over, equation: [gl.MAX, gl.MAX] });
+  assert.deepEqual(draws[2], { enabled: true, factors: over, equation: [gl.FUNC_ADD, gl.FUNC_ADD] });
+  assert.equal(draws[3].enabled, false);
+  assert.equal(state.enabled, true);
+});
+
+test("unsupported Add fails once with its shader name and missing float capability", () => {
+  for (const [format, capability] of [[3, "EXT_color_buffer_float"], [2, "EXT_float_blend"]]) {
+    for (const compile of [true, false]) {
+      const { subject, draws } = blend_subject();
+      subject[capability === "EXT_color_buffer_float" ? "ext_color_buffer_float" : "ext_float_blend"] = null;
+      subject.render_color_targets = [{ format }];
+      // A rejected framebuffer still reports the Add pipeline's missing capability.
+      subject.render_target_rejected = capability === "EXT_color_buffer_float";
+      const before = gl_messages.errors.length;
+      let done = 0;
+      subject.to_wasm.ToWasmWebGLShadersDone = ({ count }) => { done += count; };
+      if (compile) {
+        subject.FromWasmCompileWebGLShader({ shader_id: 1, shader_name: "hdr_accumulation", color_format: format, blend_add: true });
+      }
+      for (let i = 0; i < 2; i++) subject.FromWasmDrawCall({ shader_id: 1, vao_id: 1, alpha_blend: true, blend_add: true });
+      assert.equal(subject.draw_shaders[1].compile_failed, true);
+      assert.equal(draws.length, 0);
+      assert.equal(gl_messages.errors.length, before + 1);
+      const message = gl_messages.errors.at(-1).join(" ");
+      assert.match(message, /hdr_accumulation/);
+      assert.ok(message.includes(capability));
+      assert.equal(done, compile ? 1 : 0, "a completed shader does not finish its compile twice");
+    }
+  }
+  const { subject } = blend_subject();
+  subject.ext_float_blend = null;
+  assert.equal(subject.add_blend_error(3), null, "RGBA16F only needs EXT_color_buffer_float");
+  assert.equal(subject.add_blend_error(0), null, "normalized targets need no float extension");
 });

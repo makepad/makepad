@@ -722,6 +722,23 @@ impl ServerStream {
         &self.tcp
     }
 
+    /// Plaintext the TLS layer holds already: a read returns it without
+    /// waiting on the socket. A reader that waits for input on the socket
+    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
+    /// Here: decrypted bytes not read yet, or a whole record already taken
+    /// off the socket and not decrypted yet (a part of one waits on the socket).
+    pub fn buffered(&self) -> usize {
+        if self.plain_pos < self.plain.len() {
+            return self.plain.len() - self.plain_pos;
+        }
+        if self.closed {
+            // A read answers at once (end of stream).
+            return 1;
+        }
+        let whole_record = self.incoming.len() >= 5 && self.incoming.len() >= 5 + u16::from_be_bytes([self.incoming[3], self.incoming[4]]) as usize;
+        if whole_record { self.incoming.len() } else { 0 }
+    }
+
     pub fn shutdown(&mut self) {
         self.closed = true;
         let _ = self.tcp.shutdown(Shutdown::Both);
