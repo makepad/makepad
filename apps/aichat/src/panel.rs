@@ -41,9 +41,12 @@ pub const MAX_CHIPS: usize = 4;
 /// The picture picker's dialog id.
 const ATTACH_DIALOG: LiveId = live_id!(ai_chat_attach);
 /// The composer's picture chips, in order.
+const PICK_CHIPS: [LiveId; 6] = [live_id!(pick0), live_id!(pick1), live_id!(pick2), live_id!(pick3), live_id!(pick4), live_id!(pick5)];
 const ATTACH_PICS: [LiveId; 4] = [live_id!(attach_pic0), live_id!(attach_pic1), live_id!(attach_pic2), live_id!(attach_pic3)];
 /// A sent line's picture slots.
 const USER_PICS: [LiveId; 4] = [live_id!(upic0), live_id!(upic1), live_id!(upic2), live_id!(upic3)];
+/// The buttons under a finished turn, in display order.
+const TURN_BUTTONS: [LiveId; 3] = [live_id!(turn_act0), live_id!(turn_act1), live_id!(turn_act2)];
 
 fn slot_id(slot: usize) -> LiveId {
     LiveId::from_str(&format!("f{slot}"))
@@ -111,6 +114,36 @@ script_mod! {
                 sdf.stroke(mix(self.ink, self.ink_hover, self.hover), 1.4)
                 return sdf.result
             }
+        }
+    }
+
+    // One thing the host attached to the composer (a pick on the page): its kind,
+    // its name, and its own remove button.
+    let PickChip = RoundedView{
+        visible: false
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 4
+        padding: Inset{left: 7 right: 2 top: 2 bottom: 2}
+        align: Align{y: 0.5}
+        draw_bg +: { color: theme.color_u_1 border_radius: 5.0 }
+        pick_kind := Meta{
+            text: ""
+            draw_text +: { text_style: theme.font_regular{font_size: 8.0} }
+        }
+        pick_label := Label{
+            max_lines: 1
+            text: ""
+            draw_text +: {
+                color: theme.color_text
+                text_style: theme.font_regular{font_size: 8.0}
+            }
+        }
+        Tip{
+            text: "Remove from the message"
+            place: TopEnd
+            pick_remove := CloseButtonSm{}
         }
     }
 
@@ -456,6 +489,12 @@ script_mod! {
                         upic3 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
                     }
                     user_text := Line{}
+                    user_picks := Meta{
+                        visible: false
+                        width: Fill
+                        text: ""
+                        draw_text +: { text_style: theme.font_regular{font_size: 8.0} }
+                    }
                 }
             }
             EventRow := Row{
@@ -772,6 +811,31 @@ script_mod! {
                     }
                 }
             }
+
+            // A turn's actions, under its answer.
+            TurnRow := Row{
+                padding: Inset{left: 14 right: 14 top: 2 bottom: 8}
+                turn_buttons := View{
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 8
+                    align: Align{y: 0.5}
+                    turn_act0 := ButtonFlat{visible: false width: Fit height: 24}
+                    turn_act1 := ButtonFlat{visible: false width: Fit height: 24}
+                    turn_act2 := ButtonFlat{visible: false width: Fit height: 24}
+                    turn_why := Label{
+                        width: Fill
+                        max_lines: 2
+                        selectable: false
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_text_meta
+                            text_style: theme.font_regular{font_size: 8.0}
+                        }
+                    }
+                }
+            }
         }
 
         // One box: the pictures that go along, the line, and a bar with
@@ -790,35 +854,27 @@ script_mod! {
                 border_radius: 8.0
             }
 
-            // The element picked on the page, under the page's context: the
-            // turn is about it until the person clears it here or on the page.
-            selection_row := RoundedView{
+            // What the person picked on the page to point the model at: each line
+            // sent while they are here carries them. A chip goes with its x; hovering
+            // one lets the host light the thing up on the page.
+            picks_row := View{
                 visible: false
                 width: Fill
                 height: Fit
-                flow: Right
-                spacing: 6
+                flow: Flow.Right{wrap: true}
+                spacing: 4
                 margin: Inset{bottom: 2}
-                padding: Inset{left: 8 right: 2 top: 2 bottom: 2}
                 align: Align{y: 0.5}
-                draw_bg +: { color: theme.color_u_1 border_radius: 5.0 }
-                selection_kind := Meta{
-                    text: "Selected ·"
-                    draw_text +: { text_style: theme.font_regular{font_size: 8.0} }
-                }
-                selection_label := Label{
-                    width: Fill
-                    max_lines: 1
+                pick0 := PickChip{}
+                pick1 := PickChip{}
+                pick2 := PickChip{}
+                pick3 := PickChip{}
+                pick4 := PickChip{}
+                pick5 := PickChip{}
+                picks_more := Meta{
+                    visible: false
                     text: ""
-                    draw_text +: {
-                        color: theme.color_text
-                        text_style: theme.font_regular{font_size: 8.0}
-                    }
-                }
-                Tip{
-                    text: "Clear the selection"
-                    place: TopEnd
-                    selection_clear := CloseButtonSm{}
+                    draw_text +: { text_style: theme.font_regular{font_size: 8.0} }
                 }
             }
 
@@ -1019,6 +1075,30 @@ pub enum VoiceUi {
     Busy,
 }
 
+/// A button the host puts under a finished answer.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct TurnButton {
+    /// The id the host gets back on a press.
+    pub id: String,
+    /// The words on the button.
+    pub label: String,
+    /// Whether the person can press it.
+    pub enabled: bool,
+    /// Why the button is off, shown beside the buttons when filled in.
+    pub why: String,
+}
+
+/// A turn's buttons and the tool call that locates its answer in the transcript.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct TurnActions {
+    /// The person's turn as counted by the host.
+    pub turn: u64,
+    /// The id of a tool call the turn made.
+    pub call_id: String,
+    /// The buttons in display order. The panel shows the first three.
+    pub actions: Vec<TurnButton>,
+}
+
 /// What the panel tells its host.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum AiChatPanelAction {
@@ -1026,12 +1106,17 @@ pub enum AiChatPanelAction {
     ToolCallPartial { call_id: String, name: String, partial_json: String },
     /// A finished task card's action button: the service's action id, for the host to carry out.
     TaskAction { call_id: String, action: String },
+    /// The person pressed the button with this id under the turn's answer.
+    TurnAction { turn: u64, id: String },
     /// Esc with an empty composer and no turn in flight: the host may hide
     /// the pane.
     Close,
-    /// The person cleared the selected element under the context line: the
-    /// host deselects it on the page (the next target it sets has none).
-    SelectionCleared,
+    /// The person removed a chip of the composer's attachments (its id): the
+    /// host drops it on the page (the next target it sets has it no more).
+    AttachmentRemoved(String),
+    /// The pointer is over a chip of the composer's attachments (its id), or
+    /// left them (None): the host may light the thing up on the page.
+    AttachmentHovered(Option<String>),
     /// The microphone button was pressed (shown only while the host offers one,
     /// [`AiChatPanel::set_voice`]): the host starts or stops listening.
     VoiceToggled,
@@ -1107,6 +1192,15 @@ pub struct MarksUi {
     pub resolving: usize,
 }
 
+/// What a row in the transcript list shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RowAt {
+    /// An entry at this index in the conversation.
+    Entry(usize),
+    /// Buttons at this index in the host's turn actions.
+    Turn(usize),
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct AiChatPanel {
     #[source]
@@ -1127,6 +1221,19 @@ pub struct AiChatPanel {
     /// The microphone button's state, set by the host.
     #[rust]
     voice: VoiceUi,
+    /// The buttons the host has set for each turn.
+    #[rust]
+    turn_actions: Vec<TurnActions>,
+    /// Changes each time the host changes the buttons.
+    #[rust]
+    turn_actions_rev: u64,
+    /// Transcript entries and button rows in display order.
+    #[rust]
+    rows: Vec<RowAt>,
+    /// The conversation generation, the button revision and whether the chat was busy, used to
+    /// build the rows.
+    #[rust]
+    rows_key: Option<(u64, u64, bool)>,
     /// Dropped pictures being decoded on the task pool.
     #[rust]
     loading: Vec<TaskHandle<Result<Dropped, String>>>,
@@ -1140,6 +1247,11 @@ pub struct AiChatPanel {
     /// The attachment chips show this many pictures.
     #[rust]
     attach_shown: Option<(usize, usize)>,
+    /// The ids of the attachment chips as drawn, by slot, and the one the pointer is over.
+    #[rust]
+    pick_ids: Vec<String>,
+    #[rust]
+    pick_hovered: Option<String>,
     /// The host's marks on the page, as it last said.
     #[rust]
     marks: MarksUi,
@@ -1244,6 +1356,30 @@ pub struct AiChatPanel {
 }
 
 impl AiChatPanel {
+    /// The pointer over an attachment chip, or off them: the host is told once per change
+    /// (`AttachmentHovered`), so it can light the thing up. Per event: a hit test per chip shown.
+    fn hover_picks(&mut self, cx: &mut Cx, event: &Event) {
+        if self.pick_ids.is_empty() && self.pick_hovered.is_none() {
+            return;
+        }
+        let mut over = self.pick_hovered.clone();
+        for (slot, id) in PICK_CHIPS.iter().enumerate().take(self.pick_ids.len()) {
+            let area = self.view.view(cx, &[*id]).area();
+            match event.hits(cx, area) {
+                Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => over = Some(self.pick_ids[slot].clone()),
+                Hit::FingerHoverOut(_) if over.as_ref() == Some(&self.pick_ids[slot]) => over = None,
+                _ => {}
+            }
+        }
+        if over.as_ref().is_some_and(|id| !self.pick_ids.contains(id)) {
+            over = None;
+        }
+        if over != self.pick_hovered {
+            self.pick_hovered = over.clone();
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::AttachmentHovered(over));
+        }
+    }
+
     /// A draft or picture not sent yet, or a reply still coming, is unsaved work
     /// (`restart::set_unsaved`, per panel): a restart that ends this app waits for it, the WM
     /// session's restart for a deploy among them (one ended two chats with the WM, 11-06).
@@ -1517,6 +1653,15 @@ impl AiChatPanel {
     pub fn set_voice(&mut self, cx: &mut Cx, voice: VoiceUi) {
         if self.voice != voice {
             self.voice = voice;
+            self.view.redraw(cx);
+        }
+    }
+
+    /// Set the buttons shown under finished answers.
+    pub fn set_turn_actions(&mut self, cx: &mut Cx, actions: Vec<TurnActions>) {
+        if self.turn_actions != actions {
+            self.turn_actions = actions;
+            self.turn_actions_rev += 1;
             self.view.redraw(cx);
         }
     }
@@ -2087,6 +2232,44 @@ impl AiChatPanel {
         }
     }
 
+    /// Place each turn's buttons after its answer when the transcript or the buttons change.
+    fn update_rows(&mut self, state: &EngineState) {
+        // busy is in the key: a turn's buttons go after its end, known once the chat is not busy,
+        // and the status can settle without a new entry (a tool answered a frame later)
+        let key = (state.generation, self.turn_actions_rev, state.status.is_busy());
+        if self.rows_key == Some(key) {
+            return;
+        }
+        let mut turns_after = HashMap::new();
+        if !self.turn_actions.is_empty() {
+            // Walking back finds the last matching call and the user line that follows it.
+            let mut end = (!state.status.is_busy()).then_some(state.entries.len());
+            let mut end_by_call = HashMap::new();
+            for (at, entry) in state.entries.iter().enumerate().rev() {
+                match entry {
+                    Entry::User { .. } => end = Some(at),
+                    Entry::Tool(tool) => { end_by_call.entry(tool.call_id.as_str()).or_insert(end); }
+                    _ => {}
+                }
+            }
+            for (k, turn) in self.turn_actions.iter().enumerate() {
+                if !turn.actions.is_empty() {
+                    if let Some(&Some(end)) = end_by_call.get(turn.call_id.as_str()) {
+                        turns_after.entry(end - 1).or_insert_with(Vec::new).push(k);
+                    }
+                }
+            }
+        }
+        self.rows.clear();
+        for at in 0..state.entries.len() {
+            self.rows.push(RowAt::Entry(at));
+            if let Some(turns) = turns_after.remove(&at) {
+                self.rows.extend(turns.into_iter().map(RowAt::Turn));
+            }
+        }
+        self.rows_key = Some(key);
+    }
+
     /// An entry as plain text, for a copy of a row that is not drawn.
     fn entry_text(entry: &Entry) -> String {
         match entry {
@@ -2212,6 +2395,7 @@ impl Widget for AiChatPanel {
         if !self.loading.is_empty() {
             self.poll_loading(cx);
         }
+        self.hover_picks(cx, event);
         // Esc in the composer: stop a running turn; with nothing running
         // and an empty composer, ask the host to hide the pane. An Esc
         // meant for the host (leaving a presentation, a menu) is not ours.
@@ -2226,7 +2410,10 @@ impl Widget for AiChatPanel {
             if list.has_selection() && cx.has_key_focus(list.area()) && copy.response.borrow().is_none() {
                 if let Some(engine) = &self.engine {
                     let state = engine.state();
-                    let text = list.selected_text_with(&|i| state.entries.get(i).map(Self::entry_text));
+                    let text = list.selected_text_with(&|i| match self.rows.get(i)? {
+                        RowAt::Entry(at) => state.entries.get(*at).map(Self::entry_text),
+                        RowAt::Turn(_) => None,
+                    });
                     if !text.is_empty() {
                         *copy.response.borrow_mut() = Some(text);
                     }
@@ -2365,6 +2552,7 @@ impl Widget for AiChatPanel {
         // The engine exists once the panel is on screen.
         let _ = self.ensure_engine();
         let state = self.engine.as_ref().unwrap().state().clone();
+        self.update_rows(&state);
         if self.drawn_generation != state.generation {
             self.sync_task_tracks(&state);
         }
@@ -2469,10 +2657,25 @@ impl Widget for AiChatPanel {
         if let Some(target) = &state.target {
             self.view.label(cx, ids!(target_label)).set_text(cx, &target.label);
         }
-        let selection = state.target.as_ref().and_then(|target| target.selection.as_deref());
-        self.view.view(cx, ids!(selection_row)).set_visible(cx, selection.is_some());
-        if let Some(selection) = selection {
-            self.view.label(cx, ids!(selection_label)).set_text(cx, selection);
+        let picks: &[Attachment] = state.target.as_ref().map_or(&[], |target| &target.attachments);
+        self.view.view(cx, ids!(picks_row)).set_visible(cx, !picks.is_empty());
+        self.pick_ids = picks.iter().take(PICK_CHIPS.len()).map(|a| a.id.clone()).collect();
+        for (slot, id) in PICK_CHIPS.iter().enumerate() {
+            let chip = self.view.view(cx, &[*id]);
+            match picks.get(slot) {
+                Some(a) => {
+                    chip.set_visible(cx, true);
+                    chip.label(cx, ids!(pick_kind)).set_text(cx, &a.kind);
+                    chip.label(cx, ids!(pick_label)).set_text(cx, &a.label);
+                }
+                None => chip.set_visible(cx, false),
+            }
+        }
+        // More than the chips hold: the rest by name (all of them still go with the line).
+        let more = self.view.label(cx, ids!(picks_more));
+        more.set_visible(cx, picks.len() > PICK_CHIPS.len());
+        if picks.len() > PICK_CHIPS.len() {
+            more.set_text(cx, &format!("+{}: {}", picks.len() - PICK_CHIPS.len(), picks[PICK_CHIPS.len()..].iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", ")));
         }
         if !self.provider_rows.is_empty() {
             // A choice with no row (Local in a build without local AI)
@@ -2496,9 +2699,11 @@ impl Widget for AiChatPanel {
                     None => r.label.clone(),
                 })
                 .collect();
-            if self.pick_shown.as_ref() != Some(&(labels.clone(), at)) {
+            // A design re-run puts the template's labels back in the menu: what it shows is
+            // checked, not only what was last set.
+            let pick = self.view.drop_down(cx, ids!(provider_pick));
+            if self.pick_shown.as_ref() != Some(&(labels.clone(), at)) || !pick.has_labels(&labels) {
                 self.pick_shown = Some((labels.clone(), at));
-                let pick = self.view.drop_down(cx, ids!(provider_pick));
                 pick.set_labels(cx, labels);
                 pick.set_disabled_items(cx, self.provider_rows.iter().map(|r| r.unavailable.is_some()).collect());
                 pick.set_selected_item(cx, at);
@@ -2506,11 +2711,11 @@ impl Widget for AiChatPanel {
         }
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             let Some(mut list) = item.borrow_mut::<PortalList>() else { continue };
-            let total = state.entries.len();
+            let total = self.rows.len();
             list.set_item_range(cx, 0, total + work.is_some() as usize);
             while let Some(index) = list.next_visible_item(cx) {
                 if index >= total {
-                    // The work line follows the last entry (the list asks
+                    // The work line follows the last row (the list asks
                     // past its range to fill the view: those stay empty).
                     let Some((line, bar, failed)) = work.as_ref().filter(|_| index == total) else { continue };
                     let row = list.item(cx, index, id!(WorkRow));
@@ -2523,17 +2728,46 @@ impl Widget for AiChatPanel {
                     row.draw_all(cx, &mut Scope::empty());
                     continue;
                 }
-                let entry = &state.entries[index];
+                let at = match self.rows[index] {
+                    RowAt::Entry(at) => at,
+                    RowAt::Turn(k) => {
+                        let row = list.item(cx, index, id!(TurnRow));
+                        let actions = &self.turn_actions[k].actions;
+                        for (slot, id) in TURN_BUTTONS.iter().enumerate() {
+                            let button = row.button(cx, &[*id]);
+                            button.set_visible(cx, slot < actions.len());
+                            if let Some(action) = actions.get(slot) {
+                                button.set_text(cx, &action.label);
+                                button.set_enabled(cx, action.enabled);
+                                if button.disabled(cx) == action.enabled {
+                                    button.set_disabled(cx, !action.enabled);
+                                }
+                            }
+                        }
+                        let why = actions.iter().filter(|a| !a.why.is_empty()).map(|a| a.why.as_str()).collect::<Vec<_>>().join(" · ");
+                        let label = row.label(cx, ids!(turn_why));
+                        label.set_visible(cx, !why.is_empty());
+                        label.set_text(cx, &why);
+                        row.draw_all(cx, &mut Scope::empty());
+                        continue;
+                    }
+                };
+                let entry = &state.entries[at];
                 let row = match entry {
-                    Entry::User { text, pictures } => {
+                    Entry::User { text, pictures, attachments } => {
                         let row = list.item(cx, index, id!(UserRow));
                         row.label(cx, ids!(user_text)).set_text(cx, text);
+                        let pointed = row.label(cx, ids!(user_picks));
+                        pointed.set_visible(cx, !attachments.is_empty());
+                        if !attachments.is_empty() {
+                            pointed.set_text(cx, &format!("Pointing at {}", attachments.iter().map(|a| format!("{} {}", a.kind, a.label)).collect::<Vec<_>>().join(", ")));
+                        }
                         // The line's pictures that have their small copy (a restored chat's
                         // come from the task pool a moment later).
                         let thumbs: Vec<&Arc<[u8]>> = pictures.iter().filter_map(|p| self.thumbs.get(&p.file)).collect();
                         row.view(cx, ids!(user_pics)).set_visible(cx, !thumbs.is_empty());
-                        if self.pics_filled.get(&row.widget_uid()) != Some(&(index, thumbs.len())) {
-                            self.pics_filled.insert(row.widget_uid(), (index, thumbs.len()));
+                        if self.pics_filled.get(&row.widget_uid()) != Some(&(at, thumbs.len())) {
+                            self.pics_filled.insert(row.widget_uid(), (at, thumbs.len()));
                             for (slot, id) in USER_PICS.iter().enumerate() {
                                 let image = row.image(cx, &[*id]);
                                 match thumbs.get(slot) {
@@ -2797,14 +3031,24 @@ impl WidgetMatchEvent for AiChatPanel {
         if self.view.button(cx, ids!(marks_clear)).clicked(actions) {
             cx.widget_action(self.widget_uid(), AiChatPanelAction::MarksCleared);
         }
-        if self.view.button(cx, ids!(selection_clear)).clicked(actions) {
-            // Shown cleared at once; the host deselects on the page.
+        for (slot, id) in PICK_CHIPS.iter().enumerate() {
+            if !self.view.view(cx, &[*id]).button(cx, ids!(pick_remove)).clicked(actions) {
+                continue;
+            }
+            let Some(pick) = self.pick_ids.get(slot).cloned() else { continue };
+            // Gone from the composer at once (its remove button's tip with it, on the actions
+            // this sends); the host drops it on the page.
+            self.view.view(cx, &[*id]).set_visible(cx, false);
             let target = self.ensure_engine().state().target.clone();
             if let Some(mut target) = target {
-                target.selection = None;
+                target.attachments.retain(|a| a.id != pick);
                 self.ensure_engine().set_target(Some(target));
             }
-            cx.widget_action(self.widget_uid(), AiChatPanelAction::SelectionCleared);
+            if self.pick_hovered.as_ref() == Some(&pick) {
+                self.pick_hovered = None;
+                cx.widget_action(self.widget_uid(), AiChatPanelAction::AttachmentHovered(None));
+            }
+            cx.widget_action(self.widget_uid(), AiChatPanelAction::AttachmentRemoved(pick));
             self.view.redraw(cx);
         }
         if self.view.button(cx, ids!(allowed_clear)).clicked(actions) {
@@ -2851,23 +3095,37 @@ impl WidgetMatchEvent for AiChatPanel {
             self.task_tracks.clear();
             self.view.redraw(cx);
         }
-        // Cards: confirm buttons and click-to-expand.
+        // Turn buttons and tool cards in the transcript.
         let list = self.view.portal_list(cx, ids!(transcript));
         let items = list.items_with_actions(actions);
         if !items.is_empty() {
             let now = Self::now(cx);
-            let call_ids: Vec<Option<String>> = {
-                let state = self.ensure_engine().state();
-                items
-                    .iter()
-                    .map(|(index, _)| match state.entries.get(*index) {
-                        Some(Entry::Tool(t)) => Some(t.call_id.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            };
-            for ((_, item), call_id) in items.iter().zip(call_ids) {
-                let Some(call_id) = call_id else { continue };
+            let mut cards = Vec::new();
+            let mut seen_turn_rows = HashSet::new();
+            for (index, item) in &items {
+                match self.rows.get(*index) {
+                    Some(RowAt::Entry(at)) => {
+                        if let Some(Entry::Tool(t)) = self.state().and_then(|state| state.entries.get(*at)) {
+                            cards.push((item, t.call_id.clone()));
+                        }
+                    }
+                    // A change waiting to be drawn may have put another turn in this slot.
+                    Some(RowAt::Turn(k)) if self.rows_key.is_some_and(|(_, rev, _)| rev == self.turn_actions_rev) => {
+                        // The list can report a row once for each of its widget actions.
+                        if !seen_turn_rows.insert(*k) {
+                            continue;
+                        }
+                        let turn = &self.turn_actions[*k];
+                        for (id, action) in TURN_BUTTONS.iter().zip(&turn.actions) {
+                            if action.enabled && item.button(cx, &[*id]).clicked(actions) {
+                                cx.widget_action(self.widget_uid(), AiChatPanelAction::TurnAction { turn: turn.turn, id: action.id.clone() });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (item, call_id) in cards {
                 if self.card_actions(cx, item, actions, &call_id, now) {
                     self.view.redraw(cx);
                 } else if item.button(cx, ids!(tool_stop)).clicked(actions) || item.button(cx, ids!(task_stop)).clicked(actions) {

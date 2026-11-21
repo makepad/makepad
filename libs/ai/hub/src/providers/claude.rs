@@ -28,7 +28,7 @@
 //! history, as a fresh conversation does.
 
 use crate::chat_wire::{ChatRole, ProviderAvailability, ProviderKind};
-use crate::providers::cli::{categorize_cli_error, cli_command, turn_dir, CliTurn};
+use crate::providers::cli::{categorize_cli_failure, cli_command, turn_dir, CliTurn};
 use crate::providers::provider::{tool_image_media_type, validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use makepad_strict_json::{self as json, Value};
 use std::path::PathBuf;
@@ -42,6 +42,8 @@ pub struct ParseState {
     pub collected: String,
     /// The CLI's own conversation id, captured for `--resume`.
     pub session_id: Option<String>,
+    /// The failure kind the CLI named in an assistant message's top-level `error` field for this turn.
+    pub error_kind: Option<String>,
     /// A `<think>` marker has been emitted and not closed yet: the CLI is
     /// streaming reasoning (`thinking_delta`). It is forwarded inside the
     /// same textual think block the fleet Qwen lane emits, so every client
@@ -165,7 +167,8 @@ impl ClaudeCodeChatProvider {
                 let (mut evs, done) = parse_stream_line(&v, parse);
                 for ev in &mut evs {
                     if let ProviderEvent::Error(raw) = ev {
-                        *ev = ProviderEvent::Error(categorize_cli_error("Claude Code", raw, false));
+                        let public = categorize_cli_failure("Claude Code", parse.error_kind.as_deref(), raw, false);
+                        *ev = ProviderEvent::Error(public);
                     }
                 }
                 events.append(&mut evs);
@@ -385,6 +388,9 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
             }
         }
         Some("assistant") => {
+            if let Some(kind) = v.get("error").and_then(Value::as_str) {
+                state.error_kind = Some(kind.to_string());
+            }
             // A full assistant message may repeat already-streamed text;
             // deliver only the unseen suffix.
             close_think(state, &mut events);
@@ -475,7 +481,7 @@ pub fn poll_messages_turn(
             let (mut evs, done) = parse_stream_line(&v, parse);
             for ev in &mut evs {
                 if let ProviderEvent::Error(raw) = ev {
-                    let public = categorize_cli_error(what, raw, false);
+                    let public = categorize_cli_failure(what, parse.error_kind.as_deref(), raw, false);
                     *ev = ProviderEvent::Error(public);
                 }
             }
@@ -695,6 +701,7 @@ mod tests {
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             r#"{"type":"tool_progress"}"#,
+            r#"{"type":"assistant","message":{"content":[]},"error":"authentication_failed"}"#,
         ] {
             let (events, _) = parse_stream_line(&json::parse(line.as_bytes()).unwrap(), &mut state);
             notes.extend(events.into_iter().filter_map(|e| match e {
@@ -703,5 +710,6 @@ mod tests {
             }));
         }
         assert_eq!(notes, ["Using Read…", "Writing tool arguments…", "Tool result received", "Tool is running…"]);
+        assert_eq!(state.error_kind.as_deref(), Some("authentication_failed"));
     }
 }

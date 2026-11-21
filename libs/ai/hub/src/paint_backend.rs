@@ -617,7 +617,7 @@ mod tests {
     }
 
     fn spec() -> ModelSpec {
-        crate::registry::ModelSpec {
+        crate::registry::ModelSpec { on_demand: Vec::new(), host_load: None,
             id: "pbr-testpattern".to_string(),
             domain: crate::registry::Domain::Paint,
             backend: "paint-test".to_string(),

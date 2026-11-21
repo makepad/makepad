@@ -10,7 +10,7 @@ const GATE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nCross-Origin-Opener-Po
 fn response(status: u16, body: &str) -> Vec<u8> {
     format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
 }
-fn refusal(status: u16) -> Vec<u8> { response(status, r#"{"job_id":null,"ws_path":null,"error":"queue full: 2 jobs already queued on this node"}"#) }
+fn refusal(status: u16) -> Vec<u8> { response(status, r#"{"job_id":null,"ws_path":null,"error":"busy: a job is already queued or running"}"#) }
 fn accepted() -> Vec<u8> { response(200, r#"{"job_id":"accepted","error":null}"#) }
 fn request(seed: u64) -> GenerateRequestJson {
     GenerateRequestJson { model: "minimax-h3".into(), seed: Some(seed), origin_key: Some("fixture-origin".into()),
@@ -29,7 +29,7 @@ impl Script {
     }
 }
 impl Transport for Script {
-    fn post(&mut self, url: &str, _: &[(String, String)], body: &[u8], _: Duration) -> Result<Reply, AssetAiError> {
+    fn post(&mut self, url: &str, _: &[(String, String)], body: &[u8]) -> Result<Reply, AssetAiError> {
         assert_eq!(url, format!("{NODE}/generate"));
         self.posts.push(body.to_vec());
         self.now += self.post_elapsed;
@@ -52,7 +52,7 @@ impl Transport for Script {
     }
 }
 fn run(script: &mut Script, cancel: &AtomicBool, notes: &mut Vec<String>) -> Result<String, AssetAiError> {
-    LocalService::new(NODE).request_pending_using(Domain::Video, &request(u64::MAX),
+    LocalService::new(NODE).request_pending_using(Domain::Video, &request(u64::MAX), true,
         &|| cancel.load(Ordering::Relaxed), &mut |note| notes.push(note.into()), script)
 }
 
@@ -61,7 +61,8 @@ fn disk_refusal_returns_for_fleet_failover_without_reposting_to_full_disk() {
     let mut script = Script::new([response(409,
         r#"{"job_id":null,"error":"model unavailable: disk-space: insufficient on C:"}"#)]);
     let mut notes = Vec::new();
-    let error = run(&mut script, &AtomicBool::new(false), &mut notes).unwrap_err();
+    let error = LocalService::new(NODE).request_pending_using(Domain::Video, &request(42), false,
+        &|| false, &mut |s| notes.push(s.to_string()), &mut script).unwrap_err();
     assert!(matches!(error, AssetAiError::Unavailable(ref reason) if reason.starts_with("disk-space:")));
     assert_eq!(script.posts.len(), 1);
     assert!(notes.is_empty());
@@ -71,7 +72,7 @@ fn disk_refusal_returns_for_fleet_failover_without_reposting_to_full_disk() {
 fn reject_policy_returns_typed_refusal_without_waiting_or_claiming_a_lease() {
     for (reply, expected) in [
         (response(409, r#"{"job_id":null,"ws_path":null,"error":"busy: a job is already queued or running"}"#), AssetAiError::Busy),
-        (refusal(409), AssetAiError::QueueFull(2)),
+        (response(409, r#"{"job_id":null,"error":"model unavailable: local-use: quiet"}"#), AssetAiError::Unavailable("local-use: quiet".into())),
         (GATE.to_vec(), AssetAiError::Unavailable("admission-overloaded: HTTP server overloaded before job admission".into())),
     ] {
         let service = LocalService::new(NODE);
@@ -79,7 +80,7 @@ fn reject_policy_returns_typed_refusal_without_waiting_or_claiming_a_lease() {
         wire.queue_policy = Some("reject".into());
         let mut script = Script::new([reply, accepted()]);
         let before = script.now;
-        let result = service.request_pending_using(Domain::Image, &wire, &|| false,
+        let result = service.request_pending_using(Domain::Image, &wire, true, &|| false,
             &mut |_| panic!("reject must return immediately"), &mut script);
         assert_eq!(result, Err(expected));
         assert_eq!(script.posts, vec![wire.serialize_json().into_bytes()]);
@@ -97,7 +98,7 @@ fn reject_policy_preserves_accepted_ownership_and_never_invents_busy_from_transp
         response(409, r#"{"job_id":null,"error":"busy: a job is already queued or running"}"#)[..40].to_vec(),
     ] {
         let mut script = Script::new([reply, accepted()]);
-        let result = LocalService::new(NODE).request_pending_using(Domain::Image, &wire, &|| false,
+        let result = LocalService::new(NODE).request_pending_using(Domain::Image, &wire, true, &|| false,
             &mut |_| panic!("reject must not back off"), &mut script);
         assert!(matches!(result, Err(AssetAiError::Http(_))), "{result:?}");
         assert!(!result.unwrap_err().to_string().contains("private prompt"));
@@ -107,19 +108,19 @@ fn reject_policy_preserves_accepted_ownership_and_never_invents_busy_from_transp
     let cancel = Arc::new(AtomicBool::new(false));
     let mut script = Script::new([response(503, r#"{"job_id":"owned","error":"busy"}"#)]);
     script.cancel_on_post = Some(cancel.clone());
-    assert_eq!(service.request_pending_using(Domain::Image, &wire,
+    assert_eq!(service.request_pending_using(Domain::Image, &wire, true,
         &|| cancel.load(Ordering::Relaxed), &mut |_| {}, &mut script).unwrap(), "owned");
     assert_eq!(script.posts.len(), 1);
     assert!(service.lease_origin.lock().unwrap().is_some());
 }
 
 #[test]
-fn explicit_queue_policy_keeps_bounded_pre_admission_waiting() {
+fn explicit_queue_policy_waits_for_admission() {
     let mut wire = request(42);
     wire.queue_policy = Some("queue".into());
     let mut script = Script::new([refusal(409), accepted()]);
     let mut notes = Vec::new();
-    let result = LocalService::new(NODE).request_pending_using(Domain::Image, &wire, &|| false,
+    let result = LocalService::new(NODE).request_pending_using(Domain::Image, &wire, true, &|| false,
         &mut |note| notes.push(note.to_owned()), &mut script).unwrap();
     assert_eq!(result, "accepted");
     assert_eq!(script.posts, vec![wire.serialize_json().into_bytes(); 2]);
@@ -127,21 +128,14 @@ fn explicit_queue_policy_keeps_bounded_pre_admission_waiting() {
 }
 
 #[test]
-fn proven_local_use_refusal_returns_for_peer_routing_without_retrying_paused_node() {
-    for policy in [None, Some("reject"), Some("queue")] {
-        let service = LocalService::new(NODE);
-        let mut wire = request(42);
-        wire.queue_policy = policy.map(str::to_owned);
-        let mut script = Script::new([response(409,
-            r#"{"job_id":null,"ws_path":null,"error":"model unavailable: local-use: gpu-counter-unavailable"}"#), accepted()]);
-        let before = script.now;
-        let result = service.request_pending_using(Domain::Image, &wire, &|| false,
-            &mut |_| panic!("local-use admission refusal belongs to fleet routing"), &mut script);
-        assert_eq!(result, Err(AssetAiError::Unavailable("local-use: gpu-counter-unavailable".into())));
-        assert_eq!(script.posts.len(), 1);
-        assert_eq!(script.now, before);
-        assert!(service.lease_origin.lock().unwrap().is_none());
-    }
+fn quiet_node_keeps_the_same_request_until_admission_reopens() {
+    let mut script = Script::new([response(409,
+        r#"{"job_id":null,"ws_path":null,"error":"model unavailable: local-use: quiet"}"#), accepted()]);
+    let mut notes = Vec::new();
+    assert_eq!(run(&mut script, &AtomicBool::new(false), &mut notes).unwrap(), "accepted");
+    assert_eq!(script.posts.len(), 2);
+    assert_eq!(script.posts[0], script.posts[1]);
+    assert!(notes[0].contains("local-use: quiet"));
 }
 
 #[test]
@@ -159,14 +153,14 @@ fn burst_six_callers_gate_then_json_refusal_accepts_exactly_six_unchanged_reques
                 let mut script = Script::new([GATE.to_vec(), refusal([409, 429, 503][caller as usize % 3]), accepted()]);
                 let mut notes = Vec::new();
                 barrier.wait();
-                let id = service.request_pending_using(Domain::Video, &wire, &|| false,
+                let id = service.request_pending_using(Domain::Video, &wire, true, &|| false,
                     &mut |note| notes.push(note.to_string()), &mut script).unwrap();
                 assert_eq!(id, "accepted");
                 count.fetch_add(1, Ordering::Relaxed);
                 assert_eq!(script.posts, vec![bytes; 3]);
                 assert_eq!(notes.len(), 2);
-                assert!(notes[0].contains(NODE) && notes[0].contains("http 503"));
-                assert!(notes[1].contains("queue full: 2"));
+                assert!(notes[0].contains(NODE) && notes[0].contains("admission-overloaded:"));
+                assert!(notes[1].contains("busy:"));
                 assert_eq!(*service.lease_origin.lock().unwrap(), Some(("fixture-origin".into(), 42)));
             });
         }
@@ -268,15 +262,14 @@ fn any_returned_job_id_precludes_replay_even_on_error_status() {
 }
 
 #[test]
-fn finite_attempt_and_time_budgets_name_endpoint_and_last_refusal() {
-    for elapsed in [Duration::ZERO, Duration::from_secs(90)] {
-        let mut script = Script::new((0..8).map(|_| refusal(429)));
-        script.post_elapsed = elapsed;
-        let mut notes = vec![];
-        let error = run(&mut script, &AtomicBool::new(false), &mut notes).unwrap_err().to_string();
-        assert!(error.contains(NODE) && error.contains("http 429") && error.contains("queue full: 2"), "{error}");
-        assert_eq!(script.posts.len(), if elapsed.is_zero() { 8 } else { 1 });
-    }
+fn repeated_refusals_outlast_the_old_attempt_and_time_limits() {
+    let mut script = Script::new((0..20).map(|_| refusal(429)).chain(std::iter::once(accepted())));
+    script.post_elapsed = Duration::from_secs(10);
+    let mut notes = Vec::new();
+    assert_eq!(run(&mut script, &AtomicBool::new(false), &mut notes).unwrap(), "accepted");
+    assert_eq!(script.posts.len(), 21);
+    assert!(script.posts.iter().all(|body| body == &script.posts[0]));
+    assert_eq!(notes.len(), 20);
 }
 
 #[test]
@@ -285,10 +278,11 @@ fn progress_and_terminal_errors_redact_payloads_and_bound_server_text() {
     let error = format!("busy: {} {} token-secret {}\n", wire.prompt.unwrap(), wire.input_b64.unwrap(), "é".repeat(2000));
     let body = makepad_strict_json::obj(vec![("job_id", makepad_strict_json::Value::Null),
         ("error", makepad_strict_json::s(error))]).to_json();
-    let mut script = Script::new((0..8).map(|_| response(503, &body)));
+    let paused = body.replace("busy: ", "model unavailable: local-use: ");
+    let mut script = Script::new([response(409, &paused), response(400, &body)]);
     let mut notes = vec![];
     let error = LocalService::new(NODE).with_secret("token-secret").request_pending_using(Domain::Video,
-        &request(u64::MAX), &|| false, &mut |note| notes.push(note.to_string()), &mut script).unwrap_err();
+        &request(u64::MAX), true, &|| false, &mut |note| notes.push(note.to_string()), &mut script).unwrap_err();
     notes.push(error.to_string());
     for note in notes {
         assert!(note.chars().count() < 800);

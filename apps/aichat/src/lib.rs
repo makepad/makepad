@@ -29,7 +29,7 @@ pub mod settings;
 
 pub use bus::ServiceBus;
 pub use overlay::{AiChatOverlay, AiTranscript};
-pub use panel::{AiChatPanel, AiChatPanelAction, MarksUi, VoiceUi};
+pub use panel::{AiChatPanel, AiChatPanelAction, MarksUi, TurnActions, TurnButton, VoiceUi};
 pub use pictures::{ChatPictures, PictureKept};
 pub use settings::AiSettings;
 

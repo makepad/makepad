@@ -50,13 +50,11 @@ pub(crate) fn run(
             }
             chunk_index += 1;
         };
-        match engine.synthesize(text, &say_config, &mut emit) {
+        let cancelled = || mine != generation.load(Ordering::Relaxed);
+        match engine.synthesize(text, &say_config, &cancelled, &mut emit) {
+            _ if cancelled() => {}
             Ok((audio, timings)) if !audio.is_empty() => {
-                // Synthesis is slow enough that a cancel can land while it
-                // runs; a stale utterance must never be heard.
-                if mine == generation.load(Ordering::Relaxed) {
-                    send(TtsEvent::Audio { utterance, audio, timings, secs: started.elapsed().as_secs_f64() });
-                }
+                send(TtsEvent::Audio { utterance, audio, timings, secs: started.elapsed().as_secs_f64() });
             }
             Ok(_) => send(TtsEvent::Error { utterance, message: "engine produced no audio".into() }),
             Err(message) => send(TtsEvent::Error { utterance, message }),
@@ -72,7 +70,7 @@ trait Engine {
     fn info(&self) -> TtsEngineInfo;
     /// `on_chunk` gets each clause as it is ready when `config.stream` is on and the
     /// engine can; the return value is always the whole take.
-    fn synthesize(&mut self, text: &str, config: &TtsConfig, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String>;
+    fn synthesize(&mut self, text: &str, config: &TtsConfig, cancelled: &dyn Fn() -> bool, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String>;
 }
 
 // ----------------------------------------------------------------- choosing
@@ -145,7 +143,7 @@ impl Engine for SystemTts {
         }
     }
 
-    fn synthesize(&mut self, text: &str, config: &TtsConfig, _on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
+    fn synthesize(&mut self, text: &str, config: &TtsConfig, _cancelled: &dyn Fn() -> bool, _on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
         let options = sys::TtsOptions {
             voice: config.voice.clone(),
             language: config.language.clone(),
@@ -183,11 +181,11 @@ impl Engine for RemoteTts {
         }
     }
 
-    fn synthesize(&mut self, text: &str, config: &TtsConfig, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
+    fn synthesize(&mut self, text: &str, config: &TtsConfig, cancelled: &dyn Fn() -> bool, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
         if config.stream {
-            return self.pipe.synthesize_streaming(text, &kokoro_voice_name(config), config.rate, on_chunk);
+            return self.pipe.synthesize_streaming(text, &kokoro_voice_name(config), config.rate, cancelled, on_chunk);
         }
-        self.pipe.synthesize(text, &kokoro_voice_name(config), config.rate)
+        self.pipe.synthesize(text, &kokoro_voice_name(config), config.rate, cancelled)
     }
 }
 
@@ -222,7 +220,7 @@ mod kokoro {
             }
         }
 
-        fn synthesize(&mut self, text: &str, config: &TtsConfig, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
+        fn synthesize(&mut self, text: &str, config: &TtsConfig, _cancelled: &dyn Fn() -> bool, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
             let voice = kokoro_voice_name(config);
             let audio = if config.stream {
                 self.bank.synthesize_streaming(&voice, &weights::kokoro_voice_path, text, config.rate, &mut |_, _| true, &mut |samples: &[f32]| {

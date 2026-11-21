@@ -55,6 +55,14 @@ fn start_test_service(name: &str) -> LocalService {
 }
 
 fn start_service_with(name: &str, registry: Registry) -> LocalService {
+    let handle = start_test_handle(name, registry);
+    let provider = LocalService::new(&format!("http://{}", handle.addr));
+    // The service outlives the test; keep the singleton lock with it.
+    std::mem::forget(handle);
+    provider
+}
+
+fn start_test_handle(name: &str, registry: Registry) -> ServiceHandle {
     let handle = start_service(ServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
@@ -66,10 +74,7 @@ fn start_service_with(name: &str, registry: Registry) -> LocalService {
     })
     .unwrap();
     host_admits_work(&handle);
-    let provider = LocalService::new(&format!("http://{}", handle.addr));
-    // The service outlives the test; keep the singleton lock with it.
-    std::mem::forget(handle);
-    provider
+    handle
 }
 
 /// The test is the service's host, as the window manager is for a real hub:
@@ -134,11 +139,11 @@ fn a_timed_runs_quiet_refuses_work_and_says_what_it_refused() {
     let activity = |said: String| makepad_ai_hub::protocol::ActivityJson::deserialize_json(&said).unwrap();
     let snap = activity(control_post(&shared, "/control/local-use", br#"{"quiet":"timed lease L1 of lanea"}"#).unwrap());
     assert_eq!((snap.reason.as_str(), snap.admission_open, snap.quiet.as_deref()), ("timed-lease", false, Some("timed lease L1 of lanea")));
-    let err = provider.request(Domain::Image, &request()).unwrap_err();
+    let err = provider.try_request(Domain::Image, &request()).unwrap_err();
     assert!(format!("{err:?}").contains("local-use: timed-lease"), "{err:?}");
     // the WM's report (another mode, no game) leaves it closed
     control_post(&shared, "/control/local-use", br#"{"mode":"ai-first","use":""}"#).unwrap();
-    assert!(provider.request(Domain::Image, &request()).is_err());
+    assert!(provider.try_request(Domain::Image, &request()).is_err());
     let snap = activity(control_post(&shared, "/control/local-use", br#"{"quiet":""}"#).unwrap());
     assert!(snap.quiet.is_none());
     assert!(snap.refused.is_some_and(|n| n >= 2), "{:?}", snap.refused);
@@ -147,7 +152,7 @@ fn a_timed_runs_quiet_refuses_work_and_says_what_it_refused() {
     // open again once the models it held were let go
     let deadline = Instant::now() + Duration::from_secs(20);
     let job_id = loop {
-        match provider.request(Domain::Image, &request()) {
+        match provider.try_request(Domain::Image, &request()) {
             Ok(id) => break id,
             Err(e) => {
                 assert!(Instant::now() < deadline, "admission did not open again: {e:?}");
@@ -196,8 +201,15 @@ fn health_and_models() {
     let trellis = models.iter().find(|m| m.id == "trellis-2").unwrap();
     assert_eq!(trellis.domain, "mesh");
     // Availability tracks the compiled backend: the default (stub) build has
-    // no mesh feature, a `--features mesh` test run does.
-    assert_eq!(trellis.available, cfg!(feature = "mesh"));
+    // no mesh feature, a `--features mesh` test run does. On a card that
+    // cannot free what it needs (another process holds the box's GPU), the
+    // hub says that instead, as for flux.
+    if trellis.state == "too_small" {
+        assert!(!trellis.available);
+        assert!(trellis.note.as_deref().is_some_and(|n| n.contains("this card can free")), "{:?}", trellis.note);
+    } else {
+        assert_eq!(trellis.available, cfg!(feature = "mesh"), "trellis-2: state {:?}, unavailable: {:?}", trellis.state, trellis.unavailable_reason);
+    }
 }
 
 #[test]
@@ -353,6 +365,52 @@ fn queue_and_reject_policies() {
 
     poll_until_done(&provider, &slow);
     poll_until_done(&provider, &queued);
+}
+
+#[test]
+fn interactive_turn_jobs_take_the_next_heavy_slot() {
+    use makepad_ai_hub::backend::GenerateParams;
+    use makepad_ai_hub::jobs::{JobClass, JobParams, QueuePolicy};
+
+    let mut registry = Registry::parse(TESTPATTERN).unwrap();
+    let mut speech = registry.models[0].clone();
+    speech.id = "scripted-speech".into();
+    speech.domain = Domain::Speech;
+    registry.models.push(speech);
+    let handle = start_test_handle("interactive-queue", registry);
+    let provider = LocalService::new(&format!("http://{}", handle.addr));
+    let jobs = &handle.shared.jobs;
+    let image = GenerateRequestJson { model: "testpattern".into(), ..Default::default() };
+    // Hold the heavy slot while real /generate requests enter the queue.
+    let running = jobs.with(|store| {
+        let params = GenerateParams::from_request(&image).unwrap();
+        let id = store.submit(JobParams::Generate(params), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next().as_ref(), Some(&id));
+        id
+    });
+    let first_image = provider.request(Domain::Image, &image).unwrap();
+    let second_image = provider.request(Domain::Image, &image).unwrap();
+    let turn = GenerateRequestJson {
+        model: "scripted-speech".into(), text: Some("hello".into()),
+        queue_class: Some("interactive".into()), ..Default::default()
+    };
+    let first_turn = provider.request(Domain::Speech, &turn).unwrap();
+    let cancelled = provider.request(Domain::Speech, &turn).unwrap();
+    provider.cancel(&cancelled).unwrap();
+    let next_turn = provider.request(Domain::Speech, &turn).unwrap();
+
+    jobs.with(|store| {
+        assert!(store.take_next_of(JobClass::Heavy).is_none(), "the running image keeps its slot");
+        store.finish(&running, Vec::new());
+        for expected in [&first_turn, &next_turn, &first_image, &second_image] {
+            assert_eq!(store.take_next_of(JobClass::Heavy).as_ref(), Some(expected), "queue dispatch order");
+            store.finish(expected, Vec::new());
+        }
+        assert!(store.take_next().is_none());
+    });
+    let dir = handle.shared.cache_dir.clone();
+    handle.stop();
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -563,7 +621,6 @@ fn node_identity_is_durable_and_capabilities_are_honest() {
     assert_eq!(key_a.len(), 32);
     assert_ne!(first.node_id, second.node_id, "node_id rotates per start");
     assert!(first.started_ms.unwrap() > 0);
-    assert!(first.queue_limit.unwrap() >= 1);
     assert!(first.vram_reserve_mb.is_some());
 
     // Capabilities list only what THIS build+machine can serve: the

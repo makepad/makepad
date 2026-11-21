@@ -479,6 +479,8 @@ impl GgufFile {
         let mut file = File::open(&self.path)?;
         let start = tensor.absolute_offset(self.data_offset)?;
         let to_read = len.min(tensor.size_bytes as usize);
+        crate::host_floor::check(to_read as u64, format_args!("tensor '{name}' of {}", self.path.display()))
+            .map_err(GgufError::format)?;
         file.seek(SeekFrom::Start(start))?;
         let mut out = vec![0u8; to_read];
         file.read_exact(&mut out)?;
@@ -493,6 +495,8 @@ impl GgufFile {
                 name, tensor.size_bytes
             ))
         })?;
+        crate::host_floor::check(len as u64, format_args!("tensor '{name}' of {}", self.path.display()))
+            .map_err(GgufError::format)?;
         let mut out = vec![0u8; len];
         self.read_tensor_into(name, &mut out)?;
         Ok(out)

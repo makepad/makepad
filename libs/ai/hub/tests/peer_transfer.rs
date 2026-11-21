@@ -513,7 +513,7 @@ fn spawn_lying_peer(total: u64, digest: &str, close_early: bool) -> LyingPeer {
                 .to_string();
             if path == "/health" {
                 let body = format!(
-                    r#"{{"service":"makepad-asset-ai","version":"0","gpu":null,"vram_free_mb":null,"vram_total_mb":null,"models_loaded":[],"jobs_pending":null,"node_id":null,"node_key":"{}","started_ms":null,"capabilities":null,"vram_reserve_mb":null,"queue_limit":null}}"#,
+                    r#"{{"service":"makepad-asset-ai","version":"0","gpu":null,"vram_free_mb":null,"vram_total_mb":null,"models_loaded":[],"jobs_pending":null,"node_id":null,"node_key":"{}","started_ms":null,"capabilities":null,"vram_reserve_mb":null}}"#,
                     "c0ffee00c0ffee00c0ffee00c0ffee00"
                 );
                 let _ = stream.write_all(
@@ -659,7 +659,7 @@ fn spawn_poison_then_fail_peer(total: u64, digest: &str, chunk_len: u64) -> Lyin
                 .unwrap_or("/");
             if path == "/health" {
                 let body = format!(
-                    r#"{{"service":"makepad-asset-ai","version":"0","gpu":null,"vram_free_mb":null,"vram_total_mb":null,"models_loaded":[],"jobs_pending":null,"node_id":null,"node_key":"{}","started_ms":null,"capabilities":null,"vram_reserve_mb":null,"queue_limit":null}}"#,
+                    r#"{{"service":"makepad-asset-ai","version":"0","gpu":null,"vram_free_mb":null,"vram_total_mb":null,"models_loaded":[],"jobs_pending":null,"node_id":null,"node_key":"{}","started_ms":null,"capabilities":null,"vram_reserve_mb":null}}"#,
                     "c0ffee00c0ffee00c0ffee00c0ffee00"
                 );
                 let _ = stream.write_all(
@@ -712,7 +712,7 @@ fn spawn_oversized_range_peer(total: u64, digest: &str) -> LyingPeer {
                 .unwrap_or("/");
             if path == "/health" {
                 let body = format!(
-                    r#"{{"service":"makepad-asset-ai","version":"0","gpu":null,"vram_free_mb":null,"vram_total_mb":null,"models_loaded":[],"jobs_pending":null,"node_id":null,"node_key":"{}","started_ms":null,"capabilities":null,"vram_reserve_mb":null,"queue_limit":null}}"#,
+                    r#"{{"service":"makepad-asset-ai","version":"0","gpu":null,"vram_free_mb":null,"vram_total_mb":null,"models_loaded":[],"jobs_pending":null,"node_id":null,"node_key":"{}","started_ms":null,"capabilities":null,"vram_reserve_mb":null}}"#,
                     "c0ffee00c0ffee00c0ffee00c0ffee00"
                 );
                 let _ = stream.write_all(

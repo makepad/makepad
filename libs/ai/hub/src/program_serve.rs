@@ -27,6 +27,7 @@
 //!   later session made from the same recalls them ([`Kept`]), at most [`KEPT_BYTES`] a stream;
 //! - ends a session when its stream closes, and only its owner may steer or cancel it.
 
+use makepad_network::http_server::WebSocketOut;
 use crate::kernel_wire::{KernelInfoJson, KERNEL_API_VERSION};
 use makepad_compute_program::codec::Codec;
 use makepad_compute_program::wire;
@@ -51,18 +52,36 @@ const KEPT_BYTES: u64 = 1 << 30;
 /// How long the node's share stays up once no session open asks for it.
 const SHARE_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The most a program on this node may use, whatever the client asks.
+/// The most a program on this node may use, whatever the client asks. Its buffers: the
+/// machine's memory ([`machine_bytes`]), never a fixed size a large job meets on a machine that
+/// holds it (a fixed 4 GiB refused a finer solve on every node, whatever its memory).
 fn node_ceiling() -> Limits {
     Limits {
         fuel: 1 << 40,
         heap_bytes: 256 << 20,
         stack_values: 1 << 16,
         call_frames: 256,
-        work: 1 << 50,
-        buffer_bytes: 4 << 30,
+        // a program's kernel work is its client's to bound (it asks a budget, and cancels what it
+        // no longer wants): a node's own count of it was a timer, which a long solve outlived
+        work: u64::MAX,
+        buffer_bytes: machine_bytes(),
         read_words: 1 << 22,
         kernels: 256,
     }
+}
+
+/// This machine's physical memory in bytes, read once: past it a program's buffer is refused (a
+/// value the program answers) rather than the node paging or its kernel ending the hub. Unread,
+/// no ceiling: the machine's own limits stand.
+fn machine_bytes() -> u64 {
+    static BYTES: OnceLock<u64> = OnceLock::new();
+    *BYTES.get_or_init(|| match crate::ram::query_ram() {
+        Some(ram) => ram.total_mb << 20,
+        None => {
+            eprintln!("{}: programs: this machine's memory could not be read; programs' buffers are not capped by it", crate::SERVICE_NAME);
+            u64::MAX
+        }
+    })
 }
 
 fn capped(ask: Limits) -> Limits {
@@ -84,7 +103,7 @@ fn capped(ask: Limits) -> Limits {
 #[derive(Clone)]
 pub struct Push {
     pub socket: u64,
-    pub tx: std::sync::mpsc::Sender<Vec<u8>>,
+    pub tx: std::sync::mpsc::Sender<WebSocketOut>,
     kept: Arc<Mutex<Kept>>,
 }
 
@@ -475,7 +494,7 @@ impl ProgramService {
     }
 
     /// A stream opened by `owner`; its frames go out through `tx`.
-    pub fn stream_open(&self, socket: u64, owner: &str, tx: std::sync::mpsc::Sender<Vec<u8>>) {
+    pub fn stream_open(&self, socket: u64, owner: &str, tx: std::sync::mpsc::Sender<WebSocketOut>) {
         self.inner.streams.lock().unwrap().insert(socket, (owner.to_string(), Push { socket, tx, kept: Arc::default() }));
     }
 
@@ -484,14 +503,14 @@ impl ProgramService {
         self.inner.streams.lock().unwrap().contains_key(&socket)
     }
 
-    /// A frame from a stream.
-    pub fn stream_frame(&self, socket: u64, data: &[u8]) {
+    /// A frame from a stream (an open's goes on to its session's thread as it came, uncopied).
+    pub fn stream_frame(&self, socket: u64, data: Vec<u8>) {
         let Some((owner, push)) = self.inner.streams.lock().unwrap().get(&socket).cloned() else { return };
         self.frame(&owner, &push, data);
     }
 
     /// A program frame from `owner`'s stream (kinds `wire::OPEN` ..= `wire::CANCEL`).
-    fn frame(&self, owner: &str, push: &Push, data: &[u8]) {
+    fn frame(&self, owner: &str, push: &Push, data: Vec<u8>) {
         if data.len() < 9 {
             return;
         }
@@ -499,19 +518,24 @@ impl ProgramService {
         let payload = &data[9..];
         match data[0] {
             wire::OPEN => {
-                let (inner, owner, sender, payload) = (self.inner.clone(), owner.to_string(), push.clone(), payload.to_vec());
+                let (inner, owner, sender) = (self.inner.clone(), owner.to_string(), push.clone());
                 // Inputs decode and the program starts off the routing thread; this thread then
                 // sends its updates, each after the OPENED that names the session (the app
                 // drops an update for a session it was not told of).
-                let started = std::thread::Builder::new().name("program-session".into()).spawn(move || match open(&inner, &owner, &sender, word, &payload) {
-                    Ok((id, device, served)) => {
-                        send(&sender, wire::OPENED, word, wire::encode_opened(Ok((id, device))));
-                        pump(&served, &sender, id, inner.workers + 1);
-                        inner.sessions.lock().unwrap().remove(&id);
-                        inner.room_cv.notify_all();
-                        inner.reshare();
+                let started = std::thread::Builder::new().name("program-session".into()).spawn(move || {
+                    let decoded = wire::decode_open(&data[9..], MAX_INPUT_WORDS, inner.workers + 1).map_err(|e| (400, e));
+                    // the open's bytes are its inputs now: they go before the session waits or runs
+                    drop(data);
+                    match decoded.and_then(|decoded| open(&inner, &owner, &sender, word, decoded)) {
+                        Ok((id, device, served)) => {
+                            send(&sender, wire::OPENED, word, wire::encode_opened(Ok((id, device))));
+                            pump(&served, &sender, id, inner.workers + 1);
+                            inner.sessions.lock().unwrap().remove(&id);
+                            inner.room_cv.notify_all();
+                            inner.reshare();
+                        }
+                        Err(e) => send(&sender, wire::OPENED, word, wire::encode_opened(Err(e))),
                     }
-                    Err(e) => send(&sender, wire::OPENED, word, wire::encode_opened(Err(e))),
                 });
                 if started.is_err() {
                     send(push, wire::OPENED, word, wire::encode_opened(Err((503, "the node cannot start a session now".into()))));
@@ -559,8 +583,7 @@ impl ProgramService {
             s.session.cancel();
         }
         for (_, push) in &streams {
-            // (an empty frame closes the websocket)
-            let _ = push.tx.send(Vec::new());
+            let _ = push.tx.send(WebSocketOut::Close);
         }
         streams.len()
     }
@@ -579,19 +602,26 @@ impl ProgramService {
 }
 
 fn send(push: &Push, kind: u8, word: u64, payload: Vec<u8>) {
-    let mut frame = Vec::with_capacity(9 + payload.len());
-    frame.push(kind);
-    frame.extend_from_slice(&word.to_le_bytes());
-    frame.extend_from_slice(&payload);
-    let _ = push.tx.send(frame);
+    send_with(push, kind, word, payload.len(), |frame| frame.extend_from_slice(&payload));
 }
 
-/// An `OPEN` (request `word`): the session's id, what it runs on, and the session (open now, its
-/// updates not yet sent). Past [`MAX_SESSIONS`] it waits for one to end, and says so to its client
-/// first; Err only for an open the node cannot take at all, or one whose stream closed meanwhile.
-fn open(inner: &Arc<Inner>, owner: &str, push: &Push, word: u64, payload: &[u8]) -> Result<(u64, Value, Arc<Served>), (u16, String)> {
+/// A frame to the stream: its kind, the word it is about, then what `body` writes after them
+/// (room for `room` bytes of it to start with): a big message goes straight into the frame, not
+/// into a payload copied behind the head.
+fn send_with(push: &Push, kind: u8, word: u64, room: usize, body: impl FnOnce(&mut Vec<u8>)) {
+    let mut frame = Vec::with_capacity(9 + room);
+    frame.push(kind);
+    frame.extend_from_slice(&word.to_le_bytes());
+    body(&mut frame);
+    let _ = push.tx.send(WebSocketOut::Binary(frame));
+}
+
+/// An `OPEN` (request `word`, decoded): the session's id, what it runs on, and the session (open
+/// now, its updates not yet sent). Past [`MAX_SESSIONS`] it waits for one to end, and says so to
+/// its client first; Err only for an open the node cannot take at all, or one whose stream closed
+/// meanwhile.
+fn open(inner: &Arc<Inner>, owner: &str, push: &Push, word: u64, (open, arrived): (wire::Open, Vec<wire::Arrived>)) -> Result<(u64, Value, Arc<Served>), (u16, String)> {
     let threads = inner.workers + 1;
-    let (open, arrived) = wire::decode_open(payload, MAX_INPUT_WORDS, threads).map_err(|e| (400, e))?;
     let inputs = {
         let mut kept = push.kept.lock().unwrap();
         let inputs = kept.inputs(&arrived)?;
@@ -637,6 +667,8 @@ fn open(inner: &Arc<Inner>, owner: &str, push: &Push, word: u64, payload: &[u8])
     let served = Arc::new(Served { owner: owner.to_string(), socket: push.socket, class, session: Session::open(&open.program, config), codec: open.codec, flow: Mutex::new(Flow::default()) });
     inner.sessions.lock().unwrap().insert(id, served.clone());
     inner.reshare();
+    let gpu = inner.gpu.lock().unwrap().as_ref().map(|g| g.info().clone());
+    let bytes = |b: Option<u64>| b.map_or(Value::Nil, |b| Value::Number(b as f64));
     let device = Value::object(&[
         ("kind", Value::String("cpu".into())),
         ("backend", Value::String(if inner.backend == Backend::Native { "native" } else { "interp" }.into())),
@@ -644,7 +676,10 @@ fn open(inner: &Arc<Inner>, owner: &str, push: &Push, word: u64, payload: &[u8])
         ("class", Value::String(format!("{class:?}").to_lowercase())),
         // the node's CPU weight against the builds next to it (absent: no scope it can weigh)
         ("weight", inner.share.lock().unwrap().as_ref().map_or(Value::Nil, |s| Value::Number(s.wanted as f64))),
-        ("gpu", Value::Bool(inner.gpu.lock().unwrap().is_some())),
+        ("gpu", Value::Bool(gpu.is_some())),
+        // what a program's GPU buffers may hold in all and in one (the device's own limits)
+        ("gpu_buffer_bytes", bytes(gpu.as_ref().map(|g| g.budget_bytes))),
+        ("gpu_max_buffer_bytes", bytes(gpu.as_ref().map(|g| g.max_buffer_bytes))),
     ]);
     Ok((id, device, served))
 }
@@ -656,7 +691,7 @@ fn pump(served: &Served, push: &Push, id: u64, threads: usize) {
         let ending = u.end.is_some();
         let update = served.flow.lock().unwrap().admit(u, ending);
         if !update.is_empty() {
-            send(push, wire::UPDATE, id, wire::encode_update(&update, served.codec, threads));
+            send_with(push, wire::UPDATE, id, 0, |frame| wire::encode_update_into(frame, &update, served.codec, threads));
         }
         if ending {
             return;
@@ -676,7 +711,7 @@ mod tests {
         vec![7; n].into()
     }
 
-    /// A machine held quiet ends every stream: each is closed (an empty frame) and none is left.
+    /// A machine held quiet ends every stream: each is closed and none is left.
     #[test]
     fn a_quiet_ends_every_stream() {
         let service = service();
@@ -685,7 +720,7 @@ mod tests {
         assert!(service.is_stream(9_000_001));
         assert!(service.end_all() >= 1);
         assert!(!service.is_stream(9_000_001));
-        assert_eq!(rx.try_recv().ok(), Some(Vec::new()), "its websocket is closed");
+        assert_eq!(rx.try_recv().ok(), Some(WebSocketOut::Close), "its websocket is closed");
     }
 
     /// A slot keeps its last open's inputs: a later open names them by hash, what the slot held

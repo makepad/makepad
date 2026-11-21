@@ -486,6 +486,10 @@ impl SttEvents {
     }
 }
 
+impl Drop for SttHandle {
+    fn drop(&mut self) { self.cancel(); }
+}
+
 /// A running text-to-speech session. Dropping it ends the worker. Take it
 /// apart with [`TtsSession::split`] to speak from one thread and play from
 /// another.
@@ -598,6 +602,10 @@ impl TtsEvents {
     }
 }
 
+impl Drop for TtsHandle {
+    fn drop(&mut self) { self.cancel(); }
+}
+
 /// True when this build and platform may load a heavy speech model into this
 /// process for `Auto`. Phones and headsets keep 1.6 GB Whisper / 327 MB
 /// Kokoro off-device (their OS engine or a LAN node serve them) unless the
@@ -615,6 +623,26 @@ pub(crate) fn in_process_allowed(engine: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod refusing_hub;
+
+    #[test]
+    fn dropping_the_speech_handle_ends_a_refused_utterance() {
+        let hub = refusing_hub::RefusingHub::start(|path| {
+            assert_eq!(path, "/models");
+            r#"{"models":[{"id":"recognizer","domain":"stt","backend":"whisper","available":true,"gated":false,"state":"ready"}]}"#
+        });
+        let (handle, events) = SttSession::start(SttConfig {
+            hubs: vec![hub.base.clone()], ..Default::default()
+        }).split();
+        handle.transcribe(vec![0.0; 16]);
+        hub.wait_for_retry();
+        let startup = events.poll();
+        assert!(startup.iter().any(|event| matches!(event, SttEvent::Ready(_))));
+        drop(handle);
+        assert_eq!(events.from_worker.recv_timeout(std::time::Duration::from_secs(2)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected), "the speech worker must exit");
+    }
 
     #[test]
     fn reach_is_ordered_inclusively() {

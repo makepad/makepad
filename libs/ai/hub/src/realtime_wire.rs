@@ -44,10 +44,7 @@ pub fn classify_realtime_open_response(status: u16, body: &[u8]) -> RealtimeOpen
             let local_use = reason.strip_prefix("model unavailable: local-use:")
                 .or_else(|| reason.strip_prefix("local-use:"))
                 .is_some_and(|s| !s.trim().is_empty());
-            let queue_full = reason.strip_prefix("queue full: ")
-                .and_then(|s| s.strip_suffix(" jobs already queued on this node"))
-                .is_some_and(|n| n.parse::<usize>().is_ok());
-            if local_use || queue_full || matches!(reason.as_str(),
+            if local_use || matches!(reason.as_str(),
                 "busy: a job is already queued or running" | "temporarily unavailable" | "model unavailable: temporarily unavailable")
             {
                 return RealtimeOpenResponse::Unavailable { reason: reason.clone() };
@@ -159,7 +156,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(FrameHeader, &[u8]), AssetAiError> 
 /// True when `bytes` starts with [`FRAME_MAGIC`] — the self-describing
 /// signature a client uses to tell a pushed output frame apart from a JSON
 /// message on the server -> client direction (see the module doc: the
-/// in-repo `HttpServer` sends both as WebSocket Binary frames).
+/// realtime route sends both as WebSocket Binary frames).
 pub fn is_frame_message(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) == FRAME_MAGIC
 }
@@ -417,7 +414,7 @@ mod tests {
         for status in [200, 400, 404, 500] {
             assert!(matches!(classify_realtime_open_response(status, body), RealtimeOpenResponse::Failed { .. }));
         }
-        for reason in ["busy: a job is already queued or running", "queue full: 3 jobs already queued on this node", "temporarily unavailable"] {
+        for reason in ["busy: a job is already queued or running", "temporarily unavailable"] {
             let body = format!(r#"{{"job_id":null,"ws_path":null,"error":"{reason}"}}"#);
             assert!(matches!(classify_realtime_open_response(409, body.as_bytes()), RealtimeOpenResponse::Unavailable { .. }));
         }

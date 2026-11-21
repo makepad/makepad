@@ -145,17 +145,8 @@ pub fn cli_command(exe: &std::path::Path, cwd: &std::path::Path) -> Command {
 /// How much CLI stderr / vendor error text is kept in the SERVER log.
 const LOG_DETAIL_BYTES: usize = 500;
 
-/// Map a CLI failure to one of three FIXED public categories and log the
-/// bounded raw detail server-side. Raw CLI stderr and vendor `result`
-/// strings never cross the wire: they can carry env fragments, tokens,
-/// paths, or prompt text, and no denylist proves they do not.
-///
-/// - auth-smelling detail → `authentication required` (the operator must
-///   log the CLI in on the broker host);
-/// - a process that died without a protocol result → `<what> CLI exited`;
-/// - anything else the vendor reported → `provider unavailable`.
-pub fn categorize_cli_error(what: &str, detail: &str, exited_without_result: bool) -> String {
-    let detail = detail.trim();
+/// Log a bounded copy of the trimmed CLI error detail on the broker host.
+fn log_cli_error(what: &str, detail: &str) {
     if !detail.is_empty() {
         let mut bounded = String::new();
         for c in detail.chars() {
@@ -170,8 +161,22 @@ pub fn categorize_cli_error(what: &str, detail: &str, exited_without_result: boo
         // Server-side only: the broker host's log, never a wire payload.
         eprintln!("chat {what} CLI error: {bounded}");
     }
+}
+
+/// Map a CLI failure to one of three FIXED public categories and log the
+/// bounded raw detail server-side. Raw CLI stderr and vendor `result`
+/// strings never cross the wire: they can carry env fragments, tokens,
+/// paths, or prompt text, and no denylist proves they do not.
+///
+/// - auth-smelling detail → `authentication required` (the operator must
+///   log the CLI in on the broker host);
+/// - a process that died without a protocol result → `<what> CLI exited`;
+/// - anything else the vendor reported → `provider unavailable`.
+pub fn categorize_cli_error(what: &str, detail: &str, exited_without_result: bool) -> String {
+    let detail = detail.trim();
+    log_cli_error(what, detail);
     let lower = detail.to_ascii_lowercase();
-    let auth = ["not logged in", "logged out", "login", "log in", "auth", "credential",
+    let auth = ["not logged in", "logged out", "login", "log in", "sign in", "access token", "auth", "credential",
         "api key", "api_key", "unauthorized", "401", "forbidden"]
         .iter()
         .any(|m| lower.contains(m));
@@ -181,6 +186,18 @@ pub fn categorize_cli_error(what: &str, detail: &str, exited_without_result: boo
         format!("{what} CLI exited")
     } else {
         "provider unavailable".to_string()
+    }
+}
+
+/// Trust a CLI's authentication failure kind over its wording. Fall back to
+/// the phrase list for other kinds and for CLIs such as Codex, whose
+/// `exec --json` errors carry only a message.
+pub fn categorize_cli_failure(what: &str, kind: Option<&str>, detail: &str, exited_without_result: bool) -> String {
+    if matches!(kind, Some("authentication_failed" | "oauth_org_not_allowed" | "cloud_credential_error")) {
+        log_cli_error(what, detail.trim());
+        "authentication required".to_string()
+    } else {
+        categorize_cli_error(what, detail, exited_without_result)
     }
 }
 
@@ -461,11 +478,13 @@ mod tests {
 
     #[test]
     fn cli_errors_map_to_fixed_public_categories() {
+        let expired_token = "Your access token could not be refreshed. Please log out and sign in again.";
         // Auth-smelling detail, however spelled, is the auth category.
         for detail in [
             "Not logged in · Please run /login",
             "error: 401 Unauthorized",
             "missing API key",
+            expired_token,
         ] {
             assert_eq!(categorize_cli_error("grok", detail, false), "authentication required");
             assert_eq!(categorize_cli_error("grok", detail, true), "authentication required");
@@ -480,6 +499,18 @@ mod tests {
             "provider unavailable"
         );
         assert_eq!(categorize_cli_error("codex", "", true), "codex CLI exited");
+        assert_eq!(
+            categorize_cli_failure("Claude Code", Some("authentication_failed"), "Failed to authenticate: your login expired", false),
+            "authentication required"
+        );
+        for kind in ["authentication_failed", "oauth_org_not_allowed", "cloud_credential_error"] {
+            assert_eq!(categorize_cli_failure("Claude Code", Some(kind), "", false), "authentication required");
+        }
+        assert_eq!(
+            categorize_cli_failure("Claude Code", Some("rate_limit"), "quota exceeded for org acme", false),
+            "provider unavailable"
+        );
+        assert_eq!(categorize_cli_failure("codex", None, expired_token, false), "authentication required");
     }
 
     #[test]

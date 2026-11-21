@@ -2,14 +2,13 @@
 //! COMPLETE, strictly framed response, never inferred from a transport error.
 //! No redirects, connection retries, or retries after returning a job id.
 use crate::error::AssetAiError;
-use crate::http_client::{http_fetch_no_redirect, parse_url, HttpClientRequest};
+use crate::http_client::{http_fetch_no_redirect, machine_token_line, parse_url, HttpClientRequest};
 use makepad_strict_json::{self as json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
-const ATTEMPTS: usize = 8;
-const BUDGET: Duration = Duration::from_secs(90);
+const POST_TIMEOUT: Duration = Duration::from_secs(90);
 const HEAD_LIMIT: usize = 16 * 1024;
 
 pub(super) enum Reply {
@@ -18,93 +17,48 @@ pub(super) enum Reply {
 }
 
 pub(super) trait Transport {
-    fn post(&mut self, url: &str, headers: &[(String, String)], body: &[u8],
-        remaining: Duration) -> Result<Reply, AssetAiError>;
+    fn post(&mut self, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<Reply, AssetAiError>;
     fn now(&self) -> Instant { Instant::now() }
     fn sleep(&mut self, duration: Duration) { std::thread::sleep(duration); }
 }
 
 pub(super) fn submit(
     url: &str, headers: &[(String, String)], body: &[u8],
-    wait_for_admission: bool,
-    cancelled: &dyn Fn() -> bool, pending: &mut dyn FnMut(&str), transport: &mut impl Transport,
+    transport: &mut impl Transport,
 ) -> Result<String, AssetAiError> {
-    let deadline = transport.now() + BUDGET;
-    let mut last = "no admission response".to_string();
-    for attempt in 1..=ATTEMPTS {
-        if cancelled() { return Err(AssetAiError::Cancelled); }
-        let remaining = deadline.saturating_duration_since(transport.now());
-        if remaining.is_zero() { break; }
-        match transport.post(url, headers, body, remaining).map_err(|error| {
-            let reason = match error {
-                AssetAiError::Http(reason) | AssetAiError::Io(reason) => reason,
-                other => other.to_string(),
-            };
-            AssetAiError::Http(format!("{url}: {reason}"))
-        })? {
-            // Cancellation during the POST does not discard ownership.
-            Reply::Accepted(id) => return Ok(id),
-            Reply::Refused { status, reason } => {
-                // A full, strictly framed no-job refusal proves no work was
-                // accepted. A full disk won't heal on the queue backoff;
-                // return its typed reason so fleet callers can choose a peer.
-                if let Some(disk) = reason.strip_prefix("model unavailable: disk-space:") {
-                    return Err(AssetAiError::Unavailable(format!("disk-space:{disk}")));
-                }
-                if let Some(local_use) = reason.strip_prefix("model unavailable: local-use:") {
-                    return Err(AssetAiError::Unavailable(format!("local-use:{local_use}")));
-                }
-                // An explicit reject policy is an atomic attempt to claim
-                // idle capacity. Waiting/reposting here strands concurrent
-                // fleet callers on the same GPU instead of trying a peer.
-                // Only a proven no-job refusal reaches this branch; a lost
-                // or malformed response must never become a retryable Busy.
-                if !wait_for_admission {
-                    if reason == "HTTP server overloaded before job admission" {
-                        return Err(AssetAiError::Unavailable(format!("admission-overloaded: {reason}")));
-                    }
-                    if reason == "busy: a job is already queued or running" {
-                        return Err(AssetAiError::Busy);
-                    }
-                    if let Some(limit) = reason.strip_prefix("queue full: ")
-                        .and_then(|s| s.strip_suffix(" jobs already queued on this node"))
-                        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-                        .and_then(|n| n.parse::<usize>().ok()) {
-                        return Err(AssetAiError::QueueFull(limit));
-                    }
-                    return Err(AssetAiError::Http(format!("{url}: http {status}: {reason}")));
-                }
-                last = format!("http {status}: {reason}");
-            }
-        }
-        if cancelled() { return Err(AssetAiError::Cancelled); }
-        if attempt == ATTEMPTS || transport.now() >= deadline { break; }
-        let delay = Duration::from_millis((500u64 << (attempt - 1)).min(8_000));
-        pending(&format!("waiting for {url} admission (attempt {attempt}/{ATTEMPTS}): {last}"));
-        let wake = (transport.now() + delay).min(deadline);
-        while transport.now() < wake {
-            if cancelled() { return Err(AssetAiError::Cancelled); }
-            transport.sleep(wake.saturating_duration_since(transport.now()).min(Duration::from_millis(50)));
+    let reply = transport.post(url, headers, body).map_err(|e| match e {
+        AssetAiError::Http(reason) | AssetAiError::Io(reason) => AssetAiError::Http(reason),
+        other => AssetAiError::Http(other.to_string()),
+    })?;
+    match reply {
+        Reply::Accepted(id) => Ok(id),
+        Reply::Refused { status, reason } => {
+            Err(AssetAiError::admission_refusal(&reason)
+                .unwrap_or_else(|| AssetAiError::Http(format!("http {status}: {reason}"))))
         }
     }
-    Err(AssetAiError::Http(format!("{url}: admission budget exhausted: {last}")))
 }
 
 pub(super) struct HttpTransport;
 impl Transport for HttpTransport {
-    fn post(&mut self, url: &str, headers: &[(String, String)], body: &[u8],
-        remaining: Duration) -> Result<Reply, AssetAiError> {
-        let deadline = Instant::now() + remaining;
+    fn post(&mut self, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<Reply, AssetAiError> {
+        let deadline = Instant::now() + POST_TIMEOUT;
         let parsed = parse_url(url)?;
         makepad_network::lan::hub_check_host("ai-hub submission", &parsed.host)?;
         if parsed.https {
-            // Keep the platform TLS implementation. Its normalized headers
-            // cannot prove the exact transport gate, so HTTPS stays one-shot.
+            // A complete JSON no-job response can travel over either transport.
+            // The empty overload gate requires the exact wire headers below.
             let mut request = HttpClientRequest::post(url, "application/json", body);
             request.extra_headers = headers;
             let response = http_fetch_no_redirect(&request)?;
             let status = response.status;
-            return classify(status, &response.read_body_to_vec(super::MAX_JSON_BODY)?, false);
+            let length = response.header("content-length").map(str::trim)
+                .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|value| value.parse::<usize>().ok());
+            let framed = response.headers.iter().filter(|(key, _)| key == "content-length").count() == 1
+                && response.header("transfer-encoding").is_none();
+            let bytes = response.read_body_to_vec(super::MAX_JSON_BODY)?;
+            return classify(status, &bytes, framed && length == Some(bytes.len()));
         }
         let addr = (parsed.host.as_str(), parsed.port).to_socket_addrs()?
             .next().ok_or_else(|| failure("no address for submission endpoint"))?;
@@ -120,6 +74,7 @@ impl Transport for HttpTransport {
             }
             head.push_str(&format!("{key}: {value}\r\n"));
         }
+        head.push_str(&machine_token_line(&parsed, headers));
         head.push_str("\r\n");
         stream.write_all(head.as_bytes())?;
         stream.write_all(body)?;
@@ -243,10 +198,8 @@ fn classify(status: u16, bytes: &[u8], allow_refusal: bool) -> Result<Reply, Ass
     let known_shape = matches!(&value, Value::Obj(fields) if fields.iter().all(|(key, _)|
         matches!(key.as_str(), "job_id" | "error" | "think_open" | "ws_path")));
     // Explicit null is the GenerateResponseJson no-job contract. Legacy
-    // error-only responses are safe only for the hub's Busy/QueueFull reasons.
-    let known_reason = error.is_some_and(|reason| reason == "busy: a job is already queued or running"
-        || reason.strip_prefix("queue full: ").and_then(|s| s.strip_suffix(" jobs already queued on this node"))
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())));
+    // error-only responses are safe only for the hub's explicit busy reason.
+    let known_reason = error == Some("busy: a job is already queued or running");
     if allow_refusal && matches!(status, 409 | 429 | 503) && no_job && known_shape && valid_metadata
         && error.is_some() && (value.get("job_id") == Some(&Value::Null) || known_reason) {
         return Ok(Reply::Refused { status, reason: error.unwrap().into() });

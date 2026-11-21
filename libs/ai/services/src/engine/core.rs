@@ -68,6 +68,8 @@ fn picture_rect(v: &Value) -> Result<[f64; 4], String> {
     }
 }
 
+/// The most the composer's attachments add to a turn's context.
+const ATTACHMENTS_BYTES: usize = 4 * MAX_CONTEXT_BYTES;
 /// A tool result's bytes kept in a saved chat.
 const SAVED_RESULT_BYTES: usize = 2048;
 /// The earlier conversation told to the model after a restart, at most.
@@ -449,7 +451,9 @@ impl EngineCore {
 
     fn push_user(&mut self, text: &str, pictures: Vec<PictureRef>) {
         self.lines += 1;
-        self.state.push(Entry::User { text: text.to_string(), pictures });
+        // What the line points at stays with it in the transcript.
+        let attachments = self.state.target.as_ref().map(|t| t.attachments.clone()).unwrap_or_default();
+        self.state.push(Entry::User { text: text.to_string(), pictures, attachments });
     }
 
     /// The pictures the person sent in this conversation, one per picture, oldest first.
@@ -484,7 +488,7 @@ impl EngineCore {
             .entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::User { text, pictures } => Some(SavedRow {
+                Entry::User { text, pictures, .. } => Some(SavedRow {
                     kind: "user".into(),
                     title: String::new(),
                     text: text.clone(),
@@ -651,14 +655,28 @@ impl EngineCore {
     fn turn_context(&self, mut dynamic: String) -> String {
         let Some(target) = &self.state.target else { return dynamic };
         let mut line = format!("The person is looking at {} ({}).", target.label, target.app);
-        if let Some(selection) = &target.selection {
-            line.push_str(&format!(" Selected: {selection}."));
-        }
         if !target.context.trim().is_empty() {
             line.push('\n');
             line.push_str(target.context.trim());
         }
         truncate_to_char_boundary(&mut line, MAX_CONTEXT_BYTES);
+        // What the person points at, each with what the host says of it. Bounded as a whole: a
+        // long list is cut with a note, never refused (the host's own tools read the rest).
+        if !target.attachments.is_empty() {
+            let mut picks = String::from("\nThe person points at (chips on their line):");
+            for a in &target.attachments {
+                picks.push_str(&format!("\n- {} ({})", a.label, a.kind));
+                if !a.detail.trim().is_empty() {
+                    picks.push_str(": ");
+                    picks.push_str(a.detail.trim());
+                }
+            }
+            if picks.len() > ATTACHMENTS_BYTES {
+                truncate_to_char_boundary(&mut picks, ATTACHMENTS_BYTES);
+                picks.push_str(&format!("\n[cut at {ATTACHMENTS_BYTES} bytes: ask {} for the rest]", target.app));
+            }
+            line.push_str(&picks);
+        }
         if !dynamic.is_empty() && !dynamic.ends_with('\n') {
             dynamic.push('\n');
         }
@@ -1245,7 +1263,7 @@ impl EngineCore {
             return None;
         }
         let risk = def.risk.max(self.registry.risk_floor(&app));
-        let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json, caller: None };
+        let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json, caller: None, origin: CallOrigin::Conversation };
         let grant = canonical_name(&app, &tool);
         let gated = risk >= Risk::Request && (!from_console || self.external.contains_key(&call_id)) && !self.allowed.contains(&grant);
         // A proposal that only looks or changes the app's own state (Read,
@@ -2180,7 +2198,7 @@ mod tests {
         core.send("hello", 0.0);
         assert_eq!(shared.lock().unwrap().sends[0].1.contains("# Focus"), false, "no target, no focus block");
         core.cancel(0.0);
-        core.set_target(Some(Target { label: "Files".into(), app: "files".into(), context: "Folder: ~/pics".into(), selection: None }));
+        core.set_target(Some(Target { label: "Files".into(), app: "files".into(), context: "Folder: ~/pics".into(), attachments: Vec::new() }));
         assert_eq!(core.state().target.as_ref().unwrap().label, "Files");
         core.send("what is here", 1.0);
         {
@@ -2189,7 +2207,19 @@ mod tests {
             assert_eq!(text, "what is here", "the line is the person's own");
             assert!(context.contains("# Focus") && context.contains("Folder: ~/pics"), "{context}");
         }
-        assert!(matches!(&core.state().entries.last(), Some(Entry::User { text, .. }) if text == "what is here"));
+        assert!(matches!(&core.state().entries.last(), Some(Entry::User { text, attachments, .. }) if text == "what is here" && attachments.is_empty()));
+        // What the person points at goes to the model with the line and stays with it in the
+        // transcript.
+        let pick = Attachment { id: "p1".into(), label: "cat.png".into(), kind: "file".into(), detail: "~/pics/cat.png, 2 MB".into() };
+        core.set_target(Some(Target { label: "Files".into(), app: "files".into(), context: "Folder: ~/pics".into(), attachments: vec![pick.clone()] }));
+        core.cancel(1.0);
+        core.send("open it", 1.0);
+        {
+            let m = shared.lock().unwrap();
+            let (_, context) = m.sends.last().unwrap();
+            assert!(context.contains("- cat.png (file): ~/pics/cat.png, 2 MB"), "{context}");
+        }
+        assert!(matches!(&core.state().entries.last(), Some(Entry::User { attachments, .. }) if *attachments == vec![pick.clone()]));
         // Setting the target focused the instance the registry picks by default
         // (no focus beats a stale one): the call goes to the same one every time.
         core.pump(1.1);
@@ -2220,14 +2250,14 @@ mod tests {
         core.pump(0.1);
         let all = names(&shared.lock().unwrap());
         assert!(all.contains(&"files.list_dir".to_string()) && all.contains(&"notes.add".to_string()), "{all:?}");
-        core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "".into(), selection: None }));
+        core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "".into(), attachments: Vec::new() }));
         core.send("two", 1.0);
         core.pump(1.1);
         // The conversation's own tools stay with a target.
         assert_eq!(names(&shared.lock().unwrap()), vec!["notes.add", "bus.unsubscribe", "chat.pictures", "chat.picture"]);
         // A new context line for the same app does not rebind.
         let configs = shared.lock().unwrap().configured.len();
-        core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "page 2".into(), selection: None }));
+        core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "page 2".into(), attachments: Vec::new() }));
         core.send("three", 2.0);
         core.pump(2.1);
         assert_eq!(shared.lock().unwrap().configured.len(), configs);

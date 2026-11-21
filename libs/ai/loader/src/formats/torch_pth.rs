@@ -138,6 +138,7 @@ impl ZipIndex {
             .entries
             .get(name)
             .ok_or_else(|| err(format!("zip entry missing: {name}")))?;
+        crate::host_floor::check(entry.size, format_args!("zip entry {name}")).map_err(err)?;
         let mut buf = vec![0u8; entry.size as usize];
         self.file
             .seek(SeekFrom::Start(entry.data_offset))

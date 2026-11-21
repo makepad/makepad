@@ -259,6 +259,10 @@ impl MlxSafetensorsHeader {
     }
 
     fn read_file_range(&self, start: u64, len: usize) -> Result<Vec<u8>> {
+        crate::host_floor::check(len as u64, "a tensor read").map_err(|message| MlxRtError::Io {
+            path: self.path.clone(),
+            message,
+        })?;
         let mut file = self.file.lock().map_err(|_| MlxRtError::Io {
             path: self.path.clone(),
             message: "safetensors file mutex poisoned".to_string(),

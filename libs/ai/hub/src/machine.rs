@@ -32,11 +32,13 @@ use std::path::PathBuf;
 // ---------------------------------------------------------------- the token
 
 /// The machine token: minted once, mode 0600, presented on every local call.
-/// Reading it succeeding IS the authorization — only this user can.
+/// Reading it succeeding IS the authorization — only this user can. A token file that other
+/// users may read or write is refused (an error), never used or minted over.
 pub fn machine_token() -> io::Result<String> {
     let path = home::run_dir().join("machine-token");
-    match fs::read_to_string(&path) {
+    match read_owner_only(&path) {
         Ok(token) if token.trim().len() >= 32 => return Ok(token.trim().to_string()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Err(error),
         _ => {}
     }
     let token = mint_token()?;
@@ -53,17 +55,38 @@ pub fn machine_token() -> io::Result<String> {
     Ok(token)
 }
 
+/// A file's text, only when no one but its owner may read or write it (on unix: no group or
+/// other permission bits), checked on the opened file itself.
+fn read_owner_only(path: &std::path::Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the machine token file is open to other users"));
+        }
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
 /// The request header an app on this machine presents [`machine_token`] in, on a hub's
 /// loopback surface.
 pub const TOKEN_HEADER: &str = "X-Makepad-Machine-Token";
 
-/// Whether request header `lines` carry this machine's token.
+/// Whether request header `lines` carry this machine's token (compared in constant time).
 pub fn token_in_headers(lines: &[String]) -> bool {
     let sent = lines.iter().find_map(|line| {
         let (name, value) = line.trim_end().split_once(':')?;
         name.trim().eq_ignore_ascii_case(TOKEN_HEADER).then(|| value.trim().to_string())
     });
-    sent.is_some_and(|sent| machine_token().is_ok_and(|token| token == sent))
+    sent.is_some_and(|sent| machine_token().is_ok_and(|token| same_secret(token.as_bytes(), sent.as_bytes())))
+}
+
+/// Equal-time comparison: how far two secrets agree never shows in the time it takes.
+fn same_secret(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 /// 32 hex chars of OS randomness.
@@ -139,6 +162,27 @@ pub fn write_node_entry(node_key: &str, entry: &NodeEntry) -> io::Result<PathBuf
     let path = home::run_dir().join(format!("{}.node", sanitize(node_key)));
     fs::write(&path, entry.serialize_json())?;
     Ok(path)
+}
+
+/// The live hub that holds `node_key` on this machine, if one does: its entry names a running
+/// process other than this one, and the entry's loopback port takes a connection. A stale entry
+/// (its hub gone, even if its pid went to another process since) holds nothing. A port that
+/// doesn't answer within a second is a busy hub, which holds it.
+pub fn node_key_holder(node_key: &str) -> Option<NodeEntry> {
+    let path = home::run_dir().join(format!("{}.node", sanitize(node_key)));
+    let entry = NodeEntry::deserialize_json(&fs::read_to_string(path).ok()?).ok()?;
+    if entry.pid == u64::from(std::process::id()) || entry.port == 0 {
+        return None;
+    }
+    if !crate::download::process_exists(u32::try_from(entry.pid).ok()?) {
+        return None;
+    }
+    let port = std::net::SocketAddr::from(([127, 0, 0, 1], entry.port));
+    match std::net::TcpStream::connect_timeout(&port, std::time::Duration::from_secs(1)) {
+        Ok(_) => Some(entry),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => Some(entry),
+        Err(_) => None,
+    }
 }
 
 /// Every entry in the runtime dir. Staleness is the READER's problem: check

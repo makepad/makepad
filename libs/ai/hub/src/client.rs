@@ -54,6 +54,18 @@ pub trait ContentProvider {
         request: &GenerateRequestJson,
     ) -> Result<String, AssetAiError>;
 
+    /// Submit once when a fleet router owns retries and may choose another peer.
+    fn try_request(&self, domain: Domain, request: &GenerateRequestJson) -> Result<String, AssetAiError> {
+        self.request(domain, request).map_err(|error| match error {
+            // Providers also use Unavailable for domains they never implement.
+            AssetAiError::Unavailable(why) if !AssetAiError::paused_model(&why)
+                && !why.starts_with("admission-overloaded:") && why != "temporarily unavailable" => {
+                AssetAiError::Backend(why)
+            }
+            other => other,
+        })
+    }
+
     /// Worker-side submission with cancellable pre-admission waiting. The
     /// default makes ONE request: untyped provider errors never justify replay.
     /// Once accepted, always return the job id, even if cancellation arrived
@@ -119,6 +131,7 @@ pub struct LocalService {
     base_url: String,
     auth_headers: Vec<(String, String)>,
     lease_origin: Mutex<Option<(String, u64)>>,
+    capacity_wait: Option<std::sync::Arc<dyn Fn(std::time::Duration) -> bool + Send + Sync>>,
 }
 
 /// `https://host:port` given for a hub service is a fleet node.
@@ -153,7 +166,14 @@ impl LocalService {
             base_url,
             auth_headers: Vec::new(),
             lease_origin: Mutex::new(None),
+            capacity_wait: None,
         }
+    }
+
+    /// Retain queued work across confirmed capacity refusals until its owner cancels it.
+    pub(crate) fn wait_for_capacity(mut self, wait: impl Fn(std::time::Duration) -> bool + Send + Sync + 'static) -> Self {
+        self.capacity_wait = Some(std::sync::Arc::new(wait));
+        self
     }
 
     /// An explicit bearer for this service (tests; fleet nodes need none).
@@ -215,23 +235,27 @@ impl LocalService {
         &self,
         domain: Domain,
         request: &GenerateRequestJson,
+        wait_for_admission: bool,
         cancelled: &dyn Fn() -> bool,
         pending: &mut dyn FnMut(&str),
         transport: &mut impl submission::Transport,
     ) -> Result<String, AssetAiError> {
         if cancelled() { return Err(AssetAiError::Cancelled); }
         let mut request_with_model = None;
-        if request.model.is_empty() {
+        // A routed request leaves the choice to the receiving hub, which picks across the fleet
+        // (its `route_domain` names the domain); that hub need not have a model of its own.
+        if request.model.is_empty() && request.route.is_none() {
             let models = self.list_models()?;
             let chosen = models
                 .iter()
                 .find(|model| model.available && model.domain == domain.as_str())
+                .or_else(|| models.iter().find(|model| model.domain == domain.as_str()
+                    && model.unavailable_reason.as_deref().is_some_and(AssetAiError::paused_model)))
                 .ok_or_else(|| {
-                    AssetAiError::Unavailable(format!(
-                        "no available {} model on {}",
-                        domain.as_str(),
-                        self.base_url
-                    ))
+                    let why = format!("no available {} model on {}", domain.as_str(), self.base_url);
+                    // A failed lookup precedes the POST. A routed attempt reserves
+                    // Busy/Unavailable for an actual admission refusal.
+                    if wait_for_admission { AssetAiError::Unavailable(why) } else { AssetAiError::Backend(why) }
                 })?;
             let mut owned = request.clone();
             owned.model = chosen.id.clone();
@@ -240,18 +264,36 @@ impl LocalService {
         let request = request_with_model.as_ref().unwrap_or(request);
         let url = format!("{}/generate", self.base_url);
         let body = request.serialize_json();
-        let job_id = submission::submit(&url, &self.auth_headers, body.as_bytes(),
-            request.queue_policy.as_deref() != Some("reject"),
-            cancelled, &mut |note| pending(&submission::safe_note(note, request, &self.auth_headers)), transport)
-            .map_err(|error| match error {
-                AssetAiError::Cancelled => AssetAiError::Cancelled,
-                AssetAiError::Busy => AssetAiError::Busy,
-                AssetAiError::QueueFull(limit) => AssetAiError::QueueFull(limit),
-                AssetAiError::Http(reason) => AssetAiError::Http(submission::safe_note(&reason, request, &self.auth_headers)),
-                AssetAiError::Unavailable(reason) if reason.starts_with("disk-space:") || reason.starts_with("local-use:") || reason.starts_with("admission-overloaded:") =>
-                    AssetAiError::Unavailable(submission::safe_note(&reason, request, &self.auth_headers)),
-                other => AssetAiError::Http(submission::safe_note(&other.to_string(), request, &self.auth_headers)),
-            })?;
+        let mut delay = std::time::Duration::from_millis(100);
+        let mut waiting = false;
+        let job_id = loop {
+            if cancelled() { return Err(AssetAiError::Cancelled); }
+            match submission::submit(&url, &self.auth_headers, body.as_bytes(), transport) {
+                Ok(id) => break id,
+                Err(error) => {
+                    let safe = |text: &str| submission::safe_note(text, request, &self.auth_headers);
+                    let error = match error {
+                        AssetAiError::Busy => AssetAiError::Busy,
+                        AssetAiError::Unavailable(reason) => AssetAiError::Unavailable(safe(&reason)),
+                        other => return Err(AssetAiError::Http(safe(&format!("{url}: {other}")))),
+                    };
+                    if !wait_for_admission || request.queue_policy.as_deref() == Some("reject") { return Err(error); }
+                    let note = safe(&format!("waiting for {url} admission: {error}"));
+                    if !waiting { eprintln!("{note}"); waiting = true; }
+                    pending(&note);
+                    if let Some(wait) = &self.capacity_wait {
+                        if !wait(delay) { return Err(AssetAiError::Cancelled); }
+                    } else {
+                        let wake = transport.now() + delay;
+                        while transport.now() < wake {
+                            if cancelled() { return Err(AssetAiError::Cancelled); }
+                            transport.sleep(wake.saturating_duration_since(transport.now()).min(std::time::Duration::from_millis(50)));
+                        }
+                    }
+                    delay = (delay * 2).min(std::time::Duration::from_secs(8));
+                }
+            }
+        };
         *self.lease_origin.lock().unwrap_or_else(|e| e.into_inner()) = request
             .origin_key.as_ref().map(|key| (key.clone(), request.origin_epoch.unwrap_or(0)));
         Ok(job_id)
@@ -289,11 +331,15 @@ impl ContentProvider for LocalService {
         self.request_pending(domain, request, &|| false, &mut |_| {})
     }
 
+    fn try_request(&self, domain: Domain, request: &GenerateRequestJson) -> Result<String, AssetAiError> {
+        self.request_pending_using(domain, request, false, &|| false, &mut |_| {}, &mut submission::HttpTransport)
+    }
+
     fn request_pending(
         &self, domain: Domain, request: &GenerateRequestJson,
         cancelled: &dyn Fn() -> bool, pending: &mut dyn FnMut(&str),
     ) -> Result<String, AssetAiError> {
-        self.request_pending_using(domain, request, cancelled, pending, &mut submission::HttpTransport)
+        self.request_pending_using(domain, request, true, cancelled, pending, &mut submission::HttpTransport)
     }
 
     fn poll(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {

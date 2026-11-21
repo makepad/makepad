@@ -149,7 +149,8 @@ pub fn scan(registry: &Registry, cache_dir: &Path, gpu: &GpuInfo, hf_token: bool
             id: spec.id.clone(),
             domain,
             kind: crate::control::model_kind(domain),
-            download_bytes: files.iter().filter_map(|f| f.size).sum(),
+            // What a download fetches: a file fetched on demand comes with the first job that needs it.
+            download_bytes: files.iter().filter(|f| !spec.fetched_on_demand(f)).filter_map(|f| f.size).sum(),
             disk_bytes: files.iter().map(|f| bytes_on_disk(f, cache_dir)).sum(),
             on_disk: spec.files_present(cache_dir),
             licence: spec.license.as_ref().map_or("not stated", |l| l.restriction.as_str()).to_string(),
@@ -362,7 +363,8 @@ fn worker(rx: Receiver<String>, shared: Arc<Mutex<DlShared>>, registry: Registry
             continue;
         };
         let node = PrefetchNode { registry: &registry, cache_dir: &cache_dir, downloader: downloader.clone(), node_key: node_key.clone(), secret: secret.clone(), reserve_mb: 0 };
-        let files = unique_files(spec);
+        // A file fetched on demand comes with the first job that needs it, not with the model.
+        let files: Vec<&FileSpec> = unique_files(spec).into_iter().filter(|f| !spec.fetched_on_demand(f)).collect();
         let total: u64 = files.iter().filter_map(|f| f.size).sum();
         let wanted: Vec<&FileSpec> = files.iter().copied().filter(|f| !f.is_present(&cache_dir)).collect();
         // Bytes of the files already complete count as done.

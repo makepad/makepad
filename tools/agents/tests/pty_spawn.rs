@@ -56,7 +56,7 @@ mod tests {
             let ready = ready.clone();
             std::thread::spawn(move || {
                 let mut maximum = Duration::ZERO;
-                let mut samples = 0;
+                let mut samples = 0u64;
                 ready.wait();
                 while !stop.load(Ordering::Relaxed) {
                     let start = Instant::now();
@@ -103,9 +103,19 @@ mod tests {
                 let sid = unsafe { getsid(child.id() as i32) };
                 let foreground = unsafe { tcgetpgrp(master.as_raw_fd()) };
                 let killed = child.kill();
-                let waited = child.wait();
-                killed?;
+                // the child ends at its SIGKILL: waited for, it ends the spawns (and the sampler
+                // with them) as an error, never a wait without end (under the JIT on a Mac a
+                // child outlived it, and the test sampled until its count overflowed, 11-21)
+                let killed_at = Instant::now();
+                let waited = loop {
+                    match child.try_wait() {
+                        Ok(None) if killed_at.elapsed() < Duration::from_secs(10) => std::thread::sleep(Duration::from_millis(1)),
+                        Ok(None) => break Err(io::Error::other(format!("child {} still runs 10 s after its SIGKILL (kill said {killed:?})", child.id()))),
+                        other => break other.map(|_| ()),
+                    }
+                };
                 waited?;
+                killed?;
                 if sid != child.id() as i32 || foreground != child.id() as i32 {
                     return Err(io::Error::other(format!(
                         "PTY ownership: session={sid}, foreground={foreground}, child={}",

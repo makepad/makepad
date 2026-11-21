@@ -115,7 +115,7 @@ impl RemotePipe {
         }
     }
 
-    pub(crate) fn transcribe(&self, samples_16k: &[f32], language: &str, prompt: &str, timestamps: bool) -> Result<Transcript, String> {
+    pub(crate) fn transcribe(&self, samples_16k: &[f32], language: &str, prompt: &str, cancelled: &dyn Fn() -> bool) -> Result<Transcript, String> {
         let wav = wav::encode_wav_pcm16_mono(samples_16k, super::STT_SAMPLE_RATE);
         let request = GenerateRequestJson {
             model: self.model.clone(),
@@ -127,8 +127,7 @@ impl RemotePipe {
             // segments and a caller that does not want them ignores them.
             ..Default::default()
         };
-        let _ = timestamps;
-        let output = self.run_job_with(Domain::Stt, request, Want::Outputs { media: 1, text: 0 }, true, &mut |_| {})?;
+        let output = self.run_job_with(Domain::Stt, request, Want::Outputs { media: 1, text: 0 }, true, cancelled, &mut |_| {})?;
         let bytes = output.artifacts.into_iter().next().ok_or_else(|| "job finished without an artifact".to_string())?.bytes;
         let text = std::str::from_utf8(&bytes).map_err(|_| "transcript is not utf-8".to_string())?;
         let json = TranscriptJson::deserialize_json(text).map_err(|e| format!("transcript json: {e:?}"))?;
@@ -149,6 +148,7 @@ impl RemotePipe {
         text: &str,
         voice: &str,
         speed: f32,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(SpeechAudio, Option<Vec<super::WordTiming>>), String> {
         let request = GenerateRequestJson {
             model: self.model.clone(),
@@ -157,7 +157,7 @@ impl RemotePipe {
             speed: Some(speed as f64),
             ..Default::default()
         };
-        let artifacts = self.run_job(Domain::Speech, request, Want::All)?.artifacts;
+        let artifacts = self.run_job_with(Domain::Speech, request, Want::All, false, cancelled, &mut |_| {})?.artifacts;
         self.take_from(artifacts)
     }
 
@@ -190,6 +190,7 @@ impl RemotePipe {
         text: &str,
         voice: &str,
         speed: f32,
+        cancelled: &dyn Fn() -> bool,
         on_chunk: &mut dyn FnMut(SpeechAudio),
     ) -> Result<(SpeechAudio, Option<Vec<super::WordTiming>>), String> {
         let request = GenerateRequestJson {
@@ -200,7 +201,7 @@ impl RemotePipe {
             stream: Some(true),
             ..Default::default()
         };
-        let output = self.run_job_with(Domain::Speech, request, Want::All, false, &mut |chunk| {
+        let output = self.run_job_with(Domain::Speech, request, Want::All, false, cancelled, &mut |chunk| {
             if let Ok((samples, sample_rate)) = wav::decode_wav_to_mono_f32(&chunk.bytes) {
                 on_chunk(SpeechAudio { samples, sample_rate });
             }
@@ -209,18 +210,16 @@ impl RemotePipe {
     }
 
     /// Run one job on this node to completion.
-    fn run_job(&self, domain: Domain, request: GenerateRequestJson, want: Want) -> Result<GenOutput, String> {
-        self.run_job_with(domain, request, want, false, &mut |_| {})
-    }
-
     fn run_job_with(
         &self,
         domain: Domain,
         request: GenerateRequestJson,
         want: Want,
         discard: bool,
+        cancelled: &dyn Fn() -> bool,
         on_chunk: &mut dyn FnMut(ArtifactBytes),
     ) -> Result<GenOutput, String> {
+        if cancelled() { return Err("cancelled".into()); }
         let router = Arc::new(PipeRouter(self.base_url.clone()));
         let mut job = GenJob::new(router, process_origin("speech"));
         job.start(domain, request, want).map_err(|e| format!("{}: {e}", self.base_url))?;
@@ -231,6 +230,10 @@ impl RemotePipe {
         let mut watch = ProgressWatch::new(Instant::now());
         let mut last = None;
         loop {
+            if cancelled() {
+                job.cancel();
+                return Err("cancelled".into());
+            }
             let moved = match job.poll() {
                 JobPoll::Done(output) => {
                     if discard {
@@ -257,7 +260,7 @@ impl RemotePipe {
                 JobPoll::Pending => false,
             };
             let now = Instant::now();
-            if moved {
+            if moved || job.waiting_for_worker() {
                 watch.progress(now);
             } else if watch.stalled(now, STALL_AFTER) {
                 job.cancel();

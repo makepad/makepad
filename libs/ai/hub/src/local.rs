@@ -245,7 +245,8 @@ impl LocalModels {
         std::thread::Builder::new()
             .name(format!("ai-local-install-{}", spec.id))
             .spawn(move || {
-                for file in &spec.files {
+                // A file fetched on demand waits for the first job that needs it.
+                for file in spec.files.iter().filter(|file| !spec.fetched_on_demand(file)) {
                     if worker_cancel.is_cancelled() {
                         let _ = sender.send(InstallMsg::Cancelled);
                         return;
@@ -312,6 +313,11 @@ impl LocalModels {
             )));
         }
         params.model = model_id.to_string();
+        // A chat turn with a picture needs the model's vision tower: when the registry fetches it
+        // on demand and it isn't here yet, it comes in the background; this job runs without it.
+        if !params.chat_images.is_empty() {
+            crate::backend::fetch_on_demand(&spec, "mmproj", &self.downloader, &self.weights_dir);
+        }
 
         let cached = match self.backends.get(model_id) {
             Some(cached) => cached.clone(),

@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn spec(id: &str, roles: &[&str]) -> ModelSpec {
-        ModelSpec {
+        ModelSpec { on_demand: Vec::new(), host_load: None,
             id: id.to_string(),
             domain: Domain::Video,
             backend: "fast".to_string(),

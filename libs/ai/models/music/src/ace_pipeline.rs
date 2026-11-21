@@ -7,7 +7,7 @@ use crate::ace::{
     ace_apg, ace_clamp_seconds, ace_device_enabled, ace_format_prompt, ace_latent_len, ace_sigmas,
     AceApgMomentum, AceSeededNoise, ACE_APG_ETA, ACE_APG_MOMENTUM, ACE_APG_NORM_THRESHOLD,
     ACE_BASE_CFG, ACE_CONTEXT_DIM, ACE_DEFAULT_SHIFT, ACE_DEFAULT_STEPS, ACE_HOP,
-    ACE_INSTRUCTION, ACE_LATENT_DIM, ACE_MAX_LYRIC_TOKENS, ACE_MAX_TEXT_TOKENS,
+    ACE_AUDIO_CHANNELS, ACE_INSTRUCTION, ACE_LATENT_DIM, ACE_MAX_LYRIC_TOKENS, ACE_MAX_TEXT_TOKENS,
     ACE_SAMPLE_RATE, ACE_TIMBRE_SECONDS,
 };
 use crate::ace_dit::{
@@ -19,6 +19,15 @@ use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
 use crate::{emit_progress, ProgressHook, Result};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// The VAE's tiles when the whole song doesn't fit on the GPU: a core of latents with a halo of
+/// context each side, whose core is kept as it is (no blending). The decoder reaches more than 8
+/// latents either side and fewer than 16: tiled with a halo of 16, the decode equals the whole
+/// one bit for bit (8 differs by 5e-5, 4 by 2.5e-2; measured on the CPU decode). 64 latents
+/// (2.56 s) bound the largest working slab, the last block's im2col (128 channels by 7 taps at
+/// 48 kHz), to about 0.33 GB, where a whole song of 30 s takes about 2.6 GB.
+const ACE_VAE_TILE_CORE: usize = 64;
+const ACE_VAE_TILE_HALO: usize = 16;
 
 pub struct AcePaths {
     pub text_encoder: PathBuf,
@@ -96,27 +105,28 @@ pub struct AceStageTaps {
 }
 
 impl AcePipeline {
+    /// Loads the model. With a GPU each part's matrices go to their device copy as the part is
+    /// read and their f32 host copies are freed, so the host holds the bf16 copies (about 11 GB)
+    /// and not the f32 ones beside them as well (32 GB resident, which a 30 GB node ran out of).
     pub fn load(paths: &AcePaths, mut progress: Option<ProgressHook>) -> Result<Self> {
+        let device = ace_device_enabled();
         emit_progress(&mut progress, "load ace te", 0.0)?;
-        let text = AceTextEncoder::load(&paths.text_encoder)?;
+        let mut text = AceTextEncoder::load(&paths.text_encoder)?;
+        let te_device = device.then(|| text.prepare_device());
         emit_progress(&mut progress, "load ace tokenizer", 0.15)?;
         let tokenizer = H3Tokenizer::load(&paths.tokenizer)?;
         emit_progress(&mut progress, "load ace cond", 0.2)?;
-        let cond = AceConditionEncoder::load(&paths.condition_encoder)?;
+        let mut cond = AceConditionEncoder::load(&paths.condition_encoder)?;
+        let cond_device = device.then(|| cond.prepare_device());
         emit_progress(&mut progress, "load ace dit", 0.4)?;
-        let dit = AceDit::load(&paths.transformer)?;
+        let (dit, dit_device) = if device {
+            let (dit, dev) = AceDit::load_device(&paths.transformer, None)?;
+            (dit, Some(dev))
+        } else {
+            (AceDit::load(&paths.transformer)?, None)
+        };
         emit_progress(&mut progress, "load ace vae", 0.85)?;
         let vae = OobleckDecoder::load(&paths.vae, ACE_OOBLECK)?;
-        let (te_device, cond_device, dit_device) = if ace_device_enabled() {
-            emit_progress(&mut progress, "prepare ace device", 0.95)?;
-            (
-                Some(text.prepare_device()),
-                Some(cond.prepare_device()),
-                Some(dit.prepare_device()),
-            )
-        } else {
-            (None, None, None)
-        };
         emit_progress(&mut progress, "load ace", 1.0)?;
         Ok(Self {
             text,
@@ -128,6 +138,51 @@ impl AcePipeline {
             cond_device,
             dit_device,
         })
+    }
+
+    /// The VAE decode: on the GPU when there is one, the whole song at once; when that fails
+    /// (its working set doesn't fit beside what else the GPU holds, such as a chat model and its
+    /// speech models), in tiles on the GPU; only when the GPU can't at all, on the CPU, about a
+    /// hundred times slower. Each step down is logged with its reason.
+    pub fn decode_audio(&self, latents: &[f32], frames: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+        if !ace_device_enabled() {
+            return self.vae.decode_with_progress(latents, frames, None);
+        }
+        let whole = match self.vae.decode_device(latents, frames) {
+            Ok(pair) => return Ok(pair),
+            Err(e) => e,
+        };
+        eprintln!(
+            "ace vae: the whole song didn't decode on the GPU ({whole}): decoding it in tiles of \
+             {ACE_VAE_TILE_CORE} latents"
+        );
+        // What the failed attempt left in the GPU's pool goes back before the tiles.
+        if let Err(e) = crate::backend::gpu_runtime_trim() {
+            eprintln!("ace vae: the GPU's idle buffers weren't released: {e}");
+        }
+        let started = Instant::now();
+        let tiled = self.vae.decode_tiled_device(
+            latents,
+            frames,
+            frames,
+            ACE_VAE_TILE_CORE,
+            ACE_VAE_TILE_HALO,
+            &mut |_, _| Ok(()),
+        );
+        match tiled {
+            Ok(audio) => {
+                eprintln!(
+                    "ace vae: {frames} latents decoded in {} tiles on the GPU in {:.3}s",
+                    frames.div_ceil(ACE_VAE_TILE_CORE),
+                    started.elapsed().as_secs_f64()
+                );
+                Ok(audio.chunks_exact(ACE_AUDIO_CHANNELS).map(|s| (s[0], s[1])).unzip())
+            }
+            Err(e) => {
+                eprintln!("ace vae: the tiles didn't decode on the GPU either ({e}): decoding on the CPU, much slower");
+                self.vae.decode_with_progress(latents, frames, None)
+            }
+        }
     }
 
     pub fn device_active(&self) -> bool {
@@ -194,14 +249,25 @@ impl AcePipeline {
         let lyric_embed = self.text.embed_tokens(&lyric_ids)?;
         let timbre_frames = ace_latent_len(ACE_TIMBRE_SECONDS);
         let refer = self.cond.silence_slice(timbre_frames);
-        self.cond.encode(
-            &text_hidden,
-            text_ids.len(),
-            &lyric_embed,
-            lyric_ids.len(),
-            &refer,
-            timbre_frames,
-        )
+        match &self.cond_device {
+            Some(cdev) => self.cond.encode_device(
+                cdev,
+                &text_hidden,
+                text_ids.len(),
+                &lyric_embed,
+                lyric_ids.len(),
+                &refer,
+                timbre_frames,
+            ),
+            None => self.cond.encode(
+                &text_hidden,
+                text_ids.len(),
+                &lyric_embed,
+                lyric_ids.len(),
+                &refer,
+                timbre_frames,
+            ),
+        }
     }
 
     pub fn generate(
@@ -398,14 +464,7 @@ impl AcePipeline {
         );
         emit_progress(progress, "vae-decode", 0.88)?;
         let t_vae = Instant::now();
-        let (left, right) = if ace_device_enabled() {
-            match self.vae.decode_device(&xt, frames) {
-                Ok(pair) => pair,
-                Err(_) => self.vae.decode_with_progress(&xt, frames, None)?,
-            }
-        } else {
-            self.vae.decode_with_progress(&xt, frames, None)?
-        };
+        let (left, right) = self.decode_audio(&xt, frames)?;
         eprintln!(
             "ace timings cond={cond_s:.3}s denoise={denoise_s:.3}s vae={:.3}s",
             t_vae.elapsed().as_secs_f64()

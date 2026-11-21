@@ -33,8 +33,17 @@ fn observe_title(stream: &mut UnixStream, terminal: &mut HostedTerminal, expecte
             Instant::now() < deadline,
             "attached client did not receive {expected}"
         );
+        // a frame that never comes ends the read at the stream's timeout: the failure says what
+        // the session's shell printed, which is where a command that never named it says why
+        // (the full bucket's one red here said only WouldBlock, 11-19)
         let mut header = [0; 5];
-        stream.read_exact(&mut header).unwrap();
+        if let Err(e) = stream.read_exact(&mut header) {
+            panic!(
+                "attached client did not receive {expected} ({e}); its title is {:?}, its shell printed:\n{}",
+                terminal.title(),
+                terminal.text_tail(24).trim_end()
+            );
+        }
         let length = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
         assert!(length <= 1024 * 1024);
         let mut bytes = vec![0; length];

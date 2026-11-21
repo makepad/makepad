@@ -48,6 +48,7 @@ claude-stub = ["makepad-ai-hub/claude-stub"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-large-alloc = { path = "../../libs/large_alloc" }
 makepad-shell-kit = { path = "../../libs/shell_kit" }
 makepad-ai-hub-panel = { path = "../../libs/ai/hub_panel" }
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["kernel"] }

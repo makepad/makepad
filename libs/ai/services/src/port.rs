@@ -90,6 +90,7 @@ pub struct AiServicePort {
     port_tag: u32,
     endpoint: Option<EndpointId>,
     chat_open: bool,
+    logged_rejection: bool,
 }
 
 impl AiServicePort {
@@ -129,6 +130,7 @@ impl AiServicePort {
             port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
             endpoint: None,
             chat_open: false,
+            logged_rejection: false,
         };
         port.register();
         Some(port)
@@ -148,6 +150,7 @@ impl AiServicePort {
             port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
             endpoint: None,
             chat_open: false,
+            logged_rejection: false,
         };
         port.register();
         Ok((port, link))
@@ -180,19 +183,9 @@ impl AiServicePort {
     pub fn handle_event(&mut self, _cx: &mut Cx, event: &Event) -> Vec<PortEvent> {
         let mut frames = Vec::new();
         match &mut self.transport {
-            Transport::Hosted => {
-                if let Event::Custom(json) = event {
-                    if let Some(down) = HostedDown::parse(json) {
-                        frames.push(down);
-                    }
-                }
-            }
+            Transport::Hosted => frames.extend(self.parse_hosted_event(event)),
             #[cfg(not(target_arch = "wasm32"))]
-            Transport::Domain(_) => {
-                if let Event::Custom(json) = event {
-                    if let Some(down) = HostedDown::parse(json) { frames.push(down); }
-                }
-            }
+            Transport::Domain(_) => frames.extend(self.parse_hosted_event(event)),
             Transport::InProcess { down, .. } => loop {
                 match down.try_recv() {
                     Ok(msg) => frames.push(msg),
@@ -207,6 +200,23 @@ impl AiServicePort {
             }
         }
         out
+    }
+
+    fn parse_hosted_event(&mut self, event: &Event) -> Option<HostedDown> {
+        let Event::Custom(json) = event else { return None };
+        match HostedDown::parse_checked(json)? {
+            Ok(frame) => Some(frame),
+            Err(rejected) => {
+                if !self.logged_rejection {
+                    self.logged_rejection = true;
+                    makepad_platform::error!("ai service rejected a frame from the window manager: {}", rejected.error);
+                }
+                if rejected.mismatch && rejected.endpoint.as_deref()? == self.endpoint.as_ref()?.as_str() {
+                    self.reply(ToolResult::unavailable(rejected.call_id?, HOSTED_BUILD_MISMATCH));
+                }
+                None
+            }
+        }
     }
 
     /// One frame through the address filter.
@@ -377,11 +387,11 @@ mod tests {
         };
         assert!(port.endpoint().is_none());
         // A call before registration, and one for someone else, are ignored.
-        link.down.send(HostedDown { to: Some(ep("other")), msg: ServiceDown::Call(ServiceCall { call_id: "c0".into(), tool: "stat".into(), args: "{}".into(), caller: None }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("other")), msg: ServiceDown::Call(ServiceCall { call_id: "c0".into(), tool: "stat".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation }) }).unwrap();
         link.down.send(HostedDown { to: None, msg: ServiceDown::Registered { port_tag: tag + 100, endpoint: ep("not-me") } }).unwrap();
         link.down.send(HostedDown { to: None, msg: ServiceDown::Registered { port_tag: tag, endpoint: ep("e1") } }).unwrap();
-        link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into(), caller: None }) }).unwrap();
-        link.down.send(HostedDown { to: Some(ep("e2")), msg: ServiceDown::Call(ServiceCall { call_id: "c2".into(), tool: "stat".into(), args: "{}".into(), caller: None }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e2")), msg: ServiceDown::Call(ServiceCall { call_id: "c2".into(), tool: "stat".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation }) }).unwrap();
         link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::ChatOpen { open: true } }).unwrap();
         let events = pump(&mut port);
         assert_eq!(events.len(), 3, "{events:?}");
@@ -553,7 +563,7 @@ mod open_tests {
         let registry = ServiceRegistry::new();
         let mut port = AiServicePort::open_in(false, &registry, sheets()).expect("opens");
         let endpoint = registry.pick_instance("sheets", None).unwrap();
-        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None };
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation };
         assert!(registry.send(&endpoint, ServiceDown::Call(call)));
         let events = port.test_drain();
         assert!(

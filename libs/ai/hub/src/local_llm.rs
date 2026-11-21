@@ -26,9 +26,10 @@
 //! (aicore.md §7).
 //!
 //! The engine itself (`worker`) needs the `llm` feature; the types, the
-//! prompt format and the tool-call parser here do not, so a featureless
-//! hub chat (machine node or LAN fleet only) shares them.
+//! prompt format, the tool-call parser and the markup here do not, so a
+//! featureless hub chat (machine node or LAN fleet only) shares them.
 
+use crate::chat_wire::ChatRole;
 use std::{path::PathBuf, sync::Arc};
 
 #[cfg(feature = "llm")]
@@ -247,12 +248,185 @@ pub(crate) fn parse_tool_call(body: &str) -> Result<(String, Vec<(String, String
     Ok((name, args))
 }
 
+/// A call as the model writes it: the inverse of [`parse_tool_call`], for a history turn the
+/// hub renders again.
+pub(crate) fn tool_call_markup(name: &str, args: &[(String, String)]) -> String {
+    let mut out = format!("<tool_call>\n<function={name}>\n");
+    for (key, value) in args {
+        out.push_str(&format!("<parameter={key}>\n{value}\n</parameter>\n"));
+    }
+    out.push_str("</function>\n</tool_call>");
+    out
+}
+
 /// One argument by name, or the empty string.
 pub fn arg<'a>(args: &'a [(String, String)], key: &str) -> &'a str {
     args.iter()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.as_str())
         .unwrap_or("")
+}
+
+/// A call block in the contract's JSON form (`{"name", "arguments"}`, or a
+/// spelling the contract parser hears), as names and string arguments.
+fn contract_calls(body: &str) -> Option<Vec<(String, Vec<(String, String)>)>> {
+    let text = format!("<tool_call>{body}</tool_call>");
+    let (_, calls) = crate::claude_cli_calls::parse_calls(&text).ok()??;
+    if calls.is_empty() {
+        return None;
+    }
+    Some(calls.into_iter().map(|c| {
+        let args = c.args.into_iter().map(|(k, v)| {
+            let v = match v {
+                makepad_strict_json::Value::Str(s) => s,
+                other => other.to_json(),
+            };
+            (k, v)
+        }).collect();
+        (c.name, args)
+    }).collect())
+}
+
+/// The calls in a reply's `<tool_call>` bodies, in order, and the bodies that read as none (the
+/// parser's error and the body's first 120 characters).
+pub(crate) fn read_calls(bodies: Vec<String>) -> (Vec<(String, Vec<(String, String)>)>, Vec<(String, String)>) {
+    let mut calls = Vec::new();
+    let mut unreadable: Vec<(String, String)> = Vec::new();
+    for body in bodies {
+        match parse_tool_call(&body) {
+            Ok(call) => calls.push(call),
+            // Not the standard markup: the contract's JSON form (a
+            // relay that could not convert one block of a reply
+            // passes the whole reply through as written).
+            Err(error) => match contract_calls(&body) {
+                Some(found) => calls.extend(found),
+                None => {
+                    let head: String = body.trim().chars().take(120).collect();
+                    unreadable.push((error, head));
+                }
+            },
+        }
+    }
+    (calls, unreadable)
+}
+
+/// A history turn as the trained template writes it: an assistant answer with its reasoning
+/// closed, a tool outcome as a user turn in `<tool_response>` tags, any other role as it is.
+pub(crate) fn wire_turn(role: ChatRole, text: &str) -> (&'static str, String) {
+    match role {
+        ChatRole::Assistant => ("assistant", format!("\n</think>\n\n{text}")),
+        ChatRole::Tool => ("user", format!("<tool_response>\n{text}\n</tool_response>")),
+        _ => (role.slug(), text.to_string()),
+    }
+}
+
+// ------------------------------------------------------------ the markup
+
+/// The model's markup, split out of streamed text as it arrives: what is
+/// inside `<think>…</think>` is dropped, what is inside
+/// `<tool_call>…</tool_call>` is collected for [`parse_tool_call`], the
+/// rest is the visible answer. A tag may arrive split across two deltas,
+/// so a tail that could still become one is held back until it resolves.
+#[derive(Default)]
+pub(crate) struct MarkupSplitter {
+    pending: String,
+    in_think: bool,
+    in_tool: bool,
+    tool_body: String,
+    calls: Vec<String>,
+}
+
+const TAGS: [&str; 4] = ["<think>", "</think>", "<tool_call>", "</tool_call>"];
+
+impl MarkupSplitter {
+    /// Feed one delta; get the visible text it released.
+    pub(crate) fn push(&mut self, delta: &str) -> String {
+        self.pending.push_str(delta);
+        let mut visible = String::new();
+        loop {
+            let earliest = TAGS
+                .iter()
+                .filter_map(|tag| self.pending.find(tag).map(|at| (at, *tag)))
+                .min_by_key(|(at, _)| *at);
+            match earliest {
+                Some((at, tag)) => {
+                    let before = self.pending[..at].to_string();
+                    self.route(&before, &mut visible);
+                    match tag {
+                        "<think>" => self.in_think = true,
+                        "</think>" => self.in_think = false,
+                        "<tool_call>" => {
+                            self.in_tool = true;
+                            self.tool_body.clear();
+                        }
+                        _ => {
+                            if self.in_tool {
+                                self.in_tool = false;
+                                self.calls.push(std::mem::take(&mut self.tool_body));
+                            }
+                        }
+                    }
+                    self.pending.drain(..at + tag.len());
+                }
+                None => {
+                    let hold = holdback_len(&self.pending);
+                    let cut = self.pending.len() - hold;
+                    let emit = self.pending[..cut].to_string();
+                    self.pending.drain(..cut);
+                    self.route(&emit, &mut visible);
+                    break;
+                }
+            }
+        }
+        visible
+    }
+
+    /// What the reply is writing out of sight right now: `Some(true)` a tool
+    /// call, `Some(false)` its reasoning, `None` the visible answer.
+    pub(crate) fn hidden(&self) -> Option<bool> {
+        if self.in_tool { Some(true) } else if self.in_think { Some(false) } else { None }
+    }
+
+    /// The body of a `<tool_call>` that was opened and never closed.
+    pub(crate) fn unfinished_call(&self) -> Option<String> {
+        self.in_tool.then(|| format!("{}{}", self.tool_body, self.pending))
+    }
+
+    /// The turn ended: whatever is still held is text; the tool bodies
+    /// collected so far are returned in order.
+    pub(crate) fn finish(&mut self) -> (String, Vec<String>) {
+        let rest = std::mem::take(&mut self.pending);
+        let mut visible = String::new();
+        self.route(&rest, &mut visible);
+        (visible, std::mem::take(&mut self.calls))
+    }
+
+    fn route(&mut self, text: &str, visible: &mut String) {
+        if text.is_empty() {
+            return;
+        }
+        if self.in_tool {
+            self.tool_body.push_str(text);
+        } else if !self.in_think {
+            visible.push_str(text);
+        }
+    }
+}
+
+/// The longest tail of `s` that is a proper prefix of some tag — held
+/// back, since the rest of the tag may be in the next delta.
+fn holdback_len(s: &str) -> usize {
+    let longest = TAGS.iter().map(|t| t.len()).max().unwrap_or(0);
+    for len in (1..longest).rev() {
+        if s.len() < len || !s.is_char_boundary(s.len() - len) {
+            continue;
+        }
+        let tail = &s[s.len() - len..];
+        if TAGS.iter().any(|tag| tag.starts_with(tail)) {
+            return len;
+        }
+    }
+    0
 }
 
 #[cfg(test)]
@@ -316,5 +490,30 @@ mod tests {
         let mut out = String::new();
         push_json_string(&mut out, "a \"quoted\" \\ path\nnewline");
         assert_eq!(out, "\"a \\\"quoted\\\" \\\\ path\\nnewline\"");
+    }
+
+    #[test]
+    fn the_splitter_drops_thinking_collects_tool_calls_and_survives_split_tags() {
+        let mut s = MarkupSplitter::default();
+        let mut visible = String::new();
+        // The tags arrive in pieces, as a stream does.
+        for delta in ["<thi", "nk>reasoning…</th", "ink>\n\nSure. <tool_ca", "ll>\n<function=os.launch>\n<parameter=app>\nterminal\n</parameter>\n</function>\n</tool_", "call>", " done"] {
+            visible.push_str(&s.push(delta));
+        }
+        let (rest, calls) = s.finish();
+        visible.push_str(&rest);
+        assert_eq!(visible, "\n\nSure.  done");
+        assert_eq!(calls.len(), 1);
+        let (name, args) = parse_tool_call(&calls[0]).unwrap();
+        assert_eq!(name, "os.launch");
+        assert_eq!(args, vec![("app".to_string(), "terminal".to_string())]);
+        // A lone `<` that never becomes a tag is text.
+        let mut s = MarkupSplitter::default();
+        let mut out = s.push("a <");
+        out.push_str(&s.push("b"));
+        let (rest, calls) = s.finish();
+        out.push_str(&rest);
+        assert_eq!(out, "a <b");
+        assert!(calls.is_empty());
     }
 }

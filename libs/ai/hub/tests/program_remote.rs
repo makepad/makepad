@@ -145,7 +145,10 @@ fn an_open_goes_stale_on_a_silent_node_and_a_late_session_is_cancelled() {
             let n = link.read(&mut buf).unwrap();
             head.extend_from_slice(&buf[..n]);
         }
-        link.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n").unwrap();
+        let headers = std::str::from_utf8(&head).unwrap();
+        let key = headers.lines().filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("Sec-WebSocket-Key")).unwrap().1.trim();
+        link.write_all(WebSocketParser::create_upgrade_response(key).as_bytes()).unwrap();
         let mut parser = WebSocketParser::new();
         let mut next = |link: &mut std::net::TcpStream, kind: u8| loop {
             let n = link.read(&mut buf).unwrap();
@@ -233,9 +236,12 @@ fn a_remote_program_ends_with_its_typed_error() {
     let waiting = open("{run: fn(s, p) { s.wait_inbox() return 1 }}", Limits::default());
     waiting.cancel();
     assert_eq!(waiting.wait_end(), Err(ProgramError::Cancelled));
-    // The node's ceiling, not the client's ask: a refusal value the program sees.
-    let big = open("use mod.pod.*\n{run: fn(s, p) { let b = s.buffer(f32, [32768, 16384, 3]) return b.refused }}", Limits { buffer_bytes: u64::MAX, ..Limits::default() });
-    assert_eq!(big.wait_end(), Ok(Value::Bool(true)));
+    // The node's ceiling, not the client's ask: a client asking without bound gets the machine's
+    // memory for its buffers (a buffer past what is left of it is a refusal value, `Session`'s
+    // own test), never a fixed size.
+    let big = open("{run: fn(s, p) { return s.device().buffer_bytes }}", Limits { buffer_bytes: u64::MAX, ..Limits::default() });
+    let machine = makepad_ai_hub::ram::query_ram().expect("this machine's memory").total_mb << 20;
+    assert_eq!(big.wait_end(), Ok(n(machine as f64)));
 }
 
 #[test]

@@ -318,6 +318,11 @@ mod cuda {
             .map(|data| Mat::from_vec(x.rows, layer.hidden, data))
     }
 
+    /// The weight bytes this thread uploaded, and the time it took, since the last call.
+    pub fn take_uploads() -> (usize, std::time::Duration) {
+        WEIGHTS.with(|cache| cache.borrow_mut().take_uploads())
+    }
+
     /// Free this thread's device-resident Kokoro weights.
     pub fn release() {
         WEIGHTS.with(|cache| cache.borrow_mut().clear());
@@ -357,6 +362,15 @@ pub fn lstm(layer: &LstmLayer, x: &Mat, reverse: bool) -> Option<Mat> {
         let _ = (layer, x, reverse);
         None
     }
+}
+
+/// The weight bytes this thread put on the device, and the time it took, since the last call
+/// (nothing without a device backend).
+pub fn take_device_uploads() -> (usize, std::time::Duration) {
+    #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+    return cuda::take_uploads();
+    #[allow(unreachable_code)]
+    (0, std::time::Duration::ZERO)
 }
 
 /// Free the device memory this thread holds for Kokoro (cached weights).

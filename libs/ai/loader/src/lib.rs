@@ -13,6 +13,7 @@
 pub mod accel;
 pub mod bulk_read;
 pub mod formats;
+pub mod host_floor;
 pub mod mmap;
 pub mod prof;
 pub mod quant;

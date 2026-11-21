@@ -19,10 +19,6 @@ pub enum AssetAiError {
     Params(String),
     /// Submit with queue_policy "reject" while a job is queued or running.
     Busy,
-    /// Submit refused because the bounded FIFO already holds this many
-    /// queued jobs (`MAKEPAD_ASSET_AI_MAX_QUEUE`). Same 409 class as `Busy`, but
-    /// the message tells the caller the box is saturated, not merely busy.
-    QueueFull(usize),
     /// The job's cancel flag was raised mid-run; the backend unwound at the
     /// next natural boundary (between steps/tiles/components). Maps to job
     /// state "cancelled", not "error".
@@ -40,6 +36,22 @@ pub enum AssetAiError {
     Unavailable(String),
 }
 
+impl AssetAiError {
+    pub(crate) fn paused_model(reason: &str) -> bool {
+        reason.starts_with("local-use:") || reason.starts_with("disk-space:")
+    }
+
+    /// Read a busy or unavailable reason from a confirmed no-job response.
+    pub(crate) fn admission_refusal(reason: &str) -> Option<Self> {
+        match reason {
+            "busy: a job is already queued or running" | "all lanes busy" => Some(Self::Busy),
+            "HTTP server overloaded before job admission" => Some(Self::Unavailable(format!("admission-overloaded: {reason}"))),
+            "temporarily unavailable" => Some(Self::Unavailable(reason.into())),
+            _ => reason.strip_prefix("model unavailable: ").map(|why| Self::Unavailable(why.into())),
+        }
+    }
+}
+
 impl fmt::Display for AssetAiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -50,9 +62,6 @@ impl fmt::Display for AssetAiError {
             AssetAiError::Backend(m) => write!(f, "backend error: {m}"),
             AssetAiError::Params(m) => write!(f, "bad request: {m}"),
             AssetAiError::Busy => write!(f, "busy: a job is already queued or running"),
-            AssetAiError::QueueFull(limit) => {
-                write!(f, "queue full: {limit} jobs already queued on this node")
-            }
             AssetAiError::Cancelled => write!(f, "cancelled"),
             AssetAiError::UnknownModel(m) => write!(f, "unknown model: {m}"),
             AssetAiError::LicenseNotAcknowledged => {

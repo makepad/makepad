@@ -18,7 +18,7 @@ use crate::client::{verify_artifact_bytes, ArtifactBytes, ContentProvider, Local
 use crate::error::AssetAiError;
 use crate::protocol::{
     GenerateRequestJson, HealthJson, JobStatusJson, JOB_STATE_CANCELLED, JOB_STATE_DONE,
-    JOB_STATE_ERROR, JOB_STATE_LIVE, JOB_STATE_QUEUED, JOB_STATE_RUNNING, MODEL_STATE_ABSENT,
+    JOB_STATE_ERROR, JOB_STATE_LIVE, JOB_STATE_QUEUED, JOB_STATE_RUNNING, MODEL_STATE_ABSENT, ModelInfoJson,
 };
 use crate::registry::Domain;
 use crate::{discovery, fleet};
@@ -180,10 +180,93 @@ impl GenRouter for FleetRouter {
     }
 }
 
+/// The model a request that names none takes on a hub, from its `/models`: its ordinary first
+/// available model of the domain ([`HubRouter`], so `/talk`'s stages). A client that keeps the
+/// models of its turns resident asks with this.
+pub fn ordinary_model<'a>(models: &'a [ModelInfoJson], domain: &str) -> Option<&'a ModelInfoJson> {
+    models.iter().find(|model| model.available && model.domain == domain && !crate::fleet::is_explicit_only(model))
+}
+
+/// A hub's routing for the jobs it runs for its clients (`/talk`'s stages): this hub first, then
+/// the pinned hubs and the LAN fleet, by ETA. An empty model takes this hub's ordinary first
+/// available model of the domain when it has one. `stop` ends routing between probes.
+pub struct HubRouter {
+    pub home: String,
+    pub stop: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl GenRouter for HubRouter {
+    fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
+        let started = Instant::now();
+        let mut nodes = fleet_snapshots(excluded);
+        for base in std::iter::once(self.home.clone()).chain(crate::hub_order::pinned_bases()) {
+            if (self.stop)() { return Err("cancelled".into()); }
+            if !excluded.contains(&base) && !nodes.iter().any(|node| node.base_url == base) {
+                if let Ok(node) = probe_node(&base) { nodes.push(node); }
+            }
+        }
+        // Use the serving hub's ordinary first available model for this domain when it has one.
+        let mut request = request.clone();
+        if request.model.is_empty() {
+            let local = nodes.iter().find(|node| node.base_url == self.home);
+            if let Some(model) = local.and_then(|node| ordinary_model(&node.models, domain)) {
+                request.model = model.id.clone();
+            }
+        }
+        if (self.stop)() { return Err("cancelled".into()); }
+        let boxes = nodes.len();
+        let picked = FleetRouter::default().route_snapshots(nodes, domain, &request);
+        if let Ok(picked) = &picked {
+            eprintln!(
+                "routing: a {domain} job to {} ({}): {boxes} boxes probed, {} ms",
+                fleet::node_label(&picked.base_url), picked.model, started.elapsed().as_millis()
+            );
+        }
+        picked
+    }
+
+    /// As the fleet router: an image without a queue policy tries an idle GPU first.
+    fn use_idle_admission(&self, domain: &str, request: &GenerateRequestJson) -> bool {
+        FleetRouter::default().use_idle_admission(domain, request)
+    }
+}
+
+/// ETA pick over probed snapshots, by host memory first (`crate::ram`): among the boxes where
+/// the model fits the free memory now, else where it fits once that box's hub unloads its idle
+/// models, else as if host memory did not count (no box holds it by its estimate: the target
+/// tries it, and its admission or its loads' floor refuses it there if it doesn't fit, and the job
+/// moves on). A model's peak measured on any of the boxes counts on every one of them with the
+/// same OS ([`fleet::adopt_host_peaks`]).
+pub fn route_generation(
+    snapshots: Vec<fleet::BoxSnapshot>,
+    domain: &str,
+    request: &GenerateRequestJson,
+) -> Result<(fleet::BoxSnapshot, String), String> {
+    fleet::adopt_host_peaks(&snapshots);
+    for tier in [fleet::HostTier::Now, fleet::HostTier::Freed] {
+        if let Ok((snapshot, model)) = route_by_eta(fleet::host_tier(&snapshots, tier), domain, request) {
+            if tier == fleet::HostTier::Freed {
+                eprintln!(
+                    "routing: {model} fits no box's free host memory now; {} holds it once its hub unloads idle models",
+                    fleet::node_label(&snapshot.base_url)
+                );
+            }
+            return Ok((snapshot, model));
+        }
+    }
+    let picked = route_by_eta(snapshots, domain, request)?;
+    eprintln!(
+        "routing: no box holds {} in host memory by its estimate; {} tries it (a refusal there moves the job on)",
+        picked.1,
+        fleet::node_label(&picked.0.base_url)
+    );
+    Ok(picked)
+}
+
 /// ETA pick over probed snapshots. Leased requests skip nodes too old to
 /// hold a lease; an image without an explicit queue policy prefers an idle
 /// GPU that can serve it over a busy one with the model loaded.
-pub fn route_generation(
+fn route_by_eta(
     mut snapshots: Vec<fleet::BoxSnapshot>,
     domain: &str,
     request: &GenerateRequestJson,
@@ -316,6 +399,8 @@ pub enum JobPoll {
     Failed(String),
 }
 
+const INITIAL_ADMISSION_DELAY: Duration = Duration::from_millis(100);
+// Recovery after an accepted execution is separate from waiting for admission.
 const MAX_GENERATION_ATTEMPTS: usize = 3;
 const QUEUED_PAUSE_GRACE: Duration = Duration::from_secs(3);
 const QUEUED_CANCEL_WINDOW: Duration = Duration::from_secs(6);
@@ -408,8 +493,12 @@ pub fn process_origin(host: &str) -> (String, u64) {
     (format!("{host}:{}", std::process::id()), epoch)
 }
 
+/// A job a node refused for want of room there (VRAM, disk, or host memory: `server::admit_host`),
+/// which another node may have: the job moves on.
 fn is_admission_refusal(error: &str) -> bool {
-    error.contains("insufficient VRAM") || error.starts_with("model unavailable: disk-space:")
+    error.contains("insufficient VRAM")
+        || error.starts_with("model unavailable: disk-space:")
+        || error.starts_with("model unavailable: host-memory:")
 }
 
 fn admission_refusal_summary(error: &str) -> &str {
@@ -431,6 +520,9 @@ pub struct GenJob {
     provider_url: Option<String>,
     refusals: Vec<(String, String)>,
     attempts: usize,
+    admission_retry: Option<(Instant, GenPick)>,
+    queued: bool,
+    admission_delay: Duration,
     pending_stage: Option<String>,
     partial_text: String,
     /// How many `partial_artifacts` of the status have been handed out.
@@ -470,6 +562,9 @@ impl GenJob {
             provider_url: None,
             refusals: Vec::new(),
             attempts: 0,
+            admission_retry: None,
+            queued: false,
+            admission_delay: INITIAL_ADMISSION_DELAY,
             pending_stage: None,
             partial_text: String::new(),
             chunks_seen: 0,
@@ -508,12 +603,16 @@ impl GenJob {
         self.job_id = None;
         self.refusals.clear();
         self.attempts = 0;
+        self.admission_retry = None;
+        self.queued = false;
+        self.admission_delay = INITIAL_ADMISSION_DELAY;
         self.pending_stage = None;
-        self.submit_picked(None)
+        self.submit_picked(None, Instant::now())
     }
 
-    fn submit_picked(&mut self, mut next: Option<GenPick>) -> Result<(), String> {
-        const MAX_IDLE_PROBES: usize = 16;
+    fn submit_picked(&mut self, mut next: Option<GenPick>, now: Instant) -> Result<(), String> {
+        let previous_refusals = self.refusals.len();
+        let mut retry_pick = None;
         let mut busy_nodes = Vec::new();
         let mut queue_fallback = false;
         loop {
@@ -528,11 +627,22 @@ impl GenJob {
             let mut routing_request = request.clone();
             if queue_fallback { routing_request.queue_policy = Some("queue".into()); }
             let picked = match next.take().map(Ok).unwrap_or_else(|| self.router.route(domain.as_str(), &routing_request, &excluded)) {
-                Ok(picked) => picked,
-                Err(_) if automatic && !queue_fallback && !busy_nodes.is_empty() => {
+                Ok(picked) if !excluded.contains(&picked.base_url) => picked,
+                _ if automatic && !queue_fallback && !busy_nodes.is_empty() => {
                     queue_fallback = true;
                     continue;
                 }
+                _ if retry_pick.is_some() => {
+                    let (picked, reason) = retry_pick.take().unwrap();
+                    let stage = format!("waiting for generation admission: {reason}");
+                    if self.admission_delay == INITIAL_ADMISSION_DELAY { eprintln!("{stage}"); }
+                    self.pending_stage = Some(stage);
+                    self.admission_retry = Some((now + self.admission_delay, picked));
+                    self.admission_delay = (self.admission_delay * 2).min(Duration::from_secs(8));
+                    self.refusals.truncate(previous_refusals);
+                    return Ok(());
+                }
+                Ok(_) => return Err(self.refusals_error()),
                 Err(error) if !self.refusals.is_empty() => return Err(format!("{}; {error}", self.refusals_error())),
                 Err(error) => return Err(error),
             };
@@ -545,18 +655,19 @@ impl GenJob {
             // prompt and media remain unchanged.
             let accepted_request = submitted.clone();
             if automatic { submitted.queue_policy = Some(if queue_fallback { "queue" } else { "reject" }.into()); }
-            let admitted = picked.provider.request(domain, &submitted);
-            if automatic && !queue_fallback && matches!(admitted, Err(AssetAiError::Busy | AssetAiError::QueueFull(_))) {
+            let admitted = picked.provider.try_request(domain, &submitted);
+            if automatic && !queue_fallback && matches!(admitted, Err(AssetAiError::Busy)) {
                 // AIHub's actor checks reject atomically. No job exists on
                 // a 409, so trying another node cannot duplicate work.
-                if !busy_nodes.contains(&picked.base_url) { busy_nodes.push(picked.base_url); }
-                else { queue_fallback = true; }
-                if busy_nodes.len() >= MAX_IDLE_PROBES { queue_fallback = true; }
+                busy_nodes.push(picked.base_url.clone());
+                retry_pick = Some((picked, AssetAiError::Busy.to_string()));
                 continue;
             }
-            self.attempts += 1;
             match admitted {
                 Ok(job_id) => {
+                    self.attempts += 1;
+                    self.queued = false;
+                    self.admission_delay = INITIAL_ADMISSION_DELAY;
                     // A retry moves the accepted request to another machine,
                     // preserving the model the user already started with.
                     self.request = Some(accepted_request);
@@ -579,6 +690,7 @@ impl GenJob {
                         let queued = format!("all eligible GPUs busy; queued on {}", fleet::node_label(&picked.base_url));
                         self.pending_stage = Some(self.pending_stage.take().map_or(queued.clone(), |stage| format!("{queued}; {stage}")));
                     }
+                    self.refusals.truncate(previous_refusals);
                     self.provider_url = Some(picked.base_url);
                     self.job_id = Some(job_id);
                     self.provider = Some(self.used_providers.track(picked.provider));
@@ -598,12 +710,13 @@ impl GenJob {
                     // Only typed, proven no-job refusals permit another
                     // POST. Transport prose mentioning VRAM is not proof
                     // that the first submission was rejected.
-                    if !matches!(&error, AssetAiError::Unavailable(reason)
-                        if reason.starts_with("disk-space:") || reason.starts_with("local-use:")
-                            || reason.starts_with("admission-overloaded:")) {
+                    if request.queue_policy.as_deref() == Some("reject")
+                        || !matches!(error, AssetAiError::Busy | AssetAiError::Unavailable(_)) {
                         return Err(error.to_string());
                     }
-                    self.refusals.push((picked.base_url, error.to_string()));
+                    let reason = error.to_string();
+                    self.refusals.push((picked.base_url.clone(), reason.clone()));
+                    retry_pick = Some((picked, reason));
                 }
             }
         }
@@ -618,7 +731,7 @@ impl GenJob {
         self.last_keepalive = None;
         self.partial_text.clear();
         self.refusals.push((url, error));
-        match self.submit_picked(picked) {
+        match self.submit_picked(picked, Instant::now()) {
             Ok(()) => JobPoll::Progress {
                 permille: 0,
                 stage: self.pending_stage.take().unwrap_or_else(|| "retrying generation".to_string()),
@@ -641,6 +754,14 @@ impl GenJob {
     pub fn poll_at(&mut self, now: Instant) -> JobPoll {
         if let Some(stage) = self.pending_stage.take() {
             return JobPoll::Progress { permille: 0, stage };
+        }
+        if let Some((retry_at, _)) = &self.admission_retry {
+            if now < *retry_at { return JobPoll::Pending; }
+            let (_, picked) = self.admission_retry.take().unwrap();
+            if let Err(error) = self.submit_picked(Some(picked), now) { return JobPoll::Failed(error); }
+            if let Some(stage) = self.pending_stage.take() {
+                return JobPoll::Progress { permille: 0, stage };
+            }
         }
         let (Some(provider), Some(job_id)) = (self.provider.clone(), self.job_id.clone()) else {
             return JobPoll::Pending;
@@ -665,6 +786,7 @@ impl GenJob {
                 return JobPoll::Failed(error.to_string());
             }
         };
+        self.queued = status.state == JOB_STATE_QUEUED;
         if let Some(result) = self.reroute_paused_queue(&provider, &job_id, &mut status, now) {
             return result;
         }
@@ -863,6 +985,11 @@ impl GenJob {
         }
     }
 
+    /// Confirmed waiting, either for admission or for an admitted job's worker.
+    pub(crate) fn waiting_for_worker(&self) -> bool {
+        self.admission_retry.is_some() || self.queued
+    }
+
     /// The job's id on its node, once submitted.
     pub fn job_id(&self) -> Option<&str> {
         self.job_id.as_deref()
@@ -894,6 +1021,8 @@ impl GenJob {
         }
         self.provider = None;
         self.job_id = None;
+        self.admission_retry = None;
+        self.queued = false;
         self.pending_stage = None;
         self.last_keepalive = None;
         self.artifacts.clear();

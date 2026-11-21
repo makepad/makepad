@@ -211,11 +211,27 @@ pub struct Target {
     /// One or a few lines the host keeps current: the page, the document,
     /// the selection.
     pub context: String,
-    /// The element the person picked on the page, as the panel shows it
-    /// under the context line ("title text · slides/stack.splash:206");
-    /// its details go in `context`. The panel's clear button asks the host
-    /// to deselect it (`AiChatPanelAction::SelectionCleared`).
-    pub selection: Option<String>,
+    /// What the person picked on the page to point the model at, as chips on
+    /// the composer. Each line sent while they are there carries them in the
+    /// transcript, and their details go to the model with it. The host keeps
+    /// the list; the panel tells it when the person removes or hovers a chip
+    /// (`AiChatPanelAction::AttachmentRemoved` / `AttachmentHovered`).
+    pub attachments: Vec<Attachment>,
+}
+
+/// One thing the person pointed at on the page: a chip on the composer.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Attachment {
+    /// The host's own name for it: what the panel says back when the chip is
+    /// removed or hovered.
+    pub id: String,
+    /// What the chip shows ("knob", "crease body + knob").
+    pub label: String,
+    /// What kind of thing it is, the chip's first word ("edit", "crease").
+    pub kind: String,
+    /// What the model is told about it with the person's line: what to write,
+    /// what it is, where. Empty: the label alone.
+    pub detail: String,
 }
 
 /// One asynchronous service publication shown as its own card. It is sent
@@ -235,8 +251,9 @@ pub struct EventEntry {
 /// One line of the transcript.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
-    /// A line the person sent, with the pictures it carried.
-    User { text: String, pictures: Vec<crate::pictures::PictureRef> },
+    /// A line the person sent, with the pictures it carried and what it pointed at
+    /// (the composer's attachments when it was sent).
+    User { text: String, pictures: Vec<crate::pictures::PictureRef>, attachments: Vec<Attachment> },
     Event(EventEntry),
     /// `streaming` while deltas still arrive; the panel draws the landed
     /// text with markup and the streaming text plain.
@@ -336,7 +353,7 @@ mod tests {
     fn the_transcript_is_bounded_and_generation_moves() {
         let mut s = EngineState::default();
         for i in 0..(MAX_ENTRIES + 5) {
-            s.push(Entry::User { text: i.to_string(), pictures: Vec::new() });
+            s.push(Entry::User { text: i.to_string(), pictures: Vec::new(), attachments: Vec::new() });
         }
         assert_eq!(s.entries.len(), MAX_ENTRIES);
         assert_eq!(s.generation, (MAX_ENTRIES + 5) as u64);

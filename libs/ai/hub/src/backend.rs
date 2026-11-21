@@ -1461,6 +1461,11 @@ impl<'a> BackendCtx<'a> {
         let mut paths = Vec::new();
         for file in &self.spec.files {
             self.cancel.check()?;
+            // A file fetched on demand comes when a job first needs it
+            // (`local::fetch_on_demand`), never with a load.
+            if self.spec.fetched_on_demand(file) {
+                continue;
+            }
             // Legacy converters treated a final converted path as sufficient
             // and often deleted/never retained the upstream. Preserve that
             // behavior. Structured conversions require their strict receipt;
@@ -1532,6 +1537,38 @@ impl<'a> BackendCtx<'a> {
                 source.display()
             )))
         }
+    }
+}
+
+/// Fetch `spec`'s on-demand file of `role` in the background, once, when it isn't in the cache
+/// yet: the first job that needs it starts it, and the jobs after the fetch have it. The job that
+/// starts it runs without it (its backend names the missing role).
+pub(crate) fn fetch_on_demand(spec: &ModelSpec, role: &str, downloader: &Downloader, weights_dir: &Path) {
+    static FETCHING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Some(file) = spec.file_by_role(role).filter(|file| spec.fetched_on_demand(file)) else { return };
+    if crate::download::source_file_is_verified(file, weights_dir) {
+        return;
+    }
+    {
+        let mut fetching = FETCHING.lock().unwrap_or_else(|e| e.into_inner());
+        if fetching.contains(&file.cache_as) {
+            return;
+        }
+        fetching.push(file.cache_as.clone());
+    }
+    eprintln!("[local] {}: a job needs its {role}: fetching {} in the background", spec.id, file.cache_as);
+    let (id, file, downloader, dir) = (spec.id.clone(), file.clone(), downloader.clone(), weights_dir.to_path_buf());
+    let key = file.cache_as.clone();
+    let spawned = std::thread::Builder::new().name(format!("ai-local-fetch-{id}")).spawn(move || {
+        match downloader.ensure_file(&file, &dir, &mut |_| {}, &CancelToken::new()) {
+            Ok(_) => eprintln!("[local] {id}: {} fetched; the next job that needs it has it", file.cache_as),
+            Err(error) => eprintln!("[local] {id}: fetching {} failed (the next job that needs it tries again): {error}", file.cache_as),
+        }
+        FETCHING.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| *k != file.cache_as);
+    });
+    if let Err(error) = spawned {
+        eprintln!("[local] {}: no thread to fetch {key}: {error}", spec.id);
+        FETCHING.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| *k != key);
     }
 }
 
@@ -2288,7 +2325,7 @@ mod tests {
     }
 
     fn spec(backend: &str, available: bool, vram_gb: Option<f64>) -> ModelSpec {
-        ModelSpec {
+        ModelSpec { on_demand: Vec::new(), host_load: None,
             id: "fixture".into(),
             domain: Domain::Image,
             backend: backend.into(),

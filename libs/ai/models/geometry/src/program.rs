@@ -238,7 +238,7 @@ mod tests {
     fn a_device_that_ends_under_a_match_cancels_it() {
         use makepad_compute_program::gpu::{GpuInfo, GpuLink};
         let (views, _) = textured_plane(24, 120.0, 0.0, &[0.10]);
-        let (link, device) = GpuLink::new(GpuInfo { target: Default::default(), budget_bytes: 1 << 30 }, std::sync::Arc::new(|| {}));
+        let (link, device) = GpuLink::new(GpuInfo { target: Default::default(), budget_bytes: 1 << 30, max_buffer_bytes: u64::MAX }, std::sync::Arc::new(|| {}));
         // the device takes the session's first message and is gone: an app quitting mid-match
         let quit = std::thread::spawn(move || drop(device.recv()));
         let params = PatchMatchParams { depth_min: 0.3, depth_max: 1.0, iterations: 1, ..Default::default() };

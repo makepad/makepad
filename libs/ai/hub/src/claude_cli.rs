@@ -275,7 +275,7 @@ pub fn requested_by_env() -> bool {
 /// The registry entry. Domain `text` inside the hub (that is how a chat
 /// model is filed); advertised as `chat` only ([`advertised_domain`]).
 pub fn model_spec() -> ModelSpec {
-    ModelSpec {
+    ModelSpec { on_demand: Vec::new(), host_load: None,
         id: MODEL_ID.to_string(),
         domain: Domain::Text,
         backend: BACKEND.to_string(),

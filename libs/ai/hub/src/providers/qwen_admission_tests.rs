@@ -271,13 +271,13 @@ fn incomplete_or_non_refusal_http_never_replays() {
 }
 
 #[test]
-fn every_refusal_consumes_a_bounded_budget() {
-    let t = Script::new((0..MAX_ADMISSION_ATTEMPTS).map(|_| refused(503)));
+fn admission_resumes_after_many_refusals_and_a_long_wait() {
+    let t = Script::new((0..16).map(|_| refused(503)).chain(std::iter::once(accepted())));
     let mut p = t.provider(&[N1]);
     p.begin_turn(&input()).unwrap();
-    let events = finish(&mut p, &t);
-    assert!(matches!(events.last(), Some(ProviderEvent::Error(e)) if e.contains("http 503") && e.contains("all lanes busy") && e.contains("8 rounds")));
-    assert_eq!(t.0.borrow().posts.len(), MAX_ADMISSION_ATTEMPTS as usize);
+    t.0.borrow_mut().now += Duration::from_secs(600);
+    assert!(finish(&mut p, &t).contains(&ProviderEvent::Done { text: "answer".into() }));
+    assert_eq!(t.0.borrow().posts.len(), 17);
 }
 
 #[test]
@@ -438,15 +438,21 @@ fn proven_connect_failure_can_retry_but_legacy_error_strings_cannot() {
 }
 
 #[test]
-fn elapsed_deadline_expires_without_another_post() {
-    let t = Script::new([refused(429)]);
+fn quiet_model_can_reopen_after_a_long_admission_wait() {
+    let t = Script::new([refused(429), accepted()]);
     let mut p = t.provider(&[N1]);
     p.begin_turn(&input()).unwrap();
     p.poll();
-    t.0.borrow_mut().now += ADMISSION_BUDGET;
-    assert!(matches!(p.poll().as_slice(), [ProviderEvent::Error(error)] if error.contains("http 429")));
+    let quiet = json::obj(vec![("models", Value::Arr(vec![json::obj(vec![
+        ("id", json::s(MODEL)), ("domain", json::s("chat")), ("available", Value::Bool(false)),
+        ("state", json::s("loaded")), ("unavailable_reason", json::s("local-use: quiet")),
+    ])]))]);
+    t.0.borrow_mut().models.insert(N1.into(), quiet);
+    t.0.borrow_mut().now += Duration::from_secs(600);
+    assert!(matches!(p.poll().as_slice(), [ProviderEvent::Status { note, .. }] if note.contains("local-use: quiet")));
     assert_eq!(t.0.borrow().posts.len(), 1);
-    assert!(p.poll().is_empty());
+    t.0.borrow_mut().models.insert(N1.into(), models(MODEL, true, "loaded"));
+    assert!(finish(&mut p, &t).contains(&ProviderEvent::Done { text: "answer".into() }));
 }
 
 #[test]
@@ -571,38 +577,59 @@ fn local_use_cancellation_after_published_text_is_terminal_without_replay() {
 
 #[test]
 fn cancel_during_local_use_recovery_prevents_the_next_post() {
-    let t = Script::new([accepted(), accepted()]);
-    t.0.borrow_mut().polls = VecDeque::from([cancelled("local-use: foreign-gpu-load")]);
-    let mut p = t.provider(&[N1, N2]);
+    let t = Script::new((0..4).map(|_| accepted()));
+    t.0.borrow_mut().polls = (0..4).map(|_| cancelled("local-use: foreign-gpu-load")).collect();
+    let mut p = t.provider(&[N1]);
     p.begin_turn(&input()).unwrap();
-    p.poll();
+    for attempt in 0..4 {
+        if attempt > 0 {
+            t.advance();
+            assert!(p.poll().is_empty());
+        }
+        assert!(matches!(p.poll().as_slice(), [ProviderEvent::Status { note, .. }]
+            if note.contains("local-use: foreign-gpu-load")));
+    }
     assert!(p.pending.is_some());
     p.cancel();
     t.advance();
-    for _ in 0..5 { assert!(p.poll().is_empty()); }
-    assert_eq!(t.0.borrow().posts.len(), 1);
+    assert!(p.poll().is_empty());
+    assert_eq!(t.0.borrow().posts.len(), 4);
+    assert!(p.active.is_none());
     assert!(p.pending.is_none());
     assert!(p.wire.is_empty());
 }
 
 #[test]
-fn three_local_use_interruptions_are_bounded_and_never_return_to_an_interrupted_node() {
+fn repeated_local_use_interruptions_back_off_and_retry_the_same_turn() {
     let n3 = "http://n3:1";
-    let t = Script::new([accepted(), accepted(), accepted()]);
-    t.0.borrow_mut().polls = VecDeque::from([
-        cancelled("local-use: foreign-gpu-load"),
-        cancelled("local-use: foreign-gpu-load"),
-        cancelled("local-use: foreign-gpu-load"),
-    ]);
+    let delays_ms = [500, 1_000, 2_000, 4_000, 8_000, 8_000];
+    let t = Script::new((0..=delays_ms.len()).map(|_| accepted()));
+    t.0.borrow_mut().polls = delays_ms.iter().map(|_| cancelled("local-use: foreign-gpu-load"))
+        .chain(std::iter::once(done("answer"))).collect();
     let mut p = t.provider(&[N1, N2, n3]);
+    p.sample_seed = 0; // No jitter on the scripted clock.
     p.begin_turn(&input()).unwrap();
-    let terminal_events = finish(&mut p, &t);
-    assert_eq!(terminal(&terminal_events), 1);
-    assert!(terminal_events.iter().any(|event| matches!(event, ProviderEvent::Error(error) if error.contains("local-use: foreign-gpu-load"))));
+
+    for (i, delay_ms) in delays_ms.into_iter().enumerate() {
+        assert!(matches!(p.poll().as_slice(), [ProviderEvent::Status { note, .. }]
+            if note.contains("local-use: foreign-gpu-load")));
+        let gets = t.0.borrow().gets.len();
+        t.0.borrow_mut().now += Duration::from_millis(delay_ms - 1);
+        assert!(p.poll().is_empty());
+        assert_eq!(t.0.borrow().gets.len(), gets, "no probe during backoff");
+        assert_eq!(t.0.borrow().posts.len(), i + 1, "no submission during backoff");
+        t.0.borrow_mut().now += Duration::from_millis(1);
+        assert!(p.poll().is_empty());
+    }
+    let events = p.poll();
+    assert_eq!(terminal(&events), 1);
+    assert!(events.contains(&ProviderEvent::Done { text: "answer".into() }));
+    assert!(p.poll().is_empty());
     let s = t.0.borrow();
-    assert_eq!(s.posts.len(), 3);
-    assert_eq!(s.posts.iter().map(|(url, _)| url.as_str()).collect::<Vec<_>>(), vec![
-        format!("{N1}/generate"), format!("{N2}/generate"), format!("{n3}/generate"),
-    ]);
-    assert!(p.pending.is_none());
+    let bases = [N1, N2, n3, N1, N2, n3, N1];
+    assert_eq!(s.posts.len(), bases.len());
+    for ((url, body), base) in s.posts.iter().zip(bases) {
+        assert_eq!(url, &format!("{base}/generate"));
+        assert_eq!(body, &s.posts[0].1);
+    }
 }

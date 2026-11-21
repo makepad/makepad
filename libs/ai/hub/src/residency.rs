@@ -29,6 +29,9 @@
 //! - machines without a memory probe skip the byte gating but keep the
 //!   deterministic single-resident retire semantics.
 //!
+//! Host memory is admitted the same way, by measure, after this (see `crate::ram`): a load
+//! whose host-memory estimate is not free waits for it instead.
+//!
 //! Everything here is pure math/classification plus the polling helper; the
 //! worker in `server.rs` owns the actual backend map and unload calls.
 
@@ -570,7 +573,7 @@ mod tests {
     use std::cell::Cell;
 
     fn spec(vram_gb: Option<f64>) -> ModelSpec {
-        ModelSpec {
+        ModelSpec { on_demand: Vec::new(), host_load: None,
             id: "m".into(),
             domain: Domain::Image,
             backend: "testpattern".into(),

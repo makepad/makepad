@@ -568,6 +568,7 @@ fn winhttp_fetch_once(
             }
             headers.push_str(&format!("{name}: {value}\r\n"));
         }
+        headers.push_str(&machine_token_line(url, req.extra_headers));
     }
     if let Some((content_type, _)) = body {
         headers.push_str(&format!("Content-Type: {content_type}\r\n"));
@@ -697,6 +698,21 @@ pub fn http_fetch_no_redirect(
     fetch_once(&url, req.method, req, req.body, true)
 }
 
+/// The machine token's header line for a hub on this machine's loopback surface, which takes
+/// this machine's apps by it (as the WebSocket client sends it); empty for any other host, when
+/// the caller already set it in `headers`, or when the token cannot be read (the request then
+/// goes as before). Every plain-HTTP path to a hub writes it: this client, job submission and the
+/// fleet chat requests.
+pub(crate) fn machine_token_line(url: &ParsedUrl, headers: &[(String, String)]) -> String {
+    if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(crate::machine::TOKEN_HEADER)) {
+        return String::new();
+    }
+    match crate::web_socket::machine_token_for(url) {
+        Ok(Some((name, token))) if !token.contains(['\r', '\n']) => format!("{name}: {token}\r\n"),
+        _ => String::new(),
+    }
+}
+
 fn same_origin(a: &ParsedUrl, b: &ParsedUrl) -> bool {
     a.https == b.https && a.port == b.port && a.host.eq_ignore_ascii_case(&b.host)
 }
@@ -824,6 +840,7 @@ fn write_request(
             }
             head.push_str(&format!("{name}: {value}\r\n"));
         }
+        head.push_str(&machine_token_line(url, req.extra_headers));
     }
     if let Some((content_type, bytes)) = body {
         head.push_str(&format!(

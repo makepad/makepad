@@ -257,7 +257,7 @@ fn websocket_through_the_front() {
         while let Ok(request) = rx.recv() {
             if let HttpServerRequest::BinaryMessage { response_sender, data, .. } = request {
                 // The server frames what it is handed.
-                let _ = response_sender.send(data.iter().rev().copied().collect());
+                let _ = response_sender.send(makepad_network::http_server::WebSocketOut::Binary(data.iter().rev().copied().collect()));
             }
         }
     });

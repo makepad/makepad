@@ -56,6 +56,22 @@ pub struct HealthJson {
     /// VRAM admission safety reserve in MB (see the server residency policy);
     /// discrete-memory loads require fresh free VRAM >= estimate + reserve.
     pub vram_reserve_mb: Option<u64>,
+    /// Host memory free now and in all, in MB (`crate::ram::query_ram`; on Linux the kernel's
+    /// MemAvailable). Absent where unmeasured and on services predating them.
+    pub ram_free_mb: Option<u64>,
+    pub ram_total_mb: Option<u64>,
+    /// The host memory a load leaves free beside its estimate (`crate::ram::host_reserve_mb`).
+    /// Present only where a load waits for host memory (`crate::ram::HOST_GATE`): routing
+    /// weighs a box's host memory only when it does.
+    pub ram_reserve_mb: Option<u64>,
+    /// Host memory this hub's idle models hold, by their estimates (`crate::ram::host_estimate`),
+    /// in MB: what unloading them frees for a load, beside `ram_free_mb`. Routing counts it, never
+    /// memory other processes hold. Absent on services predating it.
+    pub ram_idle_mb: Option<u64>,
+    /// The box's OS, as Rust names it (`linux`, `macos`, `windows`): its models' measured host
+    /// peaks (`/models` `ram_mb`) are that OS's, and a router uses them only for boxes of the
+    /// same OS (`crate::ram::HostPeaks`). Absent on services predating it.
+    pub os: Option<String>,
     /// The chat model's context window set through `POST /llm/context`
     /// (absent until set), the window of the loaded session (absent when none),
     /// and the largest the node accepts. Absent on services predating the op.
@@ -67,8 +83,6 @@ pub struct HealthJson {
     /// predating the setting.
     pub llm_kv: Option<String>,
     pub llm_kv_loaded: Option<String>,
-    /// Max queued jobs before POST /generate refuses with 409 "queue full".
-    pub queue_limit: Option<u64>,
     /// Largest accepted JSON body for job submission. Missing on services
     /// predating per-endpoint upload limits.
     pub max_job_body_bytes: Option<u64>,
@@ -161,8 +175,6 @@ pub struct LanesJson {
     pub context_per_slot: u64,
     /// Requests waiting for a lane right now.
     pub queue_depth: u64,
-    /// Queue depth beyond which the box refuses rather than queues.
-    pub queue_max: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +226,14 @@ pub struct ModelInfoJson {
     /// `none` / `non-commercial` / `community` / `restricted`.
     pub license_restriction: Option<String>,
     pub license_sha256: Option<String>,
+    /// The host memory this model is expected to take on this box, in MB
+    /// (`crate::ram::host_estimate`): the newest peak measured for it on this box's OS, else its
+    /// weight files as its registry entry declares its loader takes them, else the files
+    /// themselves.
+    /// Absent when it counts none.
+    pub ram_mb: Option<u64>,
+    /// When `ram_mb` was measured (ms since the epoch); absent when it comes from the files.
+    pub ram_measured_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]
@@ -400,6 +420,10 @@ pub fn assistant_history_text(text: &str) -> &str {
 /// resident KV stays a prefix of the next prompt.
 pub const CHAT_IMAGE_OPEN: &str = "<|vision_start|><|image_pad|>";
 pub const CHAT_IMAGE_CLOSE: &str = "<|vision_end|>";
+/// The start of a chat job's error when its model can't take the pictures it was given (no vision
+/// tower, or one not fetched yet): a caller may ask again without them.
+pub const NO_PICTURES: &str = "this node's chat model has no vision tower";
+
 /// Pictures one chat request may carry (all turns together).
 pub const MAX_CHAT_IMAGES: usize = 8;
 
@@ -551,9 +575,25 @@ pub struct GenerateRequestJson {
     /// H3-style counts run the trained 4 — see `fast_backend`).
     pub steps: Option<u32>,
     pub guidance: Option<f64>,
-    /// "queue" (default): wait behind earlier jobs. "reject": fail with
+    /// "queue" (default): wait for a worker. "reject": fail with
     /// "busy" when any job is queued or running.
     pub queue_policy: Option<String>,
+    /// "interactive" or "batch". The heavy worker takes waiting interactive jobs first.
+    /// Chat replies default to interactive and other requests default to batch.
+    pub queue_class: Option<String>,
+    /// `"fleet"`: this hub routes the job for its caller, an app on this machine, the way
+    /// `/talk` routes its stages (this hub first, then the pinned hubs and the LAN fleet, by
+    /// ETA; an image without a queue policy tries an idle GPU first), and keeps a job of its own
+    /// that mirrors the routed one: progress, streamed text and pieces, the artifacts (copied
+    /// here) and the end. The client polls, fetches and cancels that job as any other. The
+    /// node gets a plain request, so a job is routed once at most. Such a request does no work
+    /// here, so this machine's local use and a timed run's quiet do not refuse it (the node
+    /// applies its own); `queue_policy: "reject"` fails the job with the node's busy answer
+    /// instead of a 409. Absent: the job runs on this hub, as always.
+    pub route: Option<String>,
+    /// The generation domain of a routed request (`"image"`, `"music"`, ...). Required when
+    /// `model` is empty or unknown to this hub; when this hub knows the model, they must agree.
+    pub route_domain: Option<String>,
 
     // -- binary input (cross-stage chaining: image->mesh, image->video i2v,
     //    image->world; also audio analysis such as stems) --
@@ -1222,13 +1262,8 @@ pub struct LiveStatusJson {
 //   {"type":"stopped", "reason":"stopped"|"cancelled"|"error"}  (once, as
 //    the session ends; sockets are then closed from the server side)
 //
-// IMPORTANT TRANSPORT NOTE: the in-repo `HttpServer`'s websocket write
-// thread (platform/network/src/http_server.rs, `handle_web_socket`) always
-// frames server -> client pushes with the WebSocket **Binary** opcode —
-// there is no server -> client Text-frame path in this transport. So,
-// although the messages above are JSON text, they physically arrive as
-// Binary websocket frames, indistinguishable BY OPCODE from a pushed output
-// frame. Every server -> client push is therefore self-describing instead:
+// Realtime sends control JSON and output frames with the WebSocket Binary opcode.
+// Every server -> client push is self-describing:
 // if the first 4 bytes equal `FRAME_MAGIC` it is a binary frame per the
 // layout above; otherwise the whole payload is UTF-8 JSON. Clients MUST
 // dispatch on this signature, not the WS opcode (`realtime_wire::

@@ -221,6 +221,9 @@ pub struct AceConditionEncoder {
     pub null_condition_emb: Option<Vec<f32>>,
     rope_cos: Vec<f32>,
     rope_sin: Vec<f32>,
+    /// The matrices went to the device copy ([`Self::prepare_device`]): only
+    /// [`Self::encode_device`] encodes.
+    device_only: bool,
 }
 
 pub struct AceDit {
@@ -237,6 +240,9 @@ pub struct AceDit {
     scale_shift: Vec<f32>, // (2, dim)
     rope_cos: Vec<f32>,
     rope_sin: Vec<f32>,
+    /// The matrices went to the device copy ([`Self::load_device`], [`Self::prepare_device`]):
+    /// only the device forward runs.
+    device_only: bool,
 }
 
 #[derive(Clone)]
@@ -517,6 +523,7 @@ impl AceConditionEncoder {
             null_condition_emb,
             rope_cos,
             rope_sin,
+            device_only: false,
         })
     }
 
@@ -547,6 +554,9 @@ impl AceConditionEncoder {
         refer_audio: &[f32],
         refer_frames: usize,
     ) -> Result<AceConditioning> {
+        if self.device_only {
+            return Err(DiffusionError::model("ace condition encoder: its matrices are on the device; encode there".to_string()));
+        }
         let h = ACE_COND_DIM;
         let text = linear(
             text_hidden,
@@ -615,35 +625,40 @@ impl AceConditionEncoder {
         })
     }
 
-    pub fn prepare_device(&self) -> AceCondDevice {
+    /// The device copy of the matrices, which move there: their f32 host copies are freed one by
+    /// one as they are converted, and from then on only [`Self::encode_device`] encodes. Called
+    /// once.
+    pub fn prepare_device(&mut self) -> AceCondDevice {
+        debug_assert!(!self.device_only, "the condition encoder's matrices went to the device already");
+        self.device_only = true;
         let h = ACE_COND_DIM;
         let q = ACE_COND_HEADS * ACE_DIT_HEAD_DIM;
         let kv = ACE_COND_KV_HEADS * ACE_DIT_HEAD_DIM;
-        let pack = |prefix: &str, layers: &[EncLayer]| {
+        let pack = |prefix: &str, layers: &mut [EncLayer]| {
             layers
-                .iter()
+                .iter_mut()
                 .enumerate()
                 .map(|(i, layer)| EncDevLayer {
-                    q: Bf16Weight::new(format!("{prefix}.{i}.q"), &layer.q_proj, q, h),
-                    k: Bf16Weight::new(format!("{prefix}.{i}.k"), &layer.k_proj, kv, h),
-                    v: Bf16Weight::new(format!("{prefix}.{i}.v"), &layer.v_proj, kv, h),
-                    o: Bf16Weight::new(format!("{prefix}.{i}.o"), &layer.o_proj, h, q),
-                    gate: Bf16Weight::new(format!("{prefix}.{i}.gate"), &layer.gate, ACE_COND_FFN, h),
-                    up: Bf16Weight::new(format!("{prefix}.{i}.up"), &layer.up, ACE_COND_FFN, h),
-                    down: Bf16Weight::new(format!("{prefix}.{i}.dn"), &layer.down, h, ACE_COND_FFN),
+                    q: Bf16Weight::take(format!("{prefix}.{i}.q"), &mut layer.q_proj, q, h),
+                    k: Bf16Weight::take(format!("{prefix}.{i}.k"), &mut layer.k_proj, kv, h),
+                    v: Bf16Weight::take(format!("{prefix}.{i}.v"), &mut layer.v_proj, kv, h),
+                    o: Bf16Weight::take(format!("{prefix}.{i}.o"), &mut layer.o_proj, h, q),
+                    gate: Bf16Weight::take(format!("{prefix}.{i}.gate"), &mut layer.gate, ACE_COND_FFN, h),
+                    up: Bf16Weight::take(format!("{prefix}.{i}.up"), &mut layer.up, ACE_COND_FFN, h),
+                    down: Bf16Weight::take(format!("{prefix}.{i}.dn"), &mut layer.down, h, ACE_COND_FFN),
                     sliding: layer.sliding,
                 })
                 .collect()
         };
         AceCondDevice {
             owner: WeightOwner::new("ace-cond"),
-            text_proj: Bf16Weight::new("acecond.tp", &self.text_proj, h, ACE_TE_HIDDEN),
-            lyric_embed: Bf16Weight::new("acecond.ly", &self.lyric_embed, h, ACE_TEXT_HIDDEN),
+            text_proj: Bf16Weight::take("acecond.tp", &mut self.text_proj, h, ACE_TE_HIDDEN),
+            lyric_embed: Bf16Weight::take("acecond.ly", &mut self.lyric_embed, h, ACE_TEXT_HIDDEN),
             lyric_embed_b: self.lyric_embed_b.clone().unwrap_or_else(|| vec![0f32; h]),
-            timbre_embed: Bf16Weight::new("acecond.tb", &self.timbre_embed, h, ACE_LATENT_DIM),
+            timbre_embed: Bf16Weight::take("acecond.tb", &mut self.timbre_embed, h, ACE_LATENT_DIM),
             timbre_embed_b: self.timbre_embed_b.clone().unwrap_or_else(|| vec![0f32; h]),
-            lyric_layers: pack("acecond.lyr", &self.lyric_layers),
-            timbre_layers: pack("acecond.tbr", &self.timbre_layers),
+            lyric_layers: pack("acecond.lyr", &mut self.lyric_layers),
+            timbre_layers: pack("acecond.tbr", &mut self.timbre_layers),
         }
     }
 
@@ -1054,8 +1069,29 @@ impl AceDit {
 
     pub fn load_with_progress(
         dir: impl AsRef<Path>,
-        mut progress: Option<ProgressHook>,
+        progress: Option<ProgressHook>,
     ) -> Result<Self> {
+        Ok(Self::load_blocks(dir, progress, false)?.0)
+    }
+
+    /// Loads the DiT to run on the device: each block's matrices become their bf16 device copy
+    /// as soon as they are read and their f32 is freed, so the host never holds the whole model
+    /// in f32 (about 17 GB) beside the device copy. The DiT then runs on the device only.
+    pub fn load_device(
+        dir: impl AsRef<Path>,
+        progress: Option<ProgressHook>,
+    ) -> Result<(Self, AceDitDevice)> {
+        let (mut dit, blocks) = Self::load_blocks(dir, progress, true)?;
+        let device = dit.finish_device(blocks);
+        Ok((dit, device))
+    }
+
+    /// The DiT, and with `device` each block's device copy made as it was read.
+    fn load_blocks(
+        dir: impl AsRef<Path>,
+        mut progress: Option<ProgressHook>,
+        device: bool,
+    ) -> Result<(Self, Vec<DitDevBlock>)> {
         let weights = ace_open_shards(dir)?;
         let d = ACE_DIT_DIM;
         emit_byte_progress(&mut progress, "load ace dit", 0, weights.total_disk_bytes() as usize)?;
@@ -1078,6 +1114,7 @@ impl AceDit {
         )?;
         let cond_embed_b = ace_tensor_shaped(&weights, &["condition_embedder.bias"], d)?;
         let mut blocks = Vec::with_capacity(ACE_DIT_LAYERS);
+        let mut dev_blocks = Vec::with_capacity(if device { ACE_DIT_LAYERS } else { 0 });
         for i in 0..ACE_DIT_LAYERS {
             if i % 4 == 0 {
                 emit_progress(
@@ -1086,7 +1123,11 @@ impl AceDit {
                     i as f64 / ACE_DIT_LAYERS as f64,
                 )?;
             }
-            blocks.push(load_dit_block(&weights, i)?);
+            let mut block = load_dit_block(&weights, i)?;
+            if device {
+                dev_blocks.push(dit_device_block(i, &mut block));
+            }
+            blocks.push(block);
         }
         let norm_out = ace_tensor_shaped(&weights, &["norm_out.weight"], d)?;
         let proj_out_w = ace_tensor_shaped(
@@ -1102,7 +1143,7 @@ impl AceDit {
         let scale_shift = ace_tensor_shaped(&weights, &["scale_shift_table"], 2 * d)?;
         let (rope_cos, rope_sin) = ace_rope_tables(16_384);
         emit_progress(&mut progress, "load ace dit", 1.0)?;
-        Ok(Self {
+        Ok((Self {
             proj_in_w,
             proj_in_b,
             time,
@@ -1116,7 +1157,8 @@ impl AceDit {
             scale_shift,
             rope_cos,
             rope_sin,
-        })
+            device_only: false,
+        }, dev_blocks))
     }
 
     /// One velocity prediction. `x` and `context` are token-major `[T, 64]`
@@ -1131,6 +1173,9 @@ impl AceDit {
         t_r: f32,
         mut progress: Option<ProgressHook>,
     ) -> Result<Vec<f32>> {
+        if self.device_only {
+            return Err(DiffusionError::model("ace dit: its matrices are on the device; run the device forward".to_string()));
+        }
         let d = ACE_DIT_DIM;
         if x.len() != frames * ACE_LATENT_DIM {
             return Err(DiffusionError::model(format!(
@@ -1280,10 +1325,19 @@ impl AceDit {
         Ok(y)
     }
 
-    pub fn prepare_device(&self) -> AceDitDevice {
+    /// The device copy of an already loaded DiT, whose matrices move there (their f32 host
+    /// copies freed one by one as they are converted); from then on only the device forward
+    /// runs. [`Self::load_device`] does the same while it reads. Called once.
+    pub fn prepare_device(&mut self) -> AceDitDevice {
+        let blocks = self.blocks.iter_mut().enumerate().map(|(i, block)| dit_device_block(i, block)).collect();
+        self.finish_device(blocks)
+    }
+
+    /// The device copy of the matrices outside the blocks, with the blocks' copies.
+    fn finish_device(&mut self, blocks: Vec<DitDevBlock>) -> AceDitDevice {
+        debug_assert!(!self.device_only, "the DiT's matrices went to the device already");
+        self.device_only = true;
         let d = ACE_DIT_DIM;
-        let q = ACE_DIT_HEADS * ACE_DIT_HEAD_DIM;
-        let kv = ACE_DIT_KV_HEADS * ACE_DIT_HEAD_DIM;
         let in_ch = ACE_IN_CHANNELS;
         let k = ACE_PATCH_SIZE;
         let in_k = in_ch * k;
@@ -1295,6 +1349,7 @@ impl AceDit {
                 }
             }
         }
+        self.proj_in_w = Vec::new();
         let out_ch = ACE_LATENT_DIM;
         let mut pout0 = vec![0f32; out_ch * d];
         let mut pout1 = vec![0f32; out_ch * d];
@@ -1304,35 +1359,15 @@ impl AceDit {
                 pout1[o * d + c] = self.proj_out_w[(c * out_ch + o) * k + 1];
             }
         }
-        let blocks = self
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(i, block)| {
-                DitDevBlock {
-                    q: Bf16Weight::new(format!("acedit.b{i}.q"), &block.self_q, q, d),
-                    k: Bf16Weight::new(format!("acedit.b{i}.k"), &block.self_k, kv, d),
-                    v: Bf16Weight::new(format!("acedit.b{i}.v"), &block.self_v, kv, d),
-                    o: Bf16Weight::new(format!("acedit.b{i}.o"), &block.self_o, d, q),
-                    cross_q: Bf16Weight::new(format!("acedit.b{i}.cq"), &block.cross_q, q, d),
-                    cross_k: Bf16Weight::new(format!("acedit.b{i}.ck"), &block.cross_k, kv, d),
-                    cross_v: Bf16Weight::new(format!("acedit.b{i}.cv"), &block.cross_v, kv, d),
-                    cross_o: Bf16Weight::new(format!("acedit.b{i}.co"), &block.cross_o, d, q),
-                    gate: Bf16Weight::new(format!("acedit.b{i}.gate"), &block.gate, ACE_DIT_FFN, d),
-                    up: Bf16Weight::new(format!("acedit.b{i}.up"), &block.up, ACE_DIT_FFN, d),
-                    down: Bf16Weight::new(format!("acedit.b{i}.dn"), &block.down, d, ACE_DIT_FFN),
-                    sliding: block.sliding,
-                }
-            })
-            .collect();
+        self.proj_out_w = Vec::new();
         AceDitDevice {
             owner: WeightOwner::new("ace-dit"),
             proj_in: Bf16Weight::new("acedit.pin", &pin, d, in_k),
-            cond_embed: Bf16Weight::new("acedit.cond", &self.cond_embed_w, d, ACE_DIT_ENCODER_DIM),
+            cond_embed: Bf16Weight::take("acedit.cond", &mut self.cond_embed_w, d, ACE_DIT_ENCODER_DIM),
             proj_out0: Bf16Weight::new("acedit.pout0", &pout0, out_ch, d),
             proj_out1: Bf16Weight::new("acedit.pout1", &pout1, out_ch, d),
-            time: time_embed_dev("acedit.time", &self.time, d),
-            time_r: time_embed_dev("acedit.time_r", &self.time_r, d),
+            time: time_embed_dev("acedit.time", &mut self.time, d),
+            time_r: time_embed_dev("acedit.time_r", &mut self.time_r, d),
             blocks,
             cache_id: ACE_DEVICE_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
@@ -1649,6 +1684,12 @@ fn f32_to_bf16_word(v: f32) -> u16 {
 }
 
 impl Bf16Weight {
+    /// The bf16 copy of host matrix `w`, which it replaces (the f32 is freed here).
+    fn take(key: impl Into<String>, w: &mut Vec<f32>, n: usize, k: usize) -> Self {
+        let w = std::mem::take(w);
+        Self::new(key, &w, n, k)
+    }
+
     fn new(key: impl Into<String>, w: &[f32], n: usize, k: usize) -> Self {
         debug_assert_eq!(w.len(), n * k);
         let mut bytes = Vec::with_capacity(w.len() * 2);
@@ -1715,16 +1756,34 @@ struct TimeEmbedDev {
     time_proj: Bf16Weight,
 }
 
-fn time_embed_dev(prefix: &str, embed: &TimeEmbed, dim: usize) -> TimeEmbedDev {
+/// The time embedding's device copy; its matrices move there (the biases stay on the host).
+fn time_embed_dev(prefix: &str, embed: &mut TimeEmbed, dim: usize) -> TimeEmbedDev {
     TimeEmbedDev {
-        linear1: Bf16Weight::new(
-            format!("{prefix}.l1"),
-            &embed.linear1_w,
-            dim,
-            ACE_TIME_FREQ_DIM,
-        ),
-        linear2: Bf16Weight::new(format!("{prefix}.l2"), &embed.linear2_w, dim, dim),
-        time_proj: Bf16Weight::new(format!("{prefix}.tp"), &embed.time_proj_w, 6 * dim, dim),
+        linear1: Bf16Weight::take(format!("{prefix}.l1"), &mut embed.linear1_w, dim, ACE_TIME_FREQ_DIM),
+        linear2: Bf16Weight::take(format!("{prefix}.l2"), &mut embed.linear2_w, dim, dim),
+        time_proj: Bf16Weight::take(format!("{prefix}.tp"), &mut embed.time_proj_w, 6 * dim, dim),
+    }
+}
+
+/// A DiT block's device copy; its matrices move there (the norms and the scale-shift table stay
+/// on the host, where the device forward reads them).
+fn dit_device_block(i: usize, block: &mut DitBlock) -> DitDevBlock {
+    let d = ACE_DIT_DIM;
+    let q = ACE_DIT_HEADS * ACE_DIT_HEAD_DIM;
+    let kv = ACE_DIT_KV_HEADS * ACE_DIT_HEAD_DIM;
+    DitDevBlock {
+        q: Bf16Weight::take(format!("acedit.b{i}.q"), &mut block.self_q, q, d),
+        k: Bf16Weight::take(format!("acedit.b{i}.k"), &mut block.self_k, kv, d),
+        v: Bf16Weight::take(format!("acedit.b{i}.v"), &mut block.self_v, kv, d),
+        o: Bf16Weight::take(format!("acedit.b{i}.o"), &mut block.self_o, d, q),
+        cross_q: Bf16Weight::take(format!("acedit.b{i}.cq"), &mut block.cross_q, q, d),
+        cross_k: Bf16Weight::take(format!("acedit.b{i}.ck"), &mut block.cross_k, kv, d),
+        cross_v: Bf16Weight::take(format!("acedit.b{i}.cv"), &mut block.cross_v, kv, d),
+        cross_o: Bf16Weight::take(format!("acedit.b{i}.co"), &mut block.cross_o, d, q),
+        gate: Bf16Weight::take(format!("acedit.b{i}.gate"), &mut block.gate, ACE_DIT_FFN, d),
+        up: Bf16Weight::take(format!("acedit.b{i}.up"), &mut block.up, ACE_DIT_FFN, d),
+        down: Bf16Weight::take(format!("acedit.b{i}.dn"), &mut block.down, d, ACE_DIT_FFN),
+        sliding: block.sliding,
     }
 }
 

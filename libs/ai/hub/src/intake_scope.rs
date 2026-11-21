@@ -14,7 +14,10 @@
 //!   itself, and the caller holds no token. A tool with a `type`, `mcp_servers`, `container`,
 //!   document, file and URL sources, citations, server tool blocks and every top-level field not
 //!   listed are refused. The client's headers are dropped. The models are pinned, tokens are capped
-//!   per request and per item, and the credential is rate limited.
+//!   per request and per item per UTC day, and the credential is rate limited and has a day's
+//!   total of its own, kept across restarts ([`Ledger`]). The ledger belongs to one hub process
+//!   and its cache folder: one hub serves the login for intake, and a second (or a restart that
+//!   overlaps the old process on one folder) would count a day of its own.
 //! - A call that does not name its item ([`item_of`]) is refused, and each call is logged with it.
 //!
 //! What reaches a turn is the checked request's system string and user message, never the
@@ -41,10 +44,27 @@ pub const MAX_PREFILTER_TOKENS: i64 = 1024;
 pub const MAX_MESSAGE_TOKENS: i64 = 32_000;
 /// Messages calls a minute for the intake credential.
 pub const RATE_PER_MINUTE: usize = 30;
-/// Tokens (input, output and cache writes and reads) one item may spend through `/v1/messages`.
-pub const ITEM_TOKEN_BUDGET: u64 = 12_000_000;
-/// Messages calls one item may make.
-pub const ITEM_REQUEST_BUDGET: u32 = 800;
+/// Tokens (input, output and cache writes and reads) one item may spend through `/v1/messages`
+/// in a UTC day: about two full reads of the largest item the jail reads in parts, from the
+/// estimate until a measured read sets it. Past it the item waits for the next day, so whatever
+/// its author pushes, one item takes about a tenth of the day.
+pub const ITEM_TOKEN_BUDGET: u64 = 3_000_000;
+/// Messages calls one item may make in a UTC day.
+pub const ITEM_REQUEST_BUDGET: u32 = 80;
+/// Messages calls each of our own fixtures (`canary`, `eval`) may make in a UTC day: about thirty
+/// canary runs (three calls each) or eight steering runs (twelve), and never the whole day, so a
+/// jail that named every call after a fixture would still stop well short of the credential's day.
+pub const FIXTURE_REQUEST_BUDGET: u32 = 100;
+/// Tokens each fixture may spend in a UTC day (see [`FIXTURE_REQUEST_BUDGET`]).
+pub const FIXTURE_TOKEN_BUDGET: u64 = 6_000_000;
+/// Messages calls in a UTC day for the intake credential, every item together, kept across hub
+/// restarts: a little above the jail proxy's own day (400 calls, 30M tokens), so the proxy's fires
+/// first and this one holds when a proxy does not.
+pub const DAY_REQUEST_BUDGET: u32 = 440;
+/// Tokens in a UTC day for the intake credential (see [`DAY_REQUEST_BUDGET`]).
+pub const DAY_TOKEN_BUDGET: u64 = 33_000_000;
+/// The day's counts in the hub's cache folder.
+const DAY_FILE: &str = "intake-day.json";
 /// Calls waiting for the turn worker; a full queue returns 429.
 const QUEUE: usize = 8;
 const MAX_MESSAGES_BODY: usize = 16 * 1024 * 1024;
@@ -90,6 +110,7 @@ pub enum Refusal {
     Rate,
     Busy,
     ItemBudget,
+    DayBudget,
 }
 
 impl Refusal {
@@ -109,13 +130,15 @@ impl Refusal {
             Refusal::ClaudeOff => "claude-off-intake",
             Refusal::Rate => "rate",
             Refusal::Busy => "busy",
-            Refusal::ItemBudget => "item-budget",
+            // both name the day: a jail waits on a `day-budget` for the next day, unparked
+            Refusal::ItemBudget => "item-day-budget",
+            Refusal::DayBudget => "hub-day-budget",
         }
     }
 
     fn status(self) -> u16 {
         match self {
-            Refusal::Rate | Refusal::Busy | Refusal::ItemBudget => 429,
+            Refusal::Rate | Refusal::Busy | Refusal::ItemBudget | Refusal::DayBudget => 429,
             Refusal::ClaudeOff => 503,
             Refusal::BadJson | Refusal::TooLarge => 400,
             _ => 403,
@@ -433,45 +456,180 @@ pub fn check_messages(body: &[u8]) -> Result<(Value, String), Refusal> {
     Ok((v, model))
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct ItemUse {
     requests: u32,
     tokens: u64,
 }
 
-/// Rate and per-item budgets for the intake credential (in memory: a hub restart starts them
-/// again, and the log keeps every call).
+impl ItemUse {
+    fn over(&self, requests: u32, tokens: u64) -> bool {
+        self.requests >= requests || self.tokens >= tokens
+    }
+}
+
+/// The intake credential's rate, its day's total and each item's day, by UTC day. The day's counts
+/// are kept in the hub's cache folder ([`DAY_FILE`]) after every change, so a hub restart starts
+/// none of them again; the log keeps every call.
 #[derive(Default)]
 pub struct Ledger {
+    /// the UTC day (days since the epoch) the counts are of
+    day: u64,
+    total: ItemUse,
     items: HashMap<String, ItemUse>,
     recent: VecDeque<Instant>,
+    /// where the day is kept (none in a test)
+    file: Option<PathBuf>,
+    /// the last save failed: calls are refused until one succeeds (a call whose own save fails is
+    /// not served either), so a restart cannot forget what the file does not hold
+    unsaved: bool,
 }
 
 impl Ledger {
-    pub fn admit(&mut self, item: &str, now: Instant) -> Result<(), Refusal> {
+    /// The ledger kept at `file`: today's counts as it holds them, none for another day. A file
+    /// that is there but does not read counts today as spent (it may have held anything), and
+    /// says so.
+    fn kept(file: PathBuf, today: u64) -> Ledger {
+        let mut ledger = Ledger { day: today, file: Some(file.clone()), ..Ledger::default() };
+        match std::fs::read(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(b) if ledger.read_day(&b).is_some() => {}
+            _ => {
+                eprintln!("intake scope: {DAY_FILE} does not read: today's intake budget counts as spent");
+                ledger.total = ItemUse { requests: DAY_REQUEST_BUDGET, tokens: DAY_TOKEN_BUDGET };
+            }
+        }
+        ledger
+    }
+
+    /// The kept day into this ledger when it is today's: Some when the bytes read.
+    fn read_day(&mut self, bytes: &[u8]) -> Option<()> {
+        let v = json::parse_depth(bytes, 4).ok()?;
+        let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64);
+        let usage = |v: &Value| Some(ItemUse { requests: u32::try_from(num(v, "requests")?).ok()?, tokens: num(v, "tokens")? });
+        let day = num(&v, "day")?;
+        let total = usage(&v)?;
+        let mut items = HashMap::new();
+        let Value::Obj(kept) = v.get("items")? else { return None };
+        for (item, u) in kept {
+            if !valid_item(item) {
+                return None;
+            }
+            items.insert(item.clone(), usage(u)?);
+        }
+        if day == self.day {
+            (self.total, self.items) = (total, items);
+        }
+        Some(())
+    }
+
+    /// The day into its file; a save that fails is tried again at the next call, which is refused
+    /// until one succeeds.
+    fn save(&mut self) {
+        self.unsaved = !self.write();
+    }
+
+    fn write(&self) -> bool {
+        let Some(file) = &self.file else { return true };
+        let usage = |u: &ItemUse| json::obj(vec![("requests", Value::Int(u.requests as i64)), ("tokens", Value::Int(u.tokens as i64))]);
+        let mut items: Vec<(&String, &ItemUse)> = self.items.iter().collect();
+        items.sort_by(|a, b| a.0.cmp(b.0));
+        let text = json::obj(vec![
+            ("day", Value::Int(self.day as i64)),
+            ("requests", Value::Int(self.total.requests as i64)),
+            ("tokens", Value::Int(self.total.tokens as i64)),
+            ("items", json::obj(items.into_iter().map(|(i, u)| (i.as_str(), usage(u))).collect())),
+        ])
+        .to_json();
+        let tmp = file.with_extension("tmp");
+        match std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, file)) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("intake scope: {DAY_FILE} not saved: {e}: intake calls are refused until it is");
+                false
+            }
+        }
+    }
+
+    /// A new UTC day starts every count again.
+    fn roll(&mut self, today: u64) {
+        if today != self.day {
+            (self.day, self.total) = (today, ItemUse::default());
+            self.items.clear();
+        }
+    }
+
+    /// One call of `item` at `now`, on UTC day `today`: the rate, then the day's total, then the
+    /// item's day (our own fixtures' smaller one: see [`FIXTURE_REQUEST_BUDGET`]). It is counted
+    /// only once the day is kept.
+    pub fn admit(&mut self, item: &str, now: Instant, today: u64) -> Result<(), Refusal> {
         while self.recent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60)) {
             self.recent.pop_front();
         }
         if self.recent.len() >= RATE_PER_MINUTE {
             return Err(Refusal::Rate);
         }
+        self.roll(today);
+        if self.unsaved {
+            self.save();
+        }
+        if self.unsaved || self.total.over(DAY_REQUEST_BUDGET, DAY_TOKEN_BUDGET) {
+            return Err(Refusal::DayBudget);
+        }
         let used = self.items.entry(item.to_string()).or_default();
-        if used.requests >= ITEM_REQUEST_BUDGET || used.tokens >= ITEM_TOKEN_BUDGET {
+        let (requests, tokens) = if matches!(item, "canary" | "eval") { (FIXTURE_REQUEST_BUDGET, FIXTURE_TOKEN_BUDGET) } else { (ITEM_REQUEST_BUDGET, ITEM_TOKEN_BUDGET) };
+        if used.over(requests, tokens) {
             return Err(Refusal::ItemBudget);
         }
         used.requests += 1;
+        self.total.requests += 1;
         self.recent.push_back(now);
+        self.save();
+        // a call whose count is not kept is not served
+        if self.unsaved {
+            self.undo(item);
+            return Err(Refusal::DayBudget);
+        }
         Ok(())
     }
 
-    pub fn spent(&mut self, item: &str, tokens: u64) {
+    fn undo(&mut self, item: &str) {
+        if let Some(used) = self.items.get_mut(item) {
+            used.requests = used.requests.saturating_sub(1);
+        }
+        self.total.requests = self.total.requests.saturating_sub(1);
+        self.recent.pop_back();
+    }
+
+    /// An admitted call that never reached the worker (its queue was full): its count goes back,
+    /// so a caller that asks again does not spend the day.
+    pub fn give_back(&mut self, item: &str, today: u64) {
+        if today != self.day {
+            return;
+        }
+        self.undo(item);
+        self.save();
+    }
+
+    /// The tokens a call of `item` spent, on UTC day `today` (a call that ends past midnight
+    /// counts toward the new day).
+    pub fn spent(&mut self, item: &str, tokens: u64, today: u64) {
+        self.roll(today);
         self.items.entry(item.to_string()).or_default().tokens += tokens;
+        self.total.tokens += tokens;
+        self.save();
     }
 }
 
-fn ledger() -> &'static Mutex<Ledger> {
+/// Days since the epoch, UTC.
+fn utc_day() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400)
+}
+
+/// The one ledger, read from the cache folder its first call names.
+fn ledger(cache_dir: &Path) -> &'static Mutex<Ledger> {
     static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
-    LEDGER.get_or_init(|| Mutex::new(Ledger::default()))
+    LEDGER.get_or_init(|| Mutex::new(Ledger::kept(cache_dir.join(DAY_FILE), utc_day())))
 }
 
 /// One line of the intake call log.
@@ -536,7 +694,7 @@ fn worker() -> &'static SyncSender<Call> {
             .spawn(move || {
                 while let Ok(call) = rx.recv() {
                     let (response, outcome, tokens) = upstream(&call.body);
-                    ledger().lock().unwrap().spent(&call.item, tokens);
+                    ledger(&call.cache_dir).lock().unwrap().spent(&call.item, tokens, utc_day());
                     log_call(&call.cache_dir, &CallLog { client: &call.client, item: &call.item, route: "/v1/messages", model: &call.model, outcome: &outcome, tokens });
                     let _ = call.response.send(response);
                 }
@@ -636,13 +794,22 @@ pub fn route_messages(cache_dir: &Path, client: Option<&str>, claude_serving: bo
     if let Err(why) = cli_request(&value) {
         return refuse(client, &item, why);
     }
-    if let Err(why) = ledger().lock().unwrap().admit(&item, Instant::now()) {
+    let call = Call { body: value.to_json().into_bytes(), client: client.to_string(), item: item.clone(), model, cache_dir: cache_dir.to_path_buf(), response: response.clone() };
+    // the worker starts before the ledger is locked: a start that fails cannot poison the lock.
+    // Then one lock from the count to the queue (`try_send` never waits), so a call the queue
+    // cannot take gives back its own count
+    let queue = worker();
+    let today = utc_day();
+    let mut day = ledger(cache_dir).lock().unwrap();
+    if let Err(why) = day.admit(&item, Instant::now(), today) {
+        drop(day);
         return refuse(client, &item, why);
     }
-    let call = Call { body: value.to_json().into_bytes(), client: client.to_string(), item: item.clone(), model, cache_dir: cache_dir.to_path_buf(), response: response.clone() };
-    match worker().try_send(call) {
-        Ok(()) => {}
-        Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => refuse(client, &item, Refusal::Busy),
+    if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = queue.try_send(call) {
+        // never served: the caller's next try does not spend the day
+        day.give_back(&item, today);
+        drop(day);
+        refuse(client, &item, Refusal::Busy);
     }
 }
 
@@ -795,18 +962,64 @@ mod tests {
         assert!(check_messages(with(MESSAGES, "messages", image).as_bytes()).is_ok(), "an inline picture passes");
     }
 
+    /// The rate, each item's UTC day and the credential's day total, kept across a restart.
     #[test]
-    fn the_ledger_rate_limits_and_spends_item_budgets() {
-        let mut ledger = Ledger::default();
+    fn the_ledger_rate_limits_and_spends_budgets_by_day() {
+        let (mut ledger, day) = (Ledger::default(), 20_000);
         let t0 = Instant::now();
+        let min = |m: u64| t0 + Duration::from_secs(m * 61);
         for _ in 0..RATE_PER_MINUTE {
-            assert_eq!(ledger.admit("relax#1", t0), Ok(()));
+            assert_eq!(ledger.admit("relax#1", t0, day), Ok(()));
         }
-        assert_eq!(ledger.admit("relax#2", t0), Err(Refusal::Rate), "a full minute refuses with a retry");
-        assert_eq!(ledger.admit("relax#2", t0 + Duration::from_secs(61)), Ok(()), "the window moves on");
-        ledger.spent("relax#2", ITEM_TOKEN_BUDGET);
-        assert_eq!(ledger.admit("relax#2", t0 + Duration::from_secs(200)), Err(Refusal::ItemBudget), "a spent item stops");
-        assert_eq!(ledger.admit("relax#3", t0 + Duration::from_secs(200)), Ok(()), "other items go on");
+        assert_eq!(ledger.admit("relax#2", t0, day), Err(Refusal::Rate), "a full minute refuses with a retry");
+        assert_eq!(ledger.admit("relax#2", min(1), day), Ok(()), "the window moves on");
+        ledger.spent("relax#2", ITEM_TOKEN_BUDGET, day);
+        assert_eq!(ledger.admit("relax#2", min(2), day), Err(Refusal::ItemBudget), "a spent item waits");
+        assert_eq!(ledger.admit("relax#3", min(2), day), Ok(()), "other items go on");
+        assert_eq!(ledger.admit("relax#2", min(2), day + 1), Ok(()), "and the item's next day is its own again");
+        ledger.spent("canary", ITEM_TOKEN_BUDGET, day + 1);
+        assert_eq!(ledger.admit("canary", min(3), day + 1), Ok(()), "our own fixtures have a day of their own, past an item's");
+        let mut fixture = Ledger::default();
+        for k in 0..FIXTURE_REQUEST_BUDGET {
+            assert_eq!(fixture.admit("eval", min(k as u64 + 10), day), Ok(()));
+        }
+        assert_eq!((fixture.admit("eval", min(500), day), fixture.admit("relax#1", min(500), day)), (Err(Refusal::ItemBudget), Ok(())), "but a small one, never the whole day: a jail naming every call after a fixture stops there");
+        // a call the queue could not take gives its count back
+        let mut busy = Ledger::default();
+        assert_eq!(busy.admit("relax#6", t0, day), Ok(()));
+        busy.give_back("relax#6", day);
+        assert_eq!((busy.total, busy.items["relax#6"], busy.recent.len()), (ItemUse::default(), ItemUse::default(), 0), "a busy refusal spends nothing");
+        ledger.spent("relax#4", DAY_TOKEN_BUDGET, day + 1);
+        assert_eq!(ledger.admit("relax#5", min(4), day + 1), Err(Refusal::DayBudget), "the credential's day spent: every item waits");
+        assert_eq!(ledger.admit("canary", min(4), day + 1), Err(Refusal::DayBudget), "the canary too");
+        let mut calls = Ledger::default();
+        for k in 0..DAY_REQUEST_BUDGET {
+            assert_eq!(calls.admit(&format!("relax#{}", k + 1), min(k as u64 + 10), day), Ok(()));
+        }
+        assert_eq!(calls.admit("makepad#1", min(1000), day), Err(Refusal::DayBudget), "so do the day's calls");
+        assert!(Refusal::ItemBudget.name().contains("day-budget") && Refusal::DayBudget.name().contains("day-budget") && !Refusal::ItemBudget.name().contains("item-budget"), "a jail waits on both for the next day, and parks on neither");
+        // kept across a restart: today's counts come back, another day's do not, a bad file is spent
+        let dir = std::env::temp_dir().join(format!("intake-day-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(DAY_FILE);
+        let mut kept = Ledger::kept(file.clone(), day);
+        assert_eq!(kept.admit("relax#2", t0, day), Ok(()), "no file: nothing spent");
+        kept.spent("relax#2", ITEM_TOKEN_BUDGET, day);
+        let mut again = Ledger::kept(file.clone(), day);
+        assert_eq!((again.total, again.admit("relax#2", t0, day)), (ItemUse { requests: 1, tokens: ITEM_TOKEN_BUDGET }, Err(Refusal::ItemBudget)), "a restart keeps the day and the item's");
+        assert_eq!(Ledger::kept(file.clone(), day + 1).total, ItemUse::default(), "another day's counts start none");
+        std::fs::write(&file, "{\"day\":20000}").unwrap();
+        assert_eq!(Ledger::kept(file.clone(), day).admit("relax#9", t0, day), Err(Refusal::DayBudget), "a file that does not read counts today as spent");
+        // a save that fails refuses every call until one succeeds
+        let mut cut = Ledger::kept(dir.join("gone").join(DAY_FILE), day);
+        assert_eq!((cut.admit("relax#2", t0, day), cut.unsaved, cut.total), (Err(Refusal::DayBudget), true, ItemUse::default()), "a call whose count is not kept is refused, and counts nothing");
+        cut.spent("relax#2", 10, day);
+        assert_eq!(cut.admit("relax#3", t0, day), Err(Refusal::DayBudget), "every call, while the day is not kept");
+        std::fs::create_dir_all(dir.join("gone")).unwrap();
+        assert_eq!((cut.admit("relax#3", t0, day), cut.unsaved), (Ok(()), false), "a save that succeeds lets calls through again");
+        assert_eq!(Ledger::kept(dir.join("gone").join(DAY_FILE), day).total, ItemUse { requests: 1, tokens: 10 }, "and the file holds the day, the tokens spent while it was not kept included");
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(usage_tokens(br#"{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}"#), 115);
         assert_eq!(usage_tokens(b"not json"), 0);
     }

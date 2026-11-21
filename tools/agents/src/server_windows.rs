@@ -568,6 +568,7 @@ pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<
     );
     host.persist_name()?;
     let result = host.run(listener);
+    let named = host.keep_name();
     let phase = if result.is_ok() { "ended" } else { "failed" };
     let code = result.as_ref().ok().copied().flatten();
     let finalized = finish_claim(&location, instance, phase, code);
@@ -585,5 +586,6 @@ pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<
         let _ = fs::remove_file(&location.metadata_path);
     }
     finalized?;
+    named?;
     result.map(|_| ())
 }

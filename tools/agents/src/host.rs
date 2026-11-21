@@ -116,17 +116,24 @@ impl Host {
             ("instance", json::s(&self.instance)),
         ])
     }
+    /// The session's title as its metadata says while it runs ([`replace_private`]: never
+    /// synced to disk from the I/O loop); its claim takes the last one as the host ends
+    /// ([`Self::keep_name`]).
     fn persist_name(&self) -> Result<(), String> {
+        replace_private(
+            &self.location.metadata_path,
+            self.status().to_json().as_bytes(),
+        )
+    }
+    /// The last title into the session's claim, synced, as the host ends: what its stopped
+    /// status says and its restart starts with.
+    fn keep_name(&self) -> Result<(), String> {
         let mut saved = claim(&self.location)?.ok_or("Missing session claim")?;
         if let Value::Obj(fields) = &mut saved {
             fields.retain(|(key, _)| key != "title");
             fields.push(("title".into(), json::s(self.terminal.title())));
         }
-        write_private(&self.location.claim_path, saved.to_json().as_bytes())?;
-        write_private(
-            &self.location.metadata_path,
-            self.status().to_json().as_bytes(),
-        )
+        write_private(&self.location.claim_path, saved.to_json().as_bytes())
     }
     fn replies(&mut self, bytes: Vec<u8>) -> Result<(), String> {
         if self.input.len().saturating_add(bytes.len()) > MAX_INPUT {

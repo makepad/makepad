@@ -68,18 +68,10 @@ pub(crate) fn run(
                     continue;
                 }
                 let started = Instant::now();
-                match engine.transcribe(&samples, &config) {
-                    Ok(transcript) => {
-                        // A cancel that landed mid-recognition means this
-                        // result belongs to a turn nobody wants any more.
-                        if mine == generation.load(Ordering::Relaxed) {
-                            send(SttEvent::Final {
-                                utterance,
-                                transcript,
-                                secs: started.elapsed().as_secs_f64(),
-                            });
-                        }
-                    }
+                let cancelled = || mine != generation.load(Ordering::Relaxed);
+                match engine.transcribe(&samples, &config, &cancelled) {
+                    _ if cancelled() => {}
+                    Ok(transcript) => send(SttEvent::Final { utterance, transcript, secs: started.elapsed().as_secs_f64() }),
                     Err(message) => send(SttEvent::Error { utterance: Some(utterance), message }),
                 }
             }
@@ -108,7 +100,7 @@ pub(crate) fn run(
                     last_partial.clear();
                 } else if config.partial_results && stream.partial_due() {
                     let window = stream.partial_window();
-                    if let Ok(transcript) = engine.transcribe(window, &config) {
+                    if let Ok(transcript) = engine.transcribe(window, &config, &|| mine != generation.load(Ordering::Relaxed)) {
                         stream.mark_partial();
                         let text = transcript.text();
                         if mine == generation.load(Ordering::Relaxed) && text != last_partial && !text.is_empty() {
@@ -161,12 +153,10 @@ fn finish_utterance(
         return;
     }
     let started = Instant::now();
-    match engine.transcribe(&samples, config) {
-        Ok(transcript) => {
-            if mine == generation.load(Ordering::Relaxed) {
-                send(SttEvent::Final { utterance, transcript, secs: started.elapsed().as_secs_f64() });
-            }
-        }
+    let cancelled = || mine != generation.load(Ordering::Relaxed);
+    match engine.transcribe(&samples, config, &cancelled) {
+        _ if cancelled() => {}
+        Ok(transcript) => send(SttEvent::Final { utterance, transcript, secs: started.elapsed().as_secs_f64() }),
         Err(message) => send(SttEvent::Error { utterance: Some(utterance), message }),
     }
 }
@@ -251,7 +241,7 @@ struct Listening {
 
 trait Engine {
     fn info(&self) -> SttEngineInfo;
-    fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig) -> Result<Transcript, String>;
+    fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig, cancelled: &dyn Fn() -> bool) -> Result<Transcript, String>;
     fn listen(&mut self, config: &SttConfig) -> Result<Listening, String>;
 }
 
@@ -335,7 +325,7 @@ impl Engine for SystemStt {
         }
     }
 
-    fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig) -> Result<Transcript, String> {
+    fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig, _cancelled: &dyn Fn() -> bool) -> Result<Transcript, String> {
         sys::stt::transcribe(samples_16k, &stt_options(config)).map_err(|e| e.to_string())
     }
 
@@ -362,8 +352,8 @@ impl Engine for RemoteStt {
         }
     }
 
-    fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig) -> Result<Transcript, String> {
-        self.pipe.transcribe(samples_16k, &config.language, &config.prompt, config.timestamps)
+    fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig, cancelled: &dyn Fn() -> bool) -> Result<Transcript, String> {
+        self.pipe.transcribe(samples_16k, &config.language, &config.prompt, cancelled)
     }
 
     fn listen(&mut self, _config: &SttConfig) -> Result<Listening, String> {
@@ -404,7 +394,7 @@ mod whisper {
             }
         }
 
-        fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig) -> Result<Transcript, String> {
+        fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig, _cancelled: &dyn Fn() -> bool) -> Result<Transcript, String> {
             // The encoder's cost scales with its audio context: on a phone
             // encode the utterance plus a second of margin, not 30 s of
             // padding (a 4 s turn: ~1.8 s instead of ~8.8 s on the Pixel).

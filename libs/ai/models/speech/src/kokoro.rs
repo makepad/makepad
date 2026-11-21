@@ -44,7 +44,7 @@ pub mod weights;
 pub(crate) mod vulkan;
 
 use crate::g2p;
-use crate::tts::{SpeechAudio, TtsError};
+use crate::tts::{SpeechAudio, SynthTimes, TtsError};
 
 use bert::Bert;
 use decoder::Decoder;
@@ -219,6 +219,8 @@ impl KokoroSpeaker {
         on_chunk: &mut dyn FnMut(usize, usize) -> bool,
         on_audio: &mut dyn FnMut(&[f32]),
     ) -> Result<SpeechAudio, TtsError> {
+        let started = std::time::Instant::now();
+        let mut times = SynthTimes::default();
         let speed = if speed.is_finite() && speed > 0.0 {
             speed.clamp(0.25, 4.0)
         } else {
@@ -240,8 +242,12 @@ impl KokoroSpeaker {
             }
             let offset = samples.len() as f64 / SAMPLE_RATE as f64;
             let before = samples.len();
-            if let Some(spoken) = self.synthesize_chunk(&text[*start..*end], speed, &mut samples) {
+            if let Some(spoken) = self.synthesize_chunk(&text[*start..*end], speed, &mut samples, &mut times) {
                 let rendered = samples.len() - before;
+                if rendered > 0 && times.pieces == 0 {
+                    times.first_audio = started.elapsed();
+                }
+                times.pieces += usize::from(rendered > 0);
                 let frames: usize = spoken.frames.iter().sum();
                 if frames > 0 && rendered > 0 {
                     // The decoder renders a fixed number of samples per
@@ -295,18 +301,22 @@ impl KokoroSpeaker {
         }
         let timings = finished.then(|| clock.finish(text));
         let phones = finished.then_some(phones);
+        times.total = started.elapsed();
         Ok(SpeechAudio {
             samples,
             sample_rate: SAMPLE_RATE,
             timings,
             phones,
+            times,
         })
     }
 
     /// Renders one chunk onto `samples`; returns what the timings need:
     /// per token, its predicted frames and the word it sounds.
-    fn synthesize_chunk(&self, text: &str, speed: f32, samples: &mut Vec<f32>) -> Option<SpokenChunk> {
+    fn synthesize_chunk(&self, text: &str, speed: f32, samples: &mut Vec<f32>, times: &mut SynthTimes) -> Option<SpokenChunk> {
+        let g2p_started = std::time::Instant::now();
         let (tokens, sources) = g2p::tokens_with_sources_for(text, self.frontend);
+        times.text += g2p_started.elapsed();
         // Two zero pads plus at least one phoneme.
         if tokens.len() < 3 {
             return None;
@@ -346,6 +356,7 @@ impl KokoroSpeaker {
         let prosody = self.predictor.prosody(&en, predictor_style);
         let t5 = std::time::Instant::now();
         let waveform = self.decoder.waveform(&asr, &prosody.f0, &prosody.noise, decoder_style);
+        times.model += t0.elapsed();
         if profile {
             let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
             eprintln!(

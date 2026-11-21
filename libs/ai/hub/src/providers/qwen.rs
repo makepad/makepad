@@ -153,22 +153,23 @@ fn bounded_reason(reason: &str) -> String {
     out
 }
 
-// Eight admission rounds, including rounds with no eligible node. At most
-// one POST per round; backoff is cooperative and capped, never a sleep here.
-const MAX_ADMISSION_ATTEMPTS: u8 = 8;
-const ADMISSION_BUDGET: Duration = Duration::from_secs(90);
+#[derive(Default)]
+struct ProbeNotes {
+    reasons: Vec<String>,
+    waiting: bool,
+}
 
 struct PendingSubmission {
     base: String,
     model: String,
     body: Value,
     inferred_open_think: bool,
-    attempts: u8,
+    delay: Duration,
     retry_at: Instant,
-    deadline: Instant,
-    reasons: Vec<String>,
+    last_refusal: String,
     note: Option<String>,
-    interrupted_bases: Vec<String>,
+    excluded_bases: HashSet<String>,
+    interrupted_bases: HashSet<String>,
 }
 
 /// Model ids preferred in order when several chat models are available.
@@ -615,7 +616,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 crate::discovery::wanted_fleet()
             ));
         }
-        let mut reasons = Vec::new();
+        let mut notes = ProbeNotes::default();
         self.wanted_listed.clear();
         let mut order = self.bases.clone();
         if let Some(last) = self.picks.last_base() {
@@ -652,10 +653,10 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         let mut fallback = PickLadder::default();
         for base in group {
             if self.picks.is_dead(&base) {
-                reasons.push(format!("{base}: skipped (recently unreachable)"));
+                notes.reasons.push(format!("{base}: skipped (recently unreachable)"));
                 continue;
             }
-            if let Some(hit) = self.probe_one(&base, &mut reasons, self.preferred_model.clone().as_deref()) {
+            if let Some(hit) = self.probe_one(&base, &mut notes, self.preferred_model.clone().as_deref()) {
                 if let Some((model, text_fallback)) = hit.preferred {
                     let pick = (base.clone(), model, text_fallback);
                     if hit.tier == HomeTier::FreeLane {
@@ -691,7 +692,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         }
         if let Some(wanted) = &self.preferred_model {
             if self.wanted_listed.is_empty() {
-                let unreachable = reasons.iter().filter(|r| r.contains("probe failed") || r.contains("recently unreachable")).count();
+                let unreachable = notes.reasons.iter().filter(|r| r.contains("probe failed") || r.contains("recently unreachable")).count();
                 let heard = self.bases.len();
                 let hubs = if heard == 1 { "hub" } else { "hubs" };
                 return Err(if unreachable > 0 {
@@ -701,12 +702,12 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 });
             }
             let listed = &self.wanted_listed;
-            reasons.retain(|r| listed.iter().any(|base| r.starts_with(&format!("{base}:"))));
+            notes.reasons.retain(|r| listed.iter().any(|base| r.starts_with(&format!("{base}:"))));
         }
-        Err(if reasons.is_empty() {
+        Err(if notes.reasons.is_empty() {
             "no fleet node advertises a chat or Qwen text model".to_string()
         } else {
-            reasons.join("; ")
+            notes.reasons.join("; ")
         })
     }
 
@@ -723,7 +724,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
 
     /// The third element of a hit places this box on the scan's ladder
     /// (see `probe`).
-    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>, wanted: Option<&str>) -> Option<NodePicks> {
+    fn probe_one(&mut self, base: &str, notes: &mut ProbeNotes, wanted: Option<&str>) -> Option<NodePicks> {
+        let reasons = &mut notes.reasons;
         if self.cancelled() { return None; }
         if !crate::fleet::role_allows(base, "chat") {
             reasons.push(format!("{base}: role excludes chat"));
@@ -813,6 +815,9 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                     .get("unavailable_reason")
                     .and_then(Value::as_str)
                     .unwrap_or("unavailable");
+                if wanted == Some(id) && crate::error::AssetAiError::paused_model(why) {
+                    notes.waiting = true;
+                }
                 reasons.push(format!("{base}: {id} {}", bounded_reason(why)));
                 continue;
             }
@@ -859,28 +864,20 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         })
     }
 
-    fn admission_error(&self, pending: &PendingSubmission) -> String {
-        format!("{} admission failed after {} rounds: {}", pending.model,
-            pending.attempts, pending.reasons.join("; "))
-    }
-
-    fn wait_submission(&mut self, mut pending: PendingSubmission, reason: String) -> Result<(), String> {
+    fn wait_submission(&mut self, mut pending: PendingSubmission, reason: String) {
         let reason = bounded_reason(&reason);
-        if !pending.reasons.contains(&reason) { pending.reasons.push(reason.clone()); }
-        let now = self.transport.now();
-        if pending.attempts >= MAX_ADMISSION_ATTEMPTS || now >= pending.deadline {
-            return Err(self.admission_error(&pending));
+        if pending.delay.is_zero() {
+            pending.delay = Duration::from_millis(500);
+        } else {
+            pending.delay = (pending.delay * 2).min(Duration::from_secs(8));
         }
-        let backoff_ms = (500u64 << pending.attempts.saturating_sub(1)).min(8_000);
-        // Stable per-turn jitter separates concurrent queues without changing
-        // the request's sample seed or creating another source of identity.
-        let jitter_ms = pending.body.get("seed").and_then(Value::as_u64).unwrap_or(0) % 251;
-        pending.retry_at = now + Duration::from_millis(backoff_ms + jitter_ms);
-        pending.note = Some(format!("waiting for {} admission (round {}/{}; retry in {:.1}s): {}",
-            pending.model, pending.attempts, MAX_ADMISSION_ATTEMPTS,
-            (backoff_ms + jitter_ms) as f64 / 1000.0, reason));
+        let jitter = pending.body.get("seed").and_then(Value::as_u64).unwrap_or(0) % 251;
+        let delay = pending.delay + Duration::from_millis(jitter);
+        pending.retry_at = self.transport.now() + delay;
+        pending.note = Some(format!("waiting for {} admission (retry in {:.1}s): {reason}",
+            pending.model, delay.as_secs_f64()));
+        pending.last_refusal = reason;
         self.pending = Some(pending);
-        Ok(())
     }
 
     fn submit(&mut self, mut pending: PendingSubmission) -> Result<(), String> {
@@ -890,20 +887,29 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             self.cancel();
             return Ok(());
         }
-        if self.transport.now() >= pending.deadline {
-            return Err(self.admission_error(&pending));
-        }
-        pending.attempts += 1;
         let url = format!("{}/generate", pending.base);
         let resp = match self.transport.post_json_detailed(&url, &pending.body) {
             Ok(value) => value,
             Err(error) => {
-                let retry = matches!(error, FleetError::Connection(_)
-                    | FleetError::Http { status: 409 | 429 | 503, no_job: true, .. });
-                if matches!(error, FleetError::Connection(_)) { self.mark_dead(&pending.base); }
+                match &error {
+                    FleetError::Http { status: 409 | 429 | 503, reason, no_job: true }
+                        if crate::error::AssetAiError::admission_refusal(reason).is_some() => {}
+                    // A model disabled at this peer can still run at another peer.
+                    FleetError::Http { status: 503, reason, no_job: true }
+                        if reason.starts_with("model ") && reason.contains(" is unavailable:") => {
+                            pending.excluded_bases.insert(pending.base.clone());
+                        }
+                    FleetError::Connection(_) => {
+                        self.mark_dead(&pending.base);
+                    }
+                    _ => return Err(format!("{}: {error}", pending.base)),
+                }
                 let reason = format!("{}: {error}", pending.base);
-                if retry { return self.wait_submission(pending, reason); }
-                return Err(reason);
+                if pending.delay.is_zero() {
+                    eprintln!("waiting for {} admission: {}", pending.model, bounded_reason(&reason));
+                }
+                self.wait_submission(pending, reason);
+                return Ok(());
             }
         };
         let job = resp.get("job_id").and_then(Value::as_str).filter(|s| !s.is_empty())
@@ -923,6 +929,34 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         Ok(())
     }
 
+    fn pick_submission_base(
+        &mut self,
+        bases: Vec<String>,
+        pending: &PendingSubmission,
+        notes: &mut ProbeNotes,
+    ) -> Option<(String, String, bool)> {
+        let mut ladder = PickLadder::default();
+        for base in bases {
+            if self.cancelled() {
+                return None;
+            }
+            if let Some(hit) = self.probe_one(&base, notes, Some(&pending.model)) {
+                if let Some((model, text_fallback)) = hit.preferred {
+                    let domain = if text_fallback { "text" } else { "chat" };
+                    if pending.body.get("domain").and_then(Value::as_str) == Some(domain) {
+                        ladder.offer((base, model, text_fallback), hit.tier);
+                        if hit.tier == HomeTier::FreeLane { break; }
+                    } else {
+                        notes.reasons.push(format!("{base}: {} has incompatible domain {domain}", pending.model));
+                    }
+                } else {
+                    notes.reasons.push(format!("{base}: {} is not eligible", pending.model));
+                }
+            }
+        }
+        ladder.best()
+    }
+
     fn poll_submission(&mut self) -> Vec<ProviderEvent> {
         let mut pending = self.pending.take().expect("pending submission");
         if let Some(note) = pending.note.take() {
@@ -930,10 +964,6 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             return vec![ProviderEvent::Status { note, permille: 0 }];
         }
         let now = self.transport.now();
-        if now >= pending.deadline {
-            self.wire.clear();
-            return vec![ProviderEvent::Error(self.admission_error(&pending))];
-        }
         if now < pending.retry_at {
             self.pending = Some(pending);
             return Vec::new();
@@ -944,44 +974,31 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         let mut order = self.bases.clone();
         order.retain(|b| b != &pending.base);
         order.push(pending.base.clone());
-        order.retain(|base| !pending.interrupted_bases.contains(base));
-        let mut ladder = PickLadder::default();
-        let mut reasons = Vec::new();
-        for base in order {
-            if self.transport.now() >= pending.deadline {
-                self.wire.clear();
-                return vec![ProviderEvent::Error(self.admission_error(&pending))];
-            }
-            if self.cancelled() {
-                self.cancel();
-                return Vec::new();
-            }
-            if let Some(hit) = self.probe_one(&base, &mut reasons, Some(&pending.model)) {
-                if let Some((model, text_fallback)) = hit.preferred {
-                    let domain = if text_fallback { "text" } else { "chat" };
-                    if pending.body.get("domain").and_then(Value::as_str) == Some(domain) {
-                        ladder.offer((base, model, text_fallback), hit.tier);
-                        if hit.tier == HomeTier::FreeLane { break; }
-                    } else {
-                        reasons.push(format!("{base}: {} has incompatible domain {domain}", pending.model));
-                    }
-                } else {
-                    reasons.push(format!("{base}: {} is not eligible", pending.model));
-                }
-            }
-        }
+        let (untried, interrupted) = order.into_iter()
+            .filter(|base| !pending.excluded_bases.contains(base))
+            .partition(|base| !pending.interrupted_bases.contains(base));
+        let mut notes = ProbeNotes::default();
+        let pick = self.pick_submission_base(untried, &pending, &mut notes).or_else(|| {
+            // The backoff has elapsed. An owner who interrupted us may be idle again.
+            pending.interrupted_bases.clear();
+            self.pick_submission_base(interrupted, &pending, &mut notes)
+        });
         if self.cancelled() {
             self.cancel();
             return Vec::new();
         }
-        let result = if let Some((base, model, text_fallback)) = ladder.best() {
+        let result = if let Some((base, model, text_fallback)) = pick {
             self.picks.remember(base.clone(), model, text_fallback);
             pending.base = base;
             self.submit(pending)
         } else {
-            pending.attempts += 1;
-            if reasons.is_empty() { reasons.push(format!("no eligible node for {}", pending.model)); }
-            self.wait_submission(pending, reasons.join("; "))
+            let reason = notes.reasons.join("; ");
+            if notes.waiting {
+                self.wait_submission(pending, reason);
+                Ok(())
+            } else {
+                Err(format!("{}; no eligible peer for {}: {reason}", pending.last_refusal, pending.model))
+            }
         };
         match result {
             Err(error) => {
@@ -1210,23 +1227,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let last_index = input.messages.len().saturating_sub(1);
         for (index, m) in input.messages.iter().enumerate().skip(start) {
             let (wire_role, text) = match m.role {
-                ChatRole::Assistant => {
-                    ("assistant", format!("\n</think>\n\n{}", m.text))
+                ChatRole::User if index == last_index && !input.dynamic_context.is_empty() => {
+                    (m.role.slug(), format!("{}\n\n{}", input.dynamic_context, m.text))
                 }
-                ChatRole::Tool => {
-                    ("user", format!("<tool_response>\n{}\n</tool_response>", m.text))
-                }
-                _ => {
-                    let text = if index == last_index
-                        && m.role == ChatRole::User
-                        && !input.dynamic_context.is_empty()
-                    {
-                        format!("{}\n\n{}", input.dynamic_context, m.text)
-                    } else {
-                        m.text.clone()
-                    };
-                    (m.role.slug(), text)
-                }
+                role => crate::local_llm::wire_turn(role, &m.text),
             };
             self.wire.push(WireTurn { role: m.role, wire_role, text });
         }
@@ -1288,8 +1292,8 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let now = self.transport.now();
         let pending = PendingSubmission {
             base, model, body, inferred_open_think,
-            attempts: 0, retry_at: now, deadline: now + ADMISSION_BUDGET,
-            reasons: Vec::new(), note: None, interrupted_bases: Vec::new(),
+            delay: Duration::ZERO, retry_at: now, last_refusal: String::new(),
+            note: None, excluded_bases: HashSet::new(), interrupted_bases: HashSet::new(),
         };
         let result = self.submit(pending);
         if result.is_err() { self.wire.clear(); }
@@ -1335,20 +1339,14 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             let reason = status.get("error").and_then(Value::as_str)
                 .filter(|reason| !reason.trim().is_empty()).unwrap_or("fleet job cancelled");
             let active = self.active.take().unwrap();
-            if reason.starts_with("local-use:") && active.delivered == 0 {
-                let mut pending = active.submission;
-                pending.interrupted_bases.push(active.base.clone());
-                if pending.interrupted_bases.len() < 3 {
-                    // Loading/generation time does not consume the admission
-                    // wait budget, but total attempts and failed nodes remain
-                    // bounded across the entire logical turn.
-                    pending.deadline = self.transport.now() + ADMISSION_BUDGET;
-                    let note = format!("{} interrupted: {}; choosing another worker",
-                        active.base, bounded_reason(reason));
-                    return match self.wait_submission(pending, note) {
-                        Ok(()) => self.poll_submission(),
-                        Err(error) => { self.wire.clear(); vec![ProviderEvent::Error(error)] }
-                    };
+            if reason.starts_with("local-use:") {
+                let note = format!("{} interrupted: {}", active.base, bounded_reason(reason));
+                eprintln!("[fleet-qwen] {note}");
+                if active.delivered == 0 {
+                    let mut pending = active.submission;
+                    pending.interrupted_bases.insert(active.base);
+                    self.wait_submission(pending, note);
+                    return self.poll_submission();
                 }
             }
             self.wire.clear();
@@ -1488,10 +1486,6 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 let msg =
                     status.get("error").and_then(Value::as_str).unwrap_or("fleet job failed");
                 events.push(ProviderEvent::Error(msg.to_string()));
-                self.active = None;
-            }
-            Some("cancelled") => {
-                events.push(ProviderEvent::Error("fleet job cancelled".to_string()));
                 self.active = None;
             }
             _ => {}

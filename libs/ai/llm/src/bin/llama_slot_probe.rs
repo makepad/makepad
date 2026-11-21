@@ -388,7 +388,7 @@ fn run_shipping(
 
     let session = build_session(model, slots, per_slot_context)?;
     let table = session.new_slot_table().map_err(|e| e.to_string())?;
-    let scheduler = LaneScheduler::new(table, 8);
+    let scheduler = LaneScheduler::new(table);
     let params = LlamaSamplingParams {
         temperature: 0.0,
         ..LlamaSamplingParams::default()
@@ -411,16 +411,15 @@ fn run_shipping(
     };
     let submit = |exec: &mut LaneExecutor, job: u64, text: &str| -> Result<(), String> {
         let prompt = vocab.tokenize(text, true, true).map_err(|e| e.to_string())?;
-        exec.scheduler()
-            .submit(LaneRequest {
-                job,
-                session: format!("gate-session-{job}"),
-                prompt_tokens: prompt,
-                reset_first: true,
-                max_new: BUDGET,
-                sampling: params,
-            })
-            .map_err(|r| format!("submit refused job {}", r.job))
+        exec.scheduler().submit(LaneRequest {
+            job,
+            session: format!("gate-session-{job}"),
+            prompt_tokens: prompt,
+            reset_first: true,
+            max_new: BUDGET,
+            sampling: params,
+        });
+        Ok(())
     };
     // A prefill consumes a step, so each lane needs one extra to get going.
     let pump = |exec: &mut LaneExecutor,
@@ -965,18 +964,16 @@ fn solo_speed_floor(
     // --- 2. through the shipping executor, one job on one lane ---
     let session = build_session(model, slots, per_slot_context)?;
     let table = session.new_slot_table().map_err(|e| e.to_string())?;
-    let scheduler = LaneScheduler::new(table, 8);
+    let scheduler = LaneScheduler::new(table);
     let mut exec = LaneExecutor::new(session, scheduler, params);
-    exec.scheduler()
-        .submit(LaneRequest {
-            job: 1,
-            session: "solo-floor".to_string(),
-            prompt_tokens: prompt.clone(),
-            reset_first: true,
-            max_new: tokens,
-            sampling: params,
-        })
-        .map_err(|r| format!("submit refused job {}", r.job))?;
+    exec.scheduler().submit(LaneRequest {
+        job: 1,
+        session: "solo-floor".to_string(),
+        prompt_tokens: prompt.clone(),
+        reset_first: true,
+        max_new: tokens,
+        sampling: params,
+    });
 
     // The prefill is its own step and is NOT decode time. Timing it would
     // report a prompt-length-dependent number and call it a decode rate.

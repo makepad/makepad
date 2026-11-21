@@ -567,7 +567,7 @@ fn owner_process_is_gone(owner: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn process_exists(pid: u32) -> bool {
+pub(crate) fn process_exists(pid: u32) -> bool {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -582,7 +582,7 @@ fn process_exists(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn process_exists(pid: u32) -> bool {
+pub(crate) fn process_exists(pid: u32) -> bool {
     use makepad_windows_sys::Win32::{
         Foundation::{CloseHandle, E_INVALIDARG, STILL_ACTIVE},
         System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
@@ -613,7 +613,7 @@ fn process_exists(pid: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_exists(_pid: u32) -> bool {
+pub(crate) fn process_exists(_pid: u32) -> bool {
     // No other processes exist here (wasm).
     true
 }

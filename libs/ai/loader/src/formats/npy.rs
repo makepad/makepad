@@ -18,6 +18,8 @@ fn bad(message: impl Into<String>) -> String {
 
 impl Npy {
     pub fn load(path: &str) -> Result<Self, String> {
+        let size = std::fs::metadata(path).map_err(|err| bad(format!("{path}: {err}")))?.len();
+        crate::host_floor::check(size, path)?;
         let bytes = std::fs::read(path).map_err(|err| bad(format!("{path}: {err}")))?;
         if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
             return Err(bad(format!("{path}: not a .npy")));

@@ -38,6 +38,9 @@ pub struct AceTextEncoder {
     final_norm: Vec<f32>,
     rope_cos: Vec<f32>,
     rope_sin: Vec<f32>,
+    /// The layers' matrices went to the device copy ([`Self::prepare_device`]): only
+    /// [`Self::encode_device`] encodes.
+    device_only: bool,
 }
 
 impl AceTextEncoder {
@@ -117,6 +120,7 @@ impl AceTextEncoder {
             final_norm,
             rope_cos,
             rope_sin,
+            device_only: false,
         })
     }
 
@@ -145,6 +149,9 @@ impl AceTextEncoder {
         ids: &[u32],
         mut progress: Option<ProgressHook>,
     ) -> Result<Vec<f32>> {
+        if self.device_only {
+            return Err(DiffusionError::model("ace text encoder: its matrices are on the device; encode there".to_string()));
+        }
         let h = ACE_TE_HIDDEN;
         let seq = ids.len().min(ACE_MAX_TEXT_TOKENS);
         if seq == 0 {
@@ -234,6 +241,12 @@ fn te_f32_to_bf16_word(v: f32) -> u16 {
 }
 
 impl TeBf16Weight {
+    /// The bf16 copy of host matrix `w`, which it replaces (the f32 is freed here).
+    fn take(key: impl Into<String>, w: &mut Vec<f32>, n: usize, k: usize) -> Self {
+        let w = std::mem::take(w);
+        Self::new(key, &w, n, k)
+    }
+
     fn new(key: impl Into<String>, w: &[f32], n: usize, k: usize) -> Self {
         debug_assert_eq!(w.len(), n * k);
         let mut bytes = Vec::with_capacity(w.len() * 2);
@@ -275,22 +288,27 @@ pub struct AceTeDevice {
 }
 
 impl AceTextEncoder {
-    pub fn prepare_device(&self) -> AceTeDevice {
+    /// The device copy of the layers' matrices, which move there: their f32 host copies are freed
+    /// one by one as they are converted, and from then on only [`Self::encode_device`] encodes.
+    /// Called once.
+    pub fn prepare_device(&mut self) -> AceTeDevice {
+        debug_assert!(!self.device_only, "the text encoder's matrices went to the device already");
+        self.device_only = true;
         let h = ACE_TE_HIDDEN;
         let q = ACE_TE_Q_HEADS * ACE_TE_HEAD_DIM;
         let kv = ACE_TE_KV_HEADS * ACE_TE_HEAD_DIM;
         let layers = self
             .layers
-            .iter()
+            .iter_mut()
             .enumerate()
             .map(|(i, layer)| TeDeviceLayer {
-                q: TeBf16Weight::new(format!("acete.{i}.q"), &layer.q_proj, q, h),
-                k: TeBf16Weight::new(format!("acete.{i}.k"), &layer.k_proj, kv, h),
-                v: TeBf16Weight::new(format!("acete.{i}.v"), &layer.v_proj, kv, h),
-                o: TeBf16Weight::new(format!("acete.{i}.o"), &layer.o_proj, h, q),
-                gate: TeBf16Weight::new(format!("acete.{i}.gate"), &layer.gate, ACE_TE_FFN, h),
-                up: TeBf16Weight::new(format!("acete.{i}.up"), &layer.up, ACE_TE_FFN, h),
-                down: TeBf16Weight::new(format!("acete.{i}.dn"), &layer.down, h, ACE_TE_FFN),
+                q: TeBf16Weight::take(format!("acete.{i}.q"), &mut layer.q_proj, q, h),
+                k: TeBf16Weight::take(format!("acete.{i}.k"), &mut layer.k_proj, kv, h),
+                v: TeBf16Weight::take(format!("acete.{i}.v"), &mut layer.v_proj, kv, h),
+                o: TeBf16Weight::take(format!("acete.{i}.o"), &mut layer.o_proj, h, q),
+                gate: TeBf16Weight::take(format!("acete.{i}.gate"), &mut layer.gate, ACE_TE_FFN, h),
+                up: TeBf16Weight::take(format!("acete.{i}.up"), &mut layer.up, ACE_TE_FFN, h),
+                down: TeBf16Weight::take(format!("acete.{i}.dn"), &mut layer.down, h, ACE_TE_FFN),
             })
             .collect();
         AceTeDevice {

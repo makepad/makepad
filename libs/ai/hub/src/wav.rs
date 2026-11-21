@@ -4,6 +4,10 @@
 /// Encodes mono f32 samples (nominal range -1..=1, clamped) as a 16-bit PCM
 /// WAV file.
 pub fn encode_wav_pcm16_mono(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    encode_pcm16(samples.iter().map(|sample| crate::resample::quantize_i16(*sample)), sample_rate)
+}
+
+pub(crate) fn encode_pcm16(samples: impl ExactSizeIterator<Item = i16>, sample_rate: u32) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + data_len as usize);
 
@@ -29,9 +33,8 @@ pub fn encode_wav_pcm16_mono(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     // data chunk.
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
-    for &sample in samples {
-        let value = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-        out.extend_from_slice(&value.to_le_bytes());
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
     }
     out
 }

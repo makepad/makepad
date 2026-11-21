@@ -18,7 +18,9 @@ use crate::engine::ToolDefinition;
 use makepad_platform::thread::SignalToUI;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 /// Instances one host will register at once.
 pub const MAX_INSTANCES: usize = 32;
@@ -50,6 +52,8 @@ struct Inner {
     /// Up-frames for the conversation (the core's calls, publications) drained by a remote
     /// caller's pump, kept for the core's next [`ServiceRegistry::pump`].
     queued: Vec<RegistryUp>,
+    /// Registrations promised and not made yet ([`ServiceRegistry::expect`]).
+    expecting: usize,
 }
 
 /// One frame from a service, as the core receives it.
@@ -63,6 +67,8 @@ pub enum RegistryUp {
 #[derive(Clone, Default)]
 pub struct ServiceRegistry {
     inner: Arc<Mutex<Inner>>,
+    /// Wakes the callers waiting for promised registrations ([`ServiceRegistry::wait_expected`]).
+    expected: Arc<Condvar>,
 }
 
 impl ServiceRegistry {
@@ -317,6 +323,34 @@ impl ServiceRegistry {
     pub fn instances_of(&self, app_id: &str) -> Vec<EndpointId> {
         let inner = self.inner.lock().unwrap();
         inner.order.iter().filter(|e| inner.entries[*e].manifest.id == app_id).cloned().collect()
+    }
+
+    /// This process will register services soon (a window registers its product's once its
+    /// first frame is on screen): until the matching [`Self::expected`], a caller that finds no
+    /// instance of a service waits for them ([`Self::wait_expected`]) instead of being told none
+    /// runs. Each `expect` takes one `expected`.
+    pub fn expect(&self) {
+        self.inner.lock().unwrap().expecting += 1;
+    }
+
+    /// What one [`Self::expect`] promised is registered (or will not be): the waiting callers
+    /// look again.
+    pub fn expected(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.expecting = inner.expecting.saturating_sub(1);
+        drop(inner);
+        self.expected.notify_all();
+    }
+
+    /// Waits while registrations are promised, until they are made or `cancelled` is set.
+    /// Blocks the calling thread: a caller's own thread (the `app` service answers each request
+    /// on one), never the UI's. The wake-ups to read `cancelled` cost nothing while nothing is
+    /// promised, which is the usual case: then it returns at once.
+    pub fn wait_expected(&self, cancelled: &AtomicBool) {
+        let mut inner = self.inner.lock().unwrap();
+        while inner.expecting > 0 && !cancelled.load(Ordering::Relaxed) {
+            inner = self.expected.wait_timeout(inner, Duration::from_millis(250)).unwrap().0;
+        }
     }
 
     /// The endpoint the model most likely means for an app: the one it
@@ -723,7 +757,7 @@ mod tests {
         let e = reg.register(link, "", None).unwrap();
         reg.pump();
         port.test_drain();
-        assert!(reg.send(&e, ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into(), caller: None })));
+        assert!(reg.send(&e, ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation })));
         let ev = port.test_drain();
         assert!(matches!(&ev[0], crate::port::PortEvent::Call(c) if c.call_id == "c1"));
         port.set_context("cwd=~");

@@ -21,6 +21,11 @@
 
 pub use makepad_widgets;
 
+/// Large blocks (a solve's matrices and node vectors) straight from the OS on macOS, so that a
+/// freed one leaves the process (`makepad_large_alloc`).
+#[global_allocator]
+static ALLOC: makepad_large_alloc::LargeDirect<std::alloc::System> = makepad_large_alloc::LargeDirect(std::alloc::System);
+
 mod login;
 mod serve;
 mod settings;

@@ -317,6 +317,9 @@ pub fn private_directory(path: &Path, create: bool) -> Result<(), String> {
     validate_acl(path).map_err(error)
 }
 pub fn create_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    create_file(path, bytes, true)
+}
+fn create_file(path: &Path, bytes: &[u8], durable: bool) -> Result<(), String> {
     let identity = Identity::current().map_err(error)?;
     let descriptor = identity.descriptor().map_err(error)?;
     let attributes = SecurityAttributes {
@@ -340,7 +343,7 @@ pub fn create_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     let mut file = unsafe { File::from_raw_handle(raw) };
     file.write_all(bytes)
-        .and_then(|_| file.sync_all())
+        .and_then(|_| if durable { file.sync_all() } else { Ok(()) })
         .map_err(error)
 }
 pub fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
@@ -366,7 +369,16 @@ pub fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+/// Replaces `path` whole, written through to disk: a session's identity.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    put_private(path, bytes, true)
+}
+/// Replaces `path` whole, not written through: what a running session says of itself, from its
+/// I/O loop (the unix `replace_private`).
+pub fn replace_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    put_private(path, bytes, false)
+}
+fn put_private(path: &Path, bytes: &[u8], durable: bool) -> Result<(), String> {
     if bytes.len() > 16384 {
         return Err("Screen metadata exceeds16KiB".into());
     }
@@ -375,12 +387,12 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     let parent = path.parent().ok_or("Missing screen metadata parent")?;
     let temp = parent.join(format!(".screen-{}.tmp", random_token()?));
-    create_private(&temp, bytes)?;
+    create_file(&temp, bytes, durable)?;
     let result = unsafe {
         MoveFileExW(
             wide(temp.as_os_str()).as_ptr(),
             wide(path.as_os_str()).as_ptr(),
-            1 | 8,
+            if durable { 1 | 8 } else { 1 },
         )
     };
     if result == 0 {

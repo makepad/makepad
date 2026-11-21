@@ -109,7 +109,7 @@ fn run_lanes(
     session.reset().map_err(|e| format!("reset: {e}"))?;
     let table = session.new_slot_table().map_err(|e| e.to_string())?;
     let prefill_chunk = session.config().prefill_batch_size;
-    let scheduler = LaneScheduler::new(table, 8).with_prefill_chunk(prefill_chunk);
+    let scheduler = LaneScheduler::new(table).with_prefill_chunk(prefill_chunk);
     // Greedy, so a divergence is the scheduler's or the kernels' and never the
     // RNG's. Speculation stays on: rejection sampling at temperature 0 reduces
     // to "accept iff the draft is the argmax", which is deterministic.
@@ -124,16 +124,14 @@ fn run_lanes(
         let tokens = vocab
             .tokenize(prompt, true, true)
             .map_err(|e| e.to_string())?;
-        exec.scheduler()
-            .submit(LaneRequest {
-                job: index as u64 + 1,
-                session: format!("spec-gate-{}", index + 1),
-                prompt_tokens: tokens,
-                reset_first: true,
-                max_new: budget,
-                sampling: params,
-            })
-            .map_err(|r| format!("submit refused job {}", r.job))?;
+        exec.scheduler().submit(LaneRequest {
+            job: index as u64 + 1,
+            session: format!("spec-gate-{}", index + 1),
+            prompt_tokens: tokens,
+            reset_first: true,
+            max_new: budget,
+            sampling: params,
+        });
     }
 
     let mut run = Run {

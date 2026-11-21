@@ -94,8 +94,10 @@ untimestamped service log may not contain.
 Fleet image requests without an explicit queue policy try compatible idle
 GPUs first. The client uses `queue_policy=reject` for atomic admission, so
 simultaneous requests that observe the same idle health snapshot can move to
-different servers. A proven Busy/QueueFull refusal returns immediately; when
-all eligible servers are busy, the scheduler deliberately queues the request.
+different servers. A proven Busy refusal returns immediately; when all
+eligible servers are busy, the scheduler deliberately queues the request. A
+server's queue has no length limit: a busy server makes requests wait, and
+never refuses them for its queue's length.
 Explicit queue policies and fixed-node requests retain their requested behavior.
 
 If an accepted job remains queued behind a local-use pause for three seconds,

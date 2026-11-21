@@ -112,6 +112,9 @@ pub const MAX_META_BYTES: usize = 128;
 /// namespace, versioned with the wire — not a product string.
 pub const HOSTED_KEY: &str = "wm_ai";
 
+/// The reason returned to a call whose hosted frame could not be decoded.
+pub const HOSTED_BUILD_MISMATCH: &str = "the app and its host come from different builds, so they cannot read each other's calls: rebuild them together";
+
 /// How much a tool can break.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, SerJson, DeJson)]
 pub enum Risk {
@@ -580,6 +583,15 @@ pub struct InstanceMeta {
     pub pid: u32,
 }
 
+/// Where a call came from: the conversation's engine (the model, or the person's console
+/// line), or a request to the app from outside the conversation (`makepad-remote app <pid>
+/// call`, an MCP client), with or without a `caller` token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub enum CallOrigin {
+    Conversation,
+    Remote,
+}
+
 /// One call, as the service receives it.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct ServiceCall {
@@ -592,8 +604,10 @@ pub struct ServiceCall {
     pub args: String,
     /// A capability the remote caller presented (`makepad-remote mcp --caller-env`): an app
     /// that scopes what its callers may do (Scope's per-lane token) checks it; others ignore it.
-    /// `None` for the conversation's own calls.
+    /// `None` means no token was presented.
     pub caller: Option<String>,
+    /// Where the call originated, regardless of whether a token was presented.
+    pub origin: CallOrigin,
 }
 
 /// How a call ended.
@@ -1052,6 +1066,64 @@ struct DownEnvelope {
     wm_ai: HostedDown,
 }
 
+/// A refused hosted frame. Only a typed decode failure is a wire mismatch.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RejectedFrame {
+    pub error: String,
+    pub mismatch: bool,
+    pub endpoint: Option<String>,
+    pub call_id: Option<String>,
+}
+
+enum Direction {
+    Up,
+    Down,
+}
+
+fn parse_hosted<T>(
+    json: &str,
+    direction: Direction,
+    decode: impl FnOnce() -> Result<T, DeJsonErr>,
+    validate: impl FnOnce(&T) -> Result<(), String>,
+) -> Option<Result<T, RejectedFrame>> {
+    if !json.contains("\"wm_ai\"") {
+        return None;
+    }
+    if json.len() > MAX_FRAME_BYTES {
+        return Some(Err(RejectedFrame {
+            error: format!("hosted frame is {} bytes; the cap is {MAX_FRAME_BYTES}", json.len()),
+            mismatch: false,
+            endpoint: None,
+            call_id: None,
+        }));
+    }
+    let (error, mismatch) = match decode() {
+        Ok(frame) => match validate(&frame) {
+            Ok(()) => return Some(Ok(frame)),
+            Err(error) => (error, false),
+        },
+        Err(error) => (error.to_string(), true),
+    };
+
+    // Only the address and call id can be used from a rejected frame.
+    let root = makepad_strict_json::parse(json.as_bytes()).ok();
+    let envelope = root.as_ref().and_then(|root| root.get(HOSTED_KEY));
+    let msg = envelope.and_then(|frame| frame.get("msg"));
+    let tuple_arg = |variant: &str| msg?.get(variant)?.as_arr()?.first();
+    let (address, payload) = match direction {
+        Direction::Down => ("to", tuple_arg("Call")),
+        Direction::Up => ("from", tuple_arg("Result").or_else(|| msg?.get("Progress"))),
+    };
+    let endpoint = envelope.and_then(|frame| frame.get(address)?.as_arr()?.first()?.as_str());
+    let call_id = payload.and_then(|payload| payload.get("call_id")?.as_str());
+    Some(Err(RejectedFrame {
+        error,
+        mismatch,
+        endpoint: endpoint.map(str::to_owned),
+        call_id: call_id.map(str::to_owned),
+    }))
+}
+
 impl HostedUp {
     /// The hosted frame: `{"wm_ai": {"from": …, "msg": …}}`.
     pub fn to_json(&self) -> String {
@@ -1061,12 +1133,17 @@ impl HostedUp {
     /// `None` for frames that are not ours (the window manager's own
     /// `"wm"` envelope, anything else), over the size cap, or invalid.
     pub fn parse(json: &str) -> Option<HostedUp> {
-        if json.len() > MAX_FRAME_BYTES || !json.contains("\"wm_ai\"") {
-            return None;
-        }
-        let up = UpEnvelope::deserialize_json(json).ok()?.wm_ai;
-        up.msg.validate().ok()?;
-        Some(up)
+        Self::parse_checked(json)?.ok()
+    }
+
+    /// `None` for a foreign frame, otherwise the accepted frame or its refusal.
+    pub fn parse_checked(json: &str) -> Option<Result<HostedUp, RejectedFrame>> {
+        parse_hosted(
+            json,
+            Direction::Up,
+            || UpEnvelope::deserialize_json(json).map(|envelope| envelope.wm_ai),
+            |up| up.msg.validate(),
+        )
     }
 }
 
@@ -1076,12 +1153,17 @@ impl HostedDown {
     }
 
     pub fn parse(json: &str) -> Option<HostedDown> {
-        if json.len() > MAX_FRAME_BYTES || !json.contains("\"wm_ai\"") {
-            return None;
-        }
-        let down = DownEnvelope::deserialize_json(json).ok()?.wm_ai;
-        down.msg.validate().ok()?;
-        Some(down)
+        Self::parse_checked(json)?.ok()
+    }
+
+    /// `None` for a foreign frame, otherwise the accepted frame or its refusal.
+    pub fn parse_checked(json: &str) -> Option<Result<HostedDown, RejectedFrame>> {
+        parse_hosted(
+            json,
+            Direction::Down,
+            || DownEnvelope::deserialize_json(json).map(|envelope| envelope.wm_ai),
+            |down| down.msg.validate(),
+        )
     }
 }
 
@@ -1268,7 +1350,7 @@ mod tests {
         }
         let downs = vec![
             ServiceDown::Registered { port_tag: 1, endpoint: ep("e9") },
-            ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: r#"{"to":"Utrecht"}"#.into(), caller: None }),
+            ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: r#"{"to":"Utrecht"}"#.into(), caller: None, origin: CallOrigin::Conversation }),
             ServiceDown::Cancel { call_id: "c1".into() },
             ServiceDown::Subscribe {
                 sub_id: "s1".into(),
@@ -1291,18 +1373,31 @@ mod tests {
     fn foreign_oversized_and_invalid_frames_are_refused_before_use() {
         assert_eq!(HostedUp::parse(r#"{"wm":{"Close":{}}}"#), None);
         assert_eq!(HostedDown::parse(r#"{"wm":{"Adopted":{}}}"#), None);
+        assert!(HostedUp::parse_checked(r#"{"wm":{"Close":{}}}"#).is_none());
+        assert!(HostedDown::parse_checked(r#"{"wm":{"Adopted":{}}}"#).is_none());
         assert_eq!(HostedUp::parse("not json"), None);
         let huge = format!(
             "{{\"wm_ai\":{{\"from\":null,\"msg\":{{\"Unregister\":{{}}}}}},\"pad\":\"{}\"}}",
             "x".repeat(MAX_FRAME_BYTES)
         );
         assert_eq!(HostedUp::parse(&huge), None);
-        let call = HostedDown {
-            to: Some(ep("e1")),
-            msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: "x".repeat(MAX_ARGS_BYTES + 1), caller: None }),
+        assert!(!HostedUp::parse_checked(&huge).unwrap().unwrap_err().mismatch);
+        let call = ServiceCall {
+            call_id: "c1".into(), tool: "plan".into(), args: "{}".into(),
+            caller: None, origin: CallOrigin::Conversation,
         };
-        assert_eq!(HostedDown::parse(&call.to_json()), None, "oversized args are dropped, not truncated");
-        let bad = HostedDown { to: None, msg: ServiceDown::Call(ServiceCall { call_id: "c 1".into(), tool: "Plan".into(), args: "{}".into(), caller: None }) };
+        let down = |call| HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(call) };
+        let missing_origin = down(call.clone()).to_json().replace(r#","origin":{"Conversation":[]}"#, "");
+        let rejected = HostedDown::parse_checked(&missing_origin).unwrap().unwrap_err();
+        assert!(rejected.mismatch && rejected.error.contains("origin"), "{rejected:?}");
+        assert_eq!(rejected.endpoint.as_deref(), Some("e1"));
+        assert_eq!(rejected.call_id.as_deref(), Some("c1"));
+        let oversized = down(ServiceCall { args: "x".repeat(MAX_ARGS_BYTES + 1), ..call }).to_json();
+        assert_eq!(HostedDown::parse(&oversized), None, "oversized args are dropped, not truncated");
+        let rejected = HostedDown::parse_checked(&oversized).unwrap().unwrap_err();
+        assert!(!rejected.mismatch);
+        assert_eq!(rejected.error, arguments_too_large(MAX_ARGS_BYTES + 1));
+        let bad = HostedDown { to: None, msg: ServiceDown::Call(ServiceCall { call_id: "c 1".into(), tool: "Plan".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation }) };
         assert_eq!(HostedDown::parse(&bad.to_json()), None);
     }
 

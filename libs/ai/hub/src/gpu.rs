@@ -1,12 +1,14 @@
 //! Cheap GPU info for `/health`: Metal's advisory working set on macOS,
 //! otherwise VRAM via `nvidia-smi` when present. A short-lived cache avoids
-//! probing the device on every health request.
+//! probing the device on every health request, and its refresh runs off the
+//! request path ([`GpuCache`]).
 
 #[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 use crate::child_process;
 #[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const CACHE_TTL: Duration = Duration::from_secs(2);
@@ -68,10 +70,48 @@ pub fn query_gpu() -> GpuInfo {
     }
 }
 
-/// TTL cache around `query_gpu`.
+/// TTL cache around `query_gpu`, refreshed off the request path. A read gets the last facts at
+/// once; facts older than [`CACHE_TTL`] ask the refresher thread for new ones. A query runs
+/// `nvidia-smi` (about 100 ms, more on a busy box), and the hub's one request loop answers
+/// `/health` and `/models` (every router's probe) beside the job polls and submits: a query
+/// there held all of them up. Only the first read waits for a query.
 #[derive(Default)]
 pub struct GpuCache {
-    inner: Mutex<Option<(Instant, GpuInfo)>>,
+    slot: Arc<Slot>,
+}
+
+#[derive(Default)]
+struct Slot {
+    facts: Mutex<Option<(Instant, GpuInfo)>>,
+    /// A refresh is asked for and not done yet (at most one per cache).
+    asked: AtomicBool,
+}
+
+impl Slot {
+    fn refresh(&self) {
+        let info = query_gpu();
+        *self.facts.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), info));
+        self.asked.store(false, Ordering::Release);
+    }
+}
+
+/// The one long-lived thread that queries for every cache; `None` when it could not start (then
+/// a stale read queries in place, as before).
+fn refresher() -> Option<&'static Mutex<mpsc::Sender<Arc<Slot>>>> {
+    static REFRESHER: OnceLock<Option<Mutex<mpsc::Sender<Arc<Slot>>>>> = OnceLock::new();
+    REFRESHER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Arc<Slot>>();
+        let spawned = std::thread::Builder::new().name("ai-hub-gpu-facts".into()).spawn(move || {
+            for slot in receiver { slot.refresh(); }
+        });
+        match spawned {
+            Ok(_) => Some(Mutex::new(sender)),
+            Err(error) => {
+                eprintln!("gpu facts: no refresher thread ({error}); a stale read queries in place");
+                None
+            }
+        }
+    }).as_ref()
 }
 
 impl GpuCache {
@@ -80,14 +120,23 @@ impl GpuCache {
     }
 
     pub fn get(&self) -> GpuInfo {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some((when, info)) = guard.as_ref() {
-            if when.elapsed() < CACHE_TTL {
-                return info.clone();
+        let mut guard = self.slot.facts.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((when, info)) = guard.as_ref() else {
+            let info = query_gpu();
+            *guard = Some((Instant::now(), info.clone()));
+            return info;
+        };
+        let info = info.clone();
+        if when.elapsed() >= CACHE_TTL && !self.slot.asked.swap(true, Ordering::AcqRel) {
+            drop(guard);
+            let sent = refresher().is_some_and(|sender| {
+                sender.lock().unwrap_or_else(|e| e.into_inner()).send(self.slot.clone()).is_ok()
+            });
+            if !sent {
+                self.slot.refresh();
+                return self.slot.facts.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(info, |(_, fresh)| fresh.clone());
             }
         }
-        let info = query_gpu();
-        *guard = Some((Instant::now(), info.clone()));
         info
     }
 }

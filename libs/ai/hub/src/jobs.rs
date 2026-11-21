@@ -13,10 +13,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Default cap on jobs WAITING in the FIFO (the running job is not counted).
-/// A durable node must refuse unbounded backlog explicitly rather than accept
-/// hours of queued GPU work; override per box with `MAKEPAD_ASSET_AI_MAX_QUEUE`.
-pub const DEFAULT_QUEUE_LIMIT: usize = 32;
 /// Finished (done/error/cancelled) job records retained for late pollers.
 /// Beyond this the oldest-finished records are evicted together with their
 /// artifact files, bounding a long-lived node's memory and disk.
@@ -36,7 +32,7 @@ pub fn now_ms() -> u64 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum QueuePolicy {
-    /// Wait behind earlier jobs (default).
+    /// Wait for a worker (default).
     #[default]
     Queue,
     /// Fail with `AssetAiError::Busy` when any job is queued or running.
@@ -144,6 +140,8 @@ pub struct JobRecord {
     /// Chat serving facts (warmth, think/visible split), surfaced as
     /// `JobStatusJson.serving`. Set by the backend as the turn runs.
     pub serving: Option<crate::protocol::ServingStatusJson>,
+    /// Another hub runs this job for this hub's client ([`JobStore::insert_routed`]).
+    routed: bool,
     /// Bounded stage-transition log, oldest first (see [`LOG_CAP`]).
     log: Vec<String>,
     /// Non-numeric prefix of the last logged stage (throttling key).
@@ -183,7 +181,7 @@ pub struct EvictedJob {
     pub artifact_ids: Vec<String>,
 }
 
-/// Which admission class a job belongs to.
+/// The worker that can execute a job.
 ///
 /// The box has one GPU and two very different kinds of work on it. A heavy
 /// generation owns the device for tens of seconds; a chat turn is a handful of
@@ -195,8 +193,7 @@ pub struct EvictedJob {
 /// video generation — and it means the lane machinery underneath chat can
 /// never see more than one conversation, so the lanes do nothing at all.
 ///
-/// The class is decided by the CALLER, from the registry, because the store
-/// has no registry and should not grow one.
+/// The server selects the worker from the registry and its lane configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobClass {
     /// Served by the lane worker: many turns share one resident model.
@@ -205,11 +202,20 @@ pub enum JobClass {
     Heavy,
 }
 
+/// Dispatch order for jobs waiting for the heavy slot. Each class is FIFO.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueClass {
+    Batch,
+    Interactive,
+}
+
 pub struct JobStore {
     activity: Option<Arc<crate::activity::ActivityGate>>,
     next_id: u64,
     jobs: HashMap<String, JobRecord>,
     queue: VecDeque<String>,
+    /// The leading entries are interactive jobs for the heavy worker.
+    interactive_queued: usize,
     class: HashMap<String, JobClass>,
     /// The one heavy job that owns the device.
     running_heavy: Option<String>,
@@ -220,7 +226,6 @@ pub struct JobStore {
     chat_slots: usize,
     /// Finished job ids in finish order (retention ring).
     finished: VecDeque<String>,
-    queue_limit: usize,
 }
 
 impl Default for JobStore {
@@ -230,12 +235,12 @@ impl Default for JobStore {
             next_id: 0,
             jobs: HashMap::new(),
             queue: VecDeque::new(),
+            interactive_queued: 0,
             class: HashMap::new(),
             running_heavy: None,
             running_chat: Vec::new(),
             chat_slots: 1,
             finished: VecDeque::new(),
-            queue_limit: DEFAULT_QUEUE_LIMIT,
         }
     }
 }
@@ -260,17 +265,6 @@ impl JobStore {
                 }
             }
         }
-    }
-
-    /// Replaces the queued-job bound (`MAKEPAD_ASSET_AI_MAX_QUEUE` on the service).
-    /// A zero limit is refused into 1 — a queue that can hold nothing would
-    /// make every submit fail.
-    pub fn set_queue_limit(&mut self, limit: usize) {
-        self.queue_limit = limit.max(1);
-    }
-
-    pub fn queue_limit(&self) -> usize {
-        self.queue_limit
     }
 
     /// Chat turns that may run at once. Set from the box's lane count, so the
@@ -319,30 +313,51 @@ impl JobStore {
         policy: QueuePolicy,
         class: JobClass,
     ) -> Result<String, AssetAiError> {
+        self.enqueue(params, policy, class, QueueClass::Batch)
+    }
+
+    /// Keep the heavy queue in dispatch order so status reports count the jobs ahead.
+    pub(crate) fn enqueue(
+        &mut self,
+        params: JobParams,
+        policy: QueuePolicy,
+        class: JobClass,
+        queue_class: QueueClass,
+    ) -> Result<String, AssetAiError> {
         if let Some(reason) = self.activity.as_ref().and_then(|gate|gate.refusal()) {
             return Err(AssetAiError::Unavailable(reason));
         }
         if policy == QueuePolicy::Reject && self.is_busy() {
             return Err(AssetAiError::Busy);
         }
-        if self.queue.len() >= self.queue_limit {
-            return Err(AssetAiError::QueueFull(self.queue_limit));
+        let model = params.model().to_string();
+        let id = self.insert_record(model, Some(params), JobState::Queued, false);
+        self.class.insert(id.clone(), class);
+        if class == JobClass::Heavy && queue_class == QueueClass::Interactive {
+            self.queue.insert(self.interactive_queued, id.clone());
+            self.interactive_queued += 1;
+        } else {
+            self.queue.push_back(id.clone());
         }
+        Ok(id)
+    }
+
+    fn insert_record(&mut self, model: String, params: Option<JobParams>, state: JobState, routed: bool) -> String {
         self.next_id += 1;
         let id = format!("job-{}", self.next_id);
-        let model = params.model().to_string();
+        let now = now_ms();
         self.jobs.insert(
             id.clone(),
             JobRecord {
                 id: id.clone(),
                 model,
-                params: Some(params),
-                state: JobState::Queued,
+                params,
+                state,
                 cancel: CancelToken::new(),
                 free_on_cancel: false,
                 interruption: None,
-                queued_ms: now_ms(),
-                started_ms: None,
+                queued_ms: now,
+                started_ms: routed.then_some(now),
                 finished_ms: None,
                 partial_text: None,
                 partial_artifacts: Vec::new(),
@@ -351,11 +366,28 @@ impl JobStore {
                 log: Vec::new(),
                 log_phase: String::new(),
                 log_at_ms: 0,
+                routed,
             },
         );
-        self.class.insert(id.clone(), class);
-        self.queue.push_back(id.clone());
-        Ok(id)
+        id
+    }
+
+    /// The record of a job another hub runs for this hub's client (a routed `/generate`), its
+    /// forwarder mirroring that job into it. It is running from the start (stage `routing`) and
+    /// takes no queue place and no class slot: it does no work here, so it is not counted in
+    /// `jobs_pending` or [`Self::is_busy`], is not refused or interrupted by local use (its
+    /// cancel token is not bound to the activity gate), and never holds a model here.
+    pub fn insert_routed(&mut self, model: &str) -> String {
+        let state = JobState::Running { stage: "routing".to_string(), progress: 0.0 };
+        self.insert_record(model.to_string(), None, state, true)
+    }
+
+    fn remove_queued(&mut self, at: usize) -> Option<String> {
+        let id = self.queue.remove(at)?;
+        if at < self.interactive_queued {
+            self.interactive_queued -= 1;
+        }
+        Some(id)
     }
 
     /// Models with a job RUNNING on them right now, in either class.
@@ -389,9 +421,8 @@ impl JobStore {
     ///
     /// Each class holds its own device budget, so a chat turn is never behind
     /// a running video generation and a video generation is never behind a
-    /// chat turn. FIFO is preserved WITHIN a class; across classes there is no
-    /// single order to preserve, because they are no longer competing for one
-    /// slot.
+    /// chat turn. The heavy worker takes the oldest interactive job first,
+    /// then the oldest batch job. The dedicated chat lanes keep arrival order.
     pub fn take_next_of(&mut self, class: JobClass) -> Option<String> {
         self.interrupt_for_activity();
         if self.activity.as_ref().is_some_and(|gate| !gate.allows_work()) { return None; }
@@ -411,7 +442,7 @@ impl JobStore {
             .queue
             .iter()
             .position(|id| self.class_of(id) == class)?;
-        let id = self.queue.remove(at)?;
+        let id = self.remove_queued(at)?;
         if let Some(job) = self.jobs.get_mut(&id) {
             if let Some(gate) = &self.activity { job.cancel.bind_activity(gate.clone()); }
             let is_live = job.params.as_ref().map(JobParams::is_live).unwrap_or(false);
@@ -473,6 +504,12 @@ impl JobStore {
         self.jobs.get(id).map(|job| job.model.clone())
     }
 
+    /// How long a started job waited in its queue, in ms.
+    pub fn waited_ms(&self, id: &str) -> Option<u64> {
+        let job = self.jobs.get(id)?;
+        Some(job.started_ms?.saturating_sub(job.queued_ms))
+    }
+
     /// Cancels a job. Queued: dropped from the FIFO immediately. Running:
     /// raises the job's shared cancel flag — the backend checks it between
     /// steps/tiles/load components and unwinds within seconds; the worker
@@ -480,7 +517,7 @@ impl JobStore {
     /// Finished jobs keep their result (NotCancellable).
     pub fn cancel(&mut self, id: &str) -> CancelOutcome {
         if let Some(at) = self.queue.iter().position(|q| q == id) {
-            self.queue.remove(at);
+            let _ = self.remove_queued(at);
             if let Some(job) = self.jobs.get_mut(id) {
                 job.state = JobState::Cancelled;
                 job.finished_ms = Some(now_ms());
@@ -515,8 +552,13 @@ impl JobStore {
         let job = self.jobs.get(id).filter(|job| job.free_on_cancel)?;
         let model = job.model.clone();
         let wanted = self.queue.iter().any(|q| self.jobs.get(q).is_some_and(|j| j.model == model))
-            || self.jobs.iter().any(|(other, j)| other != id && j.model == model && matches!(j.state, JobState::Running { .. } | JobState::Live { .. }));
+            || self.jobs.iter().any(|(other, j)| other != id && !j.routed && j.model == model && matches!(j.state, JobState::Running { .. } | JobState::Live { .. }));
         (!wanted).then_some(model)
+    }
+
+    /// Whether job `id`'s cancel asked for the model's memory back.
+    pub fn frees_on_cancel(&self, id: &str) -> bool {
+        self.jobs.get(id).is_some_and(|job| job.free_on_cancel)
     }
 
     /// The running job's shared cancel flag (for the worker to pass into the
@@ -737,7 +779,7 @@ impl JobStore {
         (self.running_heavy.is_some() as usize + self.running_chat.len(), self.queue.len())
     }
 
-    /// Running jobs first, then the queue in FIFO order — the live picture
+    /// Running jobs first, then the queue in dispatch order — the live picture
     /// `GET /jobs` serves (finished jobs stay reachable by id only).
     pub fn active_status_json(&self) -> Vec<JobStatusJson> {
         self.running_heavy
@@ -1342,28 +1384,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn bounded_queue_refuses_overflow_explicitly() {
+    fn forty_jobs_wait_for_the_heavy_slot_and_run_in_order() {
         let mut store = JobStore::new();
-        store.set_queue_limit(2);
-        assert_eq!(store.queue_limit(), 2);
-        let a = store.submit(params("m"), QueuePolicy::Queue).unwrap();
-        let _b = store.submit(params("m"), QueuePolicy::Queue).unwrap();
-        // Third queued submit hits the bound with the explicit error.
-        assert_eq!(
-            store.submit(params("m"), QueuePolicy::Queue),
-            Err(AssetAiError::QueueFull(2))
-        );
-        // The RUNNING job does not consume queue capacity: once `a` starts,
-        // a slot frees up.
-        assert_eq!(store.take_next(), Some(a));
-        assert!(store.submit(params("m"), QueuePolicy::Queue).is_ok());
-        assert_eq!(
-            store.submit(params("m"), QueuePolicy::Queue),
-            Err(AssetAiError::QueueFull(2))
-        );
-        // Zero is refused into a 1-slot queue, never a dead one.
-        store.set_queue_limit(0);
-        assert_eq!(store.queue_limit(), 1);
+        let running = store.submit(params("m"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next().as_ref(), Some(&running));
+        let waiting: Vec<_> = (0..40)
+            .map(|_| store.submit(params("m"), QueuePolicy::Queue).unwrap())
+            .collect();
+        assert_eq!(store.counts(), (1, 40));
+        assert!(store.take_next().is_none());
+        store.finish(&running, Vec::new());
+        for id in waiting {
+            assert_eq!(store.take_next().as_ref(), Some(&id));
+            store.finish(&id, Vec::new());
+        }
+        assert_eq!(store.counts(), (0, 0));
     }
 
     #[test]
@@ -1388,7 +1423,6 @@ pub(crate) mod tests {
     fn finished_retention_evicts_oldest_with_artifact_ids() {
         use crate::protocol::ArtifactRefJson;
         let mut store = JobStore::new();
-        store.set_queue_limit(FINISHED_RETAIN + 8);
         let mut ids = Vec::new();
         for _ in 0..FINISHED_RETAIN + 3 {
             let id = store.submit(params("m"), QueuePolicy::Queue).unwrap();

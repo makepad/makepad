@@ -152,8 +152,26 @@ pub fn call(
 ) -> ToolResult {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     let call_id = format!("app{}", NEXT.fetch_add(1, Ordering::Relaxed));
-    let Some(endpoint) = registry.pick_instance(service, instance) else {
-        return ToolResult::unavailable(&call_id, format!("no running instance of `{service}` here"));
+    // services promised and not registered yet (a window registers its product's after its
+    // first frame): the call waits for them rather than finding none
+    let picked = registry.pick_instance(service, instance).or_else(|| {
+        registry.wait_expected(cancelled);
+        registry.pick_instance(service, instance)
+    });
+    let Some(endpoint) = picked else {
+        // the services that do run, so a caller who named the wrong one (an action of a tool
+        // taken for a service) sees where the tools are
+        let mut running: Vec<String> = Vec::new();
+        for info in registry.services().into_iter().filter(|s| s.connected) {
+            if !running.contains(&info.id) {
+                running.push(info.id);
+            }
+        }
+        let why = match running.is_empty() {
+            true => format!("no running instance of `{service}` here"),
+            false => format!("no running instance of `{service}` here; running: {} (`tools` lists their tools)", running.join(", ")),
+        };
+        return ToolResult::unavailable(&call_id, why);
     };
     // a named instance is that one or none (the registry's pick falls back to the focused one)
     if let Some(wanted) = instance {
@@ -170,7 +188,7 @@ pub fn call(
         let names: Vec<&str> = manifest.tools.iter().map(|t| t.name.as_str()).collect();
         return ToolResult::refused(&call_id, format!("`{service}` has no tool `{tool}` (it has: {})", names.join(", ")));
     }
-    let Some(rx) = registry.call_remote(&endpoint, ServiceCall { call_id: call_id.clone(), tool: tool.to_string(), args, caller }) else {
+    let Some(rx) = registry.call_remote(&endpoint, ServiceCall { call_id: call_id.clone(), tool: tool.to_string(), args, caller, origin: CallOrigin::Remote }) else {
         return ToolResult::unavailable(&call_id, "the app went away");
     };
     let started = Instant::now();
@@ -277,7 +295,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         // the conversation's own calls are not taken by the remote caller's drains
-        registry.send(&endpoint, ServiceDown::Call(ServiceCall { call_id: "core1".into(), tool: "add".into(), args: "{}".into(), caller: None }));
+        registry.send(&endpoint, ServiceDown::Call(ServiceCall { call_id: "core1".into(), tool: "add".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation }));
         let t = Instant::now();
         let mut got = Vec::new();
         while got.is_empty() {
@@ -335,7 +353,7 @@ mod tests {
             let payload = String::from_utf8(frame.payload).unwrap();
             assert_eq!(AppRequest::parse(payload.strip_prefix("app\n").unwrap()).unwrap(), request);
             let hosted = crate::wire::HostedDown { to: None, msg: crate::wire::ServiceDown::Call(
-                crate::wire::ServiceCall { call_id: "c1".into(), tool: "add".into(), args, caller: Some("tok1".into()) }) };
+                crate::wire::ServiceCall { call_id: "c1".into(), tool: "add".into(), args, caller: Some("tok1".into()), origin: CallOrigin::Remote }) };
             assert_eq!(crate::wire::HostedDown::parse(&hosted.to_json()), Some(hosted));
         }
         assert_eq!(AppRequest::parse("list").unwrap(), AppRequest::List);

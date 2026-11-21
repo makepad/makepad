@@ -35,6 +35,23 @@ pub struct SpeechAudio {
     /// does: its duration predictor times each phoneme token). `None` as
     /// for `timings`. What lip sync reads.
     pub phones: Option<Vec<PhoneTiming>>,
+    /// Where the synthesis spent its time, for the caller's log.
+    pub times: SynthTimes,
+}
+
+/// Where an utterance's synthesis went (zero for a backend that doesn't say).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SynthTimes {
+    /// The pieces the text was spoken in.
+    pub pieces: usize,
+    /// Text to phonemes, all pieces.
+    pub text: std::time::Duration,
+    /// The model, all pieces.
+    pub model: std::time::Duration,
+    /// From the call to the first piece's audio.
+    pub first_audio: std::time::Duration,
+    /// The whole call.
+    pub total: std::time::Duration,
 }
 
 impl SpeechAudio {
@@ -44,6 +61,7 @@ impl SpeechAudio {
             sample_rate: 24_000,
             timings: None,
             phones: None,
+            times: SynthTimes::default(),
         }
     }
 

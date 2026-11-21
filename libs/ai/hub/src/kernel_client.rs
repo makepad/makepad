@@ -9,6 +9,7 @@
 use crate::error::AssetAiError;
 use crate::http_client::{http_fetch, HttpClientRequest};
 use crate::kernel_wire::*;
+use crate::web_socket::{machine_token_for, open_link, Link};
 use makepad_compute_program::codec::Codec;
 use makepad_compute_program::{wire, Value};
 use makepad_micro_serde::DeJson;
@@ -70,126 +71,6 @@ pub(crate) enum Look {
     Within(Duration),
 }
 
-enum Link {
-    Plain(std::net::TcpStream),
-    /// a fleet TLS link (native only: never made on the web)
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Tls(makepad_network::SocketStream),
-}
-
-impl Link {
-    fn set_read_timeout(&self, t: Duration) {
-        let _ = match self {
-            Link::Plain(s) => s.set_read_timeout(Some(t)),
-            Link::Tls(s) => s.set_read_timeout(Some(t)),
-        };
-    }
-    fn shutdown(&mut self) {
-        match self {
-            Link::Plain(s) => {
-                let _ = s.shutdown(std::net::Shutdown::Both);
-            }
-            Link::Tls(s) => s.shutdown(),
-        }
-    }
-}
-
-impl std::io::Read for Link {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Link::Plain(s) => s.read(buf),
-            Link::Tls(s) => s.read(buf),
-        }
-    }
-}
-
-impl std::io::Write for Link {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Link::Plain(s) => s.write(buf),
-            Link::Tls(s) => s.write(buf),
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Link::Plain(s) => s.flush(),
-            Link::Tls(s) => s.flush(),
-        }
-    }
-}
-
-/// A hub on this machine's loopback surface: plain http to a loopback address.
-fn on_loopback(url: &crate::http_client::ParsedUrl) -> bool {
-    !url.https && url.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
-}
-
-/// The machine token header for a hub on this machine's loopback surface, which takes this
-/// machine's apps by it; none for any other node.
-fn machine_token_for(url: &crate::http_client::ParsedUrl) -> Result<Option<(String, String)>, String> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if on_loopback(url) {
-        let token = crate::machine::machine_token().map_err(|e| format!("{}:{}: the machine token: {e}", url.host, url.port))?;
-        return Ok(Some((crate::machine::TOKEN_HEADER.to_string(), token)));
-    }
-    let _ = url;
-    Ok(None)
-}
-
-/// Connects and upgrades; returns the link, any bytes read past the upgrade response, and
-/// whether the hub is on this machine's loopback surface.
-fn open_link(base_url: &str) -> Result<(Link, Vec<u8>, bool), String> {
-    use std::io::{Read, Write};
-    let url = crate::http_client::parse_url(&format!("{base_url}/kernel/stream")).map_err(|e| e.to_string())?;
-    let host_port = format!("{}:{}", url.host, url.port);
-    makepad_network::lan::hub_check_host("ai-hub kernel stream", &url.host).map_err(|e| e.to_string())?;
-    let (mut link, authorization): (Link, Option<String>) = if url.https {
-        #[cfg(target_arch = "wasm32")]
-        return Err(format!("{host_port}: fleet TLS links are native-only"));
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (s, _server, auth) = crate::http_client::with_hub_connect(|| makepad_network::fleet::id::connect(&url.host, &url.port.to_string())).map_err(|e| format!("{host_port}: {e}"))?;
-            (Link::Tls(s), Some(auth))
-        }
-    } else {
-        let s = makepad_network::lan::hub_connect_host("ai-hub kernel stream", &url.host, url.port, Some(Duration::from_secs(5))).map_err(|e| format!("{host_port}: {e}"))?;
-        let _ = s.set_nodelay(true);
-        (Link::Plain(s), None)
-    };
-    let mut head = format!(
-        "GET /kernel/stream HTTP/1.1\r\nHost: {host_port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n"
-    );
-    if let Some(a) = authorization {
-        head.push_str(&format!("Authorization: {a}\r\n"));
-    }
-    if let Some((name, token)) = machine_token_for(&url)? {
-        head.push_str(&format!("{name}: {token}\r\n"));
-    }
-    head.push_str("\r\n");
-    link.write_all(head.as_bytes()).map_err(|e| format!("{host_port}: {e}"))?;
-    link.set_read_timeout(Duration::from_millis(200));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            let status = String::from_utf8_lossy(&data[..end]).lines().next().unwrap_or_default().to_string();
-            if !status.contains(" 101") {
-                return Err(format!("{host_port}: no kernel stream ({})", status.trim()));
-            }
-            return Ok((link, data[end + 4..].to_vec(), on_loopback(&url)));
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("{host_port}: no answer to the stream upgrade"));
-        }
-        match link.read(&mut buf) {
-            Ok(0) => return Err(format!("{host_port}: closed during the stream upgrade")),
-            Ok(n) => data.extend_from_slice(&buf[..n]),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
-            Err(e) => return Err(format!("{host_port}: {e}")),
-        }
-    }
-}
-
 /// How long after the last frame the link still reads with 1 ms timeouts.
 const LINK_BUSY: Duration = Duration::from_millis(500);
 
@@ -228,14 +109,14 @@ fn run_link(mut link: Link, leftover: Vec<u8>, out: std::sync::mpsc::Receiver<Ve
         }
         loop {
             match out.try_recv() {
-                Ok(frame) => {
+                Ok(mut frame) => {
                     last = Instant::now();
-                    // one write per frame (one TLS record, no Nagle wait inside a frame)
-                    let header = WebSocketMessageHeader::from_len(frame.len(), WebSocketMessageFormat::Binary, false);
-                    let mut bytes = Vec::with_capacity(header.as_slice().len() + frame.len());
-                    bytes.extend_from_slice(header.as_slice());
-                    bytes.extend_from_slice(&frame);
-                    if link.write_all(&bytes).is_err() {
+                    // one write per frame (one TLS record, no Nagle wait inside a frame): the
+                    // websocket header goes into the room at the frame's front
+                    let header = WebSocketMessageHeader::from_len(frame.len() - WS_ROOM, WebSocketMessageFormat::Binary, false);
+                    let at = WS_ROOM - header.as_slice().len();
+                    frame[at..WS_ROOM].copy_from_slice(header.as_slice());
+                    if link.write_all(&frame[at..]).is_err() {
                         link.shutdown();
                         return close("the stream broke while sending".into());
                     }
@@ -289,7 +170,8 @@ struct StreamState {
     /// Opens their opener stopped waiting for, by request, and the way out: a session one of
     /// them still gets is cancelled as its answer comes.
     given_up: HashMap<u64, std::sync::mpsc::Sender<Vec<u8>>>,
-    /// Per session: the updates not yet taken (decoded by the taker), and a wake not yet seen.
+    /// Per session: the update frames not yet taken (decoded by the taker), and a wake not yet
+    /// seen.
     programs: HashMap<u64, (Vec<Vec<u8>>, bool)>,
 }
 
@@ -302,7 +184,7 @@ struct StreamShared {
 impl KernelStream {
     /// Opens the stream (Err when the node has none).
     pub fn open(node: &KernelNode) -> Result<KernelStream, AssetAiError> {
-        let (link, leftover, loopback) = open_link(&node.base_url).map_err(AssetAiError::Http)?;
+        let (link, leftover, loopback) = open_link(&node.base_url, "/kernel/stream").map_err(AssetAiError::Http)?;
         let shared = Arc::new(StreamShared::default());
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let reader = shared.clone();
@@ -338,11 +220,14 @@ impl KernelStream {
     /// again.
     pub(crate) fn program_open(&self, open: &wire::Open, threads: usize, wait: &mut dyn FnMut(Option<&str>) -> bool) -> Result<Option<(u64, Value)>, AssetAiError> {
         let kept: std::collections::HashSet<u128> = self.kept.lock().unwrap().values().flatten().copied().collect();
-        let (payload, hashes) = wire::encode_open(open, threads, &|h| kept.contains(&h));
-        let opened = match self.open_request(&payload, wait)? {
+        let mut frame = frame_head(wire::OPEN, 0, 0);
+        let hashes = wire::encode_open_into(&mut frame, open, threads, &|h| kept.contains(&h));
+        let opened = match self.open_request(frame, wait)? {
             Some(Err((wire::NOT_KEPT, _))) => {
                 self.kept.lock().unwrap().clear();
-                self.open_request(&wire::encode_open(open, threads, &|_| false).0, wait)?
+                let mut frame = frame_head(wire::OPEN, 0, 0);
+                wire::encode_open_into(&mut frame, open, threads, &|_| false);
+                self.open_request(frame, wait)?
             }
             other => other,
         };
@@ -356,15 +241,17 @@ impl KernelStream {
         Ok(Some((id, device)))
     }
 
-    /// One `wire::OPEN` and the node's answer to it; None once `wait` says yes first.
-    fn open_request(&self, payload: &[u8], wait: &mut dyn FnMut(Option<&str>) -> bool) -> Result<Option<Result<(u64, Value), (u16, String)>>, AssetAiError> {
+    /// One `wire::OPEN` (its `frame`, the request's word filled in here) and the node's answer
+    /// to it; None once `wait` says yes first.
+    fn open_request(&self, mut frame: Vec<u8>, wait: &mut dyn FnMut(Option<&str>) -> bool) -> Result<Option<Result<(u64, Value), (u16, String)>>, AssetAiError> {
         let request = {
             let mut s = self.shared.state.lock().unwrap();
             s.next_request += 1;
             s.open += 1;
             s.next_request
         };
-        self.send(wire::OPEN, request, payload)?;
+        frame[WS_ROOM + 1..WS_ROOM + 9].copy_from_slice(&request.to_le_bytes());
+        self.out.lock().unwrap().send(frame).map_err(|_| AssetAiError::Http("kernel stream: closed".into()))?;
         let mut ask = Instant::now() + ASK_EVERY;
         // the node said the open waits, and the opener heard it
         let mut told = false;
@@ -406,8 +293,9 @@ impl KernelStream {
         let _ = self.send(kind, session, &payload);
     }
 
-    /// The session's updates not yet taken, waiting as `look` says for one or a wake; whether
-    /// a wake came; and why the stream closed, if it did.
+    /// The session's update frames not yet taken (each its update from [`FRAME_HEAD`] on),
+    /// waiting as `look` says for one or a wake; whether a wake came; and why the stream closed,
+    /// if it did.
     pub(crate) fn program_take(&self, session: u64, look: Look) -> (Vec<Vec<u8>>, bool, Option<String>) {
         let until = match look {
             Look::Within(wait) => Some(Instant::now() + wait),
@@ -453,16 +341,34 @@ impl KernelStream {
     }
 }
 
-/// A frame for the writer: its kind, the word it is about, its payload.
+/// A frame for the writer (its websocket header's room): its kind, the word it is about, its
+/// payload.
 fn stream_out(kind: u8, word: u64, payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(9 + payload.len());
-    frame.push(kind);
-    frame.extend_from_slice(&word.to_le_bytes());
+    let mut frame = frame_head(kind, word, payload.len());
     frame.extend_from_slice(payload);
     frame
 }
 
-fn stream_frame(shared: &StreamShared, frame: &[u8]) {
+/// A program frame's head: its kind and the word it is about; its message follows.
+pub(crate) const FRAME_HEAD: usize = 9;
+
+/// Bytes at a frame's front for its websocket header (at most 2, an 8-byte length and a 4-byte
+/// mask): the writer puts the header there and sends the frame as it is, with no copy.
+const WS_ROOM: usize = 14;
+
+/// A frame's start (the websocket header's room, its kind and the word it is about), with room
+/// for `body` bytes after them: a big message is written after it, into the frame itself.
+fn frame_head(kind: u8, word: u64, body: usize) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(WS_ROOM + 9 + body);
+    frame.resize(WS_ROOM, 0);
+    frame.push(kind);
+    frame.extend_from_slice(&word.to_le_bytes());
+    frame
+}
+
+/// A frame from the node; a session's update is kept as it came (taken from the parser, its update
+/// from [`FRAME_HEAD`] on), for its taker to decode.
+fn stream_frame(shared: &StreamShared, frame: &mut Vec<u8>) {
     if frame.len() < 9 {
         return;
     }
@@ -495,7 +401,7 @@ fn stream_frame(shared: &StreamShared, frame: &[u8]) {
         wire::UPDATE => {
             // Decoded by the session's taker, on its thread; a session the app dropped is gone.
             if let Some((q, _)) = s.programs.get_mut(&word) {
-                q.push(frame[9..].to_vec());
+                q.push(std::mem::take(frame));
             }
         }
         _ => return,

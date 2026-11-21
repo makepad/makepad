@@ -10,7 +10,7 @@
 //! [`ProgramError::Lost`].
 
 use crate::error::AssetAiError;
-use crate::kernel_client::{KernelStream, Look};
+use crate::kernel_client::{KernelStream, Look, FRAME_HEAD};
 use makepad_compute_program::codec::Codec;
 use makepad_compute_program::wire;
 use makepad_compute_program::{Class, Input, Limits, Program, ProgramError, Updates, Value};
@@ -157,7 +157,7 @@ impl RemoteSession {
         let (frames, woken, closed) = self.stream.program_take(self.id, look);
         let mut out = Updates::default();
         for frame in frames {
-            match wire::decode_update(&frame, MAX_OUTPUT_ELEMENTS, self.threads) {
+            match wire::decode_update(&frame[FRAME_HEAD..], MAX_OUTPUT_ELEMENTS, self.threads) {
                 Ok(u) => out.merge(u),
                 Err(e) => {
                     out.end = Some(Err(ProgramError::Lost(format!("a bad update from the node: {e}"))));

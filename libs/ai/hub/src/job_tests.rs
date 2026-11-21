@@ -517,6 +517,32 @@ fn proven_local_use_refusal_is_excluded_even_from_busy_queue_fallback() {
 }
 
 #[test]
+fn admission_wait_survives_repeated_fleet_refusals_and_can_be_cancelled() {
+    let farm = Farm::default();
+    {
+        let mut state = farm.0.lock().unwrap();
+        for hub in &mut state.hubs { hub.submit_error = Some(AssetAiError::Unavailable("local-use: quiet".into())); }
+    }
+    let mut job = GenJob::new(Arc::new(farm.clone()), ("admission".into(), 1));
+    job.start(Domain::Image, image(Some("same prompt"), Some(7)), Want::All).unwrap();
+    let now = Instant::now();
+    for i in 1..12 {
+        assert!(matches!(job.poll_at(now + Duration::from_secs(10 * i)), JobPoll::Progress { .. }));
+        assert!(job.job_id().is_none());
+    }
+    farm.0.lock().unwrap().hubs[1].submit_error = None;
+    job.poll_at(now + Duration::from_secs(120));
+    assert!(job.job_id().is_some());
+    job.cancel();
+    farm.0.lock().unwrap().hubs[1].submit_error = Some(AssetAiError::Busy);
+    job.start(Domain::Image, image(None, None), Want::All).unwrap();
+    job.cancel();
+    let routes = farm.0.lock().unwrap().routes;
+    assert!(matches!(job.poll_at(now + Duration::from_secs(240)), JobPoll::Pending));
+    assert_eq!(farm.0.lock().unwrap().routes, routes);
+}
+
+#[test]
 fn proven_pre_admission_overload_reroutes_but_similar_http_prose_does_not() {
     const REASON: &str = "admission-overloaded: HTTP server overloaded before job admission";
     for proven in [true, false] {
@@ -539,7 +565,7 @@ fn proven_pre_admission_overload_reroutes_but_similar_http_prose_does_not() {
         assert_eq!(state.hubs[1].requests.len(), usize::from(proven));
         if proven {
             assert_eq!(state.hubs[0].attempts[0].serialize_json(), state.hubs[1].requests[0].serialize_json());
-            assert!(executor.refusals[0].1.contains("admission-overloaded:"));
+            assert!(executor.pending_stage.as_deref().unwrap().contains("admission-overloaded:"));
         }
     }
 }

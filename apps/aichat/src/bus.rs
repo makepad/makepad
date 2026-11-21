@@ -26,6 +26,7 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct ServiceBus {
     hosts: HashMap<EndpointId, ServiceLinkHost>,
+    logged_rejection: bool,
     #[cfg(not(target_arch = "wasm32"))]
     parent: Option<makepad_widgets::makepad_platform::os::hal::HalParentSender>,
 }
@@ -36,9 +37,24 @@ impl ServiceBus {
         { self.parent = _cx.hal_parent_sender(); }
     }
 
-    /// An up-frame from the WM. `None` for frames that are not the bus's.
+    /// Consume an up-frame from the WM, including one the bus rejects.
     pub fn on_custom(&mut self, registry: &ServiceRegistry, json: &str) -> bool {
-        let Some(frame) = HostedUp::parse(json) else { return false };
+        let frame = match HostedUp::parse_checked(json) {
+            None => return false,
+            Some(Ok(frame)) => frame,
+            Some(Err(rejected)) => {
+                if !self.logged_rejection {
+                    self.logged_rejection = true;
+                    error!("AI chat rejected a frame from the window manager: {}", rejected.error);
+                }
+                let (true, Some(from), Some(call_id)) = (rejected.mismatch, rejected.endpoint, rejected.call_id)
+                    else { return true };
+                HostedUp {
+                    from: Some(EndpointId(from)),
+                    msg: ServiceUp::Result(ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH)),
+                }
+            }
+        };
         let Some(from) = frame.from.clone() else { return true };
         match (&frame.msg, self.hosts.get(&from)) {
             (ServiceUp::Register { manifest, .. }, None) => {

@@ -288,6 +288,71 @@ fn role_standing(base_url: &str, domain: &str, affinity: u32) -> (bool, bool, bo
 // Snapshots: what discovery learned about one box
 // ---------------------------------------------------------------------------
 
+/// Which boxes a model's host memory fits, for routing (`crate::ram`): now (the box's free
+/// memory holds the model's estimate and its reserve), or once memory frees there (its free
+/// memory and what its hub's idle models hold do: the job unloads them there). Never memory other
+/// processes hold: that may not free at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostTier {
+    Now,
+    Freed,
+}
+
+/// Keeps the newest measured host peak of each model that `snapshots` carry (each box's
+/// `/models`) in this process's table under that box's OS (`/health` `os`), so a measurement
+/// made on any box counts on every box of the same OS. A box that does not name its OS (an older
+/// hub) gives none.
+pub fn adopt_host_peaks(snapshots: &[BoxSnapshot]) {
+    for snapshot in snapshots {
+        let Some(os) = snapshot.health.as_ref().and_then(|health| health.os.as_deref()) else { continue };
+        for model in &snapshot.models {
+            if let (Some(mb), Some(measured_ms)) = (model.ram_mb, model.ram_measured_ms) {
+                if crate::ram::peaks().adopt(&model.id, os, crate::ram::Peak { mb, measured_ms }) {
+                    eprintln!("host memory: {} takes {mb} MB at its peak on {os}, as measured on another box", model.id);
+                }
+            }
+        }
+    }
+}
+
+/// `snapshots` with only the models whose host memory fits their box at `tier`. A model's
+/// estimate is the newest peak measured for it on any box of the box's OS ([`adopt_host_peaks`]
+/// first), else the box's own (its declared load path, or its files). Always fitting: a model resident on its
+/// box, one that counts nothing, and every model of a box that does not wait for host memory
+/// (no `ram_reserve_mb`: macOS, older hubs).
+pub fn host_tier(snapshots: &[BoxSnapshot], tier: HostTier) -> Vec<BoxSnapshot> {
+    snapshots
+        .iter()
+        .map(|snapshot| {
+            let mut snapshot = snapshot.clone();
+            if let Some(health) = snapshot.health.as_ref() {
+                if let Some(reserve_mb) = health.ram_reserve_mb {
+                    let health = health.clone();
+                    snapshot.models.retain(|model| host_fits(&health, model, reserve_mb, tier));
+                }
+            }
+            snapshot
+        })
+        .collect()
+}
+
+fn host_fits(health: &HealthJson, model: &ModelInfoJson, reserve_mb: u64, tier: HostTier) -> bool {
+    if model.state == crate::protocol::MODEL_STATE_LOADED || health.models_loaded.iter().any(|id| id == &model.id) {
+        return true;
+    }
+    let measured_mb = health.os.as_deref().and_then(|os| crate::ram::peaks().get(&model.id, os)).map(|peak| peak.mb);
+    let estimate_mb = measured_mb.or(model.ram_mb).unwrap_or(0);
+    if estimate_mb == 0 {
+        return true;
+    }
+    let need_mb = estimate_mb.saturating_add(reserve_mb);
+    let room_mb = match tier {
+        HostTier::Now => health.ram_free_mb,
+        HostTier::Freed => health.ram_free_mb.map(|free_mb| free_mb.saturating_add(health.ram_idle_mb.unwrap_or(0))),
+    };
+    room_mb.is_none_or(|room_mb| need_mb <= room_mb)
+}
+
 /// The latest discovery result for one live box. `health == None` means
 /// the box has not answered this poll yet — it stays while its beacon is
 /// leased and can come back on a later poll.
@@ -1058,7 +1123,7 @@ fn preferred_on_disk(model: &ModelInfoJson, score: u32) -> bool {
 /// Python/Torch oracle could silently outrank the canonical native runtime.
 /// `pick_box*` remains the explicit model-pin path and does not apply this
 /// filter.
-fn is_explicit_only(model: &ModelInfoJson) -> bool {
+pub(crate) fn is_explicit_only(model: &ModelInfoJson) -> bool {
     // claude-cli runs on someone's own Claude account: only a client that
     // names it gets it (crate::claude_cli).
     model.backend.ends_with("-oracle") || model.backend == crate::claude_cli::BACKEND
@@ -1985,6 +2050,8 @@ mod tests {
             license_summary: None,
             license_restriction: None,
             license_sha256: None,
+            ram_mb: None,
+            ram_measured_ms: None,
         }
     }
 
@@ -2009,12 +2076,16 @@ mod tests {
                 started_ms: None,
                 capabilities: None,
                 vram_reserve_mb: Some(1024),
+                ram_free_mb: None,
+                ram_total_mb: None,
+                ram_reserve_mb: None,
+                ram_idle_mb: None,
+                os: None,
                 llm_context_configured: None,
                 llm_context_loaded: None,
                 llm_context_max: None,
                 llm_kv: None,
                 llm_kv_loaded: None,
-                queue_limit: Some(8),
                 max_job_body_bytes: None,
                 fleet: None,
                 realtime: None,
@@ -2071,6 +2142,8 @@ mod tests {
             license_summary: None,
             license_restriction: None,
             license_sha256: None,
+            ram_mb: None,
+            ram_measured_ms: None,
         }
     }
 
@@ -2095,12 +2168,16 @@ mod tests {
                 started_ms: None,
                 capabilities: None,
                 vram_reserve_mb: None,
+                ram_free_mb: None,
+                ram_total_mb: None,
+                ram_reserve_mb: None,
+                ram_idle_mb: None,
+                os: None,
                 llm_context_configured: None,
                 llm_context_loaded: None,
                 llm_context_max: None,
                 llm_kv: None,
                 llm_kv_loaded: None,
-                queue_limit: None,
                 max_job_body_bytes: None,
                 fleet: None,
                 realtime: None,
@@ -2476,7 +2553,6 @@ mod tests {
             lanes_active: 2,
             context_per_slot: 4_096,
             queue_depth: 0,
-            queue_max: 8,
         });
         let idle = snapshot(
             "http://idle",

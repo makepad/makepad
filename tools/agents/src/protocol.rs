@@ -134,6 +134,9 @@ pub fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub fn create_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    create_file(path, bytes, true)
+}
+fn create_file(path: &Path, bytes: &[u8], durable: bool) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -141,10 +144,21 @@ pub fn create_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .open(path)
         .map_err(error)?;
     file.write_all(bytes)
-        .and_then(|_| file.sync_all())
+        .and_then(|_| if durable { file.sync_all() } else { Ok(()) })
         .map_err(error)
 }
+/// Replaces `path` whole and syncs it to disk: a session's identity (its claim at start and end).
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    put_private(path, bytes, true)
+}
+/// Replaces `path` whole (a reader sees the old bytes or the new), not synced to disk: what a
+/// running session says of itself, rewritten as it changes from its I/O loop. Each sync there
+/// held the loop (no input to the shell, no output to a client) while the disk was busy, and a
+/// title change synced four times (a name that never reached its client, 11-21).
+pub fn replace_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    put_private(path, bytes, false)
+}
+fn put_private(path: &Path, bytes: &[u8], durable: bool) -> Result<(), String> {
     if bytes.len() > 16 * 1024 {
         return Err("Screen metadata exceeds 16 KiB".into());
     }
@@ -154,8 +168,11 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("Screen metadata has no parent")?;
     let temporary = parent.join(format!(".screen-{}.tmp", random_token()?));
     let result = (|| {
-        create_private(&temporary, bytes)?;
+        create_file(&temporary, bytes, durable)?;
         fs::rename(&temporary, path).map_err(error)?;
+        if !durable {
+            return Ok(());
+        }
         File::open(parent)
             .and_then(|file| file.sync_all())
             .map_err(error)

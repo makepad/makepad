@@ -98,6 +98,9 @@ pub fn request_json_detailed(
         }
         head.push_str(&format!("Authorization: Bearer {b}\r\n"));
     }
+    if let Ok(parsed) = crate::http_client::parse_url(url) {
+        head.push_str(&crate::http_client::machine_token_line(&parsed, &[]));
+    }
     if body.is_some() {
         head.push_str(&format!(
             "Content-Type: application/json\r\nContent-Length: {}\r\n",

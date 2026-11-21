@@ -122,7 +122,7 @@ mod tests {
             sha256:None,local:false,optional:false,converts_to:None,conversion:None }
     }
     fn spec(files: Vec<FileSpec>) -> ModelSpec {
-        ModelSpec { id:"fixture".into(),domain:Domain::Video,backend:"h3".into(),available:true,gated:false,
+        ModelSpec { on_demand: Vec::new(), host_load: None, id:"fixture".into(),domain:Domain::Video,backend:"h3".into(),available:true,gated:false,
             vram_gb:None,min_vram_gb:None,min_compute_cap:None,note:None,license:None,files }
     }
     fn check(paths: BTreeMap<PathBuf,u64>, free:u64) -> Result<(),AssetAiError> {

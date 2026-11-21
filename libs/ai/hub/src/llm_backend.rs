@@ -140,6 +140,9 @@ pub(crate) enum PrefixOutcome {
     /// First turn of this conversation (or a context-full restart). The
     /// prefill is real work, not waste.
     Cold,
+    /// The prompt extends a state kept while another conversation held the
+    /// KV ([`KeptPrefixes`]): restored, and only the delta prefilled.
+    Restored,
 }
 
 /// The worker's KV prefix cache. **One entry, by construction** — the session
@@ -154,6 +157,10 @@ pub(crate) enum PrefixOutcome {
 /// no state to rewind to. Running two `LlamaSession`s instead is worse — each
 /// owns its own device copy of the 16 GB arena. That is why this stayed a
 /// one-entry cache and why the continuous-batching lane subsumes it.
+///
+/// More conversations are kept beside it by copying the live state out of
+/// the session before another conversation resets it ([`KeptPrefixes`]),
+/// which the single-stream state allows; the live entry stays this one.
 ///
 /// So what this type adds is not more cache: it is knowing, and saying, what
 /// the single entry costs. Every miss is classified and the interleave share
@@ -177,6 +184,8 @@ pub(crate) struct PrefixCache {
 #[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct PrefixStats {
     pub hits: u64,
+    /// Turns that resumed a kept state ([`PrefixOutcome::Restored`]).
+    pub restored: u64,
     pub cold: u64,
     pub interleaved: u64,
     /// Tokens re-prefilled purely because another conversation took the KV.
@@ -223,6 +232,7 @@ impl PrefixCache {
     ) {
         match outcome {
             PrefixOutcome::Hit => self.stats.hits += 1,
+            PrefixOutcome::Restored => self.stats.restored += 1,
             PrefixOutcome::Cold => self.stats.cold += 1,
             PrefixOutcome::Interleaved => {
                 self.stats.interleaved += 1;
@@ -251,6 +261,11 @@ impl PrefixCache {
         &self.committed
     }
 
+    /// Whose the live KV is and the text it holds, when it holds something.
+    pub(crate) fn live(&self) -> Option<(&PrefixOwner, &str)> {
+        self.live.as_ref().filter(|_| !self.committed.is_empty()).map(|owner| (owner, self.committed.as_str()))
+    }
+
     pub(crate) fn stats(&self) -> PrefixStats {
         self.stats
     }
@@ -270,6 +285,126 @@ impl PrefixCache {
             s.interleaved_millis as f64 / 1000.0,
         )
     }
+}
+
+/// Conversations' KV states kept beside the live one, so a conversation that
+/// another job interrupted resumes where it was instead of prefilling again.
+///
+/// The session holds one live KV, and a job of another conversation used to
+/// throw it out: the spoken-input gate's job between two turns of a chat, say,
+/// made every chat turn re-prefill its whole history. Before such a job resets
+/// the session, the live state is copied out (`LlamaSession::save_state`: the
+/// attention KV rows of its tokens, the recurrent rows and the draft head's
+/// carry, into host memory), and a later job whose prompt extends a kept text
+/// gets that state back (`restore_state`) and prefills only its delta.
+///
+/// Only a conversation that comes back is kept: its job named one
+/// (`chat_session`). A job that names none (the gate, a prompt expansion) is
+/// asked once, and keeping it would only push a conversation out.
+///
+/// Kept by prompt text, least recently used dropped beyond [`Self::SLOTS`].
+/// A slot costs its state's bytes in host memory, logged as it is kept: the
+/// recurrent rows are a fixed part, the attention rows grow with the tokens.
+/// Generic over the state so the bookkeeping is tested without a model.
+pub(crate) struct KeptPrefixes<S> {
+    /// Most recently kept or used first.
+    slots: std::collections::VecDeque<Kept<S>>,
+    /// The live state's job named a conversation, so it is worth keeping.
+    live_returns: bool,
+}
+
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
+pub(crate) struct Kept<S> {
+    pub(crate) owner: PrefixOwner,
+    /// The text the state holds, as [`PrefixCache`] committed it.
+    pub(crate) text: String,
+    pub(crate) state: S,
+    /// Host bytes the state holds.
+    pub(crate) bytes: usize,
+}
+
+impl<S> Default for KeptPrefixes<S> {
+    fn default() -> Self {
+        Self { slots: std::collections::VecDeque::new(), live_returns: false }
+    }
+}
+
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
+impl<S> KeptPrefixes<S> {
+    /// States kept beside the live one: a chat's while a gate or another job
+    /// runs, and one more conversation's. Dropping one only costs its
+    /// conversation a prefill.
+    pub(crate) const SLOTS: usize = 2;
+
+    /// Takes out the kept state this prompt extends: the same family, and the
+    /// longest such text.
+    pub(crate) fn take(&mut self, kind: &str, prompt: &str) -> Option<Kept<S>> {
+        let at = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, kept)| kept.owner.kind == kind && !kept.text.is_empty() && prompt.starts_with(&kept.text))
+            .max_by_key(|(_, kept)| kept.text.len())
+            .map(|(at, _)| at)?;
+        self.slots.remove(at)
+    }
+
+    /// Keeps a state as the most recent one; returns those dropped beyond
+    /// [`Self::SLOTS`], least recently used first. A kept text the new one
+    /// extends is stale (its conversation has moved on) and goes too.
+    pub(crate) fn keep(&mut self, kept: Kept<S>) -> Vec<Kept<S>> {
+        let mut dropped = Vec::new();
+        let mut at = 0;
+        while at < self.slots.len() {
+            if self.slots[at].owner.kind == kept.owner.kind && kept.text.starts_with(&self.slots[at].text) {
+                dropped.extend(self.slots.remove(at));
+            } else {
+                at += 1;
+            }
+        }
+        self.slots.push_front(kept);
+        while self.slots.len() > Self::SLOTS {
+            dropped.extend(self.slots.pop_back());
+        }
+        dropped
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether the job that leaves the live state named a conversation.
+    pub(crate) fn set_live_returns(&mut self, returns: bool) {
+        self.live_returns = returns;
+    }
+
+    pub(crate) fn live_returns(&self) -> bool {
+        self.live_returns
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.slots.iter().map(|kept| kept.bytes).sum()
+    }
+
+    /// For a prompt that extends none of them: how far it agrees with a kept
+    /// text of its own conversation (bytes in common, the kept text's length).
+    /// A conversation whose prompt keeps differing from its kept text loses
+    /// every resume, and this says where.
+    pub(crate) fn diverged(&self, owner: &PrefixOwner, prompt: &str) -> Option<(usize, usize)> {
+        self.slots
+            .iter()
+            .filter(|kept| kept.owner == *owner)
+            .map(|kept| (common_prefix(&kept.text, prompt), kept.text.len()))
+            .max()
+    }
+}
+
+/// Bytes two texts have in common from the start, on a char boundary.
+pub(crate) fn common_prefix(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((at, _), _)| at)
 }
 
 fn parse_prefill_counts(stage: &str) -> Option<(f64, f64)> {
@@ -594,6 +729,8 @@ impl ContentBackend for LlmBackend {
                 // The model's own vision tower, when the registry pairs one
                 // with it: chat turns may then carry pictures.
                 let mmproj = match ctx.spec.file_by_role("mmproj") {
+                    // Fetched when a turn first carries a picture: the session looks for it then.
+                    Some(file) if ctx.spec.fetched_on_demand(file) => Some(file.dest_path(ctx.cache_dir)),
                     Some(_) => Some(ctx.path_by_role("mmproj")?),
                     None => None,
                 };
@@ -1652,13 +1789,9 @@ mod llama_worker {
                 return;
             }
         };
-        let queue_max = std::env::var("MAKEPAD_ASSET_AI_LLM_QUEUE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(8);
         // The scheduler chunks prefill with the same batch the session uses,
         // so the two cannot drift into a graph neither of them sized for.
-        let scheduler = LaneScheduler::new(table, queue_max).with_prefill_chunk(prefill_batch());
+        let scheduler = LaneScheduler::new(table).with_prefill_chunk(prefill_batch());
         let advert_model = model_id.clone();
         let mut exec = LaneExecutor::new(session, scheduler, LlamaSamplingParams::default())
             .on_counts(move |counts| {
@@ -1710,7 +1843,7 @@ mod llama_worker {
             _ => "attention KV unknown".to_string(),
         };
         eprintln!(
-            "[llm-worker] batched worker: {lanes} lanes x {} tok, queue {queue_max}, \
+            "[llm-worker] batched worker: {lanes} lanes x {} tok, \
              speculation depth {}, {geometry}",
             context_per_lane(),
             exec.session().speculation_depth(),
@@ -1881,20 +2014,7 @@ mod llama_worker {
                         penalty_last_n,
                     },
                 };
-                // The queue this refuses on is the SESSION's, not the job
-                // store's — the store already refused at admission with a 409
-                // long before a turn could reach here, so this is the last
-                // honest answer rather than the first. Say the numbers and say
-                // to retry: a client that cannot tell "full right now" from
-                // "broken" retries neither.
-                if let Err(refused) = exec.scheduler().submit(request) {
-                    let _ = events.send(WorkerEvent::Done(Err(format!(
-                        "busy: all {lanes} lanes are serving and {queue_max} more turns are \
-                         already waiting, so this turn was never started - retry it"
-                    ))));
-                    let _ = refused;
-                    continue;
-                }
+                exec.scheduler().submit(request);
                 jobs.insert(
                     id,
                     JobLane {
@@ -2391,6 +2511,7 @@ mod llama_worker {
                         run_lane_worker(session, model_id.clone(), rx);
                     } else {
                         let mut prefix = super::PrefixCache::default();
+                        let mut kept = super::KeptPrefixes::default();
                         let mut vision = ChatVision::new(mmproj, model_id.clone());
                         if vision.load_at_start() {
                             if let Err(err) = vision.warm() {
@@ -2402,14 +2523,25 @@ mod llama_worker {
                             // Claimed survives the turn — the conversation's KV
                             // stays resident and its next turn comes back here.
                             crate::lane_advert::lane_entered();
+                            let tokens_before = session.token_count();
                             let result = run_expand(
                                 &mut session,
                                 &mut prefix,
+                                &mut kept,
                                 &mut vision,
                                 &job,
                                 &cancel,
                                 &events,
                             );
+                            // A job that failed or was cancelled after it
+                            // prefilled or decoded leaves the session past its
+                            // committed text: it no longer holds what the cache
+                            // says. One refused before it touched the session
+                            // (a prompt that can't fit, a picture it can't
+                            // take) leaves both as they were.
+                            if result.is_err() && session.token_count() != tokens_before {
+                                prefix.invalidate();
+                            }
                             crate::lane_advert::lane_left();
                             let _ = events.send(WorkerEvent::Done(result));
                         }
@@ -2605,7 +2737,7 @@ mod llama_worker {
         }
 
         pub(super) fn load_at_start(&self) -> bool {
-            self.mmproj.is_some() && vision_mode() == "start"
+            self.mmproj.as_ref().is_some_and(|path| path.is_file()) && vision_mode() == "start"
         }
 
         pub(super) fn tower(&mut self) -> Result<&mut makepad_ai_llm::VisionTower, String> {
@@ -2613,7 +2745,11 @@ mod llama_worker {
                 let path = self
                     .mmproj
                     .as_ref()
-                    .ok_or_else(|| "this node's chat model has no vision tower".to_string())?;
+                    .ok_or_else(|| crate::protocol::NO_PICTURES.to_string())?;
+                // A tower fetched on demand: the job that first needed it started the fetch.
+                if !path.is_file() {
+                    return Err(format!("{} yet: it is being fetched for the first picture", crate::protocol::NO_PICTURES));
+                }
                 let started = std::time::Instant::now();
                 let mut tower = makepad_ai_llm::VisionTower::load(&path.to_string_lossy())
                     .map_err(|e| format!("load vision tower: {e:?}"))?;
@@ -2839,6 +2975,7 @@ mod llama_worker {
     fn run_expand(
         session: &mut LlamaSession,
         prefix: &mut super::PrefixCache,
+        kept: &mut super::KeptPrefixes<makepad_ai_llm::LlamaSessionState>,
         vision: &mut ChatVision,
         job: &ExpandJob,
         cancel: &CancelToken,
@@ -2849,7 +2986,10 @@ mod llama_worker {
         // Chat turns send a prompt that extends the previous prompt+reply.
         // Reuse the live KV (weights already resident) and prefill only the
         // suffix. Independent expand jobs with a different prompt reset.
-        let (outcome, owner) = prefix.classify(&job.kind, &job.prompt_text);
+        let (mut outcome, owner) = prefix.classify(&job.kind, &job.prompt_text);
+        if outcome != PrefixOutcome::Hit {
+            outcome = switch_kept(session, prefix, kept, &owner, job).unwrap_or(outcome);
+        }
         let committed_len = prefix.committed().len();
         eprintln!(
             "[llm-worker] job start: session={} prefix={outcome:?} committed={committed_len}B \
@@ -2868,8 +3008,7 @@ mod llama_worker {
         let mut prefilled = 0usize;
         // A context-full restart is a cold prefill however we got here: the
         // history no longer fits, so no slot count would have saved it.
-        let mut outcome = outcome;
-        if outcome == PrefixOutcome::Hit {
+        if matches!(outcome, PrefixOutcome::Hit | PrefixOutcome::Restored) {
             let delta = job.prompt_text[committed_len..].to_string();
             if !delta.is_empty() {
                 let extra = prepare_prompt(session, vision, &delta, false, job, events)?;
@@ -3023,12 +3162,13 @@ mod llama_worker {
         let stats = prefix.stats();
         eprintln!(
             "[llm-worker] job end: decoded={} tok first={:?} eos={:?} session_tokens={} \
-             prefix={}hit/{}cold/{}interleave",
+             prefix={}hit/{}restored/{}cold/{}interleave",
             token_ids.len(),
             token_ids.first(),
             session.vocab().eos_token_id(),
             session.token_count(),
             stats.hits,
+            stats.restored,
             stats.cold,
             stats.interleaved,
         );
@@ -3038,8 +3178,90 @@ mod llama_worker {
         committed.push_str(&job.prompt_text);
         committed.push_str(&text);
         committed.push_str(&job.commit_suffix);
+        kept.set_live_returns(!job.session.is_empty());
         prefix.commit(&owner, committed);
         Ok(text)
+    }
+
+    /// A job that can't extend the live KV: the live state is kept for its
+    /// conversation's next turn ([`super::KeptPrefixes`]), and a kept state this
+    /// job's prompt extends is restored. `Restored` when the job resumes one;
+    /// `None` leaves the job to prefill from a reset as before.
+    fn switch_kept(
+        session: &mut LlamaSession,
+        prefix: &mut super::PrefixCache,
+        kept: &mut super::KeptPrefixes<makepad_ai_llm::LlamaSessionState>,
+        owner: &super::PrefixOwner,
+        job: &ExpandJob,
+    ) -> Option<super::PrefixOutcome> {
+        let found = kept.take(&job.kind, &job.prompt_text);
+        if found.is_none() {
+            if let Some((common, len)) = kept.diverged(owner, &job.prompt_text) {
+                eprintln!(
+                    "[llm-worker] {}: its prompt differs from its kept text at byte {common} of {len}: \
+                     prefilled again",
+                    owner.short()
+                );
+            }
+        }
+        if let Some((_, text)) = prefix.live().filter(|(live, _)| *live == owner) {
+            eprintln!(
+                "[llm-worker] {}: its prompt differs from its live text at byte {} of {}: prefilled again",
+                owner.short(),
+                super::common_prefix(text, &job.prompt_text),
+                text.len()
+            );
+        }
+        // A conversation that moved on from its own live text has nothing to come back to, and
+        // a job that named no conversation won't come back.
+        if let Some((live, text)) = prefix.live().filter(|(live, _)| *live != owner && kept.live_returns()) {
+            let (live, text) = (live.clone(), text.to_string());
+            let started = std::time::Instant::now();
+            match session.save_state() {
+                Ok(state) => {
+                    let bytes = state.state_bytes();
+                    let tokens = state.token_count();
+                    for gone in kept.keep(super::Kept { owner: live.clone(), text, state, bytes }) {
+                        eprintln!(
+                            "[llm-worker] dropped the kept KV of {} ({:.1} MB)",
+                            gone.owner.short(),
+                            gone.bytes as f64 / 1e6
+                        );
+                    }
+                    eprintln!(
+                        "[llm-worker] kept {}'s KV ({tokens} tok, {:.1} MB host memory, {:.0} ms) while {} runs; \
+                         {} kept, {:.1} MB",
+                        live.short(),
+                        bytes as f64 / 1e6,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        owner.short(),
+                        kept.len(),
+                        kept.bytes() as f64 / 1e6,
+                    );
+                }
+                Err(err) => eprintln!("[llm-worker] {}'s KV not kept: {err:?}", live.short()),
+            }
+        }
+        let found = found?;
+        let started = std::time::Instant::now();
+        match session.restore_state(&found.state) {
+            Ok(()) => {
+                eprintln!(
+                    "[llm-worker] {} resumed its kept KV ({} tok) in {:.0} ms",
+                    found.owner.short(),
+                    found.state.token_count(),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                prefix.commit(&found.owner, found.text);
+                Some(super::PrefixOutcome::Restored)
+            }
+            Err(err) => {
+                // Partly written: only a reset makes the session trustworthy again.
+                eprintln!("[llm-worker] {}'s kept KV not restored: {err:?}", found.owner.short());
+                prefix.invalidate();
+                None
+            }
+        }
     }
 
 }

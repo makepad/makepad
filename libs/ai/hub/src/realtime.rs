@@ -7,6 +7,7 @@
 //! session wire protocol" doc block for the wire contract and
 //! `realtime_wire.rs` for the (de)serialization helpers this module calls.
 
+use makepad_network::http_server::WebSocketOut;
 use crate::backend::{
     merge_feedback_fields, BorderMode, CameraMotion, CancelToken, ContentBackend, DriftParams,
     LiveConfig, LiveFrameIn, LiveParams, LoopMode, NoiseMode, OutputEncoding, RgbImage, SeedMode,
@@ -35,7 +36,7 @@ mod h264 {
 /// socket is detected and dropped — never retried, never blocks the loop.
 struct SessionSocket {
     id: u64,
-    sender: mpsc::Sender<Vec<u8>>,
+    sender: mpsc::Sender<WebSocketOut>,
 }
 
 /// The session-level knobs a control message can also touch, alongside the
@@ -127,7 +128,7 @@ impl RealtimeSession {
         }
     }
 
-    pub fn add_socket(&self, id: u64, sender: mpsc::Sender<Vec<u8>>) {
+    pub fn add_socket(&self, id: u64, sender: mpsc::Sender<WebSocketOut>) {
         self.sockets.lock().unwrap().push(SessionSocket { id, sender });
         // A feedback worker with no listener holds its loop on the mailbox
         // condvar; a consumer arriving is what it is waiting for.
@@ -154,16 +155,14 @@ impl RealtimeSession {
     /// instead of retried (see [`SessionSocket`]'s doc). Never blocks.
     pub fn push_bytes(&self, bytes: Vec<u8>) {
         let mut sockets = self.sockets.lock().unwrap();
-        sockets.retain(|socket| socket.sender.send(bytes.clone()).is_ok());
+        sockets.retain(|socket| socket.sender.send(WebSocketOut::Binary(bytes.clone())).is_ok());
     }
 
-    /// Sends the empty-payload close sentinel to every socket (see
-    /// `http_server::handle_web_socket`'s write thread, which shuts the TCP
-    /// connection down on an empty push) and forgets them.
+    /// Closes every socket and forgets it.
     pub fn close_all_sockets(&self) {
         let mut sockets = self.sockets.lock().unwrap();
         for socket in sockets.drain(..) {
-            let _ = socket.sender.send(Vec::new());
+            let _ = socket.sender.send(WebSocketOut::Close);
         }
     }
 

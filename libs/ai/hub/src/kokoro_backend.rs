@@ -402,6 +402,9 @@ mod kokoro_synth {
             cancel: &CancelToken,
             mut on_clause: Option<&mut dyn FnMut(super::ArtifactData)>,
         ) -> Result<(Vec<f32>, u32, Option<Vec<WordTimingJson>>), AssetAiError> {
+            let started = std::time::Instant::now();
+            // Uploads before this job (another caller on this thread) are not its own.
+            let _ = makepad_ai_speech::kokoro::accel::take_device_uploads();
             let model_path = self
                 .model_path
                 .clone()
@@ -435,6 +438,7 @@ mod kokoro_synth {
                 );
                 !cancel.is_cancelled()
             };
+            let speaking = std::time::Instant::now();
             let audio = match on_clause.as_mut() {
                 Some(sink) => bank.synthesize_streaming(&job.voice, &find_voice, &job.text, job.speed as f32, &mut on_chunk, &mut |samples: &[f32]| {
                     sink(super::ArtifactData {
@@ -446,11 +450,35 @@ mod kokoro_synth {
                 None => bank.synthesize(&job.voice, &find_voice, &job.text, job.speed as f32, &mut on_chunk),
             }
             .map_err(|e| AssetAiError::Backend(format!("kokoro synthesize: {e}")));
+            let spoken = speaking.elapsed();
             // The device copy of the weights (~0.4 GB) lives only for the job: the
             // upload is a fraction of a second, and the card is shared with the chat
             // model and the desktop between jobs.
+            let releasing = std::time::Instant::now();
             makepad_ai_speech::kokoro::accel::release_device_state();
+            let released = releasing.elapsed();
+            let (uploaded, upload) = makepad_ai_speech::kokoro::accel::take_device_uploads();
             let audio = audio?;
+            // Where the job's time went: the voice and model made ready (the speaker loads at
+            // its first job), the text to phonemes, the weights onto the device, the model.
+            let t = audio.times;
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            let ready = (speaking - started) + spoken.saturating_sub(t.total);
+            eprintln!(
+                "[speech] kokoro: {} characters, {:.2} s of speech in {} piece{}: ready {:.0} ms, text {:.0} ms, model {:.0} ms (device upload {:.0} ms, {:.0} MB), first audio at {:.0} ms, release {:.0} ms; {:.0} ms",
+                job.text.chars().count(),
+                audio.samples.len() as f64 / f64::from(audio.sample_rate.max(1)),
+                t.pieces,
+                if t.pieces == 1 { "" } else { "s" },
+                ms(ready),
+                ms(t.text),
+                ms(t.model),
+                ms(upload),
+                uploaded as f64 / 1e6,
+                ms(ready + t.first_audio),
+                ms(released),
+                ms(started.elapsed()),
+            );
             cancel.check()?;
             let timings = audio.timings.map(|words| {
                 words

@@ -65,6 +65,8 @@ pub fn read_placed(path: &Path, arena: &mut [u8], placed: &[Placement]) -> Resul
         return Ok(());
     }
     let total = validate(arena.len(), placed)?;
+    // The arena's pages are taken as they are read into.
+    crate::host_floor::check(total, format_args!("{} bytes of {}", total, path.display()))?;
 
     if !bulk_enabled() || total < BULK_THRESHOLD || placed.len() < 2 {
         return read_sequential(path, arena, placed);

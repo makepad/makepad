@@ -4,6 +4,7 @@
    "id": "pixal3d",
    "domain": "mesh",
    "backend": "trellis",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -102,6 +103,7 @@
    "id": "bs-roformer-4stem",
    "domain": "stems",
    "backend": "stems",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -127,6 +129,7 @@
    "id": "beat-this",
    "domain": "beats",
    "backend": "beats",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -161,6 +164,7 @@
    "id": "basic-pitch",
    "domain": "notes",
    "backend": "notes",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -186,6 +190,7 @@
    "id": "salamander-drumkit",
    "domain": "audio",
    "backend": "sample-kit",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -462,6 +467,7 @@
    "id": "hunyuan3d-paint-2.1",
    "domain": "paint",
    "backend": "paint",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -507,6 +513,7 @@
    "id": "flux1-schnell",
    "domain": "image",
    "backend": "flux",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -541,6 +548,7 @@
    "id": "flux1-schnell-q4",
    "domain": "image",
    "backend": "flux",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -603,6 +611,7 @@
    "id": "flux1-dev",
    "domain": "image",
    "backend": "flux",
+   "host_load": "reads",
    "available": true,
    "gated": true,
    "license": {
@@ -637,6 +646,7 @@
    "id": "flux1-depth-dev",
    "domain": "control",
    "backend": "control",
+   "host_load": "reads",
    "available": true,
    "gated": true,
    "license": {
@@ -700,6 +710,7 @@
    "id": "flux1-canny-dev",
    "domain": "control",
    "backend": "control",
+   "host_load": "reads",
    "available": true,
    "gated": true,
    "license": {
@@ -763,6 +774,7 @@
    "id": "flux1-fill-dev",
    "domain": "inpaint",
    "backend": "flux-fill",
+   "host_load": "reads",
    "available": true,
    "gated": true,
    "license": {
@@ -825,6 +837,7 @@
    "id": "flux2-klein-4b",
    "domain": "edit",
    "backend": "flux2",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -888,6 +901,7 @@
    "id": "flux2-dev",
    "domain": "image",
    "backend": "flux2",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -942,6 +956,7 @@
    "id": "flux2-dev-q4-24g",
    "domain": "image",
    "backend": "flux2",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -996,6 +1011,7 @@
    "id": "trellis-2",
    "domain": "mesh",
    "backend": "trellis",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1094,6 +1110,7 @@
    "id": "qwen3.5-4b",
    "domain": "text",
    "backend": "llm",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1113,6 +1130,17 @@
      "cache_as": "llm/Qwen3.5-4B-Q5_K_M.gguf",
      "size": 3143656608,
      "sha256": "8814232b85594dcd46c50e5b8b29324a7efe9e746edbe8a3d1df3d3fce7aad39"
+    },
+    {
+     "role": "mmproj",
+     "repo": "unsloth/Qwen3.5-4B-GGUF",
+     "path": "mmproj-F16.gguf",
+     "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+     "cache_as": "llm/Qwen3.5-4B-mmproj-F16.gguf",
+     "size": 672423616,
+     "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+     "optional": true,
+     "on_demand": true
     }
    ]
   },
@@ -1120,6 +1148,7 @@
    "id": "qwen3.5-9b",
    "domain": "text",
    "backend": "llm",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1155,6 +1184,7 @@
    "id": "qwen3.8-27b",
    "domain": "text",
    "backend": "llm",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1190,6 +1220,7 @@
    "id": "qwen3.5-9b-vision",
    "domain": "vision",
    "backend": "vision",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1225,6 +1256,7 @@
    "id": "qwen3.5-4b-vision",
    "domain": "vision",
    "backend": "vision",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1260,6 +1292,7 @@
    "id": "qwen3.8-27b-vision",
    "domain": "vision",
    "backend": "vision",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1296,6 +1329,7 @@
    "id": "chandra-ocr-2",
    "domain": "ocr",
    "backend": "ocr",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -1332,6 +1366,7 @@
    "id": "whisper-large-v3-turbo",
    "domain": "stt",
    "backend": "whisper",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -1358,6 +1393,7 @@
    "id": "kokoro",
    "domain": "speech",
    "backend": "kokoro",
+   "host_load": "converts",
    "available": true,
    "gated": false,
    "license": {
@@ -1692,6 +1728,7 @@
    "id": "indextts-2.5",
    "domain": "speech",
    "backend": "indextts",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -1799,6 +1836,7 @@
    "id": "minimax-h3",
    "domain": "video",
    "backend": "h3",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -2313,6 +2351,7 @@
    "id": "sa3-sfx",
    "domain": "audio",
    "backend": "sa3",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2370,6 +2409,7 @@
    "id": "moss-sfx",
    "domain": "audio",
    "backend": "moss",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2435,6 +2475,7 @@
    "id": "woosh-sfx",
    "domain": "audio",
    "backend": "woosh",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2483,6 +2524,7 @@
    "id": "flashworld",
    "domain": "world",
    "backend": "flashworld",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2499,6 +2541,7 @@
    "id": "triposplat",
    "domain": "splat",
    "backend": "triposplat",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2562,6 +2605,7 @@
    "id": "idol",
    "domain": "splat",
    "backend": "triposplat",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2634,6 +2678,7 @@
    "id": "birefnet-hr",
    "domain": "matte",
    "backend": "matte-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2660,6 +2705,7 @@
    "id": "da3-metric-large",
    "domain": "depth",
    "backend": "depth-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2686,6 +2732,7 @@
    "id": "mapanything-apache",
    "domain": "multiview",
    "backend": "multiview-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2712,6 +2759,7 @@
    "id": "mapanything",
    "domain": "multiview",
    "backend": "multiview-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2738,6 +2786,7 @@
    "id": "sam3dbody",
    "domain": "body",
    "backend": "body-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2774,6 +2823,7 @@
    "id": "sam3-1-multiplex",
    "domain": "segment",
    "backend": "segment-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2800,6 +2850,7 @@
    "id": "realesrgan-x4plus",
    "domain": "upscale",
    "backend": "upscale-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2826,6 +2877,7 @@
    "id": "video-enhance",
    "domain": "enhance",
    "backend": "video-enhance",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2861,6 +2913,7 @@
    "id": "skintokens",
    "domain": "rig",
    "backend": "rig-native",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2894,6 +2947,7 @@
    "id": "skintokens-oracle",
    "domain": "rig",
    "backend": "rig-oracle",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -2910,6 +2964,7 @@
    "id": "hy-motion",
    "domain": "motion",
    "backend": "motion-native",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -3053,6 +3108,7 @@
    "id": "hy-motion-oracle",
    "domain": "motion",
    "backend": "motion-oracle",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -3069,6 +3125,7 @@
    "id": "minimax-music3",
    "domain": "music",
    "backend": "music3",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -3308,6 +3365,7 @@
    "id": "minimax-music3-q4",
    "domain": "music",
    "backend": "music3",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -3397,6 +3455,7 @@
    "id": "ace-step-1.5-xl",
    "domain": "music",
    "backend": "ace",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -3560,6 +3619,7 @@
    "id": "yue2-3b",
    "domain": "music",
    "backend": "yue2",
+   "host_load": "reads",
    "available": true,
    "gated": false,
    "license": {
@@ -3643,6 +3703,7 @@
    "id": "minimax-h3-q4-24g",
    "domain": "video",
    "backend": "h3",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -3725,6 +3786,7 @@
    "id": "minimax-h3-nvfp4-32g",
    "domain": "video",
    "backend": "h3",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -3807,6 +3869,7 @@
    "id": "minimax-h3-bf16-96g",
    "domain": "video",
    "backend": "h3",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -4323,6 +4386,7 @@
    "id": "fasth3-4step",
    "domain": "video",
    "backend": "fast",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {
@@ -4868,6 +4932,7 @@
    "id": "fasth3-4step-q4-24g",
    "domain": "video",
    "backend": "fast",
+   "host_load": "maps",
    "available": true,
    "gated": false,
    "license": {

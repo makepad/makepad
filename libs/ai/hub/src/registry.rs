@@ -50,6 +50,10 @@ pub struct RegistryModelJson {
     /// registry requires it (see tests).
     pub license: Option<ModelLicenseJson>,
     pub files: Vec<RegistryEntryFileJson>,
+    /// How the model's loader takes its weights into host memory: `maps`, `reads` or
+    /// `converts` ([`HostLoad`]). Every model of the embedded registry declares it; optional on
+    /// the wire, so an older box's override registry still parses.
+    pub host_load: Option<String>,
 }
 
 /// Registry JSON shape of a model-weight license. `restriction` is one of
@@ -97,6 +101,11 @@ pub struct RegistryEntryFileJson {
     /// fail the model, readiness ignores them, and the backend names the
     /// role when a job actually needs the file. Requires `role`.
     pub optional: Option<bool>,
+    /// True for an optional artifact fetched only when a job first needs it
+    /// (a chat model's vision tower, for a turn with a picture): never by a
+    /// pull or a model load, so a model's other users never download it.
+    /// Implies `optional`; its role goes in [`ModelSpec::on_demand`].
+    pub on_demand: Option<bool>,
     /// Cache-relative path ('/'-separated) of the converted form this
     /// download is turned into by the backend (e.g. Kokoro's upstream `.pth`
     /// -> `tts/kokoro-v1_0.mktts`). A file whose converted form exists counts
@@ -580,6 +589,52 @@ pub struct ModelSpec {
     pub note: Option<String>,
     pub license: Option<ModelLicense>,
     pub files: Vec<FileSpec>,
+    /// Roles of optional files fetched when a job first needs them, never with a pull or a load:
+    /// see [`RegistryEntryFileJson::on_demand`].
+    pub on_demand: Vec<String>,
+    /// The registry's `host_load`: the first estimate of its host-memory peak (`crate::ram`).
+    pub host_load: Option<HostLoad>,
+}
+
+/// How a model's loader takes its weights into host memory, as its registry entry declares:
+/// its host-memory estimate until a load measures its peak (`crate::ram::host_estimate`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostLoad {
+    /// The weights stay in their files: mapped, or read a tensor at a time onto the device and
+    /// dropped there. A few percent of the files.
+    Maps,
+    /// A host copy of the files.
+    Reads,
+    /// A host copy bigger than the files (bf16 widened to f32, say).
+    Converts,
+}
+
+impl HostLoad {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "maps" => Some(Self::Maps),
+            "reads" => Some(Self::Reads),
+            "converts" => Some(Self::Converts),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Maps => "maps",
+            Self::Reads => "reads",
+            Self::Converts => "converts",
+        }
+    }
+
+    /// The host peak as a share of the files, in percent.
+    pub fn percent_of_files(self) -> u64 {
+        match self {
+            Self::Maps => 5,
+            Self::Reads => 100,
+            Self::Converts => 200,
+        }
+    }
 }
 
 /// Validated weight-license identity. The UI keys acknowledgements on
@@ -652,6 +707,12 @@ impl ModelSpec {
             .all(|file| file.is_present(cache_dir))
     }
 
+    /// Whether `file` is fetched when a job first needs it ([`Self::on_demand`]), and never by a
+    /// pull, a load, a catalogue download or a prefetch pass.
+    pub fn fetched_on_demand(&self, file: &FileSpec) -> bool {
+        file.role.as_deref().is_some_and(|role| self.on_demand.iter().any(|r| r == role))
+    }
+
     pub fn file_by_role(&self, role: &str) -> Option<&FileSpec> {
         self.files
             .iter()
@@ -697,6 +758,7 @@ impl Registry {
                 )));
             }
             let mut files = Vec::new();
+            let mut on_demand = Vec::new();
             let mut roles = HashMap::<String, usize>::new();
             for file in model.files {
                 let local = file.local.unwrap_or(false);
@@ -794,7 +856,13 @@ impl Registry {
                     .conversion
                     .map(|conversion| validate_conversion(&model.id, conversion))
                     .transpose()?;
-                let optional = file.optional.unwrap_or(false);
+                let on_demand_file = file.on_demand.unwrap_or(false);
+                let optional = file.optional.unwrap_or(false) || on_demand_file;
+                if on_demand_file {
+                    if let Some(role) = &file.role {
+                        on_demand.push(role.clone());
+                    }
+                }
                 if optional && file.role.is_none() {
                     return Err(AssetAiError::Registry(format!(
                         "model {}: optional file {} must declare a role",
@@ -865,6 +933,15 @@ impl Registry {
                 None => None,
                 Some(license) => Some(validate_license(&model.id, license)?),
             };
+            let host_load = match model.host_load.as_deref() {
+                None => None,
+                Some(text) => Some(HostLoad::parse(text).ok_or_else(|| {
+                    AssetAiError::Registry(format!(
+                        "model {}: host_load must be \"maps\", \"reads\" or \"converts\", got {text:?}",
+                        model.id
+                    ))
+                })?),
+            };
             models.push(ModelSpec {
                 id: model.id,
                 domain,
@@ -877,13 +954,24 @@ impl Registry {
                 note: model.note,
                 license,
                 files,
+                on_demand,
+                host_load,
             });
         }
         Ok(Registry { models })
     }
 
+    /// The registry built in. Every model declares its `host_load`: a model without it would
+    /// be estimated by its files' size alone.
     pub fn embedded() -> Result<Self, AssetAiError> {
-        Self::parse(EMBEDDED_REGISTRY)
+        let registry = Self::parse(EMBEDDED_REGISTRY)?;
+        if let Some(model) = registry.models.iter().find(|model| model.host_load.is_none()) {
+            return Err(AssetAiError::Registry(format!(
+                "model {}: the embedded registry declares every model's host_load (\"maps\", \"reads\" or \"converts\")",
+                model.id
+            )));
+        }
+        Ok(registry)
     }
 
     pub fn load_file(path: &Path) -> Result<Self, AssetAiError> {

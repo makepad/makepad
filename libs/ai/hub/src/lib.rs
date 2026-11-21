@@ -19,7 +19,7 @@
 //!   trait later so machines without local GPU boxes work identically.
 //!
 //! HTTP API summary (JSON via makepad-micro-serde):
-//! - `GET  /health`          -> service name, version, GPU name, VRAM, loaded models
+//! - `GET  /health`          -> service name, version, GPU name, VRAM, host memory, loaded models
 //! - `GET  /fleet`           -> cached peer answers/models and hub network state
 //! - `GET  /models`          -> registry list + per-model state
 //!                              (absent / downloading{progress} / ready / loaded / error)
@@ -27,6 +27,7 @@
 //! - `GET  /job/<id>`        -> queued / running{stage, progress} / live{stage, frames_in,
 //!                              frames_out, fps} / done{artifacts} / error
 //! - `GET  /artifact/<id>`   -> artifact bytes with the right content-type
+//! - `GET  /talk` (loopback WebSocket) -> spoken turns at the caller's PCM16 rate; see `talk`.
 //! - `POST /realtime`        -> `{model, width, height, prompt, strength, steps, loop_mode,
 //!                              ...}` -> `{job_id, ws_path}`; then `GET <ws_path>` (websocket
 //!                              upgrade) streams input/output video frames + live control —
@@ -151,6 +152,8 @@ pub mod subproc_img;
 pub mod testpattern;
 pub mod trellis_backend;
 pub mod wav;
+pub mod web_socket;
+pub mod talk;
 pub mod woosh_backend;
 pub mod music3_backend;
 #[cfg(feature = "notes-native")]

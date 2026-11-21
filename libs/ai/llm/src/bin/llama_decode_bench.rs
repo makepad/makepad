@@ -217,7 +217,7 @@ fn run_once(
     session.reset().map_err(|e| format!("reset: {e}"))?;
     let table = session.new_slot_table().map_err(|e| e.to_string())?;
     let prefill_chunk = session.config().prefill_batch_size;
-    let scheduler = LaneScheduler::new(table, 8).with_prefill_chunk(prefill_chunk);
+    let scheduler = LaneScheduler::new(table).with_prefill_chunk(prefill_chunk);
     let sampling = LlamaSamplingParams {
         temperature: args.temp,
         top_p: args.top_p,
@@ -232,19 +232,17 @@ fn run_once(
         },
     );
     for (index, prompt) in prompts.iter().enumerate() {
-        exec.scheduler()
-            .submit(LaneRequest {
-                job: index as u64 + 1,
-                session: format!("bench-{}", index + 1),
-                prompt_tokens: prompt.clone(),
-                reset_first: true,
-                max_new: args.tokens,
-                sampling: LlamaSamplingParams {
-                    seed: args.seed.wrapping_add(index as u64),
-                    ..sampling
-                },
-            })
-            .map_err(|r| format!("submit refused job {}", r.job))?;
+        exec.scheduler().submit(LaneRequest {
+            job: index as u64 + 1,
+            session: format!("bench-{}", index + 1),
+            prompt_tokens: prompt.clone(),
+            reset_first: true,
+            max_new: args.tokens,
+            sampling: LlamaSamplingParams {
+                seed: args.seed.wrapping_add(index as u64),
+                ..sampling
+            },
+        });
     }
 
     let width = prompts.len();

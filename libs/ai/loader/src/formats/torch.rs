@@ -194,6 +194,9 @@ impl TorchBinIndex {
                 record.name
             )));
         }
+        if len > out.capacity() {
+            crate::host_floor::check(len as u64, format_args!("tensor {}", record.name)).map_err(TorchBinError::Tensor)?;
+        }
         out.try_reserve_exact(len)
             .map_err(|_| TorchBinError::Tensor(format!("{}: allocation failed", record.name)))?;
         out.resize(len, 0);

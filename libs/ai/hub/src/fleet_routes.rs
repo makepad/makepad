@@ -17,13 +17,14 @@
 
 use makepad_network::fleet::id::{Peer, Role};
 
-/// The job API: submit, poll, fetch, cancel; listing models and voices.
+/// The job API: submit, poll, fetch, cancel, discard a finished job's results; listing models and
+/// voices. Cancel and discard reach only the caller's own jobs (the hub checks the owner).
 fn job_route(method: &str, path: &str) -> bool {
     matches!(
         (method, path),
         ("GET", "/health") | ("GET", "/fleet") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime") | ("POST", "/bye")
     ) || (method == "GET" && (path.starts_with("/job/") || path.starts_with("/artifact/") || path.starts_with("/realtime/")))
-        || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive")))
+        || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive") || path.ends_with("/discard")))
 }
 
 /// What the WM hosting this hub needs of it: the control picture (`GET /control`, its
@@ -57,15 +58,26 @@ pub fn route_allowed(peer: &Peer, edge: bool, method: &str, path: &str) -> bool 
         return true;
     }
     match peer.role {
-        Role::Node | Role::Device => {
-            job_route(method, path)
-                || blob_route(method, path)
-                || (method == "GET" && matches!(path, "/v1/model_inventory" | "/jobs" | "/loras"))
-                || path == "/kernel"
-                || path.starts_with("/kernel/")
-        }
+        Role::Node | Role::Device => machine_route(method, path),
         Role::Paired => job_route(method, path) || blob_route(method, path),
     }
+}
+
+/// What a fleet machine reaches: the job API, model blobs and inventories, kernels.
+fn machine_route(method: &str, path: &str) -> bool {
+    job_route(method, path)
+        || blob_route(method, path)
+        || (method == "GET" && matches!(path, "/v1/model_inventory" | "/jobs" | "/loras"))
+        || path == "/kernel"
+        || path.starts_with("/kernel/")
+}
+
+/// What this machine reaches when it is not the admin, as its own credential does through the
+/// front: the machine-local control and what a fleet machine reaches. An app on this machine
+/// that presents the machine token at the hub's loopback surface reaches exactly this.
+pub fn this_machine_route_allowed(method: &str, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    machine_control_route(method, path) || machine_route(method, path)
 }
 
 #[cfg(test)]

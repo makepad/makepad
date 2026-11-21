@@ -22902,6 +22902,9 @@ mod imp {
     pub struct KokoroWeightCache {
         weights: HashMap<(u64, usize), GpuTensor>,
         resident_bytes: usize,
+        /// Weight bytes put on the device, and the time it took, since [`Self::take_uploads`].
+        uploaded_bytes: usize,
+        upload_time: std::time::Duration,
     }
 
     impl KokoroWeightCache {
@@ -22911,6 +22914,19 @@ mod imp {
         pub fn clear(&mut self) {
             self.weights.clear();
             self.resident_bytes = 0;
+        }
+
+        /// The weight bytes uploaded and the time spent on it since the last call.
+        pub fn take_uploads(&mut self) -> (usize, std::time::Duration) {
+            (std::mem::take(&mut self.uploaded_bytes), std::mem::take(&mut self.upload_time))
+        }
+
+        fn upload(&mut self, values: &[f32], rows: usize, cols: usize) -> Result<GpuTensor, String> {
+            let started = std::time::Instant::now();
+            let tensor = gpu_upload(values, rows, cols)?;
+            self.uploaded_bytes += values.len() * size_of::<f32>();
+            self.upload_time += started.elapsed();
+            Ok(tensor)
         }
 
         pub fn weight(
@@ -22928,14 +22944,15 @@ mod imp {
             // Match the original Kokoro linear cache: large operands are
             // transient, and crossing the resident cap evicts the cache.
             if bytes > Self::MAX_CACHED_OPERAND_BYTES {
-                return gpu_upload(values, rows, cols);
+                return self.upload(values, rows, cols);
             }
             let key = (fingerprint, values.len());
             if !self.weights.contains_key(&key) {
                 if self.resident_bytes + bytes > Self::MAX_RESIDENT_BYTES {
                     self.clear();
                 }
-                self.weights.insert(key, gpu_upload(values, rows, cols)?);
+                let tensor = self.upload(values, rows, cols)?;
+                self.weights.insert(key, tensor);
                 self.resident_bytes += bytes;
             }
             let weight = &self.weights[&key];

@@ -1,5 +1,6 @@
 pub use crate::windows_security::{
-    create_private, private_directory, random_token, read_private, write_private, SessionLock,
+    create_private, private_directory, random_token, read_private, replace_private, write_private,
+    SessionLock,
 };
 pub use crate::wire::*;
 use makepad_strict_json::Value;

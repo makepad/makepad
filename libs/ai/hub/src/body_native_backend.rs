@@ -564,7 +564,7 @@ mod tests {
             "target/body-native-missing-test-{}-{nonce}",
             std::process::id()
         ));
-        let spec = ModelSpec {
+        let spec = ModelSpec { on_demand: Vec::new(), host_load: None,
             id: "sam3dbody".to_string(),
             domain: Domain::Body,
             backend: "body-native".to_string(),

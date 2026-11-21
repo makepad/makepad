@@ -246,7 +246,8 @@ pub fn run_pass(node: &PrefetchNode, config: &PrefetchConfig, complete: &mut dyn
         } else if let Some(reason) = config.licence_refusal(spec) {
             Verdict::Skipped(reason)
         } else {
-            for file in &spec.files {
+            // A file fetched on demand comes with the first job that needs it.
+            for file in spec.files.iter().filter(|f| !spec.fetched_on_demand(f)) {
                 if seen.insert(file.cache_as.as_str()) && !file.is_present(node.cache_dir) {
                     wanted.push(file);
                 }
@@ -275,7 +276,7 @@ pub fn run_pass(node: &PrefetchNode, config: &PrefetchConfig, complete: &mut dyn
         let line = match verdict {
             Verdict::Skipped(reason) => format!("{} skipped {gb:.1}GB {reason}", spec.id),
             Verdict::Wanted => {
-                let missing: Vec<&FileSpec> = spec.files.iter().filter(|f| !f.is_present(node.cache_dir)).collect();
+                let missing: Vec<&FileSpec> = spec.files.iter().filter(|f| !spec.fetched_on_demand(f) && !f.is_present(node.cache_dir)).collect();
                 if missing.is_empty() {
                     complete(&spec.id);
                     let licence = spec.license.as_ref().map(|l| l.restriction).unwrap_or(LicenseRestriction::Restricted);

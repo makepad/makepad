@@ -1874,7 +1874,7 @@ mod tests {
                 conversion: None,
             })
             .collect();
-        ModelSpec {
+        ModelSpec { on_demand: Vec::new(), host_load: None,
             id: id.to_string(),
             domain: Domain::Video,
             backend: "h3".to_string(),

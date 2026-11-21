@@ -36,11 +36,11 @@ pub use engine::{EngineCore, EngineEvent, Model, ModelEvent, ServiceRegistry, To
 pub use port::{AiServicePort, PortEvent, ServiceLink, ServiceLinkHost};
 pub use state::{
     EngineState, Entry, EventEntry, ProviderChoice, ProviderRow, ServiceInfo, Status, Suggestion,
-    Target, ToolEntry, ToolStatus,
+    Attachment, Target, ToolEntry, ToolStatus,
 };
 pub use card::{Card, CardValues, Field};
 pub use wire::{
-    api_name, AppLine, AppRequest, CardLayout, FieldLabel, canonical_name, split_name, Disposition, EndpointId, HostedDown, HostedUp,
+    api_name, AppLine, AppRequest, CallOrigin, CardLayout, FieldLabel, canonical_name, split_name, Disposition, EndpointId, HostedDown, HostedUp,
     InstanceMeta, Message, Risk, ServiceCall, ServiceContext, ServiceDown, ServiceManifest,
     ServiceUp, SubscriptionRequest, ToolDef, ToolOutcome, ToolResult, TopicDef,
 };

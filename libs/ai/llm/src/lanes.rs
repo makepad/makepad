@@ -63,9 +63,8 @@ pub struct LaneRequest {
     /// sticky affinity a collision would hand two players the same lane and
     /// therefore each other's KV.
     pub session: String,
-    /// Tokens to ingest. With `reset_first` false this is the DELTA the
-    /// session's existing state does not already hold, which is how prefix
-    /// reuse survives: the worker owns that decision, the executor obeys it.
+    /// The full prompt while queued. On a prefix hit, admission keeps only
+    /// the tokens the lane still needs to ingest.
     pub prompt_tokens: Vec<i32>,
     /// Clear the session's single-sequence state before ingesting. False only
     /// for a solo-lane prefix hit.
@@ -188,7 +187,6 @@ pub struct LaneScheduler {
     table: SlotTable,
     lanes: Vec<Option<Lane>>,
     pending: VecDeque<LaneRequest>,
-    queue_max: usize,
     /// Tokens a lane ingests per prefill step.
     ///
     /// The whole reason prefill is chunked at all: a prefill graph's
@@ -222,14 +220,13 @@ pub struct LaneScheduler {
 }
 
 impl LaneScheduler {
-    pub fn new(table: SlotTable, queue_max: usize) -> Self {
+    pub fn new(table: SlotTable) -> Self {
         let slots = table.len();
         let lanes = vec![None; slots];
         Self {
             table,
             lanes,
             pending: VecDeque::new(),
-            queue_max,
             prefill_chunk: DEFAULT_PREFILL_CHUNK,
             parked: vec![None; slots],
             resumed: vec![false; slots],
@@ -295,14 +292,9 @@ impl LaneScheduler {
         self.slots_claimed() == 0 && self.pending.is_empty()
     }
 
-    /// Offer work. `Err` when the queue is full — the caller must refuse the
-    /// request honestly rather than let it wait unbounded.
-    pub fn submit(&mut self, request: LaneRequest) -> Result<(), LaneRequest> {
-        if self.pending.len() >= self.queue_max {
-            return Err(request);
-        }
+    /// Queue a turn for the next available lane.
+    pub fn submit(&mut self, request: LaneRequest) {
         self.pending.push_back(request);
-        Ok(())
     }
 
     /// Move queued work into free lanes. Called at every step boundary, which
@@ -1543,17 +1535,17 @@ mod tests {
     /// The end-of-turn token these tests stand in for `<|im_end|>` with.
     const EOS: i32 = 7;
 
-    fn scheduler(slots: usize, queue_max: usize) -> LaneScheduler {
+    fn scheduler(slots: usize) -> LaneScheduler {
         let table = SlotTable::new(slots, 512, 1, 0).expect("table");
-        LaneScheduler::new(table, queue_max).with_stop_tokens([EOS])
+        LaneScheduler::new(table).with_stop_tokens([EOS])
     }
 
     /// A scheduler whose slots are sized for speculation: `draft_max + 2`
     /// recurrent rows each, so a round has checkpoint planes to commit into.
-    fn spec_scheduler(slots: usize, queue_max: usize) -> LaneScheduler {
+    fn spec_scheduler(slots: usize) -> LaneScheduler {
         let table = SlotTable::new(slots, 512, crate::slots::SOLO_DRAFT_MAX + 2, crate::slots::SOLO_DRAFT_MAX)
             .expect("table");
-        LaneScheduler::new(table, queue_max).with_stop_tokens([EOS])
+        LaneScheduler::new(table).with_stop_tokens([EOS])
     }
 
     /// What a round handed back for one lane.
@@ -1571,7 +1563,7 @@ mod tests {
 
     /// Prefill one job and return the decode plan its lane is part of.
     fn prefilled(sched: &mut LaneScheduler, job: u64, prompt: &[i32], max_new: usize, first: i32) {
-        sched.submit(request(job, prompt, max_new)).expect("submit");
+        sched.submit(request(job, prompt, max_new));
         loop {
             match sched.next_step() {
                 LaneStep::Prefill { lane, tokens, last, .. } => {
@@ -1618,15 +1610,15 @@ mod tests {
 
     #[test]
     fn an_empty_scheduler_asks_the_worker_to_block() {
-        let mut sched = scheduler(4, 8);
+        let mut sched = scheduler(4);
         assert_eq!(sched.next_step(), LaneStep::Idle);
         assert!(sched.is_idle(), "a worker that spins on Idle burns a core");
     }
 
     #[test]
     fn a_submitted_job_prefills_before_it_decodes() {
-        let mut sched = scheduler(4, 8);
-        sched.submit(request(1, &[10, 11, 12], 4)).expect("submit");
+        let mut sched = scheduler(4);
+        sched.submit(request(1, &[10, 11, 12], 4));
         match sched.next_step() {
             LaneStep::Prefill { lane, start, tokens, kv_base, .. } => {
                 assert_eq!(lane, 0, "first job takes the zero-base lane");
@@ -1639,24 +1631,12 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_refuses_rather_than_growing_without_bound() {
-        let mut sched = scheduler(1, 2);
-        sched.submit(request(1, &[1], 1)).expect("first");
-        sched.submit(request(2, &[1], 1)).expect("second");
-        let refused = sched
-            .submit(request(3, &[1], 1))
-            .expect_err("a full queue must refuse");
-        assert_eq!(refused.job, 3, "the refusal must hand the work back");
-        assert_eq!(sched.queue_depth(), 2);
-    }
-
-    #[test]
     fn a_lane_emits_the_token_it_decoded_not_the_one_it_will_decode_next() {
         // Off-by-one here drops the first token of every generation and
         // appends one that was never produced, which reads as the model
         // behaving oddly rather than as a scheduler bug.
-        let mut sched = scheduler(1, 4);
-        sched.submit(request(7, &[1, 2], 2)).expect("submit");
+        let mut sched = scheduler(1);
+        sched.submit(request(7, &[1, 2], 2));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -1676,8 +1656,8 @@ mod tests {
 
     #[test]
     fn a_lane_finishes_at_its_token_budget_and_frees_its_slot() {
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(1, &[1, 2], 3)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(1, &[1, 2], 3));
         let events = run_to_completion(&mut sched, 8);
         let tokens: Vec<_> = events
             .iter()
@@ -1695,11 +1675,9 @@ mod tests {
 
     #[test]
     fn several_lanes_decode_in_one_step() {
-        let mut sched = scheduler(4, 8);
+        let mut sched = scheduler(4);
         for job in 1..=3 {
-            sched
-                .submit(request(job, &[1, 2, 3], 4))
-                .expect("submit");
+            sched.submit(request(job, &[1, 2, 3], 4));
         }
         // Three prefills, then the decode batches all three at once.
         for _ in 0..3 {
@@ -1718,9 +1696,9 @@ mod tests {
 
     #[test]
     fn a_waiting_job_joins_as_soon_as_a_lane_frees() {
-        let mut sched = scheduler(1, 4);
-        sched.submit(request(1, &[1], 1)).expect("submit");
-        sched.submit(request(2, &[1], 1)).expect("submit");
+        let mut sched = scheduler(1);
+        sched.submit(request(1, &[1], 1));
+        sched.submit(request(2, &[1], 1));
         // Submission only enqueues; admission happens at a step boundary,
         // which is what makes joining cheap and bounded.
         sched.admit_pending();
@@ -1746,8 +1724,8 @@ mod tests {
 
     #[test]
     fn cancelling_retires_at_a_boundary_and_never_mid_step() {
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(1, &[1, 2], 50)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(1, &[1, 2], 50));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -1771,9 +1749,9 @@ mod tests {
 
     #[test]
     fn cancelling_queued_work_drops_it_without_ever_claiming_a_lane() {
-        let mut sched = scheduler(1, 4);
-        sched.submit(request(1, &[1], 9)).expect("submit");
-        sched.submit(request(2, &[1], 9)).expect("submit");
+        let mut sched = scheduler(1);
+        sched.submit(request(1, &[1], 9));
+        sched.submit(request(2, &[1], 9));
         sched.admit_pending();
         assert_eq!(sched.queue_depth(), 1, "job 2 is queued behind the one lane");
         sched.cancel(2);
@@ -1787,8 +1765,8 @@ mod tests {
         // The distinction /health exposes: a lane holding KV but not generating
         // costs no speed, and collapsing the two would make the advert useless
         // for choosing between boxes.
-        let mut sched = scheduler(4, 8);
-        sched.submit(request(1, &[1, 2], 1)).expect("submit");
+        let mut sched = scheduler(4);
+        sched.submit(request(1, &[1, 2], 1));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -1814,9 +1792,9 @@ mod tests {
         // index it cannot tell which stream to drop, and the next occupant of
         // the slot silently continues a stranger's RNG sequence — reproducible
         // only for whoever happened to be there before.
-        let mut sched = scheduler(4, 8);
-        sched.submit(request(1, &[1], 1)).expect("submit");
-        sched.submit(request(2, &[1], 1)).expect("submit");
+        let mut sched = scheduler(4);
+        sched.submit(request(1, &[1], 1));
+        sched.submit(request(2, &[1], 1));
         sched.admit_pending();
         sched.cancel(1);
         sched.cancel(2);
@@ -1846,19 +1824,17 @@ mod tests {
     /// decode rate, and there is nobody else on the box to be slowed down.
     #[test]
     fn a_conversation_arriving_alone_lands_where_it_can_speculate() {
-        let mut sched = scheduler(4, 4);
+        let mut sched = scheduler(4);
         // Someone talked, and left their history parked on slot 0.
-        sched.submit(request(1, &[1, 2, 3], 2)).expect("submit");
+        sched.submit(request(1, &[1, 2, 3], 2));
         let _ = run_to_completion(&mut sched, 12);
         assert!(sched.is_idle(), "the first conversation retired");
 
         // A DIFFERENT conversation now arrives, alone.
-        sched
-            .submit(LaneRequest {
-                session: "someone-else".to_string(),
-                ..request(2, &[9, 9, 9], 2)
-            })
-            .expect("submit");
+        sched.submit(LaneRequest {
+            session: "someone-else".to_string(),
+            ..request(2, &[9, 9, 9], 2)
+        });
         sched.admit_pending();
         assert!(
             sched.is_solo(SOLO_LANE),
@@ -1871,20 +1847,16 @@ mod tests {
     /// either way — so the park is left alone and the newcomer goes elsewhere.
     #[test]
     fn a_second_conversation_does_not_evict_a_park_for_nothing() {
-        let mut sched = scheduler(4, 4);
-        sched.submit(request(1, &[1, 2, 3], 2)).expect("submit");
+        let mut sched = scheduler(4);
+        sched.submit(request(1, &[1, 2, 3], 2));
         let _ = run_to_completion(&mut sched, 12);
 
         // One conversation is live...
-        sched
-            .submit(LaneRequest { session: "a".to_string(), ..request(2, &[5, 5], 40) })
-            .expect("submit");
+        sched.submit(LaneRequest { session: "a".to_string(), ..request(2, &[5, 5], 40) });
         sched.admit_pending();
         let first = (0..4).find(|i| sched.is_lane_claimed(*i)).expect("claimed");
         // ...and a second arrives behind it.
-        sched
-            .submit(LaneRequest { session: "b".to_string(), ..request(3, &[7, 7], 40) })
-            .expect("submit");
+        sched.submit(LaneRequest { session: "b".to_string(), ..request(3, &[7, 7], 40) });
         sched.admit_pending();
         let second = (0..4)
             .find(|i| sched.is_lane_claimed(*i) && *i != first)
@@ -1897,12 +1869,12 @@ mod tests {
         // The condition that decides whether a lane may take the speculative
         // path. It has to include the QUEUE: a lane that is alone right now
         // but has work waiting behind it would be joined mid-chunk.
-        let mut sched = scheduler(4, 8);
-        sched.submit(request(1, &[1, 2], 20)).expect("submit");
+        let mut sched = scheduler(4);
+        sched.submit(request(1, &[1, 2], 20));
         sched.admit_pending();
         assert!(sched.is_solo(0), "sole occupant, nothing queued");
 
-        sched.submit(request(2, &[1], 20)).expect("submit");
+        sched.submit(request(2, &[1], 20));
         assert!(
             !sched.is_solo(0),
             "work is queued behind it, so it is about to be joined"
@@ -1916,8 +1888,8 @@ mod tests {
         // The speculative path hands back tokens it already produced, unlike
         // the batched path which emits the token it just consumed. Getting
         // this wrong drops or duplicates a whole chunk, not one token.
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(5, &[1, 2], 10)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(5, &[1, 2], 10));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -1937,8 +1909,8 @@ mod tests {
 
     #[test]
     fn a_generated_chunk_still_stops_at_the_budget() {
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(6, &[1], 2)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(6, &[1], 2));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -1965,10 +1937,10 @@ mod tests {
     /// unspeculated batched path at 69 tok/s instead of the ~110 solo one.
     #[test]
     fn a_reply_ends_at_its_stop_token_instead_of_running_to_the_budget() {
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         // A generous budget, as a chat request has: the budget must NOT be
         // what ends this turn.
-        sched.submit(request(1, &[1, 2], 512)).expect("submit");
+        sched.submit(request(1, &[1, 2], 512));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2021,8 +1993,8 @@ mod tests {
     /// claimed, and the next turn was no longer solo.
     #[test]
     fn a_solo_chunk_that_stopped_finishes_the_lane_even_when_it_came_up_short() {
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(2, &[1], 512)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(2, &[1], 512));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2047,8 +2019,8 @@ mod tests {
     /// a spin with no exit, and it is what pinned a core on the live box.
     #[test]
     fn a_solo_chunk_that_produced_nothing_ends_the_lane_rather_than_spinning() {
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(3, &[1], 512)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(3, &[1], 512));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2063,8 +2035,8 @@ mod tests {
     /// past the end of the turn on token zero.
     #[test]
     fn a_prompt_whose_first_token_is_a_stop_token_yields_an_empty_reply() {
-        let mut sched = scheduler(2, 4);
-        sched.submit(request(4, &[1, 2], 512)).expect("submit");
+        let mut sched = scheduler(2);
+        sched.submit(request(4, &[1, 2], 512));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2083,8 +2055,8 @@ mod tests {
     /// one. This is the 69-vs-110 tok/s the box measured.
     #[test]
     fn a_finished_turn_leaves_the_next_one_solo() {
-        let mut sched = scheduler(4, 4);
-        sched.submit(request(1, &[1], 512)).expect("submit");
+        let mut sched = scheduler(4);
+        sched.submit(request(1, &[1], 512));
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2092,7 +2064,7 @@ mod tests {
         sched.on_generated(0, &[41], true);
         sched.reap();
 
-        sched.submit(request(2, &[1], 512)).expect("submit");
+        sched.submit(request(2, &[1], 512));
         let LaneStep::Prefill { lane, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2118,9 +2090,9 @@ mod tests {
     /// more than the chunk.
     #[test]
     fn a_long_prompt_is_prefilled_in_chunks() {
-        let mut sched = scheduler(2, 4).with_prefill_chunk(8);
+        let mut sched = scheduler(2).with_prefill_chunk(8);
         let prompt: Vec<i32> = (0..20).collect();
-        sched.submit(request(1, &prompt, 4)).expect("submit");
+        sched.submit(request(1, &prompt, 4));
 
         let mut offered = Vec::new();
         let mut starts = Vec::new();
@@ -2154,9 +2126,9 @@ mod tests {
         // and DRAWS FROM THE LANE'S RNG — which would make a conversation's
         // reply depend on how its prompt happened to be split, and a chunk
         // size is not something a chat should be able to feel.
-        let mut sched = scheduler(2, 4).with_prefill_chunk(4);
+        let mut sched = scheduler(2).with_prefill_chunk(4);
         let prompt: Vec<i32> = (0..10).collect();
-        sched.submit(request(1, &prompt, 4)).expect("submit");
+        sched.submit(request(1, &prompt, 4));
         let mut lasts = Vec::new();
         for _ in 0..3 {
             let LaneStep::Prefill { lane, tokens, last, .. } = sched.next_step() else {
@@ -2173,9 +2145,9 @@ mod tests {
         // Chunks after the first are appending to state THIS lane just wrote.
         // Resetting on chunk two would throw away chunk one and prefill the
         // rest at position zero — a prompt with its beginning missing.
-        let mut sched = scheduler(2, 4).with_prefill_chunk(4);
+        let mut sched = scheduler(2).with_prefill_chunk(4);
         let prompt: Vec<i32> = (0..10).collect();
-        sched.submit(request(1, &prompt, 4)).expect("submit");
+        sched.submit(request(1, &prompt, 4));
         let mut resets = Vec::new();
         for _ in 0..3 {
             let LaneStep::Prefill { lane, tokens, resumed, .. } = sched.next_step() else {
@@ -2197,10 +2169,10 @@ mod tests {
         // know what a lane is holding — only the scheduler does — and honouring
         // "do not reset" over an empty or foreign lane decodes on top of
         // whatever was left behind.
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         let mut hit = request(9, &[7, 8], 4);
         hit.reset_first = false;
-        sched.submit(hit).expect("submit");
+        sched.submit(hit);
         sched.admit_pending();
         assert!(
             sched.reset_requested(0),
@@ -2219,7 +2191,7 @@ mod tests {
     ) -> LaneStep {
         let mut a = request(1, first, 1);
         a.session = session.to_string();
-        sched.submit(a).expect("submit");
+        sched.submit(a);
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2233,7 +2205,7 @@ mod tests {
         let mut b = request(2, second, 4);
         b.session = session.to_string();
         b.reset_first = false;
-        sched.submit(b).expect("submit");
+        sched.submit(b);
         sched.next_step()
     }
 
@@ -2241,7 +2213,7 @@ mod tests {
     fn a_conversation_that_comes_back_appends_instead_of_re_ingesting() {
         // The user's own words: "the first message is slow cause of the
         // context load but then it should just be an append."
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         // The lane ends up holding [7, 8] (the prompt) + [100] (the token it
         // emitted). The next prompt extends all three.
         let step = park_then_return(&mut sched, "player-1", &[7, 8], &[7, 8, 100, 55, 66]);
@@ -2267,7 +2239,7 @@ mod tests {
         // full history would decode against a recurrent state belonging to
         // tokens the prompt no longer contains. Fluent output, conversation
         // that never happened.
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         let step = park_then_return(&mut sched, "player-1", &[7, 8], &[7, 9, 100, 55]);
         match step {
             LaneStep::Prefill { start, tokens, .. } => {
@@ -2283,7 +2255,7 @@ mod tests {
     fn a_prompt_equal_to_its_history_still_ingests_a_token() {
         // A lane must ingest at least one token to have something to decode
         // from. A zero-length delta would be admitted and then stall.
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         let step = park_then_return(&mut sched, "player-1", &[7, 8], &[7, 8, 100]);
         match step {
             LaneStep::Prefill { start, tokens, .. } => {
@@ -2309,10 +2281,10 @@ mod tests {
         // spoke last, so a second conversation interleaving with a first takes
         // the first's append away — and the user reads that as "it was fast,
         // now it is slow, for no reason".
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         let mut a = request(1, &[7, 8], 1);
         a.session = "player-1".to_string();
-        sched.submit(a).expect("submit");
+        sched.submit(a);
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2325,7 +2297,7 @@ mod tests {
         // survive.
         let mut b = request(2, &[40, 41], 1);
         b.session = "player-2".to_string();
-        sched.submit(b).expect("submit");
+        sched.submit(b);
         // ADMITTED while player 1 still holds its lane. That is the whole of
         // "interleaving": the second conversation is admitted next to a live
         // one, so the idle rule does not apply and the park is not a candidate.
@@ -2347,7 +2319,7 @@ mod tests {
         let mut back = request(3, &[7, 8, 100, 55], 4);
         back.session = "player-1".to_string();
         back.reset_first = false;
-        sched.submit(back).expect("submit");
+        sched.submit(back);
         match sched.next_step() {
             LaneStep::Prefill { lane, start, tokens, .. } => {
                 assert_eq!(lane, 0);
@@ -2363,15 +2335,15 @@ mod tests {
         // Temperature and seed belong to the caller. Two chats sharing one
         // setting would silently sample with each other's — the same
         // shared-state class as the recurrent row and the carry ring.
-        let mut sched = scheduler(2, 4);
+        let mut sched = scheduler(2);
         let mut hot = request(1, &[1], 4);
         hot.sampling.temperature = 1.3;
         hot.sampling.seed = 111;
         let mut cold = request(2, &[1], 4);
         cold.sampling.temperature = 0.0;
         cold.sampling.seed = 222;
-        sched.submit(hot).expect("submit");
-        sched.submit(cold).expect("submit");
+        sched.submit(hot);
+        sched.submit(cold);
         sched.admit_pending();
 
         let a = sched.sampling_for(0).expect("lane 0 params");
@@ -2384,14 +2356,27 @@ mod tests {
     }
 
     #[test]
-    fn lanes_never_exceed_the_table() {
-        let mut sched = scheduler(2, 16);
-        for job in 1..=6 {
-            sched.submit(request(job, &[1], 5)).expect("submit");
+    fn all_queued_turns_finish_as_lanes_free() {
+        let mut sched = scheduler(2);
+        let jobs: Vec<_> = (1..=20).collect();
+        for &job in &jobs {
+            sched.submit(request(job, &[1], 1));
         }
+        assert_eq!(sched.queue_depth(), 20);
         sched.admit_pending();
         assert_eq!(sched.slots_claimed(), 2, "only two lanes exist");
-        assert_eq!(sched.queue_depth(), 4, "the rest wait honestly");
+        assert_eq!(sched.queue_depth(), 18, "the remaining turns wait");
+
+        let mut finished: Vec<_> = run_to_completion(&mut sched, 2 * jobs.len())
+            .into_iter()
+            .filter_map(|event| match event {
+                LaneEvent::Finished { job, outcome: LaneOutcome::Complete, .. } => Some(job),
+                _ => None,
+            })
+            .collect();
+        finished.sort_unstable();
+        assert_eq!(finished, jobs, "each submitted turn completes once");
+        assert!(sched.is_idle());
     }
 
     #[test]
@@ -2400,7 +2385,7 @@ mod tests {
         // commits the token the lane was ALREADY decoding first. Emitting the
         // previous one instead — the batched path's contract — would drop the
         // first token of every generation.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         prefilled(&mut sched, 2, &[20, 21], 16, 200);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
@@ -2453,7 +2438,7 @@ mod tests {
         // Both are per-lane facts the next round reads back. A lane that took
         // its neighbour's resume row would decode against a recurrent state
         // belonging to a different conversation — fluently.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         prefilled(&mut sched, 2, &[20, 21], 16, 200);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
@@ -2484,10 +2469,10 @@ mod tests {
         // parked lane's history has to describe its caches EXACTLY. One token
         // short and the conversation comes back, appends at the wrong offset,
         // and decodes the rest of its life one position out.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         let mut req = request(1, &[10, 11], 2);
         req.session = "player-1".to_string();
-        sched.submit(req).expect("submit");
+        sched.submit(req);
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2518,7 +2503,7 @@ mod tests {
         let mut back = request(2, &[10, 11, 100, 101, 102, 55], 4);
         back.session = "player-1".to_string();
         back.reset_first = false;
-        sched.submit(back).expect("submit");
+        sched.submit(back);
         match sched.next_step() {
             LaneStep::Prefill { lane, start, tokens, .. } => {
                 assert_eq!(lane, 0, "back to the lane holding its tokens");
@@ -2534,7 +2519,7 @@ mod tests {
         // Outcomes are matched to lanes positionally. If they ever slip, every
         // lane below the slip is handed another conversation's tokens — so this
         // fails loudly rather than emitting them.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
             panic!("expected decode");
@@ -2554,7 +2539,7 @@ mod tests {
         // The turn ends at the token BEFORE its end-of-turn marker; the round
         // is supposed to have dropped it. If one arrives anyway, emitting it
         // would print `<|im_end|>` into a player's chat.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
             panic!("expected decode");
@@ -2567,7 +2552,7 @@ mod tests {
 
     #[test]
     fn a_round_that_stopped_ends_the_turn_and_frees_the_lane() {
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
             panic!("expected decode");
@@ -2591,10 +2576,10 @@ mod tests {
         // sequence's share of it. A parked lane still believed resumable
         // afterwards appends its next delta onto zeros and answers, fluently,
         // about a conversation that did not happen.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         let mut first = request(1, &[7, 8], 1);
         first.session = "player-1".to_string();
-        sched.submit(first).expect("submit");
+        sched.submit(first);
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
@@ -2610,7 +2595,7 @@ mod tests {
         let mut back = request(2, &[7, 8, 100, 55], 4);
         back.session = "player-1".to_string();
         back.reset_first = false;
-        sched.submit(back).expect("submit");
+        sched.submit(back);
         match sched.next_step() {
             LaneStep::Prefill { start, tokens, .. } => {
                 assert_eq!(start, 0, "the caches it would have resumed are zeros now");
@@ -2624,7 +2609,7 @@ mod tests {
     fn a_lane_cannot_adopt_a_resume_row_from_another_slot() {
         // The solo path hands its resume row over by number. A number past the
         // slot's own block is the neighbour's state, and reading it is silent.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         let rows = crate::slots::SOLO_DRAFT_MAX + 2;
         sched
@@ -2662,7 +2647,7 @@ mod tests {
         // right lane at the wrong position: it writes a token over a token and
         // reads a mask one row short. No error, just a conversation that starts
         // repeating itself.
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
             panic!("expected decode");
@@ -2679,7 +2664,7 @@ mod tests {
 
     #[test]
     fn a_round_reads_each_lanes_own_history_and_geometry() {
-        let mut sched = spec_scheduler(2, 4);
+        let mut sched = spec_scheduler(2);
         prefilled(&mut sched, 1, &[10, 11], 16, 100);
         prefilled(&mut sched, 2, &[20, 21, 22], 16, 200);
         let LaneStep::Decode { plan, .. } = sched.next_step() else {

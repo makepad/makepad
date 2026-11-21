@@ -13,8 +13,8 @@ pub fn resample_channel(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> 
         return input.to_vec();
     }
     let g = gcd(in_rate as u64, out_rate as u64);
-    let up = (out_rate as u64 / g) as usize; // L: phases
-    let down = (in_rate as u64 / g) as usize; // M: input step per L outputs
+    let up = out_rate as u64 / g; // L: phases
+    let down = in_rate as u64 / g; // M: input step per L outputs
 
     // Windowed-sinc kernel, HALF taps each side, cutoff at the lower of the
     // two Nyquists (with a little rolloff margin so the transition band stays
@@ -23,12 +23,11 @@ pub fn resample_channel(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> 
     let cutoff = 0.5 * 0.92 * (out_rate.min(in_rate) as f64 / in_rate as f64);
 
     // Per-phase FIR: phase p covers fractional offset p/up (in input samples).
-    let mut kernels = Vec::with_capacity(up);
-    for phase in 0..up {
+    let kernel = |phase: u64| {
         let frac = phase as f64 / up as f64;
-        let mut taps = Vec::with_capacity((2 * HALF) as usize);
+        let mut taps = [0.0; (2 * HALF) as usize];
         let mut sum = 0.0f64;
-        for k in -HALF + 1..=HALF {
+        for (i, k) in (-HALF + 1..=HALF).enumerate() {
             let t = k as f64 - frac;
             let sinc = if t == 0.0 {
                 1.0
@@ -46,22 +45,32 @@ pub fn resample_channel(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> 
             };
             let tap = 2.0 * cutoff * sinc * window;
             sum += tap;
-            taps.push(tap);
+            taps[i] = tap;
         }
         // Normalize each phase to unity DC gain (windowing slightly detunes it).
         for tap in &mut taps {
             *tap /= sum;
         }
-        kernels.push(taps);
-    }
+        taps
+    };
 
-    let out_len = input.len() * up / down;
-    let mut out = Vec::with_capacity(out_len);
+    let out_len = input.len() as u64 * up / down;
+    // Co-prime rates can have millions of phases even for a short clip. Cache the
+    // table only when its storage fits within the space needed for the output.
+    let cache = (up <= out_len / (4 * HALF as u64)).then(|| (0..up).map(kernel).collect::<Vec<_>>());
+    let mut out = Vec::with_capacity(out_len as usize);
     for n in 0..out_len {
         let num = n * down;
         let base = (num / up) as i64;
         let phase = num % up;
-        let taps = &kernels[phase];
+        let computed;
+        let taps = match &cache {
+            Some(table) => &table[phase as usize],
+            None => {
+                computed = kernel(phase);
+                &computed
+            }
+        };
         let mut acc = 0.0f64;
         for (i, k) in (-HALF + 1..=HALF).enumerate() {
             let idx = base + k;
