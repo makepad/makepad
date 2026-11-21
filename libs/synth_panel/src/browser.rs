@@ -239,6 +239,10 @@ pub struct Browser {
     /// semantic tree.
     #[rust]
     cards: Vec<(Rect, String)>,
+    /// Under the search's caret, as last drawn: where the keyboard's text
+    /// input is raised.
+    #[rust]
+    caret: DVec2,
 }
 
 impl Browser {
@@ -787,6 +791,20 @@ impl Browser {
         }
     }
 
+    /// Raise the keyboard's text input (the IME) at the search's caret, while
+    /// the browser is open and `keys`, the holder's area its keys go through,
+    /// has the key focus. The holder calls it each draw, once `keys` and the
+    /// browser are drawn, and drops it ([`Cx::hide_text_ime`]) when the
+    /// browser closes or `keys` loses the focus. A key brings typed text
+    /// only while a field has raised it (on macOS a press is a bare key
+    /// until then): without it no letter reaches the search.
+    pub fn raise_text_input(&self, cx: &mut Cx2d, keys: Area) {
+        if self.open && !keys.is_empty() && cx.has_key_focus(keys) {
+            let origin = keys.clipped_rect(cx).pos;
+            cx.show_text_ime(keys, self.caret - origin);
+        }
+    }
+
     /// Where an anchored browser goes for an anchor at `at` within `clip`.
     pub fn place(at: DVec2, clip: Rect) -> Rect {
         let w = (clip.size.x - 16.0).clamp(420.0, 900.0);
@@ -890,9 +908,11 @@ impl Browser {
         self.draw_text.color = color(ink, 1.0);
         let (shown, _) = makepad_value_pickers::panel::control::fit_text(&self.draw_text, cx, &text, search.size.x - 18.0);
         self.draw_text.draw_abs(cx, dvec2(search.pos.x + 8.0, search.pos.y + 3.5), &shown);
+        self.caret = dvec2(search.pos.x + 8.0, search.pos.y + 16.0);
         if !self.query.is_empty() {
             let tw = advance(&self.draw_text, cx, &shown);
             self.draw_shape.fill_round(cx, Rect { pos: dvec2(search.pos.x + 9.0 + tw, search.pos.y + 4.0), size: dvec2(1.0, 12.0) }, color(p.accent, 1.0), 0.0);
+            self.caret.x += 1.0 + tw;
         }
         let body_y = rect.pos.y + head;
         self.draw_shape.fill_round(cx, Rect { pos: dvec2(rect.pos.x + 1.0, body_y - 1.0), size: dvec2(rect.size.x - 2.0, 1.0) }, color(p.line, 1.0), 0.0);
@@ -1521,10 +1541,13 @@ impl Widget for InstrumentBrowser {
         if keys && !self.modal && !cx.has_key_focus(self.draw_bg.area()) {
             return;
         }
-        if let (Event::MouseDown(e), false) = (event, self.modal) {
+        if let Event::MouseDown(e) = event {
             if self.browser.rect.contains(e.abs) {
+                // The press is the browser's: held here, so the window
+                // around it does not take the keys away with it.
+                let _ = event.hits(cx, self.draw_bg.area());
                 cx.set_key_focus_from_user(self.draw_bg.area());
-            } else {
+            } else if !self.modal {
                 return;
             }
         }
@@ -1532,6 +1555,10 @@ impl Widget for InstrumentBrowser {
         if out.redraw {
             self.redraw(cx);
             self.next_frame = cx.new_next_frame();
+        }
+        // Closed or popping: its text input goes with it.
+        if (out.close || out.pop.is_some()) && cx.has_key_focus(self.draw_bg.area()) {
+            cx.hide_text_ime();
         }
         if out.close {
             cx.widget_action(self.uid, InstrumentBrowserAction::Close);
@@ -1553,6 +1580,112 @@ impl Widget for InstrumentBrowser {
         if self.browser.draw(cx, rect) {
             self.next_frame = cx.new_next_frame();
         }
+        // A modal takes the keys from its modal (which gives them to its
+        // content as it opens), so typing reaches the search; until it has
+        // them it looks again next frame.
+        let keys = self.draw_bg.area();
+        if self.modal && self.browser.is_open() && !cx.has_key_focus(keys) {
+            cx.set_key_focus(keys);
+            self.next_frame = cx.new_next_frame();
+        }
+        self.browser.raise_text_input(cx, keys);
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+    use makepad_widgets::makepad_script::script;
+    use makepad_widgets::test_cx;
+
+    const SIZE: Vec2d = Vec2d { x: 1000.0, y: 560.0 };
+
+    /// The widgets, the palette and the panel controls the browser draws with.
+    fn register(vm: &mut ScriptVm) {
+        makepad_widgets::script_mod(vm);
+        makepad_look::palette::script_mod(vm);
+        makepad_value_pickers::script_mod(vm);
+        crate::script_mod(vm);
+    }
+
+    fn draw(cx: &mut Cx, pass: &DrawPass, list: &mut DrawList2d, root: &WidgetRef) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// The key focus asked for changes hands, as the platform does once an
+    /// event's actions drain.
+    fn settle(cx: &mut Cx, root: &WidgetRef) {
+        let prev = cx.key_focus();
+        cx.action(());
+        cx.handle_actions();
+        let focus = cx.key_focus();
+        if focus != prev {
+            root.handle_event(cx, &Event::KeyFocus(KeyFocusEvent { prev, focus }), &mut Scope::empty());
+        }
+    }
+
+    /// Keys as a keyboard gives them: the press, its character as typed
+    /// text only while the widget with the key focus has raised the text
+    /// input (macOS: until then a press is a bare key), the release.
+    fn type_keys(cx: &mut Cx, root: &WidgetRef, text: &str) {
+        for c in text.chars() {
+            let name = if c == ' ' { "Space".to_string() } else { format!("Key{}", c.to_ascii_uppercase()) };
+            let key = KeyEvent { key_code: KeyCode::from_name(&name).unwrap(), ..Default::default() };
+            root.handle_event(cx, &Event::KeyDown(key.clone()), &mut Scope::empty());
+            if cx.text_input_has_focus() {
+                let typed = TextInputEvent { input: c.to_string(), ..Default::default() };
+                root.handle_event(cx, &Event::TextInput(typed), &mut Scope::empty());
+            }
+            root.handle_event(cx, &Event::KeyUp(key), &mut Scope::empty());
+        }
+    }
+
+    /// Typing in the open browser (a track's, over the window) searches as
+    /// it is typed: it takes the keys and raises the text input, so the
+    /// letters arrive, and the list narrows to what they name, the name
+    /// itself first.
+    #[test]
+    fn typing_searches_the_instruments() {
+        test_cx::on_test_cx(|| {
+            let mut pool = test_cx::checkout_test_cx(register);
+            let cx: &mut Cx = &mut pool;
+            browse::index_or_build();
+            let root = cx.with_vm(|vm| {
+                let value = vm.eval(script! {
+                    use mod.widgets.*
+                    InstrumentBrowser{modal: true}
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut list = DrawList2d::new(cx);
+            root.borrow_mut::<InstrumentBrowser>().unwrap().browser.open_on("", Some("keys"), None);
+            draw(cx, &pass, &mut list, &root);
+            settle(cx, &root);
+            draw(cx, &pass, &mut list, &root);
+            assert!(cx.text_input_has_focus(), "the open browser holds the keys and raised the text input");
+            let all = root.borrow::<InstrumentBrowser>().unwrap().browser.view.len();
+            type_keys(cx, &root, "fm bass");
+            draw(cx, &pass, &mut list, &root);
+            let w = root.borrow::<InstrumentBrowser>().unwrap();
+            let b = &w.browser;
+            assert_eq!(b.query, "fm bass", "the typed text is the search");
+            assert!(!b.view.is_empty() && b.view.len() < all, "the list narrowed: {} of {all}", b.view.len());
+            let words = ["fm".to_string(), "bass".to_string()];
+            assert!(b.view.iter().all(|i| b.entry(*i).is_some_and(|e| e.matches(&words))), "every row names both words");
+            assert_eq!(b.entry(b.view[0]).map(|e| e.choice.label.as_str()), Some("fm bass"), "the name typed comes first");
+        });
     }
 }

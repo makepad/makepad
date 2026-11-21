@@ -135,6 +135,8 @@ pub enum Command {
     VehicleStopEngine { key: u64 },
     VehicleThump { key: u64, strength: f32 },
     VehicleRelease { key: u64 },
+    /// The vehicle voice of `from` is `to`'s from now on ([`SynthBus::vehicle_rekey`]).
+    VehicleRekey { from: u64, to: u64 },
     VehicleLoops { key: u64, loops: LoopSet, mix: f32 },
     EndFrame,
     Tone { id: u64, freq: f32, wave: Option<Wave>, gain: f32 },
@@ -455,6 +457,7 @@ impl SynthBus {
             Command::VehicleStopEngine { key } => self.vehicle_stop_engine(key),
             Command::VehicleThump { key, strength } => self.vehicle_thump(key, strength),
             Command::VehicleRelease { key } => self.vehicle_release(key),
+            Command::VehicleRekey { from, to } => self.vehicle_rekey(from, to),
             Command::VehicleLoops { key, loops, mix } => self.vehicle_loops(key, loops, mix, retire),
             Command::EndFrame => self.end_frame(),
             Command::Tone { id, freq, wave, gain } => self.tone(id, freq, wave, gain),
@@ -741,6 +744,26 @@ impl SynthBus {
         if let Some(s) = self.vehicles.iter_mut().find(|s| s.active && s.key == key) {
             s.stopping = true;
             s.gain.target = 0.0;
+        }
+    }
+
+    /// The body a vehicle voice follows goes on under another key (a world
+    /// rebuilt around it gave it a new id): the voice keeps sounding as it
+    /// was, its engine, loops and incarnation unchanged, and the next drive
+    /// of `to` is its next frame. A voice already under `to` keeps the key,
+    /// and `from`'s fades.
+    pub fn vehicle_rekey(&mut self, from: u64, to: u64) {
+        if from == to {
+            return;
+        }
+        let taken = self.vehicles.iter().any(|s| s.active && s.key == to);
+        if let Some(s) = self.vehicles.iter_mut().find(|s| s.active && s.key == from) {
+            if taken {
+                s.stopping = true;
+                s.gain.target = 0.0;
+            } else {
+                s.key = to;
+            }
         }
     }
 

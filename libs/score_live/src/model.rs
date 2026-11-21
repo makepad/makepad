@@ -527,7 +527,16 @@ impl ScoreDoc {
     /// machine does not have: they play the plain starting sound until the
     /// library is installed (Resources).
     pub fn lacks_patch_library(&self) -> bool {
-        self.insts.iter().any(|inst| matches!(&inst.kind, InstKind::Tandem { patch, path, .. } if !patch.is_empty() && path.is_empty()))
+        self.missing_library_patches().next().is_some()
+    }
+
+    /// The library patches it names that this machine does not have, as
+    /// (instrument, patch): each plays the plain starting sound.
+    pub fn missing_library_patches(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.insts.iter().filter_map(|inst| match &inst.kind {
+            InstKind::Tandem { patch, path, .. } if !patch.is_empty() && path.is_empty() => Some((inst.name.as_str(), patch.as_str())),
+            _ => None,
+        })
     }
 
     /// The library files its native instruments load (SoundFonts).

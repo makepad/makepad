@@ -145,9 +145,15 @@ impl ScoreTree {
         synth::set_searching(true);
     }
 
-    fn close_list(&mut self) {
+    fn close_list(&mut self, cx: &mut Cx) {
         if self.open.take().is_some() {
             self.browser.close();
+            // The keys were the search's: its text input goes, and the
+            // page's keys (Space plays) come back.
+            if cx.has_key_focus(self.draw_bg.area()) {
+                cx.hide_text_ime();
+                cx.set_key_focus(Area::Empty);
+            }
         }
         synth::set_searching(false);
     }
@@ -158,19 +164,19 @@ impl ScoreTree {
         let tracks = synth::tracks();
         let showing = self.unfolded(&tracks).is_some_and(|(v, vars)| v == voice && !vars) && synth::selected().as_deref() == Some(node);
         if showing {
-            self.fold();
+            self.fold(cx);
             return;
         }
         synth::select(node);
         self.unfold = Some(voice.to_string());
         match inst {
             Some(inst) => self.open_list(cx, voice, inst),
-            None => self.close_list(),
+            None => self.close_list(cx),
         }
     }
 
-    fn fold(&mut self) {
-        self.close_list();
+    fn fold(&mut self, cx: &mut Cx) {
+        self.close_list(cx);
         self.unfold = None;
         synth::unselect();
     }
@@ -180,7 +186,12 @@ impl ScoreTree {
         match hit {
             Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
             Hit::KeyFocus(_) => synth::set_searching(self.open.is_some()),
-            Hit::KeyFocusLost(_) => synth::set_searching(false),
+            Hit::KeyFocusLost(_) => {
+                if self.open.is_some() {
+                    cx.hide_text_ime();
+                }
+                synth::set_searching(false);
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if let Some(hot @ Hot::Level(..)) = hot_at(fe.abs, &self.hots) {
                     self.set_level(&hot, fe.abs.x);
@@ -211,16 +222,16 @@ impl ScoreTree {
                     Some(Hot::Instrument(v, i)) => self.toggle_controls(cx, &v, &i, Some(&i)),
                     Some(Hot::Vary(v)) => {
                         if self.unfolded(&tracks).is_some_and(|(u, vars)| u == v && vars) {
-                            self.fold();
+                            self.fold(cx);
                         } else {
-                            self.close_list();
+                            self.close_list(cx);
                             synth::select_variations(&v);
                             self.unfold = Some(v);
                         }
                     }
                     Some(Hot::Switch(v, i)) => {
                         if self.open.as_ref().is_some_and(|(ov, oi)| *ov == v && *oi == i) {
-                            self.close_list();
+                            self.close_list(cx);
                         } else {
                             // Under its voice, with the instrument's tweaks.
                             if self.unfolded(&tracks).is_none_or(|(u, vars)| u != v || vars) {
@@ -282,7 +293,7 @@ impl Widget for ScoreTree {
             if !keys || cx.has_key_focus(self.draw_bg.area()) {
                 let out = self.browser.handle_event(cx, event);
                 if out.close {
-                    self.close_list();
+                    self.close_list(cx);
                 }
                 if out.redraw {
                     self.redraw(cx);
@@ -290,6 +301,9 @@ impl Widget for ScoreTree {
                 }
                 if out.consumed {
                     if matches!(event, Event::MouseDown(_)) {
+                        // The press is the tree's: held here, so the window
+                        // around it does not take the keys from the search.
+                        let _ = event.hits(cx, self.draw_bg.area());
                         cx.set_key_focus_from_user(self.draw_bg.area());
                     }
                     return;
@@ -307,7 +321,7 @@ impl Widget for ScoreTree {
         let unfolded = self.unfolded(&tracks);
         // The switch belongs to the voice unfolded.
         if self.open.as_ref().is_some_and(|(v, _)| unfolded.as_ref().is_none_or(|(u, vars)| u != v || *vars)) {
-            self.close_list();
+            self.close_list(cx);
         }
         // The tree is one rounded card; each voice a compact row, its
         // instrument a quiet line under it.
@@ -476,6 +490,7 @@ impl Widget for ScoreTree {
             self.draw_cell.fill_round(cx, Rect { pos: dvec2(part.pos.x + 12.0, part.pos.y + 2.0), size: dvec2(2.0, (part.size.y - 10.0).max(0.0)) }, color(p.accent, 0.5), 1.0);
         }
         self.draw_bg.end(cx);
+        self.browser.raise_text_input(cx, self.draw_bg.area());
         // Just unfolded: the voice comes into view when it is low in the
         // panel, its unfolded part under it.
         if let Some(row) = bring_into_view {

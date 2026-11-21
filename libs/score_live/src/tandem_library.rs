@@ -83,6 +83,16 @@ pub fn unpacked(set: &Installable) -> bool {
     manifest_path(set).is_file() && data_dir(set).join("patches_factory").is_dir()
 }
 
+/// What a score that names a library patch hears when the library is not
+/// on this machine: the tools' line for it (score_check, score_listen).
+pub fn missing_patch_message(patch: &str) -> String {
+    format!("Tandem patch '{patch}': {NOT_INSTALLED}; this part plays Tandem's plain starting sound instead. For a sound every player hears, use an installed instrument (instrument_search)")
+}
+
+/// Why no library patch plays: the library is opt-in, and installing it is
+/// the player's choice.
+pub const NOT_INSTALLED: &str = "the hybrid patch library is not installed on this device (an opt-in GPL-3 download the player can choose in the Synth app's Resources)";
+
 /// The set scores read: the current one when unpacked, else the older one.
 pub fn active() -> Option<&'static Installable> {
     sets().into_iter().find(|s| unpacked(s))

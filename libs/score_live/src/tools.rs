@@ -92,7 +92,10 @@ pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<He
         ])
     }).collect();
     match listen::listen(&source, from_bar, bars, params, held, &NoSamples) {
-        Ok(heard) => {
+        Ok(mut heard) => {
+            if let Some(doc) = &doc {
+                heard.warnings.extend(doc.missing_library_patches().map(|(_, patch)| crate::tandem_library::missing_patch_message(patch)));
+            }
             let mut answer = heard_json(&heard);
             if let Value::Obj(fields) = &mut answer {
                 fields.push(("held".into(), Value::Arr(landed)));
@@ -158,7 +161,7 @@ pub fn tandem_params(args: &Value) -> Value {
 pub fn tandem_patches(args: &Value) -> Value {
     let cats = crate::tandem_library::categories();
     if cats.is_empty() {
-        return json::obj(vec![("installed", Value::Bool(false)), ("note", json::s("the hybrid patch library is not installed: Resources offers it (an opt-in GPL-3 download)".to_string()))]);
+        return json::obj(vec![("installed", Value::Bool(false)), ("note", json::s(format!("not installed: {}; Tandem{{patch}} parts play Tandem's plain starting sound", crate::tandem_library::NOT_INSTALLED)))]);
     }
     let query = args.get("query").and_then(Value::as_str).unwrap_or("").to_lowercase();
     let limit = match args.get("limit") {
@@ -303,7 +306,13 @@ pub fn check(source: &str) -> Value {
     let mut composer = crate::compose::Composer::new(loaded);
     let mut events = Vec::new();
     composer.pump(bar * 8.0, &mut events);
-    let errors = composer.errors();
+    let mut errors = composer.errors();
+    // A patch of the opt-in library this machine lacks plays something else:
+    // a problem with the score as written, though it loads and plays.
+    for (inst, patch) in doc.missing_library_patches() {
+        let line = source.lines().position(|l| l.contains(patch)).map_or(1, |i| i as u32 + 1);
+        errors.push(Diag { line, col: 1, node: Some(inst.to_string()), message: crate::tandem_library::missing_patch_message(patch) });
+    }
     let names = |list: Vec<String>| Value::Arr(list.into_iter().map(json::s).collect());
     json::obj(vec![
         ("ok", Value::Bool(errors.is_empty())),

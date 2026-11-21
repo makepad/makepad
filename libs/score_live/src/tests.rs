@@ -1792,6 +1792,16 @@ fn a_library_patch_plays_or_says_the_library_is_missing() {
     let doc = model::ScoreDoc::load(&src).unwrap_or_else(|d| panic!("{d:?}"));
     let installed = crate::tandem_library::active().is_some();
     assert_eq!(doc.lacks_patch_library(), !installed, "the desk's install message follows the library");
+    // The tools say so too, never a quiet substitute: a problem in
+    // score_check, a warning in score_listen, "not installed" from tandem_patches.
+    let says = |v: &makepad_strict_json::Value, key: &str| v.get(key).and_then(|p| p.as_arr()).is_some_and(|p| p.iter().any(|x| x.to_json().contains("FX/Rather Low") && x.to_json().contains("not installed")));
+    let args = makepad_strict_json::obj(vec![("source", makepad_strict_json::s(src.clone())), ("bars", makepad_strict_json::Value::Int(1))]);
+    let checked = crate::tools::call("score_check", &args, None).unwrap();
+    assert_eq!(says(&checked, "problems"), !installed, "score_check: {}", checked.to_json());
+    let heard = crate::tools::call("score_listen", &args, None).unwrap();
+    assert_eq!(says(&heard, "warnings"), !installed, "score_listen: {}", heard.to_json());
+    let listed = crate::tools::call("tandem_patches", &makepad_strict_json::Value::Obj(Vec::new()), None).unwrap();
+    assert_eq!(listed.get("installed").and_then(|v| v.as_bool()), Some(installed));
     let opts = RenderOpts { seconds: Some(2.0), seed: Some(1), ..RenderOpts::default() };
     let rendered = render(&src, &opts, &NoSamples).unwrap_or_else(|d| panic!("{d:?}"));
     assert!(peak(&rendered.left).max(peak(&rendered.right)) > 0.001, "silent (library installed: {installed})");

@@ -80,7 +80,7 @@ impl Widget for SynthPicker {
                 let out = self.browser.handle_event(cx, event);
                 if out.close {
                     self.open = false;
-                    synth::set_searching(false);
+                    self.release_keys(cx);
                 }
                 if out.redraw {
                     self.redraw(cx);
@@ -88,6 +88,9 @@ impl Widget for SynthPicker {
                 }
                 if out.consumed {
                     if matches!(event, Event::MouseDown(_)) {
+                        // The press is the picker's: held here, so the window
+                        // around it does not take the keys from the search.
+                        let _ = event.hits(cx, self.draw_bg.area());
                         cx.set_key_focus_from_user(self.draw_bg.area());
                     }
                     return;
@@ -97,7 +100,12 @@ impl Widget for SynthPicker {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
             Hit::KeyFocus(_) => synth::set_searching(self.open),
-            Hit::KeyFocusLost(_) => synth::set_searching(false),
+            Hit::KeyFocusLost(_) => {
+                if self.open {
+                    cx.hide_text_ime();
+                }
+                synth::set_searching(false);
+            }
             Hit::FingerUp(fe) if fe.is_over && fe.was_tap() && self.head.contains(fe.abs) => {
                 synth::select(&self.node);
                 self.open = !self.open;
@@ -105,10 +113,11 @@ impl Widget for SynthPicker {
                     self.browser.inline = true;
                     self.browser.open(&self.node);
                     cx.set_key_focus_from_user(self.draw_bg.area());
+                    synth::set_searching(true);
                 } else {
                     self.browser.close();
+                    self.release_keys(cx);
                 }
-                synth::set_searching(self.open);
                 self.redraw(cx);
             }
             _ => {}
@@ -136,7 +145,20 @@ impl Widget for SynthPicker {
             if self.browser.draw(cx, list) {
                 self.next_frame = cx.new_next_frame();
             }
+            self.browser.raise_text_input(cx, self.draw_bg.area());
         }
         DrawStep::done()
+    }
+}
+
+impl SynthPicker {
+    /// The browser closed: the keys were its search's, so its text input
+    /// goes and the page's keys (Space plays) come back.
+    fn release_keys(&mut self, cx: &mut Cx) {
+        if cx.has_key_focus(self.draw_bg.area()) {
+            cx.hide_text_ime();
+            cx.set_key_focus(Area::Empty);
+        }
+        synth::set_searching(false);
     }
 }
