@@ -19,6 +19,8 @@
 //! web view (macOS, iOS: tvOS has no WebKit) and location (macOS, iOS: tvOS has no
 //! continuous updates).
 
+#[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+pub(crate) mod ar;
 mod audio;
 #[cfg(target_os = "macos")]
 mod audio_tap;
@@ -115,6 +117,8 @@ pub(crate) fn external_texture(fmt: u32, w: u32, h: u32) -> TextureObj {
 
 /// What one session has running.
 struct SessionMedia {
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    ar: Option<ar::ArSession>,
     players: HashMap<u64, video::Player>,
     audio: Option<Arc<Mutex<audio::AudioUnitAccess>>>,
     audio_change: Signal,
@@ -142,6 +146,8 @@ struct SessionMedia {
 impl SessionMedia {
     fn new(sid: u32) -> SessionMedia {
         SessionMedia {
+            #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+            ar: None,
             players: HashMap::new(),
             audio: None,
             audio_change: Signal::new(sid),
@@ -221,6 +227,26 @@ impl Media {
     /// Executes a media command. False when the command is not one of this module's.
     pub fn command(&mut self, sink: &mut dyn Sink, s: &mut Session, c: &HalCmd) -> bool {
         match *c {
+            #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+            HalCmd::ArStart { flags } => {
+                let sm = self.sessions.entry(s.id).or_insert_with(|| SessionMedia::new(s.id));
+                if sm.ar.as_mut().is_some_and(|ar| ar.reconfigure(flags)) { return true; }
+                if let Some(ar) = sm.ar.take() { ar.stop(&mut s.events); }
+                match ar::ArSession::start(s.id, flags) {
+                    Ok(ar) => sm.ar = Some(ar),
+                    Err(code) => s.events.ar_state(crate::ar_state::FAILED, code),
+                }
+                true
+            }
+            #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+            HalCmd::ArStop {} => {
+                if let Some(ar) = self.sessions.get_mut(&s.id).and_then(|sm| sm.ar.take()) {
+                    ar.stop(&mut s.events);
+                } else {
+                    s.events.ar_state(crate::ar_state::STOPPED, 0);
+                }
+                true
+            }
             HalCmd::VideoPrepare { tex, mode, video, y, u, v, src } => {
                 self.video_prepare(sink, s, tex, mode, video, [y, u, v], src);
                 true
@@ -494,6 +520,8 @@ impl Media {
     /// the OS threads left for the session into events.
     pub fn step(&mut self, sink: &mut dyn Sink, s: &mut Session) {
         let Some(sm) = self.sessions.get_mut(&s.id) else { return };
+        #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+        if let Some(ar) = &sm.ar { ar.step(&mut s.events); }
         if sm.camera_change.take() {
             if let Some(camera) = &sm.camera {
                 let inputs = lock(camera).get_updated_descs();
@@ -616,6 +644,8 @@ impl Media {
     /// The session is closing: everything it started stops.
     pub fn session_closed(&mut self, sid: u32) {
         if let Some(mut sm) = self.sessions.remove(&sid) {
+            #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+            drop(sm.ar.take());
             for (_, mut p) in sm.players.drain() {
                 p.cleanup();
             }

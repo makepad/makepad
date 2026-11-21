@@ -5,6 +5,10 @@ edition = "2021"
 description = "Networking runtime for Makepad UI and CLI apps"
 license = "MIT OR Apache-2.0"
 
+[lints.rust]
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate (ui_signal's real-time mark)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
+
 [dependencies]
 makepad-civil-time = { path = "../../libs/civil_time", version = "0.1.0" }
 makepad-error-log = { path = "../../libs/error_log", version = "1.0.0" }

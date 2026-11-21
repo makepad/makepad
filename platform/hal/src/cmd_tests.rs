@@ -29,7 +29,7 @@ fn every_command_round_trips() {
     assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 59 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1 + 3 + 3 + 3 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 2);
+    assert_eq!(CMD_TABLE.len(), 59 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1 + 3 + 3 + 3 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));

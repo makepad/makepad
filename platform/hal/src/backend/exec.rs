@@ -151,6 +151,9 @@ pub trait Gpu {
     fn gl_fence(&mut self, s: &mut Session, _sync: u64) {
         s.bad();
     }
+    /// A new buffer. A storage buffer reads as zero wherever nothing has written it, on every
+    /// backend with compute (`info_flags::COMPUTE`): Metal's new buffers are cleared, Vulkan's
+    /// are zeroed before the next submission, D3D11's are cleared on the GPU.
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String>;
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]);
     fn buffer_destroy(&mut self, sid: u32, id: Id);
@@ -1968,7 +1971,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::DragReply { window, to, answer, fullscreen } => os_window(gpu, s, window, OsCmd::DragReply { id: window, to, answer, fullscreen }),
 
         // ---- media
-        HalCmd::VideoPrepare { .. } | HalCmd::VideoControl { .. } | HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. } | HalCmd::GameOut { .. } | HalCmd::Location { .. } | HalCmd::Permission { .. } | HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. } | HalCmd::VideoInput { .. } => {
+        HalCmd::ArStart { .. } | HalCmd::ArStop {} | HalCmd::VideoPrepare { .. } | HalCmd::VideoControl { .. } | HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. } | HalCmd::GameOut { .. } | HalCmd::Location { .. } | HalCmd::Permission { .. } | HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. } | HalCmd::VideoInput { .. } => {
             if !gpu.media(s, &c) {
                 media_unavailable(s, &c);
             }
@@ -1992,6 +1995,9 @@ fn media_unavailable(s: &mut Session, c: &HalCmd) {
         HalCmd::NativeLayerCreate { id, .. } => s.events.native_layer_state(*id, crate::native_layer::state::REALIZED, crate::native_layer::mode::UNSUPPORTED, 0, &[]),
         HalCmd::NativeLayerDestroy { id } => s.events.native_layer_state(*id, crate::native_layer::state::CLOSED, 0, 0, &[]),
         HalCmd::VideoPrepare { video, .. } => s.events.video_status(*video, crate::media::video_status::ERROR, b"this backend has no media playback"),
+        // no world-tracked camera here: the app hears it the way a device without one answers
+        HalCmd::ArStart { .. } => s.events.ar_state(crate::ar_state::FAILED, crate::ar_state::NO_WORLD_TRACKING),
+        HalCmd::ArStop {} => s.events.ar_state(crate::ar_state::STOPPED, 0),
         _ => {}
     }
     s.stats.media_unsupported += 1;

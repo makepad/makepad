@@ -242,23 +242,31 @@ impl HttpServerPendingBody {
     }
 }
 
+/// An outgoing message on an upgraded connection. Close ends the connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebSocketOut {
+    Binary(Vec<u8>),
+    Text(String),
+    Close,
+}
+
 pub enum HttpServerRequest {
     ConnectWebSocket {
         web_socket_id: u64,
         headers: HttpServerHeaders,
-        response_sender: mpsc::Sender<Vec<u8>>,
+        response_sender: mpsc::Sender<WebSocketOut>,
     },
     DisconnectWebSocket {
         web_socket_id: u64,
     },
     BinaryMessage {
         web_socket_id: u64,
-        response_sender: mpsc::Sender<Vec<u8>>,
+        response_sender: mpsc::Sender<WebSocketOut>,
         data: Vec<u8>,
     },
     TextMessage {
         web_socket_id: u64,
-        response_sender: mpsc::Sender<Vec<u8>>,
+        response_sender: mpsc::Sender<WebSocketOut>,
         string: String,
     },
     Get {
@@ -666,23 +674,21 @@ fn handle_web_socket(
 
     let mut write_tcp_stream = crate::clone_tcp(&tcp_stream).unwrap();
     let _ = write_tcp_stream.set_nodelay(true);
-    let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8>>();
+    let (tx_socket, rx_socket) = mpsc::channel::<WebSocketOut>();
 
     let _write_thread = std::thread::spawn(move || {
         // xx
         loop {
             match rx_socket.recv_timeout(Duration::from_millis(2000)) {
-                Ok(data) => {
-                    if data.is_empty() {
-                        break;
-                    }
-                    let header = WebSocketMessageHeader::from_len(
-                        data.len(),
-                        WebSocketMessageFormat::Binary,
-                        false,
-                    );
+                Ok(message) => {
+                    let (format, data) = match &message {
+                        WebSocketOut::Binary(bytes) => (WebSocketMessageFormat::Binary, bytes.as_slice()),
+                        WebSocketOut::Text(text) => (WebSocketMessageFormat::Text, text.as_bytes()),
+                        WebSocketOut::Close => break,
+                    };
+                    let header = WebSocketMessageHeader::from_len(data.len(), format, false);
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, header.as_slice());
-                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, data);
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     write_bytes_to_tcp_stream_no_error(
@@ -728,12 +734,12 @@ fn handle_web_socket(
             Ok(n) => {
                 if n == 0 {
                     let _ = tcp_stream.shutdown(Shutdown::Both);
-                    let _ = tx_socket.send(Vec::new());
+                    let _ = tx_socket.send(WebSocketOut::Close);
                     break;
                 }
                 web_socket.parse(&data[0..n], |result| match result {
                     Ok(WebSocketMessage::Ping(_)) => {
-                        let _ = tx_socket.send(SERVER_WEB_SOCKET_PONG_MESSAGE.to_vec());
+                        let _ = tx_socket.send(WebSocketOut::Binary(SERVER_WEB_SOCKET_PONG_MESSAGE.to_vec()));
                     }
                     Ok(WebSocketMessage::Pong(_)) => {}
                     Ok(WebSocketMessage::Text(text)) => {
@@ -748,7 +754,7 @@ fn handle_web_socket(
                         {
                             eprintln!("Websocket message deserialize error");
                             let _ = tcp_stream.shutdown(Shutdown::Both);
-                            let _ = tx_socket.send(Vec::new());
+                            let _ = tx_socket.send(WebSocketOut::Close);
                         };
                     }
                     Ok(WebSocketMessage::Binary(data)) => {
@@ -757,13 +763,13 @@ fn handle_web_socket(
                             .send(HttpServerRequest::BinaryMessage {
                                 web_socket_id,
                                 response_sender: tx_socket.clone(),
-                                data: data.to_vec(),
+                                data: std::mem::take(data),
                             })
                             .is_err()
                         {
                             eprintln!("Websocket message deserialize error");
                             let _ = tcp_stream.shutdown(Shutdown::Both);
-                            let _ = tx_socket.send(Vec::new());
+                            let _ = tx_socket.send(WebSocketOut::Close);
                         };
                     }
                     Ok(WebSocketMessage::Close) => {
@@ -772,14 +778,14 @@ fn handle_web_socket(
                     Err(e) => {
                         eprintln!("Websocket error {:?}", e);
                         let _ = tcp_stream.shutdown(Shutdown::Both);
-                        let _ = tx_socket.send(Vec::new());
+                        let _ = tx_socket.send(WebSocketOut::Close);
                     }
                 });
             }
             Err(_) => {
                 println!("Websocket closed");
                 let _ = tcp_stream.shutdown(Shutdown::Both);
-                let _ = tx_socket.send(Vec::new());
+                let _ = tx_socket.send(WebSocketOut::Close);
                 break;
             }
         }

@@ -357,7 +357,8 @@ impl Cx {
         // grandchild could land AFTER the pass that consumes its output,
         // which then read a stale texture (the VJ's post/sim pass chains
         // hit exactly this). Parentless passes keep their old "run first"
-        // contract via the depth bias.
+        // contract via the depth bias. Background passes (`DrawPass::set_background`) go
+        // after all others, in the same order among themselves: no window frame waits for them.
         const ROOT_NONE_BIAS: u64 = 1 << 32;
         // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
         // (packs, mirrors them): it runs before everything else, its own producers before it.
@@ -420,7 +421,7 @@ impl Cx {
                 }
             }
         };
-        passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
+        passes_todo.sort_by_key(|id| (self.passes[*id].background, std::cmp::Reverse(depth_of(*id))));
         self.pass_time_rebase = !(time_owed || time_held);
         self.demo_time_repaint = false;
         self.time_fps_clock = TimeFpsClock { frame_time, tolerance, next_due };
@@ -2019,7 +2020,7 @@ impl Cx {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
-        if self.a11y.on { self.a11y.begin_frame(); }
+        if self.a11y.on { self.a11y_begin_frame(draw_event.redraw_all); }
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.a11y_answer_drawn = self.a11y_take_answer_frame();
@@ -2463,6 +2464,41 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_painted_again_every_frame_lands_with_its_first_whole_paint() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let pass = DrawPass::new(&mut cx);
+        let p = pass.draw_pass_id();
+        let serials = cx.textures.1.serials.clone();
+        // a whole paint goes to the GPU, and every pass is marked to paint again next frame
+        let paint = |cx: &mut Cx, repaint: u64| {
+            let frame = serials.submit();
+            let before = cx.passes[p].painted_serial;
+            cx.passes[p].painted(true, true, repaint);
+            cx.passes[p].painted_whole_in(frame, before);
+            cx.passes[p].paint_dirty = true;
+            frame
+        };
+        // recorded at repaint 5, painted again every frame, the GPU a frame behind
+        let mut on_gpu = paint(&mut cx, 5);
+        assert!(!pass.painted_whole_once_since(&cx, 5), "its first paint is still on the GPU");
+        for repaint in 6..12 {
+            let frame = paint(&mut cx, repaint);
+            serials.complete(on_gpu);
+            on_gpu = frame;
+            assert!(pass.painted_whole_once_since(&cx, 5), "a whole paint of it completed (repaint {repaint})");
+        }
+        assert!(!pass.painted_whole_once_since(&cx, 12), "a later recording waits for a paint of its own");
+        // a frame the backend completed with draws left out takes its paint back
+        let frame = paint(&mut cx, 12);
+        cx.passes[p].frame_left_out(frame);
+        serials.complete(frame);
+        assert!(!pass.painted_whole_once_since(&cx, 12), "a paint with draws left out does not land it");
+        let frame = paint(&mut cx, 13);
+        serials.complete(frame);
+        assert!(pass.painted_whole_once_since(&cx, 12), "the next whole paint does");
+    }
+
+    #[test]
     fn a_drawing_is_one_draw_event_however_many_draw_contexts_it_makes() {
         let mut cx = Cx::new(Box::new(|cx, event| {
             if let Event::Draw(_) = event {
@@ -2823,8 +2859,14 @@ mod tests {
         cx.passes[child_id].live_with_parent = true;
         cx.passes[parent_id].paint_dirty = true;
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
-        assert!(todo.contains(&child_id));
-        assert!(todo.contains(&parent_id));
+        assert_eq!(todo, [child_id, parent_id], "a producer paints before its consumer");
+        // A background producer paints after it: its consumer reads its last picture.
+        child.set_background(&mut cx, true);
+        cx.passes[child_id].paint_dirty = true;
+        cx.passes[parent_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert_eq!(todo, [parent_id, child_id], "a background pass paints after the others");
+        child.set_background(&mut cx, false);
 
         // Recorded again at redraw 2 without the child: orphaned. Neither the
         // parent's repaint nor a direct dirty flag paints it, and the flag is

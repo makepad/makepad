@@ -14,8 +14,8 @@ struct BufferInner { id: Id, size: u64, flags: GpuBufferFlags, alive: Cell<bool>
 pub struct GpuBuffer(Rc<BufferInner>);
 impl PartialEq for GpuBuffer { fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) } }
 impl GpuBuffer {
-    /// The ledger names the caller as the buffer's creation site (and the open `gpu_owner` scopes
-    /// as its owner), as it does for textures.
+    /// A buffer that reads as zero until written. The ledger names the caller as the buffer's
+    /// creation site (and the open `gpu_owner` scopes as its owner), as it does for textures.
     #[track_caller]
     pub fn new(cx: &mut Cx, size: u64, flags: GpuBufferFlags) -> Result<Self, String> {
         if !cx.compute_supported() { return Err("compute is unavailable on this backend".into()); }

@@ -121,6 +121,8 @@ relax_api::option_layouts! {
     (*mut core::ffi::c_void, *mut core::ffi::c_void),
     #[cfg(target_os = "linux")]
     (*mut backend::linux::media::gstreamer_sys::GstElement, *mut backend::linux::media::gstreamer_sys::GstElement),
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    (*mut u8, usize),
     ([u32; 2], [u32; 2], [i32; 2]),
     #[cfg(target_os = "android")]
     ([u32; 2], f32),
@@ -192,6 +194,10 @@ relax_api::option_layouts! {
     [u32; 2],
     [u32; 3],
     [u32; 4],
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    backend::apple::media::ar::Picture,
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    backend::apple::media::ar::Rows,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     backend::gl::surface::Display,
     #[cfg(target_os = "linux")]
@@ -255,6 +261,7 @@ relax_api::option_layouts! {
     types::Id,
     #[cfg(target_os = "android")]
     types::Layer,
+    types::Range,
     types::RawEvent,
     #[cfg(target_os = "android")]
     types::XrDepth,
@@ -1868,6 +1875,73 @@ fn media_keep(id: i64, result: Result<Vec<u8>, String>) -> i64 {
     len
 }
 
+/// World-tracked camera capabilities (`ar_caps`). Zero on a backend without AR.
+#[relax_api]
+pub fn hal_ar_caps() -> u32 {
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    return backend::apple::media::ar::caps();
+    #[cfg(not(all(target_os = "ios", target_arch = "aarch64")))]
+    { 0 }
+}
+
+/// On a worker thread, waits for a capture newer than the last one this thread read.
+/// Writes one `ArFrameInfo` (`buffers::Wire`) and returns its capture time in nanoseconds.
+/// Returns zero on timeout or a short buffer. While the camera is unavailable (no session,
+/// or one interrupted or stopped) it waits out the timeout too, so a loop on it never spins.
+#[relax_api]
+pub fn hal_ar_frame_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    return backend::apple::media::ar::frame_next(timeout_ms, out);
+    #[cfg(not(all(target_os = "ios", target_arch = "aarch64")))]
+    {
+        // (no camera here: the wait, as for an unavailable one)
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(timeout_ms)));
+        let _ = (timeout_ms, out);
+        0
+    }
+}
+
+/// Picture selection bits for [`hal_ar_frame_pixels`].
+pub mod ar_pixels {
+    pub const CAMERA: u32 = 1;
+    pub const DEPTH: u32 = 2;
+    pub const CONFIDENCE: u32 = 4;
+}
+
+/// On a worker thread, copies pictures from one of the four newest AR frames into `out`.
+/// Pass the `seq` from the [`ArFrameInfo`] written by [`hal_ar_frame_next`].
+/// Selected parts follow the bit order in `what`, with rows packed without padding.
+/// [`ar_pixels::CAMERA`] writes one luma byte per pixel at the frame's `image` dimensions,
+/// followed by interleaved CbCr byte pairs at half the width and half the height.
+/// [`ar_pixels::DEPTH`] writes f32 metres and [`ar_pixels::CONFIDENCE`] writes u8 values.
+/// Both maps use the frame's `depth.width` and `depth.height`.
+/// Returns the byte count, or zero if the frame expired, a requested part is unavailable,
+/// the mask contains an unknown bit, or the output is too short. A zero return leaves `out` intact.
+#[relax_api]
+pub fn hal_ar_frame_pixels(seq: u64, what: u32, out: &mut [u8]) -> usize {
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    return backend::apple::media::ar::frame_pixels(seq, what, out);
+    #[cfg(not(all(target_os = "ios", target_arch = "aarch64")))]
+    {
+        let _ = (seq, what, out);
+        0
+    }
+}
+
+/// Casts through the newest sensor image at normalized (u, v), measured from its top left.
+/// On a hit, writes the position in session metres followed by the surface normal.
+#[relax_api]
+pub fn hal_ar_raycast(u: f32, v: f32, out: &mut [f32; 6]) -> bool {
+    #[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+    return backend::apple::media::ar::raycast(u, v, out);
+    #[cfg(not(all(target_os = "ios", target_arch = "aarch64")))]
+    {
+        let _ = (u, v, out);
+        false
+    }
+}
+
 /// The headset's pose for a renderer elsewhere, once per display frame (Android XR: published by
 /// the XR thread right after xrBeginFrame, located `XrPoseLead` past the display time, whether
 /// or not the app draws that frame): waits at most `timeout_ms` for one newer than the last
@@ -2383,6 +2457,20 @@ pub fn hal_fleet_tls_free(handle: i64) {
 #[relax_api]
 pub fn hal_battery() -> i64 {
     backend::android::fleet::battery().map_or(-1, |(level, charging)| level as i64 | (charging as i64) << 8)
+}
+
+/// System thermal state from 0 (nominal) through 3 (critical), or -1 when unavailable.
+#[relax_api]
+pub fn hal_thermal_state() -> i32 {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe {
+        use makepad_apple_sys::*;
+        let process: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
+        let state: isize = msg_send![process, thermalState];
+        state as i32
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    { -1 }
 }
 
 /// The host's hook for the Android BACKGROUND lifecycle (the activity stopped): an Android process

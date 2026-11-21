@@ -70,7 +70,7 @@ impl Cx {
         display.timings = vec![None; inventory.snapshot.outputs.len()];
         display.snapshot = inventory.snapshot;
         self.hal_sync_direct_scale();
-        self.hal_repaint_all();
+        self.hal_repaint_all(crate::event::hal_intake::RepaintAll::DisplaysChanged);
     }
 
     pub(crate) fn hal_display_timing(&mut self, window: Id, generation: u64, output: u32, last_present_ns: u64, interval: f64) {

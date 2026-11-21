@@ -167,6 +167,7 @@ mod tests {
 pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
     Some(match (cmd, sub) {
         ("session", "relaunch") => params!("process": "boolean"),
+        ("cache", "verify") => params!("n": "integer"),
         ("session" | "pin" | "help" | "ping" | "threads" | "cpu" | "waits" | "vms" | "panics" | "pause" | "resume" | "rm" | "continue" | "versions" | "cache" | "frame", _) => "",
         ("inputs", _) => params!("match": "string", "of": "string"),
         ("test-results", _) => params!("group": "integer"),

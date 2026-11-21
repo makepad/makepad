@@ -97,6 +97,8 @@ pub(crate) struct PipeRec {
     /// a draw was built for it before the HAL said it was ready (the HAL skipped that draw)
     drawn_unready: bool,
     failed: bool,
+    /// what the HAL said when it failed (the backend compiler's log)
+    failure: Option<Box<str>>,
     pick: Option<usize>,
     /// the HAL was told a frame draws it while it compiles (`PipelineWanted`, sent once)
     wanted: bool,
@@ -107,7 +109,7 @@ pub(crate) struct PipeRec {
 
 impl PipeRec {
     fn new(id: Id, first_shader: usize) -> Self {
-        Self { id, first_shader, ready: false, drawn_unready: false, failed: false, pick: None, wanted: false, probed: Default::default() }
+        Self { id, first_shader, ready: false, drawn_unready: false, failed: false, failure: None, pick: None, wanted: false, probed: Default::default() }
     }
 }
 
@@ -627,7 +629,7 @@ impl FrameBuilder {
     /// targets keep their ids and are painted again. Frames the old device dropped count as done.
     pub(crate) fn device_reset(&mut self, reupload: impl Fn(usize, u64) -> bool) -> Vec<(usize, usize)> {
         for pipe in &mut self.pipes {
-            if pipe.first_shader == usize::MAX { pipe.ready = false; pipe.failed = false; }
+            if pipe.first_shader == usize::MAX { pipe.ready = false; pipe.failed = false; pipe.failure = None; }
         }
         let slots: Vec<usize> = self.tex.iter().filter(|(slot, r)| reupload(**slot, r.gen)).map(|(slot, _)| *slot).collect();
         for slot in slots {
@@ -693,6 +695,7 @@ impl FrameBuilder {
                 // A failed pipeline can come back (built again on a new device, or once there's
                 // memory for it), and then its draws, left out so far, paint again.
                 let was_failed = std::mem::take(&mut p.failed);
+                p.failure = None;
                 let again = std::mem::replace(&mut p.ready, true);
                 self.answered = true;
                 std::mem::take(&mut p.drawn_unready) || again || was_failed
@@ -759,6 +762,11 @@ impl FrameBuilder {
         self.pipes.get(pipe).is_some_and(|p| p.failed)
     }
 
+    /// What the HAL said when pipeline `pipe` failed (the backend compiler's log), while it is failed.
+    pub(crate) fn pipeline_failure(&self, pipe: usize) -> Option<&str> {
+        self.pipes.get(pipe).filter(|p| p.failed).and_then(|p| p.failure.as_deref())
+    }
+
     /// Whether the draws of pipeline `pipe` show this frame, or `None` while the HAL is still compiling it.
     pub(crate) fn pipeline_draws(&self, pipe: usize) -> Option<bool> {
         let p = self.pipes.get(pipe)?;
@@ -772,10 +780,11 @@ impl FrameBuilder {
     }
 
     /// The failed pipeline's first shader, and whether a pass waited for it (it paints again,
-    /// without those draws).
-    pub(crate) fn pipeline_failed(&mut self, id: Id) -> Option<(usize, bool)> {
+    /// without those draws). `log` is what the HAL said, kept for [`Self::pipeline_failure`].
+    pub(crate) fn pipeline_failed(&mut self, id: Id, log: &str) -> Option<(usize, bool)> {
         let p = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id)?;
         p.failed = true;
+        p.failure = Some(log.into());
         self.answered = true;
         Some((p.first_shader, std::mem::take(&mut p.drawn_unready)))
     }
@@ -1569,12 +1578,12 @@ impl Cx {
             }
             return None;
         };
-        // an XR pass paints into the XR window, once per eye, when the eyes of its next frame came
-        // (on a multiview backend once for both eyes)
+        // stereo means an XR pass, including a display with one view
         let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
         // an XR display without a display of its own (`info_flags::XR_OFFSCREEN`): the XR pass
-        // renders into its own textures, eyes side by side; the XR window only paces it
+        // renders into its own textures, its views side by side; the XR window only paces it
         let offscreen_xr = stereo && self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
+        let views = if offscreen_xr { self.hal_xr_views() } else { 2 };
         let multiview = stereo && !offscreen_xr && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
         let (window, is_window) = match self.passes[pass_id].parent {
             CxDrawPassParent::Window(w) => (Some(w), true),
@@ -1596,7 +1605,7 @@ impl Cx {
                 // paints at the window's own next FrameReady
                 return None;
             }
-        } else if !picking {
+        } else if !picking && !self.passes[pass_id].background {
             // A texture pass that feeds a window paints only when that window can show the
             // result: while a hosted window has no free shared image (its frames are still on the
             // GPU or with the host), its scene passes stay dirty with it. Painted anyway, every
@@ -1604,6 +1613,11 @@ impl Cx {
             // in-flight window frame, which then took longer still (Sandbox hosted in the WM on a node:
             // ~60 scene beats/s, window frames 125 ms p90 / 1.3 s max, ~1 fps, and thousands of
             // upload arenas alive in the queue).
+            // A background pass (`DrawPass::set_background`) is not held: it presents nothing, and
+            // it runs after the window frames, when a paced window's frame has used its credit
+            // and a hosted window's image is in flight, so held it would wait every repaint and
+            // never paint (the path tracer's steps sat at 0 samples on a visible window). Its
+            // producer paces it: a trace step waits for the last one's paint, a bake paints once.
             if let Some(w) = self.pass_root_window(pass_id) {
                 let shows = self.hal.window_ready(w) && self.hal.window_may_paint(w)
                     && self.hal.hosted.as_ref().is_none_or(|hosted| hosted.can_present(w));
@@ -1661,12 +1675,12 @@ impl Cx {
         // and a host WM made it (the pass rect is ceiled in points, which at a fractional scale is up
         // to 2 px more than the surface).
         let size = match window {
-            // an offscreen XR pass supersampled (`Cx::xr_set_supersample`): each eye's half
-            // scaled alike, whole pixels
+            // round one supersampled view to whole pixels before laying out the target
             Some(w) if offscreen_xr && self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => {
                 let s = self.hal_xr_supersample_now() as f64;
-                let eye = self.windows[w].window_geom.inner_size;
-                crate::makepad_math::dvec2(2.0 * (eye.x * 0.5 * s).round(), (eye.y * s).round())
+                let inner = self.windows[w].window_geom.inner_size;
+                let views = views as f64;
+                crate::makepad_math::dvec2(views * (inner.x / views * s).round(), (inner.y * s).round())
             }
             Some(w) if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => {
                 let inner = self.windows[w].window_geom.inner_size;
@@ -1797,22 +1811,15 @@ impl Cx {
                 self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
             }
         } else if stereo {
-            // both eyes side by side in one pass (`Pass::view_rects`): the draws are built once
-            // and each runs once per eye, with that eye's half and camera; the pass clears once
-            // (its colour as the pass says, its depth always)
+            // one pass and one clear: the draws are built once and run in each view's rect
+            // with its corresponding camera block
             let base = self.passes[pass_id].pass_uniforms;
-            let half = (tw / 2) as f32;
-            let left = self.hal_xr_eye_uniforms(&base, 0).copied();
-            let right = self.hal_xr_eye_uniforms(&base, 1).copied();
-            if let (Some(left), Some(right)) = (left, right) {
+            if let Some(uniforms) = self.hal_xr_view_uniforms(&base, views) {
                 let mut p = pass;
-                // the eyes' blocks in one run: view i's at i * len / 2
-                p.uniforms = makepad_stack::with_frame(|f| {
-                    let (l, r) = (left.as_slice(), right.as_slice());
-                    let both = f.slice_from_fn(l.len() + r.len(), |i| if i < l.len() { l[i] } else { r[i - l.len()] });
-                    fb.w.keep(&both[..])
-                });
-                p.view_rects = fb.w.put_rects(&[[0.0, 0.0, half, th as f32], [half, 0.0, half, th as f32]]);
+                p.uniforms = fb.w.keep::<f32>(crate::makepad_math::bytemuck::cast_slice(uniforms));
+                let width = (tw / views) as f32;
+                let rects = [[0.0, 0.0, width, th as f32], [width, 0.0, width, th as f32]];
+                p.view_rects = fb.w.put_rects(&rects[..views]);
                 if !p.depth.is_none() { p.load[4] = load::CLEAR; }
                 fb.w.pass(p);
                 let mut zbias = 0.0f32;
@@ -1902,8 +1909,7 @@ impl Cx {
             let before = self.passes[pass_id].painted_serial;
             self.passes[pass_id].painted(whole, fb.pass_drew_all, self.repaint_id);
             if whole {
-                self.passes[pass_id].painted_frame = serial;
-                self.passes[pass_id].painted_before = before;
+                self.passes[pass_id].painted_whole_in(serial, before);
             }
         }
         Some(serial)
@@ -2664,7 +2670,9 @@ mod tests {
         assert!(!fb.pipeline_waited_for(0), "ready: nothing to wait for");
         // a pipeline that fails: the pass that waited paints again, and nobody waits for it after
         assert!(fb.pipeline_waited_for(1));
-        assert_eq!(fb.pipeline_failed(bad_id), Some((1, true)));
+        assert_eq!(fb.pipeline_failed(bad_id, "line 3: no such function"), Some((1, true)));
+        assert_eq!(fb.pipeline_failure(1), Some("line 3: no such function"), "the HAL's log stays with its pipeline");
+        assert_eq!(fb.pipeline_failure(0), None, "a pipeline that built has none");
         assert!(!fb.take_answer(), "an answer nobody waited for sends nothing");
         fb.asked_unready();
         assert!(!fb.take_answer(), "a later not-yet waits for the next answer");
@@ -2860,6 +2868,39 @@ mod tests {
         assert_eq!(rects, vec![[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 8.0, 8.0]], "a view per eye, side by side");
         assert_eq!(p.uniforms.len(), 2 * std::mem::size_of::<crate::draw_pass::DrawPassUniforms>(), "a block of pass uniforms per eye");
         assert_eq!((p.views, p.samples, p.load[4]), (0, 4, load::CLEAR), "not multiview, the XR samples, depth cleared once");
+    }
+
+    #[test]
+    fn a_one_view_offscreen_xr_pass_covers_the_whole_target() {
+        use crate::texture::{TextureFormat, TextureSize};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        cx.hal.info = Some(makepad_hal::HalInfo { flags: makepad_hal::info_flags::XR | makepad_hal::info_flags::XR_OFFSCREEN, ..Default::default() });
+        cx.hal_xr_start();
+        cx.hal_xr_display(1, makepad_hal::xr_display_kind::WORN);
+        let window = cx.hal.xr.as_ref().expect("the XR window").window;
+        cx.windows[window].window_geom.inner_size = crate::makepad_math::dvec2(8.0, 8.0);
+        let hw = cx.hal.windows.get_mut(&window.0).expect("its HAL window");
+        (hw.confirmed, hw.credit) = (true, true);
+        let xr = cx.hal.xr.as_mut().unwrap();
+        (xr.frame, xr.msaa) = (Some(makepad_hal::XrFrame::default()), 4);
+        let (pass, _list, _target) = texture_pass(&mut cx);
+        let depth = Texture::new_with_format(&mut cx, TextureFormat::DepthD32 { size: TextureSize::Fixed { width: 8, height: 8 }, initial: true });
+        pass.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::InitWith(1.0));
+        let id = pass.draw_pass_id();
+        cx.passes[id].parent = CxDrawPassParent::Xr;
+        cx.repaint_id = 3;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some(), "the XR pass was built");
+        let buf = fb.w.buf();
+        // SAFETY: the writer is not changed while the view is read
+        let view = unsafe { buf.view() }.expect("the built commands");
+        assert_eq!(view.passes.len(), 1, "one XR pass");
+        let p = &view.passes[0];
+        assert_eq!(p.viewport, [0.0, 0.0, 8.0, 8.0], "the pass's viewport is the whole target");
+        let rects: Vec<[f32; 4]> = makepad_hal::buffers::read_rects(view.arena, p.view_rects).collect();
+        assert_eq!(rects, vec![[0.0, 0.0, 8.0, 8.0]], "one full-width view");
+        assert_eq!(p.uniforms.len(), std::mem::size_of::<crate::draw_pass::DrawPassUniforms>(), "one block of pass uniforms");
+        assert_eq!((p.views, p.samples, p.load[4]), (0, 4, load::CLEAR), "one rect, the XR samples, depth cleared once");
     }
 
     #[test]

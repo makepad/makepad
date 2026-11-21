@@ -22,6 +22,66 @@ use crate::{
 use makepad_hal::{buffers::{read_domains, read_drag_items, read_items, read_strs}, domain_state, input, window_state, HalEvent, Id};
 use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 
+/// Why every pass paints again ([`Cx::hal_repaint_all`]).
+#[derive(Clone, Copy)]
+pub(crate) enum RepaintAll {
+    SurfaceBack,
+    ChildWindow,
+    FrameDropped,
+    PipelineReady,
+    PipelineFailed,
+    BufferEvicted,
+    DeviceReset,
+    DisplaysChanged,
+    PickIncomplete,
+}
+
+impl RepaintAll {
+    const ALL: [(RepaintAll, &'static str); 9] = [
+        (RepaintAll::SurfaceBack, "surface back"),
+        (RepaintAll::ChildWindow, "child window"),
+        (RepaintAll::FrameDropped, "hosted frame dropped"),
+        (RepaintAll::PipelineReady, "pipeline ready"),
+        (RepaintAll::PipelineFailed, "pipeline failed"),
+        (RepaintAll::BufferEvicted, "buffer evicted"),
+        (RepaintAll::DeviceReset, "device reset"),
+        (RepaintAll::DisplaysChanged, "displays changed"),
+        (RepaintAll::PickIncomplete, "pick incomplete"),
+    ];
+}
+
+/// The causes of every pass painting again, counted over a second. Each costs a frame of the
+/// whole app's GPU work, and a pass painted again every frame never shows a paint complete
+/// (`DrawPass::painted_whole_since`): ten or more in a second is logged with its causes, at
+/// most every ten seconds.
+#[derive(Default)]
+pub(crate) struct RepaintAllLog {
+    since: f64,
+    counts: [u32; 9],
+    logged: f64,
+}
+
+impl RepaintAllLog {
+    fn count(&mut self, why: RepaintAll, now: f64) -> Option<String> {
+        let elapsed = now - self.since;
+        let mut line = None;
+        if elapsed >= 1.0 {
+            let total: u32 = self.counts.iter().sum();
+            // a window the calls left long ago says nothing about now
+            if elapsed < 2.0 && total >= 10 && now - self.logged >= 10.0 {
+                self.logged = now;
+                let causes: Vec<String> = RepaintAll::ALL.iter().zip(self.counts)
+                    .filter(|(_, n)| *n > 0).map(|((_, name), n)| format!("{name} {n}")).collect();
+                line = Some(format!("hal: every pass painted again {total} times in {elapsed:.1} s: {}", causes.join(", ")));
+            }
+            self.counts = [0; 9];
+            self.since = now;
+        }
+        self.counts[why as usize] += 1;
+        line
+    }
+}
+
 pub(crate) fn window_id(id: Id) -> WindowId {
     WindowId(id.index as usize, id.gen as u64)
 }
@@ -788,7 +848,7 @@ impl Cx {
                 makepad_hal::lifecycle::SURFACE_LOST => self.hal.surface_lost = true,
                 makepad_hal::lifecycle::SURFACE_AVAILABLE => {
                     self.hal.surface_lost = false;
-                    self.hal_repaint_all();
+                    self.hal_repaint_all(RepaintAll::SurfaceBack);
                 }
                 _ => {
                     self.request_quit(QuitReason::App);
@@ -831,7 +891,7 @@ impl Cx {
                     dpi: dpi as f64,
                     title: String::from_utf8_lossy(title).into_owned(),
                 }));
-                self.hal_repaint_all();
+                self.hal_repaint_all(RepaintAll::ChildWindow);
             }
             HalEvent::ChildChrome { window, child, own } => {
                 self.call_event_handler(&Event::ChildWindowAction(ChildWindowActionEvent {
@@ -869,7 +929,7 @@ impl Cx {
             }
             HalEvent::ChildWindowClosed { window, child } => {
                 self.call_event_handler(&Event::ChildWindowClosed(ChildWindowClosedEvent { child, window: crate::os::hal::lent_id(window) }));
-                self.hal_repaint_all();
+                self.hal_repaint_all(RepaintAll::ChildWindow);
             }
             HalEvent::DomainState { domain, state, phase, pct, req, text } => {
                 let strs = read_strs(text, 2);
@@ -907,6 +967,18 @@ impl Cx {
             }
             HalEvent::XrSpace { window: _, generation } => {
                 self.hal_xr_space(generation);
+            }
+            HalEvent::XrDisplay { window: _, views, kind } => {
+                self.hal_xr_display(views, kind);
+            }
+            HalEvent::ArFrame { seq, time_ns, tracking, camera, intrinsics, image, picture, depth, depth_confidence } => {
+                let frame = makepad_hal::ArFrameInfo { seq, time_ns, tracking, camera, intrinsics, image, picture, depth, depth_confidence };
+                self.call_event_handler(&Event::ArFrame(frame.into()));
+            }
+            HalEvent::ArState { state, code } => {
+                if let Some(event) = crate::ArStateEvent::from_hal(state, code) {
+                    self.call_event_handler(&Event::ArState(event));
+                }
             }
             HalEvent::FrameReady { window, next_ns } => {
                 let window_id = window_id(window);
@@ -949,12 +1021,7 @@ impl Cx {
                 partial.push_back(frame);
                 // a paint the backend left draws out of was not whole after all
                 for id in self.passes.id_iter().collect::<Vec<_>>() {
-                    let pass = &mut self.passes[id];
-                    if pass.painted_frame == frame {
-                        pass.painted_serial = pass.painted_before;
-                        pass.incomplete = true;
-                        pass.left_out = true;
-                    }
+                    self.passes[id].frame_left_out(frame);
                 }
             }
             HalEvent::DispatchTime { name, gpu_ns } => {
@@ -971,9 +1038,12 @@ impl Cx {
                 }
                 let presented = self.hal.frames.frame_done(window, frame);
                 let window_frame = presented.is_some();
-                // PerfMonitor "gpu" channel: a presented window frame's GPU time
-                // (a no-op unless the monitor is enabled)
                 if window_frame && gpu_ns > 0 {
+                    let recent = &mut self.hal.window_gpu_ns;
+                    recent[self.hal.window_gpu_next % recent.len()] = gpu_ns;
+                    self.hal.window_gpu_next += 1;
+                    // PerfMonitor "gpu" channel: a presented window frame's GPU time
+                    // (a no-op unless the monitor is enabled)
                     crate::perf_monitor::perf_gpu_frame_completed(gpu_ns as f64 * 1e-9);
                 }
                 self.hal_a11y_presented();
@@ -989,7 +1059,7 @@ impl Cx {
                     Some(crate::os::hal::HostedDone::Publish(draw)) => {
                         use std::sync::atomic::{AtomicBool, Ordering};
                         static APP_DRAWN: AtomicBool = AtomicBool::new(false);
-                        if window_frame { self.hal_window_presented(present_ns); }
+                        if window_frame { self.hal_window_presented(present_ns, frame); }
                         #[cfg(target_os = "linux")]
                         self.hal.frames.w.hosted_presented(window, frame);
                         Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw));
@@ -999,9 +1069,9 @@ impl Cx {
                     }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again
                     #[cfg(target_os = "linux")]
-                    Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(),
+                    Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(RepaintAll::FrameDropped),
                     // the HAL presented the window's frame itself (other targets' frames are passes)
-                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { self.hal_window_presented(present_ns) },
+                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { self.hal_window_presented(present_ns, frame) },
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
@@ -1020,17 +1090,18 @@ impl Cx {
             HalEvent::PipelineReady { pipeline } => {
                 // a draw built before the pipeline was ready was skipped by the HAL: paint again
                 if self.hal.frames.pipeline_ready(pipeline) {
-                    self.hal_repaint_all();
+                    self.hal_repaint_all(RepaintAll::PipelineReady);
                 }
             }
             HalEvent::PipelineFailed { pipeline, log } => {
-                if let Some((shader, waited)) = self.hal.frames.pipeline_failed(pipeline) {
+                let log = String::from_utf8_lossy(log);
+                if let Some((shader, waited)) = self.hal.frames.pipeline_failed(pipeline, &log) {
                     let name = self.draw_shaders.shaders.get(shader).map(|s| s.debug_id).unwrap_or_default();
-                    let error = format!("hal: pipeline of shader {:?} failed: {}", name, String::from_utf8_lossy(log));
+                    let error = format!("hal: pipeline of shader {:?} failed: {}", name, log);
                     crate::shader_error::note(error.clone());
                     crate::error!("{}", error);
                     // a pass that kept its picture for this pipeline paints again
-                    if waited { self.hal_repaint_all(); }
+                    if waited { self.hal_repaint_all(RepaintAll::PipelineFailed); }
                 }
             }
             HalEvent::BufferEvicted { buffer } => {
@@ -1048,7 +1119,7 @@ impl Cx {
                     }
                 }
                 if !evicted.is_empty() {
-                    self.hal_repaint_all();
+                    self.hal_repaint_all(RepaintAll::BufferEvicted);
                 }
             }
             HalEvent::TextureEvicted { texture } => {
@@ -1202,7 +1273,7 @@ impl Cx {
                 }
             }
         }
-        self.hal_repaint_all();
+        self.hal_repaint_all(RepaintAll::DeviceReset);
         // what only the GPU held is the app's to redo (`Event::GpuReset`)
         self.call_event_handler(&Event::GpuReset);
         self.redraw_all();
@@ -1218,11 +1289,14 @@ impl Cx {
         self.hal_recompile_shaders();
     }
 
-    pub(crate) fn hal_repaint_all(&mut self) {
+    pub(crate) fn hal_repaint_all(&mut self, why: RepaintAll) {
         for id in self.passes.id_iter().collect::<Vec<_>>() {
             if self.passes[id].main_draw_list_id.is_some() {
                 self.passes[id].paint_dirty = true;
             }
+        }
+        if let Some(line) = self.hal.repaint_all.count(why, Self::time_now()) {
+            crate::log!("{line}");
         }
     }
 
@@ -1394,12 +1468,12 @@ impl Cx {
         self.seconds_since_app_start()
     }
 
-    /// A window frame reached the window system (or the host): counted, and traced at the
+    /// Window frame `frame` reached the window system (or the host): counted, and traced at the
     /// backend's present time (`present_ns`, 0 for a frame the backend never presented).
-    fn hal_window_presented(&mut self, present_ns: u64) {
+    fn hal_window_presented(&mut self, present_ns: u64, frame: u64) {
         crate::frame_trace::note_presented();
         if present_ns != 0 {
-            self.hal.frame_trace.present(present_ns as f64 * 1e-9);
+            self.hal.frame_trace.present(present_ns as f64 * 1e-9, frame);
         }
     }
 }
@@ -1416,6 +1490,25 @@ pub(crate) unsafe fn texture_readback_pixels(record: makepad_hal::lease::Record)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pass_painting_again_most_frames_is_logged_with_its_causes() {
+        let mut log = RepaintAllLog::default();
+        // a second of 120 Hz frames, each with an evicted buffer, then a pipeline ready
+        for frame in 0..120 {
+            assert!(log.count(RepaintAll::BufferEvicted, 100.5 + frame as f64 / 120.0).is_none(), "the second is not over");
+        }
+        let line = log.count(RepaintAll::PipelineReady, 101.6).expect("the churn is logged");
+        assert!(line.contains("120 times") && line.contains("buffer evicted 120"), "{line}");
+        // at most every ten seconds, and never for a few in a second
+        for frame in 0..130 {
+            assert!(log.count(RepaintAll::BufferEvicted, 101.6 + frame as f64 / 120.0).is_none(), "logged a second ago");
+        }
+        let mut quiet = RepaintAllLog::default();
+        for t in [100.5, 100.9, 101.6, 102.7, 103.8] {
+            assert!(quiet.count(RepaintAll::PipelineReady, t).is_none(), "one a second is not churn");
+        }
+    }
 
     #[test]
     fn notification_click_reaches_the_app() {

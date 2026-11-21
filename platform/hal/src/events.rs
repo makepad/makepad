@@ -7,28 +7,38 @@
 //! six words of `RawEvent::b`. The time of an event (`RawEvent::time_ns`) is not a field: the queue
 //! stamps it when the event is pushed.
 
-use crate::buffers::EventQueue;
+use crate::buffers::{EventQueue, Wire};
 use crate::codec::{k, Field, Packer, Reader, EVENT_FLOATS, EVENT_WORDS};
-use crate::types::RawEvent;
+use crate::types::{ArFrameInfo, Range, RawEvent, XrEye};
 
 macro_rules! hal_events {
-    ($($(#[doc = $doc:literal])* $name:ident = $tag:literal, $ctor:ident { $($f:ident : $kind:ident),* $(,)? };)*) => {
+    ($($(#[doc = $doc:literal])* $name:ident = $tag:literal, $ctor:ident { $($f:ident : $kind:ident),* $(,)? };)*
+     $(@latest $(#[doc = $wdoc:literal])* $wname:ident = $wtag:literal, $wctor:ident $record:ident { $($wf:ident : $ty:ty),+ };)*) => {
         /// Event tags.
         #[allow(non_upper_case_globals)]
         pub mod event_tag {
             $( pub const $name: u16 = $tag; )*
+            $( pub const $wname: u16 = $wtag; )*
         }
 
         /// (tag, name, field names) of every event.
-        pub const EVENT_TABLE: &[(u16, &str, &[&str])] = &[ $( ($tag, stringify!($name), &[$(stringify!($f)),*]) ),* ];
+        pub const EVENT_TABLE: &[(u16, &str, &[&str])] = &[
+            $( ($tag, stringify!($name), &[$(stringify!($f)),*]), )*
+            $( ($wtag, stringify!($wname), &[$(stringify!($wf)),+]), )*
+        ];
 
         /// An event decoded for Cx. Borrowed payloads point into the arena it was read with.
         #[derive(Clone, Copy, Debug, PartialEq)]
         pub enum HalEvent<'a> {
-            $( $(#[doc = $doc])* $name { $( $f: <k::$kind as Field>::Out<'a> ),* } ),*
+            $( $(#[doc = $doc])* $name { $( $f: <k::$kind as Field>::Out<'a> ),* }, )*
+            $( $(#[doc = $wdoc])* $wname { $( $wf: $ty ),+ }, )*
         }
 
         impl RawEvent {
+            // A record larger than the inline lanes occupies one fixed-size arena range.
+            $( pub fn $wctor(data: Range) -> RawEvent {
+                RawEvent { tag: $wtag, data, ..Default::default() }
+            } )*
             $(
                 $(#[doc = $doc])*
                 #[allow(clippy::too_many_arguments, unused_mut)]
@@ -54,12 +64,22 @@ macro_rules! hal_events {
                         let mut r = Reader::from_event(self, arena);
                         Some(HalEvent::$name { $( $f: <k::$kind as Field>::read(&mut r) ),* })
                     } )*
+                    $( $wtag => {
+                        let r = Reader::from_event(self, arena);
+                        let bytes = r.bytes(r.data);
+                        if bytes.len() != $record::SIZE { return None; }
+                        let $record { $( $wf ),+ } = $record::read(bytes);
+                        Some(HalEvent::$wname { $( $wf ),+ })
+                    } )*
                     _ => None,
                 }
             }
         }
 
         impl EventQueue {
+            $( $(#[doc = $wdoc])* pub fn $wctor(&mut self, frame: &$record) {
+                self.push_latest_with_payload(RawEvent::$wctor(Range::default()), &frame.wire_bytes());
+            } )*
             $(
                 $(#[doc = $doc])*
                 #[allow(clippy::too_many_arguments)]
@@ -84,6 +104,13 @@ macro_rules! hal_events {
                 )*
                 expected.push(format!("{:?}", HalEvent::$name { $( $f: <k::$kind as Field>::expect($f) ),* }));
                 queue.$ctor($( $f ),*);
+            } )*
+            $( {
+                let bytes: Vec<u8> = (0..$record::SIZE).map(|i| i as u8).collect();
+                let frame = $record::read(&bytes);
+                let $record { $( $wf ),+ } = frame;
+                expected.push(format!("{:?}", HalEvent::$wname { $( $wf ),+ }));
+                queue.$wctor(&frame);
             } )*
             expected
         }
@@ -369,8 +396,16 @@ hal_events! {
     /// headset linked) or the wearer recentered, so its origin may have moved. `generation`
     /// counts these. The `XrFrame`s that follow are in the new space.
     XrSpace = 159, xr_space { window: obj, generation: u32 };
+    /// The XR window's display: its view count (1 or 2, side by side in the window) and its
+    /// `xr_display_kind`. A display that never sends it has two views and is worn.
+    XrDisplay = 163, xr_display { window: obj, views: u32, kind: u32 };
     /// A system print operation's outcome (`print_status`); `message` is UTF-8 on failure.
     PrintResult = 160, print_result { req: u32, status: u32, message: rng };
     /// On-demand semantic lookup for every window in the session; `query` is UTF-8.
     A11yLookup = 161, a11y_lookup { seq: u32, query: rng };
+    /// World-tracked camera session status (`ar_state`).
+    ArState = 165, ar_state { state: u32, code: i32 };
+    @latest
+    /// The newest sample of the session's world-tracked camera.
+    ArFrame = 164, ar_frame ArFrameInfo { seq: u64, time_ns: u64, tracking: u32, camera: XrEye, intrinsics: [f32; 4], image: [u32; 2], picture: u64, depth: crate::types::XrDepth, depth_confidence: u64 };
 }

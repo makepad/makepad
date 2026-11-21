@@ -16,6 +16,7 @@
 //! origin in the child's window space, and the first one paces the child's
 //! `Tick`s for all of them.
 
+use crate::hub::WebSocketOut;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -146,7 +147,7 @@ pub struct Slot<K, X> {
     pub launch: Option<AppLaunch>,
     pub client: ClientId,
     child: Option<Child>,
-    sender: Option<Sender<Vec<u8>>>,
+    sender: Option<Sender<WebSocketOut>>,
     /// When it was launched.
     pub born: f64,
     /// Its scratch folder: the logs, and the home of a `Home::Scratch` child.
@@ -628,7 +629,7 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
                 let outgoing = hosted.take_outgoing();
                 let Some(sender) = &sender else { continue };
                 for (_, bin) in outgoing {
-                    let _ = sender.send(bin);
+                    let _ = sender.send(WebSocketOut::Binary(bin));
                 }
             }
         }

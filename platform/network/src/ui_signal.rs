@@ -39,6 +39,12 @@ static UI_WAKER: Mutex<Option<UiWaker>> = Mutex::new(None);
 /// Installs the process event-loop wake callback. Platform initialization may
 /// replace it when ownership moves to a new event loop.
 pub fn install_ui_waker(waker: Option<UiWaker>) {
+    // any thread may wake the loop, a real-time one included (an audio callback's signal): under
+    // Relax the callback's code is compiled ahead of its first call there, in the background
+    #[cfg(relax)]
+    if let Some(w) = &waker {
+        let _ = std::relax::realtime(&*w.wake, None);
+    }
     if let Ok(mut slot) = UI_WAKER.lock() {
         *slot = waker;
     }

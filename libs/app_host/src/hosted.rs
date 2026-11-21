@@ -81,9 +81,6 @@ pub struct Presented {
     pub tex_scale: [f32; 2],
     /// The allocation, in texels.
     pub tex_size: [f32; 2],
-    /// 1.0 when the frame carries the child's size in its first two pixels
-    /// (the Linux software path), else 0.0.
-    pub packed_header: f32,
 }
 
 /// Seconds between two Ticks at the least: the frame. A timer may fire a
@@ -1282,15 +1279,6 @@ impl HostedApp {
             return None;
         }
         let texture = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height, &swapchain.snapshot)?;
-        // The in-band size header exists only on the Linux software path;
-        // reading it elsewhere blanks tiles whose top-left pixel is black
-        // (see the studio RunView note).
-        // macOS children always draw with sequence 0 and carry no header:
-        // reading that as "in band" made every macOS frame a placeholder.
-        #[cfg(not(target_os = "linux"))]
-        let packed_header = 0.0f32;
-        #[cfg(target_os = "linux")]
-        let packed_header = if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 };
         Some(Presented {
             texture,
             tex_scale: [
@@ -1298,7 +1286,6 @@ impl HostedApp {
                 (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
             ],
             tex_size: [swapchain.alloc_width as f32, swapchain.alloc_height as f32],
-            packed_header,
         })
     }
 

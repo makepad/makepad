@@ -12,6 +12,10 @@
 //! present histogram and an uneven next-frame histogram is the app clock's;
 //! the reverse is the compositor's.
 //!
+//! A person waits on the frames that took their input (a pointer move, a key, a drag): of
+//! those the line counts the gaps apart, and the wait from the input to the present, with the
+//! first such frame after frames that took none (the person starts to act) on a line of its own.
+//!
 //! A present's gap counts only time a frame was due. An idle app presents
 //! nothing, and that is no stall: a rest runs from a turn of the loop that left
 //! no work for a frame and none on its way to the screen, to when the loop next
@@ -128,6 +132,16 @@ pub struct FrameTrace {
     resting: Option<f64>,
     /// Seconds of rest since the last present.
     rested: f64,
+    /// The frames (HAL frame ids) built by a repaint that took input, with that input's time.
+    acted: Vec<(u64, f64)>,
+    /// The last present was of a frame that took input.
+    acting: bool,
+    /// Present gaps of the frames that took input.
+    acted_present: Hist,
+    /// From a frame's oldest input to its present.
+    input_wait: Hist,
+    /// The same, for the first frame that took input after one that took none.
+    first_wait: Hist,
 }
 
 pub(crate) fn on() -> bool {
@@ -147,6 +161,18 @@ impl FrameTrace {
             turn_from: None,
             resting: None,
             rested: 0.0,
+            acted: Vec::new(),
+            acting: false,
+            acted_present: Hist::default(),
+            input_wait: Hist::default(),
+            first_wait: Hist::default(),
+        }
+    }
+
+    /// A repaint that took input at `input` (seconds) built these frames (HAL frame ids).
+    pub fn built(&mut self, frames: &[u64], input: f64) {
+        if on() {
+            self.acted.extend(frames.iter().map(|frame| (*frame, input)));
         }
     }
 
@@ -200,14 +226,32 @@ impl FrameTrace {
         Some(((now - prev - rested) * 1000.0).max(0.0))
     }
 
-    /// A window frame was presented at this time (seconds of the backend's clock).
-    pub fn present(&mut self, now: f64) {
-        if !on() {
-            return;
+    /// Window frame `frame` (its HAL frame id) was presented at this time (seconds of the
+    /// backend's clock).
+    pub fn present(&mut self, now: f64, frame: u64) {
+        if on() {
+            self.presented(now, frame);
         }
+    }
+
+    fn presented(&mut self, now: f64, frame: u64) {
+        // frames finish in order: a frame listed before this one was never presented
+        let input = self.acted.iter().find(|(id, _)| *id == frame).map(|(_, input)| *input);
+        self.acted.retain(|(id, _)| *id > frame);
         if let Some(ms) = self.gap(now) {
             self.present.add(ms);
+            if input.is_some() {
+                self.acted_present.add(ms);
+            }
         }
+        if let Some(input) = input {
+            let wait = ((now - input) * 1000.0).max(0.0);
+            self.input_wait.add(wait);
+            if !self.acting {
+                self.first_wait.add(wait);
+            }
+        }
+        self.acting = input.is_some();
     }
 
     /// Print and reset every two seconds of wall time.
@@ -227,10 +271,16 @@ impl FrameTrace {
         crate::trace!("frames", "{}", self.next_frame.line("next_frame gap"));
         crate::trace!("frames", "{} (only while a frame was due)", self.present.line("present gap"));
         crate::trace!("frames", "{}", self.flip_lead.line("flip lead"));
+        crate::trace!("frames", "{} (frames that took input)", self.acted_present.line("acted present gap"));
+        crate::trace!("frames", "{}", self.input_wait.line("input to present"));
+        crate::trace!("frames", "{} (after frames that took none)", self.first_wait.line("first input to present"));
         self.sources = [0; 3];
         self.next_frame = Hist::default();
         self.present = Hist::default();
         self.flip_lead = Hist::default();
+        self.acted_present = Hist::default();
+        self.input_wait = Hist::default();
+        self.first_wait = Hist::default();
         self.last_print = Some(now);
     }
 }
@@ -289,6 +339,32 @@ mod tests {
         t.turn_from = Some(5.0);
         t.turn_over(true, 5.0);
         assert!(near(t.gap(5.01), 10.0));
+    }
+
+    #[test]
+    fn a_frame_that_took_input_counts_its_gap_and_its_wait_and_the_first_one_apart() {
+        let mut t = FrameTrace::new();
+        t.presented(1.0, 1);
+        // a repaint that took input at 1.010 built an offscreen frame (2) and a window frame (3)
+        t.acted.extend([(2, 1.010), (3, 1.010)]);
+        t.presented(1.030, 3);
+        assert_eq!((t.acted_present.count, t.input_wait.count, t.first_wait.count), (1, 1, 1), "the first acted frame");
+        assert!((t.first_wait.max_ms - 20.0).abs() < 1e-6, "its wait runs from the input: {}", t.first_wait.max_ms);
+        assert!(t.acted.is_empty(), "a presented frame and the ones before it leave the list");
+        // the next frame that took input is no longer the first
+        t.acted.push((4, 1.040));
+        t.presented(1.050, 4);
+        assert_eq!((t.acted_present.count, t.input_wait.count, t.first_wait.count), (2, 2, 1), "a second acted frame");
+        // a frame that took none counts only as a present
+        t.presented(1.067, 5);
+        assert_eq!((t.present.count, t.acted_present.count, t.input_wait.count), (3, 2, 2), "a still frame");
+        // a listed frame that was never presented is dropped; the next acted frame is a first again
+        t.acted.extend([(6, 1.070), (8, 1.080)]);
+        t.presented(1.090, 7);
+        assert_eq!((t.input_wait.count, t.acted.len()), (2, 1), "frame 6 never presented, frame 8 still to come");
+        t.presented(1.110, 8);
+        assert_eq!((t.input_wait.count, t.first_wait.count), (3, 2), "after frame 7 took none, frame 8 is a first");
+        assert!((t.first_wait.max_ms - 30.0).abs() < 1e-6, "{}", t.first_wait.max_ms);
     }
 
     #[test]

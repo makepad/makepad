@@ -113,9 +113,13 @@ pub struct CxA11y {
     /// again after a later frame than the one that found it, and stayed unnamed. A frame of an
     /// app that did not change names none of them ([`CxA11y::current`]).
     paths_settled: bool,
-    /// The last frame that built the tree: the app's event count once it drew (`Cx::event_id`)
-    /// and the key focus it built with ([`Cx::a11y_tree_current`]). None before the first.
+    /// The last frame that built the tree and covered the events before it (`frame_covers`): the
+    /// app's event count once it drew (`Cx::event_id`) and the key focus it built with
+    /// ([`Cx::a11y_tree_current`]). None before the first.
     built: Option<(u64, Area)>,
+    /// The frame building now covers the events before it, so it may mark the tree built
+    /// ([`Cx::a11y_begin_frame`]).
+    frame_covers: bool,
 }
 
 /// Names a widget node's path (`Node::path`) after the frame drew, for nodes whose path the
@@ -252,6 +256,7 @@ impl CxA11y {
     }
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        self.frame_covers = true;
         self.stack.clear();
         self.suspended.clear();
         self.outside_windows.clear();
@@ -989,9 +994,25 @@ impl Cx {
         for req in a11y.take_host_lookups_done() {
             ops.push_back(CxOsOp::A11yHostLookupDone { req });
         }
-        a11y.built = Some((self.event_id, self.keyboard.key_focus()));
+        if a11y.frame_covers {
+            a11y.built = Some((self.event_id, self.keyboard.key_focus()));
+        }
         self.platform_ops = ops;
         self.a11y = a11y;
+    }
+    /// A frame begins to draw (`redraw_all`: every list records again). It marks the tree built
+    /// only if it covers the events before it: it collects every node again, or no event reached
+    /// the app since the tree was last built. A frame that draws some lists keeps the others'
+    /// nodes as they were, and an event may have changed what their widgets describe without a
+    /// redraw (a pointer a view took on hover, drawing only the status bar): the tree is then
+    /// not current, and the next snapshot draws every window. Under the virtual clock every frame
+    /// covers its events: the app draws only on a `/step`, and a caller that wants a fresher tree
+    /// steps a frame first ([`Self::a11y_lookup`]).
+    pub(crate) fn a11y_begin_frame(&mut self, redraw_all: bool) {
+        let covers = redraw_all || crate::remote::app_clock::enabled()
+            || self.a11y.built == Some((self.event_id, self.keyboard.key_focus()));
+        self.a11y.begin_frame();
+        self.a11y.frame_covers = covers;
     }
     /// The tree the builder last built is still the app's ([`CxA11y::current`]): a snapshot of it
     /// needs no frame.
@@ -1016,10 +1037,17 @@ impl Cx {
     }
     /// A semantic lookup from the HAL (`seq`, `query`): a snapshot (an empty query) of a tree that
     /// is still the app's is acknowledged at once, with no frame; anything else is built and
-    /// acknowledged by the next frame.
+    /// acknowledged by the next frame. Under the virtual clock the app draws only on a `/step`, so
+    /// between two steps the tree its last frame built is what it shows: a snapshot is
+    /// acknowledged at once over it too. Waiting for a frame there waited out each read's
+    /// timeout while the caller that steps waited for the read (an app run's 5 fps pass: every
+    /// layout read 5 s, its counter's clicks unseen, 11-19). After a partial frame that tree may
+    /// keep a node a widget that did not redraw left behind; under the virtual clock that is
+    /// accepted: a caller that wants a fresher tree steps a frame first.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn a11y_lookup(&mut self, seq: u32, query: &str) {
-        if seq != 0 && query.trim().is_empty() && self.a11y.on && self.a11y_tree_current() {
+        let shown = self.a11y_tree_current() || (crate::remote::app_clock::enabled() && self.a11y.built.is_some());
+        if seq != 0 && query.trim().is_empty() && self.a11y.on && shown {
             self.platform_ops.push_back(CxOsOp::A11yLookupDone { seq });
             return;
         }
@@ -1961,6 +1989,37 @@ mod tests {
         cx.a11y_lookup(10, "");
         assert!(!cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yLookupDone { seq: 10 })), "a redraw waiting is a change: the frame acknowledges the request, not the request itself");
         assert!(!cx.a11y_take_answer_frame(), "a frame the app owed already is the app's, not the request's");
+    }
+
+    /// A frame that draws some lists keeps the other lists' nodes as they were built, so it makes
+    /// the tree current only when no event reached the app since: an event can change what a
+    /// widget describes without a redraw (a 3D view took a hover's pointer and only the status
+    /// bar drew). Before, every frame marked the tree current, and each snapshot after it was
+    /// answered with the view's description from before the move, for as long as the app idled.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_frame_that_draws_some_lists_after_an_event_leaves_the_tree_to_build_again() {
+        use crate::{draw_list::DrawList, event::Event};
+        use makepad_a11y::consumer::REMOTE;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        cx.a11y_consumers_changed(REMOTE);
+        cx.call_draw_event(0.0);
+        assert!(cx.a11y_tree_current(), "the frame that draws every window builds the tree");
+        cx.redraw_list(list.id());
+        cx.call_draw_event(0.0);
+        assert!(cx.a11y_tree_current(), "a frame that draws some lists with no event since keeps it current");
+        cx.call_event_handler(&Event::Signal);
+        cx.redraw_list(list.id());
+        cx.call_draw_event(0.0);
+        assert!(!cx.a11y_tree_current(), "after an event, a frame that draws some lists keeps the others' nodes as they were: not current");
+        cx.platform_ops.clear();
+        cx.a11y_lookup(3, "");
+        let acked = cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yLookupDone { seq: 3 }));
+        assert!(cx.need_redrawing() && !acked, "so a snapshot draws every window, not answered from that tree");
+        cx.call_draw_event(0.0);
+        let acked = cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yLookupDone { seq: 3 }));
+        assert!(acked && cx.a11y_tree_current(), "the frame that draws every window answers it and builds the tree");
     }
 
     #[test]

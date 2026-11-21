@@ -124,6 +124,18 @@ impl Cx {
         { let _ = shader; false }
     }
 
+    /// What the backend said when `shader`'s pipeline failed to build (its
+    /// compiler's log), while [`Self::draw_shader_failed`] holds: for a host
+    /// to show the author why a shader draws nothing.
+    pub fn draw_shader_failure(&self, shader: crate::draw_shader::DrawShaderId) -> Option<&str> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.draw_shader_window_failure(shader)
+        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = shader; None }
+    }
+
     /// Draws left out of frames so far because they were not ready (their
     /// pipeline compiling, their instances not yet on the GPU).
     pub fn pipeline_skips(&self) -> u64 {

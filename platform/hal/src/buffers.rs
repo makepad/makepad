@@ -81,14 +81,61 @@ impl Wire for TouchPoint {
 }
 
 /// `XrEye`: orientation, position, fov, 4 bytes each (floats as their bits).
+impl XrEye {
+    fn write_wire(&self, bytes: &mut [u8]) {
+        let values = self.pose.orientation.iter().chain(&self.pose.position).chain(&self.fov);
+        for (slot, value) in bytes.chunks_exact_mut(4).zip(values) {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
 impl Wire for XrEye {
     const SIZE: usize = 11 * 4;
     fn write(&self, out: &mut Vec<u8>) {
-        for x in self.pose.orientation.iter().chain(self.pose.position.iter()).chain(self.fov.iter()) { w32(out, x.to_bits()); }
+        let mut bytes = [0; Self::SIZE];
+        self.write_wire(&mut bytes);
+        out.extend_from_slice(&bytes);
     }
     fn read(b: &[u8]) -> Self {
         let f = |i: usize| f32::from_bits(r32(b, i * 4));
         XrEye { pose: XrPose { orientation: [f(0), f(1), f(2), f(3)], position: [f(4), f(5), f(6)] }, fov: [f(7), f(8), f(9), f(10)] }
+    }
+}
+
+impl ArFrameInfo {
+    const CONFIDENCE_OFFSET: usize = 96 + XrDepth::SIZE;
+
+    /// The same fixed-size record for an event and a waiting reader.
+    pub(crate) fn wire_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.seq.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.time_ns.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.tracking.to_le_bytes());
+        self.camera.write_wire(&mut bytes[20..64]);
+        for (slot, value) in bytes[64..80].chunks_exact_mut(4).zip(self.intrinsics) {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[80..84].copy_from_slice(&self.image[0].to_le_bytes());
+        bytes[84..88].copy_from_slice(&self.image[1].to_le_bytes());
+        bytes[88..96].copy_from_slice(&self.picture.to_le_bytes());
+        self.depth.write_wire(&mut bytes[96..Self::CONFIDENCE_OFFSET]);
+        bytes[Self::CONFIDENCE_OFFSET..].copy_from_slice(&self.depth_confidence.to_le_bytes());
+        bytes
+    }
+}
+
+impl Wire for ArFrameInfo {
+    const SIZE: usize = Self::CONFIDENCE_OFFSET + 8;
+    fn write(&self, out: &mut Vec<u8>) { out.extend_from_slice(&self.wire_bytes()); }
+    fn read(b: &[u8]) -> Self {
+        Self {
+            seq: r64(b, 0), time_ns: r64(b, 8), tracking: r32(b, 16),
+            camera: XrEye::read(&b[20..64]), intrinsics: <[f32; 4]>::read(&b[64..80]),
+            image: <[u32; 2]>::read(&b[80..88]), picture: r64(b, 88),
+            depth: XrDepth::read(&b[96..Self::CONFIDENCE_OFFSET]),
+            depth_confidence: r64(b, Self::CONFIDENCE_OFFSET),
+        }
     }
 }
 
@@ -138,17 +185,24 @@ impl Wire for XrFrame {
     }
 }
 
+impl XrDepth {
+    fn write_wire(&self, bytes: &mut [u8]) {
+        let fields = [self.width, self.height, self.layers, self.near.to_bits(), self.far.to_bits()];
+        for (slot, field) in bytes[..20].chunks_exact_mut(4).zip(fields) {
+            slot.copy_from_slice(&field.to_le_bytes());
+        }
+        self.views[0].write_wire(&mut bytes[20..64]);
+        self.views[1].write_wire(&mut bytes[64..108]);
+        bytes[108..116].copy_from_slice(&self.image.to_le_bytes());
+    }
+}
+
 impl Wire for XrDepth {
     const SIZE: usize = (5 + 2 * 11 + 2) * 4;
     fn write(&self, out: &mut Vec<u8>) {
-        let f = |out: &mut Vec<u8>, v: &[f32]| for x in v { w32(out, x.to_bits()); };
-        w32(out, self.width);
-        w32(out, self.height);
-        w32(out, self.layers);
-        f(out, &[self.near, self.far]);
-        for e in &self.views { f(out, &e.pose.orientation); f(out, &e.pose.position); f(out, &e.fov); }
-        w32(out, self.image as u32);
-        w32(out, (self.image >> 32) as u32);
+        let mut bytes = [0; Self::SIZE];
+        self.write_wire(&mut bytes);
+        out.extend_from_slice(&bytes);
     }
     fn read(b: &[u8]) -> Self {
         let mut at = 0;
@@ -1032,6 +1086,28 @@ impl EventQueue {
         e.data.off = off as u32;
         e.data.len = payload.len() as u32;
         self.push(e);
+    }
+
+    pub(crate) fn discard_pending(&mut self, tag: u16) -> Option<Range> {
+        let at = self.events.iter().rposition(|event| event.tag == tag)?;
+        self.events.remove(at).map(|event| event.data)
+    }
+
+    /// A reader can drain just part of a pump. Reuse the undelivered sample's arena space
+    /// and put its replacement after any intervening status events.
+    pub(crate) fn push_latest_with_payload(&mut self, mut event: RawEvent, payload: &[u8]) {
+        if let Some(range) = self.discard_pending(event.tag) {
+            let offset = range.off as usize;
+            if range.len as usize == payload.len() {
+                if let Some(slot) = self.arena.get_mut(offset..offset.saturating_add(payload.len())) {
+                    slot.copy_from_slice(payload);
+                    event.data = range;
+                    self.push(event);
+                    return;
+                }
+            }
+        }
+        self.push_with_payload(event, payload);
     }
 
     pub fn len(&self) -> usize {

@@ -1,6 +1,8 @@
 use crate::file_dialogs::{FileDialog, VirtualFileLimits};
 use crate::print::{PrintId, PrintJob};
 
+use crate::ar::{ArCaps, ArConfig, ArHit, ThermalState};
+
 use {
     crate::{
         area::Area,
@@ -61,6 +63,10 @@ pub(crate) struct InDrawRedraw {
     /// who asked (frame sources)
     pub(crate) by: &'static std::panic::Location<'static>,
 }
+
+/// How the person uses the XR display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XrDisplayKind { Worn, Handheld }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct XrFrameCpuBreakdown {
@@ -1240,10 +1246,9 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
 
-    /// A head-mounted display shows this app (`xr_start_presenting` gives it a stereo view).
-    /// The XR display has no display of its own (`info_flags::XR_OFFSCREEN`, a remote headset):
-    /// the XR passes render into their own colour and depth textures, both eyes side by side,
-    /// and the app hands them on (an encoder); they paint before every other pass.
+    /// The XR display is offscreen (`info_flags::XR_OFFSCREEN`). Its passes paint before every
+    /// other pass and render its views side by side (two eyes on a headset, one on a handheld)
+    /// into their own colour and depth textures, which the app hands to its encoder.
     pub fn xr_offscreen(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         { self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0 }
@@ -1265,10 +1270,9 @@ impl Cx {
         self.window_paints
     }
 
-    /// Supersampling of an offscreen XR display's passes (`xr_offscreen`; a no-op elsewhere):
-    /// they render at `scale` (0.5..2) of the eye pixels per axis, both eyes side by side, and
-    /// the app filters them down (or scales them up) to the eye size itself (a remote headset's
-    /// encoder input).
+    /// An offscreen XR display renders its views side by side (two eyes on a headset, one on a
+    /// handheld) at `scale` (0.5..2) of each view's pixels per axis. The app scales each view
+    /// to its encoder input size. Applies only to offscreen XR passes (`xr_offscreen`).
     pub fn xr_set_supersample(&mut self, scale: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         self.hal_xr_supersample(scale);
@@ -1276,9 +1280,10 @@ impl Cx {
         let _ = scale;
     }
 
-    /// Multisampling of the XR passes (both eyes): `samples` per pixel (2, 4 or 8 where the
-    /// GPU has that count, `xr_msaa_counts`; 1 or anything else: none), resolved into the
-    /// passes' colour and depth textures at the end of each eye.
+    /// Multisampling of the XR passes (each view: two eyes on a headset, one on a handheld):
+    /// `samples` per pixel (2, 4 or 8 where the GPU has that count, `xr_msaa_counts`; 1 or
+    /// anything else: none), resolved into the passes' colour and depth textures at the end of
+    /// each view.
     pub fn xr_set_msaa(&mut self, samples: u32) {
         #[cfg(not(target_arch = "wasm32"))]
         self.hal_xr_msaa(samples);
@@ -1302,10 +1307,9 @@ impl Cx {
         { 1 }
     }
 
-    /// The offscreen XR passes' pixels per eye pixel (1 without supersampling).
-    /// The eyes an XR pass draws its next frame with, as its pass uniforms carry them (the
-    /// scene-to-room transform applied: `[(view, projection); 2]`), and each eye's pixel size
-    /// in the XR pass's target: what a renderer marching its own stereo target matches.
+    /// The next XR pass's `[(view, projection); 2]` cameras with the scene-to-room transform
+    /// applied, and the pixel size of one view in the pass's target. A single view fills the
+    /// target and supplies both entries in the camera pair.
     pub fn xr_pass_eyes(&self) -> Option<([(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2], crate::makepad_math::DVec2)> {
         #[cfg(not(target_arch = "wasm32"))]
         { self.hal_xr_pass_eyes() }
@@ -1313,6 +1317,66 @@ impl Cx {
         { None }
     }
 
+    /// World tracking, depth and mesh reconstruction available on this device.
+    pub fn ar_caps(&self) -> ArCaps {
+        #[cfg(not(target_arch = "wasm32"))]
+        { ArCaps::from_hal(makepad_hal::hal_ar_caps()) }
+        #[cfg(target_arch = "wasm32")]
+        { ArCaps::default() }
+    }
+
+    /// Start the world-tracked camera with plane detection and the requested features.
+    pub fn ar_start(&mut self, config: ArConfig) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal.frames.w.ar_start(u32::from(config.scene_depth) | (u32::from(config.scene_mesh) << 1));
+        #[cfg(target_arch = "wasm32")]
+        let _ = config;
+    }
+
+    /// Stop the world-tracked camera and release the session's pictures.
+    pub fn ar_stop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal.frames.w.ar_stop();
+    }
+
+    /// Cast through the newest sensor image at normalized coordinates from its top left.
+    pub fn ar_raycast(&self, u: f32, v: f32) -> Option<ArHit> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut hit = [0.0; 6];
+            makepad_hal::hal_ar_raycast(u, v, &mut hit).then(|| ArHit::from_hal(hit))
+        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (u, v); None }
+    }
+
+    /// The device's thermal state, when the system reports one.
+    pub fn thermal_state(&self) -> Option<ThermalState> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { ThermalState::from_hal(makepad_hal::hal_thermal_state()) }
+        #[cfg(target_arch = "wasm32")]
+        { None }
+    }
+
+    /// How many views the XR display has: 2 for a headset's eyes, 1 for a handheld window. The
+    /// pass renders them side by side; `xr_pass_eyes` gives the pair either way (the one view
+    /// twice).
+    pub fn xr_views(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_views() }
+        #[cfg(target_arch = "wasm32")]
+        { 2 }
+    }
+
+    /// The XR display's kind: worn (a headset) or held in the hand (a window onto the room).
+    pub fn xr_display_kind(&self) -> XrDisplayKind {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_display_kind() }
+        #[cfg(target_arch = "wasm32")]
+        { XrDisplayKind::Worn }
+    }
+
+    /// The offscreen XR pass's pixels per view pixel on each axis (1 without supersampling).
     pub fn xr_supersample(&self) -> f32 {
         #[cfg(not(target_arch = "wasm32"))]
         { self.hal_xr_supersample_now() }
@@ -3714,6 +3778,32 @@ impl Cx {
     /// completed (`Texture::gpu_drawn`) and draws the frame again. The latest 256 are kept.
     pub fn frames_partial(&self, first: u64, last: u64) -> bool {
         self.textures.1.partial.iter().any(|serial| (first..=last).contains(serial))
+    }
+
+    /// The time from one window frame to the next, in seconds: the display's refresh where a
+    /// display paces the app, else the event loop's own frame period.
+    pub fn display_frame_interval(&self) -> f64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.hal.frame_interval > 0.0 { self.hal.frame_interval } else { crate::os::hal::BEAT.as_secs_f64() }
+        }
+        #[cfg(target_arch = "wasm32")]
+        { 1.0 / 60.0 }
+    }
+
+    /// The longest GPU time of the last eight window frames the backend reported a time for, in
+    /// seconds. One frame's time varies from the next; the longest of the recent ones seldom falls
+    /// short of it. What is left of [`Self::display_frame_interval`] is the GPU's time for work no
+    /// window frame waits for (`DrawPass::set_background`). `None` before the first such frame
+    /// and where the backend reports no times: then none of the interval is known to be free.
+    pub fn window_frame_gpu_time(&self) -> Option<f64> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ns = self.hal.window_gpu_ns.iter().copied().max().unwrap_or(0);
+            (ns > 0).then(|| ns as f64 * 1e-9)
+        }
+        #[cfg(target_arch = "wasm32")]
+        { None }
     }
 
     /// Last observed completed prefix, without polling the backend. Progress

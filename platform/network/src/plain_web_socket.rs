@@ -444,7 +444,7 @@ fn parse_incoming(
         }
         Ok(ParsedWebSocketMessage::Binary(data)) => {
             if rx_sender
-                .send(WebSocketMessage::Binary(data.into()))
+                .send(WebSocketMessage::Binary(std::mem::take(data)))
                 .is_err()
             {
                 *done = true;

@@ -392,9 +392,9 @@ static IN_USE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// Registers (`Some(how)`: "an XR headset (Quest 3)") or clears (`None`) a person's use of this
 /// process under `key`: a part of an app that a person uses from elsewhere (a headset streaming
-/// its XR view, a Desk Link viewer watching the machine) says so while that use lasts. A node's
-/// devhub hub reads it and puts no other work on the machine meanwhile, as when a person sits at
-/// it: their frames would share its CPU and GPU (`makepad_devhub`'s `lease::hand`).
+/// its XR view) says so while that use lasts. A node's devhub hub reads it and puts no other work
+/// on the machine meanwhile: their frames would share its CPU and GPU (`makepad_devhub`'s
+/// `lease::hand`).
 pub fn set_in_use(key: &str, how: Option<&str>) {
     let mut in_use = IN_USE.lock().unwrap();
     let before = in_use.clone();

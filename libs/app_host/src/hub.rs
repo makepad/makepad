@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, Sender};
 
+pub use makepad_network::http_server::WebSocketOut;
 use makepad_network::http_server::{start_http_server, HttpServer, HttpServerRequest, HttpServerThread};
 use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, HOSTED_VERSIONS, WIRE};
 use makepad_platform::makepad_micro_serde::{DeBin, SerBin};
@@ -27,7 +28,7 @@ pub enum HubEvent {
         client: ClientId,
         version: u32,
         socket: u64,
-        sender: Sender<Vec<u8>>,
+        sender: Sender<WebSocketOut>,
     },
     Disconnected {
         socket: u64,
@@ -117,14 +118,14 @@ impl AppHub {
                             let (client, version) = match admit(&path) {
                                 Some(Ok(admission)) => admission,
                                 Some(Err(mismatch)) => {
-                                    let _ = response_sender.send(Vec::new());
+                                    let _ = response_sender.send(WebSocketOut::Close);
                                     let _ = event_tx.send(mismatch);
                                     SignalToUI::set_ui_signal();
                                     continue;
                                 }
                                 None => {
                                     // Not a client socket: close it.
-                                    let _ = response_sender.send(Vec::new());
+                                    let _ = response_sender.send(WebSocketOut::Close);
                                     continue;
                                 }
                             };
@@ -185,11 +186,11 @@ impl AppHub {
 }
 
 /// Send a batch of StudioToApp messages over a client socket sender.
-pub fn send_to_app(sender: &Sender<Vec<u8>>, msgs: Vec<StudioToApp>) {
+pub fn send_to_app(sender: &Sender<WebSocketOut>, msgs: Vec<StudioToApp>) {
     if msgs.is_empty() {
         return;
     }
-    let _ = sender.send(StudioToAppVec(msgs).serialize_bin());
+    let _ = sender.send(WebSocketOut::Binary(StudioToAppVec(msgs).serialize_bin()));
 }
 
 /// A child's client id and admitted version: a `proto` in [`HOSTED_VERSIONS`], whatever its

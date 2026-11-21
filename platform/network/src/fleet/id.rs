@@ -167,12 +167,14 @@ pub fn normalize(ip: IpAddr) -> IpAddr {
     }
 }
 
-fn sign(key: &[u8; X963_KEY_LEN], msg: &[u8]) -> io::Result<[u8; 64]> {
+/// Signs a message with P-256/SHA-256 and returns the raw 64-byte signature.
+pub fn sign(key: &[u8; X963_KEY_LEN], msg: &[u8]) -> io::Result<[u8; 64]> {
     let der = tls::sign_p256_sha256(key, msg)?;
     tls::ecdsa_raw_from_der(&der).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ECDSA signature is not DER"))
 }
 
-fn verify(point: &[u8; 65], msg: &[u8], sig: &[u8; 64]) -> bool {
+/// Verifies a raw P-256/SHA-256 signature with an uncompressed public point.
+pub fn verify(point: &[u8; 65], msg: &[u8], sig: &[u8; 64]) -> bool {
     tls::verify_p256_sha256(point, msg, &tls::x509::ecdsa_sig_from_raw(sig))
 }
 
@@ -208,6 +210,14 @@ pub fn point_of(key: &[u8; X963_KEY_LEN]) -> [u8; 65] {
     let mut p = [0u8; 65];
     p.copy_from_slice(&key[..65]);
     p
+}
+
+/// P-256 ECDH, then HMAC over the context and the two public points in canonical order.
+pub fn shared_key(key: &[u8; X963_KEY_LEN], peer: &[u8; 65], context: &str) -> io::Result<[u8; 32]> {
+    let raw = tls::ecdh_p256(key, peer)?;
+    let mine = point_of(key);
+    let (a, b) = if mine <= *peer { (mine, *peer) } else { (*peer, mine) };
+    Ok(crate::tunnel::hmac_sha256(&raw, format!("{TAG} shared|{context}|{}|{}", to_hex(&a), to_hex(&b)).as_bytes()))
 }
 
 // --- credentials --------------------------------------------------------------------
@@ -426,10 +436,6 @@ pub enum Need {
     /// This machine's own credential: another process of the machine the
     /// service runs on (its own WM), never another machine, admin or not.
     ThisMachine,
-    /// A headset viewing an XR session (remote rendering): the admin Mac, or a paired device
-    /// the fleet root signed (a Quest). The service admits it to that XR session only: no
-    /// desktop, and its input reaches only the XR app, as headset data.
-    XrViewer,
 }
 
 /// The one policy check: `require(&peer, Need::Admin)?`.
@@ -439,7 +445,6 @@ pub fn require(peer: &Peer, need: Need) -> Result<(), String> {
         Need::Machine => peer.machine(),
         Need::Node => peer.node(),
         Need::ThisMachine => peer.this_machine(),
-        Need::XrViewer => peer.admin() || peer.role == Role::Paired,
     };
     if ok {
         return Ok(());
@@ -450,7 +455,6 @@ pub fn require(peer: &Peer, need: Need) -> Result<(), String> {
         Need::Machine => format!("{} ({}) is not a fleet machine", peer.name, peer.role.as_str()),
         Need::Node => format!("{} ({}) is not a node credential", peer.name, peer.role.as_str()),
         Need::ThisMachine => format!("{} ({}) is not this machine", peer.name, peer.role.as_str()),
-        Need::XrViewer => format!("{} ({}) is neither the admin nor a paired headset", peer.name, peer.role.as_str()),
     })
 }
 
@@ -657,10 +661,7 @@ impl Me {
     /// A key only this machine and the holder of `peer`'s key can compute
     /// (P-256 ECDH, then HMAC over `context` and both public points).
     pub fn shared_key(&self, peer: &[u8; 65], context: &str) -> io::Result<[u8; 32]> {
-        let raw = tls::ecdh_p256(&self.key, peer)?;
-        let mine = point_of(&self.key);
-        let (a, b) = if mine <= *peer { (mine, *peer) } else { (*peer, mine) };
-        Ok(crate::tunnel::hmac_sha256(&raw, format!("{TAG} shared|{context}|{}|{}", to_hex(&a), to_hex(&b)).as_bytes()))
+        shared_key(&self.key, peer, context)
     }
 }
 

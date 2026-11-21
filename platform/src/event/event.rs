@@ -156,6 +156,8 @@ pub enum Event {
     WindowLostFocus(WindowId),
     GameInputConnected(GameInputConnectedEvent),
     NextFrame(NextFrameEvent),
+    ArFrame(crate::ArFrameEvent),
+    ArState(crate::ArStateEvent),
     XrUpdate(XrUpdateEvent),
     XrLocal(XrLocalEvent),
 
@@ -484,6 +486,8 @@ impl Event {
             91 => "TrayMenu",
             92 => "TrayClick",
             98 => "NotificationClick",
+            99 => "ArFrame",
+            100 => "ArState",
             93 => "NativeLayer",
             _ => panic!(),
         }
@@ -593,6 +597,8 @@ impl Event {
             Self::TrayMenu(_) => 91,
             Self::TrayClick(_) => 92,
             Self::NotificationClick(_) => 98,
+            Self::ArFrame(_) => 99,
+            Self::ArState(_) => 100,
             Self::NativeLayer(_) => 93,
 
             #[cfg(target_arch = "wasm32")]

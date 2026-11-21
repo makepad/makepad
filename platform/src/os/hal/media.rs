@@ -328,14 +328,25 @@ impl Cx {
     /// IOSurface id; luma samples as R8, chroma as RG8 at half size). The app keeps the picture
     /// alive while frames that draw the texture may still run on the GPU.
     pub fn import_picture_plane(&mut self, handle: u64, plane: crate::video_file::PicturePlane) -> Texture {
-        let texture = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
-        let id = self.hal_external_texture(texture.texture_id());
         let kind = match plane {
             crate::video_file::PicturePlane::Luma => makepad_hal::texture_handle::LUMA,
             crate::video_file::PicturePlane::Chroma => makepad_hal::texture_handle::CHROMA,
         };
-        self.hal.frames.w.texture_import(id, handle, kind);
-        texture
+        self.import_image_handle(handle, kind)
+    }
+
+    /// Import a frame's scene depth as R32F. Sample .r for linear metres along the
+    /// camera's -z axis. Keep the frame's sequence among the four newest pictures while
+    /// a draw may still read the texture.
+    pub fn import_depth_image(&mut self, handle: u64) -> Texture {
+        self.import_image_handle(handle, makepad_hal::texture_handle::DEPTH_METRES)
+    }
+
+    /// Import a frame's confidence map as R8Unorm. Sampling .r gives the UInt8 code
+    /// divided by 255. Keep the frame's sequence among the four newest pictures while
+    /// a draw may still read the texture.
+    pub fn import_confidence_image(&mut self, handle: u64) -> Texture {
+        self.import_image_handle(handle, makepad_hal::texture_handle::CONFIDENCE)
     }
 
     /// A decoder's whole picture the app holds (`DecodedPicture::handle` of a GPU stream
@@ -344,9 +355,13 @@ impl Cx {
     /// (.g = Y', .b = Cb, .r = Cr). Nothing is copied. The app keeps the picture alive while
     /// frames that draw the texture may still run on the GPU.
     pub fn import_picture(&mut self, handle: u64) -> Texture {
+        self.import_image_handle(handle, makepad_hal::texture_handle::VIDEO)
+    }
+
+    fn import_image_handle(&mut self, handle: u64, kind: u32) -> Texture {
         let texture = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
         let id = self.hal_external_texture(texture.texture_id());
-        self.hal.frames.w.texture_import(id, handle, makepad_hal::texture_handle::VIDEO);
+        self.hal.frames.w.texture_import(id, handle, kind);
         texture
     }
 

@@ -816,6 +816,16 @@ impl Metal {
         let layer_id = layer.as_id();
         let drawable: ObjcId = unsafe {
             if self.native_sync { let () = msg_send![layer_id, setPresentsWithTransaction: YES]; }
+            // A frame read back is copied out of its drawable, and a framebuffer-only drawable
+            // keeps the display's own storage order, which a blit reads as it is (an iPad's
+            // capture came back with rows and columns swapped, cut to a square). The layer gives
+            // drawables a blit can read from then on: one pool of drawables made again, once.
+            if self.copied_out {
+                let framebuffer_only: BOOL = msg_send![layer_id, framebufferOnly];
+                if framebuffer_only == YES {
+                    let () = msg_send![layer_id, setFramebufferOnly: NO];
+                }
+            }
             let size: CGSize = msg_send![layer_id, drawableSize];
             if size.width as u32 != w || size.height as u32 != h {
                 let () = msg_send![layer_id, setDrawableSize: CGSize { width: w as f64, height: h as f64 }];
@@ -1045,6 +1055,7 @@ impl Metal {
             return Some(exec::SubmittedFrame { deps, window: false });
         }
         self.composing = badges;
+        self.copied_out = is_window && kind & (target::CAPTURE | target::SNAPSHOT) != 0;
         if sid == HOST && is_window && !pick && !badges {
             self.copy_layer_image(s, target, seq);
         }
@@ -1211,9 +1222,11 @@ impl Metal {
         if let Some(b) = self.batch.as_mut().filter(|_| !replay) {
             b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time, window: window_encoded && !pick && !hosted, kind, partial, prof, prof_samples: samples.clone() });
         }
-        if alone || sync_frame {
+        if alone || sync_frame || is_window {
             // Do not hold several unpresented native frames in a batch: segment drawable
             // pools must stay available even when the main thread has not run its closure.
+            // A window frame goes out on its own: what is encoded after it (background passes)
+            // must not hold its present.
             self.commit_batch();
         }
         Some(exec::SubmittedFrame { deps, window: window_encoded && !pick && !hosted })

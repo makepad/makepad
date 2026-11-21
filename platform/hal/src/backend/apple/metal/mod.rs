@@ -103,6 +103,9 @@ pub struct Metal {
     /// a badge layer frame is being encoded: its window pass draws into the drawable, over a
     /// copy of the window's retained image
     composing: bool,
+    /// the window frame being encoded is read back (a snapshot, a capture): its drawable is
+    /// copied out, so it must be one a blit can read (`window_target`)
+    copied_out: bool,
     /// Dismissal retries when AppKit temporarily has no drawable.
     restores: FastMap<Id, Win>,
     /// Pick targets whose latest replay skipped a not-yet-ready draw.
@@ -241,6 +244,7 @@ impl Metal {
             overlays: FastMap::default(),
             badged: FastMap::default(),
             composing: false,
+            copied_out: false,
             restores: FastMap::default(),
             pick_pending: Default::default(),
             batch: None,

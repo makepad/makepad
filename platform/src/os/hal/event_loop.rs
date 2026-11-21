@@ -17,7 +17,7 @@ use std::{cell::RefCell, rc::Rc};
 
 /// Time between beats while the app animates or waits for a frame: 60 Hz. The headless backend
 /// has no display to pace it; a window system's `FrameReady` takes this place.
-const BEAT: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+pub(crate) const BEAT: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
 /// Frames a session keeps in flight on the GPU at once before a beat waits for the oldest
 /// to complete (`FrameDone`), on every path that beats (`Cx::hal_frames_room`): the one bound
 /// that keeps a producer from running ahead of the GPU. The wait is the pump's (`PumpWait::Gpu`),
@@ -1200,7 +1200,10 @@ impl Cx {
         if !passes.is_empty() {
             self.perf_monitor.frame_boundary(time_now);
         }
-        self.fb_build(&mut fb, &passes, pass_time, input_ns);
+        let built = self.fb_build(&mut fb, &passes, pass_time, input_ns);
+        if input_ns != 0 {
+            self.hal.frame_trace.built(&built, input_ns as f64 * 1e-9);
+        }
         self.fb_picks(&mut fb);
         if let Some(t0) = perf_encode {
             self.perf_monitor.add(

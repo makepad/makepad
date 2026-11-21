@@ -170,6 +170,94 @@ pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
     0
 }
 
+/// The processes `pid` started that run now, and the ones they started in turn (not `pid`), each
+/// as (its pid, its CPU so far in nanoseconds), into `out`: what a program runs in the programs it
+/// launched (a tool it runs for a request, a build), which its own CPU time does not show. A
+/// handful of small files a process (each thread's children, the child's stat), so a caller asks
+/// seldom (a test's wait, once a look). Linux reads each thread's `children` and, on a kernel that
+/// keeps none, every process's parent from its stat; its CPU counts in clock ticks.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn started_cpu_ns(pid: u32, out: &mut Vec<(u32, u64)>) {
+    extern "C" {
+        fn sysconf(name: i32) -> std::ffi::c_long;
+    }
+    const SC_CLK_TCK: i32 = 2;
+    // SAFETY: no pointer arguments
+    let tick_ns = 1_000_000_000 / (unsafe { sysconf(SC_CLK_TCK) }.max(1) as u64);
+    // "pid (comm) state ppid ... utime stime ...": the comm may hold spaces and parentheses
+    let stat = |pid: u32| -> Option<(u32, u64)> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<&str> = text.rsplit_once(')')?.1.split_whitespace().collect();
+        let field = |n: usize| fields.get(n - 3)?.parse::<u64>().ok();
+        Some((field(4)? as u32, (field(14)? + field(15)?) * tick_ns))
+    };
+    let kept = std::path::Path::new(&format!("/proc/{pid}/task/{pid}/children")).exists();
+    let parents: Vec<(u32, u32, u64)> = if kept {
+        Vec::new()
+    } else {
+        let Ok(all) = std::fs::read_dir("/proc") else { return };
+        all.flatten().filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(|child| stat(child).map(|(parent, cpu)| (child, parent, cpu))).collect()
+    };
+    let mut parents_left = vec![pid];
+    while let Some(parent) = parents_left.pop() {
+        if kept {
+            let Ok(tasks) = std::fs::read_dir(format!("/proc/{parent}/task")) else { continue };
+            for task in tasks.flatten() {
+                let children = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+                for child in children.split_whitespace().filter_map(|c| c.parse::<u32>().ok()) {
+                    if let Some((_, cpu)) = stat(child) {
+                        out.push((child, cpu));
+                        parents_left.push(child);
+                    }
+                }
+            }
+        } else {
+            for &(child, _, cpu) in parents.iter().filter(|(_, p, _)| *p == parent) {
+                out.push((child, cpu));
+                parents_left.push(child);
+            }
+        }
+    }
+}
+
+/// See the Linux one. macOS asks libproc: each process's children, and its CPU in Mach time units.
+#[cfg(target_vendor = "apple")]
+pub fn started_cpu_ns(pid: u32, out: &mut Vec<(u32, u64)>) {
+    extern "C" {
+        fn proc_listchildpids(ppid: i32, buffer: *mut std::ffi::c_void, size: i32) -> i32;
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut std::ffi::c_void) -> i32;
+        fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+    }
+    const RUSAGE_INFO_V0: i32 = 0;
+    let mut base = [1u32, 1];
+    // SAFETY: a valid out pointer to {numer, denom}
+    unsafe { mach_timebase_info(&mut base) };
+    let mut children = [0i32; 512];
+    let mut parents_left = vec![pid as i32];
+    while let Some(parent) = parents_left.pop() {
+        // SAFETY: the buffer and its size in bytes; the answer is how many pids it filled
+        let n = unsafe { proc_listchildpids(parent, children.as_mut_ptr().cast(), std::mem::size_of_val(&children) as i32) };
+        for &child in &children[..n.clamp(0, children.len() as i32) as usize] {
+            // rusage_info_v0: a 16-byte uuid, then the user and the system time
+            let mut info = [0u64; 12];
+            // SAFETY: the buffer outlasts the call and holds a whole rusage_info_v0 (96 bytes)
+            if child <= 0 || unsafe { proc_pid_rusage(child, RUSAGE_INFO_V0, info.as_mut_ptr().cast()) } != 0 {
+                continue;
+            }
+            let ticks = (info[2] + info[3]) as u128;
+            out.push((child as u32, (ticks * base[0] as u128 / base[1].max(1) as u128) as u64));
+            parents_left.push(child);
+        }
+    }
+}
+
+/// See the Linux one: this OS answers none.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+pub fn started_cpu_ns(pid: u32, out: &mut Vec<(u32, u64)>) {
+    let _ = (pid, out);
+}
+
 #[cfg(not(any(unix, windows)))]
 pub fn raw_ns() -> u64 {
     use std::sync::OnceLock;

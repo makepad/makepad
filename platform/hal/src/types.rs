@@ -849,6 +849,16 @@ pub mod window_kind {
     pub const XR: u32 = 6;
 }
 
+/// An XR display's kind (`XrDisplay` events): how it is used, which an app may ask to choose
+/// its placement and UI.
+pub mod xr_display_kind {
+    /// Worn on the head: a headset (two eyes, lenses, hands or controllers).
+    pub const WORN: u32 = 0;
+    /// Held in the hand: a window onto the room (a phone or tablet: one view, a touch screen,
+    /// no lens).
+    pub const HANDHELD: u32 = 1;
+}
+
 /// `TraySet::flags`.
 pub mod tray_flags {
     /// a primary click answers `TrayClick`, the menu opens on a secondary click
@@ -872,6 +882,10 @@ pub mod texture_handle {
     /// `XrDepth::image`): both eyes' layers as a 2D array texture, sampled from a
     /// `texture_2d_array` slot it gives the depth (0..1, the image's projection) in .r.
     pub const XR_DEPTH: u32 = 4;
+    /// A single-channel Float32 IOSurface, sampled as R32F (linear metres in .r).
+    pub const DEPTH_METRES: u32 = 5;
+    /// A single-channel UInt8 confidence IOSurface, sampled as R8Unorm.
+    pub const CONFIDENCE: u32 = 6;
 }
 
 /// The bits above the kind byte of `WindowCreate::kind`: how a macOS window is made (Cx's
@@ -1109,6 +1123,63 @@ pub struct XrHeadAt {
 pub struct XrEye {
     pub pose: XrPose,
     pub fov: [f32; 4],
+}
+
+/// A world-tracked camera sample in native landscape sensor orientation.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ArFrameInfo {
+    pub seq: u64,
+    /// `ARFrame.timestamp` in nanoseconds on Apple's host clock. The device check confirms
+    /// the common time base by comparing it with `clock_ns()` at delivery.
+    pub time_ns: u64,
+    /// Low byte from `ar_tracking`, next byte the ARKit reason for limited tracking.
+    pub tracking: u32,
+    /// Camera in session space (metres, y up, -z forward, long sensor side along x).
+    /// Signed field of view in radians, ordered left, right, up, down.
+    pub camera: XrEye,
+    /// Focal lengths fx, fy and principal point cx, cy in sensor pixels.
+    pub intrinsics: [f32; 4],
+    /// Sensor width and height in pixels.
+    pub image: [u32; 2],
+    /// IOSurface ID of the full-range biplanar 4:2:0 image, or zero without a surface.
+    /// The session holds the pixel buffers for the four newest sequences.
+    pub picture: u64,
+    /// One layer when present, zero otherwise. Both views match `camera`, with the same
+    /// field of view as `picture`. The image is a `DEPTH_METRES` IOSurface of `width` by
+    /// `height` pixels. Zero near and far mean linear metres in .r, no projection.
+    /// Depth is measured along the camera's -z axis and shares the picture's lifetime.
+    pub depth: XrDepth,
+    /// IOSurface ID of the matching confidence map, or zero when unavailable. Its UInt8
+    /// codes are 0 (low), 1 (medium), 2 (high). It shares the picture's lifetime.
+    pub depth_confidence: u64,
+}
+
+pub mod ar_caps {
+    pub const WORLD_TRACKING: u32 = 1;
+    pub const SCENE_DEPTH: u32 = 2;
+    /// The camera can provide temporally smoothed scene depth.
+    pub const SMOOTHED_DEPTH: u32 = 4;
+    /// The session can reconstruct a mesh of its surroundings.
+    pub const SCENE_MESH: u32 = 8;
+}
+
+pub mod ar_tracking {
+    pub const NOT_AVAILABLE: u32 = 0;
+    pub const LIMITED: u32 = 1;
+    pub const NORMAL: u32 = 2;
+}
+
+/// `ArState` values. RUNNING carries packed camera tracking in `code`, FAILED an error code.
+pub mod ar_state {
+    pub const STOPPED: u32 = 0;
+    pub const RUNNING: u32 = 1;
+    pub const INTERRUPTED: u32 = 2;
+    pub const FAILED: u32 = 3;
+    /// FAILED's code when the device or backend has no world tracking (ARKit's
+    /// unsupported-configuration code).
+    pub const NO_WORLD_TRACKING: i32 = 100;
 }
 
 /// One controller (the old Android backend's `XrController`, field for field): its grip and

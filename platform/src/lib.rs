@@ -28,6 +28,7 @@ pub mod log;
 mod cx;
 mod arc_string_mut;
 mod cx_api;
+pub mod ar;
 mod shared_bytes;
 
 pub mod action;
@@ -258,7 +259,8 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
-        cx_api::{ CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
+        ar::{ArCaps, ArConfig, ArFrameEvent, ArHit, ArSessionState, ArStateEvent, ArTracking, ArTrackingReason, ThermalState},
+        cx_api::{ CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges, XrDisplayKind},
         display_context::{DisplayContext, NativeAppearance, ScreenOrientation, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,

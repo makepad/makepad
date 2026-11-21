@@ -2,10 +2,15 @@
 //!
 //! Keys: generated and used for signing with BCrypt (ECDSA P-256). For the
 //! handshake, Schannel reads the private key from the CNG key store of the
-//! account running the server, so on start the key is imported there under
-//! a fixed name derived from the certificate (overwritten each start), and
-//! the in-memory certificate context points at it. The key file remains
-//! the source of truth, so the identity moves between accounts unchanged.
+//! account running the server, so each [`ServerConfig`] imports the key
+//! there under a name of its own (`makepad-tls-<certificate>-<process>-<n>`)
+//! and points its in-memory certificate context at it. The config deletes
+//! that key when it drops (or when it fails to start), so no key outlives
+//! its server, and two servers of one identity (in one process or two)
+//! never share a stored key, so neither can delete the other's. The key
+//! file remains the source of truth, so the identity moves between accounts
+//! unchanged. A process that dies without dropping its config leaves its
+//! key behind; nothing sweeps those, since another process may be using one.
 //!
 //! Plain Win32 C APIs (SSPI, crypt32, CNG) declared here; no COM.
 
@@ -186,6 +191,8 @@ extern "system" {
         flags: u32,
     ) -> SecurityStatus;
     fn NCryptFreeObject(object: usize) -> SecurityStatus;
+    fn NCryptOpenKey(provider: usize, key: *mut usize, name: *const u16, legacy_key_spec: u32, flags: u32) -> SecurityStatus;
+    fn NCryptDeleteKey(key: usize, flags: u32) -> SecurityStatus;
 }
 
 #[link(name = "bcrypt")]
@@ -461,9 +468,40 @@ pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     unsafe { BCryptVerifySignature(handle.0, null_mut(), digest.as_ptr(), 32, raw.as_ptr(), 64, 0) == 0 }
 }
 
+const KEY_PROVIDER: &str = "Microsoft Software Key Storage Provider";
+
+/// A key this process stored in the account's CNG store, by its container name (wide): deleted
+/// when dropped.
+struct StoredKey(Vec<u16>);
+
+impl Drop for StoredKey {
+    fn drop(&mut self) {
+        let deleted = unsafe {
+            let mut provider = 0usize;
+            NCryptOpenStorageProvider(&mut provider, wide(KEY_PROVIDER).as_ptr(), 0) == 0 && {
+                let mut key = 0usize;
+                let opened = NCryptOpenKey(provider, &mut key, self.0.as_ptr(), 0, 0) == 0;
+                // NCryptDeleteKey frees the handle when it succeeds.
+                let deleted = opened && NCryptDeleteKey(key, 0) == 0;
+                if opened && !deleted {
+                    NCryptFreeObject(key);
+                }
+                NCryptFreeObject(provider);
+                deleted
+            }
+        };
+        if !deleted {
+            eprintln!("tls: could not delete the server key {} from this account's key store", String::from_utf16_lossy(&self.0[..self.0.len() - 1]));
+        }
+    }
+}
+
 pub struct ServerConfig {
     cred: SecHandle,
     cert: *const c_void,
+    /// Held for its drop, which deletes the stored key after the credential and the certificate
+    /// are freed (fields drop after `Drop::drop`).
+    _key: StoredKey,
 }
 
 unsafe impl Send for ServerConfig {}
@@ -471,13 +509,16 @@ unsafe impl Sync for ServerConfig {}
 
 impl ServerConfig {
     pub fn new(cert_der: &[u8], key: &[u8; 97]) -> io::Result<Self> {
+        static STORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let fp = crate::tls::fingerprint(cert_der);
-        let container = wide(&format!("makepad-tls-{}", crate::tls::to_hex(&fp[..12])));
-        let provider_name = wide("Microsoft Software Key Storage Provider");
+        let n = STORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let container = wide(&format!("makepad-tls-{}-{}-{n}", crate::tls::to_hex(&fp[..12]), std::process::id()));
+        let provider_name = wide(KEY_PROVIDER);
 
         // The key, persisted in this account's CNG store where Schannel
-        // looks it up through the certificate's key-provider property.
-        unsafe {
+        // looks it up through the certificate's key-provider property; this
+        // config's own, deleted with it.
+        let stored = unsafe {
             let mut provider = 0usize;
             let st = NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0);
             if st != 0 {
@@ -508,7 +549,8 @@ impl ServerConfig {
             if st != 0 {
                 return Err(status_error("NCryptImportKey", st));
             }
-        }
+            StoredKey(container.clone())
+        };
 
         let cert = unsafe { CertCreateCertificateContext(X509_ASN_ENCODING, cert_der.as_ptr(), cert_der.len() as u32) };
         if cert.is_null() {
@@ -604,7 +646,7 @@ impl ServerConfig {
             unsafe { CertFreeCertificateContext(cert) };
             return Err(status_error("AcquireCredentialsHandle", st));
         }
-        Ok(Self { cred, cert })
+        Ok(Self { cred, cert, _key: stored })
     }
 
     pub fn accept(&self, mut tcp: TcpStream) -> io::Result<ServerStream> {
@@ -1234,5 +1276,62 @@ impl Write for ServerStream {
     fn flush(&mut self) -> io::Result<()> {
         self.drain_pending()?;
         self.tcp.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    /// Whether this account's key store holds a key by this (wide) name.
+    fn stored(name: &[u16]) -> bool {
+        unsafe {
+            let mut provider = 0usize;
+            assert_eq!(NCryptOpenStorageProvider(&mut provider, wide(KEY_PROVIDER).as_ptr(), 0), 0, "the software key store opens");
+            let mut key = 0usize;
+            let found = NCryptOpenKey(provider, &mut key, name.as_ptr(), 0, 0) == 0;
+            if found {
+                NCryptFreeObject(key);
+            }
+            NCryptFreeObject(provider);
+            found
+        }
+    }
+
+    /// Two servers of one identity each store a key of their own and delete only it: dropping one
+    /// leaves the other serving, and once both are dropped the account's key store holds neither.
+    #[test]
+    fn each_server_config_deletes_the_key_it_stored() {
+        let identity = crate::tls::TlsIdentity::in_memory(generate_p256().unwrap(), "makepad stored key test", None).unwrap();
+        let first = ServerConfig::new(&identity.cert_der, &identity.key).unwrap();
+        let second = ServerConfig::new(&identity.cert_der, &identity.key).unwrap();
+        let (first_key, second_key) = (first._key.0.clone(), second._key.0.clone());
+        assert_ne!(first_key, second_key, "one identity, a key per config");
+        assert!(stored(&first_key) && stored(&second_key), "each config stored its key");
+        drop(first);
+        assert!(!stored(&first_key), "a dropped config's key is gone");
+        assert!(stored(&second_key), "the other config's key stays");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::thread::spawn(move || {
+            let (mut stream, _) = crate::SocketStream::connect_capture("127.0.0.1", &port.to_string()).expect("a handshake");
+            stream.write_all(b"k").and_then(|()| stream.flush()).unwrap();
+            let mut back = [0u8; 1];
+            stream.read_exact(&mut back).unwrap();
+            back
+        });
+        let (tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut served = second.accept(tcp).expect("the remaining config still serves with its own key");
+        let mut byte = [0u8; 1];
+        served.read_exact(&mut byte).unwrap();
+        served.write_all(&byte).and_then(|()| served.flush()).unwrap();
+        assert_eq!(client.join().unwrap(), *b"k", "a byte each way through the handshake");
+        drop(served);
+        drop(second);
+        assert!(!stored(&second_key), "the last config's key is gone too");
     }
 }

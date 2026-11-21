@@ -12,6 +12,7 @@ pub(crate) use domain::lent_id;
 pub(crate) use hosted::HostedDone;
 mod encode_surface;
 mod event_loop;
+pub(crate) use event_loop::BEAT;
 mod fonts;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod gl_interop;
@@ -186,6 +187,12 @@ pub struct HalClient {
     /// How far apart the display's ticks are, from the last `FrameReady` that predicted the next
     /// one (0 when none has), so a `time_fps` frame can take the tick nearest its due.
     pub(crate) frame_interval: f64,
+    /// The GPU times (ns) of the last eight window frames the backend reported a time for (0
+    /// where there was none yet), and the slot the next one goes in (`Cx::window_frame_gpu_time`).
+    pub(crate) window_gpu_ns: [u64; 8],
+    pub(crate) window_gpu_next: usize,
+    /// What made every pass paint again lately (`Cx::hal_repaint_all`).
+    pub(crate) repaint_all: crate::event::hal_intake::RepaintAllLog,
     /// The display tick of the `FrameReady` that starts the next beat, which `time_fps` frames go by.
     pub(crate) frame_tick: Option<f64>,
     /// The window's surface is gone (Android), so nothing can show a `time_fps` frame till it's back.
@@ -306,6 +313,9 @@ impl Default for HalClient {
             ready_flip: None,
             frame_trace: crate::frame_trace::FrameTrace::new(),
             frame_interval: 0.0,
+            window_gpu_ns: [0; 8],
+            window_gpu_next: 0,
+            repaint_all: Default::default(),
             frame_tick: None,
             surface_lost: false,
             close_pending: None,
@@ -646,6 +656,10 @@ impl Cx {
 
     pub fn is_draw_shader_window_failed(&self, shader_id: crate::draw_shader::DrawShaderId) -> bool {
         self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| self.hal.frames.pipeline_has_failed(pipe))
+    }
+
+    pub fn draw_shader_window_failure(&self, shader_id: crate::draw_shader::DrawShaderId) -> Option<&str> {
+        self.draw_shaders.shaders[shader_id.index].pipeline_id.and_then(|pipe| self.hal.frames.pipeline_failure(pipe))
     }
 
     pub(crate) fn poll_texture_lifetimes(&mut self) {

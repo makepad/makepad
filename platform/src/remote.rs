@@ -615,6 +615,18 @@ mod imp {
             for (name, version, open, close) in std::mem::take(&mut *pending) {
                 endpoint.register_program(&name, version, open, close);
             }
+            // An iOS app's files, sockets included, live in its sandbox container, which no other
+            // process can open: there is no local route to listen on (a paired network carrier
+            // would be one). Said once, not as a failure to listen.
+            #[cfg(target_os = "ios")]
+            {
+                let _ = (driven, pid, endpoint, pending);
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| println!("[makepad-remote] iOS has no local remote-control route: no other process can reach the app's sandbox"));
+                // a recorded input replay needs no route
+                super::input_rec::replay_at_start();
+            }
+            #[cfg(not(target_os = "ios"))]
             match endpoint.listen_unix("") {
                 Ok(socket) => {
                     ACTIVE.store(true, Ordering::SeqCst);

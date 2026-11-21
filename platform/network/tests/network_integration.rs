@@ -616,7 +616,7 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
                     data,
                     ..
                 } => {
-                    let _ = response_sender.send(data);
+                    let _ = response_sender.send(makepad_network::http_server::WebSocketOut::Binary(data));
                     break;
                 }
                 HttpServerRequest::DisconnectWebSocket { .. } => break,
@@ -661,6 +661,43 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
 
     let _ = runtime.ws_close(socket_id);
     let _ = server_thread.join();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn websocket_writer_preserves_frame_opcodes() {
+    use makepad_network::http_server::WebSocketOut;
+
+    let _guard = test_guard();
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, find_free_port().unwrap()));
+    let (request, events) = mpsc::channel();
+    let server = makepad_network::start_http_server(HttpServer {
+        listen_address: addr,
+        request,
+        post_max_size: 0,
+        post_max_size_overrides: Vec::new(),
+        pre_admit_posts: false,
+        client_ip_resolver: None,
+        trusted_proxy: None,
+        allowed_methods: None,
+    }).unwrap();
+    let mut socket = TcpStream::connect(addr).unwrap();
+    let timeout = Duration::from_secs(2);
+    socket.set_read_timeout(Some(timeout)).unwrap();
+    write!(socket, "GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").unwrap();
+    let HttpServerRequest::ConnectWebSocket { response_sender, .. } = events.recv_timeout(timeout).unwrap()
+        else { panic!("expected an upgrade") };
+    response_sender.send(WebSocketOut::Text("hi".into())).unwrap();
+    response_sender.send(WebSocketOut::Binary(Vec::new())).unwrap();
+    response_sender.send(WebSocketOut::Binary(vec![0xff])).unwrap();
+    response_sender.send(WebSocketOut::Close).unwrap();
+
+    let mut wire = Vec::new();
+    socket.read_to_end(&mut wire).unwrap();
+    let frames = &wire[find_header_end(&wire).expect("upgrade response") + 4..];
+    assert_eq!(frames, &[0x81, 2, b'h', b'i', 0x82, 0, 0x82, 1, 0xff]);
+    server.stop();
+    server.join().unwrap();
 }
 
 #[cfg(not(target_arch = "wasm32"))]

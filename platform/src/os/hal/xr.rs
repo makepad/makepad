@@ -1,17 +1,16 @@
 //! XR on the HAL (`info_flags::XR`): `xr_start_presenting` makes a `window_kind::XR` window (the
-//! headset's stereo view, both eyes side by side). Each `XrFrame` the HAL sends becomes an
-//! `Event::XrUpdate` and the eyes the next frame of that window is drawn with; the app's XR
-//! pass (`DrawPass::set_as_xr_pass`) paints into it once per eye, the camera matrices of each
-//! pass being that eye's view and projection -- or, on a backend with `info_flags::MULTIVIEW`,
-//! once for both eyes (one multiview pass, both cameras in its uniforms).
+//! display's views side by side). Each `XrFrame` the HAL sends becomes an `Event::XrUpdate`
+//! and supplies the cameras for the next frame. The app's XR pass (`DrawPass::set_as_xr_pass`)
+//! paints once per view with its camera, or once for both eyes in a native multiview pass.
 use super::super::super::{
     cx::Cx,
+    cx_api::XrDisplayKind,
     draw_pass::{CxDrawPassParent, DrawPassUniforms},
     event::{xr::{normalize_xr_controller_stick, XrController, XrHand, XrState, XrUpdateEvent}, Event, hal_intake::hal_window_id},
     makepad_math::{CameraFov, Mat4f, Pose, Quat, Vec2f, Vec3f},
     window::{WindowHandle, WindowId},
 };
-use makepad_hal::{buffers::{read_items, Wire}, window_kind, Id, XrDepth, XrFrame, XrPose};
+use makepad_hal::{buffers::{read_items, Wire}, window_kind, xr_display_kind, Id, XrDepth, XrFrame, XrPose};
 use std::rc::Rc;
 
 /// Near and far planes of the eye projections (metres in the room): the HAL's one definition.
@@ -37,6 +36,8 @@ pub struct XrDepthTexels {
 pub(crate) struct HalXr {
     /// the Cx window standing for the HAL's XR window
     pub(crate) window: WindowId,
+    views: usize,
+    display_kind: u32,
     /// the newest `XrFrame`: the eyes of the next frame
     pub(crate) frame: Option<XrFrame>,
     /// its predicted display time (HAL clock, ns)
@@ -145,7 +146,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()), msaa: MSAA.with(|m| m.get()), space: 0 });
+        self.hal.xr = Some(HalXr { window, views: 2, display_kind: xr_display_kind::WORN, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()), msaa: MSAA.with(|m| m.get()), space: 0 });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
@@ -218,8 +219,19 @@ impl Cx {
         self.hal.xr.as_ref().map_or(1.0, |xr| xr.supersample)
     }
 
-    /// `Cx::xr_pass_eyes`: the eye cameras of `hal_xr_eye_uniforms` and the eye size the XR
-    /// pass's target gets in `frame_build` (an offscreen pass supersampled, eyes side by side).
+    pub(crate) fn hal_xr_views(&self) -> usize {
+        self.hal.xr.as_ref().map_or(2, |xr| xr.views)
+    }
+
+    pub(crate) fn hal_xr_display_kind(&self) -> XrDisplayKind {
+        match self.hal.xr.as_ref().map(|xr| xr.display_kind) {
+            Some(xr_display_kind::HANDHELD) => XrDisplayKind::Handheld,
+            _ => XrDisplayKind::Worn,
+        }
+    }
+
+    /// `Cx::xr_pass_eyes`: the cameras of `hal_xr_eye_uniforms` and the per-view size in
+    /// `frame_build` (an offscreen pass supersampled, its views side by side).
     pub(crate) fn hal_xr_pass_eyes(&self) -> Option<([(Mat4f, Mat4f); 2], crate::makepad_math::DVec2)> {
         let xr = self.hal.xr.as_ref()?;
         let frame = xr.frame?;
@@ -235,9 +247,12 @@ impl Cx {
             return None;
         }
         let offscreen = self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
+        let views = if offscreen { xr.views } else { 2 };
         let s = if offscreen { xr.supersample as f64 } else { 1.0 };
-        let half = if offscreen { (inner.x * 0.5 * s).round() } else { (inner.x / 2.0).floor() };
-        Some(([eye(0), eye(1)], crate::makepad_math::dvec2(half, (inner.y * s).round())))
+        let width = if offscreen { (inner.x / views as f64 * s).round() } else { (inner.x / 2.0).floor() };
+        let first = eye(0);
+        let eyes = [first, if views == 2 { eye(1) } else { first }];
+        Some((eyes, crate::makepad_math::dvec2(width, (inner.y * s).round())))
     }
 
     /// `Cx::xr_set_pose_lead`.
@@ -310,6 +325,13 @@ impl Cx {
     pub(crate) fn hal_xr_space(&mut self, generation: u32) {
         if let Some(xr) = self.hal.xr.as_mut() {
             xr.space = generation;
+        }
+    }
+
+    pub(crate) fn hal_xr_display(&mut self, views: u32, kind: u32) {
+        if let Some(xr) = self.hal.xr.as_mut() {
+            xr.views = views.clamp(1, 2) as usize;
+            xr.display_kind = kind;
         }
     }
 
@@ -411,6 +433,14 @@ impl Cx {
         u.depth_projection = projection; u.depth_projection_r = projection;
         u.camera_inv = inv; u.camera_inv_r = inv;
         Some(&xr.eye_uniforms[i])
+    }
+
+    /// The side-by-side pass reads one contiguous uniform block per view, in rect order.
+    pub(crate) fn hal_xr_view_uniforms(&mut self, base: &DrawPassUniforms, views: usize) -> Option<&[DrawPassUniforms]> {
+        for i in 0..views {
+            self.hal_xr_eye_uniforms(base, i)?;
+        }
+        Some(&self.hal.xr.as_ref()?.eye_uniforms[..views])
     }
 
     /// The uniforms of a multiview XR pass: the left eye's camera in the plain fields, the

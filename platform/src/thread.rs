@@ -2218,8 +2218,10 @@ impl TaskPool {
         if let Some(inner) = global.upgrade().filter(|inner| inner.add_live_handle()) {
             return Ok(Self { inner, set: Arc::default() });
         }
+        // (the budget's limit at its long-lived pools' cores, [`makepad_cpu_budget::pool_cores`]:
+        // a live test session's call charge, not its box, which its JIT keeps)
         #[cfg(not(target_arch = "wasm32"))]
-        let workers = makepad_cpu_budget::limit() as usize;
+        let workers = (makepad_cpu_budget::pool_cores() as usize).saturating_sub(1).clamp(1, makepad_cpu_budget::limit() as usize);
         #[cfg(target_arch = "wasm32")]
         let workers = spawner
             .available_parallelism()
@@ -2404,7 +2406,22 @@ impl TaskPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.submit_with(class, std::any::type_name::<F>(), Ticket::none(), f, true)
+        self.submit_internal_named(class, std::any::type_name::<F>(), f)
+    }
+    /// [`Self::submit_internal`] under `label`, as [`Self::submit_named`] names a job: the name
+    /// the pool's summary, the CPU budget's holders and [`Self::waiting`] tell it by (a boxed
+    /// closure's type name is every boxed job's).
+    pub fn submit_internal_named<F, T>(
+        &self,
+        class: Class,
+        label: &'static str,
+        f: F,
+    ) -> Result<TaskHandle<T>, SubmitError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.submit_with(class, label, Ticket::none(), f, true)
     }
     pub fn submit_frame_job<F, T>(&self, class: Class, f: F) -> Result<FrameJob<T>, SubmitError>
     where

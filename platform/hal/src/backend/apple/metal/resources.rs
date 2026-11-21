@@ -214,13 +214,15 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
 }
 
 /// A texture over an IOSurface another process (or the host) owns, found by its global id:
-/// the whole BGRA surface (`texture_handle::NATIVE`), or one plane of a biplanar 4:2:0 one
-/// (`LUMA`: plane 0 as R8, `CHROMA`: plane 1 as RG8).
+/// the whole BGRA surface, one plane of a biplanar 4:2:0 picture, or a single-channel
+/// depth or confidence map.
 pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32, kind: u32) -> Option<(Tex, u32, u32, u32)> {
     let (plane, pixel_format, fmt) = match kind {
         texture_handle::NATIVE => (0usize, MTLPixelFormat::BGRA8Unorm, format::BGRA8),
         texture_handle::LUMA => (0, MTLPixelFormat::R8Unorm, format::R8),
         texture_handle::CHROMA => (1, MTLPixelFormat::RG8Unorm, format::RG8),
+        texture_handle::DEPTH_METRES => (0, MTLPixelFormat::R32Float, format::R32F),
+        texture_handle::CONFIDENCE => (0, MTLPixelFormat::R8Unorm, format::R8),
         _ => return None,
     };
     let surface = unsafe { IOSurfaceLookup(id) };
@@ -228,13 +230,16 @@ pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32, kind: u32) -> O
         return None;
     }
     let (w, h) = unsafe {
-        if kind == texture_handle::NATIVE {
-            (IOSurfaceGetWidth(surface) as u64, IOSurfaceGetHeight(surface) as u64)
-        } else if IOSurfaceGetPlaneCount(surface) == 2 {
-            (IOSurfaceGetWidthOfPlane(surface, plane) as u64, IOSurfaceGetHeightOfPlane(surface, plane) as u64)
-        } else {
-            CFRelease(surface);
-            return None;
+        match (kind, IOSurfaceGetPlaneCount(surface)) {
+            // A nonplanar CVPixelBuffer stores its dimensions on the surface itself.
+            (texture_handle::NATIVE, _) | (texture_handle::DEPTH_METRES | texture_handle::CONFIDENCE, 0) =>
+                (IOSurfaceGetWidth(surface) as u64, IOSurfaceGetHeight(surface) as u64),
+            (texture_handle::LUMA | texture_handle::CHROMA, 2) | (texture_handle::DEPTH_METRES | texture_handle::CONFIDENCE, 1) =>
+                (IOSurfaceGetWidthOfPlane(surface, plane) as u64, IOSurfaceGetHeightOfPlane(surface, plane) as u64),
+            _ => {
+                CFRelease(surface);
+                return None;
+            }
         }
     };
     let Some(descriptor) = NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }) else {

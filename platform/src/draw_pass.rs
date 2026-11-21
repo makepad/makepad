@@ -429,6 +429,17 @@ impl DrawPass {
         cx.passes[self.draw_pass_id()].live_with_parent = on;
     }
 
+    /// Long work no window frame waits for, such as one step of a progressive render. The
+    /// pass runs after every other pass of its repaint, so the windows' frames go to the GPU,
+    /// and to the display, ahead of it and the work fills the time to the next frame. A pass
+    /// that samples its targets in the same repaint reads what they held before (one step
+    /// older) and paints again after it, as it does for any producer still to paint. It paints
+    /// in every repaint it is dirty in, whether or not its window may show a frame then: what
+    /// paces it is its producer, not the window's display.
+    pub fn set_background(&self, cx: &mut Cx, background: bool) {
+        cx.passes[self.draw_pass_id()].background = background;
+    }
+
     pub fn set_size(&self, cx: &mut Cx, pass_size: Vec2d) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0 {
@@ -600,6 +611,21 @@ impl DrawPass {
             && p.painted_frame <= asked
             && cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire) >= p.painted_frame
             && !cx.frames_partial(p.painted_frame, p.painted_frame)
+    }
+
+    /// Whether a paint of a recording made at or after `repaint` completed whole on the GPU,
+    /// though the pass may have painted again since, or be about to. A producer whose next
+    /// recording only needs the last one to have landed once (a progressive render's step:
+    /// painting a step again writes the same picture) asks this: [`Self::painted_whole_since`]
+    /// asks it of the latest paint, and a pass painted again every frame (every pass paints
+    /// again for a buffer the GPU evicted or a pipeline that became ready) has its latest paint
+    /// on the GPU at every draw, so that answer never comes.
+    pub fn painted_whole_once_since(&self, cx: &Cx, repaint: u64) -> bool {
+        let completed = cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire);
+        !cx.draw_shaders_pending()
+            && cx.passes[self.draw_pass_id()].whole_paints.iter().any(|&(serial, frame)| {
+                serial >= repaint && frame != 0 && frame <= completed && !cx.frames_partial(frame, frame)
+            })
     }
 
     pub fn take_gpu_times_ms(&self, cx: &Cx) -> Vec<f64> {
@@ -822,6 +848,9 @@ pub struct CxDrawPass {
     /// blurs the world in realtime instead of holding the last rebuild —
     /// while texture caches, which exist to NOT re-render, stay untouched.
     pub live_with_parent: bool,
+    /// Long work no window frame waits for (see `DrawPass::set_background`): the pass runs
+    /// after every other pass of its repaint.
+    pub background: bool,
     /// The draw list that last declared this pass a dependency through
     /// `make_child_pass`, with that list's redraw id at the time. The parent
     /// link above outlives the frame that made it, but the pass's output is
@@ -865,6 +894,11 @@ pub struct CxDrawPass {
     pub(crate) painted_frame: u64,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) painted_before: u64,
+    /// Its latest whole paints, newest first, as (`painted_serial`, frame serial): a paint
+    /// that went to the GPU stays known when the pass paints again before it completes
+    /// ([`DrawPass::painted_whole_once_since`]). A frame completed with draws left out drops
+    /// its entry.
+    pub(crate) whole_paints: [(u64, u64); 4],
     /// The repaint (`Cx::repaint_id`) that last painted it, whole or not (0 before the first):
     /// in that repaint its targets hold its picture for the passes painted after it.
     pub(crate) painted_repaint: u64,
@@ -901,6 +935,31 @@ impl CxDrawPass {
         self.painted_repaint = repaint;
         if whole {
             self.painted_serial = repaint;
+        }
+    }
+
+    /// Its whole paint went to the GPU in frame `frame`; `painted_serial` was `before`.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn painted_whole_in(&mut self, frame: u64, before: u64) {
+        self.painted_frame = frame;
+        self.painted_before = before;
+        self.whole_paints.rotate_right(1);
+        self.whole_paints[0] = (self.painted_serial, frame);
+    }
+
+    /// The backend completed `frame` with draws left out (`FramePartial`): a paint of it in
+    /// that frame was not whole after all.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn frame_left_out(&mut self, frame: u64) {
+        if self.painted_frame == frame {
+            self.painted_serial = self.painted_before;
+            self.incomplete = true;
+            self.left_out = true;
+        }
+        for paint in &mut self.whole_paints {
+            if paint.1 == frame {
+                *paint = (0, 0);
+            }
         }
     }
 
@@ -1012,6 +1071,7 @@ impl Default for CxDrawPass {
             parent: CxDrawPassParent::None,
             paint_dirty: false,
             live_with_parent: false,
+            background: false,
             attached_by: None,
             repaint_requested: false,
             repaint_next: false,
@@ -1022,6 +1082,7 @@ impl Default for CxDrawPass {
             left_out: false,
             painted_frame: 0,
             painted_before: 0,
+            whole_paints: [(0, 0); 4],
             painted_repaint: 0,
             kept_recording: false,
             pass_rect: None,

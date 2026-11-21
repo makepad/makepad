@@ -7,8 +7,8 @@
 //!
 //! The provider is the shell side of remote rendering. The app sees what a native headset gives it (`info_flags::XR`, a
 //! `window_kind::XR` window paced by `XrFrame`s) with `info_flags::XR_OFFSCREEN`: the window has
-//! no display, its XR passes render into their own textures and the app hands the frames to the
-//! encoder itself (`makepad_xr_stream`). The poses come from the network
+//! no display, its XR passes render its views side by side into their own textures and the app
+//! hands the frames to the encoder itself (`makepad_xr_stream`). The poses come from the network
 //! (`crate::xr_remote::hal_xr_remote_pose`, one per frame the headset wants); this slot only paces
 //! the window with them. Reprojection is the headset's (it shows each picture with the eyes it
 //! was rendered with).
@@ -37,10 +37,11 @@ pub fn hal_xr_remote_enable() {
     }
 }
 
-/// The headset's eye size (pixels) and display refresh (mHz): the XR window takes them.
+/// The remote display's eye (view) size (pixels), refresh (mHz), view count (1 or 2, clamped)
+/// and `xr_display_kind`: the XR window takes them.
 #[relax_api::relax_api]
-pub fn hal_xr_remote_attach(eye_w: u32, eye_h: u32, refresh_mhz: u32) {
-    attach([eye_w, eye_h], refresh_mhz as f32 / 1000.0);
+pub fn hal_xr_remote_attach(eye_w: u32, eye_h: u32, refresh_mhz: u32, views: u32, kind: u32) {
+    attach([eye_w, eye_h], refresh_mhz as f32 / 1000.0, views, kind);
 }
 
 /// The pose of the headset's next frame: `frame` is one `XrFrame` (`buffers::Wire`), predicted
@@ -71,7 +72,7 @@ use crate::lock;
 use crate::buffers::EventQueue;
 use crate::backend::exec::OsCmd;
 use crate::session::World;
-use crate::types::window_kind;
+use crate::types::{window_kind, xr_display_kind};
 use std::collections::HashMap;
 use crate::types::window_state;
 use crate::Id;
@@ -103,6 +104,8 @@ struct State {
     window: Option<Key>,
     eye: Option<[u32; 2]>,
     refresh: f32,
+    views: u32,
+    kind: u32,
     /// The pose the app draws with now, and when it was asked.
     asked: Option<(u64, Instant)>,
     /// The newest pose that came while a frame was being built: (seq, display_ns, XrFrame bytes).
@@ -123,7 +126,7 @@ struct Remote {
 
 fn remote() -> &'static Remote {
     static R: OnceLock<Remote> = OnceLock::new();
-    R.get_or_init(|| Remote { state: Mutex::new(State { refresh: 72.0, ..Default::default() }) })
+    R.get_or_init(|| Remote { state: Mutex::new(State { refresh: 72.0, views: 2, kind: xr_display_kind::WORN, ..Default::default() }) })
 }
 
 /// Queues events for the XR window and wakes the HAL (its backend's step delivers them).
@@ -181,20 +184,22 @@ fn eye(s: &State) -> [u32; 2] {
     s.eye.unwrap_or(DEFAULT_EYE)
 }
 
-/// `window_kind::XR` window `key` is made: the stereo view, two eyes side by side.
+/// `window_kind::XR` window `key` is made with its views side by side.
 fn create_window(key: Key) {
     let mut s = lock(&remote().state);
     if let Some(old) = s.window.replace(key) {
         eprintln!("[hal-xr-remote] a second XR window {key:?} replaces {old:?}");
     }
     s.asked = None;
-    let (e, refresh, space) = (eye(&s), s.refresh, s.space);
+    let (e, refresh, space, views, kind) = (eye(&s), s.refresh, s.space, s.views, s.kind);
+    let width = views as f64 * e[0] as f64;
     push(&mut s, key, |q, id| {
         q.display(id, 1., refresh);
-        q.geom(id, 0., 0., 2. * e[0] as f64, e[1] as f64, 1., window_state::RESTORE);
+        q.xr_display(id, views, kind);
+        q.geom(id, 0., 0., width, e[1] as f64, 1., window_state::RESTORE);
         q.xr_space(id, space);
     });
-    eprintln!("[hal-xr-remote] XR window {key:?}: {}x{} px", 2 * e[0], e[1]);
+    eprintln!("[hal-xr-remote] XR window {key:?}: {width}x{} px", e[1]);
 }
 
 fn close_window(key: Key) -> bool {
@@ -212,16 +217,20 @@ fn is_window(key: Key) -> bool {
     lock(&remote().state).window == Some(key)
 }
 
-/// The headset's eye size and refresh: the XR window takes them.
-fn attach(eye_px: [u32; 2], refresh: f32) {
+/// The XR window takes the remote display's view size, refresh, view count and kind.
+fn attach(eye_px: [u32; 2], refresh: f32, views: u32, kind: u32) {
     let mut s = lock(&remote().state);
+    let views = views.clamp(1, 2);
     s.eye = Some([eye_px[0].max(16) & !1, eye_px[1].max(16) & !1]);
     s.refresh = refresh;
+    s.views = views;
+    s.kind = kind;
     let (window, e) = (s.window, eye(&s));
     if let Some(key) = window {
         push(&mut s, key, |q, id| {
             q.display(id, 1., refresh);
-            q.geom(id, 0., 0., 2. * e[0] as f64, e[1] as f64, 1., window_state::RESTORE);
+            q.xr_display(id, views, kind);
+            q.geom(id, 0., 0., views as f64 * e[0] as f64, e[1] as f64, 1., window_state::RESTORE);
         });
     }
 }
@@ -292,7 +301,7 @@ mod tests {
         let key = (7, Id::new(3, 1));
         assert!(!pose(1, 100, &[]), "no XR window: no frame");
         create_window(key);
-        attach([1000, 900], 90.0);
+        attach([1000, 900], 90.0, 2, xr_display_kind::WORN);
         lock(&remote().state).inbox.clear();
         assert!(pose(1, 100, &[1]));
         assert_eq!(inbox_len(7), 2, "asked: the pose and its frame-ready");

@@ -560,7 +560,7 @@ impl Cx {
                         texture: original,
                     },
                 );
-                self.hal_repaint_all();
+                self.hal_repaint_all(crate::event::hal_intake::RepaintAll::PickIncomplete);
                 return;
             }
             let result = if ok {

@@ -452,4 +452,8 @@ hal_commands! {
     GpuReclaim = 166, gpu_reclaim { bytes: u64 };
     /// A finished PDF for the system print UI; answered by `PrintResult` with the same `req`.
     PrintPdf = 167, print_pdf { req: u32, title: sid, pdf: rng };
+    /// Starts the world-tracked camera. Bit 0 of `flags` requests scene depth when supported.
+    ArStart = 171, ar_start { flags: u32 };
+    /// Stops the world-tracked camera owned by this session.
+    ArStop = 172, ar_stop {};
 }
