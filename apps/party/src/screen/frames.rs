@@ -20,10 +20,9 @@ pub enum Pic {
     Take(u64, usize),
 }
 
-/// A square tile crop, or the whole picture fitted within a screen's pixels.
+/// The whole picture fitted within a screen's pixels.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Size {
-    Tile(u32),
     Fit(u32, u32),
 }
 
@@ -62,11 +61,6 @@ impl Frames {
                 let decoded = match image::decode_jpeg(&jpeg) {
                     Ok(rgb) => {
                         let rgb = match size {
-                            Size::Tile(side) => {
-                                let s = side as usize;
-                                // A tile is a square crop; never larger than the picture.
-                                if s > 0 && s < rgb.width.min(rgb.height) { image::fit(&rgb, s, s) } else { rgb }
-                            }
                             Size::Fit(w, h) => {
                                 let (w, h) = wall_plan::fit_within(rgb.width, rgb.height, w as usize, h as usize);
                                 if (w, h) != (rgb.width, rgb.height) { image::resize(&rgb, w, h) } else { rgb }

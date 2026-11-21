@@ -324,6 +324,8 @@ pub struct Harness {
     captures: Vec<Capture>,
     /// Frames the current step has waited for its captures.
     await_frames: u32,
+    /// The tracer's step count the current step last saw, and the frames since it moved.
+    stalled: (u32, u32),
     lines: Vec<String>,
     failures: u32,
     checkpoints: Vec<(f32, f64)>,
@@ -587,10 +589,33 @@ impl PtView {
                 t.set_settings(settings);
                 self.harness.scene_cache = Some(scene);
                 self.harness.captures.clear();
+                self.harness.stalled = (0, 0);
                 self.harness.phase = Phase::Render;
             }
             Phase::Render => {
                 let t = self.tracer.as_mut().unwrap();
+                // A trace whose steps never paint (its background passes held behind a paced
+                // window's frame) makes no step at all: say so and end, rather than wait forever.
+                // A frame budget, not a wall-clock one, and a frame spent compiling pipelines does
+                // not count (a step's passes keep their picture while its shaders compile, and a
+                // cold compile of the trace on a Vulkan driver took minutes on the Linux boxes).
+                const STALL_FRAMES: u32 = 600;
+                let (seen, waited) = self.harness.stalled;
+                self.harness.stalled = if t.stats.frames != seen {
+                    (t.stats.frames, 0)
+                } else if cx.pipelines_pending() != 0 {
+                    (seen, waited)
+                } else {
+                    (seen, waited + 1)
+                };
+                if self.harness.stalled.1 >= STALL_FRAMES {
+                    let (name, ..) = Self::selftest_scene(self.harness.step);
+                    self.harness.lines.push(format!("{name}: the trace took no step in {STALL_FRAMES} frames (its passes did not paint)  [FAIL]"));
+                    self.harness.failures += 1;
+                    self.finish_harness();
+                    cx.quit();
+                    return;
+                }
                 if t.stats.done {
                     self.harness.gpu_seed = t.seed();
                     t.request_capture(CaptureKind::Accum);

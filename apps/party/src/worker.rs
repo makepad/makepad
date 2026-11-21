@@ -74,6 +74,7 @@ pub fn keep_warm(party: Arc<Party>, hub: BoxHub) -> std::io::Result<std::thread:
         let mut holding = false;
         loop {
             let wanted = party.next_keep(holding.then_some(HOLD / 3));
+            if party.stopped() { break; }
             if !wanted.about {
                 if holding {
                     holding = false;
@@ -95,16 +96,21 @@ pub fn keep_warm(party: Arc<Party>, hub: BoxHub) -> std::io::Result<std::thread:
                 }
             }
             holding = true;
-            let idle = || !party.store().busy() && !party.live.slots().busy();
+            // The screen's redraw is warm already, and a second session beside it would not fit.
+            let redrawing = || party.live.redrawing.load(std::sync::atomic::Ordering::SeqCst);
+            let idle = || !party.stopped() && !party.store().busy() && !party.live.slots().busy() && !redrawing();
             if wanted.voice && idle() {
                 // A moment of silence, heard the way a spoken prompt is.
                 let started = Instant::now();
-                match hub.transcribe(&silence_wav()) {
+                match hub.transcribe(&silence_wav(), &|| party.stopped()) {
                     Ok(_) => eprintln!("[party] {} the voice button: {VOICE_MODEL} ready in {:.1} s; {}", clock(), started.elapsed().as_secs_f64(), gpu_line(&hub)),
                     Err(e) => eprintln!("[party] {} the voice button, but {VOICE_MODEL} is not ready: {e}", clock()),
                 }
             }
-            if wanted.image && idle() {
+            // A box that takes live calls warms the model in the screen's one
+            // redraw (it opens with the first source: the box camera, a phone's
+            // offer); a warm-up session beside it would not fit the GPU.
+            if wanted.image && !party.live.available() && idle() {
                 let started = Instant::now();
                 let grey = Rgb { width: LOOP_SIDE, height: LOOP_SIDE, data: vec![128; LOOP_SIDE * LOOP_SIDE * 3] };
                 let ready = hub
@@ -155,14 +161,14 @@ pub fn gpu_line(hub: &BoxHub) -> String {
     }
 }
 
-/// Starts the worker thread; it runs as long as the process.
+/// Starts the worker thread for this party.
 pub fn start(party: Arc<Party>, hub: BoxHub) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("party-hub".into()).spawn(move || loop {
         // A guest up or live has the hub: the takes wait for their slot, and
         // for a guest's quick ask (their spoken prompt, ideas) to be answered.
-        party.live.wait_idle();
-        party.asks.wait_none();
-        let take = party.queue.pop_wait();
+        party.live.wait_idle(|| party.stopped());
+        party.asks.wait_none(|| party.stopped());
+        let Some(take) = party.queue.pop_wait(|| party.stopped()) else { break };
         party.live.take_running.store(true, Ordering::SeqCst);
         if party.live.slots().busy() {
             party.live.take_running.store(false, Ordering::SeqCst);
@@ -238,11 +244,13 @@ fn redraw(party: &Party, hub: &BoxHub, take: TakeId, job: &Job) -> Result<(), St
         }
     }
     let first = job.frames.first().ok_or("no picture")?;
+    let cancelled = || party.stopped() || party.store().take(take).is_none();
     let asked = Instant::now();
     let prompt = match &job.prompt {
         Some(prompt) => prompt.clone(),
-        None => prompt_for(hub, first, job.wish.as_deref(), take),
+        None => prompt_for(hub, first, job.wish.as_deref(), take, &cancelled),
     };
+    if cancelled() { return Err("cancelled".into()); }
     let prompted = asked.elapsed();
     party.store().take_prompt(take, prompt.clone()).map_err(|_| "gone")?;
     let seed = take.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16;
@@ -262,6 +270,7 @@ fn redraw(party: &Party, hub: &BoxHub, take: TakeId, job: &Job) -> Result<(), St
             let mut next = if from < n { Some(decode(from)?) } else { None };
             let mut drawn: Option<Rgb> = None;
             for i in from..n {
+                if party.stopped() { return Err("cancelled".into()); }
                 let why = if i == from {
                     None
                 } else if party.asks.waiting() {
@@ -313,13 +322,14 @@ fn redraw(party: &Party, hub: &BoxHub, take: TakeId, job: &Job) -> Result<(), St
             let rgb = sized(&image::decode_jpeg(first)?, PHOTO_SIDE);
             let png = image::encode_png(&rgb)?;
             let size = Some((rgb.width as u32, rgb.height as u32));
-            let (out, _) = hub.edit(FAST_MODEL, &png, &prompt, seed, Some(FAST_STEPS), None, size)?;
+            let (out, _) = hub.edit(FAST_MODEL, &png, &prompt, seed, Some(FAST_STEPS), None, size, &cancelled)?;
             keep_frame(party, take, &image::decode_png(&out)?)?;
         }
         (SourceKind::Loop { .. }, Quality::Best) => {
             let side = BEST_LOOP_SIDE as u32;
             let mut live = hub.live(FAST_MODEL, LiveInput::Raw, (side, side), &prompt, BEST_LOOP_STEPS, BEST_LOOP_STRENGTH, seed, Compute::STORED)?;
             for frame in &job.frames {
+                if party.stopped() { return Err("cancelled".into()); }
                 if !party.queue.is_empty() || party.asks.waiting() {
                     return Err(YIELDED.into());
                 }
@@ -334,7 +344,7 @@ fn redraw(party: &Party, hub: &BoxHub, take: TakeId, job: &Job) -> Result<(), St
             let size = Some((rgb.width as u32, rgb.height as u32));
             // A plain edit, as for the fast model: the photo is the model's
             // reference, and the picture is drawn from noise.
-            let (out, _) = hub.edit(QUALITY_MODEL, &png, &prompt, seed, Some(BEST_STEPS), None, size)?;
+            let (out, _) = hub.edit(QUALITY_MODEL, &png, &prompt, seed, Some(BEST_STEPS), None, size, &cancelled)?;
             keep_frame(party, take, &image::decode_png(&out)?)?;
         }
     }
@@ -439,7 +449,7 @@ pub fn plain_prompt(wish: Option<&str>, turn: u64) -> String {
 /// vision model pinned beside it on the box, the vision model writes it
 /// from the picture and the wish; otherwise, so that no take costs two model
 /// swaps, it is the wish (or the next style) in a fixed sentence.
-fn prompt_for(hub: &BoxHub, picture: &[u8], wish: Option<&str>, take: TakeId) -> String {
+fn prompt_for(hub: &BoxHub, picture: &[u8], wish: Option<&str>, take: TakeId, cancelled: &dyn Fn() -> bool) -> String {
     let style = STYLES[take as usize % STYLES.len()];
     let fixed = plain_prompt(wish, take);
     if !hub.pinned(VISION_MODEL) {
@@ -453,7 +463,7 @@ fn prompt_for(hub: &BoxHub, picture: &[u8], wish: Option<&str>, take: TakeId) ->
         "This is a picture from a party. Write one instruction for an image editing model that redraws it {goal}. \
          Keep the people, their faces, poses and the framing, and keep it kind. Answer with the instruction only, at most 40 words."
     );
-    match hub.describe(VISION_MODEL, picture, &ask, 96) {
+    match hub.describe(VISION_MODEL, picture, &ask, 96, cancelled) {
         Ok((text, _)) if !text.trim().is_empty() => text.trim().trim_matches('"').to_string(),
         Ok(_) => fixed,
         Err(e) => {
@@ -475,8 +485,43 @@ pub fn kind_wish(wish: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "../../../libs/ai/hub/src/speech/tests/refusing_hub.rs"]
+mod refusing_hub;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_the_party_server_ends_the_workers_admission_wait() {
+        use crate::api::Api;
+        use crate::store::{Budget, Keep, TakeState};
+        let hub = refusing_hub::RefusingHub::start(|path| {
+            assert_eq!(path, "/control");
+            r#"{"models":[{"id":"qwen3.5-4b-vision","pinned":true}]}"#
+        });
+        let party = Arc::new(Party::new(Default::default(), Budget::UNLIMITED));
+        let (server, dir) = crate::server::tests::start("abcdefgh", Arc::new(Api::new(party.clone())));
+        let take = {
+            let mut store = party.store();
+            let guest = store.join("guest".into());
+            let (source, _) = store.add_source(guest, [127, 0, 0, 1].into(), SourceKind::Photo,
+                vec![Arc::from([0u8; 4])], None, Keep::Me).unwrap();
+            store.add_take(source, Quality::Fast).unwrap()
+        };
+        let worker = start(party.clone(), BoxHub::locate(Some(&hub.base)).unwrap()).unwrap();
+        party.queue.push(take);
+        hub.wait_for_retry();
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(server);
+            worker.join().unwrap();
+            done.send(()).unwrap();
+        });
+        ended.recv_timeout(Duration::from_secs(2)).expect("the party worker must exit");
+        assert_eq!(party.store().take(take).unwrap().state, TakeState::Failed("cancelled".into()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn wishes_and_sizes() {

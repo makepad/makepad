@@ -10,7 +10,7 @@ use crate::desk::run::Answer;
 use crate::desk::Desk;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_ai_services::wire::{CardLayout, Risk, ServiceCall, ServiceManifest, ToolDef, ToolResult};
-use makepad_ai_services::{Suggestion, Target};
+use makepad_ai_services::{Attachment, Suggestion, Target};
 use makepad_app_aichat::AiChatPanel;
 use makepad_strict_json::{self as json, Value as Json};
 use makepad_widgets::ai_slot::AiSlotRequests;
@@ -224,7 +224,8 @@ impl Ai {
         if context != self.context {
             self.context = context.clone();
             let title = if desk.document.title.is_empty() { "Untitled".to_string() } else { desk.document.title.clone() };
-            panel.set_target(cx, Some(Target { label: title, app: SERVICE.to_string(), context, selection: desk.panel.selected.clone() }));
+            let attachments = desk.panel.selected.iter().map(|s| Attachment { id: s.clone(), label: s.clone(), kind: "selected".into(), detail: String::new() }).collect();
+            panel.set_target(cx, Some(Target { label: title, app: SERVICE.to_string(), context, attachments }));
         }
         let (markers, rated, busy) = desk.batch_chips();
         let chips = suggestions(markers, rated, busy);

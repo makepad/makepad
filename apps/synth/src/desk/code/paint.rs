@@ -270,6 +270,7 @@ impl ScoreEditor {
         self.fill(cx, Rect { pos: dvec2(r.pos.x + 5.0 + tw + 1.0, r.pos.y + 2.0), size: dvec2(1.0, 10.0) }, rgba(p.accent));
         if let Some(t) = self.typing.as_mut() {
             t.rect = r;
+            t.caret = dvec2(r.pos.x + 5.0 + tw + 1.0, r.pos.y + 12.0);
         }
         true
     }

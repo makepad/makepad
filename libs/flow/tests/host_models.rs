@@ -117,8 +117,11 @@ fn models_lists_testpattern_and_filters_by_domain() {
     assert_eq!(testpattern.domain, "image");
     assert!(testpattern.available);
 
+    // The box's own hubs are in the fleet too (a machine's apps reach them by its token), with
+    // whatever models they have: the claims are about the hinted node's.
     let video = client.models(Some("video")).unwrap();
-    assert!(video.models.is_empty());
+    assert!(video.models.iter().all(|model| model.node != base_url), "the node serves no video model");
+    assert!(video.models.iter().all(|model| model.domain == "video"), "the filter keeps video models only");
     assert_eq!(video.snapshot_ms, response.snapshot_ms);
 
     let text = client.models(Some("text")).unwrap();

@@ -52,12 +52,33 @@ pub struct Running {
     pub fingerprint: String,
 }
 
-/// Starts the party `code` (a new one when `None`) on `port`, redrawing with
+/// The party started here last (`party/code`; before that file, the party
+/// whose kept pictures changed last), so a restart keeps it.
+fn last_code() -> Option<String> {
+    let home = makepad_network::fleet::makepad_home().join("party");
+    let saved = std::fs::read_to_string(home.join("code")).ok().map(|c| c.trim().to_string());
+    if let Some(code) = saved.filter(|c| code::valid(c)) {
+        return Some(code);
+    }
+    let kept = std::fs::read_dir(home.join("kept")).ok()?;
+    kept.flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name().into_string().ok()?)))
+        .filter(|(_, c)| code::valid(c))
+        .max()
+        .map(|(_, c)| c)
+}
+
+/// Starts the party `code` (the last one here, or a new one, when `None`) on `port`, redrawing with
 /// the hub at `hub` (the box's own when `None`).
 pub fn party(port: u16, code: Option<String>, extra: &[String], hub: Option<&str>) -> Result<Running, String> {
-    let code = code.unwrap_or_else(code::new_code);
+    let code = code.or_else(last_code).unwrap_or_else(code::new_code);
     if !code::valid(&code) {
         return Err("a party code is 6 to 32 of 23456789abcdefghjkmnpqrstuvwxyz".into());
+    }
+    // A restart keeps the party: the phones' open pages and the QR stay valid.
+    let home = makepad_network::fleet::makepad_home().join("party");
+    if let Err(e) = std::fs::create_dir_all(&home).and_then(|()| std::fs::write(home.join("code"), &code)) {
+        eprintln!("[party] the party code is not kept for a restart: {e}");
     }
     let id = identity(extra)?;
     // Kept sources of this party, and only those, go here.
@@ -65,16 +86,18 @@ pub fn party(port: u16, code: Option<String>, extra: &[String], hub: Option<&str
     let budget = Party::default_budget();
     eprintln!("[party] guests' pictures may hold up to {} MB of memory, {} MB from any one address", budget.total >> 20, budget.per_address >> 20);
     let party = Arc::new(Party::new(kept, budget).with_settings(crate::settings::Settings::load(crate::settings::Settings::file())));
-    match BoxHub::locate(hub) {
+    party.live.keep_history(home.join("history.json"));
+    let worker_hub = match BoxHub::locate(hub) {
         Ok(box_hub) => {
-            eprintln!("[party] redrawing with the hub at {}", box_hub.base);
-            worker::start(party.clone(), box_hub).map_err(|e| format!("hub worker: {e}"))?;
-            worker::keep_warm(party.clone(), BoxHub::locate(hub)?).map_err(|e| format!("keeping the model warm: {e}"))?;
             // The live call has its own client of the same hub.
             party.live.redraw_with(Box::new(crate::live::HubRedrawer { hub: BoxHub::locate(hub)?, settings: party.settings.clone() }));
+            Some(box_hub)
         }
-        Err(e) => eprintln!("[party] {e}: takes wait until the party runs where a hub is"),
-    }
+        Err(e) => {
+            eprintln!("[party] {e}: takes wait until the party runs where a hub is");
+            None
+        }
+    };
     let api = match BoxHub::locate(hub) {
         Ok(box_hub) => Api::new(party.clone()).with_hub(box_hub),
         Err(_) => Api::new(party.clone()),
@@ -82,6 +105,11 @@ pub fn party(port: u16, code: Option<String>, extra: &[String], hub: Option<&str
     let handler: Arc<dyn Handler> = Arc::new(api);
     let server = Server::start(([0, 0, 0, 0], port).into(), id.tls, code.clone(), handler)
         .map_err(|e| format!("listen on port {port}: {e}"))?;
+    if let Some(box_hub) = worker_hub {
+        eprintln!("[party] redrawing with the hub at {}", box_hub.base);
+        worker::start(party.clone(), box_hub).map_err(|e| format!("hub worker: {e}"))?;
+        worker::keep_warm(party.clone(), BoxHub::locate(hub)?).map_err(|e| format!("keeping the model warm: {e}"))?;
+    }
     // Live calls come to the same port number over UDP, on the LAN address.
     #[cfg(target_os = "linux")]
     match id.lan {

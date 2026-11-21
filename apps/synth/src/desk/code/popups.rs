@@ -50,6 +50,9 @@ impl ScoreEditor {
             self.browser.close();
             cx.widget_action(self.widget_uid(), ScoreEditorAction::PopOut(node));
         }
+        if out.close || out.pop == Some(true) {
+            self.give_back_keys(cx);
+        }
         if out.close {
             // The press that closed it does not reach the code.
             if matches!(event, Event::MouseDown(_)) {
@@ -158,7 +161,9 @@ impl ScoreEditor {
         }
     }
 
-    pub(super) fn draw_picker(&mut self, cx: &mut Cx2d, _p: &Palette, clip: Rect) {
+    /// The open browser, over the code; `keys` is the code's key focus area
+    /// (its search raises the text input there, after the code's own).
+    pub(super) fn draw_picker(&mut self, cx: &mut Cx2d, _p: &Palette, clip: Rect, keys: Area) {
         if !self.browser.is_open() {
             return;
         }
@@ -167,5 +172,15 @@ impl ScoreEditor {
         if self.browser.draw(cx, rect) {
             self.browser_tick = cx.new_next_frame();
         }
+        // While it is open the code's keys are its search's (it takes them
+        // before the code does). A press on a card or on the browser leaves
+        // them with the window around it: taken back here, and the text
+        // input raised from the next frame. A press anywhere else closes it.
+        if !cx.has_key_focus(keys) {
+            cx.set_key_focus(keys);
+            self.took_keys = true;
+            self.browser_tick = cx.new_next_frame();
+        }
+        self.browser.raise_text_input(cx, keys);
     }
 }

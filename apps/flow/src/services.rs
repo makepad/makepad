@@ -3115,6 +3115,7 @@ mod tests {
             tool: "run".into(),
             args: "{}".into(),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         };
         let (tx, _rx) = channel();
         let result = start_and_wait_for(

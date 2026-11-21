@@ -295,13 +295,17 @@ struct Target {
 
 impl Target {
     fn new(cx: &mut Cx, name: &'static str, w: usize, h: usize, format: TextureFormat) -> Self {
+        let pass = DrawPass::new_with_name(cx, name);
+        // A bake no window frame waits for: the window presents first and shows each target a
+        // step later.
+        pass.set_background(cx, true);
         Target {
             name,
             w,
             h,
             tex: Texture::new_with_format(cx, format),
             extra: None,
-            pass: DrawPass::new_with_name(cx, name),
+            pass,
             list: DrawList::new(cx),
         }
     }

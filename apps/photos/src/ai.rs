@@ -231,13 +231,13 @@ mod tests {
 
     #[test]
     fn arguments_are_read_by_name_and_kind() {
-        let call = ServiceCall { call_id: "c".into(), tool: "show".into(), args: r#"{"item": 42, "query": " robot "}"#.into(), caller: None };
+        let call = ServiceCall { call_id: "c".into(), tool: "show".into(), args: r#"{"item": 42, "query": " robot "}"#.into(), caller: None, origin: makepad_ai_services::CallOrigin::Conversation };
         assert_eq!(int_arg(&call, "item"), Some(42));
         assert_eq!(str_arg(&call, "query").as_deref(), Some("robot"));
-        let text_id = ServiceCall { call_id: "c".into(), tool: "show".into(), args: r#"{"item": "7"}"#.into(), caller: None };
+        let text_id = ServiceCall { call_id: "c".into(), tool: "show".into(), args: r#"{"item": "7"}"#.into(), caller: None, origin: makepad_ai_services::CallOrigin::Conversation };
         assert_eq!(int_arg(&text_id, "item"), Some(7));
         assert_eq!(int_arg(&call, "nope"), None);
-        let bad = ServiceCall { call_id: "c".into(), tool: "show".into(), args: "[]".into(), caller: None };
+        let bad = ServiceCall { call_id: "c".into(), tool: "show".into(), args: "[]".into(), caller: None, origin: makepad_ai_services::CallOrigin::Conversation };
         assert_eq!(int_arg(&bad, "item"), None);
     }
 

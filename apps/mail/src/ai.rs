@@ -199,7 +199,7 @@ mod tests {
     use crate::storage::encode_document;
 
     fn call(tool: &str, args: &str) -> ServiceCall {
-        ServiceCall { call_id: "c1".into(), tool: tool.into(), args: args.into(), caller: None }
+        ServiceCall { call_id: "c1".into(), tool: tool.into(), args: args.into(), caller: None, origin: makepad_ai_services::CallOrigin::Conversation }
     }
 
     #[test]

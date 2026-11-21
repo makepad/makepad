@@ -200,6 +200,34 @@ fn a_derived_publish_is_found_by_digest_and_names_its_parent() {
     assert!(other.find_by_digest(&hex(&recipe)).is_none());
 }
 
+/// A run's products all carry its recipe digest and its primary alone an alias: the digest finds
+/// the primary, though a product of it was stored after it (the gen presets' reused character
+/// came back as one of its siblings when they were stored in one millisecond, 11-17 and 11-19).
+#[test]
+fn a_runs_digest_finds_its_primary_product_before_its_siblings() {
+    let root = Root::new("primary");
+    let store: Arc<dyn ResultStore> = Arc::new(FolderStore::open(&root.0, "flows").unwrap());
+    let recipe = hex(&[9u8; 32]);
+    let product = |alias: Option<&str>, fill: u8| {
+        let mut node = node();
+        node.params.retain(|(name, _)| name != "alias");
+        node.params.extend(alias.map(|alias| ("alias".to_string(), Literal::Str(alias.into()))));
+        node.params.push(("recipe_digest".into(), Literal::Str(recipe.clone())));
+        // (a product of a generator: one with none records no digest)
+        let lineage = Lineage {
+            generators: vec![GeneratorRecord { node: "gen".into(), type_name: "Gen".into(), domain: "image".into(), model: "m".into(), seed: Some(41), params: Vec::new() }],
+            prompt: "a sunset".into(),
+            sources: Vec::new(),
+        };
+        let made = publish(&store, &node, PublishRun { flow: "f".into(), instance: "i".into(), lineage, ..Default::default() }, picture(fill));
+        made.get("id").and_then(|v| v.as_str()).unwrap().to_string()
+    };
+    let primary = product(Some("flows/gen-0909"), 10);
+    let sibling = product(None, 20);
+    assert_ne!(primary, sibling);
+    assert_eq!(store.find_by_digest(&recipe).map(|found| found.id), Some(primary), "the primary, not the newer sibling {sibling}");
+}
+
 #[test]
 fn presets_are_flow_kind_results() {
     use makepad_flow::engine::results::{ResultFile, ResultFiles, ResultMedia, ResultRole};

@@ -122,6 +122,7 @@ mod tests {
             tool: "not_a_route_tool".into(),
             args: "{}".into(),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         };
         let answer = answer_with(&call, |_, _| panic!("unknown tools must not execute"));
         assert_eq!(answer.outcome, ToolOutcome::Refused);

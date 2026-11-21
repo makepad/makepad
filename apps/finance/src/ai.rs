@@ -51,6 +51,7 @@ mod tests {
             tool: "delete_everything".to_string(),
             args: "{}".to_string(),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         };
         let result = answer(&call, || "unreachable".to_string());
         assert!(!result.outcome.is_ok());

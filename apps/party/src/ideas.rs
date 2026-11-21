@@ -71,11 +71,11 @@ pub fn available(hub: &BoxHub) -> bool {
 
 /// The vision model's ideas for `picture` (a JPEG): a call to the hub, so
 /// for a connection's own thread, never the screen's or the worker's.
-pub fn ask(hub: &BoxHub, picture: &[u8]) -> Result<Vec<String>, String> {
+pub fn ask(hub: &BoxHub, picture: &[u8], cancelled: &dyn Fn() -> bool) -> Result<Vec<String>, String> {
     let rgb = image::decode_jpeg(picture)?;
     let (w, h) = crate::wall_plan::fit_within(rgb.width, rgb.height, SIDE, SIDE);
     let small = image::encode_jpeg(&image::resize(&rgb, w, h), 86)?;
-    let (answer, _) = hub.describe(VISION_MODEL, &small, &cue(), 120)?;
+    let (answer, _) = hub.describe(VISION_MODEL, &small, &cue(), 120, cancelled)?;
     Ok(parse(&answer))
 }
 

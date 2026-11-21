@@ -1,5 +1,9 @@
-//! fake_phone <party url> [seconds] [<W>x<H>]: a phone going live at a
-//! party, for trying the live path without one. A dev tool, never shipped.
+//! fake_phone <party url> [seconds] [<W>x<H>] [--say <W>x<H>] [--turn <s>]:
+//! a phone going live at a party, for trying the live path without one. A
+//! dev tool, never shipped. `--say` is the camera size the offer reports
+//! (a phone's sensor size, landscape when held upright); `--turn` turns
+//! the phone after that many seconds (the pictures' width and height swap,
+//! a new keyframe with its new size).
 //!
 //! It joins the party at its address (`https://host:port/p/<code>`),
 //! queues, calls when the party says it is up, and sends a camera's H.264
@@ -122,7 +126,11 @@ mod phone {
         let args: Vec<String> = std::env::args().collect();
         let party = Party::parse(args.get(1).ok_or("usage: fake_phone <party url> [seconds] [<W>x<H>]")?)?;
         let seconds: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(40.0);
-        let (width, height) = args.get(3).and_then(|s| s.split_once('x')).and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))).unwrap_or((640, 480));
+        let size = |s: &str| s.split_once('x').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)));
+        let (mut width, mut height) = args.get(3).and_then(|s| size(s)).unwrap_or((640, 480));
+        let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+        let said = flag("--say").and_then(|s| size(s)).unwrap_or((width, height));
+        let mut turn: Option<f64> = flag("--turn").and_then(|s| s.parse().ok());
 
         if !makepad_hal::stream_encode::hal_stream_encoder_offscreen_device() {
             return Err("no Vulkan device for the encoder".into());
@@ -148,7 +156,7 @@ mod phone {
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp: {e}"))?;
         socket.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
         let mut phone = Browser::new(&socket.local_addr().map_err(|e| e.to_string())?.to_string());
-        let (status, answer) = party.ask("POST", &format!("live/offer?w={width}&h={height}"), Some(&token), phone.offer().as_bytes())?;
+        let (status, answer) = party.ask("POST", &format!("live/offer?w={}&h={}", said.0, said.1), Some(&token), phone.offer().as_bytes())?;
         let answer = String::from_utf8(answer).map_err(|_| "the answer is not text")?;
         if status != 200 {
             return Err(format!("offer: {status} {answer}"));
@@ -196,6 +204,12 @@ mod phone {
                     eprintln!("fake_phone: the party ended the slot");
                     break;
                 }
+            }
+            if turn.is_some_and(|at| now >= at) {
+                turn = None;
+                (width, height) = (height, width);
+                encoder = VideoStreamEncoder::new(VideoStreamEncoderOptions { width, height, ..options }).map_err(|e| format!("encoder: {e:?}"))?;
+                eprintln!("fake_phone: {now:5.1} s turned: {width}x{height}");
             }
             scene(width as usize, height as usize, now, &mut rgb);
             let pts = (frames as i64) * 10_000_000 / FPS as i64;

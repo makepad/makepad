@@ -411,6 +411,7 @@ fn first_run_seed_waits_for_ack_and_reloads_absolute_dates() {
         tool: "due".into(),
         args: r#"{"days":7}"#.into(),
         caller: None,
+        origin: makepad_ai_services::CallOrigin::Conversation,
     };
     let result = view.ai_answer(&call);
     assert_eq!(

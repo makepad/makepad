@@ -26,14 +26,20 @@ impl Queue {
     }
 
     /// The next take, waiting for one. The hub worker's thread only.
-    pub fn pop_wait(&self) -> TakeId {
+    pub fn pop_wait(&self, stopped: impl Fn() -> bool) -> Option<TakeId> {
         let mut takes = self.takes.lock().unwrap_or_else(|p| p.into_inner());
-        loop {
+        while !stopped() {
             if let Some(take) = takes.pop_front() {
-                return take;
+                return Some(take);
             }
             takes = self.wake.wait(takes).unwrap_or_else(|p| p.into_inner());
         }
+        None
+    }
+
+    pub(crate) fn wake_worker(&self) {
+        drop(self.takes.lock().unwrap_or_else(|p| p.into_inner()));
+        self.wake.notify_all();
     }
 
     /// The newest take that waits, if any: the one a running take gives way to.

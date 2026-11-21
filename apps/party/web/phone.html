@@ -2,1176 +2,739 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <link rel="icon" href="data:,">
 <title>Party</title>
 <style>
-  :root { color-scheme: light dark; --bg: #faf7f2; --fg: #1d1b19; --soft: #6d655c; --line: #e4ddd3; --accent: #6b4de6; --accent-fg: #fff; --chip: #efe9e1; --rec: #e5484d; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f1ece6; --soft: #a89f95; --line: #3a352f; --accent: #a58cff; --accent-fg: #160f2e; --chip: #2d2925; } }
+  :root { color-scheme: dark; font: 16px/1.3 system-ui, sans-serif; background: #000; color: #fff; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--bg); color: var(--fg); font: 16px/1.35 system-ui, sans-serif; }
-  /* The whole page is one screen: the visible viewport, never scrolled. */
-  #app { position: fixed; left: 0; right: 0; top: 0; height: 100dvh; display: flex; flex-direction: column; align-items: center; gap: 10px;
-         padding: max(10px, env(safe-area-inset-top)) 12px max(10px, env(safe-area-inset-bottom)); }
-  .tabs { flex: none; display: inline-flex; background: var(--chip); border-radius: 999px; padding: 3px; }
-  .tabs button { border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 15px; padding: 6px 20px; border-radius: 999px; min-height: 34px; }
-  .tabs button.on { background: var(--accent); color: var(--accent-fg); }
-  #stage { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  #square { position: relative; flex: none; width: var(--side, 300px); height: var(--side, 300px); border-radius: 18px; overflow: hidden; background: var(--chip); }
-  #square video, #square canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  #v-cam.mirror, #v-live, #k-live { transform: scaleX(-1); }
-  #go-live { height: 56px; padding: 0 30px; border-radius: 999px; border: 0; background: var(--rec); color: #fff; font: inherit; font-size: 17px; font-weight: 600; }
-  #go-live.stop { background: var(--chip); color: var(--fg); border: 1px solid var(--line); }
-  .note { position: absolute; left: 10px; right: 10px; bottom: 10px; padding: 8px 12px; border-radius: 12px; background: rgba(0, 0, 0, .5); color: #fff; font-size: 15px; text-align: center; pointer-events: none; }
-  .note:empty { display: none; }
-  #share { position: absolute; top: 10px; left: 10px; height: 36px; padding: 0 12px 0 10px; border-radius: 999px; border: 0; background: rgba(0, 0, 0, .45); color: #fff; font: inherit; font-size: 14px; display: flex; align-items: center; gap: 6px; }
-  #share.on { background: var(--accent); color: var(--accent-fg); }
-  #flip { position: absolute; top: 10px; right: 10px; width: 42px; height: 42px; border-radius: 50%; border: 0; padding: 0; background: rgba(0, 0, 0, .45); color: #fff; display: grid; place-items: center; }
-  /* One segment a frame of the loop: filled once that frame is redrawn with
-     the newest prompt; the playhead rides along it; gone once all are new. */
-  #strip { flex: none; display: flex; gap: 2px; width: var(--side, 300px); height: 4px; margin-top: 8px; transition: opacity .3s; }
-  #strip.done { opacity: 0; transition: opacity 1.2s ease .8s; }
-  #strip i { flex: 1; border-radius: 2px; background: var(--line); transition: background .3s; }
-  #strip i.new { background: var(--accent); }
-  #strip i.at { transform: scaleY(2); background: var(--soft); }
-  #strip i.new.at { background: var(--fg); }
-  #del { flex: none; margin-top: 4px; font: inherit; font-size: 13px; color: var(--soft); background: none; border: 0; text-decoration: underline; padding: 2px 8px; }
-  .bar { flex: none; width: 100%; min-height: 76px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
-  /* Ready-made prompts: one row that scrolls sideways; a tap sends one. */
-  #chips { width: min(100%, var(--side, 100%)); display: flex; gap: 6px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-  #chips::-webkit-scrollbar { display: none; }
-  #chips button { flex: none; font: inherit; font-size: 14px; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--chip); color: var(--fg); white-space: nowrap; }
-  #chips button.on { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
-  #rec { position: relative; width: 72px; height: 72px; border-radius: 50%; border: 0; padding: 0;
-         background: conic-gradient(var(--rec) calc(var(--p, 0) * 1turn), var(--fg) 0); display: grid; place-items: center; }
-  #rec::before { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--bg); }
-  #rec span { position: relative; width: 56px; height: 56px; border-radius: 50%; background: var(--rec); transition: transform .15s, border-radius .15s; }
-  #rec.going span { transform: scale(.55); border-radius: 10px; }
-  #f-prompt { width: min(100%, var(--side, 100%)); display: flex; gap: 8px; }
-  #f-prompt input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 12px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--chip); color: var(--fg); }
-  #f-prompt button { flex: none; width: 48px; height: 48px; border-radius: 50%; border: 0; padding: 0; background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; }
-  #f-prompt #mic { background: var(--chip); color: var(--fg); border: 1px solid var(--line); box-shadow: 0 0 0 calc(var(--level, 0) * 12px) color-mix(in srgb, var(--rec) 45%, transparent); transition: box-shadow 60ms linear; }
-  #f-prompt #mic.on { background: var(--rec); color: #fff; border-color: transparent; }
-  #f-prompt #mic.busy { opacity: .55; }
-  .hidden { display: none !important; }
+  /* Nothing scrolls: the keyboard only lifts the dock (visualViewport). */
+  html, body { position: fixed; inset: 0; margin: 0; overflow: hidden; overscroll-behavior: none; background: #000; }
+  button, input { font: inherit; color: inherit; }
+  button { padding: 0; border: 0; cursor: pointer; touch-action: manipulation; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #c2b0ff; outline-offset: 3px; }
+  /* The camera is the whole background. */
+  #view { position: fixed; inset: 0; background: #000; display: block; }
+  #view video, #view canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #status { position: absolute; left: 50%; top: max(14px, env(safe-area-inset-top)); transform: translateX(-50%);
+    max-width: calc(100vw - 120px); padding: 6px 12px; border-radius: 16px; background: rgb(0 0 0 / 45%);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  #status:empty { display: none; }
+  #flip { position: absolute; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right));
+    width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; font-size: 20px;
+    background: rgb(0 0 0 / 40%); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+  /* The dock: the record button over a blurred prompt pill, riding above the keyboard. */
+  #dock { position: fixed; left: 0; right: 0; bottom: 0; display: grid; justify-items: center; gap: 14px;
+    padding: 0 max(12px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    transform: translateY(calc(0px - var(--lift, 0px))); pointer-events: none; }
+  #dock > * { pointer-events: auto; }
+  /* While typing only a compact prompt rides on the keyboard's top edge (sideways
+     Safari leaves ~40 px between its bars and the keyboard); Enter sends. */
+  body.typing #flip, body.typing #status, body.typing #prompt button { display: none; }
+  body.typing #dock { padding-bottom: 2px; }
+  body.typing #prompt { padding: 2px; }
+  body.typing #wish { height: 36px; }
+  /* The party's earlier prompts over the camera while typing; a tap fills the input. */
+  #history { display: none; width: 100%; max-width: 560px; max-height: calc(var(--room, 260px) - 64px); overflow-y: auto;
+    border-radius: 18px; background: rgb(20 18 24 / 55%); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+  body.typing #history:not(:empty) { display: block; }
+  #history button { display: block; width: 100%; padding: 10px 16px; text-align: left; font-size: 15px; background: transparent;
+    border-bottom: 1px solid rgb(255 255 255 / 10%); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #record { position: relative; width: 74px; height: 74px; border-radius: 50%; background: rgb(255 255 255 / 22%);
+    border: 3px solid #fff; color: #fff; font-size: 11px; line-height: 1.1; font-weight: 650;
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+  #record:disabled { cursor: default; }
+  #record::before { content: ""; position: absolute; inset: -3px; border-radius: inherit;
+    background: conic-gradient(#ff5d73 var(--progress, 0turn), transparent 0); }
+  #record span { position: absolute; inset: 5px; border-radius: inherit; display: grid; align-content: center;
+    padding: 4px; background: rgb(255 70 95 / 85%); }
+  #prompt { width: 100%; max-width: 560px; display: flex; gap: 6px; padding: 5px; border-radius: 28px;
+    background: rgb(20 18 24 / 45%); border: 1px solid rgb(255 255 255 / 18%);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); }
+  #wish { flex: 1; min-width: 0; height: 44px; padding: 0 14px; border: 0; border-radius: 22px; background: transparent;
+    font-size: 16px; outline: none; }
+  #wish::placeholder { color: rgb(255 255 255 / 70%); }
+  #prompt button { width: 44px; height: 44px; border-radius: 50%; background: #fff; color: #111; font-size: 22px; flex: none; }
 </style>
 </head>
 <body>
-<div id="app">
-  <div class="tabs" role="tablist">
-    <button id="t-cam" role="tab" class="on">Camera</button>
-    <button id="t-res" role="tab">Result</button>
-    <button id="t-live" role="tab" class="hidden">Live</button>
-  </div>
-  <div id="stage">
-    <div id="square">
-      <video id="v-cam" playsinline muted autoplay></video>
-      <canvas id="k-out" class="hidden"></canvas>
-      <video id="v-live" class="hidden" playsinline muted autoplay></video>
-      <canvas id="k-live" class="hidden"></canvas>
-      <button id="flip" class="hidden" aria-label="Flip the camera">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/></svg>
-      </button>
-      <button id="share" class="on" aria-pressed="true">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
-        <span>On the screen</span>
-      </button>
-      <div class="note" id="n-cam"></div>
-      <div class="note hidden" id="n-res"></div>
-      <div class="note hidden" id="n-live"></div>
-    </div>
-    <div id="strip" class="hidden" aria-hidden="true"></div>
-    <button id="del" class="hidden">delete</button>
-  </div>
-  <div class="bar">
-    <button id="rec" aria-label="Record 3 seconds"><span></span></button>
-    <button id="go-live" class="hidden">Go live</button>
-    <form id="f-prompt" class="hidden">
-      <input id="i-prompt" maxlength="300" enterkeyhint="send" autocomplete="off" placeholder="Prompt it (empty: the box picks)">
-      <button type="button" id="mic" aria-label="Say the prompt">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
-      </button>
-      <button aria-label="Redraw with this prompt">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
-      </button>
-    </form>
-    <div id="chips" class="hidden" role="list"></div>
-  </div>
+<button type="button" id="view" aria-label="Camera. Tap to go live." aria-describedby="status">
+  <video id="camera" playsinline muted autoplay></video>
+  <canvas id="result" width="512" height="512" hidden></canvas>
+  <span id="status" role="status"></span>
+  <span id="flip" role="button" tabindex="0" aria-label="Switch camera">⟲</span>
+</button>
+<div id="dock">
+  <div id="history" role="listbox" aria-label="Earlier prompts"></div>
+  <form id="prompt">
+    <input id="wish" type="text" maxlength="300" enterkeyhint="send" autocomplete="off" placeholder="Describe a style…" aria-label="Style prompt">
+    <button type="submit" aria-label="Send prompt">↑</button>
+  </form>
 </div>
 
 <script>
 "use strict";
-// One screen, two tabs: the camera records a 3 s loop, the result plays the
-// box's redraw of it in the same square, and a prompt redraws the same loop
-// again, as often as the guest likes (the newest replaces what is shown).
-// The redraws go on the party's screen unless the guest switches that to
-// "just me"; nothing is kept.
 const base = location.pathname.replace(/\/+$/, "") + "/";
-// A loop plays here at SIDE (the box sends this phone its frames at that
-// size) and is sent at SEND_SIDE, the size the box draws it for the screen.
 const FPS = 8, SECONDS = 3, SIDE = 512, SEND_SIDE = 1024;
-// Whether this guest's loops show on the party's screen as they are
-// redrawn, or stay on this phone: the guest's choice, on at first.
-let onScreen = stored("party-screen") !== "off";
-let token = null, stream = null, facing = "user", tab = "camera", recording = false;
-let current = null;            // the loop on the Result tab: { source: id or null while sending, fps }
-let loading = null, pending = false;
-let sending = null;
-// `take`: the take whose redrawn frames play (null: the recording's).
-const player = { frames: [], fps: FPS, i: 0, at: 0, take: null };
+const video = document.getElementById("camera"), canvas = document.getElementById("result");
+const view = document.getElementById("view");
+const status = document.getElementById("status"), recordButton = document.getElementById("record");
+const bar = document.getElementById("prompt"), input = document.getElementById("wish");
+const dock = document.getElementById("dock");
+const tapToLive = "Tap the camera to go live";
+const bumped = "Someone else took the screen. Tap to go back on.";
+const redrawing = "Redrawing your loop…";
+const textType = "text/plain; charset=utf-8";
+let live = null, current = null, showingLoop = false, recording = false;
+// The back camera points at the room; the flip in the view's corner swaps.
+let facing = "environment";
 
-function $(id) { return document.getElementById(id); }
-function note(id, text) {
-  if (id === "n-res" && sending && sending.waiting) return;
-  $(id).textContent = text || "";
+function liftBar() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  dock.style.setProperty("--lift", Math.max(0, window.innerHeight - vv.height - vv.offsetTop) + "px");
+  dock.style.setProperty("--room", vv.height + "px");
 }
-function errText(e) { return e && e.message ? e.message : String(e); }
-function store(key, value) { try { value == null ? sessionStorage.removeItem(key) : sessionStorage.setItem(key, value); } catch (e) {} }
-function stored(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", liftBar);
+  window.visualViewport.addEventListener("scroll", liftBar);
+  liftBar();
+}
+try { if (navigator.virtualKeyboard) navigator.virtualKeyboard.overlaysContent = true; } catch (e) {}
+input.addEventListener("focus", () => { document.body.classList.add("typing"); window.scrollTo(0, 0); liftBar(); showHistory(); });
+input.addEventListener("blur", () => { document.body.classList.remove("typing"); liftBar(); sendDraft(""); });
 
-// What the page meets goes to the box's own log through the camera check's
-// report route: the browser, the camera, how long a redraw took, errors. A
-// line names this page's random session, never the phone or what it shows.
+// The party's earlier prompts, newest first, above the input while typing.
+const historyList = document.getElementById("history");
+async function showHistory() {
+  try {
+    const prompts = (await (await call("GET", "history")).json()).prompts || [];
+    historyList.replaceChildren(...prompts.slice(0, 8).map(text => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = text;
+      // Keep the keyboard up: the tap fills the input without a blur.
+      b.addEventListener("pointerdown", e => e.preventDefault());
+      b.onclick = () => { input.value = text; input.focus(); sendDraft(text); };
+      return b;
+    }));
+  } catch (e) { /* No history yet, or the box is busy: the input works without it. */ }
+}
+
+// What the guest is typing shows on the big screen as they type (a few times a second).
+let draftTimer = null, draftSent = "";
+function sendDraft(text) {
+  clearTimeout(draftTimer);
+  draftTimer = null;
+  if (text === draftSent) return;
+  draftSent = text;
+  call("POST", "draft", { body: text, type: textType }).catch(() => {});
+}
+input.addEventListener("input", () => {
+  if (!draftTimer) draftTimer = setTimeout(() => { draftTimer = null; sendDraft(input.value.trim()); }, 300);
+});
+// Some iOS versions pause the camera's video when the phone turns.
+function keepPlaying() { if (video.srcObject && video.paused) video.play().catch(() => {}); liftBar(); }
+window.addEventListener("orientationchange", keepPlaying);
+window.addEventListener("resize", keepPlaying);
+
 const session = "p" + Math.random().toString(36).slice(2, 8);
 function report(test, ok, detail, withBrowser) {
   const body = { session, test, ok, detail: String(detail).slice(0, 400) };
   if (withBrowser) body.ua = navigator.userAgent.slice(0, 400);
   fetch(base + "camtest/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
-function why(e) { return e ? (e.name || "Error") + ": " + (e.message || String(e)) : "unknown"; }
+function why(e) { return (e.name || "Error") + ": " + (e.message || String(e)); }
 function secondsSince(t) { return ((performance.now() - t) / 1000).toFixed(1) + " s"; }
+window.addEventListener("error", e => report("error", false, (e.message || "error") + " at line " + (e.lineno || "?")));
+window.addEventListener("unhandledrejection", e => report("error", false, why(e.reason || "unknown")));
+report("page", true, window.innerWidth + " px wide at " + (window.devicePixelRatio || 1) + "x" +
+  (window.visualViewport ? "" : ", no visualViewport") + (window.isSecureContext ? "" : ", not a secure context"), true);
 
-async function call(method, path, body, type, action) {
-  const signal = action && action.signal;
-  for (let first = true; ; first = false) {
-    if (signal && signal.aborted) throw new DOMException("Sending cancelled", "AbortError");
-    if (!token && path !== "join") await join(action);
-    if (signal && signal.aborted) throw new DOMException("Sending cancelled", "AbortError");
-    const headers = {};
-    if (token) headers["Authorization"] = "Bearer " + token;
-    if (type) headers["Content-Type"] = type;
-    const r = await fetch(base + path, { method, headers, body });
-    if (!r.ok && signal && signal.aborted) throw new DOMException("Sending cancelled", "AbortError");
-    // Over a limit (429) or with the box full or busy (503): nothing was taken; send it again when it says.
-    if (r.status === 429 || r.status === 503) {
-      const wait = Math.max(0.2, Number(r.headers.get("Retry-After")) || 1);
-      const said = await r.text();
-      if (action) action.onWait(said, wait);
-      try {
-        await new Promise((res, rej) => {
-          const timer = setTimeout(() => {
-            if (signal) signal.removeEventListener("abort", cancel);
-            res();
-          }, wait * 1000);
-          function cancel() { clearTimeout(timer); rej(new DOMException("Sending cancelled", "AbortError")); }
-          if (signal) {
-            if (signal.aborted) cancel();
-            else signal.addEventListener("abort", cancel, { once: true });
-          }
-        });
-      } finally {
-        if (action) action.onWait();
-      }
-      continue;
+let token = null, joining = null;
+try { token = localStorage.getItem("party-token"); } catch (e) {}
+function saveToken(value) {
+  token = value;
+  try {
+    if (value) localStorage.setItem("party-token", value);
+    else localStorage.removeItem("party-token");
+  } catch (e) {}
+}
+
+function delay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    function cancel() { clearTimeout(timer); reject(new DOMException("Cancelled", "AbortError")); }
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", cancel);
+      resolve();
+    }, ms);
+    if (signal && signal.aborted) cancel();
+    else if (signal) signal.addEventListener("abort", cancel, { once: true });
+  });
+}
+
+// Finish a POST already on the wire so a later leave or replacement upload can
+// account for it. Cancelling its owner still cancels any Retry-After wait.
+async function request(method, path, bearer, { body, type, signal, onBusy } = {}) {
+  const headers = {};
+  if (bearer) headers.Authorization = "Bearer " + bearer;
+  if (type) headers["Content-Type"] = type;
+  for (;;) {
+    if (signal && signal.aborted) throw new DOMException("Cancelled", "AbortError");
+    const r = await fetch(base + path, { method, headers, body, signal: method === "GET" ? signal : undefined });
+    if (r.status !== 429 && r.status !== 503) return r;
+    await r.text();
+    if (onBusy) onBusy();
+    await delay(1000 * Math.max(0.2, Number(r.headers.get("Retry-After")) || 1), signal);
+  }
+}
+async function checked(r) {
+  if (!r.ok) {
+    const e = new Error((await r.text()) || ("The box answered " + r.status));
+    e.status = r.status;
+    throw e;
+  }
+  return r;
+}
+// The box restarted with another party: this page's address is gone.
+const moved = "This party moved: scan the QR code on the big screen again";
+function notLive(e) { return e && e.status === 404 ? moved : tapToLive; }
+async function join() {
+  if (!token) {
+    if (!joining) joining = request("POST", "join").then(checked).then(r => r.json())
+      .then(a => saveToken(a.token)).finally(() => { joining = null; });
+    await joining;
+  }
+  return token;
+}
+async function call(method, path, options) {
+  const used = await join();
+  let r = await request(method, path, used, options);
+  if (r.status === 401) {
+    if (token === used) saveToken(null);
+    r = await request(method, path, await join(), options);
+  }
+  return checked(r);
+}
+
+let openingCamera = null;
+function camera() {
+  if (!openingCamera) openingCamera = startCamera().finally(() => { openingCamera = null; });
+  return openingCamera;
+}
+async function startCamera() {
+  const asked = performance.now();
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("no getUserMedia");
+    if (!video.srcObject || !video.srcObject.active) {
+      video.srcObject = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false
+      });
     }
-    // A token the box no longer knows (it expired, and everything with it): a new one.
-    if (r.status === 401 && path !== "join" && first) { token = null; store("party-token", null); continue; }
-    if (!r.ok) throw new Error((await r.text()) || ("the box answered " + r.status));
-    return r;
+    await video.play();
+    const track = video.srcObject.getVideoTracks()[0];
+    track.onended = () => {
+      if (live) {
+        status.textContent = tapToLive;
+        leaveLive().catch(() => {});
+      }
+    };
+    report("camera", true, facing + " " + video.videoWidth + "x" + video.videoHeight + ", up in " + secondsSince(asked));
+    return track;
+  } catch (e) {
+    report("camera", false, facing + " " + why(e));
+    throw e;
   }
 }
 
-async function join(action) {
-  const r = await call("POST", "join", null, null, action);
-  token = (await r.json()).token;
-  store("party-token", token);
+// Both streams use [u32 length][kind][payload]. Live uses the local preview,
+// so skip the box's live JPEGs without allocating or decoding a picture.
+async function messages(path, signal, receive) {
+  const r = await call("GET", path, { signal });
+  const reader = r.body.getReader(), header = new Uint8Array(5);
+  let filled = 0, left = 0, payload = null;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return false;
+      let at = 0;
+      while (at < value.length && !signal.aborted) {
+        if (filled < 5) {
+          const n = Math.min(5 - filled, value.length - at);
+          header.set(value.subarray(at, at + n), filled);
+          filled += n;
+          at += n;
+          if (filled < 5) continue;
+          left = new DataView(header.buffer).getUint32(0) - 1;
+          if (left < 0) throw new Error("Invalid stream message");
+          payload = header[4] === 1 || header[4] === 2 ? new Uint8Array(left) : null;
+        }
+        const n = Math.min(left, value.length - at);
+        if (payload) payload.set(value.subarray(at, at + n), payload.length - left);
+        at += n;
+        left -= n;
+        if (!left) {
+          if (header[4] === 3) return true;
+          if (payload) await receive(header[4], payload);
+          filled = 0;
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
 }
+const decoder = new TextDecoder();
 
-function toJpeg(canvas, quality) {
-  return new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error("the phone made no picture")), "image/jpeg", quality));
+// Order changes to the slot even when the guest taps record during queue or offer.
+let changingSlot = Promise.resolve();
+function livePost(path, options) {
+  const next = changingSlot.then(() => call("POST", "live/" + path, options));
+  changingSlot = next.catch(() => {});
+  return next;
+}
+function closeLive() {
+  if (!live) return;
+  const turn = live;
+  live = null;
+  turn.controller.abort();
+  if (turn.pc) turn.pc.close();
+}
+function leaveLive() {
+  closeLive();
+  return livePost("leave");
+}
+// How long going live takes, stage by stage, for the box's log.
+function mark(turn, what) {
+  turn.marks.push(what + " " + Math.round(performance.now() - turn.t0));
+}
+async function goLive(reopening = false, how = "tap") {
+  if (recording || live) return;
+  showCamera();
+  const turn = live = { controller: new AbortController(), state: "joining", pc: null, wish: input.value.trim() || null,
+    t0: performance.now(), marks: [how] };
+  const signal = turn.controller.signal;
+  status.textContent = "Starting the camera…";
+  try {
+    await Promise.all([camera(), join()]);
+    if (signal.aborted) return;
+    mark(turn, "camera");
+    call("POST", "warm", { signal }).catch(() => {});
+    status.textContent = "Going live…";
+    if (reopening) {
+      // A reload can reuse a token whose old peer still holds the slot.
+      const before = await (await call("GET", "live", { signal })).json();
+      if (!before.available || (before.state === "out" && before.bumped)) return applyLive(turn, before);
+      if (before.state === "live" || before.state === "starting") await livePost("leave", { signal });
+    }
+    const queued = await (await livePost("queue?screen=1", { signal })).json();
+    mark(turn, "queued");
+    applyLive(turn, queued);
+    if (signal.aborted) return;
+    pollLive(turn);
+    streamLive(turn);
+  } catch (e) {
+    if (signal.aborted) return;
+    report("live", false, why(e));
+    closeLive();
+    status.textContent = notLive(e);
+  }
+}
+async function streamLive(turn) {
+  const signal = turn.controller.signal;
+  while (!signal.aborted && window.ReadableStream) {
+    try {
+      await messages("live/stream", signal, (kind, payload) => {
+        if (kind === 1) applyLive(turn, JSON.parse(decoder.decode(payload)));
+      });
+    } catch (e) { /* GET live also carries the state. */ }
+    if (!signal.aborted) await delay(1000, signal).catch(() => {});
+  }
+}
+async function pollLive(turn) {
+  const signal = turn.controller.signal;
+  while (!signal.aborted) {
+    try {
+      if (!document.hidden) applyLive(turn, await (await call("GET", "live", { signal })).json());
+    } catch (e) { /* A missed heartbeat is retried. */ }
+    if (!signal.aborted) await delay(3000, signal).catch(() => {});
+  }
+}
+function applyLive(turn, s) {
+  if (turn !== live) return;
+  if (!s.available || s.state === "out") {
+    closeLive();
+    status.textContent = !s.available ? "" : s.bumped ? bumped : tapToLive;
+    return;
+  }
+  if (turn.state !== s.state) {
+    turn.state = s.state;
+    status.textContent = s.state === "live" ? "Live on the big screen" : "Going live…";
+    if (s.state === "live") {
+      mark(turn, "live");
+      report("live", true, "went live in ms: " + turn.marks.join(", "));
+    }
+  }
+  if (s.state === "up" && !turn.pc && !turn.failing) startCall(turn);
+  if (s.state !== "waiting") sendWish(turn);
+}
+async function startCall(turn) {
+  const signal = turn.controller.signal;
+  try {
+    const track = video.srcObject.getVideoTracks()[0];
+    const pc = turn.pc = new RTCPeerConnection({ iceServers: [] });
+    pc.addTransceiver(track, { direction: "sendonly", streams: [video.srcObject] });
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") mark(turn, "connected");
+      if (pc.connectionState === "failed") callFailed(turn, new Error("WebRTC connection failed"));
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    mark(turn, "offer");
+    const size = video.videoWidth ? { width: video.videoWidth, height: video.videoHeight } : (track.getSettings ? track.getSettings() : {});
+    const r = await livePost("offer?w=" + (size.width || 0) + "&h=" + (size.height || 0), {
+      signal, body: pc.localDescription.sdp, type: "application/sdp"
+    });
+    if (signal.aborted) return;
+    mark(turn, "answer");
+    await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+    report("live", true, "call offered at " + size.width + "x" + size.height);
+  } catch (e) { await callFailed(turn, e); }
+}
+async function callFailed(turn, e) {
+  if (live !== turn || turn.failing) return;
+  turn.failing = true;
+  report("live", false, why(e));
+  try {
+    const s = await (await call("GET", "live", { signal: turn.controller.signal })).json();
+    if (!s.available || s.state === "out") return applyLive(turn, s);
+  } catch (e) {}
+  if (turn !== live) return;
+  status.textContent = tapToLive;
+  await leaveLive().catch(() => {});
 }
 
 function frameSet(blobs) {
   const parts = [];
   for (const b of blobs) {
-    const len = new Uint8Array(4);
-    new DataView(len.buffer).setUint32(0, b.size);
-    parts.push(len, b);
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, b.size);
+    parts.push(length, b);
   }
   return new Blob(parts, { type: "application/x-party-frames" });
 }
-
-// --- the screen ------------------------------------------------------------
-
-// Only uploads and wishes own a visible wait. Recording again, a new wish or
-// a delete stops the old retry, but lets an upload already on its way finish
-// so it can be deleted.
-function startSending() {
-  stopSending();
-  const controller = new AbortController();
-  const action = {
-    signal: controller.signal, cancel: () => controller.abort(), waiting: null,
-    onWait(why, seconds) {
-      if (sending !== action) return;
-      if (why == null) {
-        if (!action.waiting) return;
-        const before = action.waiting.before;
-        action.waiting = null;
-        note("n-res", before);
-      } else {
-        action.waiting = { why, until: performance.now() + seconds * 1000, before: $("n-res").textContent, seconds: null };
-        showWait();
-      }
-    }
-  };
-  return sending = action;
-}
-
-function stopSending() {
-  if (!sending) return;
-  sending.onWait();
-  sending.cancel();
-  sending = null;
-}
-
-function showWait() {
-  if (!sending || !sending.waiting) return;
-  const wait = sending.waiting, seconds = Math.max(0, Math.ceil((wait.until - performance.now()) / 1000));
-  if (seconds === wait.seconds) return;
-  wait.seconds = seconds;
-  const said = (wait.why || "the box is busy").trim().replace(/\.$/, "");
-  $("n-res").textContent = said[0].toUpperCase() + said.slice(1) + " (sending again in " + seconds + " s).";
-}
-
-// The square takes what the visible viewport leaves: smaller while the
-// keyboard is up, so the page never scrolls.
-function layout() {
-  const vv = window.visualViewport, app = $("app");
-  if (vv) { app.style.height = vv.height + "px"; app.style.top = vv.offsetTop + "px"; }
-  const stage = $("stage"), del = $("del"), bar = $("strip");
-  const below = (del.classList.contains("hidden") ? 0 : del.offsetHeight + 4) + (bar.classList.contains("hidden") ? 0 : bar.offsetHeight + 8);
-  const side = Math.max(96, Math.floor(Math.min(stage.clientWidth, stage.clientHeight - below)));
-  app.style.setProperty("--side", side + "px");
-}
-
-function show(name) {
-  tab = name;
-  const camera = name === "camera", result = name === "result";
-  $("t-cam").classList.toggle("on", camera);
-  $("t-res").classList.toggle("on", result);
-  $("t-live").classList.toggle("on", name === "live");
-  $("v-cam").classList.toggle("hidden", !camera);
-  $("flip").classList.toggle("hidden", !camera || !stream);
-  $("n-cam").classList.toggle("hidden", !camera);
-  $("k-out").classList.toggle("hidden", !result);
-  $("n-res").classList.toggle("hidden", !result);
-  $("del").classList.toggle("hidden", !result || !current);
-  $("strip").classList.toggle("hidden", !result || !current);
-  $("rec").classList.toggle("hidden", !camera);
-  $("f-prompt").classList.toggle("hidden", camera);
-  $("chips").classList.toggle("hidden", camera);
-  liveShow();
-  layout();
-}
-
-function play(frames, fps, take = null) {
-  player.frames = frames;
-  player.take = take;
-  player.fps = fps || FPS;
-  player.i = 0;
-  player.at = 0;
-  const c = $("k-out");
-  if (frames.length) { c.width = frames[0].width; c.height = frames[0].height; }
-  else c.getContext("2d").clearRect(0, 0, c.width, c.height);
-}
-
-function tick(now) {
-  showWait();
-  if (player.frames.length && now - player.at >= 1000 / player.fps) {
-    player.at = now;
-    $("k-out").getContext("2d").drawImage(player.frames[player.i], 0, 0, $("k-out").width, $("k-out").height);
-    stripAt(player.i);
-    player.i = (player.i + 1) % player.frames.length;
-  }
-  requestAnimationFrame(tick);
-}
-
-// --- the camera and the loop -------------------------------------------------
-
-async function startCamera() {
-  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
-    report("camera", false, "no getUserMedia" + (window.isSecureContext ? "" : " (not a secure context)"));
-    return note("n-cam", "This browser gives no camera here.");
-  }
-  const asked = performance.now();
-  try {
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    stream = null;
-    note("n-cam", "Starting the camera…");
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
-    const v = $("v-cam");
-    v.srcObject = stream;
-    v.classList.toggle("mirror", facing === "user");
-    await v.play().catch(() => {});
-    note("n-cam", "");
-    // A recording comes next: the box gets the redraw model ready.
-    call("POST", "warm").then(liveCheck, () => {});
-    const got = stream.getVideoTracks()[0], set = got && got.getSettings ? got.getSettings() : {};
-    report("camera", true, facing + " " + (set.width || v.videoWidth) + "x" + (set.height || v.videoHeight) +
-      (set.frameRate ? " " + Math.round(set.frameRate) + " fps" : "") + ", up in " + secondsSince(asked));
-  } catch (e) {
-    stream = null;
-    report("camera", false, facing + " " + why(e));
-    note("n-cam", "The camera did not start (" + errText(e) + "). Tap to try again.");
-  }
-  show(tab);
-}
-
-function grab(video, side) {
-  // the square in the middle of the picture, as the preview shows it
-  const w = video.videoWidth, h = video.videoHeight, s = Math.min(w, h);
+function square(side) {
   const c = document.createElement("canvas");
-  c.width = side; c.height = side;
-  const g = c.getContext("2d");
-  if (facing === "user") { g.translate(side, 0); g.scale(-1, 1); }
-  g.drawImage(video, (w - s) / 2, (h - s) / 2, s, s, 0, 0, side, side);
+  c.width = c.height = side;
   return c;
 }
 
+let playTimer = null;
+function stopPlayback() {
+  clearInterval(playTimer);
+  playTimer = null;
+}
+function showCamera() {
+  showingLoop = false;
+  stopPlayback();
+  stopWatch();
+  canvas.hidden = true;
+  view.setAttribute("aria-label", "Camera preview. Tap to go live.");
+  if (current) {
+    releaseFrames(current.frames);
+    current.frames = current.drawn = [];
+  }
+}
+function releaseFrames(frames) {
+  for (const frame of frames || []) {
+    if (frame.close) frame.close();
+    else frame.width = frame.height = 0;
+  }
+}
+function play(mine, frames) {
+  if (mine.frames !== frames) releaseFrames(mine.frames);
+  mine.frames = frames;
+  if (!showingLoop || mine !== current || document.hidden) return;
+  stopPlayback();
+  const context = canvas.getContext("2d");
+  let i = 0;
+  function draw() {
+    context.drawImage(frames[i], 0, 0, canvas.width, canvas.height);
+    i = (i + 1) % frames.length;
+  }
+  draw();
+  canvas.hidden = false;
+  playTimer = setInterval(draw, 1000 / FPS);
+}
 async function record() {
   if (recording) return;
-  if (!stream) return startCamera();
-  const video = $("v-cam");
-  if (!video.videoWidth) return note("n-cam", "The camera is not ready yet.");
-  stopSending();
-  recording = true;
-  const rec = $("rec");
-  rec.classList.add("going");
-  const count = FPS * SECONDS, jpegs = [], shots = [];
-  const started = performance.now();
-  for (let i = 0; i < count; i++) {
-    const wait = started + i * 1000 / FPS - performance.now();
-    if (wait > 0) await new Promise(res => setTimeout(res, wait));
-    // What this phone plays, and what the box draws from.
-    shots.push(grab(video, SIDE));
-    jpegs.push(toJpeg(grab(video, SEND_SIDE), 0.85));
-    rec.style.setProperty("--p", ((i + 1) / count).toFixed(3));
-  }
-  rec.classList.remove("going");
-  rec.style.setProperty("--p", "0");
-  recording = false;
-  const recorded = performance.now();
-  // A new loop starts fresh: the one before goes from the box.
-  const before = current;
-  const replaces = before ? (before.source != null ? before.source : before.replaces) : null;
-  const action = startSending();
-  const mine = current = { source: null, fps: FPS, askedAt: recorded, asked: "the recording", failed: null, replaces };
-  dropIdeas();
-  loading = null;
-  resetDrawn();
+  recording = recordButton.disabled = true;
+  showCamera();
+  status.textContent = "Getting ready…";
+  let ready = false;
   try {
-    const frames = await Promise.all(shots.map(c => createImageBitmap(c)));
-    if (current !== mine || action.signal.aborted) return;
-    mine.total = frames.length;
-    play(frames, FPS);
-    stripReset(frames.length, Infinity);
-    note("n-res", "");
-    show("result");
-    const set = frameSet(await Promise.all(jpegs));
-    const r = await call("POST", "loop?fps=" + FPS + "&keep=" + keepLevel(), set, "application/x-party-frames", action);
-    const answer = await r.json(), sent = answer.source;
-    if (current === mine) stripReset(frames.length, answer.take);
-    report("loop", true, "source " + sent + ": " + count + " frames, " + Math.round(set.size / 1024) + " KB, sent " + secondsSince(recorded) + " after recording");
-    if (replaces != null) call("POST", "delete?source=" + replaces).catch(() => {});
-    if (current !== mine || action.signal.aborted) {
-      // Left Result, deleted, or recorded again while this one was on its way.
-      call("POST", "delete?source=" + sent).catch(() => {});
+    // Ask for playback within the tap if the phone needs a gesture.
+    await Promise.all([leaveLive(), camera()]);
+    if (!video.videoWidth || !video.videoHeight) throw new Error("The camera is not ready");
+    ready = true;
+    const count = SECONDS * FPS, shots = [], jpegs = [];
+    const full = square(SEND_SIDE), context = full.getContext("2d");
+    const started = performance.now();
+    status.textContent = "Recording…";
+    for (let i = 0; i < count; i++) {
+      const wait = started + i * 1000 / FPS - performance.now();
+      if (wait > 0) await delay(wait);
+      const w = video.videoWidth, h = video.videoHeight, side = Math.min(w, h);
+      context.drawImage(video, (w - side) / 2, (h - side) / 2, side, side, 0, 0, SEND_SIDE, SEND_SIDE);
+      const shot = square(SIDE);
+      shot.getContext("2d").drawImage(full, 0, 0, SIDE, SIDE);
+      shots.push(shot);
+      jpegs.push(new Promise(resolve => full.toBlob(resolve, "image/jpeg", 0.85)));
+      recordButton.style.setProperty("--progress", (i + 1) / count + "turn");
+    }
+    const recorded = performance.now(), blobs = await Promise.all(jpegs);
+    if (blobs.includes(null)) throw new Error("The phone made no picture");
+    full.width = full.height = 0;
+    if (current) current.controller.abort();
+    const mine = current = {
+      controller: new AbortController(), set: frameSet(blobs), count, recorded,
+      wish: input.value.trim() || null, source: null, take: null, drawn: []
+    };
+    showingLoop = true;
+    view.setAttribute("aria-label", "Recorded loop. Tap to go live.");
+    play(mine, shots);
+    uploadLoop(mine);
+  } catch (e) {
+    report("loop", false, why(e));
+    status.textContent = ready ? e.message : tapToLive;
+  } finally {
+    recording = recordButton.disabled = false;
+    recordButton.style.removeProperty("--progress");
+  }
+}
+function loopNote(mine, text) {
+  if (current === mine && showingLoop) status.textContent = text;
+}
+let previousSource = null;
+async function uploadLoop(mine) {
+  const signal = mine.controller.signal;
+  loopNote(mine, "Sending your loop…");
+  try {
+    const r = await call("POST", "loop?fps=" + FPS + "&keep=wall", {
+      signal, body: mine.set, type: "application/x-party-frames",
+      onBusy: () => loopNote(mine, "Box busy. Retrying your loop…")
+    });
+    const answer = await r.json();
+    report("loop", true, "source " + answer.source + ": " + mine.count + " frames, " + Math.round(mine.set.size / 1024) +
+      " KB, sent " + secondsSince(mine.recorded) + " after recording");
+    if (signal.aborted) {
+      call("POST", "delete?source=" + answer.source).catch(() => {});
       return;
     }
-    mine.source = sent;
-    // Kept on the phone (never on the box's disk): if the box forgets this
-    // phone, say after the party restarts, the loop goes again from here.
-    mine.set = set; mine.token = token;
-    show(tab);
-    pending = true;
+    if (previousSource && previousSource.token === token) call("POST", "delete?source=" + previousSource.id).catch(() => {});
+    previousSource = { id: answer.source, token };
+    mine.source = answer.source;
+    mine.token = token;
+    mine.take = answer.take;
+    mine.askedAt = mine.recorded;
+    mine.asked = "the recording";
+    loopNote(mine, redrawing);
+    sendWish(mine);
     watch();
   } catch (e) {
-    if (current !== mine || action.signal.aborted) return;
+    if (signal.aborted) return;
     report("loop", false, why(e));
-    note("n-res", "That did not go through: " + errText(e));
-  } finally {
-    if (sending === action) sending = null;
+    loopNote(mine, "Loop upload failed. Tap to record again.");
   }
 }
 
-// --- the result ------------------------------------------------------------
-
-// The loop plays only frames redrawn for the newest take: its first frame
-// alone a second or so after the prompt, then a loop of two, and so on up
-// to the whole loop, at the loop's own frame rate. Until the newest take's
-// first frame comes, the frames shown last play on (the last take's, or
-// the recording's); they are never mixed with a newer take's. `got`: the
-// newest take's frames by their place in the loop.
-const drawn = { take: null, got: new Map() };
-
-function resetDrawn() {
-  drawn.take = null;
-  drawn.got = new Map();
-  player.take = null;
-}
-
-// The newest take's frames from its first, as many as have come in a row.
-function showDrawn() {
-  const frames = [];
-  while (drawn.got.has(frames.length)) frames.push(drawn.got.get(frames.length));
-  if (!frames.length) return;
-  if (player.take !== drawn.take) play(frames, current.fps, drawn.take);
-  else player.frames = frames;
-}
-
-// The box pushes this phone's state and each redrawn frame over one open
-// connection; it says goodbye once nothing is being redrawn, and the page
-// opens it again whenever it asks for something new or comes back to the
-// front. One that ends without a goodbye (the box restarting, the Wi-Fi
-// gone) is tried again while the page is in front.
-let streaming = null, streamRetry = 0;
-
-function watch() {
-  if (!current || current.source == null || streaming) return;
-  openStream();
-}
-
-function stopStream() {
-  const s = streaming;
-  streaming = null;
-  if (s && s.cancel) s.cancel();
-}
-
-function joined(a, b) {
-  if (!a.length) return b;
-  const c = new Uint8Array(a.length + b.length);
-  c.set(a);
-  c.set(b, a.length);
-  return c;
-}
-
-async function openStream() {
-  const s = streaming = { cancel: null };
-  let bye = false;
+// Serialize wishes per turn or loop. A send during queueing or upload is
+// remembered until the slot or source exists, including an explicit empty wish.
+async function sendWish(target) {
+  const isLive = target === live;
+  if (target.sending || target.wish == null || (isLive ? !["up", "starting", "live"].includes(target.state) : target.source == null)) return;
+  const signal = target.controller.signal;
+  target.sending = true;
   try {
-    // The frames of the shown take the page has already: not sent again.
-    let have = 0;
-    while (drawn.got.has(have)) have++;
-    const r = await call("GET", "stream" + (drawn.take != null ? "?take=" + drawn.take + "&have=" + have : ""));
-    if (streaming !== s) { r.body.cancel().catch(() => {}); return; }
-    const reader = r.body.getReader();
-    s.cancel = () => reader.cancel().catch(() => {});
-    const text = new TextDecoder();
-    let buf = new Uint8Array(0);
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || streaming !== s) break;
-      streamRetry = 0;
-      buf = joined(buf, value);
-      // Whole messages: [u32 length][kind][payload].
-      while (buf.length >= 5) {
-        const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0);
-        if (buf.length < 4 + len) break;
-        const kind = buf[4], payload = buf.slice(5, 4 + len);
-        buf = buf.slice(4 + len);
-        if (kind === 1) onState(JSON.parse(text.decode(payload)));
-        else if (kind === 2) onFrame(payload);
-        else if (kind === 3) bye = true;
+    while (target.wish != null && !signal.aborted) {
+      const text = target.wish, asked = performance.now();
+      target.wish = null;
+      const options = { signal, type: textType, body: text };
+      try {
+        const r = isLive ? await livePost("wish", options) : await call("POST", "wish?source=" + target.source, options);
+        const answer = await r.json();
+        if (signal.aborted) return;
+        report(isLive ? "live wish" : "prompt", true, text ? text.length + " characters" : "empty: the box picks");
+        if (isLive) applyLive(target, answer);
+        else {
+          target.prompt = text;
+          target.take = answer.take;
+          target.asked = "the prompt";
+          target.askedAt = asked;
+          loopNote(target, redrawing);
+          watch();
+        }
+      } catch (e) {
+        if (signal.aborted) return;
+        report(isLive ? "live wish" : "prompt", false, why(e));
+        if (isLive) status.textContent = e.message;
+        else if (target.token !== token) {
+          if (target.wish == null) target.wish = text;
+          resend(target);
+          return;
+        } else loopNote(target, e.message);
       }
     }
-  } catch (e) {
-    // opened again below
-  } finally {
-    if (streaming === s) {
-      streaming = null;
-      if (!bye) {
-        streamRetry = Math.min(10000, streamRetry ? streamRetry * 2 : 1000);
-        if (document.visibilityState === "visible") setTimeout(watch, streamRetry);
-      } else if (pending && current) setTimeout(watch, 500);
-    }
-  }
+  } finally { target.sending = false; }
+}
+function resend(mine) {
+  if (mine.source == null) return;
+  stopWatch();
+  mine.source = mine.take = mine.drawnTake = null;
+  mine.drawn = [];
+  if (mine.wish == null) mine.wish = mine.prompt;
+  report("loop", true, "sending again, the box had lost it");
+  uploadLoop(mine);
 }
 
-function onState(me) {
-  if (!current) return;
-  const s = me.sources.find(x => x.id === current.source);
-  if (!s) {
-    stopStream();
-    // The box forgot this phone (it gave a new token: the party
-    // restarted), not that the loop was deleted: send it again.
-    if (current.set && current.token !== token) { resend(current); return; }
-    forget("Gone from the box. Record a new loop on the Camera tab.");
-    return;
+let observer = null;
+function stopWatch() {
+  if (observer) observer.abort();
+  observer = null;
+}
+function takeState(mine, me) {
+  const source = me.sources.find(s => s.id === mine.source);
+  if (!source) {
+    if (mine.token !== token) resend(mine);
+    else { stopWatch(); loopNote(mine, "Loop gone. Tap to record again."); }
+    return null;
   }
-  current.total = s.frames;
-  current.takes = s.takes;
-  if (s.takes.some(t => t.frames > 0)) askIdeas(s.id);
-  const newest = s.takes[s.takes.length - 1];
-  pending = !!newest && (newest.state === "queued" || newest.state === "running");
-  // After a reload, the recording to start from.
-  if (!player.frames.length) showSource(s);
-  if (newest && newest.state === "failed") {
-    if (current.failed !== newest.id) { current.failed = newest.id; report("take", false, "take " + newest.id + ": " + (newest.error || "failed")); }
-    note("n-res", "That one did not work out" + (newest.error ? " (" + newest.error + ")" : "") + ". Try another prompt.");
+  const latest = source.takes[source.takes.length - 1];
+  // The stream sends the newest playable take even while a later one is queued.
+  mine.playable = source.takes.slice().reverse().find(t => t.frames && (t.state === "done" || t.state === "running"));
+  if (!latest || latest.id < mine.take) return null;
+  mine.take = latest.id;
+  if (latest.state === "failed" && mine.failed !== latest.id) {
+    mine.failed = latest.id;
+    report("take", false, "take " + latest.id + ": " + (latest.error || "failed"));
+    loopNote(mine, "Redraw failed. Try another prompt.");
   }
-  else note("n-res", "");
-  allThere();
+  mine.latest = latest;
+  takeComplete(mine);
+  return latest;
+}
+async function addFrame(mine, take, index, jpeg, signal) {
+  if (!mine.playable || take !== mine.playable.id || (mine.drawnTake === take && index < mine.drawn.length)) return;
+  const frame = await createImageBitmap(jpeg);
+  if (signal.aborted) { frame.close(); return; }
+  if (mine.drawnTake !== take) { mine.drawnTake = take; mine.drawn = []; }
+  if (index !== mine.drawn.length) { frame.close(); throw new Error("Missing loop frame"); }
+  mine.drawn.push(frame);
+  if (!index) {
+    play(mine, mine.drawn);
+    if (mine.askedAt != null && take === mine.take) report("take", true, "take " + take + ": first frame playing " + secondsSince(mine.askedAt) + " after " + mine.asked);
+  }
+  takeComplete(mine);
+}
+function takeComplete(mine) {
+  const t = mine.latest;
+  if (!t || t.id !== mine.take || t.id !== mine.drawnTake || t.state !== "done" || mine.drawn.length !== t.frames) return;
+  if (mine.askedAt != null) {
+    report("take", true, "take " + t.id + ": all " + t.frames + " frames " + secondsSince(mine.askedAt) + " after " + mine.asked);
+    mine.askedAt = null;
+  }
+  loopNote(mine, "");
 }
 
-// A redrawn frame: [u32 take][u16 index][JPEG]. Never back to an older
-// take: one replaced half way keeps its frames on screen until the newer
-// one's come.
-async function onFrame(payload) {
-  const at = new DataView(payload.buffer, payload.byteOffset, 6);
-  const take = at.getUint32(0), i = at.getUint16(4);
-  // Only this loop's takes (the state that names a take comes before its frames).
-  if (!current || !(current.takes || []).some(t => t.id === take)) return;
-  if (drawn.take != null && take < drawn.take) return;
+// One reader at a time, resuming after the last decoded frame. Phones that
+// cannot read a streaming response get the same state and JPEGs by polling.
+async function watch() {
   const mine = current;
-  let frame;
-  try { frame = await createImageBitmap(new Blob([payload.subarray(6)], { type: "image/jpeg" })); } catch (e) { return; }
-  if (current !== mine || !current || (drawn.take != null && take < drawn.take)) return;
-  if (drawn.take !== take) { drawn.take = take; drawn.got = new Map(); }
-  drawn.got.set(i, frame);
-  showDrawn();
-  stripFill(take, i, i + 1, current.total || strip.count);
-  if (current.askedAt != null && drawn.got.size === 1) report("take", true, "take " + take + ": first frame playing " + secondsSince(current.askedAt) + " after " + current.asked);
-  allThere();
-}
-
-function allThere() {
-  if (!current || current.askedAt == null || drawn.take == null) return;
-  const t = (current.takes || []).find(x => x.id === drawn.take);
-  if (t && t.state === "done" && drawn.got.size >= t.frames) {
-    report("take", true, "take " + drawn.take + ": all " + drawn.got.size + " frames " + secondsSince(current.askedAt) + " after " + current.asked);
-    current.askedAt = null;
-  }
-}
-
-// The loop and its last prompt again, to a box that no longer has them.
-async function resend(mine) {
-  if (mine.resending) return;
-  mine.resending = true;
-  const action = startSending();
+  if (!showingLoop || !mine || mine.source == null || observer || document.hidden) return;
+  const owner = observer = new AbortController(), signal = owner.signal;
+  let retry = true;
   try {
-    const r = await call("POST", "loop?fps=" + mine.fps + "&keep=" + keepLevel(), mine.set, "application/x-party-frames", action);
-    const answer = await r.json();
-    if (current !== mine || action.signal.aborted) { call("POST", "delete?source=" + answer.source).catch(() => {}); return; }
-    mine.source = answer.source; mine.token = token;
-    let take = answer.take;
-    if (mine.prompt != null) {
-      const w = await call("POST", "wish?source=" + mine.source, mine.prompt, "text/plain; charset=utf-8", action);
-      take = (await w.json()).take;
+    if (window.ReadableStream && window.Response && "body" in Response.prototype) {
+      const from = mine.drawnTake == null ? "" : "?take=" + mine.drawnTake + "&have=" + mine.drawn.length;
+      const bye = await messages("stream" + from, signal, (kind, data) => {
+        if (kind === 1) takeState(mine, JSON.parse(decoder.decode(data)));
+        else if (kind === 2) {
+          const at = new DataView(data.buffer);
+          return addFrame(mine, at.getUint32(0), at.getUint16(4), new Blob([data.subarray(6)], { type: "image/jpeg" }), signal);
+        }
+      });
+      retry = !bye || !mine.latest || mine.latest.id !== mine.take || ["queued", "running"].includes(mine.latest.state);
+    } else {
+      const t = takeState(mine, await (await call("GET", "me", { signal })).json());
+      if (t) {
+        const shown = mine.playable;
+        if (shown) {
+          for (let i = mine.drawnTake === shown.id ? mine.drawn.length : 0; i < shown.frames; i++) {
+            const r = await call("GET", "frame?take=" + shown.id + "&i=" + i, { signal });
+            await addFrame(mine, shown.id, i, await r.blob(), signal);
+          }
+        }
+        retry = t.id !== mine.take || ["queued", "running"].includes(t.state);
+      }
     }
-    if (current !== mine) return;
-    // The box counts takes from the start again; the loop plays on.
-    resetDrawn();
-    mine.askedAt = performance.now(); mine.asked = "sending it again";
-    stripReset(mine.total || strip.count, take);
-    report("loop", true, "source " + mine.source + ": sent again, the box had lost it");
-  } catch (e) {
-    if (current !== mine || action.signal.aborted) return;
-    report("loop", false, "sending again: " + why(e));
-    note("n-res", "That did not go through: " + errText(e));
-    return;
-  } finally {
-    mine.resending = false;
-    if (sending === action) sending = null;
+  } catch (e) { /* Resume from the last whole frame. */ }
+  finally {
+    if (observer === owner) {
+      observer = null;
+      if (retry) setTimeout(watch, 1000);
+    }
   }
-  pending = true;
-  watch();
 }
 
-function keepLevel() { return onScreen ? "wall" : "me"; }
-
-function showShare() {
-  const b = $("share");
-  b.classList.toggle("on", onScreen);
-  b.setAttribute("aria-pressed", String(onScreen));
-  b.querySelector("span").textContent = onScreen ? "On the screen" : "Just me";
-}
-
-function share() {
-  onScreen = !onScreen;
-  store("party-screen", onScreen ? "on" : "off");
-  showShare();
-  if (current && current.source != null) call("POST", "keep?source=" + current.source + "&level=" + keepLevel()).catch(() => {});
-  if (liveState !== "out") call("POST", "live/screen?on=" + (onScreen ? 1 : 0)).catch(() => {});
-  liveShow();
-}
-
-// --- live: the camera goes to the box as a call, its redraw comes back ----
-// The guest gets in line; on their turn the camera goes to the box, which
-// redraws it as they move: on this phone, and on the party's screen unless
-// they chose "Just me". The prompt field sets what they become.
-
-const LIVE_OK = !!(window.RTCPeerConnection && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-const liveCall = { pc: null, cam: null, calling: false };
-let liveState = "out", liveStreaming = null, liveFrames = 0, liveWished = null, livePing = null;
-
-// Whether the box has live: the tab shows only when it does. Asked once the
-// guest has joined (a reload, or the camera started).
-async function liveCheck() {
-  if (!LIVE_OK || !token) return;
+view.onclick = () => goLive();
+// The other camera, live calls included (the box follows the new picture's size).
+document.getElementById("flip").onclick = async event => {
+  event.stopPropagation();
+  if (recording) return;
+  facing = facing === "environment" ? "user" : "environment";
+  const old = video.srcObject;
+  video.srcObject = null;
+  if (old) old.getTracks().forEach(t => t.stop());
+  try {
+    const track = await camera();
+    const sender = live && live.pc && live.pc.getSenders()[0];
+    if (sender) await sender.replaceTrack(track);
+  } catch (e) {
+    report("camera", false, "flip " + why(e));
+    status.textContent = "The camera did not switch";
+  }
+};
+bar.onsubmit = event => {
+  event.preventDefault();
+  input.blur();
+  const target = showingLoop ? current : live;
+  if (target) { target.wish = input.value.trim(); sendWish(target); }
+};
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { stopWatch(); stopPlayback(); }
+  else if (showingLoop && current) { play(current, current.frames); watch(); }
+});
+// Alone at the party a phone goes live by itself; with others here a tap on
+// the camera takes the lead. Every open page polls, so the box knows who is here.
+async function arrive() {
+  showCamera();
   try {
     const s = await (await call("GET", "live")).json();
-    $("t-live").classList.toggle("hidden", !s.available);
-    if (s.state !== "out") liveWatch();
+    const holding = s.state === "live" || s.state === "starting" || s.state === "up";
+    if (holding || (s.available && !s.bumped && !s.others)) return goLive(!!token, "auto");
+    status.textContent = !s.available ? "" : s.bumped ? bumped : tapToLive;
   } catch (e) {
-    // no live tab
+    status.textContent = notLive(e);
   }
+  camera().catch(() => {});
 }
-
-function liveText(s) {
-  switch (s.state) {
-    case "waiting": return s.ahead ? (s.ahead === 1 ? "One guest" : s.ahead + " guests") + " before you." : "You're next.";
-    case "up": return "Your turn: connecting…";
-    case "starting": return "Starting: the box is getting ready for you…";
-    case "live": return (s.screen ? "You're on the screen" : "You're live, just for you") + (s.left != null ? ": " + s.left + " s left." : ". Prompt it below.");
-    default: return "";
-  }
-}
-
-function liveShow() {
-  const on = tab === "live", inLine = liveState !== "out";
-  const go = $("go-live");
-  go.classList.toggle("hidden", !on);
-  go.classList.toggle("stop", inLine);
-  go.textContent = inLine ? "Stop" : "Go live";
-  $("k-live").classList.toggle("hidden", !on || !liveFrames);
-  $("v-live").classList.toggle("hidden", !on || liveFrames > 0 || !liveCall.cam);
-  $("n-live").classList.toggle("hidden", !on);
-  if (on && !inLine) note("n-live", "Go live: the box redraws your camera as you move" + (onScreen ? ", on the party's screen." : ", just for you."));
-}
-
-async function goLive() {
-  if (liveState !== "out") return liveStop();
-  liveState = "waiting";
-  note("n-live", "Getting in line…");
-  liveShow();
-  try {
-    onLiveState(await (await call("POST", "live/queue?screen=" + (onScreen ? 1 : 0))).json());
-    liveWatch();
-  } catch (e) {
-    liveState = "out";
-    liveHere();
-    liveShow();
-    note("n-live", errText(e));
-  }
-}
-
-// Where this guest stands and their redraw, pushed by the box while they
-// are in line or live; the open stream keeps their place.
-async function liveWatch() {
-  if (liveStreaming) return;
-  const s = liveStreaming = { cancel: null };
-  let bye = false;
-  try {
-    const r = await call("GET", "live/stream");
-    if (liveStreaming !== s) { r.body.cancel().catch(() => {}); return; }
-    const reader = r.body.getReader(), text = new TextDecoder();
-    s.cancel = () => reader.cancel().catch(() => {});
-    let buf = new Uint8Array(0);
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || liveStreaming !== s) break;
-      buf = joined(buf, value);
-      while (buf.length >= 5) {
-        const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0);
-        if (buf.length < 4 + len) break;
-        const kind = buf[4], payload = buf.slice(5, 4 + len);
-        buf = buf.slice(4 + len);
-        if (kind === 1) onLiveState(JSON.parse(text.decode(payload)));
-        else if (kind === 4) onLiveFrame(payload);
-        else if (kind === 3) bye = true;
-      }
-    }
-  } catch (e) {
-    // opened again below while the guest is in line
-  } finally {
-    if (liveStreaming === s) {
-      liveStreaming = null;
-      if (!bye && liveState !== "out") setTimeout(liveWatch, 1000);
-    }
-  }
-}
-
-// While the guest is in line the page says so every few seconds: the box
-// keeps the place of a phone it hears from, and lets a phone put away go.
-function liveHere() {
-  const want = liveState !== "out" && document.visibilityState === "visible";
-  if (want && !livePing) {
-    livePing = setInterval(() => call("GET", "live").then(r => r.json()).then(onLiveState).catch(() => {}), 3000);
-  } else if (!want && livePing) {
-    clearInterval(livePing);
-    livePing = null;
-  }
-}
-
-function onLiveState(s) {
-  const was = liveState;
-  liveState = s.state;
-  liveHere();
-  if ((s.state === "starting" || s.state === "live") && !liveCall.pc && !liveCall.calling) {
-    // A call this page no longer holds (it was reloaded): its place goes.
-    liveStop();
-    note("n-live", "Your call ended when this page reloaded. Go live again whenever you like.");
-    return;
-  }
-  if (s.state === "up" && !liveCall.pc && !liveCall.calling) {
-    if (tab !== "live") show("live");
-    startCall();
-  }
-  if (s.state !== "out" && s.state !== "waiting" && liveWished != null) liveWish(liveWished);
-  if (s.state === "out") {
-    endCall();
-    liveShow();
-    if (was === "starting" || was === "live") note("n-live", "Your turn is over. Thank you!");
-    return;
-  }
-  liveShow();
-  note("n-live", liveText(s));
-}
-
-async function onLiveFrame(payload) {
-  let picture;
-  try {
-    picture = await createImageBitmap(new Blob([payload], { type: "image/jpeg" }));
-  } catch (e) {
-    return;
-  }
-  if (liveState === "out") return picture.close();
-  const k = $("k-live");
-  if (k.width !== picture.width || k.height !== picture.height) { k.width = picture.width; k.height = picture.height; }
-  k.getContext("2d").drawImage(picture, 0, 0);
-  picture.close();
-  if (!liveFrames++) liveShow();
-}
-
-// This guest's turn: their camera, an offer to the box, its answer.
-async function startCall() {
-  liveCall.calling = true;
-  try {
-    if (stream) {
-      // A phone gives its camera to one user at a time.
-      stream.getTracks().forEach(t => t.stop());
-      stream = null;
-      $("v-cam").srcObject = null;
-      note("n-cam", "Tap to start the camera");
-    }
-    const cam = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
-    const pc = new RTCPeerConnection({ iceServers: [] });
-    Object.assign(liveCall, { pc, cam });
-    const track = cam.getVideoTracks()[0];
-    pc.addTransceiver(track, { direction: "sendonly", streams: [cam] });
-    pc.onconnectionstatechange = () => {
-      if (liveCall.pc === pc && pc.connectionState === "failed") {
-        liveStop();
-        note("n-live", "The call to the box dropped. Go live again whenever you like.");
-      }
-    };
-    $("v-live").srcObject = cam;
-    $("v-live").play().catch(() => {});
-    liveShow();
-    await pc.setLocalDescription(await pc.createOffer());
-    const size = track.getSettings ? track.getSettings() : {};
-    const r = await call("POST", "live/offer?w=" + (size.width || 0) + "&h=" + (size.height || 0), pc.localDescription.sdp, "application/sdp");
-    await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
-    report("live", true, "call offered at " + (size.width || "?") + "x" + (size.height || "?"));
-  } catch (e) {
-    report("live", false, why(e));
-    await liveStop();
-    note("n-live", e && (e.name === "NotAllowedError" || e.name === "NotFoundError" || e.name === "NotReadableError")
-      ? "The camera is not available for live on this phone."
-      : "Going live did not work on this phone: " + errText(e));
-  } finally {
-    liveCall.calling = false;
-  }
-}
-
-function endCall() {
-  if (liveCall.pc) { try { liveCall.pc.close(); } catch (e) {} }
-  if (liveCall.cam) liveCall.cam.getTracks().forEach(t => t.stop());
-  Object.assign(liveCall, { pc: null, cam: null });
-  $("v-live").srcObject = null;
-  liveFrames = 0;
-}
-
-async function liveStop() {
-  liveState = "out";
-  liveWished = null;
-  liveHere();
-  if (liveStreaming) { const s = liveStreaming; liveStreaming = null; if (s.cancel) s.cancel(); }
-  endCall();
-  liveShow();
-  try { await call("POST", "live/leave"); } catch (e) {}
-}
-
-// The prompt field on the Live tab sets what the live guest becomes; one
-// typed while they wait goes once it is their turn.
-async function liveWish(text) {
-  const wish = text != null ? text : $("i-prompt").value.trim();
-  if (liveState === "out" || liveState === "waiting") {
-    liveWished = wish;
-    return note("n-live", liveState === "out" ? "Go live, and this prompt goes with you." : "Your prompt goes to the box when it is your turn.");
-  }
-  liveWished = null;
-  try {
-    await call("POST", "live/wish", wish, "text/plain; charset=utf-8");
-    report("live wish", true, wish ? wish.length + " characters" : "empty: the box picks");
-  } catch (e) {
-    note("n-live", errText(e));
-  }
-}
-
-// A spoken prompt: press the microphone, say it, press again. The box turns
-// the speech into words (on the box only, in memory), and they land in the
-// prompt field to check or send. The microphone is asked for on the press.
-const voice = { stream: null, ctx: null, node: null, chunks: [], rate: 0, level: 0, started: 0, busy: false };
-// A minute at most; the recording then stops and is heard as it is.
-const VOICE_SECONDS = 60;
-
-async function voiceButton() {
-  if (voice.busy) return;
-  if (voice.stream) return voiceStop();
-  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return note("n-res", "This browser gives no microphone here.");
-  // Made on the press itself: phones start sound only from a tap.
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  ctx.resume().catch(() => {});
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  } catch (e) {
-    ctx.close().catch(() => {});
-    report("voice", false, "no microphone: " + why(e));
-    return note("n-res", "The microphone is off for this page.");
-  }
-  call("POST", "warm?for=voice").catch(() => {});
-  const node = ctx.createScriptProcessor(4096, 1, 1);
-  Object.assign(voice, { stream, ctx, node, chunks: [], rate: ctx.sampleRate, level: 0, started: performance.now() });
-  node.onaudioprocess = e => {
-    if (voice.node !== node) return;
-    const x = e.inputBuffer.getChannelData(0);
-    voice.chunks.push(new Float32Array(x));
-    let sum = 0;
-    for (let i = 0; i < x.length; i++) sum += x[i] * x[i];
-    // Quick to rise, slow to fall: a meter that reads as speech.
-    voice.level = Math.max(Math.min(1, Math.sqrt(sum / x.length) * 5), voice.level * 0.8);
-    $("mic").style.setProperty("--level", voice.level.toFixed(2));
-    if (performance.now() - voice.started > VOICE_SECONDS * 1000) voiceStop();
-  };
-  ctx.createMediaStreamSource(stream).connect(node);
-  node.connect(ctx.destination);
-  $("mic").classList.add("on");
-  note("n-res", "");
-}
-
-async function voiceStop() {
-  const { stream, ctx, node, chunks, rate, started } = voice;
-  if (!stream) return;
-  Object.assign(voice, { stream: null, ctx: null, node: null, chunks: [], level: 0 });
-  stream.getTracks().forEach(t => t.stop());
-  node.disconnect();
-  ctx.close().catch(() => {});
-  const mic = $("mic");
-  mic.classList.remove("on");
-  mic.style.setProperty("--level", "0");
-  const seconds = ((performance.now() - started) / 1000).toFixed(1);
-  if (!chunks.length) return;
-  voice.busy = true;
-  mic.classList.add("busy");
-  const stopped = performance.now();
-  try {
-    const answer = await (await call("POST", "voice", wav16k(chunks, rate), "audio/wav")).json();
-    const words = (answer.text || "").trim();
-    // The words, never sent anywhere else: only their length goes in the report.
-    if (words) $("i-prompt").value = words;
-    else note("n-res", "Nothing heard. Try again a little closer.");
-    report("voice", true, seconds + " s of speech, " + words.length + " characters back " + secondsSince(stopped) + " after the stop");
-  } catch (e) {
-    report("voice", false, why(e));
-    note("n-res", "That did not come through: " + errText(e));
-  } finally {
-    voice.busy = false;
-    mic.classList.remove("busy");
-  }
-}
-
-// The recording as a 16 kHz mono 16-bit WAV file (what the box hears best),
-// each output sample the mean of the input samples it covers.
-function wav16k(chunks, rate) {
-  const n = chunks.reduce((k, c) => k + c.length, 0), all = new Float32Array(n);
-  let at = 0;
-  for (const c of chunks) { all.set(c, at); at += c.length; }
-  const step = rate / 16000, out = Math.floor(n / step), pcm = new Int16Array(out);
-  for (let i = 0; i < out; i++) {
-    const a = Math.floor(i * step), b = Math.min(n, Math.max(a + 1, Math.floor((i + 1) * step)));
-    let sum = 0;
-    for (let j = a; j < b; j++) sum += all[j];
-    const v = Math.max(-1, Math.min(1, sum / (b - a)));
-    pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
-  }
-  const head = new DataView(new ArrayBuffer(44));
-  const tag = (o, t) => { for (let i = 0; i < t.length; i++) head.setUint8(o + i, t.charCodeAt(i)); };
-  tag(0, "RIFF"); head.setUint32(4, 36 + pcm.byteLength, true); tag(8, "WAVEfmt ");
-  head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true);
-  head.setUint32(24, 16000, true); head.setUint32(28, 32000, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true);
-  tag(36, "data"); head.setUint32(40, pcm.byteLength, true);
-  return new Blob([head.buffer, pcm.buffer], { type: "audio/wav" });
-}
-
-// Ready-made prompts, under the prompt field: a tap puts one in the field
-// and sends it, the same as typing it.
-const PREFAB = [
-  "claymation figures on a tiny handmade set",
-  "soft watercolour on rough paper",
-  "an ukiyo-e woodblock print with bold waves",
-  "chunky retro pixel art",
-  "a glowing stained-glass window",
-  "neon line art on a midnight wall",
-  "a thick, swirling oil painting",
-  "deep underwater, light rays and drifting bubbles",
-  "floating in outer space among bright nebulae",
-  "an enchanted forest with glowing mushrooms",
-  "inside a retro arcade, all neon and scanlines",
-  "a tiny world inside a snow globe",
-  "a golden-hour film still with soft grain",
-  "a comic-book panel with halftone dots",
-  "dreamy pastel clouds and sparkles",
-  "knitted wool, every stitch showing",
-  "a paper cut-out pop-up book",
-  "a land made of sweets and frosting",
-  "a chalk drawing on a sunny pavement",
-  "a disco night under a mirror ball",
-];
-
-function addChip(text, idea) {
-  const el = $("chips");
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.setAttribute("role", "listitem");
-  if (idea) chip.className = "idea";
-  chip.textContent = text;
-  chip.onclick = () => {
-    $("i-prompt").value = text;
-    for (const other of el.children) other.classList.toggle("on", other === chip);
-    prompt({ preventDefault() {} });
-  };
-  el.appendChild(chip);
-}
-
-function fillChips() {
-  for (const text of PREFAB) addChip(text, false);
-  // Typing makes it the guest's own prompt again.
-  $("i-prompt").addEventListener("input", () => { for (const chip of $("chips").children) chip.classList.remove("on"); });
-}
-
-// The box's own ideas for the loop on show (its vision model's), after the
-// ready-made ones and without repeating them. Asked once its first redraw
-// is back, so the asking never holds that up.
-let ideasFor = null;
-const plainWords = t => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-
-function showIdeas(ideas) {
-  for (const chip of [...$("chips").querySelectorAll(".idea")]) chip.remove();
-  const seen = new Set(PREFAB.map(plainWords));
-  for (const text of ideas) {
-    const key = plainWords(text);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    addChip(text, true);
-  }
-}
-
-async function askIdeas(source) {
-  if (ideasFor === source) return;
-  ideasFor = source;
-  try {
-    const answer = await (await call("GET", "ideas?source=" + source)).json();
-    if (ideasFor === source && current && current.source === source) showIdeas(answer.ideas || []);
-  } catch (e) {
-    if (ideasFor === source) ideasFor = null;   // the next state asks again
-  }
-}
-
-function dropIdeas() {
-  ideasFor = null;
-  showIdeas([]);
-}
-
-// The strip under the loop. `min`: the first take whose frames fill it (the
-// one the latest recording or prompt asked for); a take before it, replaced
-// half way, still draws into the loop but never into the strip.
-const strip = { count: 0, at: -1, take: null, min: 0, fresh: 0 };
-
-function stripReset(count, min) {
-  const el = $("strip");
-  if (strip.count !== count) {
-    el.textContent = "";
-    for (let i = 0; i < count; i++) el.appendChild(document.createElement("i"));
-    strip.count = count;
-    strip.at = -1;
-  } else {
-    for (const segment of el.children) segment.classList.remove("new");
-  }
-  strip.take = null;
-  strip.min = min;
-  strip.fresh = 0;
-  el.classList.remove("done");
-}
-
-// Frames `from` to `to` of take `id` are on screen.
-function stripFill(id, from, to, total) {
-  if (id < strip.min) return;
-  if (strip.count !== total) stripReset(total, strip.min);
-  if (strip.take !== id) {
-    // A newer take than the one filling it (one the box picked after a recording, say): it starts again.
-    if (strip.take != null) stripReset(total, strip.min);
-    strip.take = id;
-  }
-  const el = $("strip");
-  for (let i = from; i < to; i++) {
-    const segment = el.children[i];
-    if (segment && !segment.classList.contains("new")) { segment.classList.add("new"); strip.fresh++; }
-  }
-  if (strip.fresh >= strip.count && strip.count > 0) el.classList.add("done");
-}
-
-function stripAt(i) {
-  if (i === strip.at) return;
-  const el = $("strip");
-  if (el.children[strip.at]) el.children[strip.at].classList.remove("at");
-  if (el.children[i]) el.children[i].classList.add("at");
-  strip.at = i;
-}
-
-function range(from, to) { return Array.from({ length: Math.max(0, to - from) }, (_, k) => from + k); }
-function bitmap(path) { return call("GET", path).then(r => r.blob()).then(b => createImageBitmap(b)); }
-
-// The recording as the box has it, to play until a redraw comes.
-async function showSource(s) {
-  const id = "s" + s.id;
-  if (loading === id) return;
-  loading = id;
-  try {
-    const frames = await Promise.all(range(0, s.frames).map(i => bitmap("frame?source=" + s.id + "&i=" + i)));
-    if (loading === id && current && current.source === s.id && !player.frames.length) play(frames, s.fps);
-  } catch (e) {
-    // the next look tries again
-  } finally {
-    if (loading === id) loading = null;
-  }
-}
-
-async function prompt(ev) {
-  ev.preventDefault();
-  $("i-prompt").blur();
-  if (tab === "live") return liveWish();
-  if (!current || current.source == null) return note("n-res", current ? "Still sending the loop…" : "Record a loop on the Camera tab first.");
-  const mine = current, action = startSending();
-  // The prompt stays in the field, to change and send again.
-  const text = $("i-prompt").value.trim();
-  note("n-res", "");
-  try {
-    const asked = performance.now();
-    const r = await call("POST", "wish?source=" + mine.source, text, "text/plain; charset=utf-8", action);
-    const answer = await r.json();
-    if (current !== mine || action.signal.aborted) return;
-    mine.askedAt = asked; mine.asked = "the prompt"; mine.prompt = text;
-    // A fresh fill: no frame is redrawn with this prompt yet.
-    stripReset(mine.total || strip.count, answer.take);
-    report("prompt", true, text ? text.length + " characters" : "empty: the box picks");
-    pending = true;
-    watch();
-  } catch (e) {
-    if (current !== mine || action.signal.aborted) return;
-    // The box forgot this phone (the party restarted): the loop goes again, with this prompt.
-    if (mine.set && mine.token !== token) { mine.prompt = text; resend(mine); return; }
-    report("prompt", false, why(e));
-    note("n-res", errText(e));
-  } finally {
-    if (sending === action) sending = null;
-  }
-}
-
-function forget(text) {
-  stopSending();
-  stopStream();
-  pending = false;
-  current = null;
-  dropIdeas();
-  loading = null;
-  resetDrawn();
-  play([], FPS);
-  stripReset(0, Infinity);
-  note("n-res", text || "Record a loop on the Camera tab.");
-  show(tab);
-}
-
-async function del() {
-  if (!current) return;
-  if (!confirm("Delete this loop and its redraws from the box?")) return;
-  const source = current.source != null ? current.source : current.replaces;
-  forget();
-  show("camera");
-  if (source != null) {
-    try { await call("POST", "delete?source=" + source); } catch (e) {}
-  }
-}
-
-$("t-cam").onclick = () => show("camera");
-$("t-res").onclick = () => show("result");
-$("t-live").onclick = () => show("live");
-$("go-live").onclick = goLive;
-$("square").onclick = ev => { if (tab === "camera" && !stream && ev.target.closest("#flip") == null) startCamera(); };
-$("flip").onclick = ev => { ev.stopPropagation(); facing = facing === "user" ? "environment" : "user"; startCamera(); };
-$("rec").onclick = record;
-$("f-prompt").onsubmit = prompt;
-$("del").onclick = del;
-$("mic").onclick = voiceButton;
-$("share").onclick = share;
-showShare();
-window.addEventListener("resize", layout);
-if (window.visualViewport) {
-  visualViewport.addEventListener("resize", layout);
-  visualViewport.addEventListener("scroll", layout);
-}
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && current) watch();
-  liveHere();
-  // The microphone never stays on behind another app.
-  if (document.visibilityState !== "visible" && voice.stream) voiceStop();
-});
-requestAnimationFrame(tick);
-fillChips();
-window.addEventListener("error", e => report("error", false, (e.message || "error") + " at line " + (e.lineno || "?")));
-window.addEventListener("unhandledrejection", e => report("error", false, why(e.reason)));
-report("page", true, innerWidth + "x" + innerHeight + " at " + (window.devicePixelRatio || 1) + "x" +
-  (window.visualViewport ? "" : ", no visualViewport") + (window.isSecureContext ? "" : ", not a secure context"), true);
-
-token = stored("party-token");
-note("n-cam", navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "Tap to start the camera" : "This browser gives no camera here.");
-note("n-res", "Record a loop on the Camera tab.");
-show("camera");
-// After a reload the newest loop comes back on the Result tab.
-(async () => {
-  if (!token) return;
-  liveCheck();
-  try {
-    const me = await (await call("GET", "me")).json();
-    const loops = me.sources.filter(s => s.kind === "loop");
-    const last = loops[loops.length - 1];
-    if (!last || current) return;
-    current = { source: last.id, fps: last.fps };
-    show("result");
-    watch();
-  } catch (e) { /* a fresh start */ }
-})();
+setInterval(() => {
+  if (live || document.hidden) return;
+  call("GET", "live").then(r => r.json()).then(s => {
+    if (!live && s.bumped) status.textContent = bumped;
+  }).catch(() => {});
+}, 4000);
+arrive();
 </script>
 </body>
 </html>

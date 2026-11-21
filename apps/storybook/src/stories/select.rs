@@ -58,6 +58,17 @@ script_mod! {
             DropDownGradientY{labels: VALUES}
         }
 
+        StoryHeading{text: "Preset or typed value"}
+        StoryRow{
+            Label{text: "Length"}
+            length := ComboBox{
+                width: 180
+                accepts_typed: true
+                labels: ["0.5 s" "1 s" "2 s" "4 s"]
+                a11y: {label: "Length"}
+            }
+        }
+
         StoryHeading{text: "Disabled"}
         StoryNote{text: "The value stays legible: a control that is off still has to say what it is set to."}
         StoryRow{
@@ -97,6 +108,21 @@ fn dropdown_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     select_actions(cx, root, actions);
     dropdown_actions(cx, root, actions);
+
+    let length = root.combo_box(cx, ids!(length));
+    if let Some(text) = length.typed(actions) {
+        let (number, scale) = if let Some(ms) = text.strip_suffix("ms") {
+            (ms, 0.001)
+        } else {
+            (text.strip_suffix('s').unwrap_or(&text), 1.0)
+        };
+        match number.trim().parse::<f64>() {
+            Ok(value) if value.is_finite() && value >= 0.0 => {
+                length.set_text(cx, &format!("{:.2} s", value * scale));
+            }
+            _ => length.set_error(cx, Some("Type seconds: 2, 2.5 s, 500 ms")),
+        }
+    }
 }
 
 pub const STORIES: &[Story] = &[Story {
@@ -108,7 +134,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "SelectOverview",
     added: "2026-09-05",
     tags: &["new", "select", "picker", "menu"],
-    doc: "# Select\n\nOne value out of a list the control owns, or a set of them.\n\n## Which one to use\n\n| Control | Reach for it when |\n|---|---|\n| `Select` | the list is short enough to read, every option is a real answer rather than a filter, and the current value is worth showing all the time |\n| `MultiSelect` | the answer is a set rather than one value |\n| `DropDown` | the rows carry icons, or the closed face has room for an icon and nothing else |\n| `ComboBox` | the list is long enough that typing three letters beats scrolling: a font, a colour, a key signature. It has its own page, Combo box |\n\nNone of them takes free text: a combo box filters its list as it is typed into, but commits only items from that list.\n\n## One value\n\nA dropdown is a menu with a value. Rather than grow a second row model beside the menu's, a select builds `MenuRow`s and hands them to the one `MenuLayer` an app already declares, so a dropdown row can carry everything a menu row can — a mark, a heading, a disabled state — and anything added for menus is immediately available here.\n\nThe values are `options`, a list the control owns, the way a segmented control owns its answers. A dropdown assembled from child widgets makes the caller keep the children and the value in step by hand.\n\n## A set\n\n`MultiSelect` makes every row a switch: a check on each chosen row, and the list **stays open** while they are pressed, because a set is not finished after one press. Its face then says how many are chosen rather than naming one of them, since \"Bass\" would be a lie about the other two; `count_summary: false` asks for the names instead, for a list short enough to fit.\n\n## The classic face\n\n`DropDown` is a face showing the value in force, and a list of the alternatives behind it. It takes `labels` rather than `options`, `icons` gives the rows an icon each, and `icon_only` draws the closed face as the chosen row's icon alone. `DropDownFlat` is the plain face, `DropDown` the standard bevel, and `DropDownGradientX` and `DropDownGradientY` shade it along either axis.\n\n## Disabled\n\nA disabled dropdown keeps its value legible: a control that is off still has to say what it is set to.",
+    doc: "# Select\n\nOne value out of a list the control owns, or a set of them.\n\n## Which one to use\n\n| Control | Reach for it when |\n|---|---|\n| `Select` | the list is short enough to read, every option is a real answer rather than a filter, and the current value is worth showing all the time |\n| `MultiSelect` | the answer is a set rather than one value |\n| `DropDown` | the rows carry icons, or the closed face has room for an icon and nothing else |\n| `ComboBox` | the list is long enough that typing three letters beats scrolling: a font, a colour, a key signature. It has its own page, Combo box |\n\nComboBox normally commits items from its list. The Length field enables `accepts_typed` so you can also enter seconds or milliseconds, such as `2.5 s` or `750 ms`.\n\n## One value\n\nA dropdown is a menu with a value. Rather than grow a second row model beside the menu's, a select builds `MenuRow`s and hands them to the one `MenuLayer` an app already declares, so a dropdown row can carry everything a menu row can — a mark, a heading, a disabled state — and anything added for menus is immediately available here.\n\nThe values are `options`, a list the control owns, the way a segmented control owns its answers. A dropdown assembled from child widgets makes the caller keep the children and the value in step by hand.\n\n## A set\n\n`MultiSelect` makes every row a switch: a check on each chosen row, and the list **stays open** while they are pressed, because a set is not finished after one press. Its face then says how many are chosen rather than naming one of them, since \"Bass\" would be a lie about the other two; `count_summary: false` asks for the names instead, for a list short enough to fit.\n\n## The classic face\n\n`DropDown` is a face showing the value in force, and a list of the alternatives behind it. It takes `labels` rather than `options`, `icons` gives the rows an icon each, and `icon_only` draws the closed face as the chosen row's icon alone. `DropDownFlat` is the plain face, `DropDown` the standard bevel, and `DropDownGradientX` and `DropDownGradientY` shade it along either axis.\n\n## Disabled\n\nA disabled dropdown keeps its value legible: a control that is off still has to say what it is set to.",
     subject: "deck",
     feature: None,
     controls: &[],

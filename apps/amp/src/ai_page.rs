@@ -103,7 +103,10 @@ impl App {
                 self.ai_models_shown = false;
             }
             AiEvent::Conversation(text) => self.ai.conversation = text,
-            AiEvent::Songs(songs) => self.ai.songs = songs,
+            AiEvent::Songs(songs) => {
+                self.ai.songs = songs;
+                self.ai_list_folders();
+            }
             AiEvent::Where { epoch: at, id, text } if at == epoch => {
                 if let Some(job) = self.ai.job_mut(id) {
                     job.at_work = text;
@@ -151,6 +154,20 @@ impl App {
         let command = if self.model.folders.iter().any(|f| *f == folder) { LocalCommand::FileAdded } else { LocalCommand::AddFolder(folder) };
         if !workers.local(command) {
             log!("amp: ai-music: the folder reader is busy; the song shows with its next scan");
+        }
+    }
+
+    /// The AI list's songs play from the library: a folder of them it does
+    /// not look in is added, as a song made here adds its own.
+    fn ai_list_folders(&mut self) {
+        let Some(workers) = &self.workers else { return };
+        for folder in self.ai.folders_to_add(&self.model.folders) {
+            log!("amp: ai-music: the AI list's songs are in {folder}; the library looks there");
+            if !workers.local(LocalCommand::AddFolder(folder.clone())) {
+                // Asked again by the next play of an AI song.
+                log!("amp: ai-music: the folder reader is busy");
+                self.ai.folders_asked.retain(|asked| *asked != folder);
+            }
         }
     }
 
@@ -229,11 +246,18 @@ impl App {
         let items = self.ai_items();
         match items.iter().position(|i| i.uri == uri) {
             Some(start) => self.model.ai_play(items, start),
+            // Its file is gone: say so, it cannot play. Else the library has
+            // not read it yet: its folder is looked in now.
+            None if !std::path::Path::new(&song.path).is_file() => {
+                self.ai.error = Some(format!("“{}” cannot play: its file is gone ({})", song.title, song.path));
+            }
             None => {
+                let title = song.title.clone();
                 if let Some(workers) = &self.workers {
                     workers.local(LocalCommand::FileAdded);
                 }
-                self.ai.error = Some(format!("“{}” is not in the library yet; try again in a moment", song.title));
+                self.ai_list_folders();
+                self.ai.error = Some(format!("“{title}” is not in the library yet; try again in a moment"));
             }
         }
         self.model.requests.redraw = true;
@@ -432,6 +456,7 @@ impl App {
                         progress: None,
                         current: playing.as_deref() == Some(uri_of(&song.path).as_str()),
                         running: false,
+                        away: self.model.index.track(&uri_of(&song.path)).is_none(),
                     })
                 }
                 RowOf::Making(id) => {
@@ -453,6 +478,7 @@ impl App {
                         progress: Some(job.permille as f64 / 1000.0),
                         current: false,
                         running: true,
+                        away: false,
                     })
                 }
             })

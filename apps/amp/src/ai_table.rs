@@ -107,6 +107,9 @@ pub struct AiTableRow {
     pub current: bool,
     /// A song being made: it reads faint and cannot play yet.
     pub running: bool,
+    /// A made song the library does not list (its file is gone, or not
+    /// read yet): it reads faint; a play says why.
+    pub away: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -239,7 +242,7 @@ impl Widget for AiTable {
                 if self.hover_any == Some(cell.row) {
                     grid.cell_bg(cx, &cell, hover_tint(&theme));
                 }
-                let faint = |color: Vec4f| if row.running { with_alpha(color, 0.5) } else { color };
+                let faint = |color: Vec4f| if row.running || row.away { with_alpha(color, 0.5) } else { color };
                 let mid = cell.rect.pos.y + cell.rect.size.y * 0.5;
                 let x = cell.rect.pos.x + 10.0;
                 let room = cell.rect.size.x - 16.0;

@@ -48,7 +48,7 @@ struct Probe {
     hub: AppHub,
     hosted: HostedApp,
     child: Child,
-    sender: Option<Sender<Vec<u8>>>,
+    sender: Option<Sender<makepad_app_host::hub::WebSocketOut>>,
     timer: Timer,
     phase: Phase,
     started: f64,
@@ -216,7 +216,7 @@ impl Probe {
         let Some(sender) = &self.sender else { return };
         for (_, bin) in self.hosted.take_outgoing() {
             self.sent += 1;
-            let _ = sender.send(bin);
+            let _ = sender.send(makepad_app_host::hub::WebSocketOut::Binary(bin));
         }
         let now = Cx::monotonic_now();
         if self.trace && now - self.last_trace > 2.0 {

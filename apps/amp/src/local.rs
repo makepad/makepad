@@ -301,7 +301,7 @@ impl LocalCache {
 }
 
 /// Whether `path` lies in `folder` (or is it).
-fn within(path: &str, folder: &str) -> bool {
+pub(crate) fn within(path: &str, folder: &str) -> bool {
     let folder = folder.trim_end_matches('/');
     path.strip_prefix(folder).is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
 }

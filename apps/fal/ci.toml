@@ -1,0 +1,8 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[app.macos]
+capture = ""
+date = "2026-11-21"
+digest = "2743dd1280aa272035f1ab5f3e147a90ab61eabbd11c7bb105cfcd1dfa6912ae"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"

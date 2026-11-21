@@ -221,7 +221,7 @@ fn check(explicit: Option<&str>) {
 
     // The fast model, one image per job, as a take's frame without a live session.
     for i in 0..6 {
-        let result = hub.edit(FAST_MODEL, &png, PROMPT, SEED, Some(4), Some(0.6), Some((512, 512)));
+        let result = hub.edit(FAST_MODEL, &png, PROMPT, SEED, Some(4), Some(0.6), Some((512, 512)), &|| false);
         if i == 0 {
             if let Ok((png, _)) = &result {
                 if let Ok(rgb) = image::decode_png(png) {
@@ -275,7 +275,7 @@ fn check(explicit: Option<&str>) {
 
     // The vision model: a prompt from a picture.
     for i in 0..3 {
-        let result = hub.describe(VISION_MODEL, &jpeg, "Describe this picture in one short sentence.", 60);
+        let result = hub.describe(VISION_MODEL, &jpeg, "Describe this picture in one short sentence.", 60, &|| false);
         if let Ok((text, _)) = &result {
             eprintln!("[check] vision says: {}", text.trim().replace('\n', " "));
         }
@@ -284,7 +284,7 @@ fn check(explicit: Option<&str>) {
             residency(&hub, "with vision");
         }
     }
-    job("klein edit after vision", hub.edit(FAST_MODEL, &png, PROMPT, SEED, Some(4), Some(0.6), Some((512, 512))).map(|r| r.1));
+    job("klein edit after vision", hub.edit(FAST_MODEL, &png, PROMPT, SEED, Some(4), Some(0.6), Some((512, 512)), &|| false).map(|r| r.1));
     residency(&hub, "klein back");
 
     // The quality models at 1024.
@@ -293,12 +293,12 @@ fn check(explicit: Option<&str>) {
         for i in 0..2 {
             job(
                 &format!("{model} edit 1024 20 steps #{i}"),
-                hub.edit(model, &png_1024, PROMPT, SEED, Some(20), Some(0.75), Some((1024, 1024))).map(|r| r.1),
+                hub.edit(model, &png_1024, PROMPT, SEED, Some(20), Some(0.75), Some((1024, 1024)), &|| false).map(|r| r.1),
             );
         }
         residency(&hub, &format!("with {model}"));
     }
-    job("klein edit after quality", hub.edit(FAST_MODEL, &png, PROMPT, SEED, Some(4), Some(0.6), Some((512, 512))).map(|r| r.1));
+    job("klein edit after quality", hub.edit(FAST_MODEL, &png, PROMPT, SEED, Some(4), Some(0.6), Some((512, 512)), &|| false).map(|r| r.1));
     residency(&hub, "at end");
     eprintln!("[check] done (the process stays so its log can be read)");
 }
@@ -661,7 +661,7 @@ fn redraws_for_ab(
     let png = image::encode_png(&still).unwrap_or_else(|e| fail(&e));
     let job_runs = if jobs { vec![("klein-job", FAST_MODEL, FAST_STEPS), ("dev-job", QUALITY_MODEL, 8)] } else { Vec::new() };
     for (name, model, steps) in job_runs {
-        match hub.edit(model, &png, &prompt, seed, Some(steps), None, Some((512, 512))) {
+        match hub.edit(model, &png, &prompt, seed, Some(steps), None, Some((512, 512)), &|| false) {
             Ok((bytes, time)) => {
                 let path = std::path::Path::new(out).join(format!("{tag}-{name}.png"));
                 if let Err(e) = std::fs::write(&path, &bytes) {

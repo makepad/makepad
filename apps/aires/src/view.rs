@@ -1,6 +1,6 @@
-use crate::source::{Answer, AnswerResult, Cleared, Snapshot};
+use crate::source::{Answer, AnswerResult, Cleared, Press, Snapshot};
 use makepad_civil_time::{local_or_utc, MONTH_ABBR, WEEKDAY_ABBR};
-use makepad_devhub::ask::{kept_words, untaken, Msg, Question, State};
+use makepad_devhub::ask::{kept_words, untaken, Item, Msg, Question, State};
 use makepad_widgets::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -72,6 +72,9 @@ pub enum Kind {
     /// A message of the card's thread; `brief`: the one line a folded card shows
     Msg { message: Msg, option: String, brief: bool },
     Option { number: u32, text: String, recommended: bool },
+    /// A review card's item, its Yes and No; `refused`: why its last press was refused, when that
+    /// came after it was last shown
+    Item { number: u32, item: Item, refused: Option<String> },
     Decide,
     Input,
     /// A card's bottom edge
@@ -99,6 +102,7 @@ impl Row {
             Kind::ContextBody(_) => ("context body", 0),
             Kind::Msg { message, .. } => ("message", message.seq),
             Kind::Option { number, .. } => ("option", *number),
+            Kind::Item { number, .. } => ("item", *number),
             Kind::Decide => ("decide", 0),
             Kind::Input => ("input", 0),
             Kind::End => ("end", 0),
@@ -139,6 +143,21 @@ fn notice(q: &Question, errors: &HashMap<String, String>) -> Option<String> {
         1 => format!("An answer was refused: {why}"),
         n => format!("{n} answers were refused, the last: {why}"),
     })
+}
+
+/// A review card's count: `2 of 3 decided`, and how.
+fn items_line(items: &[Item]) -> String {
+    let count = |word: &str| items.iter().filter(|i| i.decided == word).count();
+    let (yes, no) = (count("yes"), count("no"));
+    match yes + no {
+        n if n == items.len() => format!("{yes} yes, {no} no"),
+        n => format!("{n} of {} decided", items.len()),
+    }
+}
+
+/// Why the item's last press was refused, when it came after the item was last shown.
+fn item_refused(q: &Question, item: &Item) -> Option<String> {
+    q.refused.iter().rev().find(|r| r.item == item.key && r.at_ms >= item.at_ms).map(|r| r.why.clone())
 }
 
 /// Where the person's clear of the history stands.
@@ -205,21 +224,32 @@ pub fn rows(questions: &[Question], expanded: &HashSet<String>, errors: &HashMap
                     push(Kind::Context { shown });
                     if shown { push(Kind::ContextBody(q.context.clone())); }
                 }
+                // a review card: its count and its items, each with its Yes and No; the presses are
+                // said in the items, so its thread shows the words alone
+                if !q.items.is_empty() {
+                    push(Kind::Field { label: "Items", text: items_line(&q.items) });
+                    for (n, item) in q.items.iter().enumerate() {
+                        push(Kind::Item { number: n as u32 + 1, item: item.clone(), refused: item_refused(q, item) });
+                    }
+                }
                 // the conversation so far, then the choice
-                for m in &q.thread { push(message(q, m, false)); }
+                for m in q.thread.iter().filter(|m| m.item.is_empty()) { push(message(q, m, false)); }
                 if q.state != State::Closed {
                     for (i, text) in q.options.iter().enumerate() {
                         push(Kind::Option { number: (i + 1) as u32, text: text.clone(), recommended: *text == q.recommend });
                     }
-                    push(Kind::Decide);
+                    // (a review card is decided item by item, never left to main)
+                    if q.items.is_empty() { push(Kind::Decide); }
                     push(Kind::Input);
                 }
             } else {
                 let last = match q.state {
                     State::Answered => q.thread.iter().rev().find(|m| m.by == "user" && m.kind == "answer"),
-                    _ => q.thread.last(),
+                    _ => q.thread.iter().rev().find(|m| m.item.is_empty()),
                 };
-                if let Some(m) = last { push(message(q, m, true)); }
+                // (a folded review card says how its items went)
+                if !q.items.is_empty() { push(Kind::Field { label: "Items", text: items_line(&q.items) }); }
+                else if let Some(m) = last { push(message(q, m, true)); }
             }
             push(Kind::End);
             push(Kind::Gap);
@@ -446,13 +476,31 @@ script_mod! {
             color_disabled: theme.color_u_hidden
         }
     }
+    // A review card's Yes and No: the same weight, so the card leans neither way.
+    let Verdict = Choice{
+        width: Fill
+        padding: Inset{left: 12 right: 12 top: 7 bottom: 7}
+        align: Align{x: 0.5 y: 0.5}
+        label_align: Align{x: 0.5 y: 0.5}
+        draw_text +: {text_style: theme.font_bold{font_size: 10}}
+    }
+    // A line of an item: its label in a narrow column, its text wrapping beside it.
+    let ItemLine = View{
+        width: Fill height: Fit flow: Right spacing: 8
+        label := Label{
+            width: 40 height: Fit
+            padding: Inset{top: 1}
+            draw_text +: {color: theme.color_text_meta text_style: theme.font_regular{font_size: 8}}
+        }
+        text := Text{draw_text +: {text_style: theme.font_regular{font_size: 9}}}
+    }
     mod.widgets.InboxBase = #(Inbox::register_widget(vm))
     mod.widgets.Inbox = set_type_default() do mod.widgets.InboxBase{
         width: Fill height: Fill
         list := PortalList{
             width: Fill height: Fill
             scroll_bar: ScrollBar{}
-            scan: [@Header, @Section, @Confirm, @Head, @Notice, @Field, @Context, @ContextBody, @Msg, @Option, @Decide, @Input, @End, @Gap, @Empty]
+            scan: [@Header, @Section, @Confirm, @Head, @Notice, @Field, @Context, @ContextBody, @Msg, @Option, @Item, @Decide, @Input, @End, @Gap, @Empty]
             Header := View{
                 width: Fill height: Fit flow: Down spacing: 3
                 padding: Inset{left: 22 right: 18 top: 16 bottom: 2}
@@ -567,6 +615,44 @@ script_mod! {
                 padding: Inset{left: 18 right: 16 top: 3 bottom: 3}
                 choose := Choice{}
                 pick := Recommended{}
+            }
+            Item := Piece{
+                padding: Inset{left: 18 right: 16 top: 3 bottom: 5}
+                RoundedView{
+                    width: Fill height: Fit flow: Down spacing: 6
+                    padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
+                    draw_bg +: {color: mix(theme.color_surface_bright, theme.color_text, 0.05) border_radius: 8.0}
+                    View{
+                        width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                        head := Text{draw_text +: {text_style: theme.font_bold{font_size: 9.5}}}
+                        tag_chip := Chip{
+                            draw_bg +: {color: mix(theme.color_surface_bright, theme.color_text, 0.14)}
+                            tag_text := ChipText{draw_text +: {color: theme.color_on_surface_variant}}
+                        }
+                        chip_yes := Chip{draw_bg +: {color: theme.color_success_container} ChipText{text: "Yes" draw_text +: {color: theme.color_on_success_container}}}
+                        chip_no := Chip{draw_bg +: {color: theme.color_error_container} ChipText{text: "No" draw_text +: {color: theme.color_on_error_container}}}
+                        when := Meta{}
+                    }
+                    notice := RoundedView{
+                        width: Fill height: Fit flow: Down
+                        padding: Inset{left: 9 right: 9 top: 6 bottom: 7}
+                        draw_bg +: {color: mix(theme.color_error_container, theme.color_surface_bright, 0.55) border_radius: 6.0}
+                        notice_text := Text{draw_text +: {color: theme.color_on_error_container text_style: theme.font_regular{font_size: 8.5}}}
+                    }
+                    what := Text{}
+                    why_line := ItemLine{}
+                    risks_line := ItemLine{}
+                    yes_line := ItemLine{}
+                    plan_line := ItemLine{}
+                    no_line := ItemLine{}
+                    outcome := Text{draw_text +: {color: theme.color_on_surface_variant text_style: theme.font_regular{font_size: 9}}}
+                    buttons := View{
+                        width: Fill height: Fit flow: Right spacing: 8
+                        padding: Inset{top: 2}
+                        yes := Verdict{text: "Yes"}
+                        no := Verdict{text: "No"}
+                    }
+                }
             }
             Decide := Piece{
                 padding: Inset{left: 18 right: 16 top: 3 bottom: 3}
@@ -976,6 +1062,41 @@ impl Inbox {
                     button.set_loading(cx, pending.is_some_and(|a| a.choice == Some(*number)));
                 }
             }
+            Kind::Item { item: it, refused, .. } => {
+                let open = it.decided.is_empty();
+                item.label(cx, ids!(head)).set_text(cx, &it.head);
+                item.view(cx, ids!(tag_chip)).set_visible(cx, !it.tag.is_empty());
+                item.label(cx, ids!(tag_text)).set_text(cx, &it.tag);
+                item.view(cx, ids!(chip_yes)).set_visible(cx, it.decided == "yes");
+                item.view(cx, ids!(chip_no)).set_visible(cx, it.decided == "no");
+                let when_line = item.label(cx, ids!(when));
+                when_line.set_visible(cx, !open && it.at_ms > 0);
+                when_line.set_text(cx, &when(it.at_ms, now_ms));
+                // a refusal of its last press, else what the last press found (a row that moved)
+                let notice = refused.as_ref().map(|why| format!("Not sent: {why}")).or_else(|| (open && !it.note.is_empty()).then(|| it.note.clone()));
+                item.view(cx, ids!(notice)).set_visible(cx, notice.is_some());
+                item.label(cx, ids!(notice_text)).set_text(cx, notice.as_deref().unwrap_or(""));
+                // an open item says all it is decided on; a decided one folds to its head and outcome
+                let what = item.label(cx, ids!(what));
+                what.set_visible(cx, open && !it.what.is_empty());
+                what.set_text(cx, &it.what);
+                let doubt = if it.gate { "Doubt" } else { "Why" };
+                for (path, label, text) in [(ids!(why_line), doubt, &it.why), (ids!(risks_line), "Risks", &it.risks), (ids!(yes_line), "Yes", &it.yes), (ids!(plan_line), "Plan", &it.plan), (ids!(no_line), "No", &it.no)] {
+                    let line = item.view(cx, path);
+                    line.set_visible(cx, open && !text.is_empty());
+                    line.label(cx, ids!(label)).set_text(cx, label);
+                    line.label(cx, ids!(text)).set_text(cx, text);
+                }
+                let outcome = item.label(cx, ids!(outcome));
+                outcome.set_visible(cx, !open && !it.note.is_empty());
+                outcome.set_text(cx, &it.note);
+                item.view(cx, ids!(buttons)).set_visible(cx, open);
+                for (path, yes) in [(ids!(yes), true), (ids!(no), false)] {
+                    let button = item.button(cx, path);
+                    button.set_disabled(cx, busy || !open);
+                    button.set_loading(cx, pending.and_then(|a| a.press.as_ref()).is_some_and(|p| p.item == it.key && p.yes == yes));
+                }
+            }
             Kind::Decide => {
                 let button = item.button(cx, ids!(decide));
                 button.set_disabled(cx, busy);
@@ -1027,7 +1148,7 @@ impl Widget for Inbox {
                         Kind::Header { .. } => id!(Header), Kind::Section { .. } => id!(Section), Kind::Confirm { .. } => id!(Confirm),
                         Kind::Head { .. } => id!(Head), Kind::Notice(_) => id!(Notice), Kind::Field { .. } => id!(Field),
                         Kind::Context { .. } => id!(Context), Kind::ContextBody(_) => id!(ContextBody),
-                        Kind::Msg { .. } => id!(Msg), Kind::Option { .. } => id!(Option), Kind::Decide => id!(Decide),
+                        Kind::Msg { .. } => id!(Msg), Kind::Option { .. } => id!(Option), Kind::Item { .. } => id!(Item), Kind::Decide => id!(Decide),
                         Kind::Input => id!(Input), Kind::End => id!(End), Kind::Gap => id!(Gap), Kind::Empty => id!(Empty),
                     };
                     let (mut item, existed) = list.item_with_existed(cx, index, template);
@@ -1098,6 +1219,8 @@ impl Widget for Inbox {
             // a row on its way out takes no presses.
             let Some(row) = self.drawn.get(&item.widget_uid()).cloned() else { continue };
             let mut send = None;
+            // a Yes or No binds to the row the item was drawn with, not to whatever came since
+            let mut press = None;
             match row.kind {
                 Kind::Section { clear: true, .. } if item.button(cx, ids!(clear)).clicked(&actions) => {
                     model.clear.clearing = Clearing::Confirm;
@@ -1137,6 +1260,10 @@ impl Widget for Inbox {
                     send = Some((Some(number), false, false))
                 }
                 Kind::Decide if item.button(cx, ids!(decide)).clicked(&actions) => send = Some((None, true, false)),
+                Kind::Item { item: ref it, .. } if it.decided.is_empty() && (item.button(cx, ids!(yes)).clicked(&actions) || item.button(cx, ids!(no)).clicked(&actions)) => {
+                    let yes = item.button(cx, ids!(yes)).clicked(&actions);
+                    press = Some(Press { item: it.key.clone(), row: it.row.clone(), yes });
+                }
                 Kind::Input => {
                     if let Some(text) = item.text_input(cx, ids!(draft)).changed(&actions) {
                         model.drafts.insert(row.id.clone(), text);
@@ -1152,7 +1279,17 @@ impl Widget for Inbox {
                 }
                 _ => {}
             }
-            if let Some((choice, decide, ask)) = send {
+            if let Some(press) = press {
+                if let Some(by) = cx.injected_by() {
+                    let error = format!("not sent: injected input ({by})");
+                    log!("aires: {} {}: {error}", row.id, press.item);
+                    model.errors.insert(row.id, error);
+                    changed = true;
+                    rebuild = true;
+                } else if !model.pending.contains_key(&row.id) {
+                    cx.widget_action(self.widget_uid(), InboxAction::Answer(Answer { id: row.id, choice: None, decide: false, text: String::new(), ask: false, press: Some(press) }));
+                }
+            } else if let Some((choice, decide, ask)) = send {
                 if let Some(by) = cx.injected_by() {
                     let error = format!("not sent: injected input ({by})");
                     log!("aires: {}: {error}", row.id);
@@ -1161,7 +1298,7 @@ impl Widget for Inbox {
                     rebuild = true;
                 } else if !model.pending.contains_key(&row.id) {
                     let text = model.drafts.get(&row.id).cloned().unwrap_or_default();
-                    cx.widget_action(self.widget_uid(), InboxAction::Answer(Answer { id: row.id, choice, decide, text, ask }));
+                    cx.widget_action(self.widget_uid(), InboxAction::Answer(Answer { id: row.id, choice, decide, text, ask, press: None }));
                 }
             }
         }
@@ -1178,10 +1315,12 @@ mod tests {
     #[test]
     fn cards_follow_question_state_and_keep_the_thread_visible() {
         let mut questions = crate::source::demo_questions();
+        // (the review card has its own test)
+        questions.retain(|q| q.items.is_empty());
         let mut closed = questions.iter().find(|q| q.id == "Q1").unwrap().clone();
         closed.id = "Q9".into();
         closed.state = State::Closed;
-        closed.refused.push(Refused { at_ms: 0, chain: "an untrusted sender".into(), why: "injected".into() });
+        closed.refused.push(Refused { at_ms: 0, chain: "an untrusted sender".into(), why: "injected".into(), ..Refused::default() });
         questions.push(closed);
         let mut expanded = HashSet::from(["Q9".into()]);
         let (errors, unseen) = (HashMap::new(), HashSet::from(["Q1".to_string()]));
@@ -1221,7 +1360,7 @@ mod tests {
         reopened.insert(0, newer);
         let q1 = reopened.iter_mut().find(|q| q.id == "Q1").unwrap();
         q1.thread.push(Msg { seq: 9, at_ms: filed + 60_000, by: "main".into(), kind: "reopen".into(), choice: None, decide: false,
-            text: "Which do you pick?".into(), source: "main".into(), chain: String::new(), taken: false });
+            text: "Which do you pick?".into(), source: "main".into(), chain: String::new(), taken: false, ..Msg::default() });
         let turn = rows(&reopened, &HashSet::new(), &errors, &HashSet::new(), None, &idle);
         let heads: Vec<&str> = turn.iter().filter(|r| r.section == Section::Yours && matches!(r.kind, Kind::Head { .. })).map(|r| r.id.as_str()).collect();
         assert_eq!(heads, ["Q1", "Q7"], "the reopened question comes first");
@@ -1274,5 +1413,64 @@ mod tests {
         // A ghost whose row comes back is kept, not doubled.
         let back = merge(&[(&before[1], false), (&before[2], true)], &before[1..3]);
         assert_eq!(back, [Step::Keep(0, 0), Step::Keep(1, 1)], "a row that comes back revives its ghost");
+    }
+
+    /// A review card is one block per item, each with all it is decided on and its own Yes and
+    /// No; a press binds to the row the item was drawn with, and a row that moved comes back as it
+    /// stands now, open. The demo's card: makepad#9001 open, relax#9002 cleared, makepad#9003
+    /// pressed on a row that moved, relax#9004 closed on GitHub (tagged, the same Yes and No).
+    #[test]
+    fn a_review_card_gives_a_yes_and_no_per_item_bound_to_the_row_it_showed() {
+        use makepad_devhub::askpeer::{Judged, Source};
+        use makepad_strict_json::parse;
+        let store = crate::source::demo();
+        let tray = || Judged { source: Source::Tray, chain: "test".into(), why: String::new() };
+        let show = || {
+            let mut out = Vec::new();
+            store.serve(r#"show {"id":"Q6"}"#, &tray, &mut out);
+            Question::from_value(&parse(out[0].as_bytes()).unwrap()).unwrap()
+        };
+        let card = |q: &Question| {
+            let all = rows(std::slice::from_ref(q), &HashSet::new(), &HashMap::new(), &HashSet::new(), None, &ClearView::default());
+            all.into_iter().filter(|r| !matches!(r.kind, Kind::Gap | Kind::End | Kind::Header { .. } | Kind::Section { .. })).collect::<Vec<_>>()
+        };
+        let q = show();
+        let rows_now = card(&q);
+        let items: Vec<(&str, &str, &str, bool)> = rows_now.iter().filter_map(|r| match &r.kind {
+            Kind::Item { item, refused, .. } => Some((item.key.as_str(), item.decided.as_str(), item.note.as_str(), refused.is_some())),
+            _ => None,
+        }).collect();
+        assert_eq!(items.iter().map(|i| (i.0, i.1)).collect::<Vec<_>>(), [("makepad#9001", ""), ("relax#9002", "yes"), ("makepad#9003", ""), ("relax#9004", "")], "an item row each, in the card's order");
+        assert_eq!(q.items.iter().map(|i| i.tag.as_str()).collect::<Vec<_>>(), ["", "", "", "closed on GitHub"], "a closed item carries its tag, and its Yes and No");
+        assert!(items[2].2.contains("changed after you saw it") && !items[2].3, "the row that moved is shown as it stands now, saying so");
+        assert!(rows_now.iter().any(|r| matches!(&r.kind, Kind::Field { label: "Items", text } if text == "1 of 4 decided")), "the card counts its decisions");
+        assert!(!rows_now.iter().any(|r| matches!(r.kind, Kind::Option { .. } | Kind::Decide | Kind::Msg { .. })), "no options, no delegation, no press echoed as a message");
+        assert!(rows_now.iter().any(|r| matches!(r.kind, Kind::Input)), "the person can still write to main");
+        assert!(matches!(&rows_now.iter().find(|r| matches!(r.kind, Kind::Item { number: 1, .. })).unwrap().kind, Kind::Item { item, .. } if item.plan == "The Android lane takes it." && item.gate), "main's plan rides under its item's Yes");
+        // a press binds to the row its item was drawn with
+        let press = |key: &str, row: &str, yes: bool| {
+            let answer = Answer { id: "Q6".into(), choice: None, decide: false, text: String::new(), ask: false, press: Some(Press { item: key.into(), row: row.into(), yes }) };
+            let mut out = Vec::new();
+            store.serve(&answer.line(), &tray, &mut out);
+            parse(out[0].as_bytes()).unwrap()
+        };
+        let old = press("makepad#9003", "0000000000000003", true);
+        assert!(old.get("err").and_then(|e| e.as_str()).is_some_and(|e| e.contains("the card changed")), "the row the card no longer shows binds to nothing: {old:?}");
+        assert_eq!(show().items[2], q.items[2], "and changes nothing: the item stays as the card shows it");
+        // a press the master refused or the gate failed is said on its item, until it is shown anew
+        let mut failed = q.clone();
+        failed.refused.push(Refused { at_ms: q.items[0].at_ms, item: "makepad#9001".into(), why: "Not declined: not recorded".into(), ..Refused::default() });
+        assert!(card(&failed).iter().any(|r| matches!(&r.kind, Kind::Item { item, refused: Some(why), .. } if item.key == "makepad#9001" && why.contains("not recorded"))), "the item says its press was not sent");
+        let no = press("makepad#9001", &q.items[0].row, false);
+        assert_eq!(no.get("ok").and_then(|v| v.as_bool()), Some(true), "{no:?}");
+        let yes = press("makepad#9003", &q.items[2].row, true);
+        assert_eq!(yes.get("ok").and_then(|v| v.as_bool()), Some(true), "{yes:?}");
+        assert_eq!(show().state, State::Open, "an item still open keeps the card the person's");
+        let closed_no = press("relax#9004", &q.items[3].row, false);
+        assert_eq!(closed_no.get("ok").and_then(|v| v.as_bool()), Some(true), "{closed_no:?}");
+        let done = show();
+        assert_eq!((done.items.iter().map(|i| i.decided.as_str()).collect::<Vec<_>>(), done.state), (vec!["no", "yes", "yes", "no"], State::Answered), "the last decision answers the card");
+        let folded = card(&done);
+        assert!(folded.iter().any(|r| matches!(&r.kind, Kind::Field { label: "Items", text } if text == "2 yes, 2 no")) && !folded.iter().any(|r| matches!(r.kind, Kind::Item { .. })), "an answered review card folds to how its items went");
     }
 }

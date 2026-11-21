@@ -1060,7 +1060,7 @@ fn testpattern_hub_service_runs_through_the_http_routes() {
         port: 0,
         cache_dir: cache_dir.clone(),
         registry: Registry {
-            models: vec![ModelSpec {
+            models: vec![ModelSpec { on_demand: Vec::new(), host_load: None,
                 id: "testpattern".to_string(),
                 domain: Domain::Image,
                 backend: "testpattern".to_string(),

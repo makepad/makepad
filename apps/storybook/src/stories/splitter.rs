@@ -154,6 +154,35 @@ script_mod! {
             }
         }
 
+        StoryHeading{text: "Sash: a pane edge as a hairline"}
+        StoryNote{text: "Sash is Splitter drawn as a line: at rest the bar is one pixel, the edge between two panes; rest the pointer on it for a moment and the whole strip lights in the hover colour, so a pointer crossing it on its way somewhere else does not flash it. A drag lights it at once. Its hover_dwell is the moment, in seconds, and any Splitter can have one."}
+        StoryRow{
+            View{
+                width: 300. height: 160.
+                Sash{
+                    axis: Horizontal
+                    align: Weighted(0.5)
+                    size: 4.
+                    min_vertical: 60.
+                    max_vertical: 60.
+                    a: Pane{Label{text: "left"}}
+                    b: Pane{Label{text: "right"}}
+                }
+            }
+            View{
+                width: 300. height: 160.
+                Sash{
+                    axis: Vertical
+                    align: Weighted(0.5)
+                    size: 4.
+                    min_horizontal: 40.
+                    max_horizontal: 40.
+                    a: Pane{Label{text: "above"}}
+                    b: Pane{Label{text: "below"}}
+                }
+            }
+        }
+
         StoryHeading{text: "A window too small is a passing condition"}
         StoryNote{text: "The same split twice, both asked for 260 points and both keeping each pane to at least 90. On the right there is room and the bar stands where it was asked to. On the left there is not room for both floors at all, so each pane misses its own by the same share rather than one of them taking the whole shortfall — a squeezed layout goes on looking like the layout. Nothing was written to the align to bring that about, which is why the one on the right is still at 260."}
         StoryRow{

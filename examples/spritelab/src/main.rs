@@ -297,13 +297,7 @@ impl Widget for SpriteLab {
                 screen_instances: &instances,
                 view_model: None,
             };
-            let stage = PreviewStage {
-                ground: false,
-                sky: true,
-                ground_half: 8.0,
-                ground_color: vec4(0.0, 0.0, 0.0, 1.0),
-                dark: false,
-            };
+            let stage = PreviewStage { sky: true, ..PreviewStage::empty() };
             self.renderer.draw_preview(
                 cx3d,
                 &mut self.draw_list,

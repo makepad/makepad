@@ -377,6 +377,7 @@ impl Demo {
                 agent: agent.into(),
                 proof: false,
                 wire: false,
+                witness: String::new(),
                 asked_ms: queued_ms,
                 changed_ms: t,
             });

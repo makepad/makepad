@@ -1,6 +1,7 @@
 //! Where Synth keeps its files: wherever `SYNTH_DATA_DIR` says (a test run
 //! keeps its data apart), else `local/synth` in the Makepad checkout Synth
-//! runs in, else (an installed Synth) the app's data folder. Inside it:
+//! runs in (else the one it was compiled in, while it is there), else (an
+//! installed Synth) the app's data folder. Inside it:
 //! `scores/` (the library, `*.score`), `drafts/` (unsaved changes),
 //! `samples/` (audio a score plays by name), `renders/` (WAV exports),
 //! `resources/` (the downloads: the GM SoundFont, the MIDI datasets) and
@@ -18,6 +19,12 @@ pub fn data_dir() -> PathBuf {
         // Not on Android: there the checkout is the APK's read-only source pack.
         #[cfg(not(target_os = "android"))]
         if let Some(dir) = checkout_data_dir(std::env::current_dir().ok().as_deref(), std::env::current_exe().ok().as_deref()) {
+            return dir;
+        }
+        // A compiled Synth started from outside any checkout (a Mac's Applications, its cwd `/`):
+        // the checkout it was built in, while it is there, as its WM and its icons find it.
+        #[cfg(not(target_os = "android"))]
+        if let Some(dir) = checkout_data_dir(Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))), None) {
             return dir;
         }
         makepad_widgets::makepad_platform::home::app_data_dir("synth").unwrap_or_else(|| PathBuf::from("synth-data"))

@@ -285,7 +285,7 @@ fn local_service_keepalive_is_accepted_by_the_real_testpattern_service() {
         port: 0,
         cache_dir: root.0.clone(),
         registry: Registry {
-            models: vec![ModelSpec {
+            models: vec![ModelSpec { on_demand: Vec::new(), host_load: None,
                 id: "testpattern".to_string(),
                 domain: Domain::Image,
                 backend: "testpattern".to_string(),

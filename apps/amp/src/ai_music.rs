@@ -1028,6 +1028,9 @@ pub struct AiMode {
     /// The uri last seen playing, and whether it was an AI song.
     pub last_uri: Option<String>,
     pub last_was_ai: bool,
+    /// The folders of AI songs this run asked the library to look in
+    /// ([`AiMode::folders_to_add`]).
+    pub folders_asked: Vec<String>,
 }
 
 impl Default for AiMode {
@@ -1048,6 +1051,7 @@ impl Default for AiMode {
             conversation: String::new(),
             last_uri: None,
             last_was_ai: false,
+            folders_asked: Vec::new(),
         }
     }
 }
@@ -1100,6 +1104,26 @@ impl AiMode {
     pub fn is_ai(&self, uri: &str) -> bool {
         self.made().any(|s| uri_of(&s.path) == uri)
     }
+
+    /// The folders the made songs lie in that the library does not look in
+    /// (`folders`, the added ones), each asked for once a run. The AI list
+    /// plays from the library, so its songs' folders belong in it, as a song
+    /// made here adds its own. The list is the machine's (`session_dir`) and
+    /// a library is a start's: an Amp with a library of its own (one started
+    /// from the Dock, beside a checkout's) would otherwise list songs that
+    /// never play.
+    pub fn folders_to_add(&mut self, folders: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for song in self.songs.iter().filter(|s| !s.path.is_empty()) {
+            let Some(folder) = Path::new(&song.path).parent().map(|p| p.to_string_lossy().into_owned()).filter(|f| !f.is_empty()) else { continue };
+            let listed = folders.iter().any(|added| crate::local::within(&folder, added));
+            if !listed && !out.contains(&folder) && !self.folders_asked.contains(&folder) {
+                out.push(folder);
+            }
+        }
+        self.folders_asked.extend(out.iter().cloned());
+        out
+    }
 }
 
 /// The library uri of a song file.
@@ -1119,6 +1143,19 @@ mod tests {
         let without = writer_missing(&pins, &[], &["192.0.2.91".into()]);
         assert!(without.contains("runs without Claude"), "{without}");
         assert!(writer_missing(&[], &[], &[]).contains("AI Hub not running"));
+    }
+
+    /// The AI list another start of Amp made, whose folder this library
+    /// does not look in, asks for that folder once; a folder the library
+    /// looks in (or lies in one it does) is not asked for.
+    #[test]
+    fn the_ai_lists_folder_joins_the_library() {
+        let song = |path: &str| SongPrompt { path: path.into(), ..SongPrompt::default() };
+        let mut ai = AiMode { songs: vec![song("/m/AI music/a.ogg"), song(""), song("/m/AI music/b.ogg"), song("/x/c.ogg")], ..AiMode::default() };
+        assert_eq!(ai.folders_to_add(&["/x".into()]), ["/m/AI music"], "an unlisted folder, once; the song being made has none");
+        assert_eq!(ai.folders_to_add(&[]), ["/x"], "each asked once a run");
+        let mut fresh = AiMode { songs: ai.songs.clone(), ..AiMode::default() };
+        assert!(fresh.folders_to_add(&["/m".into(), "/x/".into()]).is_empty(), "inside added folders");
     }
 
     #[test]

@@ -159,6 +159,7 @@ mod tests {
             tool: "eval".into(),
             args: r#"{"expression":"2+3*4"}"#.into(),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         };
         let mut exec = executor;
         let ExecOutcome::Done(result) = exec.execute(&mut cx, &call) else {

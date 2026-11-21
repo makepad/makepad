@@ -1736,6 +1736,7 @@ mod tests {
             tool: "eval".into(),
             args: r#"{"expression":"sin(pi/2)"}"#.into(),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         };
         let result = crate::ai::answer(a.doc(), &call);
         assert_eq!(result.outcome, ToolOutcome::Ok);

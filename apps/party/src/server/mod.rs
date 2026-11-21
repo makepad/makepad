@@ -253,11 +253,13 @@ pub fn html(body: &str) -> Resp {
 /// What answers the routes under the party code.
 pub trait Handler: Send + Sync + 'static {
     fn handle(&self, request: &mut Request<'_>) -> Resp;
+    fn stop(&self) {}
 }
 
 /// The running server: [`Server::stop`] ends its accept loop.
 pub struct Server {
     pub port: u16,
+    handler: Arc<dyn Handler>,
     stop: Arc<AtomicBool>,
     wake: SocketAddr,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -285,7 +287,7 @@ impl Server {
         let shared = Arc::new(Shared {
             tls,
             code,
-            handler,
+            handler: handler.clone(),
             stop: stop.clone(),
             per_ip: Mutex::new(HashMap::new()),
             active: AtomicUsize::new(0),
@@ -296,11 +298,12 @@ impl Server {
         let thread = std::thread::Builder::new()
             .name("party-accept".into())
             .spawn(move || accept_loop(listener, shared))?;
-        Ok(Server { port: local.port(), stop, wake, thread: Some(thread), handshakes, reaper: Some(reaper) })
+        Ok(Server { port: local.port(), handler, stop, wake, thread: Some(thread), handshakes, reaper: Some(reaper) })
     }
 
     pub fn stop(&mut self) {
         if !self.stop.swap(true, Ordering::AcqRel) {
+            self.handler.stop();
             let _ = TcpStream::connect(self.wake);
         }
         if let Some(thread) = self.thread.take() {

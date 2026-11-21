@@ -16,12 +16,17 @@
 //! - `POST keep?source=N&level=me|wall|keep`: wall or keep applies once the
 //!   picture is redrawn.
 //! - `POST delete?source=N`, `POST leave`.
-//! - Live (`live.rs`): `POST live/queue` to wait for a turn, `GET live` for
-//!   where the guest stands (the page asks every second or so; a page that
-//!   stops asking loses its place), `POST live/offer` with the call's SDP
-//!   offer once it is their turn (answered with the SDP answer), and
-//!   `POST live/leave`. Each answers `{"available", "state":
-//!   "out|waiting|up|live", "ahead", "left", "waiting"}`.
+//! - `POST live/queue` admits the guest to call immediately. Send the SDP
+//!   offer to `POST live/offer` for its SDP answer. The previous guest
+//!   keeps the screen until the new call connects. A newer request
+//!   displaces a taker whose call is still connecting.
+//! - `GET live` keeps the guest present and returns `available`, `screen`
+//!   and `state` (out, up, starting or live). An up guest gets `left` in
+//!   seconds to connect. A displaced guest gets `"bumped":true` until
+//!   they queue again or leave. A quiet page loses its slot.
+//! - `GET live/stream` pushes the same state and the guest's own redrawn
+//!   frames. `POST live/wish` changes their prompt, `POST live/screen`
+//!   changes where the redraw is shown, and `POST live/leave` releases it.
 //! - `camtest...`: the camera check (camtest.rs), so a phone can be tried
 //!   on the party's own address.
 //!
@@ -108,6 +113,7 @@ const GUESTS_ABOUT: Duration = Duration::from_secs(3 * 60);
 
 /// The party: its store, the takes waiting for the hub, and live.
 pub struct Party {
+    stopped: std::sync::atomic::AtomicBool,
     store: Mutex<Store>,
     /// Woken when a store guard that changed the store goes: a phone's
     /// stream waits on it for something new to send.
@@ -168,9 +174,9 @@ impl Asks {
     }
 
     /// Blocks (the hub worker thread, never the UI) until no ask waits.
-    pub fn wait_none(&self) {
+    pub fn wait_none(&self, stopped: impl Fn() -> bool) {
         let waiting = self.waiting.lock().unwrap_or_else(|p| p.into_inner());
-        drop(self.done.wait_while(waiting, |n| *n > 0).unwrap_or_else(|p| p.into_inner()));
+        drop(self.done.wait_while(waiting, |n| *n > 0 && !stopped()).unwrap_or_else(|p| p.into_inner()));
     }
 }
 
@@ -187,6 +193,7 @@ impl Party {
     /// `budget`: the bytes of pictures the store may hold and promise.
     pub fn new(kept: PathBuf, budget: Budget) -> Party {
         Party {
+            stopped: Default::default(),
             store: Mutex::new(Store::new(kept, budget)),
             changed: Condvar::new(),
             queue: Queue::default(),
@@ -203,6 +210,22 @@ impl Party {
     pub fn with_settings(mut self, settings: Settings) -> Party {
         self.settings = Arc::new(settings);
         self
+    }
+
+    pub(crate) fn stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Wake the party's workers and withdraw their requests from the hub.
+    pub fn stop_workers(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::Release);
+        // Take each waiter's lock so shutdown cannot race its entry into wait.
+        drop(self.seen.lock().unwrap_or_else(|p| p.into_inner()));
+        self.arrived.notify_all();
+        drop(self.asks.waiting.lock().unwrap_or_else(|p| p.into_inner()));
+        self.asks.done.notify_all();
+        self.live.wake_worker();
+        self.queue.wake_worker();
     }
 
     /// A guest asked something just now. The first after a quiet while
@@ -233,7 +256,7 @@ impl Party {
     /// wanted warm now and whether guests are about.
     pub fn next_keep(&self, timeout: Option<Duration>) -> Wanted {
         let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
-        let wanted = |s: &mut Seen| !s.warm && !s.warm_voice;
+        let wanted = |s: &mut Seen| !s.warm && !s.warm_voice && !self.stopped();
         let mut seen = match timeout {
             Some(timeout) => self.arrived.wait_timeout_while(seen, timeout, wanted).unwrap_or_else(|p| p.into_inner()).0,
             None => self.arrived.wait_while(seen, wanted).unwrap_or_else(|p| p.into_inner()),
@@ -348,7 +371,7 @@ impl Api {
         };
         let started = Instant::now();
         let turn = self.party.asks.begin();
-        let heard = hub.transcribe(&wav);
+        let heard = hub.transcribe(&wav, &|| self.party.stopped());
         drop(turn);
         let seconds = wav_seconds(&wav);
         match heard {
@@ -396,7 +419,9 @@ impl Api {
                 IdeasClaim::Ask(picture) => {
                     let started = Instant::now();
                     let turn = self.party.asks.begin();
-                    let said = crate::ideas::ask(hub, &picture);
+                    let said = crate::ideas::ask(hub, &picture, &|| {
+                        self.party.stopped() || self.party.store().source(Who::Guest(guest), source).is_err()
+                    });
                     drop(turn);
                     let ideas = match said {
                         Ok(ideas) => {
@@ -489,7 +514,10 @@ impl Api {
         Self::limit(&self.uploads_by_ip, &request.peer)?;
         let source = id(request, "source")?;
         let wish = clean_wish(request.body(MAX_WISH_BYTES)?)?;
-        let take = self.party.store().wish(Who::Guest(guest), source, wish).map_err(refused)?;
+        let take = self.party.store().wish(Who::Guest(guest), source, wish.clone()).map_err(refused)?;
+        if let Some(wish) = &wish {
+            self.party.live.remember(wish);
+        }
         eprintln!("[party] {} take {take}: asked for, with a wish", crate::worker::clock());
         self.party.queue.push(take);
         Ok(json(200, sj::obj(vec![("take", Value::Int(take as i64))]).to_json()))
@@ -584,7 +612,7 @@ impl Api {
         loop {
             // A guest live on the screen has it: their redraw as it comes,
             // the loops again once their turn is over.
-            let caption = self.party.live.board().filter(|b| matches!(b.standing, Standing::Live { .. })).and_then(|b| b.caption());
+            let caption = self.party.live.board().filter(|b| b.standing == Standing::Live).and_then(|b| b.caption());
             if let Some(caption) = caption {
                 let state = {
                     let store = self.party.store();
@@ -597,7 +625,7 @@ impl Api {
                     (said, live_sent) = (state, Instant::now());
                 }
                 news = Instant::now();
-                match self.party.live.frame_after(live_shown, LIVE_LOOK) {
+                match self.party.live.stream_frame(None, live_shown, LIVE_LOOK) {
                     Some(frame) => {
                         live_shown = frame.count;
                         if let Some(jpeg) = frame.jpeg() {
@@ -712,62 +740,74 @@ impl Api {
     }
 
     fn leave(&self, guest: GuestId) -> Resp {
-        self.party.live.leave(guest);
         let persist = self.party.store().leave(guest);
+        self.party.live.leave(guest);
         self.party.persist(persist);
         json(200, "{}".into())
     }
 
-    /// Where `guest` stands in live, as the page shows it. Asking keeps their place.
-    /// Where `guest` stands; asking keeps their place in line.
+    /// Reading the state keeps the guest's slot alive.
     fn live_state(&self, guest: GuestId) -> Resp {
         json(200, self.live_json(guest, true).0)
     }
 
-    /// Where `guest` stands for the live slot, as JSON (`available`,
-    /// `waiting`, `state`, `ahead` or `left`, and `screen`), and that
-    /// standing; `seen` keeps their place in line.
+    /// The phone polls and streams the same state. Only a poll marks it seen.
     fn live_json(&self, guest: GuestId, seen: bool) -> (String, Standing) {
         let live = &self.party.live;
-        let (standing, waiting, screen, now) = live.change(|slots, now| {
+        let (standing, bumped, screen, others, now) = live.change(|slots, now| {
             if seen {
                 slots.seen(guest, now);
+                slots.page(guest, now);
             }
-            (slots.standing(guest), slots.waiting(), slots.screen(guest), now)
+            (slots.standing(guest), slots.bumped(guest), slots.screen(guest), slots.others(guest, now), now)
         });
-        let left = |until: f64| Value::Int((until - now).max(0.0).ceil() as i64);
         let mut fields = vec![
             ("available", Value::Bool(live.available())),
-            ("waiting", Value::Int(waiting as i64)),
             ("screen", Value::Bool(screen)),
+            ("others", Value::Int(others as i64)),
         ];
         match standing {
-            Standing::Out => fields.push(("state", sj::s("out"))),
-            Standing::Waiting { ahead } => fields.extend([("state", sj::s("waiting")), ("ahead", Value::Int(ahead as i64))]),
-            Standing::Up { until } => fields.extend([("state", sj::s("up")), ("left", left(until))]),
-            Standing::Starting => fields.push(("state", sj::s("starting"))),
-            Standing::Live { until } => {
-                fields.push(("state", sj::s("live")));
-                fields.extend(until.map(|until| ("left", left(until))));
+            Standing::Out => {
+                fields.push(("state", sj::s("out")));
+                if bumped {
+                    fields.push(("bumped", Value::Bool(true)));
+                }
             }
+            Standing::Up { until } => fields.extend([("state", sj::s("up")), ("left", Value::Int((until - now).ceil() as i64))]),
+            Standing::Starting => fields.push(("state", sj::s("starting"))),
+            Standing::Live => fields.push(("state", sj::s("live"))),
         }
         (sj::obj(fields).to_json(), standing)
     }
 
-    fn live_queue(&self, guest: GuestId, screen: bool) -> Resp {
-        if self.party.live.available() {
-            self.party.live.change(|slots, now| {
-                slots.queue(guest, now);
+    fn live_queue(&self, request: &Request<'_>, guest: GuestId) -> Result<Resp, Resp> {
+        let live = &self.party.live;
+        if live.available() {
+            // The guest could have left the party since route authentication.
+            // Keep membership locked until admission holds the slots lock.
+            let store = self.party.store();
+            let token = request.head.authorization.as_deref().and_then(|a| a.strip_prefix("Bearer "));
+            if token.and_then(|t| store.guest(t.trim())) != Some(guest) {
+                return Err(text(401, "join first"));
+            }
+            let screen = request.query("screen") != Some("0");
+            let replaced = live.change(|slots, now| {
+                drop(store);
+                let replaced = slots.queue(guest, now);
                 slots.set_screen(guest, screen);
+                replaced
             });
+            if let Some(call) = replaced {
+                live.hang_up(call);
+            }
         }
-        self.live_state(guest)
+        Ok(self.live_state(guest))
     }
 
     /// A guest's live turn, pushed (`live/stream`, messages as on the phone's
     /// stream): kind 1 where they stand, as `GET live` answers, kind 4 the
     /// newest redrawn frame of their own call (a JPEG) as it comes, kind 0 a
-    /// heartbeat. It ends with a goodbye (kind 3) once they are out of line.
+    /// heartbeat. It ends with a goodbye (kind 3) once they are out.
     /// An open stream does not keep their place: a phone put away can hold
     /// its connection for minutes, so the page asks `GET live` while shown.
     fn live_stream(&self, request: &mut Request<'_>, guest: GuestId) -> Resp {
@@ -790,8 +830,7 @@ impl Api {
             }
             // Their own frames as they come; where they stand at least every
             // half second (another guest's frames wake nobody else's stream).
-            let theirs = self.party.live.slots().current_guest() == Some(guest);
-            match self.party.live.frame_after(if theirs { shown } else { u64::MAX }, LIVE_LOOK) {
+            match self.party.live.stream_frame(Some(guest), shown, LIVE_LOOK) {
                 Some(frame) => {
                     shown = frame.count;
                     if let Some(jpeg) = frame.jpeg() {
@@ -898,13 +937,24 @@ impl Api {
                 Self::limit(&self.reads, &guest)?;
                 self.frame(request, guest)
             }
+            (Method::Post, ["draft"]) => {
+                Self::limit(&self.reads, &guest)?;
+                let draft = String::from_utf8(request.body(MAX_WISH_BYTES)?).map_err(|_| text(400, "a draft is UTF-8 text"))?;
+                self.party.live.draft(guest, &draft.chars().filter(|c| !c.is_control()).take(MAX_WISH_CHARS).collect::<String>());
+                Ok(json(200, "{}".into()))
+            }
+            (Method::Get, ["history"]) => {
+                Self::limit(&self.reads, &guest)?;
+                let prompts = self.party.live.history().into_iter().map(sj::s).collect();
+                Ok(json(200, sj::obj(vec![("prompts", Value::Arr(prompts))]).to_json()))
+            }
             (Method::Get, ["live"]) => {
                 Self::limit(&self.reads, &guest)?;
                 Ok(self.live_state(guest))
             }
             (Method::Post, ["live", "queue"]) => {
                 Self::limit(&self.reads, &guest)?;
-                Ok(self.live_queue(guest, request.query("screen") != Some("0")))
+                self.live_queue(request, guest)
             }
             (Method::Post, ["live", "screen"]) => {
                 Self::limit(&self.reads, &guest)?;
@@ -928,6 +978,10 @@ impl Api {
 }
 
 impl Handler for Api {
+    fn stop(&self) {
+        self.party.stop_workers();
+    }
+
     fn handle(&self, request: &mut Request<'_>) -> Resp {
         self.route(request).unwrap_or_else(|resp| resp)
     }
@@ -1182,6 +1236,7 @@ mod tests {
 
     /// Reads a stream route until a message of `kind` comes, and hangs up:
     /// its payload.
+    #[cfg(target_os = "linux")]
     fn stream_until(port: u16, path: &str, token: Option<&str>, kind: u8) -> Vec<u8> {
         use std::io::{Read, Write};
         let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
@@ -1275,7 +1330,7 @@ mod tests {
         assert!(party.asks.waiting(), "a voice prompt waits until its words are back");
         drop(turn);
         assert!(!party.asks.waiting());
-        party.asks.wait_none();
+        party.asks.wait_none(|| party.stopped());
         let mut store = party.store();
         let guest = store.join("a-token".into());
         let (source, _) = store.add_source(guest, IpAddr::from([127, 0, 0, 1]), SourceKind::Photo, vec![Arc::from(sample(8, 6))], None, Keep::Me).unwrap();
@@ -1481,6 +1536,9 @@ mod tests {
             self.0.lock().unwrap().prompts.push(prompt.into());
             Ok(())
         }
+        fn resize(&mut self, _size: (u32, u32)) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1490,10 +1548,9 @@ mod tests {
         }
     }
 
-    /// One guest live at a time over a real call, TLS and UDP: the queue,
-    /// the call, a running take finishing before the hub starts (the slot's
-    /// clock waiting), a keyframe asked for and the camera's pictures
-    /// redrawn from it, the guest's wish, and leaving.
+    /// Two guests take the screen over TLS and UDP. An existing take can
+    /// finish, each camera redraw starts from a keyframe, and a takeover
+    /// retires the old call and its frames.
     #[cfg(target_os = "linux")]
     #[test]
     fn live_one_guest_at_a_time_over_a_real_call() {
@@ -1521,9 +1578,7 @@ mod tests {
 
         let up = state("POST", "live/queue", &a);
         assert_eq!((named(&up).as_deref(), up.get("available").and_then(Value::as_bool)), (Some("up"), Some(true)), "the first to queue is up");
-        let waits = state("POST", "live/queue", &b);
-        assert_eq!((named(&waits).as_deref(), waits.get("ahead").and_then(Value::as_u64)), (Some("waiting"), Some(0)), "the next waits, next in line");
-        assert_eq!(ask(port, "POST", "live/offer", Some(&b), Browser::new("127.0.0.1:9").offer().as_bytes()).status, 409, "not their turn: no call");
+        assert_eq!(ask(port, "POST", "live/offer", Some(&b), Browser::new("127.0.0.1:9").offer().as_bytes()).status, 409, "a guest outside live cannot call");
         assert_eq!(ask(port, "POST", "live/offer", Some(&a), b"v=0\r\n").status, 400, "an offer that cannot be answered");
         assert_eq!(ask(port, "POST", "live/wish", Some(&b), b"a wish").status, 409, "only the guest up wishes for the live redraw");
         assert_eq!(ask(port, "POST", "live/wish", Some(&a), b"a gun").status, 400, "the guest up cannot set an unkind wish");
@@ -1540,10 +1595,9 @@ mod tests {
         assert!(phone.connect(&socket, &answer, calls, Duration::from_secs(3)), "the call comes up");
         until("the call is up: the hub starts", &|| named(&state("GET", "live", &a)).as_deref() == Some("starting"));
 
-        // The camera's first pictures come while the take finishes: the hub
-        // does not start, and the slot's clock waits.
+        // Pictures arriving while the take finishes cannot open the redraw.
         let sent = pictures();
-        let send = |phone: &mut Browser, shift: u32, pictures: &[makepad_webrtc::rtp::AccessUnit]| {
+        let send = |phone: &mut Browser, socket: &std::net::UdpSocket, shift: u32, pictures: &[makepad_webrtc::rtp::AccessUnit]| {
             for picture in pictures {
                 let mut picture = picture.clone();
                 picture.timestamp += shift;
@@ -1552,7 +1606,7 @@ mod tests {
                 }
             }
         };
-        send(&mut phone, 0, &sent);
+        send(&mut phone, &socket, 0, &sent);
         let mut buf = [0u8; 2048];
         let quiet = Instant::now();
         while quiet.elapsed() < Duration::from_millis(300) {
@@ -1590,16 +1644,20 @@ mod tests {
         }
         // A picture that needs an earlier one is not sent on; from the
         // keyframe on they all are.
-        send(&mut phone, 12_000, &sent[1..2]);
-        send(&mut phone, 15_000, &sent);
+        send(&mut phone, &socket, 12_000, &sent[1..2]);
+        send(&mut phone, &socket, 15_000, &sent);
         until("the pictures go to the redraw", &|| redrawn.lock().unwrap().pictures.len() >= sent.len());
         assert_eq!(redrawn.lock().unwrap().pictures, sent.iter().map(|p| p.data.clone()).collect::<Vec<_>>(), "from the keyframe on");
         until("the first redrawn frame puts the guest live", &|| named(&state("GET", "live", &a)).as_deref() == Some("live"));
+        let up = state("POST", "live/queue", &b);
+        assert_eq!(named(&up).as_deref(), Some("up"), "the taker can call immediately");
+        assert_eq!(named(&state("GET", "live", &b)).as_deref(), Some("up"));
         let live = state("GET", "live", &a);
-        assert!(live.get("left").and_then(Value::as_u64).is_some_and(|left| left <= 60), "someone waits: the slot has its minute: {live:?}");
+        assert_eq!(named(&live).as_deref(), Some("live"), "asking alone leaves the screen with a");
+        assert!(live.get("left").is_none() && up.get("waiting").is_none() && up.get("ahead").is_none(), "no live countdown or queue position");
         assert!(party.live.latest().is_some() && party.live.frames.load(Ordering::Relaxed) > 0, "the wall has a frame");
         let caption = party.live.board().and_then(|board| board.caption()).unwrap_or_default();
-        assert!(caption.starts_with("live · ") && caption.ends_with("s left · 1 waiting"), "{caption}");
+        assert_eq!(caption, "live", "the wall shows the current call during the takeover");
         assert!(party.live.slots().busy(), "the takes wait meanwhile");
         // The screen page shows the live redraw, and the guest's own phone
         // gets it too; "Just me" takes it off every screen.
@@ -1619,18 +1677,49 @@ mod tests {
         assert_eq!(skipped.status, 400, "the live guest cannot replace their wish with an unkind one");
         assert_eq!(skipped.body, b"the box skips that wish; try another", "the guest gets the reason for the refusal");
 
-        let left = state("POST", "live/leave", &a);
-        assert_eq!(named(&left).as_deref(), Some("out"));
-        assert_eq!(named(&state("GET", "live", &b)).as_deref(), Some("up"), "and the next guest is up at once");
-        let mut alert = false;
-        while let Ok((n, _)) = socket.recv_from(&mut buf) {
-            alert |= n > 0 && buf[0] == 21;
+        let taker_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        taker_socket.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut taker = Browser::new(&taker_socket.local_addr().unwrap().to_string());
+        let offer = ask(port, "POST", "live/offer?w=720&h=1280", Some(&b), taker.offer().as_bytes());
+        assert_eq!(offer.status, 200, "the new guest can negotiate while a is still live");
+        let old_frame = party.live.latest().unwrap().count;
+        assert_eq!(redrawn.lock().unwrap().closed, 0, "the offer alone keeps a's redraw");
+        assert_eq!(party.live.host_wish(Some("paper stars".into())), Ok(()));
+        until("the host edits a's live redraw", &|| redrawn.lock().unwrap().prompts.last().is_some_and(|p| p.contains("paper stars")));
+        let answer = String::from_utf8(offer.body).unwrap();
+        assert!(taker.connect(&taker_socket, &answer, calls, Duration::from_secs(3)), "the taker's call connects");
+        until("b takes the slot", &|| named(&state("GET", "live", &b)).as_deref() == Some("starting"));
+        let bumped = state("GET", "live", &a);
+        assert_eq!((named(&bumped).as_deref(), bumped.get("bumped").and_then(Value::as_bool)), (Some("out"), Some(true)));
+        let pushed = stream_until(port, "live/stream", Some(&a), 1);
+        assert_eq!(sj::parse(&pushed).unwrap(), bumped, "the displaced phone gets the same state on its stream");
+        assert!(party.live.latest().is_none(), "b starts with no frame from a");
+        until("b opens a fresh redraw", &|| redrawn.lock().unwrap().opened.len() == 2);
+        {
+            let seen = redrawn.lock().unwrap();
+            assert_eq!(seen.closed, 1, "a's redraw has closed");
+            assert_eq!(seen.opened[1], (288, 512), "b's redraw uses b's offer");
+            assert!(seen.prompts.last().unwrap().contains("paper stars"), "the host wish carries into b's redraw");
         }
-        assert!(alert, "leaving hangs up the call");
-        until("leaving lets the hub go", &|| redrawn.lock().unwrap().closed == 1);
-        assert!(party.live.latest().is_none(), "and the wall's frame with it");
+        let hung_up = |socket: &std::net::UdpSocket| {
+            let mut alert = [0; 2048];
+            socket.recv_from(&mut alert).is_ok_and(|(n, _)| n > 0 && alert[0] == 21)
+        };
+        until("the takeover hangs up a's call", &|| hung_up(&socket));
+        send(&mut taker, &taker_socket, 0, &sent[..1]);
+        until("b's first picture goes live", &|| named(&state("GET", "live", &b)).as_deref() == Some("live"));
+        assert!(party.live.latest().unwrap().count > old_frame, "the screen has a frame from b");
+
+        let left = state("POST", "live/leave", &b);
+        assert_eq!(named(&left).as_deref(), Some("out"));
+        assert!(left.get("bumped").is_none(), "leaving voluntarily clears the slot");
+        until("leaving hangs up b's call", &|| hung_up(&taker_socket));
+        until("leaving lets the hub and frame go", &|| redrawn.lock().unwrap().closed == 2 && party.live.latest().is_none());
+        let again = state("POST", "live/queue", &a);
+        assert_eq!(named(&again).as_deref(), Some("up"));
+        assert!(again.get("bumped").is_none(), "rejoining clears the bump");
         assert!(party.live.stop(), "the host ends a slot");
-        assert_eq!(named(&state("GET", "live", &b)).as_deref(), Some("out"));
+        assert_eq!(named(&state("GET", "live", &a)).as_deref(), Some("out"));
         assert!(!party.live.slots().busy() && !party.live.stop(), "nobody up: the takes resume");
         server.stop();
         let _ = std::fs::remove_dir_all(&dir);

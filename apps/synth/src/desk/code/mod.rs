@@ -284,6 +284,9 @@ struct Typing {
     text: String,
     error: bool,
     rect: Rect,
+    /// After the last character, as last drawn: where the keyboard's text
+    /// input is raised.
+    caret: DVec2,
     /// Opened from a picture's point (its box shows there, not under the knob).
     on_point: bool,
 }
@@ -351,6 +354,10 @@ pub struct ScoreEditor {
     browser_at: DVec2,
     #[rust]
     browser_tick: NextFrame,
+    /// The browser's search or a value being typed took the code's keys
+    /// (they were not the code's): given back as it closes.
+    #[rust]
+    took_keys: bool,
     /// Completions at the cursor, the one selected, and where they show.
     #[rust]
     completions: Option<Completing>,
@@ -674,7 +681,7 @@ impl ScoreEditor {
     fn start_typing(&mut self, node: String, knob: Knob, group: Vec<Knob>) {
         let text = knob.spec.source_text(knob.value);
         let text = if knob.spec.is_choice() { text.trim_start_matches('@').to_string() } else { text };
-        self.typing = Some(Typing { node, knob, group, text, error: false, rect: Rect::default(), on_point: false });
+        self.typing = Some(Typing { node, knob, group, text, error: false, rect: Rect::default(), caret: DVec2::default(), on_point: false });
         self.typed_fresh = true;
     }
 
@@ -753,6 +760,41 @@ impl ScoreEditor {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// While a value is typed the code's keys are its box's (it takes them
+    /// before the code does). A press on a card leaves them with what is
+    /// around the code: taken back here, and from the next frame the
+    /// keyboard's text input is raised at the box's caret, after the code's
+    /// own. A key brings typed text only while a field has raised it (on
+    /// macOS a press is a bare key until then): without it no digit reaches
+    /// the box.
+    fn raise_typing_input(&mut self, cx: &mut Cx2d, keys: Area) {
+        let Some(caret) = self.typing.as_ref().map(|t| t.caret) else { return };
+        if keys.is_empty() {
+            return;
+        }
+        if !cx.has_key_focus(keys) {
+            cx.set_key_focus(keys);
+            self.took_keys = true;
+            self.tick = cx.new_next_frame();
+            return;
+        }
+        let origin = keys.clipped_rect(cx).pos;
+        cx.show_text_ime(keys, caret - origin);
+    }
+
+    /// The browser closed or the value was typed: keys taken for them leave
+    /// the code (the page's keys, Space plays, come back); keys that were
+    /// the code's stay.
+    fn give_back_keys(&mut self, cx: &mut Cx) {
+        if !std::mem::take(&mut self.took_keys) {
+            return;
+        }
+        let keys = self.view.widget(cx, ids!(code)).borrow::<CodeView>().map(|view| view.editor.area());
+        if keys.is_some_and(|keys| cx.has_key_focus(keys)) {
+            cx.set_key_focus(Area::Empty);
         }
     }
 
@@ -885,9 +927,16 @@ impl Widget for ScoreEditor {
         if (self.browser.is_open() || self.browser_tick.is_event(event).is_some()) && self.picker_event(cx, event) {
             return;
         }
-        // A value being typed has the keys.
-        if self.typing.is_some() && self.typing_event(cx, event) {
-            return;
+        // A value being typed has the keys; written or let go, the keys it
+        // took go back.
+        if self.typing.is_some() {
+            let taken = self.typing_event(cx, event);
+            if self.typing.is_none() {
+                self.give_back_keys(cx);
+            }
+            if taken {
+                return;
+            }
         }
         if let Event::MouseUp(_) = event {
             if std::mem::take(&mut self.swallow_up) {
@@ -1042,7 +1091,8 @@ impl Widget for ScoreEditor {
         let Some(session) = view.session.as_ref() else { return DrawStep::done() };
         // Everything a lens draws stays inside the editor's text area (right
         // of the gutter, left of the scroll bar), scrolled or not.
-        let area = view.editor.area().rect(cx);
+        let keys = view.editor.area();
+        let area = keys.rect(cx);
         let origin = area.pos;
         let metrics = view.editor.metrics(session);
         let clip = Rect { pos: dvec2(area.pos.x + metrics.gutter_width, area.pos.y), size: dvec2((area.size.x - metrics.gutter_width - 10.0).max(0.0), area.size.y) };
@@ -1140,11 +1190,122 @@ impl Widget for ScoreEditor {
             self.draw_name.new_draw_call(cx);
         }
         self.draw_completions(cx, &p, area);
-        self.draw_picker(cx, &p, area);
+        self.draw_picker(cx, &p, area, keys);
+        self.raise_typing_input(cx, keys);
         if let Some((at, doc)) = self.hover.clone().filter(|_| !self.browser.is_open()) {
             self.draw_note(cx, &p, at, &doc, area);
         }
         cx.end_turtle();
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+    use makepad_widgets::makepad_script::script;
+    use makepad_widgets::test_cx;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 1000.0, y: 700.0 };
+    const SCORE: &str = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet lead = Synth{preset: @pluck cutoff: 1200}\nlet a = Loop{play: lead amp: 0.8 code: fn(i) { play(@c4) sleep(1) }}\n\nScore{clock lead a}\n";
+
+    /// What the editor draws with: the widgets, the code view and its
+    /// values, the console look, the panel controls and the browser.
+    fn register(vm: &mut ScriptVm) {
+        makepad_widgets::script_mod(vm);
+        makepad_code_editor::script_mod(vm);
+        makepad_code_values::script_mod(vm);
+        makepad_look::script_mod(vm);
+        makepad_value_pickers::script_mod(vm);
+        makepad_synth_panel::browser::script_mod(vm);
+        super::script_mod(vm);
+    }
+
+    fn draw(cx: &mut Cx, pass: &DrawPass, list: &mut DrawList2d, root: &WidgetRef) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// The key focus asked for changes hands, as the platform does once an
+    /// event's actions drain.
+    fn settle(cx: &mut Cx, root: &WidgetRef) {
+        let prev = cx.key_focus();
+        cx.action(());
+        cx.handle_actions();
+        let focus = cx.key_focus();
+        if focus != prev {
+            root.handle_event(cx, &Event::KeyFocus(KeyFocusEvent { prev, focus }), &mut Scope::empty());
+        }
+    }
+
+    /// Keys as a keyboard gives them: the press, its character as typed
+    /// text only while the widget with the key focus has raised the text
+    /// input (macOS: until then a press is a bare key), the release.
+    fn type_keys(cx: &mut Cx, root: &WidgetRef, text: &str) {
+        for c in text.chars() {
+            let key = KeyEvent { key_code: KeyCode::from_name(&c.to_string()).unwrap(), ..Default::default() };
+            root.handle_event(cx, &Event::KeyDown(key.clone()), &mut Scope::empty());
+            if cx.text_input_has_focus() {
+                let typed = TextInputEvent { input: c.to_string(), ..Default::default() };
+                root.handle_event(cx, &Event::TextInput(typed), &mut Scope::empty());
+            }
+            root.handle_event(cx, &Event::KeyUp(key), &mut Scope::empty());
+        }
+    }
+
+    /// A value clicked on a card takes what is typed: the box holds the
+    /// keys and raises the text input, so the digits arrive, and Return
+    /// writes them into the code; the keys go back as it closes.
+    #[test]
+    fn typing_a_value_writes_it() {
+        test_cx::on_test_cx(|| {
+            let mut pool = test_cx::checkout_test_cx(register);
+            let cx: &mut Cx = &mut pool;
+            let root = cx.with_vm(|vm| {
+                let value = vm.eval(script! {
+                    use mod.widgets.*
+                    ScoreEditor{}
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut list = DrawList2d::new(cx);
+            root.widget(cx, ids!(code)).set_text(cx, SCORE);
+            draw(cx, &pass, &mut list, &root);
+            let doc = makepad_score_live::ScoreDoc::load(SCORE).expect("the score loads");
+            let p = makepad_look::palette::get(cx);
+            let lenses = lens::build(&doc, SCORE, &source::outline(SCORE), &folds::Folds::default(), &p);
+            root.borrow_mut::<ScoreEditor>().unwrap().set_lenses(cx, SCORE, lenses);
+            draw(cx, &pass, &mut list, &root);
+            draw(cx, &pass, &mut list, &root);
+            let at = root.borrow::<ScoreEditor>().unwrap().hots.iter().find_map(|(r, hot)| matches!(hot, Hot::Value { knob, .. } if knob.field == "cutoff").then(|| r.center()));
+            let at = at.expect("the lead's card shows its cutoff value");
+            let press = MouseDownEvent { abs: at, button: MouseButton::PRIMARY, window_id: WindowId(0, 0), modifiers: Default::default(), handled: Cell::new(Area::Empty), time: 1.0 };
+            root.handle_event(cx, &Event::MouseDown(press), &mut Scope::empty());
+            draw(cx, &pass, &mut list, &root);
+            settle(cx, &root);
+            draw(cx, &pass, &mut list, &root);
+            assert!(root.borrow::<ScoreEditor>().unwrap().typing.is_some(), "the click opened the value's box");
+            assert!(cx.text_input_has_focus(), "the value being typed holds the keys and raised the text input");
+            type_keys(cx, &root, "800");
+            assert_eq!(root.borrow::<ScoreEditor>().unwrap().typing.as_ref().map(|t| t.text.as_str()), Some("800"), "the digits typed are the value");
+            let enter = KeyEvent { key_code: KeyCode::ReturnKey, ..Default::default() };
+            root.handle_event(cx, &Event::KeyDown(enter), &mut Scope::empty());
+            settle(cx, &root);
+            let editor = root.borrow::<ScoreEditor>().unwrap();
+            assert!(editor.typing.is_none() && editor.source.contains("cutoff: 800"), "Return wrote it: {}", editor.source);
+            assert!(!cx.text_input_has_focus(), "the keys went back as the box closed");
+        });
     }
 }

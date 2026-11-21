@@ -2,24 +2,24 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-17"
-digest = "56977eb1e6156634b70e357a45390c5f6d96a021bc78b11e8273f4bacdcc4d8a"
-main = "ad661172208bcaaeaaccf3fe832433c372b2eb40"
-work = "4c4c6f5970806623480262f5a00a34cabb91a2fc"
+date = "2026-11-20"
+digest = "6c6262d20e1c3068dad2c34f495bbd388cc5535ac0eedbfd233aad2490408e14"
+main = "04df76375c13cb26181ca1f25d61b73a3344a1fb"
+work = "8f0c688cbdccf91e5fae8ed43c5c22b9ac4345ca"
 
 [app.macos]
 capture = ""
-date = "2026-11-16"
-digest = "65b712acc766bf0046ffa0027c354c8d5d8c334f06d1507378ecfce85d2a01da"
-main = "0a1d53f4df371ff8ff0afdce8950f7694f9202f4"
-work = "523bcd689e93688d1d2b7076bd532d172ff23b29"
+date = "2026-11-19"
+digest = "80b664a6045b55985b0b85e62ac6bb5bb0ae0d6c254f7ab23d05a92fce8d3773"
+main = "9e6cb64351d5c114136cccbabc61eaacf999830b"
+work = "6116e11c66d9da006e0dedc1b21a94d859681887"
 
 [app.windows]
 capture = ""
-date = "2026-11-18"
-digest = "0a42d90fcab2697a5bd6161e5658854e6f31b8112be1bd68ff0340b2dfd79d21"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "2b97c92f612a1db1d7665d5e2aee4bc1a154cd48eae0fbd709f49e365935bafb"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.jit_05.linux]
 date = "2026-11-04"

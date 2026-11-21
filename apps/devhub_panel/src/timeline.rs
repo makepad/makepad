@@ -1705,7 +1705,7 @@ fn node_state(n: &NodeView) -> (Dot, String) {
     let word = n.state_word();
     let dot = if !n.up {
         Dot::Down
-    } else if n.updating.is_some() || n.draining || n.user().is_some() || n.caps.as_ref().is_some_and(|c| !c.sick.is_empty()) {
+    } else if n.updating.is_some() || n.draining || n.caps.as_ref().is_some_and(|c| !c.sick.is_empty()) {
         Dot::Warn
     } else if !n.dev {
         Dot::Off

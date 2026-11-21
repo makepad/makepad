@@ -482,7 +482,7 @@ impl Widget for MaterialLab {
                 screen_instances: &[],
                 view_model: None,
             };
-            let stage = PreviewStage { ground: false, sky: false, ground_half: 8.0, ground_color: vec4(0.0, 0.0, 0.0, 1.0), dark: false };
+            let stage = PreviewStage::empty();
             let stats = if scene == Scene::Hooks {
                 self.renderer.draw_preview(cx3d, &mut self.draw_list, &mut draws, look, stage, scene_state, None, Some(&mut self.draw_models))
             } else {

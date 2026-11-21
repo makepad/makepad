@@ -282,7 +282,7 @@ impl App {
             self.asked = session;
             server.set_capture(session.map(|s| (s, ASK)));
             let text = match session {
-                None => "no headset linked".to_string(),
+                None => "no device linked".to_string(),
                 Some(_) if server.capture_available() => "a headset linked: capture asked".into(),
                 Some(_) => "a headset linked: it does not capture (an older client)".into(),
             };

@@ -109,12 +109,16 @@ impl BoxHub {
         let body = json::obj(vec![("model", json::s(model)), ("action", json::s(if load { "load" } else { "unload" }))]);
         let answer = HttpFleetTransport.post_json(&format!("{}/control/model", self.base), &body)?;
         let job = answer.get("job_id").and_then(Value::as_str).ok_or_else(|| format!("control/model: {}", answer.to_json()))?;
-        self.wait(job)?;
+        self.wait(job, &|| false)?;
         Ok(started.elapsed())
     }
 
-    fn wait(&self, job: &str) -> Result<JobStatusJson, String> {
+    fn wait(&self, job: &str, cancelled: &dyn Fn() -> bool) -> Result<JobStatusJson, String> {
         loop {
+            if cancelled() {
+                self.service.cancel(job).map_err(|e| format!("cancel {job}: {e}"))?;
+                return Err("cancelled".into());
+            }
             let status = self.service.poll(job).map_err(|e| format!("{job}: {e}"))?;
             match status.state.as_str() {
                 "done" => return Ok(status),
@@ -124,10 +128,10 @@ impl BoxHub {
         }
     }
 
-    fn run(&self, domain: Domain, request: &GenerateRequestJson) -> Result<(JobStatusJson, JobTime), String> {
+    fn run(&self, domain: Domain, request: &GenerateRequestJson, cancelled: &dyn Fn() -> bool) -> Result<(JobStatusJson, JobTime), String> {
         let started = Instant::now();
-        let job = self.service.request(domain, request).map_err(|e| e.to_string())?;
-        let status = self.wait(&job)?;
+        let job = self.service.request_pending(domain, request, cancelled, &mut |_| {}).map_err(|e| e.to_string())?;
+        let status = self.wait(&job, cancelled)?;
         let time = JobTime::of(&status, started.elapsed());
         Ok((status, time))
     }
@@ -152,6 +156,7 @@ impl BoxHub {
         steps: Option<u32>,
         strength: Option<f32>,
         size: Option<(u32, u32)>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(Vec<u8>, JobTime), String> {
         let request = GenerateRequestJson {
             model: model.to_string(),
@@ -168,12 +173,12 @@ impl BoxHub {
             ..Default::default()
         };
         let domain = if model == FAST_MODEL { Domain::Edit } else { Domain::Image };
-        let (status, time) = self.run(domain, &request)?;
+        let (status, time) = self.run(domain, &request, cancelled)?;
         Ok((self.first_artifact(&status)?, time))
     }
 
     /// The vision model's answer to `prompt` about one picture (JPEG or PNG).
-    pub fn describe(&self, model: &str, image: &[u8], prompt: &str, max_tokens: u32) -> Result<(String, JobTime), String> {
+    pub fn describe(&self, model: &str, image: &[u8], prompt: &str, max_tokens: u32, cancelled: &dyn Fn() -> bool) -> Result<(String, JobTime), String> {
         let request = GenerateRequestJson {
             model: model.to_string(),
             domain: Some("vision".into()),
@@ -183,7 +188,7 @@ impl BoxHub {
             input_b64: Some(String::from_utf8(base64_encode(image, &BASE64_STANDARD)).unwrap_or_default()),
             ..Default::default()
         };
-        let (status, time) = self.run(Domain::Vision, &request)?;
+        let (status, time) = self.run(Domain::Vision, &request, cancelled)?;
         let _ = self.service.discard(&status.job_id);
         Ok((status.text.unwrap_or_default(), time))
     }
@@ -191,7 +196,7 @@ impl BoxHub {
     /// What was said in `wav` (a WAV file of any rate), in whichever
     /// language it was said. The hub keeps the audio and the words in memory
     /// only, and lets them go once they are read.
-    pub fn transcribe(&self, wav: &[u8]) -> Result<(String, JobTime), String> {
+    pub fn transcribe(&self, wav: &[u8], cancelled: &dyn Fn() -> bool) -> Result<(String, JobTime), String> {
         let request = GenerateRequestJson {
             model: VOICE_MODEL.to_string(),
             domain: Some("stt".into()),
@@ -201,7 +206,7 @@ impl BoxHub {
             memory_only: Some(true),
             ..Default::default()
         };
-        let (status, time) = self.run(Domain::Stt, &request)?;
+        let (status, time) = self.run(Domain::Stt, &request, cancelled)?;
         let bytes = self.first_artifact(&status)?;
         let transcript = TranscriptJson::deserialize_json(&String::from_utf8_lossy(&bytes)).map_err(|e| format!("{}: transcript: {e:?}", status.job_id))?;
         Ok((transcript.text.trim().to_string(), time))
@@ -234,7 +239,9 @@ impl BoxHub {
             ("loop_mode", json::s("feed")),
             ("input_encoding", json::s(if input == LiveInput::H264 { "h264" } else { "raw" })),
             ("output_encoding", json::s("raw")),
-            ("idle_timeout_s", Value::Int(30)),
+            // A client gone without `stop` (an app quit, a crash) frees the GPU
+            // at once: its successor's session would not fit beside it.
+            ("idle_timeout_s", Value::Int(2)),
             ("queue_policy", json::s("queue")),
         ];
         // Asked only when wanted: a hub from before the choices takes the session as ever.
@@ -425,6 +432,13 @@ impl LiveSession {
                 Err(mpsc::TryRecvError::Disconnected) => return Err("live: the session's socket ended".into()),
             }
         }
+    }
+
+    /// A new size for the frames after this one: the camera's pictures
+    /// are scaled to it, so it follows their aspect.
+    pub fn set_size(&mut self, size: (u32, u32)) -> Result<(), String> {
+        let control = json::obj(vec![("type", json::s("control")), ("width", Value::Int(size.0 as i64)), ("height", Value::Int(size.1 as i64))]);
+        self.socket.send_message(WebSocketMessage::String(control.to_json())).map_err(|_| "live: the session's socket is closed".to_string())
     }
 
     /// A new prompt for the frames after this one.

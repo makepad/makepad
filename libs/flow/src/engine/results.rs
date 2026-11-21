@@ -273,7 +273,8 @@ pub trait ResultStore: Send + Sync {
     fn publish(&self, files: ResultFiles) -> Result<Receiver<PublishEvent>, String>;
 
     /// The result whose reuse key is this digest (64 hex digits), within the
-    /// store's own namespace.
+    /// store's own namespace: of the products that carry it, the one with an
+    /// alias (a run's primary product), else the newest.
     fn find_by_digest(&self, digest: &str) -> Option<ResultRef>;
 
     fn list(&self, query: ResultQuery) -> Result<ResultPage, String>;
@@ -480,7 +481,11 @@ impl ResultStore for FolderStore {
             .entries
             .iter()
             .filter(|entry| entry.namespace == self.namespace && entry.digest.as_deref() == Some(digest))
-            .max_by_key(|entry| entry.created_ms)
+            // a run's products all carry its digest, and its primary alone an alias (gen's and
+            // flow studio's reuse alias): that one is the run's result, as the asset store
+            // resolves it by the alias; by age alone a product stored in the same millisecond or
+            // after it answered, and a reused character came back as its mesh
+            .max_by_key(|entry| (entry.alias.is_some(), entry.created_ms))
             .map(|entry| ResultRef { id: entry.id.clone(), revision: None, alias: entry.alias.clone() })
     }
 

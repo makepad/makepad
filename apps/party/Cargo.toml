@@ -29,6 +29,10 @@ path = "src/main.rs"
 name = "makepad-party-server"
 path = "src/bin/server.rs"
 
+# The app icon (resources/icon.svg drawn at 1024 px); the WM draws icon.svg itself.
+[package.metadata.makepad.desktop]
+icon = "resources/icon_1024.png"
+
 [dependencies]
 makepad-network = { path = "../../platform/network" }
 makepad-bounded-http = { path = "../../libs/bounded_http" }

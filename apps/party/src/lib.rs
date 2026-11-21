@@ -11,8 +11,7 @@
 //! - `settings`: the host's settings (how the live redraw computes).
 //! - `start`: starting a party (identity, store, worker, service), shared
 //!   by the party server and the big screen.
-//! - `wall_plan`: the big screen's layout and the size its pictures are
-//!   decoded at.
+//! - `wall_plan`: the size the big screen's pictures are decoded at.
 //! - `camtest`: the phase-0 camera check page.
 //! - `jpeg`: what the server checks in a guest's picture, and the metadata it
 //!   strips.

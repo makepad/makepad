@@ -240,6 +240,7 @@ mod tests {
             tool: tool.into(),
             args: args.into(),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         }
     }
 
