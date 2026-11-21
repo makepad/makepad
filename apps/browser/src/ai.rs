@@ -212,6 +212,7 @@ mod tests {
                 tool: "navigate".into(),
                 args: format!(r#"{{"url":"{url}"}}"#),
                 caller: None,
+                origin: makepad_ai_services::CallOrigin::Conversation,
             };
             let result = answer(&call, &mut target);
             assert_eq!(result.outcome, ToolOutcome::Refused);
