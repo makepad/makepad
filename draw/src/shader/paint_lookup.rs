@@ -1,7 +1,13 @@
 //! `mod.draw.PaintLookup`: the one paint lookup every renderer spreads, over a paint atlas its
 //! host writes. The host gives the texels: it defines
-//! `paint_texel(i: f32) -> vec4` over whatever texture holds the atlas (its own, or rows after
+//! `paint_texel(i: u32) -> vec4` over whatever texture holds the atlas (its own, or rows after
 //! another table in a texture it already binds), so the lookup costs no texture slot of its own.
+//!
+//! Texel numbers are whole numbers to the end: the lookup reckons them as `u32`, and the atlas
+//! stores each as the float whose bits are the smallest normal float's plus the number
+//! (`paint_number` reads it back), so a texel past 2^24 (16.7M, where an f32 stops holding
+//! every whole number) is still the texel it names. A stored number is above zero; a negative
+//! one says none.
 //!
 //! `paint_at(hdr, p, px)`: at point `p` of volume `hdr` (its header texel), with the pixel's
 //! footprint `px` (mm, from screen derivatives), returns (slot a, slot b, coverage of a, 1).
@@ -35,34 +41,40 @@ script_mod! {
     use mod.draw
 
     mod.draw.PaintLookup = {
+        // a texel number as the atlas stores it
+        paint_number: fn(v: f32) -> u32 {
+            return asuint(v) - 8388608u
+        }
+
         paint_pick: fn(v: vec4, k: f32) -> f32 {
             let m = vec4(1.0 - step(0.5, k), step(0.5, k) - step(1.5, k), step(1.5, k) - step(2.5, k), step(2.5, k))
             return dot(v, m)
         }
 
-        // the index entry of the brick holding lattice point g (in the volume): a sample brick
-        // (>= 0) or a whole one (-1 - slot)
-        paint_brick: fn(g: vec3, bmin: vec3, dim: vec3, bases: vec4) -> f32 {
+        // the index entry of the brick holding lattice point g (in the volume), the index from
+        // texel `index`: a sample brick (>= 0) or a whole one (-1 - slot)
+        paint_brick: fn(g: vec3, bmin: vec3, dim: vec3, index: u32) -> f32 {
             let b = floor(g / 8.0) - bmin
-            let i = (b.z * dim.y + b.y) * dim.x + b.x
-            return self.paint_pick(self.paint_texel(bases.x + floor(i / 4.0)), modf(i, 4.0))
+            let i = (u32(b.z) * u32(dim.y) + u32(b.y)) * u32(dim.x) + u32(b.x)
+            return self.paint_pick(self.paint_texel(index + i / 4u), f32(i % 4u))
         }
 
-        // (slot, distance over the ramp 0..1) of lattice point g in the brick of entry e
-        paint_sample: fn(g: vec3, e: f32, bases: vec4) -> vec2 {
+        // (slot, distance over the ramp 0..1) of lattice point g in the brick of entry e, the
+        // samples from texel `samples`
+        paint_sample: fn(g: vec3, e: f32, samples: u32) -> vec2 {
             if e < 0.0 {
                 return vec2((0.0 - e) - 1.0, 1.0)
             }
             let l = g - floor(g / 8.0) * 8.0
-            let li = (l.z * 8.0 + l.y) * 8.0 + l.x
-            let v = self.paint_pick(self.paint_texel(bases.y + e * 128.0 + floor(li / 4.0)), modf(li, 4.0))
+            let li = u32((l.z * 8.0 + l.y) * 8.0 + l.x)
+            let v = self.paint_pick(self.paint_texel(samples + u32(e) * 128u + li / 4u), f32(li % 4u))
             let slot = floor(v / 65536.0 + 0.000001)
             return vec2(slot, (v - slot * 65536.0) / 65535.0)
         }
 
         // (slot, distance over the ramp 0..1) of lattice point g
-        paint_corner: fn(g: vec3, bmin: vec3, dim: vec3, bases: vec4) -> vec2 {
-            return self.paint_sample(g, self.paint_brick(g, bmin, dim, bases), bases)
+        paint_corner: fn(g: vec3, bmin: vec3, dim: vec3, index: u32, samples: u32) -> vec2 {
+            return self.paint_sample(g, self.paint_brick(g, bmin, dim, index), samples)
         }
 
         paint_sign: fn(c: vec2, slot: f32) -> f32 {
@@ -79,7 +91,7 @@ script_mod! {
 
         // the distance signed by slot `a` (over the ramp), cubic through the 4x4x4 lattice points
         // round cell g at t in it, those past the volume read at its face
-        paint_cubic: fn(g: vec3, t: vec3, a: f32, bmin: vec3, dim: vec3, bases: vec4) -> f32 {
+        paint_cubic: fn(g: vec3, t: vec3, a: f32, bmin: vec3, dim: vec3, index: u32, samples: u32) -> f32 {
             let wx = self.paint_catmull(t.x)
             let wy = self.paint_catmull(t.y)
             let wz = self.paint_catmull(t.z)
@@ -92,7 +104,7 @@ script_mod! {
                     var vx = 0.0
                     for i in 0..4 {
                         let q = clamp(g + vec3(float(i) - 1.0, float(j) - 1.0, float(k) - 1.0), lo, hi)
-                        vx = vx + self.paint_pick(wx, float(i)) * self.paint_sign(self.paint_corner(q, bmin, dim, bases), a)
+                        vx = vx + self.paint_pick(wx, float(i)) * self.paint_sign(self.paint_corner(q, bmin, dim, index, samples), a)
                     }
                     vy = vy + self.paint_pick(wy, float(j)) * vx
                 }
@@ -101,40 +113,40 @@ script_mod! {
             return v
         }
 
-        // the colour of a slot of volume `bases` (linear)
-        paint_color: fn(bases: vec4, slot: f32) -> vec3 {
-            return self.paint_texel(bases.z + slot).xyz
+        // the colour of a slot of a volume whose palette is at texel `palette` (linear)
+        paint_color: fn(palette: u32, slot: f32) -> vec3 {
+            return self.paint_texel(palette + u32(slot)).xyz
         }
 
         // a point through the three affine rows at texel `at`
-        paint_rows: fn(at: f32, p: vec3) -> vec3 {
+        paint_rows: fn(at: u32, p: vec3) -> vec3 {
             let r0 = self.paint_texel(at)
-            let r1 = self.paint_texel(at + 1.0)
-            let r2 = self.paint_texel(at + 2.0)
+            let r1 = self.paint_texel(at + 1u)
+            let r2 = self.paint_texel(at + 2u)
             return vec3(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w)
         }
 
         // a direction through them
-        paint_turn: fn(at: f32, v: vec3) -> vec3 {
-            return vec3(dot(self.paint_texel(at).xyz, v), dot(self.paint_texel(at + 1.0).xyz, v), dot(self.paint_texel(at + 2.0).xyz, v))
+        paint_turn: fn(at: u32, v: vec3) -> vec3 {
+            return vec3(dot(self.paint_texel(at).xyz, v), dot(self.paint_texel(at + 1u).xyz, v), dot(self.paint_texel(at + 2u).xyz, v))
         }
 
-        // a point of the shader's frame into volume `hdr`'s
-        paint_frame: fn(hdr: f32, p: vec3) -> vec3 {
-            return self.paint_rows(hdr + 3.0, p)
+        // a point of the shader's frame into the frame of the volume whose header is texel `hdr`
+        paint_frame: fn(hdr: u32, p: vec3) -> vec3 {
+            return self.paint_rows(hdr + 3u, p)
         }
 
-        // node g of an overlay's lattice with weight w in the blend: (w v, w), nothing where it
-        // has no value
-        overlay_node: fn(g: vec3, w: f32, dim: vec3, base: f32) -> vec2 {
-            let i = (g.z * dim.y + g.y) * dim.x + g.x
-            let v = self.paint_pick(self.paint_texel(base + floor(i / 4.0)), modf(i, 4.0))
+        // node g of an overlay's lattice (from texel `base`) with weight w in the blend: (w v, w),
+        // nothing where it has no value
+        overlay_node: fn(g: vec3, w: f32, dim: vec3, base: u32) -> vec2 {
+            let i = (u32(g.z) * u32(dim.y) + u32(g.y)) * u32(dim.x) + u32(g.x)
+            let v = self.paint_pick(self.paint_texel(base + i / 4u), f32(i % 4u))
             return vec2(v, 1.0) * (w * step(0.0, v))
         }
 
-        // `albedo` under an overlay's value at q, through its palette (`dim.w`): where no node
-        // near has a value, `albedo` as it is
-        overlay_value: fn(q: vec3, cell: vec4, dim: vec4, base: f32, albedo: vec3) -> vec3 {
+        // `albedo` under an overlay's value at q, through its palette (`dim.w`, a stored texel
+        // number): where no node near has a value, `albedo` as it is
+        overlay_value: fn(q: vec3, cell: vec4, dim: vec4, base: u32, albedo: vec3) -> vec3 {
             let one = vec3(1.0, 1.0, 1.0)
             let f = (q - cell.xyz) / cell.w
             let g = clamp(floor(f), vec3(0.0, 0.0, 0.0), dim.xyz - one)
@@ -151,19 +163,20 @@ script_mod! {
             s = s + self.overlay_node(g + vec3(1.0, 1.0, 1.0), t.x * t.y * t.z, d, base)
             if s.y <= 0.0 { return albedo }
             let x = s.x / s.y
-            let over = self.paint_texel(dim.w + 33.0)
+            let palette = self.paint_number(dim.w)
+            let over = self.paint_texel(palette + 33u)
             if x > 1.0 && over.w > 0.5 { return over.xyz }
             let k = clamp(x, 0.0, 1.0) * 32.0
             let k0 = min(floor(k), 31.0)
-            return mix(self.paint_texel(dim.w + k0).xyz, self.paint_texel(dim.w + k0 + 1.0).xyz, k - k0)
+            return mix(self.paint_texel(palette + u32(k0)).xyz, self.paint_texel(palette + u32(k0) + 1u).xyz, k - k0)
         }
 
-        // `albedo` under the mark of an overlay's cell at q, where the surface (normal n in q's
-        // frame) runs along the one marked, in its kind's colour
-        overlay_mark: fn(q: vec3, n: vec3, cell: vec4, dim: vec4, at: f32, albedo: vec3) -> vec3 {
+        // `albedo` under the mark of an overlay's cell at q (the marks from texel `at`), where the
+        // surface (normal n in q's frame) runs along the one marked, in its kind's colour
+        overlay_mark: fn(q: vec3, n: vec3, cell: vec4, dim: vec4, at: u32, albedo: vec3) -> vec3 {
             let g = clamp(floor((q - cell.xyz) / cell.w), vec3(0.0, 0.0, 0.0), dim.xyz - vec3(1.0, 1.0, 1.0))
-            let i = (g.z * dim.y + g.y) * dim.x + g.x
-            let m = self.paint_pick(self.paint_texel(at + floor(i / 4.0)), modf(i, 4.0))
+            let i = (u32(g.z) * u32(dim.y) + u32(g.y)) * u32(dim.x) + u32(g.x)
+            let m = self.paint_pick(self.paint_texel(at + i / 4u), f32(i % 4u))
             if m < 0.5 { return albedo }
             let r = floor(m / 16.0)
             let c = vec2(modf(r, 128.0), floor(r / 128.0)) * (2.0 / 127.0) - vec2(1.0, 1.0)
@@ -171,14 +184,16 @@ script_mod! {
             if abs(dot(normalize(n), marked)) < 0.6 { return albedo }
             let kind = modf(m, 16.0)
             let stripe = step(0.5, fract((q.x + q.y + q.z) * 0.6))
+            let palette = self.paint_number(dim.w)
             if kind > 4.5 {
-                return mix(albedo, self.paint_texel(dim.w + 33.0 + kind - 4.0).xyz, 0.8 + 0.2 * stripe)
+                return mix(albedo, self.paint_texel(palette + 29u + u32(kind)).xyz, 0.8 + 0.2 * stripe)
             }
-            return mix(albedo, self.paint_texel(dim.w + 33.0 + kind).xyz, 0.35 + 0.4 * stripe)
+            return mix(albedo, self.paint_texel(palette + 33u + u32(kind)).xyz, 0.35 + 0.4 * stripe)
         }
 
-        // `albedo` at frame point p of a part (normal n in that frame): the paint of volume `hdr`
-        // (footprint px mm); an overlay's header shows its colours and marks over its part's paint
+        // `albedo` at frame point p of a part (normal n in that frame): the paint of the volume
+        // whose header `hdr` names (a stored texel number, negative for none; footprint px mm);
+        // an overlay's header shows its colours and marks over its part's paint
         paint_albedo: fn(hdr: f32, p: vec3, n: vec3, px: f32, albedo: vec3) -> vec3 {
             return self.paint_shade(hdr, p, n, px, albedo).xyz
         }
@@ -186,24 +201,25 @@ script_mod! {
         // `paint_albedo` and, in w, the share of the pixel at its volume's light floor (an
         // overlay's colours and marks are lit as they are: none)
         paint_shade: fn(hdr: f32, p: vec3, n: vec3, px: f32, albedo: vec3) -> vec4 {
-            if hdr < 0.0 { return vec4(albedo, 0.0) }
-            let h0 = self.paint_texel(hdr)
+            if hdr <= 0.0 { return vec4(albedo, 0.0) }
+            let h = self.paint_number(hdr)
+            let h0 = self.paint_texel(h)
             var under = hdr
             var pv = p
             if h0.x < 0.0 {
                 under = h0.y
-                pv = self.paint_rows(hdr + 11.0, p)
+                pv = self.paint_rows(h + 11u, p)
             }
             var shaded = vec4(albedo, 0.0)
-            if under >= 0.0 { shaded = self.paint_volume(under, pv, px, albedo) }
+            if under > 0.0 { shaded = self.paint_volume(self.paint_number(under), pv, px, albedo) }
             if h0.x >= 0.0 { return shaded }
             var base = shaded.xyz
-            let q = self.paint_rows(hdr + 6.0, p)
-            let dim = self.paint_texel(hdr + 2.0)
-            if h0.z >= 0.0 { base = self.overlay_value(q, self.paint_texel(hdr + 1.0), dim, h0.z, base) }
-            if h0.w >= 0.0 {
-                let marks = vec4(self.paint_texel(hdr + 10.0).xyz, dim.w)
-                base = self.overlay_mark(q, self.paint_turn(hdr + 6.0, n), self.paint_texel(hdr + 9.0), marks, h0.w, base)
+            let q = self.paint_rows(h + 6u, p)
+            let dim = self.paint_texel(h + 2u)
+            if h0.z > 0.0 { base = self.overlay_value(q, self.paint_texel(h + 1u), dim, self.paint_number(h0.z), base) }
+            if h0.w > 0.0 {
+                let marks = vec4(self.paint_texel(h + 10u).xyz, dim.w)
+                base = self.overlay_mark(q, self.paint_turn(h + 6u, n), self.paint_texel(h + 9u), marks, self.paint_number(h0.w), base)
             }
             return vec4(base, 0.0)
         }
@@ -211,18 +227,22 @@ script_mod! {
         // A surface an overlay's values colour reads alike on any material: a metal has no
         // diffuse lobe to show them, so none is metal under them.
         paint_metal: fn(hdr: f32, metal: f32) -> f32 {
-            if hdr < 0.0 { return metal }
-            let h0 = self.paint_texel(hdr)
-            if h0.x < 0.0 && h0.z >= 0.0 { return 0.0 }
+            if hdr <= 0.0 { return metal }
+            let h0 = self.paint_texel(self.paint_number(hdr))
+            if h0.x < 0.0 && h0.z > 0.0 { return 0.0 }
             return metal
         }
 
-        // `albedo` with volume `hdr`'s paint at frame point p (footprint px mm), and in w the
-        // share of the pixel its paint covers times the volume's light floor
-        paint_volume: fn(hdr: f32, p: vec3, px: f32, albedo: vec3) -> vec4 {
+        // `albedo` with the paint of the volume whose header is texel `hdr` at frame point p
+        // (footprint px mm), and in w the share of the pixel its paint covers times the volume's
+        // light floor
+        paint_volume: fn(hdr: u32, p: vec3, px: f32, albedo: vec3) -> vec4 {
             let h0 = self.paint_texel(hdr)
-            let h1 = self.paint_texel(hdr + 1.0)
-            let bases = self.paint_texel(hdr + 2.0)
+            let h1 = self.paint_texel(hdr + 1u)
+            let bases = self.paint_texel(hdr + 2u)
+            let index = self.paint_number(bases.x)
+            let samples = self.paint_number(bases.y)
+            let palette = self.paint_number(bases.z)
             let cell = h0.x
             let bmin = vec3(h0.z, h0.w, h1.x)
             let dim = vec3(h1.y, h1.z, h1.w)
@@ -241,24 +261,24 @@ script_mod! {
             var c111 = vec2(0.0, 1.0)
             let l0 = g - floor(g / 8.0) * 8.0
             if l0.x < 6.5 && l0.y < 6.5 && l0.z < 6.5 {
-                let e = self.paint_brick(g, bmin, dim, bases)
-                c000 = self.paint_sample(g, e, bases)
-                c100 = self.paint_sample(g + vec3(1.0, 0.0, 0.0), e, bases)
-                c010 = self.paint_sample(g + vec3(0.0, 1.0, 0.0), e, bases)
-                c110 = self.paint_sample(g + vec3(1.0, 1.0, 0.0), e, bases)
-                c001 = self.paint_sample(g + vec3(0.0, 0.0, 1.0), e, bases)
-                c101 = self.paint_sample(g + vec3(1.0, 0.0, 1.0), e, bases)
-                c011 = self.paint_sample(g + vec3(0.0, 1.0, 1.0), e, bases)
-                c111 = self.paint_sample(g + vec3(1.0, 1.0, 1.0), e, bases)
+                let e = self.paint_brick(g, bmin, dim, index)
+                c000 = self.paint_sample(g, e, samples)
+                c100 = self.paint_sample(g + vec3(1.0, 0.0, 0.0), e, samples)
+                c010 = self.paint_sample(g + vec3(0.0, 1.0, 0.0), e, samples)
+                c110 = self.paint_sample(g + vec3(1.0, 1.0, 0.0), e, samples)
+                c001 = self.paint_sample(g + vec3(0.0, 0.0, 1.0), e, samples)
+                c101 = self.paint_sample(g + vec3(1.0, 0.0, 1.0), e, samples)
+                c011 = self.paint_sample(g + vec3(0.0, 1.0, 1.0), e, samples)
+                c111 = self.paint_sample(g + vec3(1.0, 1.0, 1.0), e, samples)
             } else {
-                c000 = self.paint_corner(g, bmin, dim, bases)
-                c100 = self.paint_corner(g + vec3(1.0, 0.0, 0.0), bmin, dim, bases)
-                c010 = self.paint_corner(g + vec3(0.0, 1.0, 0.0), bmin, dim, bases)
-                c110 = self.paint_corner(g + vec3(1.0, 1.0, 0.0), bmin, dim, bases)
-                c001 = self.paint_corner(g + vec3(0.0, 0.0, 1.0), bmin, dim, bases)
-                c101 = self.paint_corner(g + vec3(1.0, 0.0, 1.0), bmin, dim, bases)
-                c011 = self.paint_corner(g + vec3(0.0, 1.0, 1.0), bmin, dim, bases)
-                c111 = self.paint_corner(g + vec3(1.0, 1.0, 1.0), bmin, dim, bases)
+                c000 = self.paint_corner(g, bmin, dim, index, samples)
+                c100 = self.paint_corner(g + vec3(1.0, 0.0, 0.0), bmin, dim, index, samples)
+                c010 = self.paint_corner(g + vec3(0.0, 1.0, 0.0), bmin, dim, index, samples)
+                c110 = self.paint_corner(g + vec3(1.0, 1.0, 0.0), bmin, dim, index, samples)
+                c001 = self.paint_corner(g + vec3(0.0, 0.0, 1.0), bmin, dim, index, samples)
+                c101 = self.paint_corner(g + vec3(1.0, 0.0, 1.0), bmin, dim, index, samples)
+                c011 = self.paint_corner(g + vec3(0.0, 1.0, 1.0), bmin, dim, index, samples)
+                c111 = self.paint_corner(g + vec3(1.0, 1.0, 1.0), bmin, dim, index, samples)
             }
             // the nearest corner's slot, and another slot among the eight
             let r = step(vec3(0.5, 0.5, 0.5), t)
@@ -276,7 +296,7 @@ script_mod! {
             var v = 0.0
             if abs(b - a) > 0.5 {
                 // two slots meet in the cell: the cubic, smooth across its faces
-                v = self.paint_cubic(g, t, a, bmin, dim, bases) * h0.y
+                v = self.paint_cubic(g, t, a, bmin, dim, index, samples) * h0.y
             } else {
                 let x0 = mix(self.paint_sign(c000, a), self.paint_sign(c100, a), t.x)
                 let x1 = mix(self.paint_sign(c010, a), self.paint_sign(c110, a), t.x)
@@ -286,9 +306,9 @@ script_mod! {
             }
             let cov = clamp(0.5 + v / max(px, cell * 0.02), 0.0, 1.0)
             var ca = albedo
-            if a > 0.5 { ca = self.paint_color(bases, a) }
+            if a > 0.5 { ca = self.paint_color(palette, a) }
             var cb = albedo
-            if b > 0.5 { cb = self.paint_color(bases, b) }
+            if b > 0.5 { cb = self.paint_color(palette, b) }
             let painted = mix(step(0.5, b), step(0.5, a), cov)
             return vec4(mix(cb, ca, cov), painted * bases.w)
         }

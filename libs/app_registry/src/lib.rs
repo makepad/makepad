@@ -21,7 +21,10 @@
 //!   previews never steal each other's window. image and pdf are hidden:
 //!   they open through Files and previews, not the menu.
 //! - aichat is the assistant the WM seats in its pane slot, never a menu
-//!   row or a tile; splash and counter are the WM's pacing/protocol rigs.
+//!   row or a tile: the Runner's list names it a `companion`, which it
+//!   compiles and installs beside the WM (an agent app, out of the Dock), so
+//!   an installed WM seats its compiled build. splash and counter are the
+//!   WM's pacing/protocol rigs.
 //! - scope and stage come from the optional private checkout of
 //!   makepad/commercial at apps/commercial (Scope at scope/, Stage's app at
 //!   stage/app, or a release's slice of it holding
@@ -32,6 +35,8 @@
 //!   and is filtered out the same way.
 //! - wm, wm-all and ai-hub are in the Runner's list (`runner_apps.json`) but are not
 //!   windows the WM hosts (`wm_launchable: false`).
+//! - runner is the Runner itself (apps/commercial/runner, `makepad` with no arguments): a
+//!   Mac's dock, never a WM window. Its row lets a node's launches name it like any app.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -147,8 +152,10 @@ pub fn find_by_bin(bin: &str) -> Option<&'static AppEntry> {
 /// The checkout root: `MAKEPAD_WM_ROOT`, else (under the JIT) the checkout this
 /// program's sources are in, else the checkout above the running exe (`target/<profile>/<bin>`), else the checkout at or above the
 /// current directory — started from the repo root with its target dir
-/// elsewhere (CARGO_TARGET_DIR) is still running out of a checkout. None:
-/// an installed layout without sources.
+/// elsewhere (CARGO_TARGET_DIR) is still running out of a checkout — else the checkout this
+/// program was compiled from, while it is there: a compiled app started from its installed copy
+/// (a Dock entry: an app bundle elsewhere, the cwd `/`) still lists and starts the apps of the
+/// tree it was built from. None: an installed layout without sources.
 pub fn repo_root() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("MAKEPAD_WM_ROOT") {
         return Some(PathBuf::from(root));
@@ -163,7 +170,9 @@ pub fn repo_root() -> Option<PathBuf> {
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
         .and_then(|dir| checkout_at_or_above(&dir));
-    from_exe.or_else(|| std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)))
+    from_exe
+        .or_else(|| std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)))
+        .or_else(|| checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))))
 }
 
 /// The nearest directory at or above `start` that is a makepad checkout: the
@@ -254,14 +263,48 @@ pub fn same_program(a: &Path, b: &Path) -> bool {
 }
 
 /// `bin` beside the running executable (`.exe` on Windows, where a bare
-/// name never exists): an installed layout's apps.
+/// name never exists), else in an app bundle beside the running one: an installed layout's apps
+/// (a folder of bundles, as the Runner's Applications/Makepad holds its compiled apps).
 pub fn installed_binary(bin: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let mut path = exe.parent()?.join(bin);
+    let dir = exe.parent()?;
+    let mut path = dir.join(bin);
     if cfg!(windows) {
         path.set_extension("exe");
     }
-    path.exists().then_some(path)
+    if path.exists() {
+        return Some(path);
+    }
+    bundle_sibling(dir, bin)
+}
+
+/// `bin` as the executable of an app bundle beside the running one (a Mac's folder of installed
+/// apps, as the Runner's Applications/Makepad holds its compiled builds): None elsewhere.
+pub fn bundled_sibling(bin: &str) -> Option<PathBuf> {
+    bundle_sibling(std::env::current_exe().ok()?.parent()?, bin)
+}
+
+/// The folder of app bundles the running executable's bundle sits in (a Mac's Applications/Makepad
+/// of the Runner's compiled builds): an installed app expects its siblings compiled there. None
+/// when the executable is not a bundle's (a checkout's build, the JIT).
+pub fn installed_folder() -> Option<PathBuf> {
+    bundle_folder(std::env::current_exe().ok()?.parent()?).map(Path::to_path_buf)
+}
+
+/// The folder holding the app bundle whose `Contents/MacOS` is `dir`.
+fn bundle_folder(dir: &Path) -> Option<&Path> {
+    let contents = dir.parent().filter(|_| dir.file_name().is_some_and(|n| n == "MacOS"))?;
+    let bundle = contents.parent().filter(|_| contents.file_name().is_some_and(|n| n == "Contents"))?;
+    bundle.parent().filter(|_| bundle.extension().is_some_and(|e| e == "app"))
+}
+
+/// `bin` as the executable of an app bundle beside the one whose `Contents/MacOS` is `dir`: a
+/// compiled app's own file (a live entry's executable is a link to the JIT loader, never one).
+fn bundle_sibling(dir: &Path, bin: &str) -> Option<PathBuf> {
+    let folder = bundle_folder(dir)?;
+    let mut bundles: Vec<PathBuf> = std::fs::read_dir(folder).ok()?.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "app")).collect();
+    bundles.sort();
+    bundles.into_iter().map(|b| b.join("Contents/MacOS").join(bin)).find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file()))
 }
 
 /// The binary that starts `app` without compiling anything: a sibling of the
@@ -473,6 +516,29 @@ mod tests {
     use super::*;
     use makepad_strict_json::Value;
 
+    /// An installed app finds a compiled app in a bundle beside its own, never a live entry's
+    /// link to the loader, and only from inside a bundle.
+    #[cfg(unix)]
+    #[test]
+    fn an_installed_app_finds_its_compiled_siblings() {
+        let dir = std::env::temp_dir().join(format!("app-registry-bundles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let macos = |name: &str| dir.join(format!("{name}.app/Contents/MacOS"));
+        for (bundle, exe) in [("WM", "wm"), ("Terminal", "terminal")] {
+            std::fs::create_dir_all(macos(bundle)).unwrap();
+            std::fs::write(macos(bundle).join(exe), b"").unwrap();
+        }
+        std::fs::create_dir_all(macos("Notes")).unwrap();
+        std::os::unix::fs::symlink(macos("WM").join("wm"), macos("Notes").join("makepad")).unwrap();
+        assert_eq!(bundle_sibling(&macos("WM"), "terminal"), Some(macos("Terminal").join("terminal")), "a compiled sibling");
+        assert_eq!(bundle_sibling(&macos("WM"), "makepad"), None, "a live entry's loader link is no app build");
+        assert_eq!(bundle_sibling(&macos("WM"), "calculator"), None, "an app not beside it");
+        assert_eq!(bundle_sibling(&dir, "terminal"), None, "outside a bundle there are no bundle siblings");
+        assert_eq!(bundle_folder(&macos("WM")), Some(dir.as_path()), "an installed app's folder of bundles");
+        assert_eq!(bundle_folder(&dir), None, "outside a bundle there is no folder of bundles");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_program_is_the_same_file_or_the_same_bytes() {
         let dir = std::env::temp_dir().join(format!("app-registry-program-{}", std::process::id()));
@@ -609,6 +675,20 @@ mod tests {
         // The commercial repository's apps sit in its checkout inside Makepad.
         for id in ["scope", "stage", "story", "sandbox"] {
             assert!(find(id).unwrap().target().dir.starts_with("apps/commercial/"), "{id}");
+        }
+        // A row builds its binary with `--no-default-features` and its features: the features its
+        // `[[bin]]` requires are among them, or no launcher can build it (Stage's `stage`).
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for e in apps() {
+            let t = e.target();
+            let Ok(manifest) = std::fs::read_to_string(root.join(t.dir).join("Cargo.toml")) else { continue };
+            for bin in manifest.split("[[bin]]").skip(1).map(|b| b.split("\n[").next().unwrap_or(b)) {
+                if !bin.lines().any(|l| l.replace(' ', "") == format!("name=\"{}\"", t.bin)) { continue; }
+                let required = bin.lines().find_map(|l| l.trim().strip_prefix("required-features")).unwrap_or("");
+                for f in required.split('"').skip(1).step_by(2) {
+                    assert!(e.features.contains(&f), "{}: its binary {} requires the feature {f}", e.id, t.bin);
+                }
+            }
         }
     }
 

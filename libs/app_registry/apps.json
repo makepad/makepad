@@ -142,7 +142,7 @@
   {
     "id": "stage", "label": "Stage", "package": "makepad-stage",
     "dir": "apps/commercial/stage/app", "bin": "makepad-stage", "manifest": null, "args": [],
-    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["stage"], "mobile": false
   },
   {
     "id": "story", "label": "Makepad Story", "package": "makepad-story",
@@ -230,5 +230,10 @@
     "id": "browser_host", "label": "Browser host", "package": "makepad-app-browser-host",
     "dir": "apps/browser_host", "bin": "makepad-app-browser-host", "manifest": null, "args": [],
     "policy": "always_new", "menu_visible": false, "wm_launchable": false, "features": [], "mobile": false
+  },
+  {
+    "id": "runner", "label": "Makepad", "package": "makepad-runner",
+    "dir": "apps/commercial/runner", "bin": "makepad-runner", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": false, "features": [], "mobile": false
   }
 ]

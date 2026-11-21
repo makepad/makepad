@@ -48,6 +48,8 @@ script_mod! {
         bar_reopens: false
         /** the pane a hand may fold: dragged shut (past half its floor) or a double click on the bar folds it, and a double click or a drag brings it back: SplitterCollapse.None A B */
         fold: mod.widgets.SplitterCollapse.None
+        /** seconds the pointer rests on the bar before its hover look comes in, 0 for at once 0..1 step 0.05 */
+        hover_dwell: 0.0
 
         draw_bg +: {
             /** dragging mix 0..1 step 0.01 */
@@ -180,6 +182,72 @@ script_mod! {
                 default: @off
                 off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
+                    apply: {draw_bg: {focus: 0.0}}
+                }
+                on: AnimatorState{
+                    from: {all: Snap}
+                    apply: {draw_bg: {focus: 1.0}}
+                }
+            }
+        }
+    }
+
+    /** A pane edge drawn as a hairline: the line at rest, the bar in the hover
+     * colour across the whole strip once the pointer has rested on it (so a
+     * pointer crossing it does not flash it), and at once while it is
+     * dragged or has the keyboard. Nothing moves on hover. */
+    mod.widgets.Sash = mod.widgets.Splitter{
+        hover_dwell: 0.3
+        draw_bg +: {
+            /** the line's width at rest, in pixels 0..4 step 0.5 */
+            line_width: uniform(1.0)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.clear(self.color_bg)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                // The line runs the bar's whole length, centred across it.
+                if self.is_vertical > 0.5 {
+                    sdf.rect(0.5 * (w - self.line_width), 0.0, self.line_width, h)
+                }
+                else {
+                    sdf.rect(0.0, 0.5 * (h - self.line_width), w, self.line_width)
+                }
+                sdf.fill(self.color)
+                let bar = self.color_hover
+                    .mix(self.color_drag, self.drag)
+                    .mix(self.color_focus, self.focus)
+                sdf.rect(0.0, 0.0, w, h)
+                sdf.fill(vec4(bar.rgb, bar.a * max(self.hover, self.focus)))
+                return sdf.result
+            }
+        }
+
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.12}}
+                    apply: {draw_bg: {drag: 0.0, hover: 0.0}}
+                }
+                // The dwell has passed (or a drag ended over the bar): the bar fades in.
+                on: AnimatorState{
+                    from: {
+                        all: Forward {duration: 0.12}
+                        drag: Forward {duration: 0.01}
+                    }
+                    apply: {draw_bg: {drag: 0.0, hover: 1.0}}
+                }
+                drag: AnimatorState{
+                    from: {all: Snap}
+                    apply: {draw_bg: {drag: 1.0, hover: 1.0}}
+                }
+            }
+            focus: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.12}}
                     apply: {draw_bg: {focus: 0.0}}
                 }
                 on: AnimatorState{
@@ -526,6 +594,15 @@ pub struct Splitter {
     /// This drag folded the pane: it stays folded until the finger lifts.
     #[rust]
     folded_by_drag: bool,
+    /// Seconds the pointer rests on the bar before the hover look comes in,
+    /// so a pointer crossing the bar does not flash it. Nothing, the
+    /// default, shows it at once. A drag and the keyboard's focus show their
+    /// looks at once either way.
+    #[live(0.0)]
+    pub hover_dwell: f64,
+    /// The dwell running for the pointer resting on the bar.
+    #[rust]
+    dwell: Timer,
 
     #[rust]
     rect: Rect,
@@ -621,6 +698,12 @@ impl Widget for Splitter {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
+        if self.dwell.is_event(event).is_some() {
+            self.dwell = Timer::empty();
+            if self.drag_start_align.is_none() {
+                self.animator_play(cx, ids!(hover.on));
+            }
+        }
 
         match event.hits_with_options(
             cx,
@@ -634,9 +717,15 @@ impl Widget for Splitter {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
                 }
-                self.animator_play(cx, ids!(hover.on));
+                if self.hover_dwell > 0.0 {
+                    cx.stop_timer(self.dwell);
+                    self.dwell = cx.start_timeout(self.hover_dwell);
+                } else {
+                    self.animator_play(cx, ids!(hover.on));
+                }
             }
             Hit::FingerHoverOut(_) => {
+                cx.stop_timer(std::mem::replace(&mut self.dwell, Timer::empty()));
                 self.animator_play(cx, ids!(hover.off));
             }
             // A folded splitter's bar is dead unless it was told to bring
@@ -661,6 +750,7 @@ impl Widget for Splitter {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
                 }
+                cx.stop_timer(std::mem::replace(&mut self.dwell, Timer::empty()));
                 self.animator_play(cx, ids!(hover.drag));
                 // Under the law, and out of a fold, the hand takes the bar
                 // from where it STANDS, so the bar tracks the hand rather

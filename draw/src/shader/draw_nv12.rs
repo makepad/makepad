@@ -178,6 +178,10 @@ pub struct DrawNv12 {
     pub gamut_g: Vec3f,
     #[live]
     pub gamut_b: Vec3f,
+    /// A pad lane: 46 f32 lanes in all, an even count, so a struct built on DrawNv12 starts
+    /// its own fields where the shader reads them (the `Script` derive's layout check).
+    #[live]
+    pub pad_nv12: f32,
 }
 
 impl DrawNv12 {

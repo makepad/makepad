@@ -32,6 +32,21 @@ pub enum Runner {
     Jit,
 }
 
+impl Runner {
+    /// The runner a start of `app` uses here. An installed app among compiled ones (a Mac's
+    /// folder of app bundles, the Runner's Applications/Makepad, whose builds the Runner keeps
+    /// current) starts the compiled build beside it: the apps a person installed run compiled,
+    /// never under the JIT (user, 11-19). Elsewhere the JIT needs a checkout (the app's sources) or
+    /// an installed `makepad` tool; without either an installed build of the app runs as itself.
+    pub fn available(self, app: &AppEntry, root: Option<&Path>) -> Runner {
+        match self {
+            Runner::Jit if crate::bundled_sibling(app.target().bin).is_some() => Runner::Native,
+            Runner::Jit if root.is_none() && built_binary(&MAKEPAD_RUN, None).is_none() && built_binary(&app.target(), None).is_some() => Runner::Native,
+            runner => runner,
+        }
+    }
+}
+
 /// What a spawned process is, for the host's environment and output handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -86,6 +101,8 @@ pub struct AppLaunch {
     diagnostic: String,
     last_output: String,
     closed_streams: usize,
+    /// A JIT run as the Runner's releases run the app ([`Self::start_release`]).
+    release: bool,
 }
 
 impl AppLaunch {
@@ -102,16 +119,49 @@ impl AppLaunch {
         extra: Vec<String>,
         policy: BuildPolicy,
         held: bool,
+        spawn: impl FnMut(Command, LaunchKind) -> Result<C, String>,
+    ) -> Result<(Self, C), String> {
+        Self::start_as(app, runner, root, extra, policy, held, false, spawn)
+    }
+
+    /// [`Self::start`] as the Runner's releases run an app (its pinned Dock entries, a Mac node's
+    /// dock): under the JIT without the package's default features (the design overlay,
+    /// `tweaker`), with the registry's own (`AppEntry::features`, the Runner's list's), and
+    /// standalone in a window of its own, never a `--stdin-loop` child (with no host on its wire
+    /// a hosted app draws nowhere and ends after the host's silence limit). Another feature set
+    /// is another build of the app and of `makepad-widgets` under it: a run with the defaults
+    /// leaves a Dock entry's start cold.
+    pub fn start_release<C>(
+        app: &'static AppEntry,
+        root: Option<PathBuf>,
+        extra: Vec<String>,
+        spawn: impl FnMut(Command, LaunchKind) -> Result<C, String>,
+    ) -> Result<(Self, C), String> {
+        Self::start_as(app, Runner::Jit, root, extra, BuildPolicy::IfMissing, false, true, spawn)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_as<C>(
+        app: &'static AppEntry,
+        runner: Runner,
+        root: Option<PathBuf>,
+        extra: Vec<String>,
+        policy: BuildPolicy,
+        held: bool,
+        release: bool,
         mut spawn: impl FnMut(Command, LaunchKind) -> Result<C, String>,
     ) -> Result<(Self, C), String> {
         let policy = if held { BuildPolicy::Rebuild } else { policy };
         let target = Self::target_of(app, runner);
-        let run = !held
+        // an installed app's compiled sibling (`Runner::available`) starts as it is: the Runner
+        // keeps it current, and a checkout beside it builds nothing for it
+        let sibling = runner == Runner::Native && !held && crate::bundled_sibling(target.bin).is_some();
+        let run = !held && !sibling
             && root.as_deref().is_some_and(|root| has_sources(&target, root));
-        let building = run || root.is_some() && match policy {
+        let building = !sibling && (run || root.is_some() && match policy {
             BuildPolicy::IfMissing => built_binary(&target, root.as_deref()).is_none(),
             BuildPolicy::Rebuild => true,
-        };
+        });
         let mut launch = Self {
             app, runner, root, extra, building, run, ran: false,
             status: if run { format!("starting {}…", app.label) } else if building { format!("building {}…", app.label) } else { format!("starting {}…", app.label) },
@@ -119,6 +169,7 @@ impl AppLaunch {
             diagnostic: String::new(),
             last_output: String::new(),
             closed_streams: 0,
+            release,
         };
         let kind = if run { LaunchKind::Run } else if building { LaunchKind::Build } else { LaunchKind::App };
         // the loader runs the app at once, compiling as it runs: started, no build to wait for
@@ -138,7 +189,7 @@ impl AppLaunch {
     pub fn build_command(app: &'static AppEntry, runner: Runner, root: PathBuf) -> Result<Command, String> {
         let launch = Self {
             app, runner, root: Some(root), extra: Vec::new(), building: true, run: false, ran: false,
-            status: String::new(), progress: String::new(), diagnostic: String::new(), last_output: String::new(), closed_streams: 0,
+            status: String::new(), progress: String::new(), diagnostic: String::new(), last_output: String::new(), closed_streams: 0, release: false,
         };
         launch.command()
     }
@@ -209,8 +260,8 @@ impl AppLaunch {
         match self.runner {
             Runner::Native => std::iter::once("--stdin-loop".to_string()).chain(self.app_args()).collect(),
             // only Linux's HAL finds the window manager by its socket: elsewhere the app is hosted
-            // the way a native child is, over the host's wire
-            Runner::Jit => self.run_args(!cfg!(target_os = "linux")),
+            // the way a native child is, over the host's wire; a release run is no host's child
+            Runner::Jit => self.run_args(!self.release && !cfg!(target_os = "linux")),
         }
     }
 
@@ -225,6 +276,13 @@ impl AppLaunch {
         // the app's own binary, as a native launch's `cargo run --bin` names it (a package may
         // hold several)
         let mut args = vec!["run".to_string(), self.app.package.to_string(), "--bin".to_string(), self.app.bin.to_string()];
+        if self.release {
+            args.push("--no-default-features".to_string());
+            if !self.app.features.is_empty() {
+                args.push("--features".to_string());
+                args.push(self.app.features.join(","));
+            }
+        }
         if !app_args.is_empty() {
             args.push("--".to_string());
             args.extend(app_args);
@@ -288,10 +346,16 @@ impl AppLaunch {
         // and test switches reach neither the app nor a checkout's cargo (which builds into the
         // checkout's own target/, as the prebuild did).
         crate::child_env::scrub_lane(&mut command);
-        // (the run in the mount keeps the edits over it: the JIT hands its child the mount, and the
-        // edits only when the launcher does not clear them)
-        if in_mount {
-            if let Some(edits) = std::env::var_os("RELAX_EDITS") { command.env("RELAX_EDITS", edits); }
+        // A run in the JIT's virtual source tree (a devhub overlay: its host runs from the mount),
+        // as the JIT or on the host's loader, keeps the edits over it and their live patching: the
+        // JIT hands its child the mount, and the edits and the live switch only when the launcher
+        // does not clear them. Cleared, the apps a WM in an overlay live session started ran the
+        // overlay's base commit, not the lane's saved edits, and a UI proof through that WM was
+        // stale with nothing said (11-20; only `--tree` gave the edited apps).
+        if loader.is_some() && self.root.as_deref().is_some_and(|root| crate::on_disk(root).is_err()) {
+            for key in ["RELAX_EDITS", "RELAX_STORE_LIVE"] {
+                if let Some(value) = std::env::var_os(key) { command.env(key, value); }
+            }
         }
         // The app itself gets this machine's settings for it (`machine::launch_env`); a host
         // adds its own after this.
@@ -491,6 +555,23 @@ mod tests {
             let tail: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "-p").collect();
             assert_eq!(tail, [&["-p", "makepad-run", "--bin", "makepad", "--"][..], &run[..]].concat());
         }
+        // as the Runner's releases run it: the registry's features instead of the defaults (no
+        // design overlay), an empty list too, standalone (no `--stdin-loop` on any OS)
+        let release = |id: &str| {
+            let entry = crate::find(id).unwrap();
+            let mut seen: Vec<String> = Vec::new();
+            let _ = AppLaunch::start_release::<()>(entry, Some(root.clone()), Vec::new(), |cmd, _| {
+                seen = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                Err("captured".into())
+            });
+            // the tool's `run <package> ...` (after `cargo run ... --` when not under a loader)
+            let at = seen.iter().position(|a| a == entry.package).expect("the package is named");
+            seen[at - 1..].to_vec()
+        };
+        let calc = release("calculator");
+        assert_eq!(&calc[..6], ["run", "makepad-app-calculator", "--bin", "makepad-app-calculator", "--no-default-features", "--features"]);
+        assert_eq!(&calc[6..], ["standalone"]);
+        assert_eq!(&release("terminal")[4..], ["--no-default-features"]);
         let (native, _) = started("terminal", Runner::Native, &root);
         assert!(native.iter().any(|a| a == "--stdin-loop"), "{native:?}");
         assert!(native.iter().any(|a| a == "makepad-app-terminal"));
@@ -567,10 +648,23 @@ mod tests {
                 let (program, expected_args) = crate::build_argv(&MAKEPAD_RUN, &root);
                 assert_eq!(build.get_program(), program.as_os_str());
                 assert_eq!(build_args, expected_args, "{id}");
-                let mut expected = Command::new(&loader);
-                crate::child_env::scrub(&mut expected);
-                crate::child_env::scrub_lane(&mut expected);
+                let scrubbed = || {
+                    let mut c = Command::new(loader);
+                    crate::child_env::scrub(&mut c);
+                    crate::child_env::scrub_lane(&mut c);
+                    c
+                };
+                let mut expected = scrubbed();
+                // from the JIT's virtual tree (a test run in a devhub overlay) the host's edits and
+                // their live patching go along: the app runs the lane's saved sources, not the
+                // overlay's base commit (a WM's apps in an overlay live session, 11-20)
+                if crate::on_disk(&root).is_err() {
+                    for key in ["RELAX_EDITS", "RELAX_STORE_LIVE"] {
+                        if let Some(value) = std::env::var_os(key) { expected.env(key, value); }
+                    }
+                }
                 assert_eq!(envs(&run), envs(&expected), "{id}");
+                let mut expected = scrubbed();
                 crate::cargo_env(&mut expected);
                 assert_eq!(envs(&build), envs(&expected), "{id}");
             } else if let Some(loader) = loader.as_ref().filter(|_| crate::on_disk(&root).is_err()) {

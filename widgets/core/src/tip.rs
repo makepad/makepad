@@ -584,8 +584,10 @@ impl Widget for Tip {
         }
         let uid = self.widget_uid();
         // A control that went away takes its tip with it: the pointer may never move again over
-        // it, and a key focus stays on an area nothing draws any more.
-        if (self.hovered || self.focused) && self.children_all_hidden() {
+        // it, and a key focus stays on an area nothing draws any more. So does one a hidden
+        // ancestor took out of sight (a row removed with its own button): no pointer event
+        // reaches it there, only actions, which say so.
+        if (self.hovered || self.focused) && (self.children_all_hidden() || crate::held_events::in_hidden_subtree(cx)) {
             self.hovered = false;
             self.focused = false;
             cx.widget_action(uid, TipAction::HoverOut);
@@ -1361,7 +1363,8 @@ mod tests {
     }
 
     /// A control that hides with its tip up takes the tip with it, on the next event of any
-    /// kind: nothing else would, with the pointer still or the key focus left behind on it.
+    /// kind: nothing else would, with the pointer still or the key focus left behind on it. A
+    /// control whose row hides does too, on the next actions.
     #[test]
     fn a_control_that_hides_takes_its_tip_with_it() {
         crate::on_test_cx(|| {
@@ -1371,6 +1374,7 @@ mod tests {
             use mod.prelude.widgets.*
             View{ width: 300 height: 20 flow: Right
                 Tip{ text: "first" View{ width: 50 height: 20 } }
+                View{ width: 100 height: 20 Tip{ text: "in a row" View{ width: 50 height: 20 } } }
             }
         });
         let mut layer = tip_layer(&mut cx);
@@ -1381,6 +1385,13 @@ mod tests {
         assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Signal).as_deref(), Some("first"), "the control is still there");
         at(&root, &[0, 0]).set_visible(&mut cx, false);
         assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Signal), None, "the control went, and the tip");
+        // The row holding a tipped control hides (removed with its own button): the next
+        // actions, all that reach a hidden subtree, take the tip down.
+        let to = at(&root, &[1, 0]).area();
+        assert_eq!(focus(&mut cx, &mut root, &mut layer, to).as_deref(), Some("in a row"));
+        at(&root, &[1]).set_visible(&mut cx, false);
+        let none = cx.capture_actions(|_| {});
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Actions(none)), None, "the row went, and the tip");
         });
     }
 

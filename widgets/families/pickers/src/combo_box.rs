@@ -1,10 +1,7 @@
-//! ComboBox — an editable, *filtering* selector over a **closed set** of items.
+//! ComboBox filters a list of items and optionally accepts typed values.
 //!
-//! This is a selector over a closed set, not a free-text field: half-typed
-//! filter text is never itself a value. The control only ever commits ITEMS
-//! from `labels` — typing filters the list, Enter commits the highlighted
-//! match, Esc or blur restores the previous selection and the filter text
-//! evaporates. No action is ever emitted carrying free text.
+//! By default only items from `labels` can be committed. With `accepts_typed`,
+//! the app receives other text for validation and supplies the value to show.
 //!
 //! # Interaction contract
 //!
@@ -18,19 +15,31 @@
 //! ## Keyboard (key focus lives in the embedded `TextInput` at all times —
 //! the popup highlight is a purely visual "activedescendant")
 //!
-//! | Key | Popup closed | Popup open |
+//! | Key (closed-set mode) | Popup closed | Popup open |
 //! |---|---|---|
-//! | printable | opens popup, filters, highlights top match | filters, highlights top match |
+//! | printable | opens popup and filters as at right | filters and highlights the committed item if present, otherwise the top match |
 //! | Backspace to empty | (as above) shows all items | shows all items, highlights the committed item |
 //! | Down | opens popup, highlights **first** item | moves highlight down (wraps) |
-//! | Alt+Down | opens popup, highlight unchanged | — |
+//! | Alt+Down | opens the full list at the committed item | moves highlight down (wraps) |
 //! | Up | opens popup, highlights **last** item | moves highlight up (wraps) |
 //! | Alt+Up | — | closes popup, keeps the committed value |
 //! | PageDown / PageUp | (caret: text start/end, `TextInput`) | moves highlight by one page |
 //! | Home / End | caret to start / end of text | caret to start / end of text (APG: never a list jump) |
 //! | Enter | nothing | commits the highlighted item and closes; **no match ⇒ nothing happens**, filter stays editable |
-//! | Esc | restores the committed label | closes popup **and** restores the committed label |
+//! | Esc | keeps the committed label | closes popup **and** restores the committed label |
 //! | Tab | moves focus on | commits the highlighted item, then moves focus on |
+//!
+//! | In typed mode | Result |
+//! |---|---|
+//! | Type, paste or erase | filters and opens the list with no row highlighted |
+//! | Down / Up | explicitly highlights a row for Enter. PageDown / PageUp can then move it by a page |
+//! | Enter | selects the keyboard highlight, else an exact label, else emits trimmed `Typed` text. Closes and keeps focus |
+//! | Tab or click outside / blur | ignores the highlight. Submits changed text by exact label or `Typed`. Unchanged text closes quietly |
+//! | Exact label | trims both sides and ignores ASCII case unless `match_case: true` |
+//! | Empty submission without a highlight, or Esc | restores the last shown value and clears the error |
+//! | Alt+Up or click the focused field | closes the list and keeps the draft editable |
+//! | App calls `set_error(Some(hint))` | shows the hint under the field and selects the text for correction |
+//! | Select, `set_text`, or `set_error(None)` | clears the hint. Select shows the label, and `set_text` shows the app's text |
 //!
 //! ## Pointer
 //!
@@ -41,13 +50,12 @@
 //! | click the text of a focused box | places the caret; closes the popup if it was open (macOS: the field counts as "outside") |
 //! | hover a row | paints a weak hover highlight — it does **not** move the keyboard highlight |
 //! | click a row | commits that item and closes |
-//! | click outside | closes and restores the committed label |
+//! | click outside | closes and restores the committed label in closed-set mode, or submits a changed typed value |
 //! | wheel / scrollbar drag | scrolls the list |
 //!
-//! ## Deliberate divergences (macOS-native / closed-set semantics win)
+//! ## Closed-set conventions
 //!
-//! * `NSComboBox` accepts typed text as a value; we never do — blur and
-//!   click-outside **revert** to the last committed item (VS Code model).
+//! * Blur and click-outside restore the last committed item (VS Code model).
 //! * APG's second Escape *clears* the textbox; an empty box is not a member of
 //!   a closed set, so a second Escape re-asserts the committed label instead.
 //! * APG's list-autocomplete variant highlights nothing until an arrow key is
@@ -138,6 +146,7 @@ script_mod! {
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
+            error: instance(0.0)
             down: instance(0.0)
             disabled: instance(0.0)
             border_size: uniform(theme.beveling)
@@ -151,6 +160,7 @@ script_mod! {
             border_color_hover: uniform(theme.color_bevel_hover)
             border_color_focus: uniform(theme.color_bevel_focus)
             border_color_down: uniform(theme.color_bevel_down)
+            border_color_error: uniform(theme.color_error)
             arrow_color: uniform(theme.color_label_inner)
             arrow_color_hover: uniform(theme.color_label_inner_hover)
             pixel: fn() {
@@ -173,7 +183,8 @@ script_mod! {
                         .mix(self.border_color_focus, self.focus)
                         .mix(self.border_color_hover, self.hover)
                         .mix(self.border_color_down, self.down * self.hover)
-                    self.border_size
+                        .mix(self.border_color_error, self.error)
+                    max(self.border_size, self.error)
                 )
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
                 let sz = 2.5
@@ -204,6 +215,11 @@ script_mod! {
                 sdf.stroke(self.border_color, self.border_size)
                 sdf.result
             }
+        }
+
+        draw_hint +: {
+            color: theme.color_error
+            text_style: theme.font_regular{font_size: theme.font_size_p}
         }
 
         draw_item +: {
@@ -299,9 +315,7 @@ const SCROLL_BAR_RESERVE: f64 = 12.0;
 // only owns the *view* state derived from them.
 // ---------------------------------------------------------------------------
 
-/// Case-insensitive substring filter over `labels`. An empty filter matches
-/// everything; a filter that matches nothing yields an empty set (the
-/// "no match" state, in which nothing can be committed).
+/// Case-insensitive substring filter over `labels`. An empty filter matches all items.
 pub fn filter_indices(labels: &[String], filter: &str) -> Vec<usize> {
     if filter.trim().is_empty() {
         return (0..labels.len()).collect();
@@ -357,10 +371,9 @@ pub struct ComboFilter {
     /// Indices into the widget's `labels`, in list order.
     pub filtered: Vec<usize>,
     /// Position **within `filtered`** of the visually highlighted row, i.e. the
-    /// item Enter would commit. `None` in the no-match state.
+    /// item Enter would commit. Typed filters start with no highlight.
     pub highlight: Option<usize>,
-    /// True while the text field holds filter text rather than the committed
-    /// label. Cleared on commit, revert and blur.
+    /// True while the field holds an editable draft.
     pub editing: bool,
 }
 
@@ -381,20 +394,27 @@ impl ComboFilter {
     /// model) unless the committed item is itself still in the filtered set,
     /// in which case the highlight stays on it.
     pub fn set_filter(&mut self, labels: &[String], filter: &str, selected: usize) {
+        self.filter_for_mode(labels, filter, selected, false);
+    }
+
+    fn filter_for_mode(
+        &mut self,
+        labels: &[String],
+        filter: &str,
+        selected: usize,
+        accepts_typed: bool,
+    ) {
         self.filter = filter.to_string();
         self.editing = true;
         self.filtered = filter_indices(labels, filter);
-        self.highlight = if self.filtered.is_empty() {
+        self.highlight = if accepts_typed || self.is_empty() {
             None
-        } else if let Some(pos) = self.filtered.iter().position(|i| *i == selected) {
-            Some(pos)
         } else {
-            Some(0)
+            Some(self.position_of(selected).unwrap_or(0))
         };
     }
 
-    /// The index into `labels` that Enter would commit, or `None` when nothing
-    /// matches — in which case Enter must do nothing at all.
+    /// The index into `labels` of the highlighted row.
     pub fn highlighted_label_index(&self) -> Option<usize> {
         self.filtered.get(self.highlight?).copied()
     }
@@ -638,7 +658,7 @@ struct DrawComboItemBg {
 // Widget
 // ---------------------------------------------------------------------------
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, Widget, Animator)]
 pub struct ComboBox {
     #[uid]
     uid: WidgetUid,
@@ -657,10 +677,11 @@ pub struct ComboBox {
     #[live]
     draw_item_text: DrawComboItemText,
     #[live]
+    draw_hint: DrawText,
+    #[live]
     draw_list: DrawList2d,
 
-    /// The closed control: a real text field, so selection, clipboard and IME
-    /// all work. Its content is either the committed label or filter text.
+    /// The text field owns focus, selection, clipboard and IME.
     #[live]
     input: TextInput,
     #[live]
@@ -675,6 +696,12 @@ pub struct ComboBox {
     labels: Vec<String>,
     #[live]
     selected_item: usize,
+    /// Lets the app validate and display typed values.
+    #[live]
+    accepts_typed: bool,
+    /// Requires an exact case match when submitting typed text as a label.
+    #[live]
+    match_case: bool,
     #[live(22.0)]
     item_height: f64,
     /// Rows shown before the list starts scrolling.
@@ -694,9 +721,17 @@ pub struct ComboBox {
     #[rust]
     state: ComboFilter,
     #[rust]
+    applied_accepts_typed: bool,
+    #[rust]
+    shown_text: Option<String>,
+    /// Original input kept until the app accepts it or reports an error.
+    #[rust]
+    submitted_text: Option<String>,
+    #[rust]
+    error_hint: Option<String>,
+    #[rust]
     is_open: bool,
-    /// Held while the popup is open, so `Escape` belongs to it rather than to
-    /// whatever it was opened in front of.
+    /// Routes Escape to the list or the typed edit under correction.
     #[rust]
     cancel_scope: Option<CancelScope>,
     #[rust]
@@ -723,12 +758,46 @@ pub struct ComboBox {
     action_data: WidgetActionData,
 }
 
+impl ScriptHook for ComboBox {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if self.applied_accepts_typed != self.accepts_typed {
+            self.applied_accepts_typed = self.accepts_typed;
+            self.shown_text = None;
+            vm.with_cx_mut(|cx| self.revert(cx));
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum ComboBoxAction {
-    /// An ITEM was committed. Carries the index into `labels` — never text.
+    /// The index of the committed label.
     Select(usize),
+    /// Trimmed input for the app to validate.
+    Typed(String),
     #[default]
     None,
+}
+
+fn typed_action(labels: &[String], text: &str, highlighted: Option<usize>, match_case: bool) -> ComboBoxAction {
+    let text = text.trim();
+    if let Some(index) = highlighted {
+        ComboBoxAction::Select(index)
+    } else if text.is_empty() {
+        ComboBoxAction::None
+    } else if let Some(index) = labels.iter().position(|label| {
+        let label = label.trim();
+        if match_case { label == text } else { label.eq_ignore_ascii_case(text) }
+    }) {
+        ComboBoxAction::Select(index)
+    } else {
+        ComboBoxAction::Typed(text.to_owned())
+    }
 }
 
 impl ComboBox {
@@ -747,11 +816,69 @@ impl ComboBox {
             .unwrap_or("")
     }
 
-    /// Pushes the committed label into the text field. Only ever called when
-    /// the field is not holding filter text.
+    fn shown_value(&self) -> &str {
+        if self.accepts_typed {
+            return self.shown_text.as_deref().unwrap_or_else(|| self.selected_label());
+        }
+        self.selected_label()
+    }
+
+    fn reset_filter(&mut self) {
+        self.state.reset(self.labels.len(), self.selected_item);
+        if self.accepts_typed {
+            self.state.highlight = None;
+        }
+    }
+
+    /// Shows the app's text in typed mode, or selects a matching label in closed-set mode.
+    pub fn set_text(&mut self, cx: &mut Cx, text: &str) {
+        if self.accepts_typed {
+            if self.shown_text.as_deref() == Some(text) && !self.state.editing
+                && self.submitted_text.is_none() && self.error_hint.is_none()
+            {
+                return;
+            }
+            self.shown_text = Some(text.to_owned());
+            self.revert(cx);
+        } else if let Some(i) = self.labels.iter().position(|l| l == text) {
+            self.selected_item = i;
+            self.reset_filter();
+            self.sync_text(cx);
+        }
+    }
+
+    /// Shows a validation hint and selects the input for correction.
+    pub fn set_error(&mut self, cx: &mut Cx, hint: Option<&str>) {
+        if !self.accepts_typed || (hint.is_none() && self.error_hint.is_none()) {
+            return;
+        }
+        if let Some(hint) = hint {
+            self.error_hint = Some(hint.replace(['\r', '\n'], " "));
+            if let Some(text) = self.submitted_text.take() {
+                self.input.set_text(cx, &text);
+            }
+            self.state.editing = true;
+            self.close_popup(cx);
+            self.input.take_key_focus(cx);
+            self.input.select_all(cx);
+        } else {
+            self.clear_error(cx);
+        }
+        self.update_cancel_scope(cx);
+        self.draw_bg.redraw(cx);
+        self.draw_list.redraw(cx);
+    }
+
+    fn clear_error(&mut self, cx: &mut Cx) {
+        if self.error_hint.take().is_some() {
+            self.draw_bg.set_dyn_instance(cx, id!(error), &[0.0]);
+        }
+    }
+
+    /// Restores the value shown outside an edit.
     fn sync_text(&mut self, cx: &mut Cx) {
-        let label = self.selected_label().to_string();
-        if self.input.text() != label {
+        if self.input.text() != self.shown_value() {
+            let label = self.shown_value().to_owned();
             self.input.set_text(cx, &label);
             // A closed control shows the START of a long label, not the tail
             // the text field would scroll to after a set_text.
@@ -780,14 +907,19 @@ impl ComboBox {
     fn open_popup(&mut self, cx: &mut Cx, keep_filter: bool) {
         self.clamp_selected();
         if !keep_filter {
-            self.state.reset(self.labels.len(), self.selected_item);
-            self.sync_text(cx);
+            let keep_draft = self.accepts_typed && self.state.editing;
+            self.reset_filter();
+            self.state.editing = keep_draft;
+            if !keep_draft {
+                self.submitted_text = None;
+                self.sync_text(cx);
+            }
         }
         if !self.is_open {
             self.is_open = true;
-            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             cx.sweep_lock(self.draw_bg.area());
         }
+        self.update_cancel_scope(cx);
         self.hover_row = None;
         self.scroll = 0.0;
         self.scroll_to_highlight = true;
@@ -799,24 +931,39 @@ impl ComboBox {
     fn close_popup(&mut self, cx: &mut Cx) {
         if self.is_open {
             self.is_open = false;
-            if let Some(scope) = self.cancel_scope.take() {
-                cx.end_cancel_scope(scope);
-            }
             cx.sweep_unlock(self.draw_bg.area());
         }
-        // Editing used to outlive the popup, which left `Escape` reverting a box that
-        // owned no cancel scope. One flag, one scope.
-        self.state.editing = false;
+        if self.accepts_typed {
+            self.state.highlight = None;
+        } else {
+            self.state.editing = false;
+        }
+        self.update_cancel_scope(cx);
         self.hover_row = None;
         self.geom = None;
         self.draw_bg.redraw(cx);
         self.draw_list.redraw(cx);
     }
 
-    /// Esc / blur / click-outside: the half-typed filter evaporates and the
-    /// previously committed item comes back. Never emits an action.
+    fn update_cancel_scope(&mut self, cx: &mut Cx) {
+        let has_draft = self.state.editing || self.submitted_text.is_some();
+        let typed_edit = self.accepts_typed
+            && (self.error_hint.is_some() || (has_draft && self.input.key_focus(cx)));
+        let needs_cancel = self.is_open || typed_edit;
+        if needs_cancel && self.cancel_scope.is_none() {
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
+        } else if !needs_cancel {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
+    }
+
+    /// Restores the shown value without emitting an action.
     fn revert(&mut self, cx: &mut Cx) {
-        self.state.reset(self.labels.len(), self.selected_item);
+        self.clear_error(cx);
+        self.submitted_text = None;
+        self.reset_filter();
         self.sync_text(cx);
         self.close_popup(cx);
     }
@@ -838,10 +985,9 @@ impl ComboBox {
         let index = index.min(self.labels.len() - 1);
         let changed = index != self.selected_item;
         self.selected_item = index;
-        self.state.reset(self.labels.len(), self.selected_item);
-        self.sync_text(cx);
-        self.close_popup(cx);
-        if changed {
+        self.shown_text = None;
+        self.revert(cx);
+        if changed || self.accepts_typed {
             cx.widget_action_with_data(
                 &self.action_data,
                 self.uid,
@@ -849,6 +995,40 @@ impl ComboBox {
             );
         }
         self.draw_bg.redraw(cx);
+    }
+
+    fn submit_typed(&mut self, cx: &mut Cx, highlighted: Option<usize>) {
+        let text = self.input.text();
+        match typed_action(&self.labels, &text, highlighted, self.match_case) {
+            ComboBoxAction::Select(index) => self.commit_index(cx, index),
+            ComboBoxAction::None => self.revert(cx),
+            action @ ComboBoxAction::Typed(_) => {
+                self.submitted_text = Some(text);
+                self.state.editing = false;
+                self.close_popup(cx);
+                cx.widget_action_with_data(&self.action_data, self.uid, action);
+            }
+        }
+    }
+
+    fn enter(&mut self, cx: &mut Cx) {
+        if self.accepts_typed {
+            let highlighted = if self.is_open { self.state.highlighted_label_index() } else { None };
+            self.submit_typed(cx, highlighted);
+        } else if self.is_open {
+            self.commit_highlighted(cx);
+        }
+    }
+
+    fn finish_on_blur(&mut self, cx: &mut Cx) {
+        if !self.accepts_typed {
+            self.revert(cx);
+        } else if self.state.editing && self.input.text() != self.shown_value() {
+            self.submit_typed(cx, None);
+        } else {
+            self.state.editing = false;
+            self.close_popup(cx);
+        }
     }
 
     fn visible_rows(&self) -> usize {
@@ -878,10 +1058,11 @@ impl ComboBox {
     /// sync. Typing always opens the popup (APG: printable characters filter
     /// the listbox).
     fn on_text_changed(&mut self, cx: &mut Cx, text: &str) {
-        self.state.set_filter(&self.labels, text, self.selected_item);
+        self.submitted_text = None;
+        self.state.filter_for_mode(&self.labels, text, self.selected_item, self.accepts_typed);
         if !self.is_open {
             self.is_open = true;
-            self.cancel_scope = Some(self.begin_cancel_scope(cx));
+            self.update_cancel_scope(cx);
             cx.sweep_lock(self.draw_bg.area());
         }
         self.hover_row = None;
@@ -925,23 +1106,20 @@ impl ComboBox {
                 self.draw_list.redraw(cx);
                 true
             }
-            KeyCode::PageDown if self.is_open => {
+            KeyCode::PageDown if self.is_open && (!self.accepts_typed || self.state.highlight.is_some()) => {
                 self.state.page_highlight(self.visible_rows() as isize);
                 self.scroll_highlight_into_view(cx);
                 self.draw_list.redraw(cx);
                 true
             }
-            KeyCode::PageUp if self.is_open => {
+            KeyCode::PageUp if self.is_open && (!self.accepts_typed || self.state.highlight.is_some()) => {
                 self.state.page_highlight(-(self.visible_rows() as isize));
                 self.scroll_highlight_into_view(cx);
                 self.draw_list.redraw(cx);
                 true
             }
             KeyCode::ReturnKey => {
-                if self.is_open {
-                    // No match: Enter does nothing, the filter stays editable.
-                    self.commit_highlighted(cx);
-                }
+                self.enter(cx);
                 true
             }
             KeyCode::Escape => {
@@ -953,8 +1131,9 @@ impl ComboBox {
                 true
             }
             KeyCode::Tab => {
-                // Commit what is highlighted, then let focus move on.
-                if self.is_open && !self.commit_highlighted(cx) {
+                if self.accepts_typed {
+                    self.finish_on_blur(cx);
+                } else if self.is_open && !self.commit_highlighted(cx) {
                     self.revert(cx);
                 } else if self.state.editing {
                     self.revert(cx);
@@ -1013,10 +1192,38 @@ impl ComboBox {
     }
 
     fn draw_field(&mut self, cx: &mut Cx2d, walk: Walk) {
+        if self.error_hint.is_some() {
+            self.draw_bg.set_dyn_instance(cx.cx, id!(error), &[1.0]);
+        }
         self.draw_bg.begin(cx, walk, self.layout);
         let input_walk = self.input.walk(cx);
         let _ = self.input.draw_walk(cx, &mut Scope::empty(), input_walk);
         self.draw_bg.end(cx);
+    }
+
+    /// Draws the hint in the overlay and reserves its height for the open list.
+    fn draw_hint(&mut self, cx: &mut Cx2d, trigger: Rect) -> Rect {
+        let Some(hint) = &self.error_hint else { return trigger };
+        let layout = row_layout();
+        let run = self.draw_hint.layout(cx, 0.0, 0.0, None, false, Align::default(), hint);
+        let size = run.size_in_lpxs * self.draw_hint.font_scale;
+        let geom = layout_combo_popup(
+            cx.current_pass_size(),
+            trigger,
+            1,
+            1,
+            self.item_height.max(f64::from(size.height)),
+            f64::from(size.width) + layout.padding.left + layout.padding.right,
+            0.0,
+            self.popup_margin,
+            self.popup_gap,
+        );
+        let rect = geom.popup_rect();
+        let walk = Walk::fixed(rect.size.x, rect.size.y).with_abs_pos(rect.pos);
+        self.draw_popup_bg.begin(cx, walk, layout);
+        self.draw_hint.draw_walk_laidout(cx, Walk::fit(), &run);
+        self.draw_popup_bg.end(cx);
+        trigger.hull(rect)
     }
 
     fn draw_row_text(&mut self, cx: &mut Cx2d, label: &str) {
@@ -1072,9 +1279,6 @@ impl ComboBox {
             }
         }
         self.scroll = self.scroll.clamp(0.0, geom.max_scroll());
-
-        self.draw_list.begin_overlay_reuse(cx);
-        cx.begin_root_turtle(pass, Layout::flow_overlay());
 
         let popup_walk = Walk::fixed(geom.width, geom.height).with_abs_pos(dvec2(geom.x, geom.y));
         self.draw_popup_bg.begin(
@@ -1168,8 +1372,6 @@ impl ComboBox {
         cx.end_turtle();
 
         self.draw_popup_bg.end(cx);
-        cx.end_pass_sized_turtle();
-        self.draw_list.end(cx);
     }
 }
 
@@ -1280,7 +1482,8 @@ impl Widget for ComboBox {
             .set(a11y_tree::States::DISABLED, self.disabled(cx));
         node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
         node.states.insert(a11y_tree::States::HAS_POPUP);
-        node.value = self.selected_label().to_owned();
+        node.value = self.shown_value().to_owned();
+        makepad_platform::a11y::set_string(&mut node.description, self.error_hint.as_deref().unwrap_or(""));
         node.states.set(a11y_tree::States::EXPANDED, self.is_open);
         node.states
             .set(a11y_tree::States::COLLAPSED, !(self.is_open));
@@ -1306,20 +1509,16 @@ impl Widget for ComboBox {
     }
 
     fn text(&self) -> String {
-        self.selected_label().to_string()
+        self.shown_value().to_owned()
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        if let Some(i) = self.labels.iter().position(|l| l == v) {
-            self.selected_item = i;
-            self.state.reset(self.labels.len(), self.selected_item);
-            self.sync_text(cx);
-        }
+        ComboBox::set_text(self, cx, v);
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.animator_handle_event(cx, event);
-        if self.is_open && crate::family_api::is_modal_dismissal(event) {
+        if self.cancel_scope.is_some() && crate::family_api::is_modal_dismissal(event) {
             self.revert(cx);
             return;
         }
@@ -1332,7 +1531,7 @@ impl Widget for ComboBox {
         }
         // Between draws every deferred alignment has been applied, so this is
         // the field's true on-screen rect (see `aligned_rect`).
-        let rect = self.draw_bg.area().rect(cx);
+        let rect = drawn_rect(cx, self.draw_bg.area());
         if rect.size.x > 0.0 && rect.size.y > 0.0 {
             self.aligned_rect = Some(rect);
         }
@@ -1376,19 +1575,36 @@ impl Widget for ComboBox {
                 self.handle_popup_pointer(cx, popup_event);
                 return;
             }
-            // Anything pressed outside the popup dismisses it and restores the
-            // committed label (macOS: the text field itself counts as
-            // "outside"). `dismissed` keeps the press from re-opening the list
-            // further down — a click on the arrow must toggle, not cycle.
-            if matches!(popup_event, Event::MouseDown(_) | Event::TouchUpdate(_)) {
-                self.revert(cx);
+            // A press on the field toggles the list once. Only a press outside
+            // the field also submits a typed edit.
+            let press = match event {
+                Event::MouseDown(e) => Some((e.abs, live_id!(mouse).into())),
+                Event::TouchUpdate(e) => e.touches.iter().find(|t| t.state == TouchState::Start)
+                    .map(|t| (t.abs, live_id_num!(touch, t.uid).into())),
+                _ => None,
+            };
+            if press.is_some() || (!self.accepts_typed && matches!(event, Event::TouchUpdate(_))) {
                 dismissed = true;
                 // A press anywhere but on this box is the list's, as a press
                 // outside the list is for a plain drop-down: the lock is
                 // released by now, and whatever is walked after would
                 // otherwise take it. One on the box itself goes on to the
                 // field and the arrow below.
-                let field = self.aligned_rect.unwrap_or_else(|| self.draw_bg.area().rect(cx));
+                let field = self.aligned_rect.unwrap_or_else(|| drawn_rect(cx, self.draw_bg.area()));
+                if self.accepts_typed {
+                    if let Some((_, digit)) = press.filter(|(pos, _)| !field.contains(*pos)) {
+                        if self.input.key_focus(cx) {
+                            cx.set_key_focus(Area::Empty);
+                            // The release must respect focus restored by set_error.
+                            cx.fingers.mark_press_as_keeping_key_focus(digit);
+                        }
+                        self.finish_on_blur(cx);
+                    } else {
+                        self.close_popup(cx);
+                    }
+                } else {
+                    self.revert(cx);
+                }
                 claim_press_outside(event, field, self.draw_bg.area());
             } else {
                 self.handle_popup_pointer(cx, popup_event);
@@ -1399,7 +1615,7 @@ impl Widget for ComboBox {
         //    dispatched before the field-wide hit test below, or the arrow's
         //    hit area would swallow every press.
         let input_area = self.input.area();
-        let input_rect = input_area.rect(cx);
+        let input_rect = drawn_rect(cx, input_area);
         let was_focused = self.input.key_focus(cx);
         let clicked_text = matches!(event, Event::MouseDown(e) if input_rect.contains(e.abs));
         // A mouse-up on our own chrome (the arrow, the padding) makes a focused
@@ -1422,16 +1638,17 @@ impl Widget for ComboBox {
                         // drop the filter.
                         if !self.input.key_focus(cx) {
                             self.animator_play(cx, ids!(focus.off));
-                            self.revert(cx);
+                            self.finish_on_blur(cx);
                         }
                     }
                     TextInputAction::Changed(text) => {
                         self.on_text_changed(cx, &text);
                     }
                     TextInputAction::Returned(_, _) => {
-                        if self.is_open {
-                            self.commit_highlighted(cx);
+                        if self.accepts_typed {
+                            self.input.take_key_focus(cx);
                         }
+                        self.enter(cx);
                     }
                     TextInputAction::Escaped => {
                         self.revert(cx);
@@ -1481,13 +1698,12 @@ impl Widget for ComboBox {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.clamp_selected();
-        if !self.state.editing {
-            // The field shows the committed label whenever it is not holding
-            // filter text — this also picks up `labels` arriving from the DSL.
+        let showing_submission = self.submitted_text.is_some() && self.input.key_focus(cx);
+        if !self.state.editing && !showing_submission {
             self.sync_text(cx);
         }
         self.draw_field(cx, walk);
-        if self.is_open {
+        if self.is_open || self.error_hint.is_some() {
             // Turtle alignment is deferred: a field laid out after a Fill
             // sibling is recorded at its pre-shift position and only moved when
             // the ancestor turtle ends, so the rect visible during THIS draw
@@ -1500,23 +1716,57 @@ impl Widget for ComboBox {
                 .popup_anchor_transform
                 .map(|transform| transform.rect(trigger))
                 .unwrap_or(trigger);
-            self.draw_popup(cx, trigger);
+            let pass = cx.current_pass_size();
+            if self.error_hint.is_some() {
+                self.draw_list.begin_popup_overlay(cx);
+            } else {
+                self.draw_list.begin_overlay_reuse(cx);
+            }
+            cx.begin_root_turtle(pass, Layout::flow_overlay());
+            let trigger = self.draw_hint(cx, trigger);
+            if self.is_open {
+                self.draw_popup(cx, trigger);
+            }
+            cx.end_pass_sized_turtle();
+            self.draw_list.end(cx);
         }
         DrawStep::done()
     }
 }
 
 impl ComboBoxRef {
-    /// Replaces the closed set. The committed index is clamped and the text
-    /// field re-shows the (possibly new) committed label.
+    /// The embedded input's area, for routing focus changes when the field is shown or hidden.
+    pub fn input_area(&self) -> Area {
+        self.borrow().map_or(Area::Empty, |inner| inner.input.area())
+    }
+
+    /// Gives the drawn field key focus and selects its whole text for replacement.
+    pub fn focus_and_select(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.input.take_key_focus(cx);
+            inner.input.select_all(cx);
+        }
+    }
+
+    /// Replaces the labels, keeping any value supplied by the app.
     pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
+            let inner = &mut *inner;
             inner.labels = labels;
             inner.clamp_selected();
-            let n = inner.labels.len();
-            let selected = inner.selected_item;
-            inner.state.reset(n, selected);
-            inner.sync_text(cx);
+            if inner.accepts_typed && inner.state.editing {
+                inner.state.filter_for_mode(
+                    &inner.labels,
+                    &inner.input.text(),
+                    inner.selected_item,
+                    true,
+                );
+            } else {
+                inner.reset_filter();
+                if inner.submitted_text.is_none() || !inner.input.key_focus(cx) {
+                    inner.sync_text(cx);
+                }
+            }
             inner.draw_bg.redraw(cx);
             if inner.is_open {
                 inner.draw_list.redraw(cx);
@@ -1542,6 +1792,30 @@ impl ComboBoxRef {
         self.selected(actions)
     }
 
+    /// The trimmed text submitted for validation.
+    pub fn typed(&self, actions: &Actions) -> Option<String> {
+        if let Some(action) = actions.find_widget_action(self.widget_uid()) {
+            if let ComboBoxAction::Typed(text) = action.cast() {
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    /// Sets the value shown in the field.
+    pub fn set_text(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, text);
+        }
+    }
+
+    /// Sets or clears the validation hint.
+    pub fn set_error(&self, cx: &mut Cx, hint: Option<&str>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_error(cx, hint);
+        }
+    }
+
     /// The label committed by this action batch, if any.
     pub fn changed_label(&self, actions: &Actions) -> Option<String> {
         let index = self.selected(actions)?;
@@ -1555,13 +1829,19 @@ impl ComboBoxRef {
             } else {
                 item.min(inner.labels.len() - 1)
             };
-            if new_selected != inner.selected_item {
+            let replaces_draft = inner.accepts_typed && !inner.labels.is_empty()
+                && (inner.shown_text.is_some() || inner.submitted_text.is_some()
+                    || inner.state.editing || inner.error_hint.is_some());
+            if new_selected != inner.selected_item || replaces_draft {
                 inner.selected_item = new_selected;
-                let n = inner.labels.len();
-                let selected = inner.selected_item;
-                inner.state.reset(n, selected);
-                inner.sync_text(cx);
-                inner.draw_bg.redraw(cx);
+                if inner.accepts_typed {
+                    inner.shown_text = None;
+                    inner.revert(cx);
+                } else {
+                    inner.reset_filter();
+                    inner.sync_text(cx);
+                    inner.draw_bg.redraw(cx);
+                }
             }
         }
     }
@@ -1624,6 +1904,13 @@ impl ComboBoxRef {
             inner.draw_list.redraw(cx);
         }
     }
+}
+
+/// Where `area` is on screen, or an empty rect when it is not: an event
+/// arrives at a field whose draw list its parent let go (a layout or tab that
+/// no longer shows it) until it draws again, and its area is then a dead id.
+fn drawn_rect(cx: &Cx, area: Area) -> Rect {
+    if area.is_valid(cx) { area.rect(cx) } else { Rect::default() }
 }
 
 /// Mark a press that starts outside `field` as handled by `owner`, unless
@@ -1821,6 +2108,30 @@ mod tests {
     }
 
     // -- commit / restore semantics -----------------------------------------
+
+    #[test]
+    fn typed_prefix_waits_for_an_explicit_selection() {
+        let labels = vec!["30 s".to_owned()];
+        let mut filter = ComboFilter::default();
+        filter.filter_for_mode(&labels, "3", 0, true);
+        assert_eq!(filter.filtered, [0]);
+        assert_eq!(filter.highlight, None);
+        assert!(matches!(
+            typed_action(&labels, "3", filter.highlighted_label_index(), false),
+            ComboBoxAction::Typed(text) if text == "3"
+        ));
+        filter.move_highlight(1);
+        assert!(matches!(
+            typed_action(&labels, "3", filter.highlighted_label_index(), false),
+            ComboBoxAction::Select(0)
+        ));
+        assert!(matches!(typed_action(&labels, " 30 S ", None, false), ComboBoxAction::Select(0)));
+        assert!(matches!(typed_action(&labels, "  ", None, false), ComboBoxAction::None));
+        assert!(matches!(typed_action(&labels, " 30 S ", None, true), ComboBoxAction::Typed(s) if s == "30 S"),
+            "case-sensitive submission keeps the typed case");
+        assert!(matches!(typed_action(&labels, " 30 s ", None, true), ComboBoxAction::Select(0)),
+            "case-sensitive submission still trims whitespace");
+    }
 
     #[test]
     fn typing_preselects_the_top_match_and_enter_commits_it() {

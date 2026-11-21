@@ -100,6 +100,7 @@ pub const SCRIPT_MOD_STEPS: &[(&str, fn(&mut ScriptVm) -> ScriptValue)] = &[
     ("draw_sploded_hairline", crate::shader::draw_sploded_hairline::script_mod),
     ("draw_text_3d", crate::shader::draw_text_3d::script_mod),
     ("draw_vector", crate::shader::draw_vector::script_mod),
+    ("ggx", crate::shader::ggx::script_mod),
     ("draw_pbr", crate::shader::draw_pbr::script_mod),
     ("draw_svg", crate::shader::draw_svg::script_mod),
     ("draw_svg_glyph", crate::shader::draw_svg_glyph::script_mod),

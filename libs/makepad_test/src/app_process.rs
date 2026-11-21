@@ -588,16 +588,32 @@ fn unannounced_in(registry: &Path, pid: u32, tree: &[u32]) -> String {
 /// that finds them all under 1/[`IDLE_SHARE`](crate::runtime::IDLE_SHARE) of a core over it,
 /// with no process started or ended since the last, is no progress, and the launch fails, saying
 /// what the registry holds. Where the platform cannot say what a process ran, it waits.
+/// A thread in an uninterruptible kernel wait runs no CPU: one seen so in a window, at looks
+/// [`HELD_LOOKS`] to a window, holds the launch there (the disk, a filesystem lock), and it waits
+/// on, saying so. An app whose parse thread slept in `balance_dirty_pages` holding btrfs's inode
+/// lock, its other JIT threads queued on that lock, read "1.8% of a core in the last 10 s" and
+/// failed as never come up (11-21).
 struct Startup {
     root: u32,
     idle: Duration,
     since: Instant,
     at: Option<(Vec<u32>, u64)>,
+    /// the tree's threads seen in an uninterruptible kernel wait this window
+    held: Vec<makepad_remote::procs::Blocked>,
+    /// when its threads are looked at next for such waits
+    held_look: Instant,
+    /// what the last window that held it said, for a verdict after it
+    was_held: Option<String>,
 }
+
+/// Looks for threads in an uninterruptible kernel wait in a startup window ([`Startup`]): a
+/// tenth of it apart, so a wait the disk holds for a part of the window is seen.
+const HELD_LOOKS: u32 = 10;
 
 impl Startup {
     fn new(root: u32, idle: Duration) -> Startup {
-        Startup { root, idle, since: Instant::now(), at: Self::look(root) }
+        let now = Instant::now();
+        Startup { root, idle, since: now, at: Self::look(root), held: Vec::new(), held_look: now, was_held: None }
     }
 
     /// The launched process's tree and the CPU it ran, None where the platform cannot say.
@@ -610,6 +626,16 @@ impl Startup {
 
     /// Why the launch is idle, once a window ends without progress.
     fn idle(&mut self, now: Instant) -> Option<String> {
+        if now >= self.held_look {
+            self.held_look = now + self.idle / HELD_LOOKS;
+            for &pid in self.at.as_ref().map_or(&[][..], |(tree, _)| tree.as_slice()) {
+                for b in makepad_remote::procs::blocked_threads(pid) {
+                    if !self.held.iter().any(|h| h.tid == b.tid) {
+                        self.held.push(b);
+                    }
+                }
+            }
+        }
         let span = now.duration_since(self.since);
         if span < self.idle {
             return None;
@@ -617,24 +643,59 @@ impl Startup {
         self.since = now;
         let next = Self::look(self.root);
         let before = std::mem::replace(&mut self.at, next.clone());
-        idle_over(span, &before?, &next?)
+        let held = std::mem::take(&mut self.held);
+        match idle_over(span, &before?, &next?, &held) {
+            Window::Works => None,
+            Window::Held(said) => {
+                eprintln!("[makepad_test] the launch of pid {} waits on: {said}", self.root);
+                self.was_held = Some(said);
+                None
+            }
+            Window::Idle(said) => Some(match &self.was_held {
+                Some(held) => format!("{said} (an earlier window: {held})"),
+                None => said,
+            }),
+        }
     }
 }
 
-/// Whether the tree went from `before` to `now` over `span` without progress, and how it read.
-fn idle_over(span: Duration, before: &(Vec<u32>, u64), now: &(Vec<u32>, u64)) -> Option<String> {
+/// How a startup window went ([`idle_over`]).
+#[derive(Debug, PartialEq)]
+enum Window {
+    /// it ran, or a process started or ended
+    Works,
+    /// it ran next to nothing, with threads in an uninterruptible kernel wait: held there
+    Held(String),
+    /// it sat idle: why
+    Idle(String),
+}
+
+/// How the tree went from `before` to `now` over `span`, its threads seen in an uninterruptible
+/// kernel wait meanwhile `held`, and how it read.
+fn idle_over(span: Duration, before: &(Vec<u32>, u64), now: &(Vec<u32>, u64), held: &[makepad_remote::procs::Blocked]) -> Window {
     if before.0 != now.0 {
-        return None;
+        return Window::Works;
     }
     let cores = now.1.saturating_sub(before.1) as f64 / span.as_nanos().max(1) as f64;
     if cores * crate::runtime::IDLE_SHARE as f64 >= 1.0 {
-        return None;
+        return Window::Works;
     }
-    Some(format!(
-        "it and the processes under it ran {:.1}% of a core in the last {:.1} s, with no process started or ended",
-        cores * 100.0,
-        span.as_secs_f64()
-    ))
+    let ran = format!("it and the processes under it ran {:.1}% of a core in the last {:.1} s", cores * 100.0, span.as_secs_f64());
+    if held.is_empty() {
+        return Window::Idle(format!("{ran}, with no process started or ended"));
+    }
+    // (by the kernel function they sleep in: a lock's waiters are one line)
+    let mut by_wait: Vec<(&str, Vec<String>)> = Vec::new();
+    for b in held {
+        let wait = if b.wchan.is_empty() { "a kernel wait it does not name" } else { b.wchan.as_str() };
+        let who = format!("{} ({}) of {}", b.tid, b.name, b.pid);
+        match by_wait.iter_mut().find(|(w, _)| *w == wait) {
+            Some((_, who_all)) => who_all.push(who),
+            None => by_wait.push((wait, vec![who])),
+        }
+    }
+    let waits: Vec<String> = by_wait.iter().map(|(wait, who)| format!("{} in {wait} ({})", if who.len() == 1 { "thread".to_string() } else { format!("{} threads", who.len()) }, who.join(", "))).collect();
+    Window::Held(format!("the disk or a filesystem lock holds it: {ran}, its threads in uninterruptible kernel waits: {}", waits.join("; ")))
 }
 
 /// `[makepad-remote] pid=9931 app=NAME socket=/tmp/makepad-remote-9931.sock`
@@ -928,11 +989,23 @@ mod tests {
         let span = Duration::from_secs(10);
         let tree = |pids: &[u32], cpu_ms: u64| (pids.to_vec(), cpu_ms * 1_000_000);
         // a twentieth of a core and up is work, a process started or ended is progress
-        assert!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1, 2], 500)).is_none(), "5% of a core works");
-        assert!(idle_over(span, &tree(&[1], 0), &tree(&[1, 2], 0)).is_none(), "a process started");
-        assert!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1], 0)).is_none(), "a process ended");
-        let idle = idle_over(span, &tree(&[1, 2], 100), &tree(&[1, 2], 400)).expect("3% of a core with the same processes is idle");
+        assert_eq!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1, 2], 500), &[]), Window::Works, "5% of a core works");
+        assert_eq!(idle_over(span, &tree(&[1], 0), &tree(&[1, 2], 0), &[]), Window::Works, "a process started");
+        assert_eq!(idle_over(span, &tree(&[1, 2], 0), &tree(&[1], 0), &[]), Window::Works, "a process ended");
+        let Window::Idle(idle) = idle_over(span, &tree(&[1, 2], 100), &tree(&[1, 2], 400), &[]) else { panic!("3% of a core with the same processes is idle") };
         assert!(idle.contains("3.0% of a core in the last 10.0 s"), "{idle}");
+        // threads in an uninterruptible kernel wait run no CPU: the disk holds the launch, which
+        // waits on, saying which threads sleep where (a lock's waiters on one line)
+        let blocked = |tid: u32, name: &str, wchan: &str| makepad_remote::procs::Blocked { pid: 2, tid, name: name.into(), wchan: wchan.into() };
+        let held = [blocked(7, "parse-1", "balance_dirty_pages"), blocked(8, "jit-2", "btrfs_inode_lock"), blocked(9, "jit-3", "btrfs_inode_lock")];
+        let Window::Held(said) = idle_over(span, &tree(&[1, 2], 100), &tree(&[1, 2], 280), &held) else { panic!("held by the disk, not idle") };
+        assert!(said.contains("1.8% of a core in the last 10.0 s") && said.contains("thread in balance_dirty_pages (7 (parse-1) of 2)") && said.contains("2 threads in btrfs_inode_lock (8 (jit-2) of 2, 9 (jit-3) of 2)"), "{said}");
+        // read from a thread's stat line: its state D, its name whatever it holds, the kernel's
+        // `0` for an unnamed wait; any other state is no such wait
+        let stat = |state: &str| format!("4711 (relax parse (2)) {state} 4700 4700 0 -1 4194560 12 0 0 0 9 3 0 0 20 0 31 0");
+        assert_eq!(makepad_remote::procs::blocked_of(4700, 4711, &stat("D"), "balance_dirty_pages\n"), Some(makepad_remote::procs::Blocked { pid: 4700, tid: 4711, name: "relax parse (2)".into(), wchan: "balance_dirty_pages".into() }));
+        assert_eq!(makepad_remote::procs::blocked_of(4700, 4711, &stat("D"), "0").map(|b| b.wchan), Some(String::new()));
+        assert!(["R", "S", "Z"].iter().all(|state| makepad_remote::procs::blocked_of(4700, 4711, &stat(state), "do_wait").is_none()));
 
         // a record of a process under the launched one that names another parent, or none at all
         // (the registry keeps only live processes' records: this process stands in for the run)

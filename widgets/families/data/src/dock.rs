@@ -182,6 +182,10 @@ pub struct Dock {
     tab_bar: ScriptObjectRef,
     #[live]
     splitter: ScriptObjectRef,
+    /// A panel showing no tab bar still takes drops on its edges and middle (an app whose
+    /// one-tab panels hide their bar). Off, such a panel is no drop target.
+    #[live]
+    drop_on_hidden_tab_bars: bool,
 
     #[rust]
     needs_save: bool,
@@ -533,6 +537,24 @@ pub struct DropPosition {
     part: DropPart,
     rect: Rect,
     id: LiveId,
+}
+
+impl DropPosition {
+    /// Where on its target a drop would land.
+    pub fn part(&self) -> DropPart {
+        self.part
+    }
+
+    /// The target: a tab (`Tab`), a splitter (`Bar`), else a tab set, or the dock's root for its
+    /// outer band.
+    pub fn id(&self) -> LiveId {
+        self.id
+    }
+
+    /// The room the drop would take, as the dock's own preview shows it.
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1070,10 +1092,15 @@ impl Dock {
             }
         }
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
-            if self.hides_its_tab_bar(*tab_bar_id) {
+            let hidden = self.hides_its_tab_bar(*tab_bar_id);
+            if hidden && !self.drop_on_hidden_tab_bars {
                 continue;
             }
-            let body = panel_body(tab_bar.contents_rect, tab_bar.tab_bar.bar_rect(cx));
+            let body = if hidden {
+                tab_bar.contents_rect
+            } else {
+                panel_body(tab_bar.contents_rect, tab_bar.tab_bar.bar_rect(cx))
+            };
             if let Some((part, rect)) = drop_band(body, abs) {
                 return Some(DropPosition { part, id: *tab_bar_id, rect });
             }
@@ -1147,8 +1174,8 @@ impl Dock {
         })
     }
 
-    /// A panel with no tab bar showing is no drop target: there is nothing
-    /// to aim at and nothing to report having hit.
+    /// A panel with no tab bar showing has no tab or bar to aim at; it is
+    /// no drop target at all unless `drop_on_hidden_tab_bars` is on.
     fn hides_its_tab_bar(&self, tabs_id: LiveId) -> bool {
         matches!(
             self.dock_items.get(&tabs_id),
@@ -2805,6 +2832,12 @@ impl DockRef {
             dock.close_tab(cx, tab_id, true);
             dock.dock_items.remove(&tab_id);
         }
+    }
+
+    /// Where a drop at `abs` would land, as the dock's own drop finds it, without taking the
+    /// drag: for an app that shows its own preview and applies the drop itself.
+    pub fn drop_position(&self, cx: &Cx, abs: Vec2d) -> Option<DropPosition> {
+        self.borrow().and_then(|dock| dock.find_drop_position(cx, abs))
     }
 
     pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr: DragResponse) {

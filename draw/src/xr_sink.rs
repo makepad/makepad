@@ -2,8 +2,8 @@
 //! encoder, `makepad_xr_stream`), so an app only renders its XR pass as on any headset.
 //!
 //! An app marks its pass `DrawPass::set_as_xr_pass`; with an offscreen XR display
-//! (`Cx::xr_offscreen`) the pass renders both eyes side by side into its own colour and depth
-//! textures. Right after the app ends that pass ([`Cx2d::end_pass`]) the installed sink gets
+//! (`Cx::xr_offscreen`) the pass renders its views side by side (two eyes on a headset, one on a
+//! handheld) into its own colour and depth textures. At [`Cx2d::end_pass`] the installed sink gets
 //! them ([`XrFrameSink::presented`]) in the same draw, and packs them for its encoder. A frame
 //! the app draws without content says so with [`xr_frame_empty`] (the sink asks for the next
 //! pose instead of streaming a picture of nothing). The sink also hears every `Signal`
@@ -18,7 +18,8 @@ use crate::makepad_platform::*;
 
 /// The XR pass's attachments of the frame just drawn.
 pub struct XrPresented<'a> {
-    /// Both eyes side by side (premultiplied colour; the room shows where alpha is 0).
+    /// The display's views side by side (two eyes on a headset, one on a handheld), in
+    /// premultiplied colour. The room shows where alpha is 0.
     pub color: &'a Texture,
     pub depth: &'a Texture,
     /// The colour holds linear light (`DrawPass::set_linear_light`): whoever shows it encodes it.

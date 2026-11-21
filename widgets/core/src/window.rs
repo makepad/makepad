@@ -317,9 +317,17 @@ script_mod! {
                 color: theme.color_app_caption_bar
                 color_unfocused: uniform(vec4(-1.0))
                 window_focus: instance(1.0)
+                // A clear bar shows the window's ground. A window that clears see-through
+                // (it paints its own ground, as the terminal does, translucent over the
+                // desk) has none there, so the bar lays the theme's under itself: the
+                // window sets `grounded` from its pass's clear colour (`Window::begin`).
+                ground: uniform(theme.color_bg_app)
+                grounded: instance(0.0)
                 pixel: fn() {
-                    if self.color_unfocused.x < 0.0 { return Pal.premul(self.color) }
-                    return Pal.premul(self.color_unfocused.mix(self.color, self.window_focus))
+                    var c = self.color
+                    if self.color_unfocused.x >= 0.0 { c = self.color_unfocused.mix(self.color, self.window_focus) }
+                    let laid = vec4(self.ground.rgb.mix(c.rgb, c.a), 1.0)
+                    return Pal.premul(c.mix(laid, self.grounded))
                 }
             }
             // Note: by default, the caption bar height is calculated at runtime
@@ -330,9 +338,13 @@ script_mod! {
             // left of the caption (`draw_hosted_controls`): their room, as macOS keeps it.
             // Also the bar's least height there, so a title-only caption is a real bar.
             hosted_controls_gap := View{visible: false width: 76 height: 28}
+            // A sheet's caption writes here (Windows 2000's lays its title at the start). A
+            // style reapply writes only what the template names (an inset only the sides it
+            // names), so what a sheet may set is named, at its default too, as a number: else
+            // the next style keeps the last one's.
             caption_label := View {
                 width: Fill height: Fill flow: Right
-                align: Center
+                align: Center padding: 0
                 // Off by default: an app id makepad ships no artwork for falls back
                 // to a generic tile, so apps opt in with `caption_icon +: {visible: true}`.
                 caption_icon := AppIcon{visible: false width: 16 height: 16 margin: Inset{right: 6}}
@@ -365,7 +377,7 @@ script_mod! {
             jit_ring_gap := View{visible: false width: 0 height: 1}
             windows_buttons := View {
                 visible: false
-                width: Fit height: Fit
+                width: Fit height: Fit margin: 0
                 min := DesktopButton {
                     draw_bg.button_type: DesktopButtonType.WindowsMin
                     width: 46 height: 29
@@ -384,7 +396,7 @@ script_mod! {
                 }
                 close := DesktopButton {
                     draw_bg.button_type: DesktopButtonType.WindowsClose
-                    width: 46 height: 29
+                    width: 46 height: 29 margin: 0
                     draw_bg +: {
                         color: theme.color_label_inner, color_hover: #FFF, color_down: #FFF
                         bg_color_hover: #E81123, bg_color_down: #F1707A
@@ -590,8 +602,6 @@ pub struct Window {
     #[live]
     window: ScriptWindowHandle,
     #[live]
-    stdin_size: DrawColor,
-    #[live]
     draw_gauss_downsample: DrawGaussDownsample,
     #[live]
     draw_gauss_upsample: DrawGaussUpsample,
@@ -737,13 +747,26 @@ impl ScriptHook for Window {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
-        _value: ScriptValue,
+        value: ScriptValue,
     ) {
         self.caption_has_content = None;
         self.caption_window_gap = None;
         self.caption_centering_inputs = None;
+        // Nothing shows or hides the caption icon at run time: whether it shows is the
+        // template's (an app's opt-in, a sheet's caption). A style reapply keeps every
+        // widget's visibility as it stands, so the window takes the icon's from the new one.
+        if matches!(apply, Apply::ScriptReapply) {
+            let mut at = value;
+            for id in [id!(caption_bar), id!(caption_label), id!(caption_icon), id!(visible)] {
+                at = at.as_object().map_or(ScriptValue::NIL, |obj| vm.value(obj, id));
+            }
+            if let Some(shown) = at.as_bool() {
+                let icon = self.view.child(id!(caption_bar)).child(id!(caption_label)).child(id!(caption_icon));
+                icon.set_visible(vm.cx_mut(), shown);
+            }
+        }
         // A host window manager reads it from the drag query's answer. Its captions maximise on a
         // double click; only a window that drags by its content keeps its own.
         self.window.handle.set_double_click_fullscreen(vm.cx_mut(), self.double_click == WindowDoubleClick::Fullscreen && self.drag == WindowDrag::Window);
@@ -1380,6 +1403,14 @@ impl Window {
         (visible, caption_rect, buttons_rect, caption_area)
     }
 
+    /// The window has no ground under its caption: its pass clears see-through (it paints
+    /// its own ground, as the terminal does, translucent over the desk) and it draws none
+    /// of its own (`show_bg`, a sheet's ground recipe). A clear caption bar then lays the
+    /// theme's ground under itself (`grounded`), or it would show what is behind the window.
+    fn see_through(&self, cx: &Cx) -> bool {
+        !self.view.show_bg && cx.passes[self.pass.handle.draw_pass_id()].clear_color.w < 1.0
+    }
+
     /// Tells the platform the caption this window drew (the strip that drags it), the window
     /// buttons in it (its own, else the system's) and whether it is dark, when that changed:
     /// `makepad run` draws its JIT ring in the caption by it. Direct children only (no tree
@@ -1406,11 +1437,16 @@ impl Window {
         } else {
             cx.windows[self.window.window_id()].window_geom.window_chrome_buttons
         };
-        // the caption's ground: the stock bar's colour, else the window's
+        // the caption's ground: the stock bar's colour, else the window's (the theme's, which a
+        // clear bar lays itself where the window has none: `see_through`)
         let mut ground = [0.0f32; 4];
         if self.drag_region.is_none() && bar.visible() {
             if let Some(view) = bar.borrow::<View>() {
                 view.draw_bg.draw_vars.get_instance(cx, live_id!(color), &mut ground);
+                if ground[3] < 0.5 && self.see_through(cx) {
+                    view.draw_bg.draw_vars.get_uniform(cx, live_id!(ground), &mut ground);
+                    ground[3] = 1.0;
+                }
             }
         }
         if ground[3] < 0.5 {
@@ -1697,6 +1733,13 @@ impl Window {
         let bar_width = bar_area.rect(cx).size.x;
         let buttons = caption_bar.child(id!(windows_buttons));
         let buttons_width = if buttons.visible() { buttons.area().rect(cx).size.x } else { 0.0 };
+        // A title the theme lays at the caption's start (Windows 2000's, beside its icon) is not
+        // centred: its padding is the theme's. Only beside our own window buttons: where the OS
+        // draws its buttons over the caption's start (macOS's lights) it stays centred, clear of them.
+        let starts = caption_label.borrow::<View>().is_some_and(|view| view.layout.align.x < 0.5);
+        if starts && buttons.visible() {
+            return;
+        }
 
         if bar_width <= 0.0 {
             return; // No area info yet (first frame)
@@ -1873,8 +1916,10 @@ impl Window {
         }
 
         let focus = if self.has_focus || !self.focus_known { 1.0 } else { 0.0 };
+        let grounded = if self.see_through(cx) { 1.0 } else { 0.0 };
         if let Some(mut bar) = self.view(cx, ids!(caption_bar)).borrow_mut() {
             bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(window_focus), &[focus]);
+            bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(grounded), &[grounded]);
         }
         if let Some(mut label) = self.label(cx, ids!(caption_bar.caption_label.label)).borrow_mut() {
             label.draw_text.draw_vars.set_dyn_instance(cx, id!(window_focus), &[focus]);
@@ -2034,36 +2079,6 @@ impl Window {
         crate::relief::end_window_relief_frame(cx, window_id);
         if finish_window_gauss_frame(cx, window_id) {
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
-        }
-
-        // lets get te pass size
-        fn encode_size(x: f64) -> Vec4f {
-            let x = x as usize;
-            let r = ((x >> 8) & 0xff) as f32 / 255.0;
-            let b = ((x >> 0) & 0xff) as f32 / 255.0;
-            vec4(r, 0.0, b, 1.0)
-        }
-
-        // if we are running in stdin mode, write a tracking pixel with the pass size
-        if cx.in_makepad_studio() {
-            let df = cx.current_dpi_factor();
-            let size = self.pass.handle.size(cx).unwrap() * df;
-            self.stdin_size.color = encode_size(size.x);
-            self.stdin_size.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(0.0, 0.0),
-                    size: dvec2(1.0 / df, 1.0 / df),
-                },
-            );
-            self.stdin_size.color = encode_size(size.y);
-            self.stdin_size.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(1.0 / df, 0.0),
-                    size: dvec2(1.0 / df, 1.0 / df),
-                },
-            );
         }
 
         //if self.show_performance_view {

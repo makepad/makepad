@@ -938,6 +938,9 @@ pub struct CaptionLook {
     pub size: f64,
     /// The window buttons' glyph colour (minimise / maximise / close at rest).
     pub button: u32,
+    /// The bar of a window that clears see-through (the terminal, translucent over the desk):
+    /// a clear bar has no window's ground under it there and lays its own (`ground`, window.rs).
+    pub bar_see_through: u32,
 }
 
 /// The stock caption of `mod.widgets.Window` in `vm` as its theme and sheet left it.
@@ -958,7 +961,12 @@ pub fn caption_look(vm: &mut ScriptVm) -> CaptionLook {
     let color = |vm: &mut ScriptVm, ids: &[LiveId]| path(vm, ids).as_color();
     let ground = color(vm, &[id!(pass), id!(clear_color)]).unwrap_or(0);
     let over_ground = |c: u32| if c & 0xff == 0 { ground } else { c };
-    let bar = over_ground(color(vm, &[id!(caption_bar), id!(draw_bg), id!(color)]).unwrap_or(0));
+    let raw = color(vm, &[id!(caption_bar), id!(draw_bg), id!(color)]).unwrap_or(0);
+    let bar = over_ground(raw);
+    // `uniform(x)`: the colour under the wrapper
+    let laid = path(vm, &[id!(caption_bar), id!(draw_bg), id!(ground)]);
+    let laid = laid.as_object().map_or(laid, |o| vm.heap().proto(o)).as_color().unwrap_or(0);
+    let bar_see_through = if raw & 0xff == 0 { laid } else { raw };
     let bar_unfocused = color(vm, &[id!(caption_bar), id!(draw_bg), id!(color_unfocused)]).map_or(bar, over_ground);
     let ink = color(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(color)]).unwrap_or(0xff);
     let ink_unfocused = color(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(color_unfocused)]).unwrap_or(ink);
@@ -966,7 +974,7 @@ pub fn caption_look(vm: &mut ScriptVm) -> CaptionLook {
     let style = path(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(text_style)]);
     let size = TextStyle::script_from_value(vm, style).font_size as f64;
     let button = color(vm, &[id!(caption_bar), id!(windows_buttons), id!(min), id!(draw_bg), id!(color)]).unwrap_or(ink);
-    CaptionLook { bar, bar_unfocused, ink, ink_unfocused, size, button }
+    CaptionLook { bar, bar_unfocused, ink, ink_unfocused, size, button, bar_see_through }
 }
 
 /// [`caption_look`] under `sheet`, in a VM of its own made as a child process makes its
@@ -1044,8 +1052,13 @@ mod tests {
         cx.init_cx_os();
         for entry in catalogue() {
             let look = caption_look_of(&mut cx, &StyleSheet::load(entry));
-            println!("{}: {:08x} {:08x} {:08x} {:08x} {} {:08x}", entry.id, look.bar, look.bar_unfocused, look.ink, look.ink_unfocused, look.size, look.button);
+            println!("{}: {:08x} {:08x} {:08x} {:08x} {} {:08x} {:08x}", entry.id, look.bar, look.bar_unfocused, look.ink, look.ink_unfocused, look.size, look.button, look.bar_see_through);
             assert!(look.size > 0.0 && look.bar & 0xff != 0, "{}: {look:?}", entry.id);
+            // A window that clears see-through (the terminal) has the caption every window
+            // has, opaque: under the WM it showed the desk through its clear bar on every
+            // sheet but the macOS ones, the only ones that colour the bar.
+            assert_eq!(look.bar_see_through, look.bar, "{}: a see-through window's caption is another", entry.id);
+            assert_eq!(look.bar_see_through & 0xff, 0xff, "{}: a see-through window's caption is not opaque", entry.id);
         }
         let mac = caption_look_of(&mut cx, &StyleSheet::named("macos").unwrap());
         assert_eq!((mac.bar, mac.bar_unfocused, mac.ink, mac.ink_unfocused), (0xededf0ff, 0xf6f6f6ff, 0x242426ff, 0x98989eff));

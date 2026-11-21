@@ -1371,7 +1371,12 @@ pub fn run_current_package_test<F, R>(
 /// other threads under 1/[`TICK_SHARE`] of a core, with nothing pending, is idle too: a steady
 /// tick is no progress, while a thread at work, at half a core or more, still is. (A Fab test's
 /// wait for a button that never came ran 19 min beside its app's sim ticking at 4-12% of a core,
-/// its main thread parked in poll, L798418, 11-10.)
+/// its main thread parked in poll, L798418, 11-10.) An app that runs nothing (or only ticks) while
+/// it says something is pending (a load held on its way, a fetch nobody answers) is no idle app,
+/// but nothing it runs brings what it waits on either: that stretch counts against the wait's
+/// budget as wall time, and once it lasts the budget (the idle limit at least) the wait fails,
+/// naming what the app said was pending. (A Fab test's wait for its view at rest sat 17 min beside
+/// a load the test held, its app at 0% and saying the load was on its way, 11-20.)
 struct Budget {
     /// The main thread's CPU the wait may spend.
     limit: Duration,
@@ -1409,16 +1414,49 @@ struct Budget {
     /// The time the wait spent asking the app (its closure ran), and the app's own CPU and its main
     /// thread's in it, since the last look.
     asked: (Duration, Duration, Duration),
+    /// How long the app has run nothing while it said something was pending, to the last look, and
+    /// what it said then.
+    pending: (Duration, Vec<String>),
+    /// What the processes the app started have run, which the wait counts as its own CPU.
+    started: Started,
+}
+
+/// What the processes an app started ran (a tool it runs for a call, a picture it hands to another
+/// program), which its own CPU does not show: a wait on a call it answers once that program ends
+/// would read it as running nothing. Each one's CPU since a look first found it, all of it for one
+/// started since, summed; one that ended keeps what it ran to the last look that found it.
+#[derive(Default)]
+struct Started {
+    seen: HashMap<u32, u64>,
+    ran: Duration,
+    now: Vec<(u32, u64)>,
+}
+
+impl Started {
+    /// What they ran so far, the processes `pid` started that run now looked at.
+    fn look(&mut self, pid: u32) -> Duration {
+        self.now.clear();
+        makepad_hal::clock::started_cpu_ns(pid, &mut self.now);
+        let seen = std::mem::take(&mut self.seen);
+        for &(child, cpu) in &self.now {
+            self.ran += Duration::from_nanos(cpu.saturating_sub(seen.get(&child).copied().unwrap_or(0)));
+            self.seen.insert(child, cpu);
+        }
+        self.ran
+    }
 }
 
 impl Budget {
     fn start(app: &TestApp, limit: Duration) -> TestResult<Budget> {
-        Ok(Budget::at(limit, app.action_timeout(), app.client().cpu(true)?, Instant::now(), beside_cpu()))
+        let mut started = Started::default();
+        let mut cpu = app.client().cpu(true)?;
+        cpu.own += started.look(app.pid());
+        Ok(Budget { started, ..Budget::at(limit, app.action_timeout(), cpu, Instant::now(), beside_cpu()) })
     }
 
     /// A wait's budget from the app's CPU `cpu` and the test process's `beside` it at `now`.
     fn at(limit: Duration, idle_limit: Duration, cpu: crate::remote::AppCpu, now: Instant, beside: Duration) -> Budget {
-        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO) }
+        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO), pending: (Duration::ZERO, Vec::new()), started: Started::default() }
     }
 
     /// The wait asked the app from `since` (its closure ran): its CPU before and after.
@@ -1434,7 +1472,8 @@ impl Budget {
 
     /// Looks at the app: once it has spent the whole budget, what it spent, in words.
     fn spent(&mut self, app: &TestApp) -> TestResult<Option<String>> {
-        let cpu = app.client().cpu(true)?;
+        let mut cpu = app.client().cpu(true)?;
+        cpu.own += self.started.look(app.pid());
         self.judge(cpu, Instant::now(), beside_cpu(), &mut || app.client().settled(), &mut || app.client().waits_on_jit())
     }
 
@@ -1468,6 +1507,13 @@ impl Budget {
         // the app ran nothing (or only ticked), with nothing pending (or only pool jobs, none taken
         // since the last look), and nothing ran beside the test in its own process
         let stalled = settled.as_ref().is_some_and(|s| s.settled || (s.only_pool && taken == self.taken)) && !waits_on_jit()?;
+        // it ran nothing (or only ticked) with something pending that is not its pool: what it
+        // waits on runs nowhere it would show
+        let waiting = !stalled && settled.as_ref().is_some_and(|s| !s.settled && !s.only_pool) && !waits_on_jit()?;
+        match (waiting, settled.as_mut()) {
+            (true, Some(s)) => self.pending = (self.pending.0 + over, std::mem::take(&mut s.pending)),
+            _ => self.pending = (Duration::ZERO, Vec::new()),
+        }
         let faults = cpu.faults.saturating_sub(self.faults);
         let queue = queued.iter().any(|&n| n > 0);
         if stalled {
@@ -1498,6 +1544,15 @@ impl Budget {
         self.faults = cpu.faults;
         self.taken = taken;
         self.queued = queue;
+        if self.pending.0 >= self.limit.max(self.idle_limit) {
+            return Ok(Some(format!(
+                "it ran nothing for {:.1} s while it said it waited on {} (budget {:.0} s): nothing it ran brought that on (its main thread ran {:.1} s of CPU)",
+                self.pending.0.as_secs_f64(),
+                self.pending.1.join(", "),
+                self.limit.max(self.idle_limit).as_secs_f64(),
+                main.as_secs_f64()
+            )));
+        }
         if self.idle < self.idle_limit {
             return Ok(None);
         }
@@ -1784,7 +1839,7 @@ mod tests {
             (1..=60u64).find_map(|look| {
                 let n = look as f64;
                 let now = t0 + Duration::from_secs(look);
-                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None, slots: Vec::new() }) };
+                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None, slots: Vec::new(), pending: Vec::new() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
                 budget.judge(cpu(main * n, (main + other) * n, waited * n), now, Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
             })
@@ -1798,6 +1853,30 @@ mod tests {
         assert_eq!(wait(0.2, 0.0, 0.1).map(|(look, _)| look), Some(10), "a tick that waits a little on a loaded box is still a tick");
         let (look, why) = wait(0.0, 0.0, 0.02).expect("an app with nothing running is idle on a loaded box");
         assert!(look == 10 && why.starts_with("it sat idle for 10.0 s") && !why.contains("tick"), "{look}: {why}");
+    }
+
+    /// A wait beside an app that runs nothing while it says a load is on its way (a load the test
+    /// holds) fails once that lasted the wait's budget, naming the load: a wait with a budget ends.
+    /// One whose main thread works meanwhile is held to its CPU budget instead. (A Fab test's wait
+    /// sat 17 min beside a held load, its app at 0%, 11-20.)
+    #[test]
+    fn a_pending_app_that_runs_nothing_fails_within_the_budget() {
+        let secs = Duration::from_secs_f64;
+        let wait = |main: f64| -> Option<(u64, String)> {
+            let (t0, cpu) = (Instant::now(), |m: f64| AppCpu { main: secs(m), own: secs(m), faults: 0, waited: Duration::ZERO });
+            let mut budget = Budget::at(secs(30.0), secs(10.0), cpu(0.0), t0, Duration::ZERO);
+            (1..=120u64).find_map(|look| {
+                let pending = || vec!["loads (build: 1)".to_string()];
+                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: false, only_pool: false, pool: None, slots: Vec::new(), pending: pending() }) };
+                let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
+                budget.judge(cpu(main * look as f64), t0 + Duration::from_secs(look), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
+            })
+        };
+        let (look, why) = wait(0.0).expect("a load that never comes ends the wait");
+        assert_eq!(look, 30, "the wait ends after its budget, not at the idle limit: {why}");
+        assert!(why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1) (budget 30 s)"), "the verdict names what was pending: {why}");
+        let (look, why) = wait(0.5).expect("a main thread at work spends the CPU budget");
+        assert!(look == 60 && why.starts_with("its main thread ran 30.0 s"), "a working app is held to its CPU budget: {look}: {why}");
     }
 
     /// A wait whose app sits idle names a stall (a starved pool, a memory wait) only while it lasts
@@ -1822,7 +1901,7 @@ mod tests {
                     0 => Vec::new(),
                     _ => vec![BudgetSlot { class: "background".into(), client: "jit".into(), label: "another compile job".into(), lent: false, n: 1, held: Duration::from_secs(n) }],
                 };
-                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: queued == 0, only_pool: queued > 0, pool: Some(([0, 0, queued], 0, taken)), slots: slots() }) };
+                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: queued == 0, only_pool: queued > 0, pool: Some(([0, 0, queued], 0, taken)), slots: slots(), pending: Vec::new() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
                 budget.judge(cpu(faults), t0 + Duration::from_secs(n), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (n, why))
             }).expect("the wait ends")

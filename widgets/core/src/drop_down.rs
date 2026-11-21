@@ -516,6 +516,12 @@ pub struct DropDown {
     #[live]
     labels: Vec<String>,
 
+    /// The closed face's words per item, for items whose list label is too long for the face;
+    /// an item past its end shows its `labels` entry. The list, and the face's accessible
+    /// value, always use `labels`.
+    #[rust]
+    face_labels: Vec<String>,
+
     /// Icons parallel to `labels`, one per item. Short is fine: an item past
     /// the end of this list simply draws no icon, so a caller can give icons to
     /// the few entries that have one and leave the rest as words.
@@ -944,7 +950,7 @@ impl DropDown {
         if !(self.icon_only && has_icon) {
             if self.mixed {
                 self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), "—");
-            } else if let Some(val) = self.labels.get(self.selected_item) {
+            } else if let Some(val) = self.face_labels.get(self.selected_item).or_else(|| self.labels.get(self.selected_item)) {
                 // A label set to ellipsize takes the room the face leaves it
                 // (its padding keeps the chevron clear) and ends in "…".
                 let walk = if self.draw_text.text_overflow == crate::makepad_draw::shader::draw_text::TextOverflow::Ellipsis {
@@ -977,13 +983,18 @@ impl DropDown {
                 .popup_anchor_transform
                 .map(|transform| transform.rect(area))
                 .unwrap_or(area);
+            // The list is placed from the window's origin at where the face settled (the event
+            // side's rect), not shifted off the face's area: inside a popover the face is drawn at
+            // the popover's unplaced origin and the popover's move does not carry a list hung off
+            // it, which then opened at the window's far edge.
+            let origin = Rect::default();
             popup_menu.begin(
                 cx,
                 match self.popup_menu_position {
                     PopupMenuPosition::OnSelected => PopupMenuPlace::OnItem,
                     PopupMenuPosition::BelowInput => PopupMenuPlace::Below { anchor },
                 },
-                area,
+                origin,
             );
             popup_menu.fit_width_to_items(
                 cx,
@@ -1010,10 +1021,10 @@ impl DropDown {
                         );
                     }
 
-                    let shift = anchor.pos - area.pos;
+                    let shift = anchor.pos;
                     match item_pos {
-                        Some(item_pos) => popup_menu.end_at_item(cx, self.draw_bg.area(), shift, item_pos),
-                        None => popup_menu.end(cx, self.draw_bg.area(), shift),
+                        Some(item_pos) => popup_menu.end_at_item(cx, Area::Empty, shift, item_pos),
+                        None => popup_menu.end(cx, Area::Empty, shift),
                     }
                 }
                 PopupMenuPosition::BelowInput => {
@@ -1029,9 +1040,9 @@ impl DropDown {
                         );
                     }
 
-                    let shift = anchor.pos - area.pos + dvec2(0.0, anchor.size.y);
+                    let shift = anchor.pos + dvec2(0.0, anchor.size.y);
 
-                    popup_menu.end(cx, self.draw_bg.area(), shift);
+                    popup_menu.end(cx, Area::Empty, shift);
                 }
             }
         }
@@ -1481,6 +1492,23 @@ impl DropDownRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;
             inner.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Whether the list holds exactly `labels`. `labels` is a design field: a re-run of the
+    /// design puts the design's own list back, so a host that sets the list at run time checks
+    /// what it shows rather than what it last set.
+    pub fn has_labels(&self, labels: &[String]) -> bool {
+        self.borrow().is_some_and(|inner| inner.labels == labels)
+    }
+
+    /// The closed face's words per item (`face_labels`); empty: the face shows `labels`.
+    pub fn set_face_labels(&self, cx: &mut Cx, face_labels: Vec<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.face_labels != face_labels {
+                inner.face_labels = face_labels;
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 

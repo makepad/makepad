@@ -284,6 +284,13 @@ pub struct CodeEditor {
     pub line_dims: Vec<Range<usize>>,
     #[live(0.4)]
     line_dim_opacity: f32,
+    /// Text inlays (`InlineInlay::Text`) draw in this colour when set, otherwise in the identifier colour.
+    #[rust]
+    pub inlay_color: Option<Vec4f>,
+    /// Lines whose text inlays draw lifted toward the identifier colour: (0-based line, amount
+    /// 0..1), ascending by line. A host flashing a value that just changed, then fading it.
+    #[rust]
+    pub inlay_lifts: Vec<(usize, f32)>,
     /// A line to scroll to the middle of the view (caret untouched).
     #[rust]
     center_line: Option<usize>,
@@ -2201,7 +2208,15 @@ impl CodeEditor {
                                 let shown = session.layout().line_byte_range(line_index);
                                 let line_len = session.layout().as_text().as_lines()[line_index].len();
                                 if shown.contains(&byte_index) || (byte_index == shown.end && byte_index == line_len) {
-                                    self.draw_text.color = self.token_colors.identifier;
+                                    let base = self.inlay_color.unwrap_or(self.token_colors.identifier);
+                                    let lift = self.inlay_lifts.binary_search_by_key(&line_index, |l| l.0).map_or(0.0, |k| self.inlay_lifts[k].1.clamp(0.0, 1.0));
+                                    let lit = self.token_colors.identifier;
+                                    self.draw_text.color = vec4(
+                                        base.x + (lit.x - base.x) * lift,
+                                        base.y + (lit.y - base.y) * lift,
+                                        base.z + (lit.z - base.z) * lift,
+                                        base.w + (lit.w - base.w) * lift,
+                                    );
                                     self.draw_text.color.w *= opacity;
                                     self.draw_text.draw_abs(cx, Vec2d { x, y: origin_y + y } * self.cell_size + self.viewport_rect.pos, text);
                                 }

@@ -1,4 +1,5 @@
 use mod.prelude.widgets_internal.*
+use mod.widgets.DesktopButtonType
 mod.widgets.Button.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
 mod.widgets.Button.draw_bg.border_radius = 0.0
 mod.widgets.Button.draw_bg.border_size = 2.0
@@ -72,6 +73,86 @@ field_frame(mod.widgets.DateRangePicker)
 mod.widgets.WellInput.min_height = 0.0
 
 mod.widgets.Window.pass.clear_color = #d4d0c8
+
+// THE CAPTION. A window draws its own caption, under the window manager too,
+// so the classic title bar is this sheet's: the active blue gradient (grey
+// when the window is not focused), the app's icon and a bold white title at
+// the left, and raised grey buttons at the right, close set apart. The frame
+// around it is the window manager's (its resize edges). 18 points of title
+// over 2 of the window's grey, as the classic bar stands.
+// `color` and `color_unfocused` are where the gradient starts: what draws the
+// caption without widgets (`makepad run`'s load screen) lays them flat.
+mod.widgets.Window.caption_bar.draw_bg.color = #0a246a
+mod.widgets.Window.caption_bar.draw_bg.color_unfocused = #808080
+mod.widgets.Window.caption_bar.draw_bg.pixel = fn() {
+    let p=self.pos*self.rect_size
+    if p.y>=self.rect_size.y-2.0 {
+        return #d4d0c8
+    }
+    let start=self.color_unfocused.mix(self.color,self.window_focus)
+    let end=mix(#c0c0c0,#a6caf0,self.window_focus)
+    return vec4(mix(start.rgb,end.rgb,self.pos.x),1.0)
+}
+// The title starts at the left, centred on the 18 points of blue.
+mod.widgets.Window.caption_bar.caption_label.align = mod.turtle.Align{x: 0.0 y: 0.5}
+mod.widgets.Window.caption_bar.caption_label.padding = mod.turtle.Inset{left: 2.0 top: 0.0 right: 0.0 bottom: 2.0}
+mod.widgets.Window.caption_bar.caption_label.caption_icon.visible = true
+mod.widgets.Window.caption_bar.caption_label.caption_icon.margin = mod.turtle.Inset{left: 0.0 top: 0.0 right: 3.0 bottom: 0.0}
+mod.widgets.Window.caption_bar.caption_label.label.padding = 0.0
+mod.widgets.Window.caption_bar.caption_label.label.draw_text.text_style = mod.theme.font_bold
+mod.widgets.Window.caption_bar.caption_label.label.draw_text.color = #ffffff
+mod.widgets.Window.caption_bar.caption_label.label.draw_text.color_unfocused = #d4d0c8
+// 16 by 14, 2 points in from the top and the right; the bar is 20 tall.
+mod.widgets.Window.caption_bar.windows_buttons.margin = mod.turtle.Inset{left: 0.0 top: 2.0 right: 2.0 bottom: 4.0}
+// A raised grey face with its glyph in black, pressed in while held. The
+// glyphs are the classic pixel drawings on a 10 point grid. `color` is the
+// glyph a caption without faces draws on the bar (the load screen): white.
+let caption_button = fn() {
+    let p=self.pos*self.rect_size
+    let size=self.rect_size
+    let pressed=if self.down>0.5 {1.0}else{0.0}
+    let tl=min(p.x,p.y)
+    let br=min(size.x-p.x,size.y-p.y)
+    let d=min(tl,br)
+    let outer=if tl<br {mix(#d4d0c8,#808080,pressed)}else{mix(#404040,#ffffff,pressed)}
+    let inner=if tl<br {mix(#ffffff,#404040,pressed)}else{mix(#808080,#d4d0c8,pressed)}
+    let face=if d<1.0 {outer}else{if d<2.0 {inner}else{#d4d0c8}}
+    // the glyph's 10 point cell, a point down and right while pressed
+    let q=floor(p-floor((size-vec2(10.0))*0.5)-vec2(pressed))
+    let x=q.x
+    let y=q.y
+    let kind=match self.button_type {
+        DesktopButtonType.WindowsMin => 1.0
+        DesktopButtonType.WindowsMax => 2.0
+        DesktopButtonType.WindowsMaxToggled => 3.0
+        DesktopButtonType.WindowsClose => 4.0
+        _ => 0.0
+    }
+    // minimise: a bar on the floor
+    let low=x>=1.0 && x<7.0 && y>=7.0 && y<9.0
+    // maximise: a window, its title edge thick
+    let win=x>=0.0 && x<10.0 && y>=1.0 && y<10.0 && (y<3.0 || y>=9.0 || x<1.0 || x>=9.0)
+    // restore: a window over the corner of another
+    let back=x>=3.0 && x<9.0 && y>=0.0 && y<6.0 && (y<2.0 || x>=8.0 || (y<3.0 && x<4.0) || (y>=5.0 && x>=6.0))
+    let front=x>=0.0 && x<6.0 && y>=3.0 && y<9.0 && (y<5.0 || y>=8.0 || x<1.0 || x>=5.0)
+    // close: two strokes two points wide
+    let cross=y>=1.0 && y<9.0 && (x-y==0.0 || x-y==1.0 || x+y==9.0 || x+y==10.0)
+    let ink=(kind==1.0 && low) || (kind==2.0 && win) || (kind==3.0 && (back || front)) || (kind==4.0 && cross)
+    return if ink {#000000}else{face}
+}
+mod.widgets.Window.caption_bar.windows_buttons.min.width = 16.0
+mod.widgets.Window.caption_bar.windows_buttons.min.height = 14.0
+mod.widgets.Window.caption_bar.windows_buttons.min.draw_bg.pixel = caption_button
+mod.widgets.Window.caption_bar.windows_buttons.min.draw_bg.color = #ffffff
+mod.widgets.Window.caption_bar.windows_buttons.max.width = 16.0
+mod.widgets.Window.caption_bar.windows_buttons.max.height = 14.0
+mod.widgets.Window.caption_bar.windows_buttons.max.draw_bg.pixel = caption_button
+mod.widgets.Window.caption_bar.windows_buttons.max.draw_bg.color = #ffffff
+mod.widgets.Window.caption_bar.windows_buttons.close.width = 16.0
+mod.widgets.Window.caption_bar.windows_buttons.close.height = 14.0
+mod.widgets.Window.caption_bar.windows_buttons.close.margin = mod.turtle.Inset{left: 2.0 top: 0.0 right: 0.0 bottom: 0.0}
+mod.widgets.Window.caption_bar.windows_buttons.close.draw_bg.pixel = caption_button
+mod.widgets.Window.caption_bar.windows_buttons.close.draw_bg.color = #ffffff
 
 // Raised gray command buttons, with a depressed face while held.
 mod.widgets.Button.draw_bg.pixel = fn() {

@@ -137,7 +137,8 @@ pub(crate) struct AppCpu {
     pub(crate) main: Duration,
     /// The whole process's but what its threads serving remote peers ran (answering a test's
     /// snapshots and log reads among it) and what the runtime's own threads ran (under the JIT,
-    /// its background checks, tier-ups and monitor): the app's own work.
+    /// its background checks, tier-ups and monitor): the app's own work. A wait adds what the
+    /// processes it started ran (`Started`).
     pub(crate) own: Duration,
     /// The process's major page faults so far: pages it waited on from disk (swap, or a mapped
     /// file's), what an app that runs no CPU while it waits on memory shows.
@@ -159,6 +160,8 @@ pub(crate) struct AppSettled {
     pub(crate) pool: Option<([u64; 3], u64, u64)>,
     /// While pool jobs wait: who holds the process's CPU budget slots (`slots`), the longest first.
     pub(crate) slots: Vec<BudgetSlot>,
+    /// What is pending, in the app's words: its reasons, the loads with their kinds.
+    pub(crate) pending: Vec<String>,
 }
 
 /// Holders of the CPU budget's slots alike in class, client (app, jit, hal), label and lent (its
@@ -278,7 +281,15 @@ impl RemoteClient {
                 })
                 .collect()
         });
-        Ok(AppSettled { settled, only_pool, pool, slots })
+        let pending = reasons.iter().filter_map(|r| r.string()).map(|reason| match (reason.as_str(), json.key("loads")) {
+            ("loads", Some(JsonValue::Object(kinds))) => {
+                let mut kinds: Vec<String> = kinds.iter().map(|(kind, n)| format!("{kind}: {}", json_f64(Some(n)).unwrap_or(0.0))).collect();
+                kinds.sort();
+                format!("loads ({})", kinds.join(", "))
+            }
+            _ => reason.clone(),
+        }).collect();
+        Ok(AppSettled { settled, only_pool, pool, slots, pending })
     }
 
     /// The socket path this client dials, for diagnostics.
