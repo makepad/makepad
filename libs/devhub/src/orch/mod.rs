@@ -18,6 +18,7 @@
 
 pub mod after;
 pub mod allapps;
+pub mod dockbuild;
 pub mod arm;
 pub mod ci;
 pub mod ci_status;
@@ -48,7 +49,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The control services of the jobs (`cli` talks to them).
-pub const SERVICES: [&str; 14] = ["overlay-shadow", "lane", "job", "live", "show", "verify", "jitlegs", "warm", "after", "allapps", "push", "state", "ci", "master"];
+pub const SERVICES: [&str; 15] = ["overlay-shadow", "lane", "job", "live", "show", "verify", "jitlegs", "warm", "after", "allapps", "dockbuild", "push", "state", "ci", "master"];
 
 /// What every job has: the state, the leases, the checkout the master serves.
 pub struct Ctx {
@@ -141,6 +142,7 @@ pub fn go() {
     ci_status::start(ctx.clone());
     after::start(ctx.clone());
     allapps::start(ctx.clone());
+    dockbuild::start(ctx.clone());
     // the workflows read their records back above: a lease of the master's own work that no
     // record names has nothing that follows it, and frees its box now
     let named = ctx.store.read(|d| {
@@ -324,6 +326,7 @@ fn serve(ctx: &Arc<Ctx>, svc: &str, line: &str, out: &mut Vec<String>) {
         "warm" => warm::serve(line),
         "after" => after::serve(ctx, line),
         "allapps" => allapps::serve(ctx, line),
+        "dockbuild" => dockbuild::serve(ctx, line),
         "push" => push::serve(ctx, line),
         "ci" => ci::serve(ctx, line),
         // builds work's tip and answers how that went: the exec follows the answer, a failed

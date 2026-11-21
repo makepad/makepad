@@ -321,7 +321,8 @@ fn removable(ctx: &Ctx, l: &LaneRec, views: &mut Views, cwds: &[(u32, PathBuf)],
     let nested = path.join("apps/commercial");
     if nested.join(".git").exists() {
         if l.cbranch.is_empty() {
-            if wt::unique_commits(&nested) {
+            // (one git let go of has no HEAD to read: it is refused below, on no branch)
+            if !let_go(&ctx.commercial(), &nested) && wt::unique_commits(&nested) {
                 return Err("apps/commercial has commits on no commercial ref".into());
             }
         } else if let Some(c) = views.commercial.as_mut() {
@@ -331,16 +332,22 @@ fn removable(ctx: &Ctx, l: &LaneRec, views: &mut Views, cwds: &[(u32, PathBuf)],
             }
         }
     }
-    for (tree, branch) in [(path.to_path_buf(), &l.branch), (nested.clone(), &l.cbranch)] {
-        if tree.join(".git").exists() {
+    // a half git let go of mid-removal has no HEAD: what is left of it is checked against its branch
+    for (tree, repo, branch) in [(path.to_path_buf(), ctx.repo.clone(), &l.branch), (nested.clone(), ctx.commercial(), &l.cbranch)] {
+        if let_go(&repo, &tree) {
+            left_is_branchs(&repo, &tree, branch)?;
+        }
+    }
+    for (tree, repo, branch) in [(path.to_path_buf(), ctx.repo.clone(), &l.branch), (nested.clone(), ctx.commercial(), &l.cbranch)] {
+        if tree.join(".git").exists() && !let_go(&repo, &tree) {
             let (head, actual) = crate::monitor::read_head(&tree).ok_or("worktree has no HEAD")?;
             if actual != *branch || (!branch.is_empty() && branch_tip(&tree, branch).as_deref() != Some(head.as_str())) {
                 return Err(format!("{}: HEAD or branch identity changed; reconcile before cleanup", tree.display()));
             }
         }
     }
-    for tree in [path.to_path_buf(), nested.clone()] {
-        if !tree.join(".git").exists() {
+    for (tree, repo) in [(path.to_path_buf(), ctx.repo.clone()), (nested.clone(), ctx.commercial())] {
+        if !tree.join(".git").exists() || let_go(&repo, &tree) {
             continue;
         }
         let d = ctx.monitor.dirty(&tree)?;
@@ -810,6 +817,68 @@ fn preserve_head(tree: &Path, target: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether git let go of the worktree at `tree` (of `repo`) partway through removing it: its `.git`
+/// file names an admin dir that is gone, or the tree has no `.git` and `repo` lists no worktree
+/// there. `git worktree remove` deletes the admin dir even when the tree's own delete failed, so
+/// what is left of the tree has no HEAD and no index (wmcaption, 11-19).
+fn let_go(repo: &Path, tree: &Path) -> bool {
+    let dot = tree.join(".git");
+    if dot.is_file() {
+        return std::fs::read_to_string(&dot).ok().and_then(|t| t.trim().strip_prefix("gitdir:").map(|d| !tree.join(d.trim()).exists())).unwrap_or(false);
+    }
+    // (a nested half's dir with no `.git` is its makepad half's, not a worktree)
+    if dot.exists() || !tree.is_dir() || tree.ends_with("apps/commercial") {
+        return false;
+    }
+    let listed = wt::git(Some(repo), None, &["worktree", "list", "--porcelain"]).unwrap_or_default();
+    let canon = std::fs::canonicalize(tree).unwrap_or_else(|_| tree.to_path_buf());
+    !listed.lines().filter_map(|x| x.strip_prefix("worktree ")).any(|w| Path::new(w) == tree || Path::new(w) == canon)
+}
+
+/// What is left of a half git let go of ([`let_go`]) that `tip` of `repo` does not hold: each file
+/// changed or added (one git ignores aside, and the nested half's dir). A file gone is the
+/// removal's. Read with a private index against the repository's objects; no file of git's changes.
+fn left_beyond(repo: &Path, tree: &Path, tip: &str) -> Result<Vec<String>, String> {
+    let common = wt::git(Some(repo), None, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let index = std::env::temp_dir().join(format!("devhub-let-go-{}-{}.index", std::process::id(), wall_ms()));
+    let git = |args: &[&str]| -> Result<String, String> {
+        let out = crate::git_exec::command().arg("-c").arg("core.hooksPath=/dev/null").arg("--git-dir").arg(common.trim()).arg("--work-tree").arg(tree).args(args)
+            .current_dir(tree).stdin(std::process::Stdio::null()).env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env("GIT_INDEX_FILE", &index)
+            .output().map_err(|e| format!("git: {e}"))?;
+        if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).into_owned()) } else { Err(format!("git {}: {}", args[0], crate::proto::clean(String::from_utf8_lossy(&out.stderr).trim(), 300))) }
+    };
+    let read = (|| {
+        git(&["read-tree", tip])?;
+        // (the files' stat data in the index, so only a content change shows; -q: one is no error)
+        let _ = git(&["update-index", "-q", "--refresh"]);
+        Ok::<_, String>((git(&["diff-files", "--name-status", "-z"])?, git(&["ls-files", "--others", "--exclude-standard", "-z"])?))
+    })();
+    let _ = std::fs::remove_file(&index);
+    let (changed, others) = read?;
+    let fields: Vec<&str> = changed.split('\0').collect();
+    let mut left: Vec<String> = fields.chunks(2).filter(|c| c.len() == 2 && !c[0].is_empty() && c[0] != "D").map(|c| c[1].to_string()).collect();
+    left.extend(others.split('\0').filter(|p| !p.is_empty() && !(*p == "apps/commercial/" || p.starts_with("apps/commercial/"))).map(str::to_string));
+    Ok(left)
+}
+
+/// A half git let go of ([`let_go`]) may go when what is left of it is its branch's.
+fn left_is_branchs(repo: &Path, tree: &Path, branch: &str) -> Result<(), String> {
+    let tip = (!branch.is_empty()).then(|| branch_tip(repo, branch)).flatten()
+        .ok_or_else(|| format!("{}: git let go of it mid-removal, and it is on no branch to check what is left of it against", tree.display()))?;
+    let left = left_beyond(repo, tree, &tip)?;
+    if left.is_empty() {
+        return Ok(());
+    }
+    let more = if left.len() > 8 { format!(" and {} more", left.len() - 8) } else { String::new() };
+    Err(format!("{}: git let go of it mid-removal, and {} file(s) left in it are not {branch}'s: {}{more}", tree.display(), left.len(), left[..left.len().min(8)].join(", ")))
+}
+
+/// Deletes what is left of a half git let go of ([`let_go`]), checked against its branch first.
+fn drop_let_go(repo: &Path, tree: &Path, branch: &str) -> Result<(), String> {
+    left_is_branchs(repo, tree, branch)?;
+    std::fs::remove_dir_all(tree).map_err(|e| format!("{}: {e}", tree.display()))
+}
+
 /// Removes the worktree pair after preserving its actual heads, conditionally deletes the
 /// checked local/origin branch tips (`branches`; a retired lane keeps them), and cleans the
 /// lane's dirs on every node.
@@ -827,25 +896,36 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool, branches: bool) -> Result<String, 
         }
     }
 
-    if nested.join(".git").exists() {
-        // removed from its own repository (the one its .git names), so neither keeps a dangling entry
-        let common = wt::git(Some(&nested), None, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        preserve_head(&nested, "main")?;
-        let mut a = vec!["worktree", "remove"];
-        a.extend_from_slice(force);
-        let n = nested.to_string_lossy().into_owned();
-        a.push(&n);
-        wt::git(None, Some(Path::new(common.trim())), &a)?;
+    // The merge bot moves none of its files while it goes (the lane's write turn): a fast-forward
+    // the bot made while `git worktree remove` deleted the tree wrote a file back into it, the
+    // delete stopped at that file's dir, and git dropped the worktree with half its tree left
+    // (wmcaption, 11-19). A half git let go of so goes once what is left of it is its branch's.
+    crate::sync::lanes::lane_write_as(&path, "the lane's removal", || -> Result<(), String> {
+        if let_go(&ctx.commercial(), &nested) {
+            drop_let_go(&ctx.commercial(), &nested, &l.cbranch)?;
+        } else if nested.join(".git").exists() {
+            // removed from its own repository (the one its .git names), so neither keeps a dangling entry
+            let common = wt::git(Some(&nested), None, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+            preserve_head(&nested, "main")?;
+            let mut a = vec!["worktree", "remove"];
+            a.extend_from_slice(force);
+            let n = nested.to_string_lossy().into_owned();
+            a.push(&n);
+            wt::git(None, Some(Path::new(common.trim())), &a)?;
+        }
         ctx.monitor.forget(&nested);
-    }
-    if path.exists() {
-        preserve_head(&path, "work")?;
-        let mut a = vec!["worktree", "remove"];
-        a.extend_from_slice(force);
-        let p = path.to_string_lossy().into_owned();
-        a.push(&p);
-        wt::git(Some(&ctx.repo), None, &a)?;
-    }
+        if let_go(&ctx.repo, &path) {
+            drop_let_go(&ctx.repo, &path, &l.branch)?;
+        } else if path.exists() {
+            preserve_head(&path, "work")?;
+            let mut a = vec!["worktree", "remove"];
+            a.extend_from_slice(force);
+            let p = path.to_string_lossy().into_owned();
+            a.push(&p);
+            wt::git(Some(&ctx.repo), None, &a)?;
+        }
+        Ok(())
+    })?;
     ctx.monitor.forget(&path);
     done.push(format!("removed {}", path.display()));
     // landed (checked) or bundled (a drop): the branch goes even with the merge bot's merges on it
@@ -1711,7 +1791,8 @@ const RETIRE_OFFER_MS: u64 = 6 * 3_600_000;
 /// run's units far over their measure ([`crate::bucket::slow_units`]). Some just work on code. Then the lanes offered for retirement ([`retire_offers`]) and the parked
 /// ones, in one row.
 /// The bucket shards' units far past their measure, each with its box as the lease scheduler sees
-/// it now ([`crate::bucket::slow_units`]): the check-in's rows, and `devhub bucket`'s beside the run.
+/// it now ([`crate::bucket::slow_units`]), and CI's shards still running past their overdue verdict
+/// ([`super::ci::overdue_running`]): the check-in's rows, and `devhub bucket`'s beside the run.
 pub(crate) fn slow_now(ctx: &Ctx, now: u64) -> Vec<String> {
     let (leases, nodes) = (ctx.leases.view(), ctx.leases.nodes());
     let shard_box = |id: &str| {
@@ -1719,7 +1800,11 @@ pub(crate) fn slow_now(ctx: &Ctx, now: u64) -> Vec<String> {
         let caps = nodes.iter().find(|n| n.name == node).map(|n| (n.up, n.caps.as_ref()));
         Some(crate::bucket::ShardBox { up: caps.is_some_and(|(up, _)| up), load: caps.and_then(|(_, c)| c).map_or(0.0, |c| c.load1), cores: caps.and_then(|(_, c)| c).map_or(0, |c| c.cores), node })
     };
-    crate::bucket::slow_units(&ctx.home, now, &shard_box)
+    let mut out = crate::bucket::slow_units(&ctx.home, now, &shard_box);
+    // and CI's shards past their overdue verdict whose lease still runs
+    let live = |id: &str| leases.iter().any(|l| l.id == id && !matches!(l.state, crate::lease::sched::State::Ended(_)));
+    out.extend(ctx.store.read(|d| super::ci::overdue_running(&d.ci, now, &live)));
+    out
 }
 
 /// How long a node goes unheard before the check-in lists it ([`down_nodes`]).
@@ -1777,9 +1862,19 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
         rows.push("leases far over their measure whose agent went silent:".to_string());
         rows.extend(overdue);
     }
+    let silent = ctx.leases.output_silent(now);
+    if !silent.is_empty() {
+        rows.push(format!("leases whose output grew none for {} min or more (busy or not):", crate::lease::sched::OUTPUT_SILENT_MS / 60_000));
+        rows.extend(silent);
+    }
     rows.extend(super::live::restarts_pending(ctx, now));
     rows.extend(slow_now(ctx, now));
     rows.extend(down_nodes(&ctx.leases.nodes()));
+    let stale = ctx.leases.stale_boxes(now);
+    if !stale.is_empty() {
+        rows.push("boxes that run older code than their checkout (their WM or JIT apps):".to_string());
+        rows.extend(stale);
+    }
     let view = ctx.leases.view();
     rows.extend(deep_queues(view.iter().filter(|l| l.state == crate::lease::sched::State::Queued).map(|l| (l.req.lane.as_str(), l.asked_ms)), now));
     let offers = offered(ctx, &lanes, &ended, &busy, now);
@@ -2596,6 +2691,22 @@ mod tests {
         cleanup(&ctx);
         assert_eq!(state("r"), "removed");
         assert!(!ran.exists());
+        // git let go of a lane partway through removing it (the merge bot wrote a file into it as
+        // `git worktree remove` deleted it: the admin dir went, part of the tree stayed, with no
+        // HEAD; wmcaption, 11-19): asked again, it goes once what is left of it is its branch's
+        serve(&ctx, "lane new {\"name\":\"half\"}").unwrap();
+        let half = base.join("wt.noindex/half");
+        std::fs::remove_dir_all(mk.join(".git/worktrees/half")).unwrap();
+        std::fs::write(half.join("a.txt"), "not the branch's").unwrap();
+        std::fs::write(half.join("new.txt"), "n").unwrap();
+        let e = serve(&ctx, "lane remove half").unwrap_err();
+        assert!(e.contains("git let go of it mid-removal, and 2 file(s) left in it are not rc-half's: a.txt, new.txt"), "{e}");
+        assert!(half.exists() && state("half") == "live");
+        std::fs::remove_file(half.join("a.txt")).unwrap();
+        std::fs::remove_file(half.join("new.txt")).unwrap();
+        serve(&ctx, "lane remove half").unwrap();
+        assert_eq!(state("half"), "removed", "{:?}", ctx.store.read(|d| d.lanes.iter().rev().find(|l| l.name == "half").map(|l| l.note.clone())));
+        assert!(!half.exists() && g(&mk, &["branch", "--list", "rc-half"]).is_empty(), "the rest of its tree and its branch went");
         // branch and worktree gone some other way: the pass clears the record, and so does asking
         for name in ["gone", "gone2"] {
             serve(&ctx, &format!("lane new {{\"name\":\"{name}\"}}")).unwrap();

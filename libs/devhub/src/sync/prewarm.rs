@@ -28,14 +28,13 @@ use std::sync::Mutex;
 
 /// Why a node does not pre-warm after an apply that asks for it (None: it does): dev off, a
 /// bench box (timed work there needs the box quiet, and a pre-warm runs outside any lease), a
-/// person at it, a lease on it, or a failed prebuild.
-pub fn refusal(dev: bool, bench: bool, person: bool, leased: bool, built_ok: bool) -> Option<&'static str> {
+/// lease on it, or a failed prebuild. A person's input there is none of these: only the dev
+/// switch takes a box out of the pool.
+pub fn refusal(dev: bool, bench: bool, leased: bool, built_ok: bool) -> Option<&'static str> {
     if !dev {
         Some("dev off")
     } else if bench {
         Some("a bench box: timed work needs it quiet")
-    } else if person {
-        Some("a person uses it")
     } else if leased {
         Some("a lease holds the node")
     } else if !built_ok {
@@ -122,11 +121,11 @@ mod board_tests {
     /// that built pre-warms; each other reason keeps it from it.
     #[test]
     fn a_bench_box_never_prewarms() {
-        assert_eq!(refusal(true, true, false, false, true), Some("a bench box: timed work needs it quiet"), "an idle bench box that built");
-        assert_eq!(refusal(true, false, false, false, true), None, "an idle pool box that built pre-warms");
-        assert_eq!(refusal(false, true, false, false, true), Some("dev off"), "dev off says so first");
-        for (person, leased, built, why) in [(true, false, true, "a person uses it"), (false, true, true, "a lease holds the node"), (false, false, false, "the prebuild failed")] {
-            assert_eq!(refusal(true, false, person, leased, built), Some(why));
+        assert_eq!(refusal(true, true, false, true), Some("a bench box: timed work needs it quiet"), "an idle bench box that built");
+        assert_eq!(refusal(true, false, false, true), None, "an idle pool box that built pre-warms");
+        assert_eq!(refusal(false, true, false, true), Some("dev off"), "dev off says so first");
+        for (leased, built, why) in [(true, true, "a lease holds the node"), (false, false, "the prebuild failed")] {
+            assert_eq!(refusal(true, false, leased, built), Some(why));
         }
     }
 

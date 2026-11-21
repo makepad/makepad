@@ -440,7 +440,7 @@ fn place_input(work: &Path, tmp: &Path, hash: &str, part: &Path, size: u64) -> R
 
 /// Requests on one routed channel to a node service, up to [`WINDOW`] in flight; each answer is
 /// its lines up to the `end` line.
-struct Pipe {
+pub(crate) struct Pipe {
     ch: makepad_remote::conn::Channel,
     pending: VecDeque<String>,
     buf: String,
@@ -450,13 +450,13 @@ struct Pipe {
 }
 
 impl Pipe {
-    fn open(c: &Client, node: &str, service: &str) -> Result<Pipe, String> {
+    pub(crate) fn open(c: &Client, node: &str, service: &str) -> Result<Pipe, String> {
         let ch = c.open("route", &format!("{node} {service} ")).map_err(|e| format!("{node} {service}: {e}"))?;
         Ok(Pipe { ch, pending: VecDeque::new(), buf: String::new(), what: format!("{node} {service}"), node_ms: 0 })
     }
 
     /// Sends `line`; when the window is full, first takes the oldest answer (checked by `check`).
-    fn send(&mut self, line: String, check: &mut dyn FnMut(&str, &[String]) -> Result<(), String>) -> Result<(), String> {
+    pub(crate) fn send(&mut self, line: String, check: &mut dyn FnMut(&str, &[String]) -> Result<(), String>) -> Result<(), String> {
         if self.pending.len() >= WINDOW {
             self.take(check)?;
         }
@@ -496,7 +496,7 @@ impl Pipe {
         }
     }
 
-    fn drain(&mut self, check: &mut dyn FnMut(&str, &[String]) -> Result<(), String>) -> Result<(), String> {
+    pub(crate) fn drain(&mut self, check: &mut dyn FnMut(&str, &[String]) -> Result<(), String>) -> Result<(), String> {
         while !self.pending.is_empty() {
             self.take(check)?;
         }
@@ -852,9 +852,14 @@ mod tests {
     }
 }
 
-/// The repositories of a tree pinned at `pin`: (dir, commit, path prefix in the tree).
+/// The repositories of a tree pinned at `pin`: (dir, commit, path prefix in the tree). A nested one
+/// the tree lacks is read in the user's checkout ([`crate::nested::checkout`]): a lane's runs pin
+/// each followed one at its landed tip (11-19).
 fn pinned_repos(root: &Path, pin: &super::Pin) -> Vec<(PathBuf, String, String)> {
-    pin.repos().into_iter().map(|(name, sha, prefix)| (if prefix.is_empty() { root.to_path_buf() } else { root.join(crate::nested::dir(name)) }, sha.to_string(), prefix)).collect()
+    pin.repos().into_iter().map(|(name, sha, prefix)| {
+        let dir = if prefix.is_empty() { root.to_path_buf() } else { crate::nested::checkout(root, name).unwrap_or_else(|| root.join(crate::nested::dir(name))) };
+        (dir, sha.to_string(), prefix)
+    }).collect()
 }
 
 /// Whether `path` (in the tree) belongs to the repository with `prefix` under `pin`: the makepad
@@ -974,7 +979,8 @@ pub fn uncommitted_seen(monitor: &crate::monitor::Monitor, root: &Path, pin: &su
 /// ships, a path gone is a deletion when the pin has it.
 fn uncommitted_with(root: &Path, pin: &super::Pin, dirty: impl Fn(&Path) -> Result<(String, Vec<String>), String>) -> Result<(Vec<String>, Vec<String>), String> {
     let mut paths = std::collections::BTreeSet::new();
-    for (dir, sha, prefix) in pinned_repos(root, pin) {
+    // (a nested repository the tree lacks, read in the user's checkout, holds nothing of the lane's)
+    for (dir, sha, prefix) in pinned_repos(root, pin).into_iter().filter(|(dir, _, _)| dir.starts_with(root)) {
         let (head, mut rel) = dirty(&dir)?;
         if head != sha {
             let id = |s: &str| makepad_git::ObjectId::from_hex(s).map_err(|e| format!("{s}: {e}"));

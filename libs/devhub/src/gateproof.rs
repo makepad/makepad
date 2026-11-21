@@ -165,7 +165,8 @@ pub(crate) fn blame_keys(repo: &Path, pair: &Pair, units: &[String]) -> BTreeMap
     let Ok(digests) = digests(repo, &tree, &dirs, units, false) else { return keys };
     for (unit, key) in &mut keys {
         let Some(app) = app_unit(&dirs, unit) else { continue };
-        let digest = digests.of(&app, Os::Linux);
+        // (a Windows check's inputs hold the Windows-only files, which a Linux unit's leave out)
+        let digest = digests.of(&app, if unit.starts_with("windows ") { Os::Windows } else { Os::Linux });
         *key = key_text(&tree, &app.dir, unit, digest, true).zip(key_text(&tree, &app.dir, unit, digest, false));
     }
     keys

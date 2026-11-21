@@ -54,7 +54,8 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           the current tips in queue order (later commits are the next
                                           hand-in); timer buckets check the landed tips afterwards
   land [...] --wire-change                a hand-in that changes the hosted wire's files (platform/studio,
-                                          key_code: a WM and apps of different builds refuse each other);
+                                          key_code: a WM and apps of different builds refuse each other;
+                                          the AI bus: they drop each other's tool calls);
                                           without it such a hand-in fails, naming the files
   land [...] --supersede                  re-pin this branch's hand-in that is still queued to the branch's
                                           commits now; without it a second hand-in of a queued branch is
@@ -68,7 +69,12 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed);
                                           a conflict or failure is final: hand in again
   land hold <branch> [reason] | unhold <branch> | retry <branch> (its pinned commits again) | drop <branch>
-  bucket [status]                        the last 10 post-land bucket runs and attributed lanes
+  bucket [status]                        the last 10 post-land bucket runs and attributed lanes; a red test's
+                                          bisect probes every target of its package the run failed: `bisect of
+                                          <pkg> --test a, --test b: #N .. turned it red`, then `green at its
+                                          red tip, not reproduced: <targets>` for those that passed there;
+                                          `flaky or not reproduced` only when all passed, and a probe that
+                                          ran none of them stops at its red tip (no answer)
   bucket run <fast|tests|hot|mac|ci|full> that bucket's run now, of the tip then (full: every package's tests;
                                           mac: the test targets only a Mac can fail, a package's
                                           [package.metadata.makepad.macos-tests])
@@ -509,6 +515,13 @@ pub(crate) fn whose_of_ps(lines: &[String]) -> Vec<Whose> {
         .collect()
 }
 
+/// The lease id of a run's lease mark (`<hub ledger dir>/<id>`, what `ps` and discovery files
+/// carry): a WM session's hosted apps went unfound by their bare id (11-20).
+#[cfg(feature = "checkout")]
+pub(crate) fn lease_of_mark(mark: &str) -> &str {
+    mark.rsplit('/').next().unwrap_or(mark)
+}
+
 /// The JITs of `machine` with their leases: this machine's from their discovery files (what
 /// [`Client::connect`] reaches), another's from its hub's `ps`.
 pub(crate) fn whose(c: &Client, machine: &str, here: bool) -> Result<Vec<Whose>, String> {
@@ -799,6 +812,9 @@ pub fn main(args: &[String]) -> i32 {
     if a.first() == Some(&crate::gate::WORD) {
         return crate::gate::forward(&a[1..]);
     }
+    if a.first() == Some(&"serial") {
+        return crate::serial::cli(&a[1..]);
+    }
     let c = match control() {
         Ok(c) => c,
         Err(e) => {
@@ -1013,7 +1029,7 @@ fn serve(args: &[&str]) -> i32 {
         }
         [] => {
             #[cfg(all(unix, feature = "checkout"))]
-            if let Err(e) = crate::logstamp::stamp_output(crate::logstamp::stamper) {
+            if let Err(e) = crate::logstamp::stamp_output(crate::logstamp::stamper, &proto::home().join("master.log")) {
                 eprintln!("devhub: the master's log goes on without times: {e}");
             }
             let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
@@ -1209,7 +1225,16 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         }
         // when each bucket's last run ended, and how
         if let Some(Value::Obj(last)) = v.get("last_runs") {
-            let runs = last.iter().map(|(name, r)| format!("{name} {} ago {}", ago(r.get("ended_ms").and_then(Value::as_u64).unwrap_or(0)), if r.get("ok").and_then(Value::as_bool) == Some(true) { "ok" } else { "FAILED" })).collect::<Vec<_>>();
+            // (a run after its last verdict that had none: said first, so "27h ago" is not read as
+            // the bucket not running, 11-20)
+            let runs = last.iter().map(|(name, r)| {
+                let verdict = r.get("ended_ms").and_then(Value::as_u64).map(|ms| format!("{} ago {}", ago(ms), if r.get("ok").and_then(Value::as_bool) == Some(true) { "ok" } else { "FAILED" }));
+                match (r.get("no_verdict"), verdict) {
+                    (Some(n), verdict) => format!("{name} {} ago no verdict ({}){}", ago(n.get("ended_ms").and_then(Value::as_u64).unwrap_or(0)),
+                        crate::proto::clean(n.get("why").and_then(Value::as_str).unwrap_or(""), 60), verdict.map_or(String::new(), |v| format!(", its last verdict {v}"))),
+                    (None, verdict) => format!("{name} {}", verdict.unwrap_or_default()),
+                }
+            }).collect::<Vec<_>>();
             println!("last runs: {}", runs.join(", "));
             continue;
         }
@@ -1234,6 +1259,8 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
                 if let Some(cmd) = cmd.as_str() { println!("    {}", crate::bucket::repro_said(unit, cmd)); }
             }
         }
+        // its slowest part's slowest tests, and those at its highest look
+        if let Some(said) = crate::bucket::slowest_tests(&v) { println!("    slowest tests: {said}"); }
     }
     0
 }
@@ -1430,7 +1457,16 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 let lane = if args[0] == "-" { com.map_or(branch, |(_, b)| b.as_str()) } else { branch };
                 // a branch that does not resolve here is the master's to refuse, as before
                 if let (Some(ms), Some(cs)) = (ms, cs.unwrap_or(Some(String::new()))) {
-                    let rev = if cs.is_empty() { format!("{branch}@{ms}") } else { format!("{branch}@{ms},{}={}@{cs}", crate::state::PAIRED, com.map_or("", |(_, b)| b.as_str())) };
+                    let mut rev = if cs.is_empty() { format!("{branch}@{ms}") } else { format!("{branch}@{ms},{}={}@{cs}", crate::state::PAIRED, com.map_or("", |(_, b)| b.as_str())) };
+                    // its halves in the other nested repositories, merged onto their tips there
+                    // (a followed one it has no half in is checked at its tip, 11-19)
+                    let top = crate::lease::client::makepad_top().unwrap_or_default();
+                    let here = crate::nested::names(std::path::Path::new(&top));
+                    for (name, nb) in args.iter().filter_map(|a| a.split_once('=')).filter(|(n, b)| *n != crate::state::PAIRED && here.iter().any(|h| h == n) && !b.is_empty()) {
+                        if let Some(sha) = g(&format!("{top}/{}", crate::nested::dir(name)), &["rev-parse", "--verify", &format!("refs/heads/{nb}^{{commit}}")]) {
+                            rev.push_str(&format!(",{name}={nb}@{sha}"));
+                        }
+                    }
                     // how long the hand-in waits on its gates, said to the train (`land status --json`)
                     let t0 = std::time::Instant::now();
                     let (features, dependents) = crate::lease::client::hand_in_gates(lane, &rev);
@@ -1564,11 +1600,9 @@ fn master_start() -> i32 {
     }
     let home = proto::home();
     let log = home.join("master.log");
-    let out = std::fs::create_dir_all(&home).and_then(|()| {
-        // (the last master's log says why a new one had to be started)
-        let _ = std::fs::rename(&log, home.join("master.log.old"));
-        std::fs::File::create(&log)
-    });
+    // (until its stamper runs: the master's own start moves the last master's log to .old and
+    // starts its own, [`crate::logstamp::stamp_output`])
+    let out = std::fs::create_dir_all(&home).and_then(|()| std::fs::OpenOptions::new().create(true).append(true).open(&log));
     let Ok((out, err)) = out.and_then(|o| o.try_clone().map(|e| (o, e))).map_err(|e| fail(format!("{}: {e}", log.display()))) else { return 1 };
     let own = own_argv(&crate::lease::wt::default_repo());
     let mut cmd = std::process::Command::new(&own[0]);
@@ -1705,6 +1739,8 @@ mod tests {
         ]
         .map(String::from);
         assert_eq!(whose_of_ps(&lines), vec![jit(41, "makepad-source-library", ""), jit(42, "makepad-app-calculator", "/leases/L7")]);
+        #[cfg(feature = "checkout")]
+        assert_eq!((lease_of_mark("/leases/L7"), lease_of_mark("L7"), lease_of_mark("")), ("L7", "L7", ""), "a mark's lease id");
     }
 
     /// Its options go before or after the target; the command's own words are left to it.

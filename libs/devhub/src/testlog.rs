@@ -21,7 +21,30 @@ pub struct Tally {
     /// does not name them: a scope test that printed no `test result:` was "no test ran", 11-07)
     quiet_target: bool,
     partial: Vec<u8>,
+    /// the targets whose `test result:` said FAILED, in the order they ran ([`Self::failed_said`])
+    pub failed: Vec<FailedTarget>,
+    /// the target running now (`Running <target>`): its failed tests and first panics so far
+    current: FailedTarget,
+    /// `current` said `Running` and not yet its `test result:`
+    open: bool,
+    /// the line before was a panic's `panicked at <where>:`, its message on this one
+    panic_at: Option<String>,
 }
+
+/// A target that failed: its name as cargo and the JIT say it runs (`tests/chrome.rs`, empty for
+/// a run of one target), its failed tests, and the first lines of its panics, each `panicked at
+/// <where>: <message>` once per place.
+#[derive(Default, Debug, PartialEq, Clone)]
+pub struct FailedTarget {
+    pub target: String,
+    pub tests: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// How many of a failed target's panics, and of its failed tests, its verdict line names; the
+/// whole run's output says the rest (the lease's or job's kept log).
+const SAID_ERRORS: usize = 2;
+const SAID_TESTS: usize = 5;
 
 impl Tally {
     pub fn of(log: &str) -> Tally {
@@ -44,7 +67,16 @@ impl Tally {
     }
 
     fn line(&mut self, line: &str) {
+        if let Some(at) = self.panic_at.take() { self.panicked(at, line); }
         if line.starts_with("Running ") || line.starts_with("Doc-tests ") {
+            let name = line.split_once(' ').map_or("", |(_, rest)| rest);
+            let target = name.split(" (").next().unwrap_or(name).trim();
+            // the open target's own processes (the tests that start its binary again) say its
+            // `Running` line again: still that target, its failures so far kept (a devhub lib run
+            // said its failed target only `failed`, 11-20)
+            if self.open && self.current.target == target { return; }
+            self.open = true;
+            self.current = FailedTarget { target: target.to_string(), ..Default::default() };
             self.plain += u64::from(std::mem::take(&mut self.quiet_target));
             if line.ends_with("(harness = false)") {
                 self.plain += 1;
@@ -58,13 +90,55 @@ impl Tally {
             self.quiet_target = false;
             return;
         }
+        if let Some(name) = line.strip_prefix("test ").and_then(|t| t.strip_suffix(" ... FAILED")) {
+            self.current.tests.push(name.to_string());
+            return;
+        }
+        // `thread '<test>' (<tid>) panicked at <where>:`, its message on the next line (older
+        // libtest: on the same line)
+        if let Some(at) = line.find("panicked at ") {
+            let said = &line[at..];
+            match said.strip_suffix(':') {
+                Some(at) => self.panic_at = Some(at.to_string()),
+                None => self.panicked(said.to_string(), ""),
+            }
+            return;
+        }
         let Some(rest) = line.strip_prefix("test result: ") else { return };
         self.quiet_target = false;
+        self.open = false;
         let count = |word: &str| rest.split([';', '.']).filter_map(|p| p.trim().strip_suffix(word)?.trim().parse::<u64>().ok()).next();
         if let (Some(passed), Some(failed)) = (count(" passed"), count(" failed")) {
             self.results += 1;
             self.executed += passed + failed;
         }
+        let target = self.current.target.clone();
+        let done = std::mem::replace(&mut self.current, FailedTarget { target, ..Default::default() });
+        if rest.starts_with("FAILED") { self.failed.push(done); }
+    }
+
+    /// A panic's place and message, once per place in its target (the JIT's harness says each
+    /// twice).
+    fn panicked(&mut self, at: String, message: &str) {
+        let errors = &mut self.current.errors;
+        if errors.len() < SAID_ERRORS && !errors.iter().any(|e| e.starts_with(&at)) {
+            errors.push(if message.is_empty() { at } else { format!("{at}: {message}") });
+        }
+    }
+
+    /// Each failed target, its failed tests and its first panics, one line each, indented: a run
+    /// of 70 makepad-fab targets said only `failed`, and its 64 KB tail named none of its failing
+    /// targets; its lane ran 35 min again to find them (11-20). Empty when none failed.
+    pub fn failed_said(&self) -> String {
+        let mut out = String::new();
+        for f in &self.failed {
+            let more = f.tests.len().saturating_sub(SAID_TESTS);
+            let tests = f.tests.iter().take(SAID_TESTS).cloned().collect::<Vec<_>>().join(", ") + &if more > 0 { format!(" and {more} more") } else { String::new() };
+            let target = if f.target.is_empty() { "its tests" } else { f.target.as_str() };
+            out.push_str(&format!("  {target}: {}\n", if tests.is_empty() { "failed".to_string() } else { tests }));
+            for e in &f.errors { out.push_str(&format!("    {}\n", crate::proto::clean(e, 240))); }
+        }
+        out
     }
 
     /// Why a test command's run is no pass although it exited 0: it executed no test. None when
@@ -438,6 +512,26 @@ mod tests {
         let mut t = Tally::default();
         for piece in ["test res", "ult: FAILED. 0 passed; 2 fa", "iled; 0 ignored\n"] { t.feed(piece.as_bytes()); }
         assert_eq!((t.results, t.executed), (1, 2));
+        // each failed target, its failed tests and its first panic once per place (the JIT's
+        // harness says each twice), in the order they ran, kept over the target's own processes
+        // saying its `Running` line again; a passing target is none of them: a 70-target run said
+        // only `failed` (11-20)
+        let run = "     Running tests/chrome.rs\n\nrunning 2 tests\n\
+            thread 'the_first_frame' (17) panicked at libs/makepad_test/src/runtime.rs:1724:5:\nwait: `path=\"ws_design\"` did not come\n\
+            thread 'the_first_frame' (17) panicked at libs/makepad_test/src/runtime.rs:1724:5:\ntest panicked: wait: `path=\"ws_design\"` did not come\n\
+            test the_first_frame ... FAILED\n     Running tests/chrome.rs\ntest the_second ... ok\n\nfailures:\n    the_first_frame\n\n\
+            test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.00s\n\
+            relax test: 0 warnings\n     Running tests/undo.rs\n\nrunning 1 test\ntest it_undoes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored\n\
+            \x20    Running tests/monitor.rs (target/release/deps/monitor-1)\n\nrunning 1 test\nthread 'old' panicked at tests/monitor.rs:9:5: assertion failed\n\
+            test old ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored\n";
+        let t = Tally::of(run);
+        assert_eq!(t.failed.iter().map(|f| (f.target.as_str(), f.tests.clone())).collect::<Vec<_>>(), [("tests/chrome.rs", vec!["the_first_frame".to_string()]), ("tests/monitor.rs", vec!["old".to_string()])]);
+        assert_eq!(t.failed[0].errors, ["panicked at libs/makepad_test/src/runtime.rs:1724:5: wait: `path=\"ws_design\"` did not come"], "once per place, with its message");
+        assert_eq!(t.failed_said(), "  tests/chrome.rs: the_first_frame\n    panicked at libs/makepad_test/src/runtime.rs:1724:5: wait: `path=\"ws_design\"` did not come\n  tests/monitor.rs: old\n    panicked at tests/monitor.rs:9:5: assertion failed\n");
+        let mut streamed = Tally::default();
+        for piece in run.as_bytes().chunks(7) { streamed.feed(piece); }
+        assert_eq!(streamed.failed, t.failed, "fed as a stream");
+        assert_eq!(Tally::of(one).failed_said(), "", "none failed");
     }
 
     #[test]

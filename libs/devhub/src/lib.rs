@@ -49,6 +49,7 @@ pub mod trust;
 pub mod glance;
 pub mod explorer;
 pub mod top;
+pub mod serial;
 pub mod lease;
 pub mod land;
 pub mod private_check;

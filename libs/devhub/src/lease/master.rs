@@ -10,11 +10,20 @@ use super::sched::{Action, Lease, NodeView, Req, Sched, State};
 use super::{Caps, CostClass, Kind};
 use crate::proto::{self, hub_record, Record, Sev};
 use makepad_remote::json_str;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// The lanes whose timed series keep their JIT stores ([`Sched::series_lanes`]), as the last pump
+/// saw them: a deployment's order to a node is preceded by them ([`series_keep`]).
+static SERIES_KEEP: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The lanes whose timed series keep their last build's JIT stores through a deployment's retire.
+pub fn series_keep() -> Vec<String> {
+    SERIES_KEEP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// Recent runs decide the route, and cargo-routed classes keep measuring the JIT: fab-shell's
 /// lib tests went to cargo at 136 s while the JIT ran them in 40 s, its JIT measure frozen at
@@ -35,6 +44,10 @@ pub(super) struct CostRecords {
     native_builds: Vec<(String, String, String, super::prof::Build)>,
     /// A work tree's runs: (tree lane, box, rev, class, kind) ([`Sched::note_tree_run`])
     trees: Vec<(String, String, String, String, String)>,
+    /// (class, kind, box, warm, GB) its directories grew ([`Sched::record_disk`])
+    disks: Vec<(String, String, String, bool, f64)>,
+    /// (class, kind, cores told, cores used) of each released run told its width ([`Sched::record_told`])
+    told: Vec<(String, String, f64, f64)>,
 }
 
 /// A lease measures its JIT build's cores when that build was at least this long, and
@@ -85,6 +98,11 @@ impl CostRecords {
         // or it stopped a unit as hung): it measures neither time, cores nor RAM.
         if v.get("how").and_then(|h| h.as_str()).is_some_and(|h| h != "released") { return; }
         if v.get("unmeasured").and_then(|a| a.as_str()).is_some() { return; }
+        // what it grew its box's disk, warm or cold there (a record before 11-18 says neither)
+        if let (Some(class), Some(gb), Some(warm)) = (v.get("class").and_then(|v| v.as_str()), v.get("disk_grew_gb").and_then(super::num), v.get("warm").and_then(|w| w.as_bool())) {
+            let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            self.disks.push((class.to_string(), s("kind"), s("node"), warm, gb));
+        }
         if let (Some(class), Some(wall)) = (v.get("class").and_then(|v| v.as_str()), v.get("wall_ms").and_then(super::num)) {
             if wall.is_finite() && wall > 0.0 {
                 let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -121,6 +139,9 @@ impl CostRecords {
                     if !told && built { self.jit_builds.push((os, cores)); }
                 }
                 let cores = cores.filter(|_| !built || own_build);
+                if let (Some(told), Some(used)) = (v.get("told_cores").and_then(super::num), cores) {
+                    self.told.push((class.to_string(), kind.to_string(), told, used));
+                }
                 if let Some(p) = v.get("peak_cores").and_then(super::num).filter(|p| p.is_finite() && *p >= 0.0 && (!built || own_build)) { self.cpu_peaks.push((class.to_string(), kind.to_string(), p)); }
                 let cost = v.get("cost").and_then(|c| c.as_str()).and_then(CostClass::parse);
                 self.records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), lane(&v), os(&v), wall as u64, peak, cores, run, build, cost));
@@ -138,6 +159,9 @@ impl CostRecords {
         }
         for (class, kind, peak) in self.cpu_peaks {
             sched.record_peak_cores(&class, &kind, Some(peak));
+        }
+        for (class, kind, told, used) in self.told {
+            sched.record_told(&class, &kind, told, used);
         }
         for (class, kind, lane, os, peak) in self.memory {
             sched.record_resources(&class, &kind, peak, None);
@@ -168,6 +192,9 @@ impl CostRecords {
         for (lane, node, rev, class, kind) in self.trees {
             sched.note_tree_run(&lane, &node, &rev, &class, &kind);
         }
+        for (class, kind, node, warm, gb) in self.disks {
+            sched.record_disk(&class, &kind, &node, warm, gb);
+        }
     }
 }
 
@@ -177,15 +204,40 @@ pub type Publish = Arc<dyn Fn(Record) + Send + Sync>;
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// `(node, repo, repo dir, branch, fresh)` -> that commit, present in the node's store; `fresh`:
 /// asks the node again even when this master sent it the commit a moment ago.
+/// Where a lease's nested repository `name` ships from: the lane's own checkout of it, else the
+/// user's checkout's ([`crate::nested::checkout`]). A lane's pin names each followed one it lacks
+/// at its landed tip, and every start of one was refused while it shipped from the lane's absent
+/// `apps/<name>` ("not a git checkout", #7434, 11-19).
+fn nested_source(repo_dir: &Path, name: &str) -> PathBuf {
+    crate::nested::checkout(repo_dir, name).unwrap_or_else(|| repo_dir.join(crate::nested::dir(name)))
+}
+
 pub type EnsureRev = Arc<dyn Fn(&str, &str, &Path, &super::RevPin, bool) -> Result<String, String> + Send + Sync>;
 /// Sends `node` objects of a repository (by name, at a dir) its store lacks ([`super::NO_OBJECTS`]).
 pub type FillObjects = Arc<dyn Fn(&str, &str, &Path, &[String]) -> Result<(), String> + Send + Sync>;
 /// The nodes the master dials: (name, address).
 pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
+/// ` keep <lane>,..` of a reclaim ask: the lanes whose own JIT trees it keeps (their queued
+/// overlay asks, [`Sched::queued_overlay_lanes`]); nothing when none.
+fn keep_said(keep: &[String]) -> String {
+    if keep.is_empty() { String::new() } else { format!(" keep {}", keep.join(",")) }
+}
+
 /// The worktree the lane registry holds for a live lane (`devhub lane new|adopt`), by name.
 pub type LaneTrees = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-pub const SERVICES: [&str; 22] = ["lease", "agent-seen", "retarget", "beat", "release", "cancel", "leases", "why-queued", "estimate", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof", "native", super::panel::SERVICE];
+/// The `estimate <kind> <class>` answer: the class's wall by its measure, and its RAM charge
+/// (`ram_gb`, null while it has none: [`Sched::class_ram`]), what the tests bucket sizes its pool by.
+pub(crate) fn estimate_answer(s: &Sched, line: &str) -> String {
+    let Some((kind, class)) = line.trim().split_once(' ') else { return err("estimate <kind> <class>") };
+    let ram = s.class_ram(class.trim(), kind).map_or("null".to_string(), |gb| format!("{gb:.1}"));
+    match s.estimate(class.trim(), kind) {
+        Some(how) => format!("{{\"ms\":{},\"how\":{},\"ram_gb\":{ram}}}", how.ms(), json_str(&how.label())),
+        None => format!("{{\"ms\":null,\"ram_gb\":{ram}}}"),
+    }
+}
+
+pub const SERVICES: [&str; 23] = ["lease", "agent-seen", "retarget", "beat", "release", "cancel", "leases", "why-queued", "disk-need", "estimate", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof", "native", super::panel::SERVICE];
 /// How long a commit sent to a node's store counts as there without asking again.
 #[cfg(feature = "checkout")]
 const ENSURED_FOR: std::time::Duration = std::time::Duration::from_secs(600);
@@ -213,8 +265,9 @@ struct Marks {
 }
 
 /// The command sent to a hub after its revisions are available there.
-/// `cores`: what its runs are told ([`super::sched::Sched::start_cores`]).
-pub(super) fn lease_start_line(l: &Lease, rev: &str, cores: f64, weighed: f64, peak: Option<f64>, threads: Option<u32>) -> String {
+/// `cores`: what its runs are told ([`super::sched::Sched::start_cores`]); `pool`: what a live test
+/// session's long-lived pools size from ([`super::sched::Sched::pool_cores`]).
+pub(super) fn lease_start_line(l: &Lease, rev: &str, cores: f64, weighed: f64, peak: Option<f64>, threads: Option<u32>, pool: Option<u32>) -> String {
     let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
     let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
     let warms = match l.req.cpu_target.as_deref() { Some(t) => format!("{warms},\"cpu_target\":{}", json_str(t)), None => warms };
@@ -225,6 +278,8 @@ pub(super) fn lease_start_line(l: &Lease, rev: &str, cores: f64, weighed: f64, p
     let peak = match l.jit_jobs { Some(jobs) => format!("{peak},\"jit_jobs\":{jobs}"), None => peak };
     // (only to a hub with `live-threads`: [`super::sched::Sched::live_threads`])
     let peak = match threads { Some(n) => format!("{peak},\"threads\":{n}"), None => peak };
+    // (only to a hub with `pool-cores`: [`super::sched::Sched::pool_cores`])
+    let peak = match pool { Some(n) => format!("{peak},\"pool_cores\":{n}"), None => peak };
     format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{},\"weighed_gb\":{weighed},\"peak_gb\":{peak}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), cores, l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","))
 }
 
@@ -262,6 +317,11 @@ pub struct LeaseMaster {
     holders: Mutex<HashMap<(String, u32), String>>,
     /// the dev switch each node was last told (a role change on the node moves its default)
     pushed: Mutex<HashMap<String, bool>>,
+    /// the boxes this master set `serve = on` on, from their `serial=on` in nodes.conf
+    serial_on: Mutex<HashSet<String>>,
+    /// why setting it failed on a box, as last said: a box is asked again at every sync, and told
+    /// of once a reason
+    serial_failed: Mutex<HashMap<String, String>>,
     /// per node: the lifetime JIT builds and build seconds its store reported last (the ledger gets the deltas)
     jit_seen: Mutex<HashMap<String, (u64, f64)>>,
     /// per node: the end of the last hub build its restart answer said (the ledger gets each new one)
@@ -455,6 +515,19 @@ fn read_dev(path: &Path) -> HashMap<String, bool> {
         }
     }
     out
+}
+
+/// The boxes whose `nodes.conf` line says `serial=on` (no word: off).
+fn read_serial(path: &Path) -> HashSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut w = line.split('#').next().unwrap_or("").split_whitespace();
+            let name = w.next()?;
+            w.any(|kv| kv == "serial=on").then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// Sets `dev=` on the node's line of `nodes.conf` (appends a line for a node it lacks).
@@ -807,6 +880,8 @@ impl LeaseMaster {
             input_calls: Mutex::new(HashMap::new()),
             holders: Mutex::new(HashMap::new()),
             pushed: Mutex::new(HashMap::new()),
+            serial_on: Mutex::new(HashSet::new()),
+            serial_failed: Mutex::new(HashMap::new()),
             jit_seen: Mutex::new(HashMap::new()),
             hub_seen: Mutex::new(HashMap::new()),
             cleanups: Mutex::new(HashMap::new()),
@@ -991,9 +1066,9 @@ impl LeaseMaster {
         Ok(alive.then(|| v.get("start").and_then(super::num).map_or(0, |s| s as u64)))
     }
 
-    pub fn timed_series(&self, dir: &str) -> Option<String> {
+    pub fn merge_held(&self, dir: &str) -> Option<String> {
         let now = self.now();
-        self.sched.lock().unwrap().timed_series(dir, now)
+        self.sched.lock().unwrap().merge_held(dir, now)
     }
 
     /// Asks the nodes again to start the leases a previous master left `starting`.
@@ -1069,6 +1144,7 @@ impl LeaseMaster {
             let mut s = self.sched.lock().unwrap();
             #[cfg(feature = "checkout")]
             { s.interactive_lanes = interactive_lanes; s.live_jobs = live_jobs; s.first_lanes = first_lanes; s.held_branches = held_branches; }
+            *SERIES_KEEP.lock().unwrap_or_else(|e| e.into_inner()) = s.series_lanes(now);
             self.note_sleep(&mut s);
             for id in s.holders_gone(&|pid| crate::procinfo::alive(pid)) {
                 s.release(&id, "holder-dead", now);
@@ -1105,6 +1181,9 @@ impl LeaseMaster {
             match a {
                 Action::Profile { .. } => {}
                 Action::Event(r) => (self.publish)(r),
+                Action::Note { agent, line } => {
+                    if let Err(e) = crate::notes::leave(&self.home, &agent, &line) { eprintln!("devhub sched: a note for {agent}: {e}"); }
+                }
                 Action::Log(line) => eprintln!("devhub sched: {line}"),
                 Action::Grant { id, node } => {
                     let inspect = self.sched.lock().unwrap().get(&id).is_some_and(|l| !l.req.set_up_on_node());
@@ -1118,11 +1197,11 @@ impl LeaseMaster {
                     }
                 }
                 Action::End { id, node, how } => self.spawn(move |m| m.end(&id, node.as_deref(), &how)),
-                Action::ParkLive { leases, note } => {
+                Action::ParkLive { leases, note, resume_after } => {
                     #[cfg(feature = "checkout")]
-                    if let Some(ctx) = crate::orch::ctx() { crate::orch::live::park(&ctx, &leases, &note); }
+                    if let Some(ctx) = crate::orch::ctx() { crate::orch::live::park(&ctx, &leases, &note, resume_after.as_deref()); }
                     #[cfg(not(feature = "checkout"))]
-                    let _ = (leases, note);
+                    let _ = (leases, note, resume_after);
                 }
                 Action::Capture { id, node, why } => self.spawn(move |m| m.capture(&id, &node, &why)),
                 Action::Yield { id, node, why } => self.spawn(move |m| {
@@ -1130,9 +1209,23 @@ impl LeaseMaster {
                         m.event(Sev::Warn, format!("{id} on {node}: its $DEVHUB_YIELD file was not made: {e}"));
                     }
                 }),
-                Action::Reclaim { node, need_gb } => self.spawn(move |m| {
-                    if let Err(e) = m.ask1(&node, "disk", &format!("disk need {need_gb:.0}")) {
-                        m.event(Sev::Warn, format!("node {node}: disk reclaim failed: {e}"));
+                // what the reclaim freed and kept is said: a reclaim that freed nothing left its
+                // head waiting 35 min with no word (L1377857, 11-18)
+                Action::Reclaim { node, need_gb, keep } => self.spawn(move |m| {
+                    match m.ask1(&node, "disk", &format!("disk need {need_gb:.0}{}", keep_said(&keep))) {
+                        Ok(v) => {
+                            let gb = |k: &str| v.get(k).and_then(super::num).unwrap_or(0.0);
+                            let reaches = v.get("reaches_floor").and_then(|r| r.as_bool()).unwrap_or(false);
+                            // (short of it, the node's own disk_short warns, saying what it kept); in
+                            // the master's log too, which keeps no info records
+                            let line = format!("node {node}: its reclaim for {need_gb:.0} GB over its {:.0} GB floor freed {:.1} GB at {:.1} GB free, kept {:.1} GB: {}", gb("floor_gb"), gb("reclaim_gb"), gb("free_gb"), gb("kept_gb"),
+                                if reaches { "it reaches the need" } else { "short of the need (its disk_short says what it kept)" });
+                            eprintln!("devhub disk: {line}");
+                            m.event(Sev::Info, line);
+                            // the head it reaches is granted at the next tick, not at the box's next caps round
+                            m.sched.lock().unwrap().reclaimed(&node, need_gb, gb("free_gb"), gb("reclaim_gb"), reaches);
+                        }
+                        Err(e) => m.event(Sev::Warn, format!("node {node}: disk reclaim failed: {e}")),
                     }
                 }),
             }
@@ -1222,9 +1315,19 @@ impl LeaseMaster {
         if std::fs::read_to_string(self.lease_log(id)).is_ok_and(|t| t.contains(&head)) {
             return String::new();
         }
-        let ask = r#"{"cmd":"stacks","thread":"all","depth":"48"}"#;
-        let stacks = (self.ask)(&format!("{node}:{pid}"), "cmd", ask).map_or_else(|e| format!("(its stacks did not come: {e})"), |lines| lines.join("\n"));
-        match self.keep_log(id, &format!("{head} when it stalled ({why}); its capture {node}:{capture}\n{stacks}\n")) {
+        let ask = |cmd: &str| (self.ask)(&format!("{node}:{pid}"), "cmd", cmd).map(|lines| lines.join("\n"));
+        let stacks = ask(r#"{"cmd":"stacks","thread":"all","depth":"48"}"#);
+        let mut text = format!("{head} when it stalled ({why}); its capture {node}:{capture}\n{}\n", stacks.as_ref().map_or_else(|e| format!("(its stacks did not come: {e})"), String::clone));
+        // where it waits, its threads and its tier-up log beside them (the capture's report
+        // holds them too, but stays on its box, its newest 40 only); a JIT whose stacks did not
+        // come is not asked again
+        if stacks.is_ok() {
+            for (what, cmd) in [("where it waits (why-hung)", r#"{"cmd":"why-hung"}"#), ("its threads", r#"{"cmd":"threads"}"#), ("its tier log (why-tier stuck)", r#"{"cmd":"why-tier stuck","n":"20"}"#)] {
+                let got = ask(cmd).unwrap_or_else(|e| format!("(it did not come: {e})"));
+                text.push_str(&format!("== JIT {pid} on {node}: {what}\n{got}\n"));
+            }
+        }
+        match self.keep_log(id, &text) {
             Ok(_) => format!("; every thread's stack: devhub job result {id}"),
             Err(e) => format!("; its stacks are not kept: {e}"),
         }
@@ -1237,11 +1340,57 @@ impl LeaseMaster {
 
     /// Adds `text` to the lease's kept log, after what it holds.
     fn keep_log(&self, id: &str, text: &str) -> std::io::Result<PathBuf> {
+        self.keep_bytes(id, text.as_bytes())
+    }
+
+    fn keep_bytes(&self, id: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
         use std::io::Write;
         let path = self.lease_log(id);
         std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::OpenOptions::new().create(true).append(true).open(&path)?.write_all(text.as_bytes())?;
+        std::fs::OpenOptions::new().create(true).append(true).open(&path)?.write_all(bytes)?;
         Ok(path)
+    }
+
+    /// The lease's failed runs (`lease-failed`), each whole in its kept log (`devhub job result
+    /// <id>`), read from its box in the hub's log chunks (`lease-log`) before the lease's end
+    /// takes them. Its release answer had only a failed run's last 64 KB: a 26-min makepad-fab run
+    /// kept a tail with its start cut that named none of its failing targets, and its lane ran it
+    /// again to find them (L1473985, 11-20). False: none kept (none failed, or a hub from before
+    /// `lease-failed`, whose release answer's tail is kept as before).
+    fn keep_failed_runs(&self, id: &str, node: &str) -> bool {
+        let Ok(v) = self.ask1(node, "lease-failed", &format!("lease-failed {id}")) else { return false };
+        let runs = v.get("runs").and_then(|r| r.as_arr()).map(|a| a.to_vec()).unwrap_or_default();
+        let mut kept = false;
+        for run in &runs {
+            let num = |k: &str| run.get(k).and_then(super::num).unwrap_or(0.0) as i64;
+            let n = num("n");
+            if let Err(e) = self.keep_log(id, &format!("== run {n} on {node}: its whole output ({} bytes, exit {})\n", num("bytes"), num("exit"))) {
+                self.event(Sev::Warn, format!("{id}: its failed run {n}'s output is not kept: {e}"));
+                return kept;
+            }
+            let mut off = 0u64;
+            loop {
+                let chunk = self.ask1(node, "lease-log", &format!("lease-log {id} {n} {off}"))
+                    .and_then(|v| Ok((b64_decode(v.get("data").and_then(|d| d.as_str()).unwrap_or("")).ok_or("bad data")?, v.get("off").and_then(super::num).map(|o| o as u64))));
+                let (data, next) = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // said where it stopped: a cut log is never read as a whole one
+                        let _ = self.keep_log(id, &format!("\n== run {n}'s output stops here, at byte {off}: {e}\n"));
+                        break;
+                    }
+                };
+                if data.is_empty() { break; }
+                if let Err(e) = self.keep_bytes(id, &data) {
+                    self.event(Sev::Warn, format!("{id}: its failed run {n}'s output is cut at byte {off}: {e}"));
+                    return kept;
+                }
+                off = next.unwrap_or(off + data.len() as u64);
+            }
+            let _ = self.keep_log(id, "\n");
+            kept = true;
+        }
+        kept
     }
 
     /// A live session's call ended and none runs: its box is charged its resident share
@@ -1334,8 +1483,24 @@ impl LeaseMaster {
     /// A live job's lease ends: by its session's own release or end, or once a parked one copied
     /// its last answer (a release by its id refuses an active session's lease). Teardown runs off
     /// the caller's thread. Whether it was still open.
+    /// A test session released while its call runs past its class's measure first keeps what its
+    /// processes and JITs do in its kept log ([`Self::capture_on`]: its last lines, every thread's
+    /// stack, where it waits, its threads and tier log; `devhub job result <id>`), off the
+    /// caller's thread, then ends: a release was the end of a hang's only evidence (W15726, 11-21:
+    /// its log ended at "running 1 test", no stacks, the process gone).
     #[cfg(feature = "checkout")]
     pub fn release_live(self: &Arc<Self>, id: &str) -> bool {
+        let over = self.sched.lock().unwrap().live_call_over(id, self.now());
+        let Some((node, why)) = over else { return self.release_now(id) };
+        let id = id.to_string();
+        self.spawn(move |m| {
+            if !m.capture_on(&id, &node, &why).1 { m.release_now(&id); }
+        });
+        true
+    }
+
+    #[cfg(feature = "checkout")]
+    fn release_now(self: &Arc<Self>, id: &str) -> bool {
         let ended = self.sched.lock().unwrap().release(id, "released", self.now());
         if ended {
             self.save_live();
@@ -1483,7 +1648,7 @@ impl LeaseMaster {
                 self.event(Sev::Warn, format!("{} {node}: its store lacks {} object(s) of {repo}'s pin: sending them", l.id, ids.len()));
                 let f = self.fill_objects.as_ref().ok_or("this master cannot send objects (built without checkout)")?;
                 let base = PathBuf::from(l.req.repo_dir.clone().unwrap_or_else(|| ".".into()));
-                let dir = if repo == "makepad" { base } else { base.join(crate::nested::dir(&repo)) };
+                let dir = if repo == "makepad" { base } else { nested_source(&base, &repo) };
                 f(node, &repo, &dir, &ids).map_err(|why| format!("{e} (sending its {} object(s): {why})", ids.len()))?;
                 self.start_once(l, node, ship_ms, false).map_err(|again| format!("{again} (after sending the {} object(s) its store lacked)", ids.len()))
             }
@@ -1504,15 +1669,15 @@ impl LeaseMaster {
                 // each repository's commit by name: makepad's, then each nested one's
                 let mut sides = vec![format!("\"makepad\":{}", json_str(&f(node, "makepad", &dir, &mk, fresh).map_err(|e| error("makepad", &mk.sha, e))?))];
                 for (name, side) in &nested {
-                    let sha = f(node, name, &dir.join(crate::nested::dir(name)), side, fresh).map_err(|e| error(name, &side.sha, e))?;
+                    let sha = f(node, name, &nested_source(&dir, name), side, fresh).map_err(|e| error(name, &side.sha, e))?;
                     sides.push(format!("{}:{}", json_str(name), json_str(&sha)));
                 }
                 *ship_ms = t.elapsed().as_millis() as u64;
                 format!("{{{}}}", sides.join(","))
             }
         };
-        let ((weighed, peak), threads, cores) = { let s = self.sched.lock().unwrap(); (s.ram_weighed(l), s.live_threads(l), s.start_cores(l)) };
-        let line = lease_start_line(l, &rev, cores, weighed, peak, threads);
+        let ((weighed, peak), threads, pool, cores) = { let s = self.sched.lock().unwrap(); (s.ram_weighed(l), s.live_threads(l), s.pool_cores(l), s.start_cores(l)) };
+        let line = lease_start_line(l, &rev, cores, weighed, peak, threads, pool);
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -1537,16 +1702,24 @@ impl LeaseMaster {
         let mut phases = l.profile();
         phases.close("report", ended);
         let measured = |key| usage.and_then(|v| v.get(key)).and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0).map_or("null".into(), |n| n.to_string());
+        // the most its runs held at one look of its node's beats counts too: a Mac's end report
+        // said 10.1 GB of a run its beats showed at 20.4 GB as it swapped, and the class's next
+        // run was weighed from the 10.1 (L1484329, 11-21)
+        let peak_ram = [usage.and_then(|v| v.get("peak_ram_gb")).and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0), l.ram_peak_gb].into_iter().flatten().reduce(f64::max).map_or("null".to_string(), |n| n.to_string());
         let os = self.os_field(l.node.as_deref().unwrap_or(""));
         // why its run measures nothing of its class, by its node's word ([`Self::refresh_costs`]):
         // its last run did not end by itself, or it stopped a unit as hung
         let said = |k: &str| usage.and_then(|v| v.get(k));
-        let unmeasured = said("abnormal").and_then(|a| a.get("line")).and_then(|a| a.as_str()).or_else(|| said("hung").and_then(|h| h.as_str())).map_or("null".to_string(), json_str);
+        let unmeasured = said("abnormal").and_then(|a| a.get("line")).and_then(|a| a.as_str()).or_else(|| said("hung").and_then(|h| h.as_str()))
+            .or(l.ended_stalled.then_some("it ended while said stalled")).map_or("null".to_string(), json_str);
         // a work tree's lease: its tree and rev, whose JIT its box holds now ([`CostRecords`])
         let tree = |s: &str| if l.req.src == super::Src::Tree && l.req.rev.is_some() { json_str(s) } else { "null".to_string() };
         let (tree_lane, tree_rev) = (tree(l.req.tree_lane()), tree(l.req.rev.as_deref().unwrap_or("")));
         let jit_jobs = l.jit_jobs.map_or("null".to_string(), |j| j.to_string());
-        let line = format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"peak_cores\":{},\"node\":{},\"os\":{os},\"lane\":{},\"tree_lane\":{tree_lane},\"tree_rev\":{tree_rev},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"jit_jobs\":{jit_jobs},\"deployment\":{},\"source\":{}, {}}}\n", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), measured("peak_ram_gb"), measured("cpu_seconds"), l.peak_cores.map_or("null".to_string(), |p| format!("{p:.2}")), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended));
+        // the width its run was told (`exec::job_env`), which its cores are read against
+        // ([`super::sched::Sched::record_told`]); a live session's JIT is told none
+        let told = if l.req.live { "null".to_string() } else { format!("{:.1}", self.sched.lock().unwrap().start_cores(l)) };
+        let line = format!("{{\"class\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"wall_ms\":{wall},\"jit_peak_gb\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"peak_cores\":{},\"disk_grew_gb\":{},\"warm\":{},\"node\":{},\"os\":{os},\"lane\":{},\"tree_lane\":{tree_lane},\"tree_rev\":{tree_rev},\"ended_ms\":{ended},\"lease\":{},\"how\":{},\"unmeasured\":{unmeasured},\"jit_jobs\":{jit_jobs},\"told_cores\":{told},\"deployment\":{},\"source\":{}, {}}}\n", json_str(class), l.req.kind.as_str(), l.cost_class.as_str(), measured("jit_peak_gb"), peak_ram, measured("cpu_seconds"), l.peak_cores.map_or("null".to_string(), |p| format!("{p:.2}")), measured("disk_grew_gb"), l.warm.map_or("null".to_string(), |w| w.to_string()), json_str(l.node.as_deref().unwrap_or("")), json_str(&l.req.lane), json_str(&l.id), json_str(how), json_str(&l.deployment), json_str(usage.and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("")), phases.fields(ended));
         let _ = std::fs::create_dir_all(&self.home);
         // File appends and the rolling window have the same order, including concurrent ends.
         let offset = self.costs_offset.lock().unwrap();
@@ -1588,6 +1761,9 @@ impl LeaseMaster {
                 if how != "released" { parts.push("\"tail\":true".to_string()); }
                 let payload = if parts.is_empty() { String::new() } else { format!(" {{{}}}", parts.join(",")) };
                 let t0 = std::time::Instant::now();
+                // a client's failed runs, each whole, before the end takes their logs (a job's are
+                // whole in its own log)
+                let whole = !l.req.master && self.keep_failed_runs(id, node);
                 let end_line = format!("lease-end {id} {wire_how}{payload}");
                 let answer = self.ask1(node, "lease-end", &end_line);
                 teardown = t0.elapsed().as_millis() as u64;
@@ -1647,7 +1823,8 @@ impl LeaseMaster {
                             Err(e) => { self.event(Sev::Warn, format!("{} of {}: its last lines are not kept: {e}", l.tag(), l.req.lane)); false }
                         });
                         let failed: Vec<String> = v.get("failed_tests").and_then(|t| t.as_str()).map_or(Vec::new(), |text| {
-                            if let Err(e) = keep(text) {
+                            // (its last 64 KB: kept only when its whole run was not)
+                            if let Err(e) = if whole { Ok(PathBuf::new()) } else { keep(text) } {
                                 self.event(Sev::Warn, format!("{} of {}: its failed tests' output is not kept: {e}", l.tag(), l.req.lane));
                             }
                             failed_names(text)
@@ -1779,6 +1956,27 @@ impl LeaseMaster {
         }
     }
 
+    /// `serve = on` in the box's serial.conf, once a run, when its nodes.conf line says
+    /// `serial=on` (the user's rule: off by default, on for our boxes). The node writes that one
+    /// line; the person's device lines stay as they are.
+    fn push_serial(&self, node: &str) {
+        if self.serial_on.lock().unwrap().contains(node) || !read_serial(&self.home.join("nodes.conf")).contains(node) {
+            return;
+        }
+        match self.ask1(node, crate::serial::SERVICE, "serve on") {
+            Ok(_) => {
+                self.serial_on.lock().unwrap().insert(node.to_string());
+                self.serial_failed.lock().unwrap().remove(node);
+            }
+            // asked again at every sync; said once a reason, not at every ask
+            Err(e) => {
+                if self.serial_failed.lock().unwrap().insert(node.to_string(), e.clone()).as_ref() != Some(&e) {
+                    self.event(Sev::Warn, format!("node {node}: serial.conf's serve = on not set: {e}"));
+                }
+            }
+        }
+    }
+
     fn push_policy(&self, node: &str, on: bool) {
         match self.ask1(node, "policy", &format!("policy dev={}", if on { "on" } else { "off" })) {
             Ok(_) => {
@@ -1873,6 +2071,7 @@ impl LeaseMaster {
                     self.event(Sev::Warn, c.trouble.clone());
                 }
                 let asked = c.dev_req;
+                let serves = c.has(crate::serial::FEATURE);
                 let (up, sample) = {
                     let mut s = self.sched.lock().unwrap();
                     let up = s.set_caps(name, c, now);
@@ -1893,6 +2092,9 @@ impl LeaseMaster {
                 let on = self.sched.lock().unwrap().dev(name);
                 if up || self.pushed.lock().unwrap().get(name) != Some(&on) {
                     self.push_policy(name, on);
+                }
+                if serves {
+                    self.push_serial(name);
                 }
             }
             None => {
@@ -2337,6 +2539,17 @@ impl LeaseMaster {
         }).collect()
     }
 
+    /// The boxes that run older code than their checkout ([`super::sched::Sched::stale_rows`]).
+    pub fn stale_boxes(&self, now: u64) -> Vec<String> {
+        self.sched.lock().unwrap().stale_rows(now)
+    }
+
+    /// The running leases whose output grew none for [`super::sched::OUTPUT_SILENT_MS`] or more
+    /// ([`super::sched::Sched::output_silent_rows`]).
+    pub fn output_silent(&self, now: u64) -> Vec<String> {
+        self.sched.lock().unwrap().output_silent_rows(now)
+    }
+
     /// Agents with granted work and nothing of their own talking to devhub, newest silence last.
     pub fn detached(&self, now: u64) -> Vec<String> {
         self.detached_agents(now).into_iter().map(|(_, _, row)| row).collect()
@@ -2513,17 +2726,17 @@ impl LeaseMaster {
                 }
             }
             // `estimate <kind> <class>`: what a run of the class takes by the measures
-            "estimate" => match line.trim().split_once(' ') {
-                Some((kind, class)) => out.push(match self.sched.lock().unwrap().estimate(class.trim(), kind) {
-                    Some(how) => format!("{{\"ms\":{},\"how\":{}}}", how.ms(), json_str(&how.label())),
-                    None => "{\"ms\":null}".to_string(),
-                }),
-                None => out.push(err("estimate <kind> <class>")),
-            },
+            "estimate" => out.push(estimate_answer(&self.sched.lock().unwrap(), line)),
             "why-queued" => match self.sched.lock().unwrap().why_queued(line.trim(), now) {
                 Ok(lines) => out.extend(lines),
                 Err(e) => out.push(err(&e)),
             },
+            // `disk-need <node>`: the queued need a reclaim there by hand aims for (`devhub disk`)
+            "disk-need" => {
+                let node = line.split_whitespace().nth(1).unwrap_or("");
+                let (need, keep) = { let s = self.sched.lock().unwrap(); (s.disk_need(node), s.queued_overlay_lanes()) };
+                out.push(format!("{{\"node\":{},\"need_gb\":{:.0},\"for\":{},\"keep\":{}}}", json_str(node), need.as_ref().map_or(0.0, |n| n.1), json_str(need.as_ref().map_or("", |n| n.0.as_str())), json_str(&keep.join(","))));
+            }
             "leases" => {
                 let s = self.sched.lock().unwrap();
                 for l in s.view() {
@@ -3030,6 +3243,8 @@ mod tests {
         // the node's lease-end answer for a run its memory watch ended: what it held, and why
         let ended = |id: &str| Some(format!("{{\"ended\":\"{id}\",\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[],\"peak_ram_gb\":7.5,\"cpu_seconds\":8,\"memory\":\"it outgrew its memory weight\"}}"));
         assert!(ask("memory-run").contains("\"state\":\"granted\""), "the lease is granted");
+        // its beats showed it holding more than its end report says: the record keeps the most
+        m.sched.lock().unwrap().set_info("L1", r#"{"held_mb":10240}"#, 0);
         *node.end_answer.lock().unwrap() = ended("L1");
         *node.beat_end.lock().unwrap() = ",\"memory\":[{\"id\":\"L77\",\"why\":\"another lease\"}]".to_string();
         m.beat_nodes();
@@ -3045,9 +3260,21 @@ mod tests {
         serve(&m, "release", "L2 released exit=137");
         let end = serve(&m, "beat", "L2");
         assert!(end.contains("\"how\":\"memory\"") && end.contains("it outgrew its memory weight"), "a release before the node's beat is a memory end too: {end}");
+        // a run said stalled and then released (by hand, or by its holder) measures nothing of
+        // its class: a hung CI shard released by hand took its class from 10 to 64 min (11-21)
+        *node.end_answer.lock().unwrap() = None;
+        assert!(ask("stalled-run").contains("\"state\":\"granted\""), "the third lease is granted");
+        m.sched.lock().unwrap().set_info("L3", r#"{"idle_s":600}"#, 0);
+        let now = m.now();
+        m.sched.lock().unwrap().tick(now);
+        assert!(m.sched.lock().unwrap().is_stalled("L3"), "every process idle 10 min: said stalled");
+        serve(&m, "release", "L3 released");
         let costs = std::fs::read_to_string(dir.join("costs.jsonl")).unwrap();
+        assert!(costs.lines().any(|l| l.contains("\"lease\":\"L3\"") && l.contains("\"unmeasured\":\"it ended while said stalled\"")), "{costs}");
         assert_eq!(costs.lines().filter(|l| l.contains("\"how\":\"memory\"")).count(), 2, "both ends are recorded as memory ends: {costs}");
         assert!(costs.lines().all(|l| l.contains("\"os\":\"linux\"")), "each record says its box's OS family: {costs}");
+        let peak = |id: &str| costs.lines().find(|l| l.contains(&format!("\"lease\":\"{id}\""))).and_then(|l| l.split("\"peak_ram_gb\":").nth(1)).and_then(|r| r.split(',').next()).unwrap_or("").to_string();
+        assert_eq!((peak("L1"), peak("L2")), ("10".to_string(), "7.5".to_string()), "the most its beats or its end report held: {costs}");
         // a cancelled run beside them still measures nothing; a box's family weighs on its own
         // peaks once it has any, every box's (a record from before, saying no family) until then
         let mut file = std::fs::OpenOptions::new().append(true).open(dir.join("costs.jsonl")).unwrap();
@@ -3080,10 +3307,11 @@ mod tests {
         assert_eq!(m.sched.lock().unwrap().jit_build_ram("box-a"), Some(6.0), "its peak and a fifth");
         m.refresh_costs();
         let s = m.sched.lock().unwrap();
-        for class in ["memory-run", "raced-run"] {
+        // (memory-run's beats showed 10 GB held: its next run is weighed from that)
+        for (class, gb) in [("memory-run", 12.0), ("raced-run", 9.0)] {
             let mut req = Req::new("big", Kind::Test);
             req.class = class.into();
-            assert_eq!(s.measured_ram(&req, None), Some(9.0), "{class}: a memory end measures its class's peak (and a fifth)");
+            assert_eq!(s.measured_ram(&req, None), Some(gb), "{class}: a memory end measures its class's peak (and a fifth)");
             assert_eq!(s.class_median(class, "test"), None, "{class}: its cut wall is no measure");
             assert_eq!(s.class_run_median(class, "test"), None, "{class}: its cut run is no measure");
         }
@@ -3156,6 +3384,9 @@ mod tests {
         jits: Mutex<Vec<u64>>,
         /// what its `lease-weight <id> idle` answers add (`,"call":{..}`: the call it metered)
         call_answer: Mutex<String>,
+        /// a lease's failed run 1, its log: `lease-failed` names it and `lease-log` reads it in
+        /// the hub's chunks; None: a hub from before `lease-failed`
+        failed_run: Mutex<Option<Vec<u8>>>,
         /// the cause its JITs' captures find (empty: a main thread that waits)
         capture_cause: Mutex<String>,
 }
@@ -3176,6 +3407,16 @@ mod tests {
                 "ps" => "{\"pid\":42,\"app\":\"foo\"}".into(),
                 "lease-weight" if line.ends_with(" idle") => format!("{{\"weight\":1,\"scopes\":1{}}}", self.call_answer.lock().unwrap()),
                 "lease-weight" => "{\"weight\":1,\"scopes\":1}".into(),
+                "lease-failed" => match self.failed_run.lock().unwrap().as_ref() {
+                    Some(log) => format!("{{\"runs\":[{{\"n\":1,\"exit\":101,\"bytes\":{}}}]}}", log.len()),
+                    None => return Err(format!("no service {service}")),
+                },
+                "lease-log" => {
+                    let log = self.failed_run.lock().unwrap().clone().unwrap_or_default();
+                    let off: usize = line.split_whitespace().nth(3).unwrap().parse().unwrap();
+                    let chunk = &log[off.min(log.len())..(off + super::super::exec::LOG_CHUNK).min(log.len())];
+                    format!("{{\"data\":\"{}\",\"off\":{},\"exit\":101}}", makepad_network::digest::base64_encode(chunk), off + chunk.len())
+                }
                 "policy" => "{\"dev\":\"on\"}".into(),
                 "lease-start" if *self.no_gui.lock().unwrap() == node => "{\"err\":\"lease-start L1: gui=1: caps has no live WM display\"}".to_string(),
                 "lease-start" if self.apply.load(Ordering::SeqCst) && line.contains("\"kind\":\"timed\"") => {
@@ -3236,7 +3477,7 @@ mod tests {
 
     /// A master whose clock starts at `start`.
     fn master_at(dir: &Path, start: u64) -> (Arc<LeaseMaster>, Arc<FakeNode>, Arc<AtomicU64>, Arc<Mutex<Vec<Record>>>) {
-        let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default(), capture_cause: Default::default() });
+        let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default(), capture_cause: Default::default(), failed_run: Default::default() });
         let clock = Arc::new(AtomicU64::new(start));
         let recs = Arc::new(Mutex::new(Vec::new()));
         let (n, c, r) = (node.clone(), clock.clone(), recs.clone());
@@ -3304,6 +3545,50 @@ mod tests {
         let got: Vec<(u64, f32)> = e.exact[0].1.iter().map(|s| (s.t_ms, s.cpu_pct)).collect();
         assert_eq!(got, (10..61).map(|i| (t0 + i * 10_000, cpu(i) as f32)).collect::<Vec<_>>(), "every sample of the range, as taken");
         drop(clock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lane's lease names each followed nested repository its worktree lacks at its landed tip
+    /// (Source Library, [`crate::nested::absent`]): its start ships that one from the user's
+    /// checkout, the lane's own tree from the lane. #7434 shipped it from the lane's absent
+    /// `apps/<name>`, and every lane's overlay start was refused, box after box (11-19).
+    #[test]
+    fn a_lane_lease_ships_a_nested_repository_it_lacks_from_the_users_checkout() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (home, hub, lane) = (dir.join("home"), dir.join("hub"), dir.join("lane"));
+        let nested = hub.join(crate::nested::dir("extra"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            let o = std::process::Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        for (at, branch) in [(&hub, "work"), (&nested, "main")] {
+            git(at, &["init", "-q", "-b", branch]);
+            git(at, &["commit", "-q", "--allow-empty", "-m", branch]);
+        }
+        git(&hub, &["worktree", "add", "-q", "-b", "rc-lane", &lane.to_string_lossy()]);
+        let (mut m, _, _, _) = master(&home);
+        let shipped = Arc::new(Mutex::new(Vec::new()));
+        let s = shipped.clone();
+        Arc::get_mut(&mut m).unwrap().ensure_rev = Some(Arc::new(move |_, repo, from, pin, _| {
+            s.lock().unwrap().push((repo.to_string(), from.canonicalize().unwrap_or_else(|_| from.to_path_buf())));
+            Ok(pin.sha.clone())
+        }));
+        m.refresh(&[("box-a".to_string(), "box-a:8797".to_string())]);
+        let mut req = Req::new("lane", Kind::Test);
+        req.src = super::super::Src::Overlay;
+        req.rev = Some(format!("rc-lane@{},extra=main@{}", git(&lane, &["rev-parse", "HEAD"]), git(&nested, &["rev-parse", "main"])));
+        req.repo_dir = Some(lane.to_string_lossy().into_owned());
+        req.node = Some("box-a".into());
+        req.cores = Some(1.0);
+        req.ram_gb = Some(1.0);
+        let answer = serve(&m, "lease", &req.to_json());
+        assert!(answer.contains("\"state\":\"granted\""), "{answer}");
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(*shipped.lock().unwrap(), [("makepad".to_string(), canon(&lane)), ("extra".to_string(), canon(&nested))], "the lane's tree, and the nested repository from the user's checkout");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3651,11 +3936,41 @@ mod tests {
         assert_eq!(log.matches("== JIT 42 on node-a: every thread's stack").count(), 1, "{log}");
         assert!(log.contains("its capture node-a:/c/a.txt") && log.contains("futex_wait"), "{log}");
         assert_eq!(node.calls.lock().unwrap().iter().filter(|(n, s, l)| n == "node-a:42" && s == "cmd" && l.contains("\"stacks\"")).count(), 1);
+        for (head, cmd) in [("where it waits (why-hung)", "\"why-hung\""), ("its threads", "\"threads\""), ("its tier log (why-tier stuck)", "\"why-tier stuck\"")] {
+            assert_eq!(log.matches(&format!("== JIT 42 on node-a: {head}\n")).count(), 1, "{head} kept once: {log}");
+            assert_eq!(node.calls.lock().unwrap().iter().filter(|(n, s, l)| n == "node-a:42" && s == "cmd" && l.contains(cmd)).count(), 1, "{cmd} asked once");
+        }
         assert!(recs.lock().unwrap().iter().any(|r| r.sev == Sev::Err && r.line.contains("JIT 42: blocked: main waits (node-a:/c/a.txt; every thread's stack: devhub job result L1)")));
         *node.end_answer.lock().unwrap() = Some("{\"ended\":\"L1\",\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[],\"tail\":\"run 1: still running\\nrunning for over a minute: a::hung\\n\"}".into());
         assert!(serve(&m, "cancel", "L1 by=test").contains("\"kept_tail\":true"));
         let log = std::fs::read_to_string(dir.join("lease-logs/L1.log")).unwrap();
         assert!(log.find("futex_wait").unwrap() < log.find("a::hung").unwrap(), "{log}");
+        // a test session released while its call runs past its measure keeps all that first; one
+        // released between calls, or inside its measure, keeps nothing (a hub that runs checkouts
+        // runs live sessions)
+        #[cfg(feature = "checkout")]
+        {
+            *node.end_answer.lock().unwrap() = None;
+            for _ in 0..3 { m.sched.lock().unwrap().record_node_cost("test", "test", "node-a", 60_000); }
+            let mut r = Req::new("live-w1", Kind::Test);
+            r.live = true;
+            m.refresh(&["node-a", "node-b", "node-c"].map(|n| (n.to_string(), "192.0.2.89:8797".to_string())));
+            let ids: Vec<String> = (0..3).map(|_| { let a = serve(&m, "lease", &r.to_json()); assert!(a.contains("\"state\":\"granted\""), "{a}"); makepad_strict_json::parse(a.as_bytes()).unwrap().get("id").and_then(|i| i.as_str()).unwrap().to_string() }).collect();
+            for t in [30_000, 60_001] {
+                _clock.store(1_000 + t, Ordering::SeqCst);
+                for id in &ids { assert!(serve(&m, "beat", id).contains("\"state\":\"granted\""), "{id} beats"); }
+            }
+            m.live_idle(&ids[1]);
+            m.sched.lock().unwrap().live_call_began(&ids[2], 1_000 + 30_000);
+            let whys = || node.calls.lock().unwrap().iter().filter(|(_, s, _)| s == "lease-why").count();
+            let before = whys();
+            for id in &ids { assert!(m.release_live(id), "{id} was open"); }
+            assert_eq!(whys(), before + 1, "only the call past its measure is looked at");
+            let kept = std::fs::read_to_string(dir.join(format!("lease-logs/{}.log", ids[0]))).unwrap();
+            let on = m.sched.lock().unwrap().get(&ids[0]).and_then(|l| l.node.clone()).unwrap();
+            assert!(kept.contains(&format!("== {on}: its processes and last lines when it stalled ({} test@{on} of live-w1 released while its live call ran 1m00s against its class's measured 1m00s)", ids[0])) && kept.contains(&format!("== JIT 42 on {on}: where it waits (why-hung)\n")), "{kept}");
+            for id in &ids { assert!(matches!(m.sched.lock().unwrap().get(id).map(|l| l.state.clone()), Some(State::Ended(_))), "{id} ended"); }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3684,6 +3999,23 @@ mod tests {
         assert!(answer.contains("\"kept_tail\":false"), "{answer}");
         assert_eq!(ends("L2"), ["lease-end L2 released"]);
         assert!(!dir.join("lease-logs/L2.log").exists());
+        // a failed run's whole output is kept, read in the hub's chunks before the lease's end:
+        // its release answer's last 64 KB cut a 26-min run's start, and with it the failing
+        // targets (L1473985, 11-20); a run that failed early in 200 KB of output is kept whole
+        let mut log = b"     Running tests/early.rs\nthread 'early_failure' panicked at tests/early.rs:3:5:\nEARLY-FAILURE-MARK\n".to_vec();
+        while log.len() < 200_000 { log.extend_from_slice(b"test a_passing_test_with_a_long_name ... ok\n"); }
+        log.extend_from_slice(b"test result: ok. 4000 passed; 0 failed\n");
+        *node.failed_run.lock().unwrap() = Some(log.clone());
+        *node.end_answer.lock().unwrap() = Some("{\"ended\":\"L3\",\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[],\"failed_tests\":\"its last 64 KB\\n\"}".into());
+        serve(&m, "lease", &Req::new("gapz", Kind::Test).to_json());
+        serve(&m, "release", "L3");
+        let kept = std::fs::read(dir.join("lease-logs/L3.log")).unwrap();
+        let head = b"== run 1 on node-a: its whole output (";
+        assert!(kept.starts_with(head) && kept.windows(log.len()).any(|w| w == log.as_slice()), "the whole run, its early failure first: {} bytes kept", kept.len());
+        assert!(!String::from_utf8_lossy(&kept).contains("its last 64 KB"), "the release answer's tail is not kept beside the whole run");
+        let calls = node.calls.lock().unwrap().iter().filter(|(_, _, l)| l.contains("L3")).map(|(_, s, _)| s.clone()).collect::<Vec<_>>();
+        assert!(calls.iter().rposition(|s| s == "lease-log") < calls.iter().position(|s| s == "lease-end"), "read before its end: {calls:?}");
+        assert_eq!(calls.iter().filter(|s| *s == "lease-log").count(), log.len().div_ceil(super::super::exec::LOG_CHUNK) + 1, "in the hub's chunks, to the empty one");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4231,6 +4563,21 @@ mod tests {
 #[cfg(test)]
 mod cost_record_tests {
     use super::*;
+
+    /// A released run's disk growth, warm or cold on its box, is a sample of its class's disk need;
+    /// a cancelled run's, or a record that says no warmth (before 11-18), is none.
+    #[test]
+    fn a_released_runs_disk_growth_measures_its_class_on_its_box() {
+        let mut c = CostRecords::default();
+        for row in [
+            r#"{"class":"prebuild","kind":"build","how":"released","wall_ms":160000,"node":"a","disk_grew_gb":1.25,"warm":false}"#,
+            r#"{"class":"prebuild","kind":"build","how":"cancelled","wall_ms":160000,"node":"a","disk_grew_gb":7.0,"warm":false}"#,
+            r#"{"class":"prebuild","kind":"build","how":"released","wall_ms":160000,"node":"a","disk_grew_gb":9.0}"#,
+        ] {
+            c.push(&makepad_strict_json::parse(row.as_bytes()).unwrap());
+        }
+        assert_eq!(c.disks, vec![("prebuild".to_string(), "build".to_string(), "a".to_string(), false, 1.25)]);
+    }
 
     /// A lease whose wall was its own JIT build measures that build's cores on its OS family; a
     /// short build, a lease mostly run, a waiter on another lease's build (under 2 cores), one

@@ -6,7 +6,7 @@
 //! ([`CANCELLED_EXIT`]), 4 the lease was lost under the command: no verdict ([`LOST_EXIT`]).
 
 use super::master::b64_decode;
-use super::sched::{ordinal, parse_needs, Req};
+use super::sched::{ordinal, Req};
 use super::{CostClass, Kind, Priority, Src};
 use crate::cli::{ask, control, has, local_name, retry_master};
 use makepad_remote::link::Client;
@@ -106,6 +106,7 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           A run's outputs (sheets, grabs, logs): the cmd writes them to $DEVHUB_KEEP and
                                           --keep <dir> copies them into <dir> before the lease ends; a `get` after the
                                           run can find the lane's tree already handed to another lane.
+                                          A lease's end stops an app its run `open`s too: no run (re)starts a user's app.
                                           JIT commands of kinds test, screen, gpu, long and build use overlays by default;
                                           --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
                                           Main checkout edits need --with-uncommitted. --rev R: those commits
@@ -128,13 +129,15 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
   overlay selftest [--node N] [--case NAME]
                                           compare real checkouts with overlay runs on a test lease
   overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
-  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--no-default-features] [--needs k=v,..] [--node N [--series S|--pin-why R]] [--avoid N[,N..]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live [--offline]] [--rev R] [--tree] [-- args...]
+  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--no-default-features] [--needs k=v,..] [--node N [--series S|--pin-why R]] [--avoid N[,N..]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live [--offline] [--env K=V ..]] [--rev R] [--tree] [-- args...]
                                           --features F, --no-default-features: the package built with those features,
                                           as cargo builds it (the land gate's `--lib --no-default-features` run of
                                           makepad-devhub, which Scope's agents and the phone host build so); with
                                           --live, the feature set is part of the session's key: each set its own session.
                                           --offline needs --live: Linux user/network namespaces, only loopback up;
                                           a namespace failure or JIT miss fails the run, never a networked fallback.
+                                          --env K=V (with --live, repeatable): the session's environment, as `live start
+                                          --env`; a session asked with other env or another --jit is a session of its own.
                                           --pin-why R (with --node): the reason it names its box when no series
                                           does; devhub then never asks it to unpin.
                                           --avoid N[,N..]: boxes it never takes (a tests run's rerun of a lost
@@ -214,13 +217,13 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
   replay run <dir> <from> <to>             simulate scheduler waits offline from exported inputs
   nodes                                   capabilities, dev switch and leases per node
   node <n> dev on|off                     the node's dev switch (the user's decision)
-  node <n> back                           the person hands the node back (on their say-so): the input it saw so
-                                          far holds it no more; new input does again
   node <n> probe                          its toolchain probe now (a compile and a link): a box a toolchain move left
                                           out of rotation comes back at once (it probes again as a lease there ends too)
   node <n> [role pool|hot|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node)
-  disk <node> [--dry-run]                 the node's disk categories and reclaim
+  disk <node> [--need GB] [--dry-run]     the node's disk categories and reclaim, to its floor plus
+                                          GB (default: the largest need of a queued ask its disk
+                                          keeps off, as that ask's own reclaim aims for)
   heap <node>|master [top]                its hub's (or the master's) heap: live, peak and resident
                                           MB, then the call sites holding the most (sampled), top 12
   desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
@@ -253,6 +256,14 @@ pub const DEFERRED_EXIT: i32 = 6;
 /// How the master ends a lease that infrastructure lost, never a person or the command.
 fn lost_how(how: &str) -> bool {
     matches!(how, "expired" | "lost")
+}
+
+/// How the master ends a lease for what its command did: its end is the command's verdict, said
+/// with its reason, never a lost lease. A lease ended for a panic its run held parked with nobody
+/// to decide it read as `LEASE LOST ... the code is not to blame: run it again`, and its agent
+/// hunted a hub and master restart that had not touched it (L1382556, 11-18).
+fn verdict_how(how: &str) -> bool {
+    matches!(how, "hung" | "disk" | "memory" | "panicked")
 }
 
 /// A node call's error that means the lease is gone there: its hub no longer has it, or it stayed
@@ -564,6 +575,8 @@ struct Opts {
     /// A hand-in's gate run that has not started this long after it asked goes after the landing
     /// unrun ([`DEFERRED_EXIT`], [`gate_start_bound`]); None: it waits for its start.
     start_within: Option<Duration>,
+    /// `test --live --env K=V`: the live session's environment (`live start --env`)
+    env: Vec<(String, String)>,
 }
 
 /// Flags handled by the client instead of fields in the lease request.
@@ -639,12 +652,12 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--ram-gb" => req.ram_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-gb is a positive number")?),
             "--ram-floor-gb" => req.ram_floor_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-floor-gb is a positive number")?),
             "--class" => req.class = val(i)?.to_string(),
-            "--node" => req.node = Some(val(i)?.to_string()),
+            "--node" => super::sched::one_node(&mut req.node, val(i)?)?,
             "--series" => req.series = Some(val(i)?.to_string()),
             "--pin-why" => req.pin_why = Some(val(i)?.to_string()),
             "--run-since" => req.run_ms = Some(val(i)?.parse().map_err(|_| "--run-since takes a wall-clock time in ms")?),
-            "--avoid" => req.avoid = super::sched::avoid_list(val(i)?),
-            "--needs" => req.needs = parse_needs(val(i)?),
+            "--avoid" => super::sched::add_avoid(&mut req.avoid, val(i)?),
+            "--needs" => super::sched::add_needs(&mut req.needs, val(i)?)?,
             "--lane" => req.lane = val(i)?.to_string(),
             "--priority" => req.priority = Priority::parse(val(i)?).ok_or("--priority is interactive or background")?,
             "--prio" => req.prio = val(i)?.parse().map_err(|_| "--prio takes a number")?,
@@ -662,6 +675,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         i += 2;
     }
     req.check_series()?;
+    if let Some(why) = reads_stdin(&cmd) { return Err(why); }
     let root = lane_root().map(|(root, _)| root);
     if req.lane.is_empty() {
         req.lane = default_lane();
@@ -694,7 +708,24 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         eprintln!("makepad devhub: `{what}` changes its box's toolchain: the lease takes the box whole");
         req.whole = true;
     }
-    Ok(Opts { req, watch, keep, cmd, tree, native, patches: Vec::new(), commits_only, inputs, for_node, exit_to, start_within: None })
+    Ok(Opts { req, watch, keep, cmd, tree, native, patches: Vec::new(), commits_only, inputs, for_node, exit_to, start_within: None, env: Vec::new() })
+}
+
+/// Why a run's command would read its script from stdin, which a lease's run never gets (it runs
+/// on its box with an empty stdin): `/dev/stdin` named, or a shell given no script (`-s`, or
+/// options alone). `devhub run ... -- bash /dev/stdin < script` ran nothing and said nothing
+/// (a tier rig, 11-21).
+fn reads_stdin(cmd: &[String]) -> Option<String> {
+    let fix = "ship the script as a file (in the lane's tree, or `--input NAME=<archive>`) and run it by its path";
+    if let Some(a) = cmd.iter().find(|a| matches!(a.as_str(), "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")) {
+        return Some(format!("the command reads `{a}`, and a lease's run gets no stdin from here: {fix}"));
+    }
+    let shell = cmd.first().map(|p| p.rsplit('/').next().unwrap_or(p))?;
+    if !matches!(shell, "sh" | "bash" | "zsh" | "dash" | "ksh") { return None; }
+    let rest = &cmd[1..];
+    let opts = |a: &&String| a.starts_with('-') && !a.starts_with("--") && a.len() > 1;
+    let from_stdin = rest.iter().filter(opts).any(|a| a.contains('s') && !a.contains('c')) || rest.iter().all(|a| a.starts_with('-'));
+    from_stdin.then(|| format!("`{}` with no script reads it from stdin, and a lease's run gets no stdin from here: {fix}", cmd.join(" ")))
 }
 
 /// `--for <node>`: the lease builds for that box's CPU, as its hub reports it
@@ -891,10 +922,11 @@ fn acquire_within(c: &Client, req: &Req, within: Option<Duration>) -> Result<Hel
                     eprintln!("{id}: between steps, check $DEVHUB_YIELD: it appears when this run is past twice its estimate while a timed ask waits on its box, or runs over 10 min while one of 10 min or less waits there; then stop after the current step with what you have and release");
                 }
                 let start = v.get("start");
-                let env = match start.and_then(|st| st.get("env")) {
+                let env: Vec<(String, String)> = match start.and_then(|st| st.get("env")) {
                     Some(Value::Obj(pairs)) => pairs.iter().map(|(k, x)| (k.clone(), x.as_str().unwrap_or("").to_string())).collect(),
                     _ => Vec::new(),
                 };
+                eprintln!("{}", budget_said(&id, req.kind, &env));
                 if !s(&v, "reason").is_empty() { eprintln!("{id}: {}", s(&v, "reason")); }
                 let beat = Beat::start(&id);
                 return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env, beat, adopt: None, handed: Default::default(), lost: Default::default() });
@@ -945,6 +977,24 @@ fn acquire_within(c: &Client, req: &Req, within: Option<Duration>) -> Result<Hel
                 eprintln!("makepad devhub: beat {id}: {e} (after {} s)", t0.elapsed().as_secs());
                 return Err((1, format!("lease {id}: beat: {e}")));
             }
+        }
+    }
+}
+
+/// The CPU budget a lease hands its job, at its grant (exec.rs job_env, as the lease's environment
+/// holds it): MAKEPAD_CPU_CORES, which the job's JIT workers and pools size from, and RELAX_JOBS,
+/// or the box's budget when it hands neither (a live session). A budget of one or two cores admits
+/// one job at once (cpu_budget: its limit is the cores less one), so a timing a timed or screen run
+/// takes on it is a single-core figure: Fab's cold start measured on such screen leases took
+/// 49.5 s where a live session's took 13.7 s (11-20).
+fn budget_said(id: &str, kind: Kind, env: &[(String, String)]) -> String {
+    let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    match (get("MAKEPAD_CPU_CORES"), get("RELAX_JOBS")) {
+        (None, None) => format!("{id}: CPU budget: box budget (no MAKEPAD_CPU_CORES or RELAX_JOBS handed to the job)"),
+        (cores, jobs) => {
+            let one = matches!(kind, Kind::Timed | Kind::Screen) && cores.and_then(|c| c.parse::<u32>().ok()).is_some_and(|c| c <= 2);
+            format!("{id}: CPU budget handed to the job: MAKEPAD_CPU_CORES={} RELAX_JOBS={}{}", cores.unwrap_or("unset"), jobs.unwrap_or("unset"),
+                if one { " (one core: timings are single-core)" } else { "" })
         }
     }
 }
@@ -1217,7 +1267,7 @@ fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
         return CANCELLED_EXIT;
     }
     // a verdict on the command, not a lost box: run again, it hangs again
-    if let Some(how) = ended.as_deref().filter(|h| matches!(*h, "hung" | "disk" | "memory")) {
+    if let Some(how) = ended.as_deref().filter(|h| verdict_how(h)) {
         return fail(format!("{} on {} ended ({how}): {}", held.id, held.node, end.as_ref().map_or(String::new(), |v| s(v, "reason"))));
     }
     let (exit, code) = match r {
@@ -1309,7 +1359,8 @@ fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
 /// worktree's HEAD alone: on work, the main that commit landed beside; else the HEAD, unless the
 /// master says another main (the HEAD holds a two-repo landing the commit lacks). An older makepad
 /// commit beside a lane's newer main is a pair that never landed together: a rig branch on an older
-/// base died at cargo's "no matching package named `makepad-relax`" (11-12).
+/// base died at cargo's "no matching package named `makepad-relax`" (11-12). Each followed nested
+/// repository the worktree lacks is pinned at its landed tip ([`crate::nested::absent`]).
 pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str, paired: Option<&dyn Fn(&str, Option<&str>) -> Result<String, String>>) -> Result<String, String> {
     let named: Vec<&str> = spec.split(',').skip(1).filter_map(|side| side.split_once('=').map(|(name, _)| name)).collect();
     let first = spec.split(',').next().unwrap_or("");
@@ -1333,7 +1384,10 @@ pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str, paired: Option<&dyn Fn(
         };
         whole.push_str(&format!(",{name}={side}"));
     }
-    super::pin_revs(root, &whole)
+    // and each followed one the worktree lacks, at its landed tip, as the buckets build it: a lane
+    // had no Source Library, so it could not test what its change broke there (#7425, 11-19)
+    let absent: String = crate::nested::absent(root).into_iter().filter(|(n, _, _)| !named.contains(&n.as_str())).map(|(n, branch, sha)| format!(",{n}={branch}@{sha}")).collect();
+    Ok(super::pin_revs(root, &whole)? + &absent)
 }
 
 /// The master's [`pin_lane_rev`] pairing (`job landed-main`), its line said when it moved the
@@ -1577,7 +1631,7 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
             eprintln!("makepad devhub run: --rounds is for a timed run: only timed work hands its box over between rounds");
             return 2;
         }
-        Ok(o) if !o.cmd.is_empty() => Opts { patches, ..o },
+        Ok(o) if !o.cmd.is_empty() => Opts { req: Req { patched: !patches.is_empty(), ..o.req }, patches, ..o },
         Ok(_) => {
             eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] [--tree] -- cmd...");
             return 2;
@@ -1723,6 +1777,11 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
             let lost = || held.lost.lock().unwrap().clone().unwrap_or_else(|| format!("its lease {} was lost on {}; no verdict, run it again", held.id, held.node));
             let verdict = match (code, &none) { (0, _) => "passed".into(), (CANCELLED_EXIT, _) => "cancelled".into(), (LOST_EXIT, _) => format!("{NOT_RUN}{}", lost()), (_, Some(why)) => format!("failed: {why}"), _ => "failed".to_string() };
             let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
+            // each failed target with its first panics, and where its whole output is: its end
+            // kept it whole (a failed run) under the lease's id
+            if none.is_none() && !matches!(code, 0 | CANCELLED_EXIT | LOST_EXIT) {
+                let _ = write!(out, "{}its whole output: `devhub job result {}`\n", tally.failed_said(), held.id);
+            }
         }
         break (code, completed);
     }
@@ -1992,7 +2051,13 @@ fn live_targets(root: &Path, pkg: &str, flags: &[String]) -> Result<LiveTargets,
             _ => {}
         }
     }
-    let targets = relax_base::resolve::test_targets(&std::sync::Arc::new(relax_base::Session::default()), &root.to_string_lossy(), pkg, &features, &[], &[], &[])?;
+    let targets_in = |dir: &Path| relax_base::resolve::test_targets(&std::sync::Arc::new(relax_base::Session::default()), &dir.to_string_lossy(), pkg, &features, &[], &[], &[]);
+    // a package of a followed nested repository the worktree lacks: its targets as the user's
+    // checkout holds it, which the lane's runs pin at its tip ([`crate::nested::absent`])
+    let targets = targets_in(root).or_else(|e| match crate::nested::hub(root).filter(|_| !crate::nested::absent(root).is_empty()) {
+        Some(hub) => targets_in(&hub).map_err(|_| e),
+        None => Err(e),
+    })?;
     let mut out = LiveTargets { runs: Vec::new(), not_live: Vec::new() };
     if targets.lib.as_ref().is_some_and(|l| l.test) { out.runs.push(vec!["--lib".into()]); }
     for (flag, targets) in [("--bin", targets.bins), ("--test", targets.tests)] {
@@ -2023,7 +2088,7 @@ fn bucket_said(pkg: &str, select: &[&str]) -> Option<(String, bool)> {
 
 /// devhub's own `test` flags that the test binary never takes (libtest's `--test` is its own): one
 /// after `--` reached the binary, which refused it, and that read as a JIT miss (M98, 11-16).
-const TEST_FLAGS: [&str; 21] = ["--native", "--live", "--offline", "--rev", "--tree", "--needs", "--node", "--avoid", "--series", "--pin-why", "--priority", "--jit", "--cost", "--est-min", "--cores", "--class", "--features", "--no-default-features", "--lib", "--bin", "--tests"];
+const TEST_FLAGS: [&str; 22] = ["--env", "--native", "--live", "--offline", "--rev", "--tree", "--needs", "--node", "--avoid", "--series", "--pin-why", "--priority", "--jit", "--cost", "--est-min", "--cores", "--class", "--features", "--no-default-features", "--lib", "--bin", "--tests"];
 
 /// The refusal of a devhub flag among the test binary's arguments (the words after `--`).
 fn flag_after_separator(args: &[&str]) -> Option<String> {
@@ -2039,11 +2104,20 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         let (mut flags, mut select, mut args) = (Vec::new(), Vec::new(), Vec::new());
         let (mut native, mut live, mut offline, mut target, mut rev_spec) = (false, false, false, None::<String>, None::<&str>);
         let mut asked_native = false;
+        let mut env: Vec<(String, String)> = Vec::new();
         let mut i = 0;
         while i < rest.len() {
             let val = || rest.get(i + 1).copied().filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or_else(|| format!("{} needs a value", rest[i]));
             match rest[i] {
                 "--" => { args.extend_from_slice(&rest[i..]); break; }
+                // the live session's environment, as `live start --env` (a saved JIT cache state
+                // replayed, 11-18); the master checks each name
+                "--env" => {
+                    let pair = val()?;
+                    let (k, v) = pair.split_once('=').filter(|(k, _)| !k.is_empty()).ok_or("--env needs K=V")?;
+                    env.push((k.to_string(), v.to_string()));
+                    i += 1;
+                }
                 // `--native "<reason>"`: the reason goes to the JIT-first gate (lease/native.rs)
                 "--native" => {
                     (native, asked_native) = (true, true);
@@ -2086,6 +2160,8 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             return Err("--live follows the lane's saves; --rev runs its commits once (drop one of them)".into());
         }
         if live && native { return Err("--native cannot be combined with --live".into()); }
+        if !env.is_empty() && !live { return Err("--env sets a live session's environment: add --live".into()); }
+        o.env = env;
         // (--cost and --est-min are the live job's hints, as everywhere: refused, two lanes lost a
         // run each to a flag AGENTS.md asks of every run, 11-16)
         let mut suite = if live && matches!(target.as_deref(), None | Some(ALL_TESTS)) {
@@ -2103,6 +2179,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if let Some(whole) = &whole {
             let targets = whole.runs.iter().map(|s| s.join(" ")).collect::<Vec<_>>().join(", ");
             if offline { return Err(format!("--offline is one live session's sandbox, and {pkg} has {} harness targets: select one ({targets})", whole.runs.len())); }
+            if !o.env.is_empty() { return Err(format!("--env is one live session's environment, and {pkg} has {} harness targets: select one ({targets})", whole.runs.len())); }
             eprintln!("devhub test: {pkg}: {} harness targets ({targets}): one JIT run of the whole package on one lease, no live session per target (--lib, --bin B or --test T keeps one warm)", whole.runs.len());
             live = false;
         }
@@ -2113,7 +2190,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             if live { o.req.class = format!("live:{}", o.req.class); }
         }
         let own = if native { false } else {
-            let p = crate::jit_misses::test_package(&root, &pin.pair(), pkg)?;
+            let p = crate::jit_misses::test_package_at(&root, &pin, pkg)?;
             // tests that read the checkout itself (its history, cargo on it) say so in their
             // Cargo.toml, and run in the lane's tree: an overlay has neither
             if let Some(why) = p.tree.filter(|_| !o.tree) {
@@ -2195,13 +2272,13 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     }
     // a run that passed is the lane's pre-land check when devhub chose its route (a `--native` one
     // is a baseline, a whole package's live run an iteration): the packages its diff touches are
-    // checked without their tests too
-    let (lane, commits_only) = (o.req.lane.clone(), o.commits_only);
+    // checked without their tests too, placed as the run was
+    let (lane, commits_only, placed) = (o.req.lane.clone(), o.commits_only, o.req.clone());
     if native {
         if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &mut o)) { return code; }
         let rev = o.req.rev.clone().unwrap_or_default();
         let code = run_worktree(o, false, Some(pkg));
-        return if code == 0 && !asked_native && !whole { pre_land_checks(&lane, &rev, commits_only) } else { code };
+        return if code == 0 && !asked_native && !whole { pre_land_checks(&lane, &rev, commits_only, &placed) } else { code };
     }
     match test_miss(&o, pkg, &test_args, "lookup", &[], None) {
         Ok(miss) if !miss.is_null() => {
@@ -2233,8 +2310,10 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     if let Some(line) = log.lines().map(str::trim).find(|l| crate::jit_misses::usage_error(l)).filter(|_| code != 0) {
         eprintln!("devhub test: the test binary refused its arguments (`{line}`): a usage error, not a JIT miss");
     }
+    let (lines, code) = warnings_verdict(&run_warnings(&log), code);
+    for l in lines { println!("{l}"); }
     if code != 0 || whole { return code; }
-    pre_land_checks(&lane, o.req.rev.as_deref().unwrap_or(""), commits_only)
+    pre_land_checks(&lane, o.req.rev.as_deref().unwrap_or(""), commits_only, &placed)
 }
 
 /// One check of the hand-in's feature-set gate: the package, a feature set a dependent builds it
@@ -2348,8 +2427,9 @@ pub(crate) struct Merged {
     /// the tips it merged onto
     pub w: String,
     pub m: String,
-    /// the merge: work's side and commercial's (main's tip when the hand-in has no commercial half)
-    pub pair: crate::state::Pair,
+    /// the merge: work's side, commercial's (main's tip when the hand-in has no commercial half),
+    /// and each other followed nested repository's tip (a half of the hand-in there merged onto it)
+    pub tree: super::Pin,
     pub rev: String,
     /// the tips without the hand-in, pinned as `rev` is: a run that fails at the merge is asked
     /// here too, and what it says here is not the hand-in's ([`red_at_tips`])
@@ -2394,24 +2474,34 @@ fn merged_onto_tips(root: &Path, lane: &str, rev: &str) -> Result<Merged, Vec<St
         None => m.clone(),
     };
     let (mk, nested) = super::parse_pinned(rev).map_err(|e| vec![e])?;
+    // Each other followed nested repository at its landed tip ([`crate::nested::tips`]): Source
+    // Library's build broke at #7425's landing, its 0 crates checked by a gate that saw makepad and
+    // commercial alone (11-19). A hand-in's half in one merges onto that tip, as commercial's does.
+    let others = crate::nested::tips(root);
+    let tip_of = |name: &str| others.iter().find(|(n, _, _)| n == name).map(|(_, _, sha)| sha.clone());
     let mut merged_rev = format!("{}@{cm}", mk.branch);
+    let mut tips = format!("{}@{w}", mk.branch);
     for (name, side) in &nested {
-        let sha = if name == crate::state::PAIRED { &cc } else { &side.sha };
+        let (sha, tip) = if name == crate::state::PAIRED { (cc.clone(), m.clone()) } else {
+            match (tip_of(name), crate::nested::checkout(root, name)) {
+                (Some(tip), Some(dir)) => (merge(&dir, &tip, &side.sha)?, tip),
+                _ => (side.sha.clone(), side.sha.clone()),
+            }
+        };
         merged_rev.push_str(&format!(",{name}={}@{sha}", side.branch));
+        tips.push_str(&format!(",{name}={}@{tip}", side.branch));
     }
     // a makepad-only hand-in is checked beside main's tip
     if !cc.is_empty() && !pin.nested.contains_key(crate::state::PAIRED) {
         merged_rev.push_str(&format!(",{}=main@{cc}", crate::state::PAIRED));
-    }
-    let mut tips = format!("{}@{w}", mk.branch);
-    for (name, side) in &nested {
-        let sha = if name == crate::state::PAIRED { &m } else { &side.sha };
-        tips.push_str(&format!(",{name}={}@{sha}", side.branch));
-    }
-    if !m.is_empty() && !pin.nested.contains_key(crate::state::PAIRED) {
         tips.push_str(&format!(",{}=main@{m}", crate::state::PAIRED));
     }
-    Ok(Merged { pair: crate::state::Pair::new(&cm, &cc), rev: merged_rev, tips, w, m })
+    for (name, branch, sha) in others.iter().filter(|(n, _, _)| !pin.nested.contains_key(n)) {
+        merged_rev.push_str(&format!(",{name}={branch}@{sha}"));
+        tips.push_str(&format!(",{name}={branch}@{sha}"));
+    }
+    let tree = super::Pin::of_rev(&merged_rev).ok_or_else(|| vec![format!("the merge `{merged_rev}` is not pinned")])?;
+    Ok(Merged { tree, rev: merged_rev, tips, w, m })
 }
 
 /// The hand-in's gates, before queueing it: the feature sets and test targets of what it touches
@@ -2429,7 +2519,7 @@ pub(crate) fn hand_in_gates(lane: &str, rev: &str) -> (Result<Vec<String>, Vec<S
         if let Err(line) = pre_land(run, estimate) { return (2, format!("{line}\n")); }
         let on = shadow.get_or_init(|| retry_master(master).and_then(|c| one(&c, "overlay-shadow", "overlay-shadow enabled")).map(|v| v.get("on").and_then(Value::as_bool) == Some(true)));
         match on {
-            Ok(on) => check_run(lane, at, true, run, *on, true, Some(gate_start_bound(estimate))),
+            Ok(on) => check_run(lane, at, true, run, *on, true, Some(gate_start_bound(estimate)), None),
             Err(e) => (2, format!("check {}: {e}\n", run.packages.join(" "))),
         }
     })
@@ -2469,10 +2559,14 @@ fn deferred_said(id: &str, waited: Duration, within: Duration) -> String {
 #[cfg(feature = "checkout")]
 fn pre_land(run: &crate::jit_misses::CheckRun, estimate: Option<u64>) -> Result<(), String> {
     match estimate.filter(|ms| *ms > CHEAP_GATE_MS) {
-        Some(ms) => Err(not_run_line(&format!("check of {}", run.packages.join(" ")), &format!("estimated {}, past the {} a hand-in's check may take before it lands", super::sched::dur(ms), super::sched::dur(CHEAP_GATE_MS)))),
+        Some(ms) => Err(not_run_line(&format!("check of {}", run.packages.join(" ")), &format!("estimated {}, past the {} {PAST_GATE_BOUND}", super::sched::dur(ms), super::sched::dur(CHEAP_GATE_MS)))),
         None => Ok(()),
     }
 }
+
+/// How a gate run past [`CHEAP_GATE_MS`] by its estimate ends its not-run line ([`pre_land`]).
+#[cfg(feature = "checkout")]
+const PAST_GATE_BOUND: &str = "a hand-in's check may take before it lands";
 
 /// The master's estimate of a gate run (`estimate`), in ms: None when no measure says or the
 /// master does not answer.
@@ -2511,9 +2605,8 @@ fn feature_gate(root: &Path, rev: &str, merged: &Merged, check: &(dyn Fn(&crate:
     let paths = crate::jit_misses::touched_paths(root, &pin, true).map_err(|e| vec![format!("feature sets: the paths the hand-in touches: {e}")])?;
     if paths.is_empty() { return Ok(Vec::new()); }
     // (its commercial side is main's tip without a commercial half: scope's agents build
-    // makepad-devhub without defaults)
-    let pair = &merged.pair;
-    let tree = crate::orch::ci::Tree::at(root, pair).map_err(|e| vec![format!("feature sets: the merged tree: {e}")])?;
+    // makepad-devhub without defaults; each other followed nested repository's is its tip)
+    let tree = crate::orch::ci::Tree::at_pin(root, &merged.tree).map_err(|e| vec![format!("feature sets: the merged tree: {e}")])?;
     let touched = crate::jit_misses::packages_touched(&tree, &paths);
     let checks = feature_checks(&touched, &crate::orch::ci::dependent_feature_sets(&tree));
     // and rustc's check of the touched packages' test targets, beside them ([`tests_gate`])
@@ -2521,7 +2614,7 @@ fn feature_gate(root: &Path, rev: &str, merged: &Merged, check: &(dyn Fn(&crate:
     let read = t.elapsed();
     if checks.is_empty() && tested.is_empty() { return Ok(Vec::new()); }
     let runs: Vec<crate::jit_misses::CheckRun> = checks.iter().map(|(pkg, set, _)| {
-        let own = crate::jit_misses::test_package(root, pair, pkg).map(|p| p.own).unwrap_or(false);
+        let own = crate::jit_misses::test_package_at(root, &merged.tree, pkg).map(|p| p.own).unwrap_or(false);
         let flags = set.flags();
         // `makepad check <package> <flags>`: the package first (a flag before it reads as `run`'s)
         let (cmd, alone): (Vec<String>, String) = if own {
@@ -2570,7 +2663,7 @@ fn dependents_gate(root: &Path, rev: &str, merged: &Merged, check: &(dyn Fn(&cra
     let pin = super::Pin::of_rev(rev).ok_or_else(|| vec![format!("dependents: rev `{rev}` is not pinned")])?;
     let paths = crate::jit_misses::touched_paths(root, &pin, true).map_err(|e| vec![format!("dependents: the paths the hand-in touches: {e}")])?;
     let (w, m) = (&merged.w, &merged.m);
-    let tree = Tree::at(root, &merged.pair).map_err(|e| vec![format!("dependents: the merged tree: {e}")])?;
+    let tree = Tree::at_pin(root, &merged.tree).map_err(|e| vec![format!("dependents: the merged tree: {e}")])?;
     let touched = touched_crates(&tree, &paths);
     let wide = touched.clone(); // Step 5 narrows wide to crates whose interfaces changed.
     let set = in_set(&tree, &touched, &wide);
@@ -2578,13 +2671,34 @@ fn dependents_gate(root: &Path, rev: &str, merged: &Merged, check: &(dyn Fn(&cra
     for (name, packages) in [("touched", &touched), ("wide", &wide), ("set", &set)] {
         words.push(format!("{name}={}", packages.iter().cloned().collect::<Vec<_>>().join(",")));
     }
-    let said = check_set(&tree, &merged.rev, &merged.tips, &set.iter().cloned().collect::<Vec<_>>(), check);
+    let mut said = check_set(&tree, &merged.rev, &merged.tips, &set.iter().cloned().collect::<Vec<_>>(), check);
+    // Past the bound by its estimate, the set goes to the buckets, and the touched crates are
+    // checked alone, beside it: the hand-in's own errors and warnings refuse it, as when its whole
+    // set is checked. Two hand-ins' sets of 28 and 38 crates went unchecked whole, each with its
+    // own warning in a touched crate, and the fast bucket after them failed on it for every lane
+    // (#6704, #6712, 11-18). The set's crates in the other nested repositories go with them: a fix
+    // there is a landing of its own in another repository, and #7425's set of 338 broke Source
+    // Library's build unchecked, its fix-forward written without a compile (11-19).
+    let dirs = crate::orch::ci::package_dirs(&tree);
+    let elsewhere = |p: &String| dirs.get(p).is_some_and(|d| merged.tree.nested.keys().any(|n| n != crate::state::PAIRED && format!("{d}/").starts_with(&crate::nested::prefix(n))));
+    let own: Vec<String> = said.past_bound.iter().filter(|p| touched.contains(*p) || elsewhere(p)).cloned().collect();
+    let mut alone_note = None;
+    if !own.is_empty() && own.len() < said.past_bound.len() {
+        let alone = check_set(&tree, &merged.rev, &merged.tips, &own, check);
+        let which = if own.iter().any(elsewhere) { "the crates the hand-in touches and its dependents in other repositories" } else { "the crates the hand-in touches" };
+        alone_note = Some(format!("dependents: {} of them checked alone, {which}{}", own.join(", "), if alone.skipped.is_empty() { String::new() } else { format!(" (not run: {})", alone.unchecked) }));
+        said.checked += alone.checked;
+        said.failed.extend(alone.failed);
+        said.red.extend(alone.red);
+        if said.node.is_empty() { said.node = alone.node; }
+    }
     let mut refused = Vec::new();
     for (named, alone, failures) in said.failed {
         refused.push(format!("dependents: {named} fail at the merge with work {w:.10} / main {m:.10}: {} error and warning line(s); `{alone}` shows it alone", failures.len()));
         refused.extend(failures.into_iter().map(|l| format!("  {l}")));
     }
     let mut notes: Vec<String> = said.skipped.into_iter().map(|(named, why)| format!("dependents: {named} not checked ({why}): the buckets check them after the landing")).collect();
+    notes.extend(alone_note);
     notes.extend(said.red.into_iter().map(|(named, n)| red_note("dependents", &named, n)));
     let (unchecked, node, checked) = (said.unchecked, said.node, said.checked);
     let took = format!("dependents: {checked} crate(s) checked at the merge with work {w:.10} in {:.1} s", t.elapsed().as_secs_f64());
@@ -2608,6 +2722,8 @@ struct SetVerdict {
     red: Vec<(String, usize)>,
     /// the first reason a run did not run (empty: all ran)
     unchecked: String,
+    /// the crates of the runs past the hand-in's bound by their estimate ([`PAST_GATE_BOUND`])
+    past_bound: Vec<String>,
     /// the box the JIT's run ran on
     node: String,
     /// the crates whose run ran
@@ -2636,7 +2752,7 @@ fn check_set(tree: &crate::orch::ci::Tree, rev: &str, tips: &str, set: &[String]
         })).collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| (1, "its check's thread panicked".into(), Red::new()))).collect()
     });
-    let mut said = SetVerdict { failed: Vec::new(), skipped: Vec::new(), red: Vec::new(), unchecked: String::new(), node: String::new(), checked: 0 };
+    let mut said = SetVerdict { failed: Vec::new(), skipped: Vec::new(), red: Vec::new(), unchecked: String::new(), past_bound: Vec::new(), node: String::new(), checked: 0 };
     for (run, (code, log, red)) in runs.into_iter().zip(ran) {
         let named = run.packages.join(", ");
         let (failures, old) = brought(crate::jit_misses::check_failures(&log), &red);
@@ -2652,6 +2768,7 @@ fn check_set(tree: &crate::orch::ci::Tree, rev: &str, tips: &str, set: &[String]
         } else {
             let why = no_verdict(code, &log);
             if said.unchecked.is_empty() { said.unchecked = why.clone(); }
+            if why.ends_with(PAST_GATE_BOUND) { said.past_bound.extend(run.packages.iter().cloned()); }
             said.skipped.push((named, why));
         }
     }
@@ -2666,7 +2783,7 @@ fn check_set(tree: &crate::orch::ci::Tree, rev: &str, tips: &str, set: &[String]
 /// ([`crate::jit_misses::check_failures`]): a fn only tests called compiled under cfg(test) in the
 /// lane's tests, and twice the fast bucket after the landing was the first to say it was dead
 /// (#4005, #4024, 11-12).
-fn pre_land_checks(lane: &str, rev: &str, commits_only: bool) -> i32 {
+fn pre_land_checks(lane: &str, rev: &str, commits_only: bool, placed: &Req) -> i32 {
     let Some((root, _)) = lane_root() else { return 0 };
     let Some(pin) = super::Pin::of_rev(rev) else {
         eprintln!("devhub test: rev `{rev}` is not pinned: the packages it touches are not checked");
@@ -2679,7 +2796,7 @@ fn pre_land_checks(lane: &str, rev: &str, commits_only: bool) -> i32 {
     if touched.is_empty() { return 0; }
     let mut sides = Vec::new();
     for pkg in touched {
-        match crate::jit_misses::test_package(&root, &pin.pair(), &pkg) {
+        match crate::jit_misses::test_package_at(&root, &pin, &pkg) {
             Ok(p) => sides.push((pkg, p.own)),
             Err(e) => return fail(format!("devhub test: check {pkg}: {e}")),
         }
@@ -2692,7 +2809,7 @@ fn pre_land_checks(lane: &str, rev: &str, commits_only: bool) -> i32 {
     eprintln!("devhub test: the lane's diff touches {}: checked without their tests in {} run{}, and a warning fails it",
         sides.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", "), runs.len(), if runs.len() == 1 { "" } else { "s" });
     let ran: Vec<(i32, String)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = runs.iter().map(|run| scope.spawn(move || check_run(lane, rev, commits_only, run, shadow, false, None))).collect();
+        let handles: Vec<_> = runs.iter().map(|run| scope.spawn(move || check_run(lane, rev, commits_only, run, shadow, false, None, Some(placed)))).collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| (1, "its check's thread panicked".into()))).collect()
     });
     let mut worst = 0;
@@ -2717,6 +2834,36 @@ fn pre_land_checks(lane: &str, rev: &str, commits_only: bool) -> i32 {
         worst = 1;
     }
     worst
+}
+
+/// The warnings of a JIT test run's output, each with whether the lane changed its file
+/// ([`crate::orch::live::round_warnings`], in this shell's lane).
+#[cfg(feature = "checkout")]
+fn run_warnings(log: &str) -> Vec<(String, bool)> {
+    lane_root().map_or_else(Vec::new, |(root, _)| crate::orch::live::round_warnings(log, &root))
+}
+
+/// (a build without the lane's orchestration reads no lane: no warning is the lane's)
+#[cfg(not(feature = "checkout"))]
+fn run_warnings(_: &str) -> Vec<(String, bool)> {
+    Vec::new()
+}
+
+/// A JIT test run's rustc warnings (each with whether the lane changed its file,
+/// [`crate::orch::live::round_warnings`]): the lines that end its output, and its exit. Each crate's
+/// build says its own among the run's output (`relax test: 1 warning` among ten targets' `0
+/// warnings`), and a run that passed with one in a file the lane changed fails: a validated
+/// revision has none (AGENTS.md), and the fast bucket after the landing fails on it for every
+/// lane. Two lanes' whole-package runs passed so, each with its own warning in its output, and
+/// both landed it (#6704, #6712, 11-18).
+fn warnings_verdict(warned: &[(String, bool)], code: i32) -> (Vec<String>, i32) {
+    if warned.is_empty() { return (Vec::new(), code); }
+    let mine = warned.iter().filter(|(_, m)| *m).count();
+    let mut lines = vec![format!("devhub test: {} warning(s), {mine} in files this lane changed", warned.len())];
+    lines.extend(warned.iter().map(|(l, m)| format!("  {}{l}", if *m { "[this lane] " } else { "" })));
+    if code != 0 || mine == 0 { return (lines, code); }
+    lines.push(format!("devhub test: FAILED: {mine} warning(s) in files this lane changed: a validated revision has none, and the fast bucket fails on them after the landing"));
+    (lines, 1)
 }
 
 /// What a test run whose lease never started says in place of its verdict, before why.
@@ -2747,12 +2894,18 @@ fn no_verdict(code: i32, log: &str) -> String {
 
 /// One run of the pre-land check at `rev` ([`pre_land_checks`]), or of a hand-in's gates
 /// (`hand_in`: [`hand_in_gates`]): its exit and output.
-fn check_run(lane: &str, rev: &str, commits_only: bool, run: &crate::jit_misses::CheckRun, shadow: bool, hand_in: bool, start_within: Option<Duration>) -> (i32, String) {
+fn check_run(lane: &str, rev: &str, commits_only: bool, run: &crate::jit_misses::CheckRun, shadow: bool, hand_in: bool, start_within: Option<Duration>, placed: Option<&Req>) -> (i32, String) {
     let named = run.packages.join(" ");
     let mut o = match parse("test", Some(lane), &[]) {
         Ok(o) => o,
         Err(e) => return (2, format!("check {named}: {e}\n")),
     };
+    // a test's check goes where the test went: on the box it names (a timed series, a home's
+    // files), on its platform, off the boxes it avoids. Placed anywhere, a timed arm's check read
+    // "test@<another box>" in its log, as if the arm had left its box (L1351943, 11-18)
+    if let Some(r) = placed {
+        (o.req.node, o.req.series, o.req.pin_why, o.req.avoid, o.req.needs) = (r.node.clone(), r.series.clone(), r.pin_why.clone(), r.avoid.clone(), r.needs.clone());
+    }
     (o.req.rev, o.commits_only, o.req.class, o.cmd) = (Some(rev.to_string()), commits_only, run.class.clone(), run.cmd.clone());
     o.req.hand_in = hand_in;
     o.start_within = start_within;
@@ -2823,7 +2976,9 @@ fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i3
                 if j.exit.is_none() && !j.note.is_empty() { eprintln!("test: {}", j.note); }
                 if code != 0 && j.exit == Some(0) { if let Some(why) = j.errors.first() { eprintln!("test: {why}"); } }
                 let seconds = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1000.0;
+                let failed = (!matches!(code, 0 | CANCELLED_EXIT)).then(|| crate::testlog::Tally::of(&String::from_utf8_lossy(&output)).failed_said());
                 let _ = writeln!(output, "devhub test: {pkg} {} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", if code == 0 { "passed" } else if code == CANCELLED_EXIT { "cancelled" } else { "failed" }, seconds(j.submitted_ms, j.ended_ms), seconds(j.submitted_ms, j.granted_ms), seconds(j.granted_ms, j.shipped_ms), seconds(j.shipped_ms, j.ended_ms), j.node);
+                if let Some(said) = failed { let _ = write!(output, "{said}its whole output: `devhub job result {id}`\n"); }
                 o.req.rev = Some(j.rev.clone());
                 return Ok((code, j.exit.is_some()));
             }
@@ -2914,6 +3069,10 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, out: &mut dyn 
         let loader = o.req.loader.clone().unwrap_or_default();
         let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
         let sandbox = if offline { ",\"offline\":true" } else { "" };
+        // (`live start --env`'s pairs: a session asked with other env, or another JIT, is no
+        // session of this call's, orch/live.rs `answers`)
+        let env = o.env.iter().map(|(k, v)| format!("[{},{}]", makepad_remote::json_str(k), makepad_remote::json_str(v))).collect::<Vec<_>>().join(",");
+        let sandbox = format!("{sandbox},\"env\":[{env}]");
         // placed as a lease is: --node (with --series/--pin-why), --needs, --avoid
         let placement = format!(",\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{}", makepad_remote::json_str(o.req.node.as_deref().unwrap_or("")), makepad_remote::json_str(&o.req.avoid.join(",")), makepad_remote::json_str(o.req.series.as_deref().unwrap_or("")), makepad_remote::json_str(o.req.pin_why.as_deref().unwrap_or("")));
         let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{}{placement},\"priority\":{},\"loader\":{},\"cost\":{},\"est_min\":{},\"class\":{},\"also\":[{}],\"test_args\":[{}]{sandbox}}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(o.req.cost.as_str()), o.req.est_min.map_or("null".to_string(), |m| m.to_string()), makepad_remote::json_str(&o.req.class), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(makepad_remote::json_str).collect::<Vec<_>>().join(","), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
@@ -3004,6 +3163,10 @@ fn single_live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs,
                 }
             }
             print!("{}", x.test_result(started.elapsed().as_secs_f64()));
+            // (its verdict lists the round's warnings already)
+            let warned = x.patch.as_ref().and_then(|p| p.tests.as_ref()).map_or(&[][..], |t| &t.warnings[..]);
+            let (lines, code) = warnings_verdict(warned, code);
+            for l in lines.into_iter().filter(|l| l.contains("FAILED")) { println!("{l}"); }
             code
         }
         None => code,
@@ -3443,8 +3606,28 @@ fn desk(c: &Client, node: &str, what: &str) -> i32 {
     }
 }
 
-fn disk(c: &Client, node: &str, dry: bool) -> i32 {
-    match ask(c, Some(node), "disk", if dry { "disk dry" } else { "disk" }) {
+fn disk(c: &Client, node: &str, rest: &[&str]) -> i32 {
+    let dry = rest.contains(&"--dry-run");
+    // the queue's: the need of a head its disk keeps off, and the lanes whose own JIT trees stay
+    // for their queued asks, as the head's own reclaim has them
+    let queue = ask(c, None, "disk-need", &format!("disk-need {node}")).ok().and_then(|l| l.first().and_then(|l| json(l)));
+    let need = match rest.iter().position(|a| *a == "--need") {
+        Some(i) => match rest.get(i + 1).and_then(|n| n.parse::<f64>().ok()).filter(|n| *n >= 0.0) {
+            Some(n) => n,
+            None => { eprintln!("makepad devhub disk <node> [--need GB] [--dry-run]"); return 2; }
+        },
+        None => match &queue {
+            Some(v) if n(v, "need_gb") > 0.0 => {
+                eprintln!("devhub disk: {} waits for {:.0} GB over {node}'s floor: the reclaim aims there (--need 0: the floor only)", s(v, "for"), n(v, "need_gb"));
+                n(v, "need_gb")
+            }
+            _ => 0.0,
+        },
+    };
+    let keep = queue.as_ref().map(|v| s(v, "keep")).unwrap_or_default();
+    let line = format!("disk{}{}{}", if dry { " dry" } else { "" }, if need > 0.0 { format!(" need {need:.0}") } else { String::new() },
+        if keep.is_empty() { String::new() } else { format!(" keep {keep}") });
+    match ask(c, Some(node), "disk", &line) {
         Ok(lines) => {
             let mut code = 0;
             for l in lines {
@@ -3744,15 +3927,6 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             }
             Err(e) => fail(e),
         },
-        // the person hands the node back (main, on their say-so): its input so far holds it no more
-        ["node", node, "back"] => match node_one(&c, node, "user-back", "user-back") {
-            Ok(v) => {
-                println!("{node}: {}", if v.get("was_present").and_then(|b| b.as_bool()) == Some(true) { "handed back: takes leases again (new input holds it again)" } else { "no person held it" });
-                0
-            }
-            Err(e) if e.contains("unknown") || e.contains("unsupported") => fail(format!("{e} ({node}'s hub is older than `node back`: it takes it from its next self-update)")),
-            Err(e) => fail(e),
-        },
         // the toolchain probe now (a box out of rotation after a toolchain move comes back at once)
         ["node", node, "probe"] => match node_one(&c, node, "toolchain-probe", "toolchain-probe") {
             Ok(v) => match v.get("why").and_then(|w| w.as_str()) {
@@ -3765,7 +3939,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["node", node] => node_conf(&c, node, ""),
         ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}{}", conf_by())),
         ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}{}", kvs.join(" "), conf_by())),
-        ["disk", node, rest @ ..] => disk(&c, node, rest.contains(&"--dry-run")),
+        ["disk", node, rest @ ..] => disk(&c, node, rest),
         ["heap", node, rest @ ..] => heap(&c, node, rest.first().copied().unwrap_or("12")),
         ["desk", node, rest @ ..] => match rest {
             [] | ["state"] => desk(&c, node, "state"),
@@ -3846,6 +4020,8 @@ mod restart_tests {
         let r: Result<(), String> = through_restarts("L1", &mut c, |_| { n += 1; Err(if n == 1 { "node-a: link lost: no answer to OPEN" } else { "L1 ended (expired)" }.into()) }, &up);
         assert_eq!((r, n), (Err("L1 ended (expired)".to_string()), 2));
         assert!(lost_how("expired") && lost_how("lost") && !lost_how("cancelled") && lost_error("node-a: no lease L1 on a node") && !lost_error("node-a: lease-log: bad"));
+        // the command's own end is said with its reason, never as lost
+        assert!(["hung", "disk", "memory", "panicked"].iter().all(|h| verdict_how(h) && !lost_how(h)) && !verdict_how("lost") && !verdict_how("cancelled"));
     }
 }
 
@@ -4220,6 +4396,22 @@ mod tests {
             let request = makepad_strict_json::parse(request.as_bytes()).unwrap();
             assert_ne!(request.get(key), baseline.get(key), "`{flag}` is parsed but `{key}` in the request does not change");
         }
+        // a repeated list flag adds to the ones before it, or is refused saying both: never the
+        // last alone (`--avoid <a> --avoid <b>` kept only `<b>`, and the lease ran on `<a>`, 11-21)
+        let req = parse("build", Some("lane-a"), &["--avoid", "box-a", "--avoid", "box-b,box-a", "--needs", "os=linux", "--needs", "gpu=1,os=linux", "--node", "box-c", "--node", "box-c"]).unwrap().req;
+        let pairs = |p: &[(&str, &str)]| p.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        assert_eq!((req.avoid, req.needs, req.node.as_deref()), (vec!["box-a".to_string(), "box-b".to_string()], pairs(&[("os", "linux"), ("gpu", "1")]), Some("box-c")));
+        assert_eq!(parse("build", Some("lane-a"), &["--node", "box-a", "--node", "box-b"]).err(), Some("--node box-b after --node box-a: a lease names one box (--avoid keeps it off others)".to_string()));
+        assert!(parse("build", Some("lane-a"), &["--needs", "os=linux", "--needs", "os=macos"]).is_err_and(|e| e.contains("--needs os=macos after os=linux")));
+        // a command that reads its script from stdin is refused: its run gets none (11-21)
+        for cmd in [&["bash", "/dev/stdin", "a"][..], &["/bin/sh", "-s", "x"], &["bash"], &["sh", "-e"], &["python3", "/dev/fd/0"]] {
+            let args: Vec<&str> = ["--"].into_iter().chain(cmd.iter().copied()).collect();
+            assert!(parse("build", Some("lane-a"), &args).is_err_and(|e| e.contains("gets no stdin") && e.contains("ship the script as a file")), "{cmd:?}");
+        }
+        for cmd in [&["bash", "-c", "true"][..], &["sh", "-ec", "true"], &["bash", "tools/x.sh"], &["sh", "-e", "x.sh"], &["cat", "-s"]] {
+            let args: Vec<&str> = ["--"].into_iter().chain(cmd.iter().copied()).collect();
+            assert!(parse("build", Some("lane-a"), &args).is_ok(), "{cmd:?}");
+        }
     }
 
     /// A lease with no lane from the main checkout would run in tree `makepad` on its box: an
@@ -4437,7 +4629,7 @@ mod tests {
         g(&["config", "user.name", "t"]);
         g(&["config", "user.email", "t@t"]);
         g(&["config", "commit.gpgsign", "false"]);
-        write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\", \"apps/*/src/..\"]\n");
         write("crates/a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
         write("crates/b/Cargo.toml", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\na = { path = \"../a\" }\n");
         write("crates/a/src/lib.rs", "pub fn f() {}\n");
@@ -4506,6 +4698,24 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 2, "a run without a verdict is tried exactly twice");
         assert!(gate.words.contains(&"unchecked=no_box_available".to_string()) && !gate.words.iter().any(|w| w.starts_with("checked=")), "unchecked reasons replace checked pairs and escape spaces and equals");
         assert!(gate.notes.iter().any(|n| n == "dependents: a, b not checked (no box=available): the buckets check them after the landing"), "unchecked notes name the packages and reason: {:?}", gate.notes);
+        // past the bound by its estimate, the set goes to the buckets, and the crate the hand-in
+        // touches is checked alone: its own warning refuses it (#6704, #6712, 11-18)
+        let warning = "crates/a/src/lib.rs:1:10: warning: unused variable: `y`";
+        let seen = std::sync::Mutex::new(Vec::new());
+        let past = |run: &crate::jit_misses::CheckRun, rev: &str, own: &str| {
+            seen.lock().unwrap().push(run.packages.clone());
+            let at_tips = super::super::Pin::of_rev(rev).unwrap().makepad == work;
+            match run.packages.len() {
+                2 => (2, not_run_line("check of a b", &format!("estimated 9m14s, past the 2m00s {PAST_GATE_BOUND}"))),
+                _ if at_tips => (0, String::new()),
+                _ => (0, own.to_string()),
+            }
+        };
+        let refused = dependents(&root, "rc-body", &rev, &|run, rev| past(run, rev, warning)).expect_err("the touched crate's own warning refuses the hand-in");
+        assert!(refused.iter().any(|l| l.starts_with("dependents: a fail at the merge")) && refused.iter().any(|l| l.trim() == warning), "{refused:?}");
+        assert!(seen.lock().unwrap().contains(&vec!["a".to_string()]), "the touched crate is checked alone: {:?}", seen.lock().unwrap());
+        let gate = dependents(&root, "rc-body", &rev, &|run, rev| past(run, rev, "")).expect("clean alone, it lands, its set left to the buckets");
+        assert!(gate.notes.iter().any(|n| n.starts_with("dependents: a, b not checked (estimated 9m14s")) && gate.notes.iter().any(|n| n == "dependents: a of them checked alone, the crates the hand-in touches"), "{:?}", gate.notes);
 
         g(&["checkout", "-qb", "rc-docs", "work"]);
         write("README.md", "documentation\n");
@@ -4515,6 +4725,35 @@ mod tests {
             .expect("docs-only changes have an empty checked scope");
         assert_eq!(gate.words, [format!("checked={work},"), "touched=".into(), "wide=".into(), "set=".into()], "docs-only changes still name their checked pair and empty lists");
         assert!(gate.notes.last().unwrap().starts_with("dependents: 0 crate(s) checked"), "an empty scope still has a final timing note");
+
+        // A followed nested repository the lane's tree lacks (Source Library: #7425 broke its build
+        // with 0 crates of it checked, 11-19): its crates the hand-in reaches are in the set, checked
+        // at its landed tip, and past the bound checked alone beside the touched ones.
+        let extra = root.join("apps/extra");
+        std::fs::create_dir_all(extra.join("src")).unwrap();
+        let x = |args: &[&str]| git(&extra, &[&["-c", "core.hooksPath=/dev/null", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"][..], args].concat()).expect("fixture git succeeds");
+        x(&["init", "-q", "-b", "main"]);
+        std::fs::write(extra.join("Cargo.toml"), "[package]\nname = \"c\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\na = { path = \"../../crates/a\" }\n").unwrap();
+        std::fs::write(extra.join("src/lib.rs"), "pub fn g() {\n    a::f(1);\n}\n").unwrap();
+        x(&["add", "."]);
+        x(&["commit", "-qm", "extra"]);
+        let extra_tip = x(&["rev-parse", "main"]);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let gate = dependents(&root, "rc-body", &rev, &|run, rev| {
+            seen.lock().unwrap().push((run.packages.clone(), rev.to_string()));
+            (0, String::new())
+        }).expect("a passing set lands");
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.iter().map(|(p, _)| p.join(",")).collect::<Vec<_>>(), ["a,b,c"], "the other repository's dependent is in the one run of the set");
+        assert_eq!(super::super::Pin::of_rev(&seen[0].1).unwrap().nested.get("extra"), Some(&extra_tip), "checked at its landed tip: {}", seen[0].1);
+        assert!(gate.words.contains(&"set=a,b,c".to_string()), "{:?}", gate.words);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let gate = dependents(&root, "rc-body", &rev, &|run, _| {
+            seen.lock().unwrap().push(run.packages.join(","));
+            if run.packages.len() == 3 { (2, not_run_line("check of a b c", &format!("estimated 2h14m, past the 2m00s {PAST_GATE_BOUND}"))) } else { (0, String::new()) }
+        }).expect("clean alone, it lands");
+        assert_eq!(seen.into_inner().unwrap().last().map(String::as_str), Some("a,c"), "past the bound, the touched crate and the other repository's are checked alone");
+        assert!(gate.notes.iter().any(|n| n == "dependents: a, c of them checked alone, the crates the hand-in touches and its dependents in other repositories"), "{:?}", gate.notes);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4548,6 +4787,21 @@ mod tests {
         let mine = "core/src/land.rs:4:1: error[E0425]: cannot find function `x` in this scope\n";
         let refused = feature_verdict(&checks, &[(101, format!("{broken}{mine}"))], &[red]).unwrap_err();
         assert!(refused[0].starts_with("core --no-default-features (as panel builds it): 1 error") && refused.iter().any(|l| l.contains("E0425")) && !refused.iter().any(|l| l.contains("E0433")), "only the hand-in's own line refuses: {refused:?}");
+    }
+
+    /// A JIT test run that passed with a warning in a file the lane changed fails, each warning
+    /// listed at its end; others' warnings are listed and fail nothing (#6704, #6712, 11-18).
+    #[test]
+    fn a_passing_run_with_the_lanes_own_warning_fails() {
+        let warned = vec![("src/a.rs:1:1: warning: unused variable: `z`".to_string(), true), ("src/b.rs:2:3: warning: unused import: `y`".to_string(), false)];
+        let (lines, code) = warnings_verdict(&warned, 0);
+        assert_eq!(code, 1, "the lane's own warning fails a run that passed");
+        assert_eq!(lines[0], "devhub test: 2 warning(s), 1 in files this lane changed");
+        assert!(lines[1] == "  [this lane] src/a.rs:1:1: warning: unused variable: `z`" && lines[2] == "  src/b.rs:2:3: warning: unused import: `y`", "{lines:?}");
+        assert!(lines[3].starts_with("devhub test: FAILED: 1 warning(s) in files this lane changed"), "{lines:?}");
+        assert_eq!(warnings_verdict(&warned[1..], 0).1, 0, "another's warning is said, and fails nothing");
+        assert_eq!(warnings_verdict(&warned, 101).1, 101, "a failed run keeps its own exit");
+        assert_eq!(warnings_verdict(&[], 0), (Vec::new(), 0));
     }
 
     /// A hand-in's gate run runs before the landing only when cheap by the master's estimate; a

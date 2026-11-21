@@ -89,8 +89,15 @@ fn jit_diagnostic(t: &str) -> bool {
 }
 
 /// The lines of a log that say why it failed: cargo's `error` lines with the few lines under each
-/// (the `-->` pointer, the code), and test failures and panics.
+/// (the `-->` pointer, the code), and test failures and panics; or, from a fixture that names its
+/// failed rows, those lines alone.
 pub fn error_lines(log: &str) -> Vec<String> {
+    // a fixture that names its failed rows (ci.rs `failed_rows`) has those as its errors: the
+    // compile errors it prints by design (live_kinds' refused edits) are none
+    let rows: Vec<String> = log.lines().filter(|l| l.trim_start().starts_with("CI-FAILED ")).take(MAX_ERRORS).map(|l| crate::proto::clean(l, 300)).collect();
+    if !rows.is_empty() {
+        return rows;
+    }
     let mut out = Vec::new();
     let mut under = 0;
     for line in log.lines() {

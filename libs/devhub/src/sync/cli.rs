@@ -38,20 +38,36 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
   rebuild <node,...|all> [wm|apps]              push work + commercial main, prebuild, restart the WM (wm), our
                                                 launches (apps) or what the build replaced (default)
   wm-restart <node>                             restart the node's WM (and AI Hub) through its service
-  launch <node> --lease <id> [--visible|--hidden] [--lan] [K=V...] <app> [args...]
+  launch <node> --lease <id> [--visible|--hidden] [--lan] [--release] [K=V...] <app> [args...]
                                                 start <app> (registry name or package) under makepad run on the
                                                 node; prints its JIT id (--lease defaults to $DEVHUB_LEASE)
                                                 (a lane's TEST instance: badged, not the dock's app, LAN off
-                                                unless --lan)
+                                                unless --lan; --release: standalone with the Runner's
+                                                features, what a Mac's Dock entries run and so warm)
   show <node> <app>                             open the node's WM dock app <app> (launch-or-focus: the user's
                                                 one instance, the latest synced tree under the JIT); how a lane
-                                                shows the user what it landed
+                                                shows the user what it landed; on a Mac its Runner entry, as a
+                                                click in the Dock opens it
+  dock <node>                                   a Mac's dock: the Runner's entries, each with the tree and
+                                                arguments its launch record runs, and whether the Dock keeps it
+  dock <node> add [app ...]                     put the Runner's entries (all, or those apps) in the Mac's Dock
+  dock <node> remove <app|entry> ...            take those apps' Runner entries (or one entry, by its path)
+                                                out of the Mac's Dock (the entries stay; the Runner's Pin is
+                                                what makes or removes them)
+  dock <node> own                               the Runner's own entry runs the synced tree's Runner
+  put <node> <local path> <dest> [--replace]    copy a local folder (or file) into the node checkout's
+                                                local/<dest> (an app's state: its library, its home), the
+                                                counterpart of `get`: by default file by file into what it
+                                                holds; --replace: the copy in place of the folder, which is
+                                                kept beside it as <dest>.before-put-<ms>
   open <app>                                    on a WM machine's shell: open this machine's dock app <app>
                                                 (what clicking it in the dock does)
   restart <node>/<pid>                          stop a launch and start it again (same lease, env, args)
   stop <node>/<pid>                             stop a launch by its JIT id (also <node>/<app>#<pid>)
-  launched <node>                               the node's running launches
-  launch-log <node>/<pid> [n]                   the tail of a launch's log";
+  launched <node>                               the node's running launches (present_ms: their first frame
+                                                after the start)
+  launch-log <node>/<pid|app> [n]               the tail of a launch's log (an app's: its latest launch,
+                                                ended ones too)";
 
 fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "devhub-sync");
@@ -750,6 +766,10 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)
                     RoomNow::Held(jobs) => (with_jobs(words("on"), jobs), None),
                     RoomNow::Built(room) => (with_jobs(words("on"), room.jobs()), Some(room)),
                 };
+                // the lanes whose timed series keep their last build through the retire the move
+                // starts there (a hub before it reads this as a disk look: it frees nothing above its floor)
+                let keep = crate::lease::master::series_keep();
+                let _ = ask(c, n, "disk", &format!("series-keep {}", if keep.is_empty() { "-".to_string() } else { keep.join(",") }));
                 let order = sign::sign(&words)?;
                 let answer = ask(c, n, "sync", &format!("apply {order}"))?;
                 let Some(repoint) = answer.iter().find_map(|l| retired_refusal(repo, l)) else { return Ok(answer) };
@@ -952,6 +972,7 @@ fn launch_words(args: &[&str]) -> Result<(String, String), String> {
                 "--visible" => words.push("visible".into()),
                 "--hidden" => words.push("hidden".into()),
                 "--lan" => words.push("lan".into()),
+                "--release" => words.push("release".into()),
                 "--lease" => {
                     i += 1;
                     lease = Some(args.get(i).ok_or("--lease needs a lease id")?.to_string());
@@ -990,7 +1011,7 @@ pub fn main(args: &[&str]) -> Option<i32> {
     if let Some(code) = super::lanes::cli(args) {
         return Some(code);
     }
-    if !matches!(verb, "sync" | "autosync" | "launch" | "show" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
+    if !matches!(verb, "sync" | "autosync" | "launch" | "show" | "dock" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart" | "put") {
         return None;
     }
     // only `show <node> <app>` is a launcher's: `show <app>` is the master's, `show <event id>` the inbox's
@@ -1094,10 +1115,28 @@ pub fn main(args: &[&str]) -> Option<i32> {
         },
         ("launched", [node]) => out(node, ask(&c, node, "launch", "list")),
         ("show", [node, app]) => out(node, ask(&c, node, "launch", &format!("show {app}"))),
-        ("launch-log", [id, rest @ ..]) => match jit_id(id) {
-            Some((n, pid)) => out(&n, ask(&c, &n, "launch", &format!("log {pid} {}", rest.first().unwrap_or(&"40")))),
+        ("dock", [node]) => out(node, ask(&c, node, "launch", "dock")),
+        ("dock", [node, own]) if *own == "own" => out(node, ask(&c, node, "launch", "dock own")),
+        ("dock", [node, add, apps @ ..]) if *add == "add" => out(node, ask(&c, node, "launch", &format!("dock add {}", apps.join(" ")))),
+        // an entry's path goes as `b64:<path>`: the line's words split at spaces, which a title has
+        ("dock", [node, remove, apps @ ..]) if *remove == "remove" && !apps.is_empty() => {
+            let words: Vec<String> = apps.iter().map(|a| if a.contains('/') { format!("b64:{}", makepad_network::digest::base64_encode(a.as_bytes())) } else { a.to_string() }).collect();
+            out(node, ask(&c, node, "launch", &format!("dock remove {}", words.join(" "))))
+        }
+        ("put", [node, src, dest, rest @ ..]) if matches!(rest, [] | ["--replace"]) => match super::put::put(&c, node, Path::new(src), dest, !rest.is_empty()) {
+            Ok((files, bytes, kept)) => {
+                println!("{node} put {files} files ({:.1} MB) into local/{dest}{}", bytes as f64 / 1048576.0, kept.map_or(String::new(), |k| format!("; what it held is kept as {k}")));
+                0
+            }
+            Err(e) => {
+                eprintln!("makepad devhub put: {node}: {e}");
+                2
+            }
+        },
+        ("launch-log", [id, rest @ ..]) => match jit_id(id).map(|(n, pid)| (n, pid.to_string())).or_else(|| id.split_once('/').map(|(n, app)| (n.to_string(), app.to_string()))) {
+            Some((n, which)) => out(&n, ask(&c, &n, "launch", &format!("log {which} {}", rest.first().unwrap_or(&"40")))),
             None => {
-                eprintln!("makepad devhub launch-log <node>/<pid> [n]");
+                eprintln!("makepad devhub launch-log <node>/<pid|app> [n]");
                 2
             }
         },

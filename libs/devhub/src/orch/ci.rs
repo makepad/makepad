@@ -75,14 +75,48 @@ const NO_BOX_WAIT: Duration = Duration::from_secs(15 * 60);
 /// A run with no shard progress this long reports what its asks wait for.
 const STALLED: Duration = Duration::from_secs(30 * 60);
 
-/// A run no shard of which ended for [`STALLED`]: what runs and what the waiting ones wait for.
+/// The summary of a shard given the overdue verdict while its step still runs ([`overdue_secs`]):
+/// its real end replaces it.
+const OVERDUE: &str = "overdue: ";
+
+/// Whether shard `s` still runs past its overdue verdict (its lease holds its box).
+fn runs_overdue(s: &CiShard) -> bool {
+    s.state == "fail" && s.summary.starts_with(OVERDUE) && !s.lease.is_empty()
+}
+
+/// A run no shard of which ended for [`STALLED`]: what runs (an overdue one too: it holds its box)
+/// and what the waiting ones wait for.
 fn stall_line(pair: &str, state: &[CiShard], ended: usize) -> String {
-    let running: Vec<String> = state.iter().filter(|s| s.state == "run").map(|s| format!("{} on {} ({})", s.id, s.node, s.lease)).take(4).collect();
+    let running: Vec<String> = state.iter().filter(|s| s.state == "run" || runs_overdue(s)).map(|s| {
+        let past = if runs_overdue(s) { ", past its overdue verdict" } else { "" };
+        format!("{} on {} ({}{past})", s.id, s.node, s.lease)
+    }).take(4).collect();
     let mut why: Vec<&str> = state.iter().filter(|s| s.state == "wait" && !s.summary.is_empty()).map(|s| s.summary.as_str()).collect();
     why.sort_unstable();
     why.dedup();
     let waiting = state.iter().filter(|s| s.state == "wait").count();
     format!("ci {pair}: no shard ended in {} min ({ended} of {} ended): running {}; {waiting} waiting: {}", STALLED.as_secs() / 60, state.len(), running.join(", "), why[..why.len().min(3)].join("; "))
+}
+
+/// For the check-in (`lane quiet`) and `devhub bucket`: the CI shards still running past their
+/// overdue verdict while their lease lives (`live`), each with its lease, box and time. The run
+/// goes on without such a shard, but it holds its box: a Windows smoke's `powershell` step,
+/// measured 255 s, ran 7 h on the one Windows box while five Windows shards waited behind it, and
+/// the run's stall lines said "running" with nothing named (L1460002, 11-20).
+pub fn overdue_running(ci: &crate::state::Ci, now_ms: u64, live: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let runs = ci.run.iter().chain(ci.sweep_run.iter()).chain(ci.runs.iter().rev().take(8));
+    let mut out = Vec::new();
+    for r in runs {
+        for s in r.shards.iter().filter(|s| runs_overdue(s) && live(&s.lease)) {
+            if !seen.insert((r.id.clone(), s.id.clone())) { continue; }
+            let waiting = r.shards.iter().filter(|w| w.state == "wait").count();
+            let busy = now_ms.saturating_sub(s.granted_ms) / 60_000;
+            out.push(format!("ci run {} `{}` ({} on {}): busy {busy} min, {}; the run went on without it, {waiting} of its shards still wait; nothing stops it: main or its owner decides (`devhub cancel {}`)",
+                r.pair.short(), s.id, s.lease, s.node, &s.summary[OVERDUE.len()..], s.lease));
+        }
+    }
+    out
 }
 
 /// A test binary that takes longer than this on Linux stays off the one Windows box.
@@ -197,23 +231,44 @@ impl Tree {
 
     /// The tree of `pair` in `repo` (and `repo/apps/commercial`), read in process (gitread).
     pub fn at(repo: &Path, pair: &Pair) -> Result<Tree, String> {
-        let com = repo.join(COMMERCIAL);
-        let mut blobs = crate::gitread::files_at(repo, &pair.work)?;
-        let has_com = !pair.main.is_empty() && com.join(".git").exists();
-        if has_com {
-            blobs.extend(crate::gitread::files_at(&com, &pair.main)?.into_iter().map(|(p, h)| (format!("{COMMERCIAL}/{p}"), h)));
+        let pin = crate::lease::Pin::at(&pair.work);
+        let own = |name: &str| Some(repo.join(crate::nested::dir(name))).filter(|d| d.join(".git").exists());
+        Tree::read_at(repo, &if pair.main.is_empty() { pin } else { pin.with(crate::state::PAIRED, &pair.main) }, &own)
+    }
+
+    /// The tree of `pin` in `repo`: makepad's, and each nested repository's it names, read where
+    /// it is checked out ([`crate::nested::checkout`]: a lane's worktree lacks Source Library, the
+    /// user's checkout holds it). One checked out nowhere is left out.
+    pub fn at_pin(repo: &Path, pin: &crate::lease::Pin) -> Result<Tree, String> {
+        Tree::read_at(repo, pin, &|name| crate::nested::checkout(repo, name))
+    }
+
+    /// The tree of `pin`, each nested repository's read in `dir_of(name)` (None: left out).
+    fn read_at(repo: &Path, pin: &crate::lease::Pin, dir_of: &dyn Fn(&str) -> Option<PathBuf>) -> Result<Tree, String> {
+        let mut blobs = crate::gitread::files_at(repo, &pin.makepad)?;
+        let mut readers = Vec::new();
+        for (name, sha) in &pin.nested {
+            let Some(dir) = dir_of(name) else { continue };
+            let prefix = crate::nested::prefix(name);
+            blobs.extend(crate::gitread::files_at(&dir, sha)?.into_iter().map(|(p, h)| (format!("{prefix}{p}"), h)));
+            readers.push((prefix, crate::gitread::blob_reader(&dir)));
         }
         let files = blobs.keys().cloned().collect();
         let oids = blobs.clone();
-        let (main_blobs, com_blobs) = (crate::gitread::blob_reader(repo), if has_com { crate::gitread::blob_reader(&com) } else { None });
-        let com_prefix = format!("{COMMERCIAL}/");
+        let main_blobs = crate::gitread::blob_reader(repo);
+        // the pair's id as before; the other nested repositories after it
+        let paired = pin.nested.get(crate::state::PAIRED).map_or("", String::as_str);
+        let id = pin.nested.iter().filter(|(n, _)| *n != crate::state::PAIRED).fold(format!("{},{paired}", pin.makepad), |id, (n, sha)| format!("{id},{n}={sha}"));
         Ok(Tree {
-            id: format!("{},{}", pair.work, pair.main),
+            id,
             cache: Mutex::new(BTreeMap::new()),
             files,
             blobs,
             read: Box::new(move |p| {
-                let read = if p.starts_with(&com_prefix) { com_blobs.as_ref() } else { main_blobs.as_ref() }?;
+                let read = match readers.iter().find(|(prefix, _)| p.starts_with(prefix.as_str())) {
+                    Some((_, read)) => read.as_ref(),
+                    None => main_blobs.as_ref(),
+                }?;
                 read(oids.get(p)?).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
             }),
         })
@@ -884,8 +939,56 @@ const PROOF_BATCH: Duration = Duration::from_secs(600);
 const OVERDUE_TIMES: f64 = 10.0;
 /// ... and at least this long ...
 const OVERDUE_MIN_SECS: f64 = 1800.0;
-/// ... and at most this long (a measured time can come from a run that hung, then was ended)
+/// ... and at most this long (a measured time can come from a run that hung, then was ended),
+/// or twice its estimate when that is longer ([`overdue_secs`])
 const OVERDUE_MAX_SECS: f64 = 7200.0;
+
+/// When a shard estimated at `est` seconds is overdue. A shard whose estimate is the size of its
+/// work ([`declares_est`]) can be estimated past the cap: the live replay's 40 Fab landings at 3 min
+/// each would be overdue at its own estimate.
+fn overdue_secs(est: f64) -> f64 {
+    (est * OVERDUE_TIMES).clamp(OVERDUE_MIN_SECS, OVERDUE_MAX_SECS.max(est * 2.0))
+}
+
+/// The landings a live replay takes ([`live_replays`]).
+const REPLAY_COUNT: u32 = 40;
+
+/// A replayed landing's seconds before its app has a measure: a Fab one's on a Linux box (25 in
+/// 73 min on 11-15, 28 in 84 min on 11-19; a Storybook one's took 75 s, an Amp one's 248 s).
+const REPLAY_LANDING_GUESS: f64 = 180.0;
+
+/// The CI timing of the live replay's seconds per landing of `app`: its estimate is that times the
+/// landings it takes. Its whole run, measured under its id as every shard's is, was its guess
+/// once: a 40-landing replay on its 3 min landings read as stalled against 30 min (L1402816, 11-19).
+fn replay_key(app: &str) -> String {
+    format!("replay-landing:{app}")
+}
+
+/// A shard whose estimate is the size of its work, not one measure of its id: its lease declares
+/// it (`est_min`), so the master's stall and overdue checks hold the run to it. Without it every
+/// live shard was held to their one class's measure (`screen cargo build --profile @ci`, the build
+/// step they share), 7m43s against the replay's 84 min of landings (L1402816, 11-19).
+fn declares_est(shard: &Shard) -> bool {
+    shard.id == REPLAY
+}
+
+/// The live replay's shard id.
+const REPLAY: &str = "live:replay";
+
+/// What a finished replay's log measures: its app's timing key and its seconds per landing (the
+/// run's `secs` over the landings it judged, each a line that starts with the landing's short
+/// hash and its result). None for another shard or a replay that judged none.
+fn replay_measure(shard: &Shard, log: &str, secs: f64) -> Option<(String, f64)> {
+    if shard.id != REPLAY { return None; }
+    let step = shard.steps.last()?;
+    let app = step.iter().position(|a| a == "--app").and_then(|k| step.get(k + 1))?;
+    let judged = log.lines().filter(|l| {
+        let mut w = l.split_whitespace();
+        w.next().is_some_and(|sha| sha.len() == 10 && sha.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+            && w.next().is_some_and(|r| matches!(r, "pass" | "fail" | "silent" | "skip" | "unreached"))
+    }).count();
+    (judged > 0).then(|| (replay_key(app), secs / judged as f64))
+}
 
 /// The apps the live replay takes in turn, one per CI run.
 const REPLAY_APPS: [&str; 5] = ["makepad-app-storybook", "makepad-fab", "makepad-stage", "makepad-app-synth", "makepad-app-amp"];
@@ -1449,8 +1552,11 @@ fn runs_why(repo: &Path, pair: &Pair, tree: &Tree, dg: &Digests, sh: &Shard, cac
 
 /// An app runs on one OS only; a matching proof on any shipped OS keeps it. All available
 /// platforms, including Macs, rotate by oldest proof date, then load per box. The picks, why each
-/// runs or is kept, and how soon each that runs goes.
-pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidates: Vec<Shard>, boxes_of: &dyn Fn(Os) -> usize, going: &BTreeSet<String>) -> Result<(Vec<Shard>, Vec<(String, String)>, BTreeMap<String, Urgency>), String> {
+/// runs or is kept, and how soon each that runs goes. A smoke shard red in its last run (`red`,
+/// [`red_smokes`]) runs there again while that OS has a box, a proof elsewhere or not: its red is
+/// answered where it was seen. Rotated to another OS, Linux reds of the pdf viewer and Fab stayed
+/// STILL FAILING a day after both apps passed on macOS and Windows (11-18).
+pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidates: Vec<Shard>, boxes_of: &dyn Fn(Os) -> usize, going: &BTreeSet<String>, red: &BTreeSet<String>) -> Result<(Vec<Shard>, Vec<(String, String)>, BTreeMap<String, Urgency>), String> {
     let mut changes = Changes::new();
     let mut urgency = BTreeMap::new();
     let mut by_unit: BTreeMap<Unit, Vec<Shard>> = BTreeMap::new();
@@ -1463,14 +1569,15 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
     let (mut out, mut lines) = (Vec::new(), Vec::new());
     for (unit, options) in by_unit {
         let proofs = proofs_at(tree, &unit)?;
-        if let Some((sh, proof)) = options.iter().find_map(|sh| proofs.get(&(unit.section.clone(), sh.os)).filter(|p| p.digest == digests.of(&unit, sh.os)).map(|p| (sh, p))) {
+        let red_here = options.iter().find(|s| red.contains(&s.id) && boxes_of(s.os) > 0).cloned();
+        if let Some((sh, proof)) = options.iter().filter(|_| red_here.is_none()).find_map(|sh| proofs.get(&(unit.section.clone(), sh.os)).filter(|p| p.digest == digests.of(&unit, sh.os)).map(|p| (sh, p))) {
             lines.push((sh.id.clone(), format!("kept: proof on {} from {} {}", sh.os.as_str(), proof.pair.short(), proof.date)));
             out.push(sh.clone());
             continue;
         }
         let changed = changed_paths(repo, pair, newest(&proofs, &unit.section), digests.closures.get(&unit), &mut changes);
         let only_os = changed.iter().map(|p| os_of_path(p)).collect::<Option<BTreeSet<Os>>>().filter(|s| s.len() == 1).and_then(|s| s.into_iter().next());
-        let pick = match options.iter().find(|s| going.contains(&s.id)).or_else(|| only_os.and_then(|os| options.iter().find(|s| s.os == os))) {
+        let pick = match options.iter().find(|s| going.contains(&s.id)).or(red_here.as_ref()).or_else(|| only_os.and_then(|os| options.iter().find(|s| s.os == os))) {
             Some(s) => s.clone(),
             None => {
                 let load = |os: Os| *assigned.get(&os).unwrap_or(&0) as f64 / boxes_of(os).max(1) as f64;
@@ -1488,11 +1595,25 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
             }
             None => (format!("runs on {}: no proof", pick.os.as_str()), Urgency::New),
         };
+        let why = if red_here.as_ref().is_some_and(|r| r.id == pick.id) { format!("{why}; red there in its last run") } else { why };
         urgency.insert(pick.id.clone(), soon);
         lines.push((pick.id.clone(), why));
         out.push(pick);
     }
     Ok((out, lines, urgency))
+}
+
+/// The smoke shards (`smoke:<os>:<dir>`) whose last verdict, in the rolling verifier's finished
+/// runs (`runs`, oldest first; a calling checkout's or a CLI run's are other code), was a fail:
+/// each runs on its OS again ([`select`]).
+pub fn red_smokes(runs: &[crate::state::CiRun]) -> BTreeSet<String> {
+    let (mut seen, mut red) = (BTreeSet::new(), BTreeSet::new());
+    for run in runs.iter().rev().filter(|r| r.checkout.is_empty() && !r.dry) {
+        for sh in run.shards.iter().filter(|s| s.id.starts_with("smoke:") && (s.state == "ok" || s.state == "fail")) {
+            if seen.insert(sh.id.as_str()) && sh.state == "fail" { red.insert(sh.id.clone()); }
+        }
+    }
+    red
 }
 
 /// The live replays: fixtures run through `makepad run`, `makepad test` and the check server (in
@@ -1502,10 +1623,13 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
 /// had ever logged, and four `--allow-c` ones that failed read as nothing wrong). Like every live
 /// shard they read the JIT's crates ([`units_of`]), so a run takes them again when those move.
 /// `rotation` picks the app of the replay and the rebuild. A shard's guess is its time in one run
-/// on a Linux box on 11-14 (the CI's own timing replaces it after its first run; the replay's is
-/// the CI's); the Windows ones and the `--allow-c` ones did not run then and keep a guess.
+/// on a Linux box on 11-14 (the CI's own timing replaces it after its first run); the Windows ones
+/// and the `--allow-c` ones did not run then and keep a guess. The replay's estimate is its app's
+/// measured time per landing times the landings it takes ([`replay_key`]).
 fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64) -> Vec<Shard> {
     let app = REPLAY_APPS[rotation as usize % REPLAY_APPS.len()];
+    let count = REPLAY_COUNT.to_string();
+    let replay_est = timing(&replay_key(app)).unwrap_or(REPLAY_LANDING_GUESS) * REPLAY_COUNT as f64;
     let mut rebuild = vec!["python3", "tools/run/fixture/live_replay.py", "--host", "--app", app];
     if rotation % 2 == 0 {
         rebuild.push("--wm");
@@ -1622,7 +1746,7 @@ fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64
         // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
         // new landing's to clear, so a miss reports and does not fail the run), and a landing into
         // what makepad is built from (offer, click, back), under a WM every other run, which gates
-        ("live:replay", screen, linux, true, Judge::Report, vec!["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", "40"], 1793.0),
+        (REPLAY, screen, linux, true, Judge::Report, vec!["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", count.as_str()], replay_est),
         ("live:rebuild", screen, linux, true, exit, rebuild, 336.0),
     ];
     // a live shard on Linux builds the JIT its script runs first, in its own step: on a box whose
@@ -1632,7 +1756,7 @@ fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64
     // first shard ([`tool_first`]); this step is then a no-op
     let shard = |id: &str, kind, os, gui, judge, step: &[&str], secs: f64, dirs| {
         let build = (os == Os::Linux && id.starts_with("live:")).then(|| argv(&["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad"]));
-        Shard { id: id.to_string(), kind, os, gui, gpu: false, steps: build.into_iter().chain([argv(step)]).collect(), judge, est: timing(id).unwrap_or(secs), dirs, whole: false, cores: None }
+        Shard { id: id.to_string(), kind, os, gui, gpu: false, steps: build.into_iter().chain([argv(step)]).collect(), judge, est: if id == REPLAY { secs } else { timing(id).unwrap_or(secs) }, dirs, whole: false, cores: None }
     };
     // a tree without a row's file (a bisect's baseline) has no shard for it
     let mut out: Vec<Shard> = rows.into_iter().filter(|r| r.5.iter().find(|a| a.contains('/')).is_some_and(|f| tree.has(f))).map(|(id, kind, os, gui, judge, step, secs)| shard(id, kind, os, gui, judge, &step, secs, None)).collect();
@@ -2006,13 +2130,26 @@ pub fn check_errors(log: &str) -> Option<u64> {
     log.lines().rev().find_map(|l| l.trim_end().strip_suffix(" errors").and_then(|h| h.rsplit([' ', ',']).next()).and_then(|n| n.parse().ok()))
 }
 
+/// The rows a fixture named failed, one `CI-FAILED <row id>: <why>` line each ([`judge`] names
+/// them in a failed step's summary, ci_status.rs `error_lines` takes them as its errors): live_kinds
+/// said only "exit 1", and the rustc errors its refused edits print by design stood as the leg's
+/// errors, while the row that failed (`const_assoc`) was a line in a fixture's tail (11-18).
+pub fn failed_rows(log: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in log.lines().filter_map(|l| l.trim_start().strip_prefix("CI-FAILED ")).map(|r| r.split_once(": ").map_or(r, |(id, _)| id).trim()) {
+        if !id.is_empty() && !out.iter().any(|o| o == id) { out.push(id.to_string()); }
+    }
+    out
+}
+
 /// A step's verdict and summary from its exit code and output.
 pub fn judge(judge: Judge, step: &str, exit: i32, log: &str) -> (bool, String) {
     if judge == Judge::Report && exit == 3 {
         return (true, log.lines().rev().find(|l| l.contains("pass rate")).unwrap_or(step).to_string());
     }
     if exit != 0 {
-        let names = if judge == Judge::Tests { crate::lease::master::failed_names(log) } else { Vec::new() };
+        let mut names = if judge == Judge::Tests { crate::lease::master::failed_names(log) } else { Vec::new() };
+        names.extend(failed_rows(log));
         return (false, if names.is_empty() { format!("{step}: exit {exit}") } else { format!("{step}: exit {exit}: {}", names.join(", ")) });
     }
     match judge {
@@ -2980,7 +3117,8 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         let was: BTreeSet<String> = going.as_ref().map(|r| r.shards.iter().map(|s| s.id.clone()).collect()).unwrap_or_default();
         let (apps, others): (Vec<Shard>, Vec<Shard>) = shards.into_iter().partition(|s| s.id.starts_with("smoke:"));
         let (macs, apps): (Vec<Shard>, Vec<Shard>) = apps.into_iter().partition(|s| arm.full && s.os == Os::Macos);
-        match select(&ctx.repo, pair, &tree, &digests, apps, &|os| bs.iter().filter(|b| b.os == os).count(), &was) {
+        let red = ctx.store.read(|d| red_smokes(&d.ci.runs));
+        match select(&ctx.repo, pair, &tree, &digests, apps, &|os| bs.iter().filter(|b| b.os == os).count(), &was, &red) {
             Ok((picked, lines, soon)) => { shards = picked; why_lines = lines; urgency = soon; }
             Err(e) => {
                 ctx.store.event("ci", Sev::Err, e, None);
@@ -3185,9 +3323,9 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                     continue;
                 }
                 let ran = wall_ms().saturating_sub(s.granted_ms) / 1000;
-                if ran as f64 >= (g.shards[i].est * OVERDUE_TIMES).clamp(OVERDUE_MIN_SECS, OVERDUE_MAX_SECS) {
+                if ran as f64 >= overdue_secs(g.shards[i].est) {
                     let step = g.shards[i].steps.get(s.step as usize).map(|st| step_name(st)).unwrap_or_default();
-                    let line = format!("overdue: running {} min (measured {:.0} s), at {step} on {}", ran / 60, g.shards[i].est, s.node);
+                    let line = format!("{OVERDUE}running {} min (measured {:.0} s), at {step} on {}", ran / 60, g.shards[i].est, s.node);
                     ctx.store.event("ci", Sev::Err, format!("ci {}: {} {line}; the run goes on without it (it is not stopped)", pair.short(), s.id), None);
                     g.overdue[i] = true;
                     g.state[i].state = "fail".into();
@@ -3467,7 +3605,8 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
             }
         };
         let (whole, cores) = (shard.whole, shard.cores);
-        let held = match Held::acquire_with(&spec, &|r| { r.whole = whole; r.cores = cores; }, &mut queued, &stop) {
+        let est_min = declares_est(&shard).then(|| shard.est / 60.0);
+        let held = match Held::acquire_with(&spec, &|r| { r.whole = whole; r.cores = cores; r.est_min = est_min; }, &mut queued, &stop) {
             Ok(h) => h,
             Err(e) => {
                 // busy or held: the shard goes back, this box rests a while; a request that only
@@ -3727,7 +3866,11 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         cv.notify_all();
         return true;
     }
-    let errors = if state == "fail" { super::ci_status::error_lines(&std::fs::read_to_string(&log_path).unwrap_or_default()) } else { Vec::new() };
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    if let Some((key, per)) = replay_measure(&shard, &log, secs).filter(|_| state != "incomplete") {
+        ctx.store.update(|d| d.ci.measured(&key, per)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
+    }
+    let errors = if state == "fail" { super::ci_status::error_lines(&log) } else { Vec::new() };
     let bs = boxes(ctx);
     let mut g = p.lock().unwrap();
     g.reserved[i] = None;
@@ -4390,6 +4533,29 @@ fn batch_tests(shards: Vec<Shard>, lines: &mut Vec<(String, String)>, urgency: &
     out
 }
 
+/// The committed proofs at `tree` of each CI leg of `legs`, by the leg's units: each unit's proofs
+/// on the leg's OS (a Linux and a macOS one for a leg of any OS), as [`kept_shard`] reads them. A
+/// proof is written only by a run that passed the leg at its inputs, so one from a run at a tip
+/// after a red says the leg passed since (the CI bucket's reds, bucket.rs `ci_reds`). A leg no plan
+/// at `tree` has is left out.
+pub fn leg_proofs(tree: &Tree, legs: &[&str]) -> BTreeMap<String, Vec<Vec<Proof>>> {
+    let mut shards: Vec<Shard> = plan(tree, &|_| None, 0).into_iter().chain(live_replays(tree, &|_| None, 0)).collect();
+    if legs.iter().any(|leg| !shards.iter().any(|s| s.id == *leg)) {
+        shards.extend(sweep_plan(tree, &|_| None, 0).into_iter().chain(test_shards(tree, &|_| None)));
+    }
+    let mut out = BTreeMap::new();
+    for leg in legs {
+        let Some(sh) = shards.iter().find(|s| s.id == *leg) else { continue };
+        let oses = if sh.os == Os::Any { vec![Os::Linux, Os::Macos] } else { vec![sh.os] };
+        let units: Vec<Vec<Proof>> = units_of(sh).iter().map(|unit| {
+            let proofs = proofs_at(tree, unit).unwrap_or_default();
+            oses.iter().filter_map(|os| proofs.get(&(unit.section.clone(), *os)).cloned()).collect()
+        }).collect();
+        if !units.is_empty() { out.insert(leg.to_string(), units); }
+    }
+    out
+}
+
 fn kept_shard(tree: &Tree, dg: &Digests, sh: &Shard) -> Result<Option<String>, String> {
     let units = units_of(sh);
     if units.is_empty() {
@@ -4417,7 +4583,7 @@ pub fn status(repo: &Path) -> Result<Value, String> {
         if proofs_at(&tree, &unit)?.keys().any(|(section, _)| *section == unit.section) { units.push(unit); }
     }
     let dg = Digests::at(repo, &tree, &units)?;
-    let (picked, lines, _) = select(repo, &pair, &tree, &dg, apps, &|_| 1, &BTreeSet::new())?;
+    let (picked, lines, _) = select(repo, &pair, &tree, &dg, apps, &|_| 1, &BTreeSet::new(), &BTreeSet::new())?;
     let mut dirty = BTreeMap::new();
     let mut changes = Changes::new();
     for sh in picked.iter().chain(&tests) {
@@ -4923,6 +5089,27 @@ mod tests {
         }
     }
 
+    /// A smoke shard red in the verifier's last run of it runs there again ([`select`]); a pass
+    /// there since answers it, another OS's pass does not, and a lane's or a CLI run's are other
+    /// code. Linux reds of two apps stayed STILL FAILING once their next runs rotated to macOS and
+    /// Windows and passed there (11-18).
+    #[test]
+    fn a_smoke_red_on_an_os_runs_there_again_until_it_passes_there() {
+        let run = |shards: &[(&str, &str)], checkout: &str, dry: bool| CiRun {
+            checkout: checkout.into(), dry,
+            shards: shards.iter().map(|(id, state)| CiShard { id: (*id).into(), state: (*state).into(), ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        let runs = vec![
+            run(&[("smoke:linux:apps/pdf", "fail"), ("smoke:linux:apps/fab", "fail"), ("smoke:linux:apps/wm", "fail"), ("live:kinds", "fail")], "", false),
+            run(&[("smoke:macos:apps/pdf", "ok"), ("smoke:linux:apps/fab", "ok"), ("smoke:linux:apps/wm", "incomplete")], "", false),
+            run(&[("smoke:linux:apps/pdf", "ok"), ("smoke:windows:apps/term", "fail")], "", true),
+            run(&[("smoke:linux:apps/pdf", "ok")], "/a/lane", false),
+        ];
+        let want: BTreeSet<String> = ["smoke:linux:apps/pdf", "smoke:linux:apps/wm"].into_iter().map(String::from).collect();
+        assert_eq!(red_smokes(&runs), want, "a pass on macOS, a CLI run's or a lane's answers no Linux red; an incomplete run is no verdict");
+    }
+
     #[test]
     fn gate_and_sweep_publish_and_resume_independently() {
         let run = |id: &str, sweep| CiRun {
@@ -5217,6 +5404,35 @@ shared = { workspace = true }
             let builds = s.steps.len() == 2 && s.steps[0].join(" ") == "cargo build --profile host -q -p makepad-run --bin makepad";
             assert_eq!(builds, s.os == Os::Linux && s.id.starts_with("live:"), "{}: {:?}", s.id, s.steps);
         }
+    }
+
+    /// The live replay is estimated at its app's measured time per landing times the landings it
+    /// takes, and its lease declares that, so a 40-landing replay of 3 min landings is not stalled
+    /// at 15 min against the live shards' shared class measure (L1402816, 11-19); its finished log
+    /// measures the time per landing it judged; its CI overdue line is past twice its estimate.
+    #[test]
+    fn the_live_replay_is_estimated_per_landing_and_declares_it() {
+        let t = Tree::mem(vec![("tools/run/fixture/live_replay.py", ""), ("tools/run/fixture/live_kinds.py", "")]);
+        let replay = |timing: &dyn Fn(&str) -> Option<f64>| live_replays(&t, timing, 0).into_iter().find(|s| s.id == REPLAY).unwrap();
+        let app = REPLAY_APPS[0];
+        let guessed = replay(&|_| None);
+        assert_eq!(guessed.est, REPLAY_LANDING_GUESS * 40.0, "no measure: the guess per landing times 40");
+        assert!(guessed.steps.last().unwrap().join(" ").ends_with(&format!("--app {app} --count 40")), "{:?}", guessed.steps);
+        let key = replay_key(app);
+        let measured = replay(&|id| if id == key { Some(75.0) } else if id == REPLAY { Some(1793.0) } else { None });
+        assert_eq!(measured.est, 3000.0, "its app's 75 s per landing times 40, not its whole run's measure");
+        let kinds = live_replays(&t, &|_| None, 0).into_iter().find(|s| s.id == "live:kinds").unwrap();
+        assert!(declares_est(&measured) && !declares_est(&kinds), "only the replay's lease declares its estimate");
+        let log = "live_replay: makepad-app-storybook, 40 landings, kept at this tree: libs/relax\n\
+                   1a2b3c4d5e pass      applied   edit       {'boot': 3.1, 'total': 41.0}\n\
+                   1a2b3c4d5e quit hangs: 12 s\n\
+                   0f9e8d7c6b fail      restart   panic      {} app: panicked\n\
+                   \x20 the relaunch with no edit moved (skipped as state): x\n\
+                   live_replay: makepad-app-storybook pass rate 50% (1/2 judged; 1 fail)\n";
+        assert_eq!(replay_measure(&measured, log, 300.0), Some((key.clone(), 150.0)), "300 s over the 2 landings it judged");
+        assert_eq!(replay_measure(&measured, "live_replay: makepad-app-storybook, 40 landings\nerror: no build\n", 300.0), None, "a replay that judged none measures nothing");
+        assert_eq!(replay_measure(&kinds, log, 300.0), None, "another shard's log is no replay's");
+        assert_eq!([120.0, 400.0, 1000.0, 7200.0].map(overdue_secs), [1800.0, 4000.0, 7200.0, 14400.0], "overdue: 10x within 30 min to 2 h, or twice an estimate past that");
     }
 
     #[test]
@@ -5635,6 +5851,11 @@ shared = { workspace = true }
     #[test]
     fn steps_are_judged_by_exit_warnings_and_error_counts() {
         assert_eq!(judge(Judge::Exit, "x", 1, "").0, false);
+        // a fixture's failed rows, by its CI-FAILED lines: their ids, once each, in its summary
+        let kinds = "type_error  refused  yes  w4/pkg/src/kinds.rs:178:26: E0308: mismatched types\nCI-FAILED cache_warm_const_edit/const_assoc: RESTART, MUST LAND 308 ms\nCI-FAILED live_closure_owner_app: exit 1: boom\nCI-FAILED cache_warm_const_edit/const_assoc: again\n";
+        assert_eq!(failed_rows(kinds), ["cache_warm_const_edit/const_assoc", "live_closure_owner_app"]);
+        assert_eq!(judge(Judge::Exit, "python3 live_kinds.py", 1, kinds), (false, "python3 live_kinds.py: exit 1: cache_warm_const_edit/const_assoc, live_closure_owner_app".to_string()));
+        assert_eq!(super::super::ci_status::error_lines(kinds), ["CI-FAILED cache_warm_const_edit/const_assoc: RESTART, MUST LAND 308 ms", "CI-FAILED live_closure_owner_app: exit 1: boom", "CI-FAILED cache_warm_const_edit/const_assoc: again"], "a refused edit's rustc error, there by design, is none of the leg's errors");
         assert!(!judge(Judge::Tests, "x", 0, "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured\n").0);
         assert!(judge(Judge::Tests, "x", 0, "test result: ok. 0 passed; 0 failed\ntest result: ok. 3 passed; 0 failed\n").0);
         assert!(!judge(Judge::Tests, "cargo test --release -p x", 101, "test result: ok. 3 passed; 0 failed\nerror: could not compile `x`\n").0);

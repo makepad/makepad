@@ -855,6 +855,9 @@ pub struct Live {
     /// with no call or save
     pub left_ms: u64,
     pub ended_ms: u64,
+    /// The timed lease it was parked for while in use: once that lease ends it starts again by
+    /// itself, under its id ([`crate::lease::sched::Sched::park_live`]); empty: none.
+    pub resume_after: String,
     /// the last edit: files, when saved, shipped, patched (or refused), the first frame after
     pub patch: Option<LivePatch>,
     /// when a save first waited for a restart (0: none waits), how many have since and why the
@@ -1341,12 +1344,18 @@ pub struct Doc {
     /// why the land rule is switched off (empty: it runs; `devhub land rule on|off`): off, no
     /// landing runs it and the master neither builds nor ticks its binary ([`crate::gate`])
     pub land_rule_off: String,
+    /// the land rule's ledger witness as the last landing left it ([`crate::gate::witness_of`];
+    /// empty: none yet), handed to its next run; the user's `land rule off` drops it, so the first
+    /// landing after `on` starts a fresh one
+    pub land_witness: String,
     /// the merge bot's last result per lane half (`sync/lanes.rs`'s lanes, as their JSON)
     pub merges: Vec<Value>,
     /// the branches the merge bot keeps off (`devhub hold`): (branch, why)
     pub held: Vec<(String, String)>,
     /// the last pre-warm record per node (`sync/prewarm.rs`)
     pub prewarm: Vec<Value>,
+    /// each Mac node's dock build: on or off, asked, its last run (`orch/dockbuild.rs`'s JSON)
+    pub dockbuild: Vec<Value>,
     /// the JIT warm plan, spares and running legs (`orch/warm.rs`'s, as its JSON): a master
     /// restart takes each leg back on its lease
     pub warm: Option<Value>,
@@ -1398,9 +1407,11 @@ impl Doc {
             ("land", Value::Arr(self.land.clone())),
             ("land_paused", s(&self.land_paused)),
             ("land_rule_off", s(&self.land_rule_off)),
+            ("land_witness", s(&self.land_witness)),
             ("merges", Value::Arr(self.merges.clone())),
             ("held", Value::Arr(self.held.iter().map(|(b, w)| obj(vec![("branch", s(b)), ("why", s(w))])).collect())),
             ("prewarm", Value::Arr(self.prewarm.clone())),
+            ("dockbuild", Value::Arr(self.dockbuild.clone())),
             ("warm", self.warm.clone().unwrap_or(Value::Null)),
         ])
     }
@@ -1447,9 +1458,11 @@ impl Doc {
             land: arr(Some(v), "land").to_vec(),
             land_paused: text(Some(v), "land_paused"),
             land_rule_off: text(Some(v), "land_rule_off"),
+            land_witness: text(Some(v), "land_witness"),
             merges: arr(Some(v), "merges").to_vec(),
             held: arr(Some(v), "held").iter().map(|h| (text(Some(h), "branch"), text(Some(h), "why"))).filter(|(b, _)| !b.is_empty()).collect(),
             prewarm: arr(Some(v), "prewarm").to_vec(),
+            dockbuild: arr(Some(v), "dockbuild").to_vec(),
             warm: v.get("warm").filter(|w| !matches!(w, Value::Null)).cloned(),
         }
     }
@@ -1807,6 +1820,7 @@ fn live_state_value(x: &Live) -> Value {
         ("series", s(&x.series)),
         ("pin_why", s(&x.pin_why)),
         ("joins", s(&x.joins)),
+        ("resume_after", s(&x.resume_after)),
         ("visible", Value::Bool(x.visible)),
         ("lease", s(&x.lease)),
         ("node", s(&x.node)),
@@ -1876,6 +1890,7 @@ fn live_state_from(v: &Value) -> Live {
         series: text(o, "series"),
         pin_why: text(o, "pin_why"),
         joins: text(o, "joins"),
+        resume_after: text(o, "resume_after"),
         visible: flag(o, "visible", false),
         lease: text(o, "lease"),
         node: text(o, "node"),
@@ -2731,9 +2746,11 @@ mod tests {
             land: vec![makepad_strict_json::parse(br#"{"id":4,"branch":"rc-x","state":"queued"}"#).unwrap()],
             land_paused: "user review".into(),
             land_rule_off: "user review".into(),
+            land_witness: "ports.jsonl=1:aa".into(),
             merges: vec![makepad_strict_json::parse(br#"{"branch":"rc-x","repo":"makepad","result":"merged"}"#).unwrap()],
             held: vec![("rc-h".into(), "a viewer rebuild".into())],
             prewarm: vec![makepad_strict_json::parse(br#"{"node":"node-a","sev":"info","line":"prewarm: done","at_ms":5}"#).unwrap()],
+            dockbuild: vec![makepad_strict_json::parse(br#"{"node":"node-m","on":true,"apps":[{"app":"clock","build":"current"}]}"#).unwrap()],
             warm: Some(makepad_strict_json::parse(br#"{"plan":null,"spares":{"generation":2},"legs":[]}"#).unwrap()),
         };
         let text = doc.to_value().to_json();

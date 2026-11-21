@@ -5,10 +5,9 @@
 //! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; CI only with `slots.ci`),
 //! `disk_floor_gb` (its warning follows the JIT's floor: [`super::disk::warn_gb`]), `timed = on|off|spare` (`spare`: a pool box that takes a timed lease
 //! while the bench boxes that meet it are taken by timed work), `spec = <text>`, `work = <dir>` (default
-//! [`WORK_DIR`] in home), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
-//! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
-//! takes work again, [`super::UserSense`]).
-//! `native_trees` (default 3) bounds per-lane native trees and their targets.
+//! [`WORK_DIR`] in home) and CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`).
+//! `native_trees` (default 3) bounds per-lane native trees and their targets. A box leaves the
+//! dev pool only by its dev switch: no key here makes a person's input take it out.
 
 use super::{Caps, HotTemp, Kind, Role, Temp};
 use std::collections::BTreeMap;
@@ -32,12 +31,8 @@ pub struct LeaseConf {
     /// taskset CPU lists for shared kinds and for `timed` (empty: no pinning)
     pub cpus_shared: String,
     pub cpus_timed: String,
-    /// minutes without a person's input before the node takes work again
-    pub user_idle_min: u32,
 }
 
-/// `user_idle_min`'s default.
-pub const USER_IDLE_MIN: u32 = 3;
 pub const NATIVE_TREES: u32 = 3;
 
 pub fn home_dir() -> PathBuf {
@@ -70,7 +65,6 @@ impl LeaseConf {
             native_trees: NATIVE_TREES,
             cpus_shared: String::new(),
             cpus_timed: String::new(),
-            user_idle_min: USER_IDLE_MIN,
         };
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -85,7 +79,6 @@ impl LeaseConf {
                 "native_trees" => c.native_trees = v.parse().unwrap_or(c.native_trees),
                 "cpus.shared" if valid_cpus(v) => c.cpus_shared = v.to_string(),
                 "cpus.timed" if valid_cpus(v) => c.cpus_timed = v.to_string(),
-                "user_idle_min" => c.user_idle_min = v.parse().ok().filter(|m| *m >= 1).unwrap_or(c.user_idle_min),
                 _ => {
                     if let (Some(kind), Ok(n)) = (k.strip_prefix("slots.").and_then(Kind::parse), v.parse::<u32>()) {
                         c.slots.retain(|(x, _)| *x != kind);
@@ -116,10 +109,9 @@ pub fn settable(key: &str, value: &str) -> Result<(), String> {
         "timed" => matches!(value, "on" | "off" | "spare").then_some(()).ok_or_else(|| "timed = on|off|spare".to_string()),
         "spec" => (!value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_graphic())).then_some(()).ok_or_else(|| "spec: one word".to_string()),
         "cpus.shared" | "cpus.timed" => (value.is_empty() || valid_cpus(value)).then_some(()).ok_or_else(|| format!("{key}: a CPU list like 8-15,24-31")),
-        "user_idle_min" => value.parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).map(|_| ()).ok_or_else(|| "user_idle_min: whole minutes, 1..1440".to_string()),
         k => match k.strip_prefix("slots.").and_then(Kind::parse) {
             Some(_) => value.parse::<u32>().map(|_| ()).map_err(|_| format!("{key} takes a count")),
-            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, native_trees, disk_floor_gb, timed, spec, cpus.shared, cpus.timed, user_idle_min)")),
+            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, native_trees, disk_floor_gb, timed, spec, cpus.shared, cpus.timed)")),
         },
     }
 }
@@ -308,6 +300,8 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.hub_building = super::exec::hub_building();
     #[cfg(feature = "checkout")]
     { c.wm_drain = crate::sync::serve::wm_drain(); }
+    #[cfg(feature = "checkout")]
+    { (c.stale, c.stale_since_ms) = crate::sync::serve::stale_runs(&crate::sync::SyncConf::load().checkout, crate::proto::wall_ms()); }
     #[cfg(feature = "checkout")]
     { c.prewarming = crate::sync::prewarm::running(); }
     #[cfg(feature = "checkout")]
@@ -634,6 +628,19 @@ pub fn parse_loadavg(text: &str) -> f64 {
     text.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0.0)
 }
 
+/// The ns its tasks waited for a CPU, summed over the CPUs of `/proc/schedstat` (each `cpuN`
+/// line's eighth count, the run delay); None without such lines.
+pub fn parse_schedstat_wait(text: &str) -> Option<u64> {
+    let per_cpu: Vec<u64> = text.lines().filter(|l| l.starts_with("cpu")).filter_map(|l| l.split_whitespace().nth(8)?.parse().ok()).collect();
+    (!per_cpu.is_empty()).then(|| per_cpu.iter().sum())
+}
+
+/// The tasks that waited for a CPU on average between two looks at [`parse_schedstat_wait`]'s
+/// sums `secs` apart.
+pub fn cpu_wait(before: u64, after: u64, secs: f64) -> Option<f64> {
+    (secs > 0.0 && after >= before).then(|| (after - before) as f64 / 1e9 / secs)
+}
+
 /// Chip limits may replace a class default only nearby; low DIMM maxima are not load alerts.
 fn temp_limit(chip: &str, label: &str, max: Option<f64>, crit: Option<f64>) -> Option<f64> {
     let default = match chip {
@@ -794,9 +801,17 @@ mod os {
             (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
             _ => None,
         };
+        // and the tasks that waited for a CPU meanwhile: the demand past the cores
+        static WAITED: std::sync::Mutex<Option<(std::time::Instant, u64)>> = std::sync::Mutex::new(None);
+        let waited = parse_schedstat_wait(&read("/proc/schedstat")).map(|ns| (std::time::Instant::now(), ns));
+        let cpu_wait = match (std::mem::replace(&mut *WAITED.lock().unwrap(), waited), waited) {
+            (Some((t0, a)), Some((t1, b))) => cpu_wait(a, b, t1.duration_since(t0).as_secs_f64()),
+            _ => None,
+        };
         Caps {
             temps,
             cpu_pct,
+            cpu_wait,
             gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
             arch: std::env::consts::ARCH.to_string(),
             os: std::env::consts::OS.to_string(),
@@ -1399,6 +1414,12 @@ mod tests {
         let (t, a) = parse_meminfo("MemTotal:       65536000 kB\nMemFree:  100 kB\nMemAvailable:   32768000 kB\n");
         assert!((t - 62.5).abs() < 0.01 && (a - 31.25).abs() < 0.01);
         assert_eq!(parse_loadavg("3.52 2.10 1.00 2/900 1234\n"), 3.52);
+        // the run delay is each cpu line's eighth count; the domain lines under it are not CPUs
+        let sched = "version 15\ntimestamp 4295\ncpu0 0 0 9 4 7 3 5000 2000000000 40\ndomain0 00000003 1 2 3\ncpu1 0 0 9 4 7 3 6000 1000000000 41\n";
+        assert_eq!(parse_schedstat_wait(sched), Some(3_000_000_000));
+        assert_eq!(parse_schedstat_wait("version 15\n"), None, "a kernel without its CPUs' lines");
+        assert_eq!(cpu_wait(3_000_000_000, 63_000_000_000, 10.0), Some(6.0), "60 s waited over 10 s: six tasks waiting on average");
+        assert_eq!(cpu_wait(5, 4, 10.0), None, "a sum that went back (the counters reset)");
         let psi = "some avg10=31.20 avg60=4.00 avg300=1.00 total=99\nfull avg10=14.20 avg60=3.10 avg300=0.80 total=88\n";
         assert_eq!(parse_psi_full(psi), 14.2, "the full line's avg10, not the some line's");
         assert_eq!(parse_psi_full(""), 0.0, "a kernel without PSI");

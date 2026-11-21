@@ -30,9 +30,6 @@ fn layer(repo: &str, commit: &str, what: &str, e: impl std::fmt::Display) -> Str
 /// The refs of CI overlay lanes (one lane per pin, `ci-<hash>`) and how many of them a store keeps.
 const CI_REF: &str = "devhub:ci-";
 const CI_REFS_KEPT: usize = 8;
-/// The landing train's re-checks' (one lane per pin, `land-recheck-<hash>`), kept as CI's are: a
-/// hundred a day would push every lane's own ref out of the newest [`LANE_REFS_KEPT`].
-const RECHECK_REF: &str = "devhub:land-recheck-";
 /// The other lanes' refs a store keeps (newest first), besides those with a live lease.
 pub const LANE_REFS_KEPT: usize = 12;
 
@@ -78,10 +75,10 @@ fn kept_refs(refs: &[Ref], live: &HashSet<String>) -> Vec<Ref> {
     }
     let mut kept: Vec<Ref> = newest.into_values().collect();
     kept.sort_by(|a, b| b.time.cmp(&a.time));
-    let (mut ci, mut rechecks, mut lanes) = (0, 0, 0);
+    let (mut ci, mut lanes) = (0, 0);
     kept.retain(|r| {
         let lane = r.key.strip_prefix("devhub:").unwrap_or(&r.key);
-        let (n, cap) = if r.key.starts_with(CI_REF) { (&mut ci, CI_REFS_KEPT) } else if r.key.starts_with(RECHECK_REF) { (&mut rechecks, CI_REFS_KEPT) } else { (&mut lanes, LANE_REFS_KEPT) };
+        let (n, cap) = if r.key.starts_with(CI_REF) { (&mut ci, CI_REFS_KEPT) } else { (&mut lanes, LANE_REFS_KEPT) };
         *n += 1;
         *n <= cap || live.contains(lane)
     });
@@ -447,19 +444,16 @@ mod tests {
         let r = |key: &str, time: u64| Ref { key: format!("devhub:{key}"), commit: [time as u8; 20], time };
         let mut refs: Vec<Ref> = (0..30).map(|t| r(&format!("lane{t}"), t)).collect();
         refs.extend((0..12).map(|t| r(&format!("ci-{t}"), 100 + t)));
-        refs.extend((0..12).map(|t| r(&format!("land-recheck-{t}"), 200 + t)));
         refs.push(r("lane29", 5));
         refs.push(Ref { key: "https://x#main".into(), commit: [9; 20], time: 1 });
         let live: HashSet<String> = ["lane0".to_string()].into();
         let kept = kept_refs(&refs, &live);
-        let lanes: BTreeSet<&str> = kept.iter().filter(|x| !x.key.starts_with(CI_REF) && !x.key.starts_with(RECHECK_REF)).map(|x| x.key.as_str()).collect();
+        let lanes: BTreeSet<&str> = kept.iter().filter(|x| !x.key.starts_with(CI_REF)).map(|x| x.key.as_str()).collect();
         // the 12 newest lanes, the live one however old, the newest ref per lane only
         let want: BTreeSet<String> = (18..30).map(|t| format!("devhub:lane{t}")).chain(["devhub:lane0".to_string()]).collect();
         assert_eq!(lanes, want.iter().map(String::as_str).collect());
         assert_eq!(kept.iter().find(|x| x.key == "devhub:lane29").unwrap().time, 29);
         assert_eq!(kept.iter().filter(|x| x.key.starts_with(CI_REF)).count(), CI_REFS_KEPT);
         assert!(kept.iter().filter(|x| x.key.starts_with(CI_REF)).all(|x| x.time >= 104), "the newest CI pins");
-        let rechecks: Vec<u64> = kept.iter().filter(|x| x.key.starts_with(RECHECK_REF)).map(|x| x.time).collect();
-        assert!(rechecks.len() == CI_REFS_KEPT && rechecks.iter().all(|t| *t >= 204), "the newest re-check pins, apart from the lanes': {rechecks:?}");
     }
 }

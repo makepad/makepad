@@ -253,6 +253,21 @@ pub(crate) fn test_package(repo: &Path, pair: &crate::state::Pair, pkg: &str) ->
     }
 }
 
+/// [`test_package`] in the whole tree of `pin`: a package of another nested repository it names
+/// (Source Library) too.
+pub(crate) fn test_package_at(repo: &Path, pin: &crate::lease::Pin, pkg: &str) -> Result<TestPackage, String> {
+    #[cfg(feature = "checkout")]
+    {
+        let repo = if repo.as_os_str().is_empty() { crate::orch::repo() } else { repo.to_path_buf() };
+        Ok(package_of(&crate::orch::ci::Tree::at_pin(&repo, pin)?, pkg))
+    }
+    #[cfg(not(feature = "checkout"))]
+    {
+        let _ = (repo, pin, pkg);
+        Ok(TestPackage::default())
+    }
+}
+
 /// The package a JIT `makepad test` command tests: the first word after `test` that is no option,
 /// as makepad test reads it (relax test_pkg.rs: `-p` / `--package` only mark it; an option before
 /// it may take a value).
@@ -348,7 +363,7 @@ pub(crate) fn jit_binary_packages(repo: &Path, pair: &crate::state::Pair) -> Res
 #[cfg(feature = "checkout")]
 pub(crate) fn touched_packages(repo: &Path, pin: &crate::lease::Pin, commits_only: bool) -> Result<Vec<String>, String> {
     let paths = touched_paths(repo, pin, commits_only)?;
-    Ok(packages_touched(&crate::orch::ci::Tree::at(repo, &pin.pair())?, &paths))
+    Ok(packages_touched(&crate::orch::ci::Tree::at_pin(repo, pin)?, &paths))
 }
 
 /// The paths of [`touched_packages`], for a caller that holds the tree already.
@@ -357,10 +372,19 @@ pub(crate) fn touched_paths(repo: &Path, pin: &crate::lease::Pin, commits_only: 
     use crate::orch::ci::COMMERCIAL;
     let pair = pin.pair();
     let mut paths = Vec::new();
-    for (dir, sha, branch, prefix) in [(repo.to_path_buf(), &pair.work, "refs/heads/work", ""), (repo.join(COMMERCIAL), &pair.main, "refs/heads/main", "apps/commercial/")] {
+    let mut sides = vec![(repo.to_path_buf(), pair.work.clone(), "refs/heads/work".to_string(), String::new()), (repo.join(COMMERCIAL), pair.main.clone(), "refs/heads/main".to_string(), "apps/commercial/".to_string())];
+    // a half in another followed nested repository the lane holds, since it left that one's branch
+    // (one the lane lacks is pinned at its tip, [`crate::nested::absent`]: nothing of the lane's)
+    let followed = crate::nested::tips(repo);
+    for (name, sha) in pin.nested.iter().filter(|(n, _)| *n != crate::state::PAIRED) {
+        if let Some((_, branch, _)) = followed.iter().find(|(n, _, _)| n == name) {
+            sides.push((repo.join(crate::nested::dir(name)), sha.clone(), format!("refs/heads/{branch}"), crate::nested::prefix(name)));
+        }
+    }
+    for (dir, sha, branch, prefix) in sides {
         if sha.is_empty() || !dir.join(".git").exists() { continue; }
-        let base = crate::orch::git(&dir, &["merge-base", sha, branch])?;
-        paths.extend(crate::orch::git(&dir, &["diff", "--name-only", base.trim(), sha])?.lines().map(|p| format!("{prefix}{p}")));
+        let base = crate::orch::git(&dir, &["merge-base", &sha, &branch])?;
+        paths.extend(crate::orch::git(&dir, &["diff", "--name-only", base.trim(), &sha])?.lines().map(|p| format!("{prefix}{p}")));
     }
     if !commits_only {
         let (files, deleted) = crate::lease::ship::uncommitted(repo, pin)?;
@@ -537,9 +561,8 @@ pub(crate) fn behind_work_jit(_: &Path, _: &crate::state::Pair) -> Option<String
 #[cfg(feature = "checkout")]
 pub(crate) fn crate_inputs(repo: &Path, pin: &crate::lease::Pin, pkg: &str) -> Result<String, String> {
     use crate::orch::ci::{package_dirs, Tree};
-    let pair = pin.pair();
-    let tree = Tree::at(repo, &pair)?;
-    let dir = package_dirs(&tree).remove(pkg).ok_or_else(|| format!("no package {pkg} at {}", pair.short()))?;
+    let tree = Tree::at_pin(repo, pin)?;
+    let dir = package_dirs(&tree).remove(pkg).ok_or_else(|| format!("no package {pkg} at {}", pin.short()))?;
     let dirs = crate::orch::roll::crate_dirs_from(&dir, &|p| tree.read(p));
     let under = |p: &str| ["Cargo.toml", ".cargo/config.toml"].contains(&p) || dirs.iter().any(|d| d.is_empty() || p.strip_prefix(d.as_str()).is_some_and(|rest| rest.starts_with('/')));
     let (edited, deleted) = crate::lease::ship::uncommitted(repo, pin)?;

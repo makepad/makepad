@@ -195,7 +195,7 @@ fn procs() -> std::collections::HashMap<u32, (String, u32, u32, u64, u64)> {
 
 /// The kernel's CPU ticks per second.
 #[cfg(target_os = "linux")]
-fn ticks_per_s() -> f64 {
+pub(crate) fn ticks_per_s() -> f64 {
     extern "C" {
         fn sysconf(name: i32) -> i64;
     }
@@ -422,27 +422,9 @@ pub fn processes() -> Vec<ProcRow> {
 #[cfg(target_os = "macos")]
 pub fn named() -> Vec<ProcRow> {
     extern "C" {
-        fn sysctl(name: *const i32, namelen: u32, oldp: *mut u8, oldlenp: *mut usize, newp: *const u8, newlen: usize) -> i32;
         fn proc_pidpath(pid: i32, buffer: *mut u8, size: u32) -> i32;
     }
-    // struct kinfo_proc (sys/sysctl.h), 648 bytes on 64-bit macOS: p_stat at 36 (5: a zombie),
-    // p_pid at 40, p_comm[17] at 243, kp_eproc's e_ppid at 560 and e_pgid at 564
-    const SIZE: usize = 648;
-    let mib = [1, 14, 0]; // CTL_KERN, KERN_PROC, KERN_PROC_ALL
-    let buf = loop {
-        let mut len = 0usize;
-        if unsafe { sysctl(mib.as_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null(), 0) } != 0 {
-            return Vec::new();
-        }
-        len += len / 8 + SIZE * 16;
-        let mut buf = vec![0u8; len];
-        // (the table grew between the two calls: ask again)
-        if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } == 0 {
-            buf.truncate(len);
-            break buf;
-        }
-    };
-    buf.chunks_exact(SIZE).filter(|k| k[36] != 5).filter_map(|k| {
+    kinfo_table().chunks_exact(KINFO_SIZE).filter(|k| k[36] != 5).filter_map(|k| {
         let int = |at: usize| i32::from_ne_bytes(k[at..at + 4].try_into().unwrap());
         let pid = int(40);
         (pid > 0).then_some(())?;
@@ -450,8 +432,7 @@ pub fn named() -> Vec<ProcRow> {
         // process was exec'd by. A path resolved from its file (proc_pidpath) names whichever hard
         // link of the file the system resolved last: a JIT run's file is the loader's, which other
         // programs' links share (relax selfexe.rs), so it counts only where it begins with p_comm.
-        let comm = &k[243..260];
-        let comm = String::from_utf8_lossy(&comm[..comm.iter().position(|b| *b == 0).unwrap_or(comm.len())]).into_owned();
+        let comm = kinfo_comm(k);
         let base = |full: &str| full.rsplit('/').next().unwrap_or(full).to_string();
         let mut path = [0u8; 4096];
         let n = unsafe { proc_pidpath(pid, path.as_mut_ptr(), path.len() as u32) };
@@ -463,6 +444,55 @@ pub fn named() -> Vec<ProcRow> {
         };
         Some(ProcRow { pid: pid as u32, ppid: int(560) as u32, pgid: int(564) as u32, name, ..Default::default() })
     }).collect()
+}
+
+/// `struct kinfo_proc` (sys/sysctl.h), 648 bytes on 64-bit macOS: p_starttime (a timeval) at 0,
+/// p_stat at 36 (5: a zombie), p_pid at 40, p_comm[17] at 243, kp_eproc's e_ppid at 560 and
+/// e_pgid at 564.
+#[cfg(target_os = "macos")]
+const KINFO_SIZE: usize = 648;
+
+/// macOS's `sysctl` process table (KERN_PROC_ALL): a `struct kinfo_proc` per process, other
+/// users' too; empty when the table cannot be read.
+#[cfg(target_os = "macos")]
+fn kinfo_table() -> Vec<u8> {
+    extern "C" {
+        fn sysctl(name: *const i32, namelen: u32, oldp: *mut u8, oldlenp: *mut usize, newp: *const u8, newlen: usize) -> i32;
+    }
+    let mib = [1, 14, 0]; // CTL_KERN, KERN_PROC, KERN_PROC_ALL
+    loop {
+        let mut len = 0usize;
+        if unsafe { sysctl(mib.as_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null(), 0) } != 0 {
+            return Vec::new();
+        }
+        len += len / 8 + KINFO_SIZE * 16;
+        let mut buf = vec![0u8; len];
+        // (the table grew between the two calls: ask again)
+        if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } == 0 {
+            buf.truncate(len);
+            return buf;
+        }
+    }
+}
+
+/// A `struct kinfo_proc`'s p_comm: the first 16 bytes of the name its exec gave it.
+#[cfg(target_os = "macos")]
+fn kinfo_comm(k: &[u8]) -> String {
+    let comm = &k[243..260];
+    String::from_utf8_lossy(&comm[..comm.iter().position(|b| *b == 0).unwrap_or(comm.len())]).into_owned()
+}
+
+/// When the newest live process named `comm` (its p_comm) started, in µs since the epoch as
+/// `makepad_remote::group::start_time` gives a process's start. The process table's start holds
+/// for another user's process too (the window server's), which libproc does not read. None: no
+/// such process.
+#[cfg(target_os = "macos")]
+pub fn newest_start(comm: &str) -> Option<u64> {
+    kinfo_table().chunks_exact(KINFO_SIZE).filter(|k| k[36] != 5 && kinfo_comm(k) == comm).map(|k| {
+        let sec = i64::from_ne_bytes(k[0..8].try_into().unwrap());
+        let usec = i32::from_ne_bytes(k[8..12].try_into().unwrap());
+        sec.max(0) as u64 * 1_000_000 + usec.max(0) as u64
+    }).max()
 }
 
 /// [`processes`]: off macOS the process table comes with CPU and RSS in place.
@@ -484,6 +514,11 @@ fn the_named_table_holds_other_users_processes_without_a_spawn() {
     assert_eq!((me.ppid, me.pgid), (unsafe { getppid() } as u32, unsafe { getpgrp() } as u32));
     assert!(!me.name.is_empty());
     assert!(rows.iter().any(|r| r.pid == 1 && r.name == "launchd"), "another user's process: {:?}", rows.iter().find(|r| r.pid == 1));
+    // its start too, on the clock a process's own start is read on: launchd's is the boot's
+    let mine = makepad_remote::group::start_time(std::process::id()).expect("this process's start");
+    let boot = newest_start("launchd").expect("launchd's start");
+    assert!(boot > 0 && boot < mine, "launchd started at {boot} µs, this process at {mine} µs");
+    assert_eq!(newest_start("no-such-process-name"), None);
 }
 
 /// The compilers among a look's `rows` ([`processes`]; `me`: the hub's pid) that run outside

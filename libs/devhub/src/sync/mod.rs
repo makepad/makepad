@@ -49,6 +49,8 @@ pub(crate) mod jits;
 pub mod lanes;
 #[cfg(feature = "checkout")]
 mod launch;
+#[cfg(feature = "checkout")]
+mod put;
 pub mod prewarm;
 #[cfg(feature = "checkout")]
 pub(crate) mod serve;

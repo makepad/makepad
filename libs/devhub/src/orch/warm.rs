@@ -3,7 +3,9 @@
 //! first, with one lane-priority leg per box using four cores, never held back by background
 //! admission or preemption: a box left out made the first live session there build the JIT itself
 //! (3-5 min, a fifth of all live starts, 11-03). After building it, each box lists (never runs)
-//! tests for its four most-used package/target pairs in the same held lease. Every 20 s,
+//! tests for its four most-used package/target pairs in the same held lease, then, as background
+//! work on a lease of its own, starts each app lanes ran on overlays there in the last day once
+//! under the new JIT, hidden, until its first present ([`apps_leg`]). Every 20 s,
 //! agent lanes with grants in the last hour keep one extra box warm at their newest pin, unless
 //! they already used two up boxes in that group; a landed lane whose branch is deleted keeps
 //! no spare. Live/show job lanes only count toward their box's plan. Overlay spares list the
@@ -37,6 +39,8 @@ const ACTIVE_MS: u64 = 60 * 60 * 1000;
 const REWARM_MS: u64 = 10 * 60 * 1000;
 const RETRY: Duration = Duration::from_secs(30);
 const AGENT: &str = "devhub-warm";
+/// The window of lane app runs a box's app pass warms ([`apps_by_box`]).
+const APPS_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Package {
@@ -246,6 +250,11 @@ struct Node {
     activity: usize,
     key: Key,
     progress: Progress,
+    /// the apps lanes ran on overlays on this box in the last [`APPS_MS`], the most-run first: its
+    /// app pass after the prebuild ([`apps_leg`])
+    apps: Vec<String>,
+    /// that pass's progress (None: no apps)
+    apps_progress: Option<Progress>,
 }
 
 #[derive(Clone)]
@@ -282,6 +291,8 @@ struct Run {
     generation: u64,
     lane: Option<String>,
     native: bool,
+    /// its plan box's app pass ([`apps_leg`]), not its prebuild
+    apps: bool,
     node: String,
     os: String,
     key: Key,
@@ -316,7 +327,12 @@ static PERSISTED: Mutex<String> = Mutex::new(String::new());
 
 /// A leg's name (its lane, else its box) and start: the same through a newer plan it follows.
 fn leg_key(run: &Run) -> (String, u64) {
-    (run.lane.as_ref().map_or_else(|| format!("box {}", run.node), |lane| format!("lane {lane}")), run.started_ms)
+    let name = match (&run.lane, run.apps) {
+        (Some(lane), _) => format!("lane {lane}"),
+        (None, true) => format!("apps {}", run.node),
+        (None, false) => format!("box {}", run.node),
+    };
+    (name, run.started_ms)
 }
 
 /// Writes the plan, the spares and the running legs to the store when they changed: what a
@@ -343,8 +359,8 @@ pub(super) fn prebuild_on(ctx: &Arc<Ctx>, node: &str, rev: &str) {
     let now = wall_ms();
     let key = Key { id: "test-jit".into(), rev: rev.into(), packages: Vec::new() };
     let progress = Progress::waiting(&key.id, now);
-    *PLAN.lock().unwrap() = Some(Plan { generation: 1, pair: Pair::new("", ""), base: None, ids: vec![key.id.clone()], started_ms: now, nodes: vec![Node { name: node.into(), os: "linux".into(), activity: 0, key: key.clone(), progress }], judged: false });
-    spawn(ctx, Run { generation: 1, lane: None, native: false, node: node.into(), os: "linux".into(), key, started_ms: now, since_ms: Some(now), adopt: None });
+    *PLAN.lock().unwrap() = Some(Plan { generation: 1, pair: Pair::new("", ""), base: None, ids: vec![key.id.clone()], started_ms: now, nodes: vec![Node { name: node.into(), os: "linux".into(), activity: 0, key: key.clone(), progress, apps: Vec::new(), apps_progress: None }], judged: false });
+    spawn(ctx, Run { generation: 1, lane: None, native: false, apps: false, node: node.into(), os: "linux".into(), key, started_ms: now, since_ms: Some(now), adopt: None });
 }
 
 /// A leg that follows a newer plan's target for its box: its state says the new one.
@@ -389,11 +405,19 @@ fn restore(plan: &mut Option<Plan>, spares: &mut Spares, runs: Vec<Run>, held: &
     if let Some(p) = plan.as_mut() {
         let (generation, started_ms, len) = (p.generation, p.started_ms, p.nodes.len());
         for (rank, n) in p.nodes.iter_mut().enumerate() {
-            if n.progress.ended_ms != 0 || legs.iter().any(|r| r.lane.is_none() && r.node == n.name) { continue; }
+            let since_ms = Some(started_ms.saturating_sub((len - rank) as u64));
+            // an app pass whose prebuild is done, its leg missing from the state, starts again
+            if n.progress.state == "done" && !legs.iter().any(|r| r.apps && r.node == n.name) {
+                if let Some(a) = n.apps_progress.as_mut().filter(|a| a.ended_ms == 0) {
+                    a.lease = None;
+                    a.state = "waiting".into();
+                    legs.push(Run { generation, lane: None, native: false, apps: true, node: n.name.clone(), os: n.os.clone(), key: n.key.clone(), started_ms, since_ms, adopt: None });
+                }
+            }
+            if n.progress.ended_ms != 0 || legs.iter().any(|r| r.lane.is_none() && !r.apps && r.node == n.name) { continue; }
             n.progress.lease = None;
             n.progress.state = "waiting".into();
-            let since_ms = Some(started_ms.saturating_sub((len - rank) as u64));
-            legs.push(Run { generation, lane: None, native: false, node: n.name.clone(), os: n.os.clone(), key: n.key.clone(), started_ms, since_ms, adopt: None });
+            legs.push(Run { generation, lane: None, native: false, apps: false, node: n.name.clone(), os: n.os.clone(), key: n.key.clone(), started_ms, since_ms, adopt: None });
         }
     }
     let stale: Vec<String> = spares.running.iter().filter(|(lane, g)| !legs.iter().any(|r| r.lane.as_ref() == Some(*lane) && r.generation == **g)).map(|(lane, _)| lane.clone()).collect();
@@ -412,7 +436,10 @@ fn restore(plan: &mut Option<Plan>, spares: &mut Spares, runs: Vec<Run>, held: &
 fn progress_in<'a>(plan: &'a mut Option<Plan>, spares: &'a mut Spares, run: &Run) -> Option<&'a mut Progress> {
     match &run.lane {
         Some(lane) => spares.lanes.get_mut(lane).filter(|s| s.generation == run.generation).map(|s| &mut s.progress),
-        None => plan.as_mut().filter(|p| p.generation == run.generation)?.nodes.iter_mut().find(|n| n.name == run.node).map(|n| &mut n.progress),
+        None => {
+            let n = plan.as_mut().filter(|p| p.generation == run.generation)?.nodes.iter_mut().find(|n| n.name == run.node)?;
+            if run.apps { n.apps_progress.as_mut() } else { Some(&mut n.progress) }
+        }
     }
 }
 
@@ -425,7 +452,12 @@ fn set(run: &Run, f: impl FnOnce(&mut Progress)) -> bool {
         let mut plan = PLAN.lock().unwrap();
         let Some(p) = plan.as_mut().filter(|p| p.generation == run.generation) else { return false };
         let Some(n) = p.nodes.iter_mut().find(|n| n.name == run.node) else { return false };
-        f(&mut n.progress);
+        if run.apps {
+            let Some(a) = n.apps_progress.as_mut() else { return false };
+            f(a);
+        } else {
+            f(&mut n.progress);
+        }
     }
     true
 }
@@ -565,7 +597,10 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     let by_compiler: BTreeMap<_, _> = compilers.iter().cloned().zip(ids.iter().cloned()).collect();
     let ids: Vec<_> = ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
     if PLAN.lock().unwrap().as_ref().is_some_and(|p| p.ids == ids) { return; }
-    let nodes = plan_nodes(nodes, &by_compiler, activity, &pair.rev(), started_ms);
+    let mut apps = apps_by_box(&crate::proto::home().join("records.jsonl"), started_ms.saturating_sub(APPS_MS));
+    let off = apps_off(&crate::master::nodes_conf());
+    apps.retain(|node, _| !off.contains(node));
+    let nodes = plan_nodes(nodes, &by_compiler, activity, &apps, &pair.rev(), started_ms);
     let (plan, previous, followed) = {
         let mut p = PLAN.lock().unwrap();
         let generation = p.as_ref().map_or(1, |p| p.generation + 1);
@@ -578,7 +613,8 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     };
     // Registration and generation changes share the lock; no held old leg is missed.
     if let Some(p) = previous {
-        for id in p.nodes.iter().filter_map(|n| n.progress.lease.as_deref()) { ctx.leases.release_live(id); }
+        // (an app pass of the older JIT ends with it: its lease goes)
+        for id in p.nodes.iter().flat_map(|n| [n.progress.lease.as_deref(), n.apps_progress.as_ref().and_then(|a| a.lease.as_deref())]).flatten() { ctx.leases.release_live(id); }
         // the listings it got to before the next JIT came are its verdict (off this thread: the
         // landings' attribution reads their trees)
         if !p.judged {
@@ -592,7 +628,7 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     let runs = plan.nodes.iter().enumerate().filter(|(_, n)| !followed.contains(&n.name)).map(|(rank, node)| {
         // Keep every timestamp in the past: the scheduler clamps future queue times to now.
         let since_ms = Some(plan.started_ms.saturating_sub((plan.nodes.len() - rank) as u64));
-        Run { generation: plan.generation, lane: None, native: false, node: node.name.clone(), os: node.os.clone(), key: node.key.clone(), started_ms, since_ms, adopt: None }
+        Run { generation: plan.generation, lane: None, native: false, apps: false, node: node.name.clone(), os: node.os.clone(), key: node.key.clone(), started_ms, since_ms, adopt: None }
     }).collect();
     spawn_all(ctx, runs);
 }
@@ -600,8 +636,10 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
 /// The boxes a new JIT id is built on: every up dev box that lacks it, per OS/arch group the most
 /// lane-active first. A box no lane used lately builds it too (the next session may come to it),
 /// listing no tests; so does a bench box, whose tests are its timed runs' own (the listing held
-/// it a minute more per landing while timed work waited "held for interactive", 11-03).
-fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activity: &Activity, rev: &str, started_ms: u64) -> Vec<Node> {
+/// it a minute more per landing while timed work waited "held for interactive", 11-03). A box's
+/// `apps` ([`apps_by_box`]) are its app pass after the prebuild; none on a bench box, whose runs
+/// are timed, nor on Windows, where a run cannot quit after its present.
+fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activity: &Activity, apps: &BTreeMap<String, Vec<String>>, rev: &str, started_ms: u64) -> Vec<Node> {
     let mut groups: BTreeMap<(String, String), Vec<Node>> = BTreeMap::new();
     for n in nodes.iter().filter(|n| n.up && n.dev && !n.role().users()) {
         let Some(caps) = &n.caps else { continue };
@@ -610,7 +648,9 @@ fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activi
         if store.ids.contains(id) { continue; }
         let b = activity.boxes.get(&n.name);
         let packages = if n.role() == Role::Bench { Vec::new() } else { b.map(BoxActivity::packages).unwrap_or_default() };
-        groups.entry((caps.os.clone(), caps.arch.clone())).or_default().push(Node { name: n.name.clone(), os: caps.os.clone(), activity: b.map_or(0, |b| b.lanes.len()), key: Key { id: id.clone(), rev: rev.to_string(), packages }, progress: Progress::waiting(id, started_ms) });
+        let apps = if n.role() == Role::Bench || caps.os == "windows" { Vec::new() } else { apps.get(&n.name).cloned().unwrap_or_default() };
+        let apps_progress = (!apps.is_empty()).then(|| Progress { state: "after its prebuild".into(), ..Progress::waiting(id, started_ms) });
+        groups.entry((caps.os.clone(), caps.arch.clone())).or_default().push(Node { name: n.name.clone(), os: caps.os.clone(), activity: b.map_or(0, |b| b.lanes.len()), key: Key { id: id.clone(), rev: rev.to_string(), packages }, progress: Progress::waiting(id, started_ms), apps, apps_progress });
     }
     let mut out = Vec::new();
     for (_, mut candidates) in groups {
@@ -807,15 +847,21 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
         s.progress = Progress::waiting(id, now);
         spares.running.insert(lane.clone(), generation);
         spares.last_started.insert(lane.clone(), now);
-        runs.push(Run { generation, lane: Some(lane.clone()), native, node, os: caps.os.clone(), key, started_ms: now, since_ms: None, adopt: None });
+        runs.push(Run { generation, lane: Some(lane.clone()), native, apps: false, node, os: caps.os.clone(), key, started_ms: now, since_ms: None, adopt: None });
     }
     drop(spares);
     for id in release { ctx.leases.release_live(&id); }
     spawn_all(ctx, runs);
 }
 
-/// The measurement class of the JIT warm legs (prebuilds and lane warms), whatever they run.
+/// The measurement class of the lanes' JIT warm legs, whatever they run.
 const WARM_CLASS: &str = "build jit warm";
+
+/// The measurement class of a box's prebuild: its JIT's build, then the listing of each package
+/// its lanes used, each compiled under that JIT. Measured with the lanes' warm legs, whose peaks
+/// are a spare JIT's 0.06 GB, a 16 GB Mac's prebuild asked 1.58 GB, listed a firmware test whose
+/// compile peaks at 3.2-3.8 GB beside 3.5 GB of other work, and the system killed it (11-19).
+const PREBUILD_CLASS: &str = "build jit prebuild";
 
 fn spawn(ctx: &Arc<Ctx>, run: Run) {
     LEGS.lock().unwrap().insert(leg_key(&run), run.clone());
@@ -838,7 +884,11 @@ fn spawn_all(ctx: &Arc<Ctx>, runs: Vec<Run>) {
 }
 
 fn log_name(run: &Run) -> String {
-    match &run.lane { Some(lane) => format!("lane-{lane}.log"), None => format!("{}.log", run.node) }
+    match (&run.lane, run.apps) {
+        (Some(lane), _) => format!("lane-{lane}.log"),
+        (None, true) => format!("{}-apps.log", run.node),
+        (None, false) => format!("{}.log", run.node),
+    }
 }
 
 /// A box prebuild's leg asks while registered here (box → the plan generation it asks for), so
@@ -859,6 +909,11 @@ fn adopt(plan: &Option<Plan>, run: &mut Run) -> bool {
 }
 
 fn run_leg(ctx: &Ctx, run: &Run) {
+    if run.apps {
+        let result = apps_leg(ctx, run);
+        finish(ctx, run, "", result);
+        return;
+    }
     let run = std::cell::RefCell::new(run.clone());
     let prebuild = run.borrow().lane.is_none() && !run.borrow().native;
     let mut dropped = String::new();
@@ -939,7 +994,7 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                     // Measured under a class of their own: unnamed, they were measured as nothing and
                     // took a build's 12 GB default (three pool boxes' prebuilds waited 23 min an hour
                     // on RAM, holding their box meanwhile, 11-03)
-                    r.class = WARM_CLASS.into();
+                    r.class = if prebuild { PREBUILD_CLASS } else { WARM_CLASS }.into();
                     if run.borrow().os == "macos" { r.needs.push(("os".into(), "macos".into())); }
                 }, &mut on_wait, &give_up, &mut follow);
                 if prebuild {
@@ -1009,8 +1064,14 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                     // a listing that ran is a verdict on the tip (a lease's error is none); a failed
                     // one keeps its output (its errors), a passing one only its line
                     if let Ok(code) = result {
-                        let output = if code == 0 { String::new() } else { String::from_utf8_lossy(&tee.1).into_owned() };
-                        set(&r, |p| p.listed.push(Listed { unit: format!("suite {}", package.pkg), ok: code == 0, text: format!("{label} on {}: exit {code}\n{output}", r.node) }));
+                        let unit = format!("suite {}", package.pkg);
+                        let head = format!("{label} on {}: exit {code}", r.node);
+                        let text = if code == 0 { format!("{head}\n") } else {
+                            let output = String::from_utf8_lossy(&tee.1).into_owned();
+                            let kept = keep_listing(&ctx.logs(super::job::LEASE_LOGS), &held.id, &unit, &head, &output);
+                            failed_listing(&unit, &head, &output, code, kept.as_ref().ok().map(|_| held.id.as_str()))
+                        };
+                        set(&r, |p| p.listed.push(Listed { unit, ok: code == 0, text }));
                     }
                     let failure = match result {
                         Ok(0) => None,
@@ -1039,6 +1100,167 @@ fn run_leg(ctx: &Ctx, run: &Run) {
     })();
     let run = run.into_inner();
     finish(ctx, &run, &dropped, result);
+}
+
+/// The measurement class of a box's app pass ([`apps_leg`]).
+const APPS_CLASS: &str = "warm jit apps";
+
+/// A box's app pass, after its prebuild built the new JIT: each app lanes ran on overlays there in
+/// the last [`APPS_MS`], the most-run first, started once under that JIT and ended by itself once
+/// its startup went quiet after the first present (`makepad run --quit-after-present`: a graceful
+/// quit, so the run's code cache is committed), so a lane's first run of it there finds that
+/// JIT's code (11-19: 185 of 193 first app runs per box and dev JIT were cold; Fab's first frame
+/// 25.5 s cold against 6.1 s warm, medians). It runs as background work (lane work goes first and
+/// preempts it, which asks again for the apps not run yet); the next plan ends it and releases its
+/// lease ([`plan_tick`]). Each app runs hidden, in an app home of its own: never the box's own
+/// app state. An app that fails is noted; the rest go on.
+fn apps_leg(ctx: &Ctx, run: &Run) -> Result<String, String> {
+    let dir = ctx.logs("warm");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(log_name(run))).map_err(|e| e.to_string())?;
+    let apps = {
+        let plan = PLAN.lock().unwrap();
+        let n = plan.as_ref().filter(|p| p.generation == run.generation).and_then(|p| p.nodes.iter().find(|n| n.name == run.node));
+        match n { Some(n) => n.apps.clone(), None => return Ok(String::new()) }
+    };
+    let _ = writeln!(log, "warm generation {} apps: {} {}: {}", run.generation, run.key.rev, run.key.id, apps.join(", "));
+    // the app home every app starts in: an empty archive, unpacked afresh for each lease
+    let archive = crate::proto::home().join("warm-apps-home.tar");
+    if !archive.exists() { std::fs::write(&archive, [0u8; 1024]).map_err(|e| format!("{}: {e}", archive.display()))?; }
+    let lane = format!("{WARM_LANE_PREFIX}apps-{}", run.node);
+    let stale = || !set(run, |_| {});
+    let mut ran: Vec<String> = Vec::new();
+    let mut failures = Vec::new();
+    let mut adopted = run.adopt.clone();
+    loop {
+        if stale() { return Ok(String::new()); }
+        let (asked, ship) = match adopted.take() {
+            Some((lease, shipped)) => {
+                let mut held = Held::attach(&lease, &run.node);
+                held.rev = run.key.rev.clone();
+                let _ = writeln!(log, "{lease} on {}: taken back after the master's restart; its runs are asked again by name", run.node);
+                (Ok(held), !shipped)
+            }
+            None => {
+                // (the kind of a hidden live session's lease, whose environment its app runs in)
+                let spec = Spec { lane: lane.clone(), agent: AGENT.into(), kind: Kind::Test, needs: String::new(), prio: leg::BACKGROUND_PRIO, rev: run.key.rev.clone(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(run.node.clone()), since_ms: run.since_ms };
+                let mut on_wait = |line: &str| {
+                    let _ = writeln!(log, "{line}");
+                    set(run, |p| p.note = line.into());
+                };
+                let asked = Held::acquire_with(&spec, &|r| {
+                    r.src = Src::Overlay;
+                    r.cores = Some(4.0);
+                    r.class = APPS_CLASS.into();
+                    if run.os == "macos" { r.needs.push(("os".into(), "macos".into())); }
+                }, &mut on_wait, &stale);
+                (asked, true)
+            }
+        };
+        let held = match asked {
+            Ok(held) => held,
+            Err(_) if stale() => return Ok(String::new()),
+            Err(e) if e.split_whitespace().next().is_some_and(leg::was_preempted) => continue,
+            Err(e) => return Err(e),
+        };
+        if !set(run, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); }) {
+            held.release(None);
+            return Ok(String::new());
+        }
+        persist();
+        let mut preempted = false;
+        let result = (if ship { held.ship_nothing() } else { Ok(()) }).and_then(|_| {
+            let home = crate::lease::ship::send_home(held.client(), &held.node, &held.id, &archive)?;
+            for app in &apps {
+                if ran.contains(app) { continue; }
+                if stale() { break; }
+                set(run, |p| p.state = format!("warming {app}"));
+                persist();
+                let _ = writeln!(log, "warming {app}");
+                let mut argv: Vec<String> = ["env", "MAKEPAD_HIDE_WINDOWS=1", "RELAX_STORE_LIVE=1"].map(String::from).to_vec();
+                argv.extend([format!("MAKEPAD_TEST_HOME={home}"), format!("MAKEPAD_TEST_RUN={lane} {}", held.id)]);
+                argv.extend(["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "run", "--quit-after-present", app.as_str()].map(String::from));
+                let result = held.run_asked(&format!("warm-app-{app}"), ".", &argv, &mut log, &mut |_| {});
+                if leg::was_preempted(&held.id) { preempted = true; break; }
+                ran.push(app.clone());
+                let failure = match result {
+                    Ok(0) => None,
+                    Ok(code) => Some(format!("{app}: exit {code}")),
+                    Err(e) => Some(format!("{app}: {e}")),
+                };
+                if let Some(e) = failure {
+                    let _ = writeln!(log, "warm skipped {e}");
+                    failures.push(e);
+                }
+            }
+            Ok(0)
+        });
+        let preempted = preempted || leg::was_preempted(&held.id);
+        held.release(result.as_ref().ok().copied());
+        set(run, |p| p.lease = None);
+        if stale() { return Ok(String::new()); }
+        if preempted {
+            let _ = writeln!(log, "preempted for lane work; asking again for the apps not run yet");
+            set(run, |p| { p.state = "waiting".into(); p.note = "preempted for lane work".into(); });
+            continue;
+        }
+        return result.map(|_| failures.join("; "));
+    }
+}
+
+/// The boxes whose `nodes.conf` line says `warm_apps=off`: no app pass there (a person's own
+/// machine in the pool: no hidden app runs on it; a cold first start after an update is fine there).
+fn apps_off(path: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| {
+        let mut w = line.split('#').next().unwrap_or("").split_whitespace();
+        let name = w.next()?;
+        w.any(|kv| kv == "warm_apps=off").then(|| name.to_string())
+    }).collect()
+}
+
+/// Per box, the apps lanes ran there on overlays since `since_ms` (live sessions, not tests), the
+/// most-run first. The store appends each live record to `records.jsonl` as it changes; read back
+/// from the end, the newest line of each session counts, until a chunk whose sessions all started
+/// before `since_ms` (24 h of them: about 16 MB, 11-19).
+fn apps_by_box(path: &Path, since_ms: u64) -> BTreeMap<String, Vec<String>> {
+    const CHUNK: u64 = 4 << 20;
+    // per session id: its (box, app) when it counts
+    let mut sessions: BTreeMap<String, Option<(String, String)>> = BTreeMap::new();
+    let Ok(mut file) = std::fs::File::open(path) else { return BTreeMap::new() };
+    let mut end = file.metadata().map_or(0, |m| m.len());
+    // the start of the line the last chunk began inside of
+    let mut carry: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let mut bytes = vec![0; (end - start) as usize];
+        if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut bytes).is_err() { break; }
+        bytes.extend_from_slice(&carry);
+        let whole = if start == 0 { 0 } else { bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |i| i + 1) };
+        carry = bytes[..whole].to_vec();
+        // (a chunk of other records, a CI run's, says nothing of the window)
+        let (mut any, mut recent) = (false, false);
+        for line in bytes[whole..].split(|b| *b == b'\n').rev() {
+            if !line.starts_with(b"{\"id\":\"W") { continue; }
+            let Ok(v) = makepad_strict_json::parse(line) else { continue };
+            let Some(id) = v.get("id").and_then(Value::as_str) else { continue };
+            let started = v.get("started_ms").and_then(Value::as_u64).unwrap_or(0);
+            any = true;
+            recent |= started >= since_ms;
+            if sessions.contains_key(id) { continue; }
+            let counts = started >= since_ms && v.get("src").and_then(Value::as_str) == Some("overlay") && v.get("test").and_then(Value::as_bool) == Some(false);
+            let run = counts.then(|| Some((v.get("node")?.as_str()?.to_string(), v.get("app")?.as_str()?.to_string()))).flatten().filter(|(n, a)| !n.is_empty() && !a.is_empty());
+            sessions.insert(id.to_string(), run);
+        }
+        if any && !recent { break; }
+        end = start;
+    }
+    let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for (node, app) in sessions.into_values().flatten() { *counts.entry(node).or_default().entry(app).or_default() += 1; }
+    counts.into_iter().map(|(node, apps)| {
+        let mut apps: Vec<(String, usize)> = apps.into_iter().collect();
+        apps.sort_by(|(a, n), (b, m)| m.cmp(n).then_with(|| a.cmp(b)));
+        (node, apps.into_iter().map(|(a, _)| a).collect())
+    }).collect()
 }
 
 fn native_leg(run: &Run, spec: &Spec, packages: &[Package], log: &mut dyn Write) -> Result<String, String> {
@@ -1124,12 +1346,21 @@ fn finish(ctx: &Ctx, run: &Run, dropped: &str, result: Result<String, String>) {
         } else { false }
     } else { set(run, update) };
     drop(persisted);
-    if changed && run.lane.is_none() {
+    if changed && run.lane.is_none() && !run.apps {
         let done = listings_done(PLAN.lock().unwrap().as_mut(), run.generation);
         if let Some(plan) = done { judge(ctx, &plan, false); }
+        // the box's app pass follows its prebuild, while its plan is the newest
+        let pass = (state == "done").then(|| {
+            let plan = PLAN.lock().unwrap();
+            let n = plan.as_ref().filter(|p| p.generation == run.generation)?.nodes.iter().find(|n| n.name == run.node)?;
+            n.apps_progress.as_ref().filter(|a| a.ended_ms == 0 && a.lease.is_none())?;
+            Some(Run { generation: run.generation, lane: None, native: false, apps: true, node: n.name.clone(), os: n.os.clone(), key: n.key.clone(), started_ms: ended_ms, since_ms: Some(ended_ms), adopt: None })
+        }).flatten();
+        if let (Some(pass), Some(c)) = (pass, super::ctx()) { spawn(c, pass); }
     }
     if changed {
-        let who = run.lane.as_deref().unwrap_or(&run.key.rev);
+        let who = match (&run.lane, run.apps) { (Some(lane), _) => lane.clone(), (None, true) => format!("{} apps", run.key.rev), (None, false) => run.key.rev.clone() };
+        let who = who.as_str();
         let line = |note: &str| format!("warm {who} on {}: {state} in {seconds} s{}", run.node, if note.is_empty() { String::new() } else { format!(": {note}") });
         if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(ctx.logs("warm").join(log_name(run))) {
             // Drops were logged before acquiring the lease.
@@ -1177,6 +1408,81 @@ fn judge(ctx: &Ctx, plan: &Plan, superseded: bool) {
     }
 }
 
+/// What a failed listing keeps in its bucket's log: its line, its output's last [`LISTING_TAIL`]
+/// bytes, what its end says when no error of its own does ([`exit_said`]: an `EXIT: ` line, which
+/// the bucket names its red by) and the lease its whole stream is kept under (`GATEKEPT <unit> ::
+/// <lease>`: `devhub job result <lease>` shows it, and the bucket's line points there).
+fn failed_listing(unit: &str, head: &str, output: &str, code: i32, kept: Option<&str>) -> String {
+    let mut text = format!("{head}\n{}", tail_of(output, LISTING_TAIL));
+    if !text.ends_with('\n') { text.push('\n'); }
+    if let Some(said) = exit_said(output, code) { text.push_str(&format!("EXIT: {said}\n")); }
+    if let Some(lease) = kept { text.push_str(&format!("GATEKEPT {unit} :: {lease}\n")); }
+    text
+}
+
+/// The bytes of a failed listing's output its bucket's log keeps: its end, where a run says why it
+/// stopped; the whole stream is its lease's ([`keep_listing`]).
+const LISTING_TAIL: usize = 64 << 10;
+
+/// The last `max` bytes of `text` or fewer, from a line's start.
+fn tail_of(text: &str, max: usize) -> &str {
+    if text.len() <= max { return text; }
+    let mut at = text.len() - max;
+    while !text.is_char_boundary(at) { at += 1; }
+    text[at..].find('\n').map_or(&text[at..], |n| &text[at + n + 1..])
+}
+
+/// Adds a failed listing's whole stream to its lease's kept log (`lease-logs/<lease>.log`), where
+/// `devhub job result <lease>` reads it; once, as a master that took the lease back asks the box
+/// again and hears the same run. A warm leg's lease is released as its JIT build ended, which
+/// keeps nothing: `job result L1348447` said "kept no output" of a listing's exit 101 (11-18).
+fn keep_listing(logs: &std::path::Path, lease: &str, unit: &str, head: &str, output: &str) -> std::io::Result<()> {
+    let path = logs.join(format!("{lease}.log"));
+    let said = format!("== {unit} failed: {head}; its whole stream");
+    if std::fs::read_to_string(&path).is_ok_and(|t| t.lines().any(|l| l == said)) { return Ok(()); }
+    std::fs::create_dir_all(logs)?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    write!(f, "{said}\n{output}{}", if output.is_empty() || output.ends_with('\n') { "" } else { "\n" })
+}
+
+/// What a failed listing's end says when its output holds no error of its own (no compile error
+/// and no panic: the bucket names its red by those): `exit after listing` when its stream ends on
+/// the whole listings of the targets it started (each `Running` line's `N tests, M benchmarks`, and
+/// after the last only notes of warnings and doc tests), naming them; else where it stopped. None:
+/// its errors say why. fab-elec-simjit's listing ended on its tests' count and exited 101 without a
+/// word; the prebuild bucket's red named only its unit, and its lane chased its own tests (11-18).
+fn exit_said(output: &str, code: i32) -> Option<String> {
+    let lines: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.iter().any(|l| l.contains("panicked at") || crate::bucket::error_key(l).is_some()) { return None; }
+    let note = |l: &str| l.starts_with("relax test: ") && (l.contains(" warning") || l.contains(" doc test"));
+    let (mut listed, mut open, mut after) = (Vec::new(), None, false);
+    for &l in &lines {
+        if let Some(target) = l.strip_prefix("Running ") {
+            open = Some(target);
+            after = false;
+        } else if listing_summary(l) {
+            if let Some(target) = open.take() { listed.push(target); }
+            after = false;
+        } else if open.is_none() && !listed.is_empty() && !note(l) {
+            after = true;
+        }
+    }
+    let n = listed.len();
+    let named = if n > 4 { format!("{} and {} more", listed[..3].join(", "), n - 3) } else { listed.join(", ") };
+    Some(match open {
+        None if n > 0 && !after => format!("{}: exit {code} with no error in its output once it had listed {n} target{} whole ({named}); --list runs no test, so the exit is the runner's own", crate::bucket::EXIT_AFTER_LISTING, if n == 1 { "" } else { "s" }),
+        Some(target) => format!("exit {code} with no compile error or panic in its output, inside its listing of {target} (no count of its tests came)"),
+        None => format!("exit {code} with no compile error or panic in its output; {}", lines.last().map_or("it printed nothing".to_string(), |l| format!("its last line: {}", crate::proto::clean(l, 200)))),
+    })
+}
+
+/// libtest's count at the end of a target's `--list`: `N tests, M benchmarks` (either singular).
+fn listing_summary(line: &str) -> bool {
+    let Some((tests, benches)) = line.split_once(", ") else { return false };
+    let count = |part: &str, word: &str| part.split_once(' ').is_some_and(|(n, w)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && (w == word || w.strip_suffix('s') == Some(word)));
+    count(tests, "test") && count(benches, "benchmark")
+}
+
 /// Writes through to the leg's log and keeps a copy: a listing's own output.
 struct Tee<'a>(&'a mut dyn Write, Vec<u8>);
 
@@ -1205,6 +1511,10 @@ pub fn serve(line: &str) -> Result<String, String> {
             ("nodes", Value::Arr(p.nodes.iter().map(|n| {
                 let mut fields = n.progress.fields(now);
                 fields.extend([("name", s(&n.name)), ("activity", Value::Int(n.activity as i64))]);
+                if let Some(a) = &n.apps_progress {
+                    let pass = a.fields(now).into_iter().filter(|(k, _)| *k != "id").collect();
+                    fields.extend([("apps", Value::Arr(n.apps.iter().map(s).collect())), ("apps_pass", obj(pass))]);
+                }
                 obj(fields)
             }).collect())),
         ]
@@ -1226,6 +1536,10 @@ pub fn render(v: &Value) -> String {
     };
     for n in v.get("nodes").and_then(Value::as_arr).unwrap_or(&[]) {
         out.push_str(&format!("  {} {:<8} {}s ({} lanes) {} {}\n", s(n, "name"), s(n, "state"), n.get("seconds").and_then(Value::as_u64).unwrap_or(0), n.get("activity").and_then(Value::as_u64).unwrap_or(0), s(n, "id"), s(n, "note")));
+        if let Some(a) = n.get("apps_pass") {
+            let apps = n.get("apps").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+            out.push_str(&format!("    apps {:<8} {}s: {apps} {}\n", s(a, "state"), a.get("seconds").and_then(Value::as_u64).unwrap_or(0), s(a, "note")));
+        }
     }
     for n in v.get("spares").and_then(Value::as_arr).unwrap_or(&[]) {
         let native = if s(n, "src") == "tree" { "native " } else { "" };
@@ -1316,6 +1630,7 @@ impl Node {
         obj(vec![
             ("name", s(&self.name)), ("os", s(&self.os)), ("activity", Value::Int(self.activity as i64)),
             ("key", self.key.value()), ("progress", self.progress.value()),
+            ("apps", Value::Arr(self.apps.iter().map(s).collect())), ("apps_progress", self.apps_progress.as_ref().map_or(Value::Null, Progress::value)),
         ])
     }
 
@@ -1324,6 +1639,9 @@ impl Node {
             name: v.get("name")?.as_str()?.to_string(), os: v.get("os")?.as_str()?.to_string(),
             activity: v.get("activity")?.as_u64()? as usize,
             key: Key::parse(v.get("key")?)?, progress: Progress::parse(v.get("progress")?)?,
+            // (a state a master before app passes wrote has none)
+            apps: v.get("apps").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            apps_progress: v.get("apps_progress").and_then(Progress::parse),
         })
     }
 }
@@ -1397,7 +1715,7 @@ impl Run {
     fn value(&self) -> Value {
         obj(vec![
             ("generation", Value::Int(self.generation as i64)), ("lane", self.lane.as_ref().map_or(Value::Null, s)),
-            ("native", Value::Bool(self.native)), ("node", s(&self.node)), ("os", s(&self.os)), ("key", self.key.value()),
+            ("native", Value::Bool(self.native)), ("apps", Value::Bool(self.apps)), ("node", s(&self.node)), ("os", s(&self.os)), ("key", self.key.value()),
             ("started_ms", Value::Int(self.started_ms as i64)), ("since_ms", self.since_ms.map_or(Value::Null, |ms| Value::Int(ms as i64))),
         ])
     }
@@ -1406,7 +1724,8 @@ impl Run {
         Some(Self {
             generation: v.get("generation")?.as_u64()?,
             lane: match v.get("lane")? { Value::Null => None, v => Some(v.as_str()?.to_string()) },
-            native: v.get("native")?.as_bool()?, node: v.get("node")?.as_str()?.to_string(), os: v.get("os")?.as_str()?.to_string(),
+            native: v.get("native")?.as_bool()?, apps: v.get("apps").and_then(Value::as_bool).unwrap_or(false),
+            node: v.get("node")?.as_str()?.to_string(), os: v.get("os")?.as_str()?.to_string(),
             key: Key::parse(v.get("key")?)?, started_ms: v.get("started_ms")?.as_u64()?,
             since_ms: match v.get("since_ms")? { Value::Null => None, v => Some(v.as_u64()?) },
             adopt: None,
@@ -1492,7 +1811,7 @@ mod tests {
         let plan = Plan {
             generation: 3, pair: Pair::new("work", "main"), base: Some(Pair::new("base-work", "base-main")),
             ids: vec!["jit".into(), "other".into()], started_ms: 10,
-            nodes: vec![Node { name: "node".into(), os: "linux".into(), activity: 2, key: key.clone(), progress: progress.clone() }],
+            nodes: vec![Node { name: "node".into(), os: "linux".into(), activity: 2, key: key.clone(), progress: progress.clone(), apps: vec!["makepad-fab".into(), "app".into()], apps_progress: Some(progress.clone()) }],
             judged: true,
         };
         let spares = Spares {
@@ -1500,8 +1819,9 @@ mod tests {
             running: [("lane".into(), 4)].into(), last_started: [("lane".into(), 20)].into(), generation: 4,
         };
         let legs = [
-            Run { generation: 3, lane: None, native: false, node: "node".into(), os: "linux".into(), key: key.clone(), started_ms: 10, since_ms: Some(5), adopt: None },
-            Run { generation: 4, lane: Some("lane".into()), native: true, node: "node".into(), os: "linux".into(), key, started_ms: 20, since_ms: None, adopt: None },
+            Run { generation: 3, lane: None, native: false, apps: false, node: "node".into(), os: "linux".into(), key: key.clone(), started_ms: 10, since_ms: Some(5), adopt: None },
+            Run { generation: 4, lane: Some("lane".into()), native: true, apps: false, node: "node".into(), os: "linux".into(), key: key.clone(), started_ms: 20, since_ms: None, adopt: None },
+            Run { generation: 3, lane: None, native: false, apps: true, node: "node".into(), os: "linux".into(), key, started_ms: 30, since_ms: Some(30), adopt: None },
         ];
         let value = state_value(Some(&plan), &spares, &legs);
         let (plan, spares, legs) = state_parse(&value).expect("serialized warm state parses");
@@ -1514,7 +1834,9 @@ mod tests {
         assert_eq!(node.key.packages[0].features, ["f"], "the test features survive");
         assert_eq!(node.key.packages[1].harness, Harness::Bin("b".into()), "the binary harness survives");
         assert!(node.key.packages[1].features.is_empty(), "the binary keeps its empty features");
-        assert_eq!(legs.len(), 2, "both running legs survive");
+        assert_eq!((node.apps.as_slice(), node.apps_progress.as_ref().and_then(|a| a.lease.as_deref())), (["makepad-fab".to_string(), "app".to_string()].as_slice(), Some("L9")), "the app pass keeps its apps, in order, and its lease");
+        assert_eq!(legs.len(), 3, "the running legs survive");
+        assert!(legs[2].apps && !legs[0].apps && !legs[1].apps, "an app pass stays one, and the others stay theirs");
         assert_eq!((legs[0].lane.as_deref(), legs[0].native, legs[0].since_ms), (None, false, Some(5)), "the prebuild keeps its lane, native flag and since time");
         assert_eq!((legs[1].lane.as_deref(), legs[1].native, legs[1].since_ms), (Some("lane"), true, None), "the native lane run keeps its lane, native flag and since time");
     }
@@ -1527,10 +1849,14 @@ mod tests {
         use super::{restore, Pair, Run, Spare, Spares};
         let key = Key { id: "jit".into(), rev: "work@x".into(), packages: Vec::new() };
         let progress = |state: &str, lease: Option<&str>, ended_ms: u64| Progress { state: state.into(), note: String::new(), id: "jit".into(), lease: lease.map(Into::into), started_ms: 10, ended_ms, listed: Vec::new() };
-        let node = |name: &str, p: Progress| Node { name: name.into(), os: "linux".into(), activity: 0, key: key.clone(), progress: p };
+        let node = |name: &str, p: Progress| Node { name: name.into(), os: "linux".into(), activity: 0, key: key.clone(), progress: p, apps: Vec::new(), apps_progress: None };
         let mut plan = Some(Plan {
             generation: 3, pair: Pair::new("work", "main"), base: None, ids: vec!["jit".into()], started_ms: 100,
-            nodes: vec![node("held", progress("building", Some("L1"), 0)), node("gone", progress("building", Some("L2"), 0)), node("unled", progress("waiting", None, 0)), node("ended", progress("done", None, 150))],
+            nodes: vec![
+                node("held", progress("building", Some("L1"), 0)), node("gone", progress("building", Some("L2"), 0)), node("unled", progress("waiting", None, 0)), node("ended", progress("done", None, 150)),
+                Node { apps: vec!["app".into()], apps_progress: Some(progress("warming app", Some("L5"), 0)), ..node("passing", progress("done", None, 150)) },
+                Node { apps: vec!["app".into()], apps_progress: Some(progress("after its prebuild", None, 0)), ..node("pass-unled", progress("done", None, 150)) },
+            ],
             judged: false,
         });
         let spare = |generation: u64, p: Progress| Spare { node: "node".into(), native: false, generation, warmed: None, progress: p };
@@ -1540,18 +1866,22 @@ mod tests {
             last_started: [("shipping".into(), 90), ("unled".into(), 80)].into(),
             generation: 5,
         };
-        let run = |generation: u64, lane: Option<&str>, node: &str| Run { generation, lane: lane.map(Into::into), native: false, node: node.into(), os: "linux".into(), key: key.clone(), started_ms: 100, since_ms: Some(96), adopt: None };
-        let runs = vec![run(3, None, "held"), run(3, None, "gone"), run(3, None, "ended"), run(2, None, "unled"), run(5, Some("shipping"), "node")];
+        let run = |generation: u64, lane: Option<&str>, node: &str| Run { generation, lane: lane.map(Into::into), native: false, apps: false, node: node.into(), os: "linux".into(), key: key.clone(), started_ms: 100, since_ms: Some(96), adopt: None };
+        let runs = vec![run(3, None, "held"), run(3, None, "gone"), run(3, None, "ended"), run(2, None, "unled"), run(5, Some("shipping"), "node"), Run { apps: true, ..run(3, None, "passing") }];
         let legs = restore(&mut plan, &mut spares, runs, &|l| l != "L2");
+        let pass = |node: &str| legs.iter().find(|r| r.apps && r.node == node);
+        assert_eq!(pass("passing").and_then(|r| r.adopt.clone()), Some(("L5".into(), true)), "an app pass whose lease is held goes on on it");
+        assert!(pass("pass-unled").is_some_and(|r| r.generation == 3 && r.adopt.is_none()), "a done prebuild's app pass the state names no leg for starts one");
+        assert!(!legs.iter().any(|r| !r.apps && (r.node == "passing" || r.node == "pass-unled")), "their done prebuilds are not run again");
         let leg = |lane: Option<&str>, node: &str| legs.iter().find(|r| r.lane.as_deref() == lane && (lane.is_some() || r.node == node));
-        assert_eq!(legs.len(), 4, "the held, the gone, the unled box and the shipping lane go on; nothing else: {:?}", legs.iter().map(|r| (&r.lane, &r.node)).collect::<Vec<_>>());
+        assert_eq!(legs.len(), 6, "the held, the gone, the unled box, the shipping lane and the two app passes go on; nothing else: {:?}", legs.iter().map(|r| (&r.lane, &r.node, r.apps)).collect::<Vec<_>>());
         assert_eq!(leg(None, "held").and_then(|r| r.adopt.clone()), Some(("L1".into(), true)), "a leg whose lease is held goes on on it, shipped");
         assert_eq!(leg(Some("shipping"), "").and_then(|r| r.adopt.clone()), Some(("L3".into(), false)), "a lane leg held but not shipped ships on its lease");
         let plan = plan.unwrap();
         assert!(leg(None, "gone").is_some_and(|r| r.adopt.is_none() && r.since_ms == Some(96)), "a leg whose lease went asks again, keeping its age");
         assert_eq!((plan.nodes[1].progress.lease.as_deref(), plan.nodes[1].progress.state.as_str()), (None, "waiting"), "its box waits for a lease again");
         assert!(leg(None, "ended").is_none(), "an ended leg is not run again");
-        assert!(leg(None, "unled").is_some_and(|r| r.generation == 3 && r.adopt.is_none() && r.since_ms == Some(98)), "a plan box whose leg the state missed starts one of the plan's generation, at its rank's age");
+        assert!(leg(None, "unled").is_some_and(|r| r.generation == 3 && r.adopt.is_none() && r.since_ms == Some(96)), "a plan box whose leg the state missed starts one of the plan's generation, at its rank's age");
         assert!(leg(Some("unled"), "").is_none() && !spares.running.contains_key("unled") && !spares.last_started.contains_key("unled"), "a lane marked running without a leg may start again at once");
         assert_eq!((spares.lanes["unled"].progress.lease.as_deref(), spares.lanes["unled"].progress.state.as_str()), (None, "waiting"), "its spare waits again");
     }
@@ -1601,7 +1931,7 @@ mod tests {
         let mut activity = super::Activity::default();
         activity.boxes.insert("busy".into(), super::BoxActivity { lanes: ["rc-a".to_string()].into(), packages: Default::default() });
         let by_compiler = std::collections::BTreeMap::from([("c".to_string(), "new".to_string())]);
-        let plan = super::plan_nodes(&nodes, &by_compiler, &activity, "work@x", 1);
+        let plan = super::plan_nodes(&nodes, &by_compiler, &activity, &Default::default(), "work@x", 1);
         assert_eq!(plan.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), vec!["busy", "idle"]);
         assert!(plan.iter().all(|n| n.key.id == "new"));
     }
@@ -1663,7 +1993,7 @@ mod tests {
 
     fn node(name: &str, packages: &[&str], ended_ms: u64, listed: Vec<Listed>) -> Node {
         let packages = packages.iter().map(|p| Package::from_class(&format!("test:{p}")).unwrap()).collect();
-        Node { name: name.into(), os: "linux".into(), activity: 0, key: Key { id: "new".into(), rev: "work@x".into(), packages }, progress: Progress { ended_ms, listed, ..Progress::waiting("new", 1) } }
+        Node { name: name.into(), os: "linux".into(), activity: 0, key: Key { id: "new".into(), rev: "work@x".into(), packages }, progress: Progress { ended_ms, listed, ..Progress::waiting("new", 1) }, apps: Vec::new(), apps_progress: None }
     }
 
     /// The last box that lists tests to end judges the plan, once; a box that lists none is not
@@ -1696,19 +2026,38 @@ mod tests {
         let ctx = super::Ctx { store, leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home: home.clone() };
         let broken = Listed { unit: "suite x".into(), ok: false, text: "x:lib on a: exit 1\n/n/tree/libs/x/src/lib.rs:3:9: E0425: cannot find value `z`\n".into() };
         let fine = Listed { unit: "suite y".into(), ok: true, text: "y on b: exit 0\n".into() };
-        super::judge(&ctx, &plan(vec![node("a", &["x"], 5, vec![broken]), node("b", &["y"], 5, vec![fine.clone()])]), false);
+        // a listing that ended on its tests' count and exited 101 without a word (L1348447, 11-18):
+        // labelled, its whole stream kept once under its lease, and its red points there
+        let stream = "L7 a: selecting\nrelax test: 0 warnings\n     Running tests/proofs.rs\nsolves: test\n\n1 tests, 0 benchmarks\n";
+        let logs = home.join("lease-logs");
+        for _ in 0..2 { super::keep_listing(&logs, "L7", "suite z", "z on a: exit 101", stream).unwrap(); }
+        let kept = std::fs::read_to_string(logs.join("L7.log")).unwrap();
+        assert_eq!(kept.matches("== suite z failed: z on a: exit 101; its whole stream\n").count(), 1, "kept once, a master's second ask hearing the same run: {kept}");
+        assert!(kept.ends_with("1 tests, 0 benchmarks\n"), "{kept}");
+        let silent = Listed { unit: "suite z".into(), ok: false, text: super::failed_listing("suite z", "z on a: exit 101", stream, 101, Some("L7")) };
+        assert!(silent.text.contains("EXIT: exit after listing: exit 101 with no error in its output once it had listed 1 target whole (tests/proofs.rs)") && silent.text.ends_with("GATEKEPT suite z :: L7\n"), "{}", silent.text);
+        let said = |out: &str| super::exit_said(out, 101);
+        assert_eq!(said("/n/tree/libs/x/src/lib.rs:3:9: E0425: cannot find value `z`\n"), None, "its errors say why");
+        assert_eq!(said("     Running x\nthread 'main' panicked at a.rs:1:1:\n"), None, "so does its panic");
+        assert!(said("     Running src/lib.rs\na: test\n").is_some_and(|s| s.contains("inside its listing of src/lib.rs")), "a listing cut short is no whole one");
+        assert!(said("     Running a\n1 test, 0 benchmarks\nerror: test failed\n").is_some_and(|s| s.contains("its last line: error: test failed")), "a line after the count is where it stopped");
+        assert!(said("").is_some_and(|s| s.ends_with("it printed nothing")));
+        let long = format!("{}\nend\n", "x".repeat(super::LISTING_TAIL));
+        assert_eq!(super::tail_of(&long, super::LISTING_TAIL), "end\n", "a tail starts at a line");
+        super::judge(&ctx, &plan(vec![node("a", &["x", "z"], 5, vec![broken, silent]), node("b", &["y"], 5, vec![fine.clone()])]), false);
         let rows: Vec<_> = crate::bucket::ledger(&home, 10).iter().map(|l| makepad_strict_json::parse(l.as_bytes()).unwrap()).collect();
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.get("bucket").and_then(|v| v.as_str()), Some("prebuild"));
         assert_eq!(row.get("ok").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(row.get("failing").and_then(|v| v.as_arr()).map(|f| f.iter().filter_map(|u| u.as_str()).collect::<Vec<_>>()), Some(vec!["suite x"]));
+        assert_eq!(row.get("failing").and_then(|v| v.as_arr()).map(|f| f.iter().filter_map(|u| u.as_str()).collect::<Vec<_>>()), Some(vec!["suite x", "suite z"]));
         assert_eq!(row.get("errors").and_then(|e| e.get("suite x")).and_then(|v| v.as_arr()).map(|e| e.len()), Some(1), "{}", row.to_json());
+        assert!(row.get("errors").and_then(|e| e.get("suite z")).and_then(|v| v.as_arr()).and_then(|e| e.first()?.as_str().map(str::to_string)).is_some_and(|e| e.starts_with(crate::bucket::EXIT_AFTER_LISTING)), "{}", row.to_json());
         assert!(row.get("passed").and_then(|v| v.as_arr()).is_some_and(|p| p.iter().any(|u| u.as_str() == Some("suite y"))));
         {
             let fed = fed.lock().unwrap();
             let red = fed.iter().find(|r| r.kind == "bucket").expect("a bucket line on the feed");
-            assert!(red.sev == Sev::Err && red.line.contains("bucket prebuild") && red.line.contains("FAILED suite x"), "{}", red.line);
+            assert!(red.sev == Sev::Err && red.line.contains("bucket prebuild") && red.line.contains("FAILED suite x, suite z (exit after listing; its output: devhub job result L7)"), "{}", red.line);
         }
         // the next JIT's listings pass: an ok row; a plan that listed nothing is none
         super::judge(&ctx, &plan(vec![node("b", &["y"], 5, vec![fine])]), false);

@@ -24,9 +24,14 @@
 //! unmapped; JIT code is in memory and only grows) and writes new stores into the kept folders.
 //!
 //! Removal walks the tree with explicit paths: no shell, no glob, links removed, never followed.
+//!
+//! The disk guard takes one Relax build's stores out of a run dir at a time ([`builds`],
+//! [`retire`]): what a store file's header names (relax-session store_file), under the build's
+//! live lock, as the JIT's own prune retires a build.
 
 use makepad_remote::discovery;
 use makepad_remote::json_str;
+use relax_session::store_file as header;
 use std::path::{Path, PathBuf};
 
 /// What a run dir is, for the line that names it.
@@ -207,6 +212,207 @@ pub(crate) fn held_locks(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// One Relax build's stores in a run dir's `cache/` (relax store.rs: a store file's header names
+/// the build that wrote it, and a running process of the build holds `cache/live/<build>` shared).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BuildStores {
+    pub build: u64,
+    pub files: usize,
+    /// bytes on disk
+    pub bytes: u64,
+    /// when a run of it last used them, unix seconds: its newest store stamp (a run stamps the
+    /// stores of its own build it opens) or its live lock's (stamped when a run takes it)
+    pub used: u64,
+    /// a running process of the build holds its live lock
+    pub running: bool,
+}
+
+/// A store file's name (relax store.rs name_ours, split_gen): `<crate>-<16 hex>.rcs`, or a
+/// generation of one (`.rcs.<n>`).
+fn store_name(n: &str) -> bool {
+    let base = match n.rsplit_once('.') {
+        Some((b, g)) if b.ends_with(".rcs") && !g.is_empty() && g.len() <= 9 && !g.starts_with('0') && g.bytes().all(|c| c.is_ascii_digit()) => b,
+        _ => n,
+    };
+    let Some((c, h)) = base.strip_suffix(".rcs").and_then(|s| s.rsplit_once('-')) else { return false };
+    !c.is_empty() && c.len() <= 128 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The build a store file's header names (relax-session store_file); None: not a store of the
+/// store's format (an older format's header names none: the JIT's own prune retires those), or its
+/// writer holds it right now.
+fn store_build(p: &Path) -> Option<u64> {
+    let mut f = std::fs::File::open(p).ok()?;
+    f.try_lock_shared().ok()?;
+    let mut h = [0u8; header::HEADER];
+    let ours = std::io::Read::read_exact(&mut f, &mut h).is_ok() && &h[..4] == header::MAGIC && h[4..8] == header::FORMAT.to_le_bytes();
+    let _ = f.unlock();
+    ours.then(|| u64::from_le_bytes(h[header::BUILD_AT..header::BUILD_AT + 8].try_into().unwrap()))
+}
+
+fn live_lock(dir: &Path, build: u64) -> PathBuf {
+    dir.join("cache").join("live").join(format!("{build:016x}"))
+}
+
+/// The store files of run dir `dir`: (path, its build, its metadata).
+fn store_files(dir: &Path) -> Vec<(PathBuf, u64, std::fs::Metadata)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir.join("cache")).into_iter().flatten().flatten() {
+        let p = e.path();
+        if !e.file_name().to_str().is_some_and(store_name) {
+            continue;
+        }
+        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+        if !m.file_type().is_file() {
+            continue;
+        }
+        if let Some(b) = store_build(&p) {
+            out.push((p, b, m));
+        }
+    }
+    out
+}
+
+/// The builds whose stores the run dir `dir` holds, the most recently used first. One dir holds
+/// the stores of every Relax build that ran there (another build's stay a day: relax cache.rs
+/// OTHER_UNUSED_FOR), so on a box whose JIT is rebuilt at each landing one dir is most of its disk.
+pub(crate) fn builds(dir: &Path) -> Vec<BuildStores> {
+    let mut by: std::collections::BTreeMap<u64, BuildStores> = std::collections::BTreeMap::new();
+    for (_, b, m) in store_files(dir) {
+        let (bytes, mtime) = crate::os::on_disk(&m);
+        let s = by.entry(b).or_insert(BuildStores { build: b, files: 0, bytes: 0, used: 0, running: false });
+        s.files += 1;
+        s.bytes += bytes;
+        s.used = s.used.max(mtime);
+    }
+    for s in by.values_mut() {
+        let lock = live_lock(dir, s.build);
+        if let Ok(m) = std::fs::metadata(&lock) {
+            s.used = s.used.max(crate::os::on_disk(&m).1);
+        }
+        s.running = std::fs::OpenOptions::new().read(true).open(&lock).is_ok_and(|f| f.try_lock().is_err());
+    }
+    let mut v: Vec<BuildStores> = by.into_values().collect();
+    v.sort_by_key(|s| std::cmp::Reverse(s.used));
+    v
+}
+
+/// The deployment moved on this box: the dev run dirs ([`dev_runs`]) retire the stores of every
+/// Relax build older than the previous one ([`superseded`]), and this move's time is kept for the
+/// next. Relax's own prune keeps another build's stores a day, or until the volume is down to its
+/// free floor (relax cache.rs OTHER_UNUSED_FOR); each landing that changes the JIT writes a cold
+/// set of 2-22 GB, so one dir held 67 builds, 134 GB, and a box sat at that floor (11-19).
+/// (builds retired, bytes freed)
+pub fn deployment_moved() -> (usize, u64) {
+    let keep = kept_builds();
+    let stamp = crate::proto::home().join("deployed-at");
+    let since = std::fs::read_to_string(&stamp).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    let _ = std::fs::write(&stamp, (crate::proto::wall_ms() / 1000).to_string());
+    // (the first move a box records has no earlier one to measure use from)
+    let Some(since) = since else { return (0, 0) };
+    let (mut n, mut freed) = (0, 0);
+    for dir in std::fs::read_dir(dev_runs()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        for b in superseded(&builds(&dir), since, &keep) {
+            if let Ok(f) = retire(&dir, b) {
+                n += 1;
+                freed += f;
+            }
+        }
+    }
+    (n, freed)
+}
+
+/// What a deployment's move retires of one run dir's `builds` (the most recently used first):
+/// all but the two most recently used (the current build and the previous one), those a run used
+/// since the move before this one (`since`, unix seconds: a lane's build in use), those a running
+/// process holds and those a timed series keeps (`keep`, [`kept_builds`]).
+fn superseded(builds: &[BuildStores], since: u64, keep: &std::collections::HashSet<u64>) -> Vec<u64> {
+    builds.iter().skip(2).filter(|b| !b.running && b.used < since && !keep.contains(&b.build)).map(|b| b.build).collect()
+}
+
+/// A series' last builds by lane: `<home>/series-builds/<lane>`, one build per line (16 hex).
+fn series_dir() -> PathBuf {
+    crate::proto::home().join("series-builds")
+}
+
+fn lane_name(l: &str) -> bool {
+    !l.is_empty() && l.len() <= 64 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A timed lease of `lane` ended here: the builds the dev run dirs used from its first run's
+/// start (`since`, unix seconds) on are its series' last build, which a deployment's retire keeps
+/// while the master names the lane ([`series_keep`]). A series that went cold between its runs
+/// would time its next run's compile (its gaps can outlast a deployment).
+pub fn note_series(lane: &str, since: u64) {
+    if !lane_name(lane) {
+        return;
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for dir in std::fs::read_dir(dev_runs()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        ids.extend(builds(&dir).into_iter().filter(|b| b.used >= since).map(|b| b.build));
+    }
+    if ids.is_empty() {
+        return;
+    }
+    let text: Vec<String> = ids.iter().map(|b| format!("{b:016x}")).collect();
+    let _ = std::fs::create_dir_all(series_dir()).and_then(|_| std::fs::write(series_dir().join(lane), text.join("\n")));
+}
+
+/// The master names the lanes whose timed series keep their last build through the next
+/// deployment's retire (`-`: none): its timed leases queued, live or just ended, its named
+/// series and its held branches (lease/sched.rs `series_lanes`).
+pub fn series_keep(lanes: &str) -> String {
+    let lanes: Vec<&str> = lanes.split(',').map(str::trim).filter(|l| lane_name(l)).collect();
+    match std::fs::write(crate::proto::home().join("series-keep"), lanes.join("\n")) {
+        Ok(()) => format!("{{\"series_keep\":{}}}", lanes.len()),
+        Err(e) => format!("{{\"err\":{}}}", makepad_remote::json_str(&format!("series-keep: {e}"))),
+    }
+}
+
+/// The builds the lanes the master named last keep ([`series_keep`], [`note_series`]).
+fn kept_builds() -> std::collections::HashSet<u64> {
+    let lanes = std::fs::read_to_string(crate::proto::home().join("series-keep")).unwrap_or_default();
+    lanes.lines().filter(|l| lane_name(l)).flat_map(|l| std::fs::read_to_string(series_dir().join(l)).unwrap_or_default().lines().filter_map(|b| u64::from_str_radix(b.trim(), 16).ok()).collect::<Vec<_>>()).collect()
+}
+
+/// Removes build `build`'s stores from run dir `dir` as the store retires a build (relax store.rs
+/// retire_build): under the build's live lock held exclusively, so no run of it starts meanwhile
+/// (one that starts waits for the lock, then finds the file gone and takes a new one: a cold
+/// start), then the lock file goes. Only files with a store's name whose header names the build go;
+/// what else the dir holds (build script outputs, startup manifests) the JIT keeps by use. Refused
+/// while a run of the build holds the lock. The bytes freed.
+pub(crate) fn retire(dir: &Path, build: u64) -> Result<u64, String> {
+    let p = live_lock(dir, build);
+    let live = dir.join("cache").join("live");
+    std::fs::create_dir_all(&live).map_err(|e| format!("{}: {e}", live.display()))?;
+    let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    if f.try_lock().is_err() {
+        return Err(format!("a run of build {build:016x} holds its live lock"));
+    }
+    // a retire by the JIT's own prune may have removed the file between the open and the lock
+    // (a run of the build then locks a new one there)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let same = matches!((f.metadata(), std::fs::metadata(&p)), (Ok(a), Ok(b)) if (a.dev(), a.ino()) == (b.dev(), b.ino()));
+        if !same {
+            return Err(format!("build {build:016x}'s live lock was retired meanwhile"));
+        }
+    }
+    let mut freed = 0;
+    for (path, b, m) in store_files(dir) {
+        if b == build && std::fs::remove_file(&path).is_ok() {
+            freed += crate::os::on_disk(&m).0;
+        }
+    }
+    // a run that locks the file checks it is still there (hold_build); on Windows an open file's
+    // name stays taken until it closes, so the empty lock file stays
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&p);
+    let _ = f.unlock();
+    Ok(freed)
 }
 
 /// The package names `app` may mean (`foo` is `makepad-app-foo`).
@@ -495,4 +701,23 @@ fn who(busy: &[&CachePlan]) -> String {
         names.push("a makepad run/check/test process".into());
     }
     if names.is_empty() { "a running process".into() } else { names.join(", ") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A deployment's move keeps the current and the previous build, what a run used since the
+    /// move before it, what a run holds and a named timed series' last build; every older build goes.
+    #[test]
+    fn a_deployment_retires_the_builds_older_than_the_previous_one() {
+        let b = |build: u64, used: u64, running: bool| BuildStores { build, files: 1, bytes: 1, used, running };
+        let since = 1_000;
+        let none = std::collections::HashSet::new();
+        let builds = [b(1, 1_500, false), b(2, 1_200, false), b(3, 1_100, false), b(4, 900, true), b(5, 800, false), b(6, 100, false)];
+        assert_eq!(superseded(&builds, since, &none), vec![5, 6], "kept: the two newest, one used since the last move, a running one");
+        assert_eq!(superseded(&builds, since, &[6].into()), vec![5], "a timed series' last build stays between its runs");
+        assert_eq!(superseded(&builds[..2], u64::MAX, &none), Vec::<u64>::new(), "the current and the previous build stay however long unused");
+        assert_eq!(superseded(&[b(1, 10, false), b(2, 5, false), b(3, 1, false)], since, &none), vec![3], "an idle box keeps its two newest builds");
+    }
 }

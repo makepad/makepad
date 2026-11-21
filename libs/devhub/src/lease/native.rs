@@ -263,8 +263,10 @@ pub enum OnWindows {
 /// Whether a Windows box runs `cmd`: plain argv (a Windows run is never a shell's), `cargo build`,
 /// `check`, `clippy` or `test` of packages it names with `-p`, each checked on Windows (`gaps`:
 /// its platform-gaps' `windows` table, None when it has none) and selecting none of its gaps.
-/// A build or check selects its lib and bins unless it names targets; a test, every target. The
-/// workspace, another manifest or a `--target` is not checked anywhere: it stays off Windows.
+/// A build or check selects its lib and bins unless it names targets; a test, every target. A
+/// `lib` gap is its tests' alone (a lib that does not build is its package's `build` gap), so it
+/// keeps only a test off. The workspace, another manifest or a `--target` is not checked anywhere:
+/// it stays off Windows.
 pub fn on_windows(cmd: &[String], gaps: &dyn Fn(&str) -> Option<std::collections::BTreeMap<String, String>>) -> OnWindows {
     let Some(first) = cmd.first() else { return OnWindows::Not };
     let program = first.rsplit(['/', '\\']).next().unwrap_or(first);
@@ -295,8 +297,10 @@ pub fn on_windows(cmd: &[String], gaps: &dyn Fn(&str) -> Option<std::collections
     if pkgs.is_empty() { return OnWindows::Not; }
     if verb != "test" && select.is_empty() { select = vec!["lib".into(), "bins".into()]; }
     for pkg in &pkgs {
-        let Some(gaps) = gaps(pkg) else { return OnWindows::Not };
+        let Some(mut gaps) = gaps(pkg) else { return OnWindows::Not };
         if let Some(why) = gaps.get("build") { return OnWindows::Gap(format!("{pkg} does not build on Windows: {why}")); }
+        // (devhub's lib, whose tests fail there, kept every Windows check of its hub off the box, 11-19)
+        if verb != "test" { gaps.remove("lib"); }
         if let Some((target, why)) = crate::jit_misses::native_selected(&gaps, &select).first() {
             return OnWindows::Gap(format!("{pkg} {target} on Windows: {why}"));
         }
@@ -446,6 +450,7 @@ mod tests {
             "clean" => Some(std::collections::BTreeMap::new()),
             "gappy" => Some([("test:modules".to_string(), "no sandbox there yet".to_string())].into()),
             "broken" => Some([("build".to_string(), "its Unix-only deps".to_string())].into()),
+            "redlib" => Some([("lib".to_string(), "3 of 90 fail there".to_string())].into()),
             _ => None,
         };
         let on = |cmd: &str| on_windows(&argv(cmd), &gaps);
@@ -456,6 +461,11 @@ mod tests {
         assert_eq!(on("cargo test -p gappy --test modules"), OnWindows::Gap("gappy test:modules on Windows: no sandbox there yet".into()));
         assert_eq!(on("cargo check -p gappy --all-targets"), OnWindows::Gap("gappy test:modules on Windows: no sandbox there yet".into()));
         assert_eq!(on("cargo build -p broken --lib"), OnWindows::Gap("broken does not build on Windows: its Unix-only deps".into()));
+        // a lib gap is its tests': its build, check and clippy run there
+        for runs in ["cargo check -p redlib", "cargo build -p redlib --lib", "cargo clippy -p redlib"] {
+            assert_eq!(on(runs), OnWindows::Runs, "{runs}");
+        }
+        assert_eq!(on("cargo test -p redlib --lib"), OnWindows::Gap("redlib lib on Windows: 3 of 90 fail there".into()));
         assert_eq!(on("cargo test -p clean -p unchecked"), OnWindows::Not, "a package never checked there");
         for not in ["cargo test", "cargo test --workspace", "cargo run -p clean", "cargo check -p clean --target wasm32-unknown-unknown", "bash -c cargo", "env A=1 cargo test -p clean", "cargo"] {
             assert_eq!(on(not), OnWindows::Not, "{not}");

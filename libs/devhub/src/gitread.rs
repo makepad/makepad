@@ -421,6 +421,51 @@ pub fn path_blobs(dir: &Path, tips: &[&str]) -> Result<std::collections::BTreeSe
     .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
 }
 
+/// Every commit reachable from `tips` (names [`resolve`] takes), by all parents, each once with its
+/// generation (1 for a root, or a commit whose parents are past a shallow boundary, else one more
+/// than its highest parent's) and whether the first tip holds it. A descendant always counts more
+/// than its ancestors, whatever the commits' dates, so of several commits of one history the
+/// highest is never an ancestor of another. One walk over the histories.
+pub fn generations(dir: &Path, tips: &[&str]) -> Result<HashMap<String, (u32, bool)>, String> {
+    with(dir, |p, repo| {
+        let mut parents: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+        let mut first: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+        for (k, tip) in tips.iter().enumerate() {
+            let c = resolve(p, repo, tip).ok_or_else(|| format!("{}: no commit {tip}", dir.display()))?;
+            if parents.contains_key(&c) {
+                continue;
+            }
+            for (id, commit) in repo.log(&c, usize::MAX).map_err(|e| format!("history of {tip}: {e}"))? {
+                if k == 0 {
+                    first.insert(id);
+                }
+                parents.entry(id).or_insert(commit.parents);
+            }
+        }
+        // parents before children, with a stack of our own: a history is deeper than a thread's
+        let mut gen: HashMap<ObjectId, u32> = HashMap::with_capacity(parents.len());
+        for start in parents.keys() {
+            let mut stack = vec![*start];
+            while let Some(&id) = stack.last() {
+                if gen.contains_key(&id) {
+                    stack.pop();
+                    continue;
+                }
+                let ps = &parents[&id];
+                let before = stack.len();
+                stack.extend(ps.iter().filter(|q| parents.contains_key(q) && !gen.contains_key(q)));
+                if stack.len() == before {
+                    let g = 1 + ps.iter().filter_map(|q| gen.get(q)).max().copied().unwrap_or(0);
+                    gen.insert(id, g);
+                    stack.pop();
+                }
+            }
+        }
+        Ok(gen.into_iter().map(|(id, g)| (id.to_hex(), (g, first.contains(&id)))).collect())
+    })
+    .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
+}
+
 /// A reader of the blobs of the repository `dir` is in, its paths and shared repository found
 /// once: [`blob`] finds them for each blob, and a gate-proof check of a landed tree reads
 /// thousands (two of its five seconds after a master restart, 11-06).
@@ -646,6 +691,41 @@ mod tests {
         assert!(super::undone(&d, &tip, &kept, 0).unwrap().is_empty(), "a merge that keeps the tip's files undoes nothing");
         assert!(super::undone(&d, "refs/heads/missing", &merged, 0).is_err(), "an unreadable target must not pass");
         assert_eq!(crate::git_exec::on_this_thread(), before, "the undo walk must not start git");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Every commit of the tips' histories, by all parents, once, a descendant above its ancestors
+    /// whatever the dates say.
+    #[test]
+    fn generations_count_every_parent_and_ignore_dates() {
+        let d = std::env::temp_dir().join(format!("devhub-gitread-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        g(&d, &["init", "-q", "-b", "main"]);
+        let commit = |date: &str, msg: &str| {
+            let o = std::process::Command::new("git").arg("-C").arg(&d).args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", msg]).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_COMMITTER_DATE", date).env("GIT_AUTHOR_DATE", date).output().unwrap();
+            assert!(o.status.success());
+            g(&d, &["rev-parse", "HEAD"])
+        };
+        let root = commit("2026-01-03T00:00:00", "root");
+        let a = commit("2026-01-01T00:00:00", "a, dated before its parent");
+        g(&d, &["checkout", "-q", "-b", "side", &root]);
+        let s1 = commit("2026-01-02T00:00:00", "s1");
+        let s2 = commit("2026-01-02T00:00:01", "s2");
+        g(&d, &["checkout", "-q", "main"]);
+        g(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "merge", "side"]);
+        let merge = g(&d, &["rev-parse", "HEAD"]);
+        g(&d, &["checkout", "-q", "-b", "other", &root]);
+        let o1 = commit("2026-01-05T00:00:00", "o1");
+        let before = crate::git_exec::on_this_thread();
+        let gens = super::generations(&d, &["main", "other"]).unwrap();
+        let at = |c: &str| gens.get(c).map(|g| g.0);
+        assert_eq!((gens.len(), at(&root), at(&a), at(&s1), at(&s2), at(&merge), at(&o1)), (6, Some(1), Some(2), Some(2), Some(3), Some(4), Some(2)), "each commit once, one above its highest parent");
+        let on_main: Vec<bool> = [&root, &a, &s1, &s2, &merge, &o1].iter().map(|c| gens[c.as_str()].1).collect();
+        assert_eq!(on_main, [true, true, true, true, true, false], "and whether the first tip holds it, by any parent");
+        assert_eq!(super::generations(&d, &["side"]).unwrap().len(), 3, "a tip's own history only");
+        assert!(super::generations(&d, &["missing"]).is_err(), "a tip that is no commit fails");
+        assert_eq!(crate::git_exec::on_this_thread(), before, "and no git starts");
         let _ = std::fs::remove_dir_all(&d);
     }
 

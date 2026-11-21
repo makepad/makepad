@@ -132,7 +132,7 @@ pub fn start(ctx: Arc<Ctx>) {
 }
 
 /// What lease ends keep (lease/master.rs), and how many of them stay.
-const LEASE_LOGS: &str = "lease-logs";
+pub(crate) const LEASE_LOGS: &str = "lease-logs";
 const LEASE_LOGS_KEPT: usize = 500;
 
 /// Removes the logs and snapshots of jobs the state no longer keeps, and all but the newest lease logs.
@@ -908,8 +908,12 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 return Err("job lease-log L<id>".into());
             }
             let path = ctx.logs(LEASE_LOGS).join(format!("{rest}.log"));
-            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless it stalled, a test run or a bucket's test unit failed, or a run ended abnormally"))?;
-            Ok(format!("{{\"text\":{},\"path\":{}}}", json_str(&String::from_utf8_lossy(&bytes)), json_str(&path.display().to_string())))
+            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless it stalled, a run failed, a bucket's test unit failed, or a run ended abnormally"))?;
+            // its error lines and last lines, said here: a failed run's whole output (MBs of a
+            // long test run, lease/master.rs keep_failed_runs) is read at its path
+            let (errors, tail) = digest(&String::from_utf8_lossy(&bytes));
+            let list = |v: &[String]| v.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(",");
+            Ok(format!("{{\"errors\":[{}],\"tail\":[{}],\"bytes\":{},\"path\":{}}}", list(&errors), list(&tail), bytes.len(), json_str(&path.display().to_string())))
         }
         "output" => {
             use std::io::{Read, Seek};
@@ -1172,6 +1176,8 @@ fn dirty_set(ctx: &Ctx, tree: &std::path::Path, lane: &str) -> Result<(String, V
         changed.extend(c.changed.into_iter().map(|p| format!("{prefix}{p}")));
         deleted.extend(c.deleted.into_iter().map(|p| format!("{prefix}{p}")));
     }
+    // each followed one the worktree lacks at its landed tip, as the lane's runs pin it
+    rev.push_str(&crate::nested::absent_sides(tree));
     changed.retain(|p| !crate::lease::ship::never_ships(p));
     deleted.retain(|p| !crate::lease::ship::never_ships(p));
     Ok((rev, changed, deleted))
@@ -1733,6 +1739,13 @@ mod tests {
         let done = get(&c, &j.id).unwrap();
         assert_eq!(done.tail.last().map(String::as_str), Some("test a ..."), "its result reads the run's output");
         assert!(std::fs::read_to_string(&log).unwrap().ends_with("== what L7 kept when it stalled (`devhub job result L7`)\n== node-a: its processes and last lines when it stalled (L7 test@node-a of lane1: every process idle for 10m00s)\npid 7: sleep 3600\n"));
+        // `devhub job result L7` hears the kept log's error lines and last lines, its size and its
+        // path, not its text: a failed run's whole output can be MBs (11-20)
+        std::fs::write(c.logs(LEASE_LOGS).join("L8.log"), format!("== run 1 on node-a: its whole output\n{}test x ... FAILED\n", "test y ... ok\n".repeat(20_000))).unwrap();
+        let said = makepad_strict_json::parse(serve(&c, "job lease-log L8").unwrap().as_bytes()).unwrap();
+        let lines = |k: &str| said.get(k).and_then(|v| v.as_arr()).map_or(0, |a| a.len());
+        assert!(lines("errors") == 1 && lines("tail") == TAIL && said.get("text").is_none(), "{}", said.to_json());
+        assert_eq!(said.get("bytes").and_then(|b| b.as_u64()), Some(std::fs::metadata(c.logs(LEASE_LOGS).join("L8.log")).unwrap().len()));
         let _ = std::fs::remove_dir_all(&c.home);
     }
 

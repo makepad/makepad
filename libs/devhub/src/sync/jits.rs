@@ -40,15 +40,16 @@ pub fn list() -> Vec<Jit> {
     out
 }
 
-/// Whether `pid` announced itself (a discovery file answers to it): what started a run holds a pid
-/// that on Windows is the parent the run stands behind.
-pub fn announced(pid: u32) -> Option<String> {
+/// Whether `pid` announced itself (a discovery file answers to it: what started a run holds a pid
+/// that on Windows is the parent the run stands behind, on a Mac `makepad run`, which runs the
+/// program in a child of its own): its app name and the JIT's own pid, what inspect names it by.
+pub fn announced_jit(pid: u32) -> Option<(String, u32)> {
     let dir = std::fs::read_dir(discovery::registry_dir()).ok()?;
     dir.flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("makepad-remote-"))
         .filter_map(|e| discovery::parse(&std::fs::read_to_string(e.path()).ok()?))
         .find(|a| a.answers_to(pid))
-        .map(|a| a.app)
+        .map(|a| (a.app, a.pid))
 }
 
 fn environ(pid: u32, key: &str) -> Option<String> {
@@ -69,6 +70,24 @@ pub fn runs_from(pid: u32, checkout: &Path) -> bool {
 /// Its executable was replaced on disk (a build rewrote the `makepad` binary it runs).
 pub fn exe_replaced(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p.to_string_lossy().ends_with(" (deleted)"))
+}
+
+/// When the process started (wall ms; 0: gone, or this platform cannot tell): the code it runs
+/// is at least that old. Not its binary's replacement: each later build rewrites the file again.
+pub fn started_ms(pid: u32) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let boot = std::fs::read_to_string("/proc/stat").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|v| v.trim().parse::<u64>().ok()));
+        match (boot, makepad_remote::relay::proc_start(pid)) {
+            (Some(boot), Some(ticks)) => boot * 1000 + (ticks as f64 * 1000.0 / crate::top::ticks_per_s()) as u64,
+            _ => 0,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        0
+    }
 }
 
 /// Where the JIT writes its live-edit records: its discovery file names it (`live_log`, the run's

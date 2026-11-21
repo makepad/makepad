@@ -151,9 +151,34 @@ impl<T> Held<T> {
 }
 
 /// The waits in this process now, one line each: `<waiter> waits on <lock> held by <holder>`,
-/// and what the holder itself waits on (its own thread: a deadlock). A line's text before ` (for`
-/// stays the same while the wait does.
+/// and what the holder itself waits on (its own thread, or the waiter's: a deadlock). A line's
+/// text before ` (for` stays the same while the wait does.
 pub fn stalls() -> Vec<String> {
+    waits().into_iter().map(|w| w.line).collect()
+}
+
+/// The waits of [`stalls`] that never free by themselves, waiting at least `at_least` each: a
+/// thread that waits on a lock it holds itself, or whose holder waits on a lock that it, or the
+/// waiter, holds. A lease start that ended its lease under the start lock took that lock again
+/// on its thread, and two pool boxes' hubs answered no lease start or end, nor their own
+/// self-update or TERM, until each was stopped by hand 26 min later (11-18).
+pub fn deadlocks(at_least: Duration) -> Vec<String> {
+    waits().into_iter().filter(|w| w.deadlock && w.waited >= at_least).map(|w| w.line).collect()
+}
+
+/// A deadlock of `now` that `before` (an earlier look's [`deadlocks`]) named too: the same wait
+/// on both looks, not a view of locks that moved while it was taken.
+pub fn lasting<'a>(before: &[String], now: &'a [String]) -> Option<&'a String> {
+    now.iter().find(|l| before.iter().any(|b| stall_key(b) == stall_key(l)))
+}
+
+struct Wait {
+    line: String,
+    deadlock: bool,
+    waited: Duration,
+}
+
+fn waits() -> Vec<Wait> {
     let all: Vec<(&'static str, Arc<Mutex<Seen>>)> = ALL.lock().unwrap_or_else(PoisonError::into_inner).iter().filter_map(|(n, w)| Some((*n, w.upgrade()?))).collect();
     let view: Vec<(&'static str, Option<Who>, Vec<Who>)> = all.iter().map(|(n, s)| {
         let s = seen_of(s);
@@ -163,22 +188,28 @@ pub fn stalls() -> Vec<String> {
     for (name, holder, waiting) in &view {
         for w in waiting {
             let mut line = format!("{} waits on {name}", w.line());
+            let mut deadlock = false;
             match holder {
-                Some(h) if h.thread == w.thread => line.push_str(&format!(" that its own thread holds ({}): a deadlock", h.line())),
+                Some(h) if h.thread == w.thread => {
+                    line.push_str(&format!(" that its own thread holds ({}): a deadlock", h.line()));
+                    deadlock = true;
+                }
                 Some(h) => {
                     line.push_str(&format!(" held by {}", h.line()));
                     // what the holder waits on, if anything: a chain ends at a holder that runs
                     if let Some((other, oh)) = view.iter().find_map(|(n, oh, ws)| ws.iter().any(|x| x.thread == h.thread).then_some((n, oh))) {
                         line.push_str(&format!(", which waits on {other}"));
                         if let Some(oh) = oh {
-                            line.push_str(&format!(" held by {}{}", oh.line(), if oh.thread == h.thread { ": a deadlock" } else { "" }));
+                            deadlock = oh.thread == h.thread || oh.thread == w.thread;
+                            line.push_str(&format!(" held by {}{}", oh.line(), if deadlock { ": a deadlock" } else { "" }));
                         }
                     }
                 }
                 None => line.push_str(" (freed just now)"),
             }
-            line.push_str(&format!(" (for {} s)", w.since.elapsed().as_secs()));
-            out.push(line);
+            let waited = w.since.elapsed();
+            line.push_str(&format!(" (for {} s)", waited.as_secs()));
+            out.push(Wait { line, deadlock, waited });
         }
     }
     out
@@ -226,6 +257,28 @@ mod tests {
         seen_of(&c.seen).waiting.push(me);
         let line = stalls().into_iter().find(|l| l.contains("held-test-c")).unwrap();
         assert!(line.contains("that its own thread holds") && line.ends_with("s)") && line.contains("a deadlock"), "{line}");
+        let found = deadlocks(Duration::ZERO).into_iter().find(|l| l.contains("held-test-c"));
+        assert_eq!(found.as_deref().map(stall_key), Some(stall_key(&line)), "a deadlock of its own");
+        assert!(!deadlocks(Duration::from_secs(60)).iter().any(|l| l.contains("held-test-c")), "a deadlock is one that lasts: not one this new");
         seen_of(&c.seen).waiting.clear();
+
+        // two threads, each waiting on the lock the other holds
+        let other = std::thread::Builder::new().name("held-other".into()).spawn(Who::here).unwrap().join().unwrap();
+        let (d, e) = (Held::new("held-test-d", ()), Held::new("held-test-e", ()));
+        seen_of(&d.seen).holder = Some(Who::here());
+        seen_of(&d.seen).waiting.push(other.clone());
+        seen_of(&e.seen).holder = Some(other);
+        seen_of(&e.seen).waiting.push(Who::here());
+        let both = deadlocks(Duration::ZERO);
+        let line = both.iter().find(|l| l.contains("(held-other) waits on held-test-d")).unwrap();
+        assert!(line.contains("which waits on held-test-e held by") && line.contains(": a deadlock"), "{line}");
+        assert!(lasting(&[], &both).is_none(), "one look is not lasting");
+        let later: Vec<String> = both.iter().map(|l| l.replace("(for 0 s)", "(for 20 s)")).collect();
+        assert!(lasting(&both, &later).is_some_and(|l| l.contains("held-test-")), "the same waits on the next look last");
+        assert!(lasting(&[format!("{} (for 0 s)", "x waits on y that its own thread holds (z): a deadlock")], &later).is_none(), "another wait does not");
+        for h in [&d, &e] {
+            *seen_of(&h.seen) = Seen::default();
+        }
+        assert!(!deadlocks(Duration::ZERO).iter().any(|l| l.contains("held-test-")), "and none after");
     }
 }

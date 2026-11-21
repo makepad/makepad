@@ -239,7 +239,8 @@ pub fn pid_file() -> PathBuf {
 }
 
 /// The master's node list, `~/.makepad/devhub/nodes.conf`: one line per node,
-/// `<name> addr=<ip[:port]> [dev=on|off]` (`#` comments; no `dev=` means on, for every node). It is the master's seeds (the master
+/// `<name> addr=<ip[:port]> [dev=on|off] [serial=on] [warm_apps=off]` (`#` comments; no `dev=` means on, for every node;
+/// `warm_apps=off`: no app pass of the warm legs there, orch/warm.rs). It is the master's seeds (the master
 /// never listens for announcements: receiving LAN broadcasts would ask the macOS Local Network
 /// question) and the dev switch of each node (DESIGN.md §10.7).
 pub fn nodes_conf() -> PathBuf {
@@ -402,6 +403,9 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // (a review card's intake items, with the private checkout: gate.rs)
+        let repo = crate::lease::wt::default_repo();
+        if crate::gate::present(&repo) { asks.set_gate(Arc::new(crate::gate::Binary::new(repo))); }
         crate::ask::register(&ep, asks);
         crate::sync::register_control(&ep, &hub);
         let (s, o) = (sink.clone(), on_record.clone());
@@ -409,6 +413,7 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        crate::serial::Master::start(&ep, leases.clone());
         // every inspect, grab and act on a node's app routes through here: a lane's screen run
         // of the app is in use, and so is a live session that runs it
         let l = leases.clone();
@@ -495,6 +500,15 @@ impl Master {
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
             crate::bucket::spawn("mac", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run, |_| None, None);
+            // the packages checked on Windows, a cargo check there after the landings that reach
+            // them: batched as the mac bucket's, the Windows box being shared
+            let run = crate::bucket::windows(repo.clone(), home.clone());
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
+            crate::bucket::spawn(crate::bucket::WINDOWS, timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None, None);
@@ -907,14 +921,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The open fds of this process.
-    fn fds() -> usize {
+    /// The open fds of this process that are sockets of the Unix socket at `path`: its listener,
+    /// a socket it accepted (named `path` too) and a client's end of a connection to it (its peer
+    /// is `path`). Tests running beside its caller open files and pipes and sockets of their own,
+    /// none of them these.
+    #[cfg(unix)]
+    fn fds_of(path: &std::path::Path) -> usize {
+        extern "C" {
+            fn getsockname(fd: i32, addr: *mut u8, len: *mut u32) -> i32;
+            fn getpeername(fd: i32, addr: *mut u8, len: *mut u32) -> i32;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let want = path.as_os_str().as_bytes();
+        let named = |fd: i32, peer: bool| {
+            let mut addr = [0u8; 128];
+            let mut len = addr.len() as u32;
+            // SAFETY: `addr` holds `len` bytes, which the call writes at most
+            let ok = unsafe { if peer { getpeername(fd, addr.as_mut_ptr(), &mut len) } else { getsockname(fd, addr.as_mut_ptr(), &mut len) } } == 0;
+            // (a Unix socket's path starts at byte 2 on Linux and macOS alike)
+            ok && addr.get(2..(len as usize).min(addr.len())).is_some_and(|p| p.split(|&b| b == 0).next() == Some(want))
+        };
         let dir = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
-        std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
+        std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok()).filter(|&fd| named(fd, false) || named(fd, true)).count()
     }
 
     /// The master's control socket (the hub's client endpoint, as `serve` builds it): many CLI
     /// calls leave the fd count flat (each call's sockets used to stay open: 13k after an hour).
+    /// It counts the sockets of its own listener alone ([`fds_of`]): a count of the whole test
+    /// process's fds read the 150 that tests running beside it opened as a leak (11-21).
+    #[cfg(unix)]
     #[test]
     fn cli_calls_leave_the_fd_count_flat() {
         let hub = Hub::new(&Hosts::default());
@@ -941,13 +976,14 @@ mod tests {
             call();
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+        let fds = || fds_of(&sock);
         let before = fds();
+        assert!(before >= 1, "the census finds the listener: it counts this test's sockets");
         for _ in 0..300 {
             call();
         }
-        // the server side sees the last closes a moment later. The count is the whole test
-        // process's: tests running beside this one open files and pipes meanwhile (a bound of 12
-        // failed on that noise), while a leak of even one fd per call leaves 300 or more
+        // the server side sees the last closes a moment later, while a leak of even one fd per
+        // call leaves 300 or more
         const BOUND: usize = 75;
         let t = std::time::Instant::now();
         while fds() > before + BOUND && t.elapsed() < std::time::Duration::from_secs(10) {

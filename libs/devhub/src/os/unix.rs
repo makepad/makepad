@@ -326,6 +326,39 @@ fn group_members(groups: &[(u32, u64)]) -> Option<Vec<u32>> {
     Some(table.keys().copied().filter(|pid| member(*pid)).collect())
 }
 
+/// The sessions the unit watches among `pids` watch (land_gate.sh's `unit_watch.sh <session> <out>`),
+/// each with its live processes (none: the unit ended). A gate's unit leads a session of its own, and
+/// what it starts may leave its run's groups and its lease's mark.
+#[cfg(target_os = "linux")]
+pub fn watched_sessions(pids: &[u32]) -> Vec<(u32, Vec<u32>)> {
+    let mut of: std::collections::BTreeMap<u32, Vec<u32>> = pids.iter().filter_map(|p| {
+        let cmd = std::fs::read(format!("/proc/{p}/cmdline")).ok()?;
+        let args: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
+        let i = args.iter().position(|a| a.ends_with(b"unit_watch.sh"))?;
+        Some((std::str::from_utf8(args.get(i + 1)?).ok()?.parse::<u32>().ok().filter(|s| *s > 0)?, Vec::new()))
+    }).collect();
+    if of.is_empty() {
+        return Vec::new();
+    }
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { continue };
+        // after `(comm) `: state, ppid, pgrp, session
+        let Some(f) = stat.rfind(')').map(|i| stat[i + 1..].split_whitespace().take(4).collect::<Vec<_>>()) else { continue };
+        if f.first() == Some(&"Z") { continue; }
+        if let Some(live) = f.get(3).and_then(|s| s.parse::<u32>().ok()).and_then(|s| of.get_mut(&s)) {
+            live.push(pid);
+        }
+    }
+    of.into_iter().collect()
+}
+
+/// No unit watches outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn watched_sessions(_pids: &[u32]) -> Vec<(u32, Vec<u32>)> {
+    Vec::new()
+}
+
 /// The processes of one run: its group and what descended from it.
 pub fn group_pids(pid: u32, start: u64, _hold: &Hold) -> Vec<u32> {
     group_members(&[(pid, start)]).unwrap_or_default()
@@ -547,6 +580,57 @@ pub fn scope_now(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Opti
     Some(parse_held(&stat))
 }
 
+/// Where a run's memory is, for its memory end's line ([`scope_now`], [`groups_held`]): a scoped
+/// run's `anon` and `shmem` (`memory.stat`; tmpfs files count as shmem) and the `n` largest
+/// processes of its scope by resident set; a run measured by its process group, its group's
+/// largest. Each (bytes, pid, command line's start). A full-a gate ended at 52 GB said only
+/// that, and no record named the process (11-20).
+#[cfg(target_os = "linux")]
+pub fn held_where(pid: u32, start: u64, unit: Option<&str>, usage: &Path, n: usize) -> (Option<(u64, u64)>, Vec<(u64, u32, String)>) {
+    let (split, pids) = match scope_dir(pid, start, unit, usage) {
+        Some(group) => {
+            let stat = std::fs::read_to_string(group.join("memory.stat")).unwrap_or_default();
+            let field = |name: &str| stat.lines().filter_map(|l| l.split_once(' ')).find(|(k, _)| *k == name).and_then(|(_, v)| v.trim().parse::<u64>().ok()).unwrap_or(0);
+            let pids = std::fs::read_to_string(group.join("cgroup.procs")).unwrap_or_default().lines().filter_map(|l| l.trim().parse::<u32>().ok()).collect();
+            (Some((field("anon"), field("shmem"))), pids)
+        }
+        None => (None, group_members(&[(pid, start)]).unwrap_or_default()),
+    };
+    let mut top: Vec<(u64, u32)> = pids.into_iter().map(|p| (crate::procinfo::proc(p).map_or(0, |i| i.rss_bytes), p)).collect();
+    top.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    top.truncate(n);
+    let top = top.into_iter().map(|(bytes, p)| {
+        let cmd = String::from_utf8_lossy(&std::fs::read(format!("/proc/{p}/cmdline")).unwrap_or_default()).replace('\0', " ");
+        (bytes, p, cmd.trim().chars().take(160).collect())
+    }).collect();
+    (split, top)
+}
+
+/// The processes in a scoped run's scope now (its `cgroup.procs`), each with its command line's
+/// start: what its leader left behind once it ended. None: no scope (or it is gone).
+pub fn scope_procs(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Vec<(u32, String)> {
+    let Some(group) = scope_dir(pid, start, unit, usage) else { return Vec::new() };
+    std::fs::read_to_string(group.join("cgroup.procs")).unwrap_or_default().lines().filter_map(|l| l.trim().parse::<u32>().ok()).map(|p| {
+        let cmd = String::from_utf8_lossy(&std::fs::read(format!("/proc/{p}/cmdline")).unwrap_or_default()).replace('\0', " ");
+        (p, cmd.trim().chars().take(80).collect())
+    }).collect()
+}
+
+/// The threads of a scoped run's scope that run or wait to run now (state R in their `stat`):
+/// its share of the box's run queue. 0: none, no scope, or not Linux.
+pub fn scope_runnable(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> u32 {
+    let Some(group) = scope_dir(pid, start, unit, usage) else { return 0 };
+    std::fs::read_to_string(group.join("cgroup.threads")).unwrap_or_default().lines().filter(|t| {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", t.trim())).unwrap_or_default();
+        stat.rfind(')').and_then(|i| stat[i + 1..].split_whitespace().next()) == Some("R")
+    }).count() as u32
+}
+
+/// The box's tasks that run or wait to run now (`/proc/stat`'s `procs_running`).
+pub fn procs_running() -> Option<u32> {
+    std::fs::read_to_string("/proc/stat").ok()?.lines().find_map(|l| l.strip_prefix("procs_running ")?.trim().parse().ok())
+}
+
 /// `anon` + `shmem` of a cgroup's `memory.stat`, bytes: what a run holds that the kernel cannot
 /// reclaim, and what its class asks for. No page cache, active or not: `memory.peak` counted
 /// every file the run read (a third of a tests shard's scope was idle cache, and its class asked
@@ -565,12 +649,14 @@ pub fn groups_held(groups: &[(u32, u64)]) -> Option<u64> {
     groups_rss(groups)
 }
 
-/// RSS in bytes across recorded process groups, in one read of the process table in place (no
-/// `ps` per sample). A departed leader can still have children; a reused pid is excluded.
+/// RSS in bytes across recorded process groups and what descends from them ([`group_members`], as
+/// [`groups_held`] counts), in one read of the process table in place (no `ps` per sample). A
+/// departed leader can still have children; a reused pid is excluded. It counted the groups'
+/// members alone, and a JIT-run test or app leads a group of its own: the Macs' live sessions
+/// peaked at their leader's 0.07 GB while their apps held 1.8 GB, a 16 GB Mac was charged for
+/// that, and a test there was killed by the system for memory (11-19).
 pub fn groups_rss(groups: &[(u32, u64)]) -> Option<u64> {
-    let leaders: Vec<u32> = groups.iter().filter(|(pid, start)| *pid != 0 && proc_start(*pid).is_none_or(|s| s == *start)).map(|(pid, _)| *pid).collect();
-    if leaders.is_empty() { return None; }
-    let rss: Vec<u64> = process_table(&leaders).into_iter().filter(|(_, (_, member))| *member).filter_map(|(pid, _)| crate::procinfo::proc(pid).map(|p| p.rss_bytes)).collect();
+    let rss: Vec<u64> = group_members(groups)?.into_iter().filter_map(|pid| crate::procinfo::proc(pid).map(|p| p.rss_bytes)).collect();
     (!rss.is_empty()).then(|| rss.iter().sum())
 }
 
@@ -677,6 +763,107 @@ pub fn pid_alive(pid: u32) -> bool {
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// The password database's entries (`struct passwd`), read at the right offsets on each platform
+/// written here (another field would be a name, the shell, or a crash).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod passwd {
+    use std::ffi::{c_char, c_int};
+
+    #[repr(C)]
+    pub struct Passwd {
+        pub pw_name: *mut c_char,
+        pub pw_passwd: *mut c_char,
+        pub pw_uid: u32,
+        pub pw_gid: u32,
+        #[cfg(target_os = "macos")]
+        pub pw_change: i64,
+        #[cfg(target_os = "macos")]
+        pub pw_class: *mut c_char,
+        pub pw_gecos: *mut c_char,
+        pub pw_dir: *mut c_char,
+        pub pw_shell: *mut c_char,
+        #[cfg(target_os = "macos")]
+        pub pw_expire: i64,
+    }
+
+    extern "C" {
+        pub fn getuid() -> u32;
+        pub fn getpwuid_r(uid: u32, pwd: *mut Passwd, buf: *mut c_char, len: usize, result: *mut *mut Passwd) -> c_int;
+        pub fn getpwnam_r(name: *const c_char, pwd: *mut Passwd, buf: *mut c_char, len: usize, result: *mut *mut Passwd) -> c_int;
+    }
+
+    /// One entry as `ask` (a `getpw*_r` call into the entry and buffer it is handed) finds it, and
+    /// what `read` takes of it. The buffer grows while the entry does not fit (ERANGE); a signal
+    /// during the lookup (EINTR) asks it again; any other answer is no entry.
+    pub fn entry<T>(mut ask: impl FnMut(*mut Passwd, *mut c_char, usize, *mut *mut Passwd) -> c_int, read: impl Fn(&Passwd) -> Option<T>) -> Option<T> {
+        const EINTR: c_int = 4;
+        const ERANGE: c_int = 34;
+        let mut buf = vec![0 as c_char; 16 << 10];
+        loop {
+            // SAFETY: a zeroed `struct passwd` (pointers null, numbers 0) is a valid value to hand
+            // a getpw*_r call, which fills it with pointers into `buf`; both outlive `read`.
+            let mut pwd: Passwd = unsafe { std::mem::zeroed() };
+            let mut found: *mut Passwd = std::ptr::null_mut();
+            match ask(&mut pwd, buf.as_mut_ptr(), buf.len(), &mut found) {
+                0 if !found.is_null() => return read(&pwd),
+                EINTR => continue,
+                ERANGE => {
+                    let more = buf.len().checked_mul(2)?;
+                    buf = vec![0 as c_char; more];
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+/// The account's home as the password database has it (`getpwuid_r` of this process's user),
+/// never the environment: state that every process of the account must find in one place, whatever
+/// HOME or MAKEPAD_HOME a caller's shell sets. None: no entry, a home that is no absolute path, or
+/// a platform whose `struct passwd` is not written here.
+pub fn account_home() -> Option<PathBuf> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::ffi::{CStr, OsStr};
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: getuid has no preconditions; getpwuid_r writes only the entry and buffer `entry`
+        // hands it, within the length it names
+        passwd::entry(
+            |pwd, buf, len, found| unsafe { passwd::getpwuid_r(passwd::getuid(), pwd, buf, len, found) },
+            |pwd| {
+                if pwd.pw_dir.is_null() {
+                    return None;
+                }
+                // SAFETY: on success pw_dir points at a NUL-terminated string inside the buffer
+                let dir = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes();
+                (dir.first() == Some(&b'/')).then(|| PathBuf::from(OsStr::from_bytes(dir)))
+            },
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// The uid of the account `name` as the password database has it (`getpwnam_r`, so through every
+/// source the system's lookup reads, not one file). None: no such account, a name with a NUL, or
+/// a platform whose `struct passwd` is not written here.
+pub fn account_uid(name: &str) -> Option<u32> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let name = std::ffi::CString::new(name).ok()?;
+        // SAFETY: `name` is NUL-terminated and outlives the call; getpwnam_r writes only the entry
+        // and buffer `entry` hands it, within the length it names
+        passwd::entry(|pwd, buf, len, found| unsafe { passwd::getpwnam_r(name.as_ptr(), pwd, buf, len, found) }, |pwd| Some(pwd.pw_uid))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// `name` as the one file a spawn starts: the first PATH directory that holds an executable `name`,
@@ -1078,6 +1265,18 @@ pub fn no_image_roles() -> bool {
     false
 }
 
+/// The account's home comes from the password database, whatever the environment says: its
+/// `struct passwd` is read at the right offsets on each platform (another field would be a name,
+/// the shell, or a crash).
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn the_account_home_is_the_password_databases() {
+    let home = account_home().expect("this account has an entry");
+    assert!(home.is_absolute() && home.is_dir(), "{home:?}");
+    assert_eq!(account_uid("root"), Some(0), "an account by name");
+    assert_eq!((account_uid("intake-no-such-account"), account_uid("a\0b")), (None, None), "no such account, and a name no lookup can take");
+}
+
 /// A run's level is the one asked for, whatever level its hub runs at.
 #[cfg(all(test, target_os = "linux"))]
 #[test]
@@ -1148,6 +1347,28 @@ fn groups_held_counts_a_groups_members_and_their_descendants() {
     let [run_held, other_held, reused, none] = looks;
     assert!(run_held.unwrap() > other_held.unwrap() && other_held.unwrap() > 0, "{looks:?}");
     assert_eq!((reused, none), (None, None), "{looks:?}");
+}
+
+/// A run's peak (its resident set) counts the members that moved to a group of their own, as a
+/// JIT-run test's or app's process does, beside its own group's.
+#[cfg(all(test, unix))]
+#[test]
+fn groups_rss_counts_a_member_that_moved_to_a_group_of_its_own() {
+    use std::os::unix::process::CommandExt;
+    // (`set -m`: the shell puts each job in a group of its own)
+    let mut run = Command::new("sh").args(["-c", "set -m; sleep 30 & sleep 30 & wait"]).process_group(0).spawn().unwrap();
+    let start = proc_start(run.id()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let pgrep = Command::new("pgrep").args(["-P", &run.id().to_string()]).output().unwrap();
+    let moved: Vec<u32> = String::from_utf8_lossy(&pgrep.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect();
+    let rss = |pid: u32| crate::procinfo::proc(pid).map_or(0, |p| p.rss_bytes);
+    let (alone, theirs) = (rss(run.id()), moved.iter().map(|p| rss(*p)).sum::<u64>());
+    let (counted, groups) = (groups_rss(&[(run.id(), start)]), moved.iter().map(|p| proc_stat(*p).map(|s| s.pgrp)).collect::<Vec<_>>());
+    for pid in &moved { signal_one(*pid, true); }
+    signal_group(run.id(), true, &Hold);
+    let _ = run.wait();
+    assert!(moved.len() == 2 && groups.iter().zip(&moved).all(|(g, p)| *g == Some(*p)), "each job leads a group of its own: {moved:?} {groups:?}");
+    assert!(theirs > 0 && counted.is_some_and(|c| c >= alone + theirs / 2), "the moved members count beside the leader: {counted:?} of {alone} + {theirs}");
 }
 
 /// A run dumps no core: its soft core limit is 0, and its hard one is the hub's, so a run that

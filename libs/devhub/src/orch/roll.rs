@@ -34,9 +34,10 @@
 //!   and the node's apply has built it, only when the hub does not run that build already (a
 //!   restart reloads its models; `current` answers)
 //!   (SIGTERM: it hands its jobs back; the WM starts it again through `cargo run`), never while
-//!   a user is at the box (input within `user_idle_min`) or an app holds unsaved work: the roll
-//!   waits until the box is idle. The hub itself restarts regardless (the user never sees it); a
-//!   WM restart waits the same way on the node ([`crate::lease::exec::user_blockers`]).
+//!   someone watches the box's screen ([`crate::lease::exec::user_watching`]) or an app holds
+//!   unsaved work: the roll waits until neither holds. The hub itself restarts regardless (the
+//!   user never sees it); a WM restart waits the same way on the node
+//!   ([`crate::lease::exec::user_blockers`]).
 //! - the master itself, never held up by the node rolls and ending nothing: what runs under a lease
 //!   lives on the node, and the new master takes it back (jobs, live jobs, verify legs and CI
 //!   shards go on from where their logs stand; queued ones stay queued). Only an allapps run is
@@ -467,6 +468,8 @@ pub fn start(ctx: Arc<Ctx>) {
         // why this landing's closures are the whole repo
         let mut closures_why: Option<String> = None;
         let mut wait_since: Option<Instant> = None;
+        // the last tip whose no-restart was said
+        let mut quiet_at = String::new();
         let mut fds_said = 1000;
         // the commit the CLI binary was last built at (this master's build at first), and the
         // newest one that built
@@ -520,7 +523,7 @@ pub fn start(ctx: Arc<Ctx>) {
             if !mine.is_empty() && touches(&ctx.repo, mine, &good, &master_dirs) {
                 let since = *wait_since.get_or_insert_with(Instant::now);
                 let allapps = ctx.store.read(|d| d.allapps.running.is_some());
-                match restart_blocker_of(building, super::lane::sweeping(), allapps, since.elapsed()) {
+                match restart_blocker_of(building, super::lane::sweeping(), allapps, crate::serial::master_flashing(), since.elapsed()) {
                     Some(why) => {
                         if said.insert(format!("master {good} {}", why.split(' ').take(2).collect::<Vec<_>>().join(" "))) {
                             event(&ctx, Sev::Info, format!("update: the master's restart on {} waits (stalled: {why})", super::short(&good)));
@@ -534,6 +537,15 @@ pub fn start(ctx: Arc<Ctx>) {
                 }
             } else {
                 wait_since = None;
+                // a landing that changed nothing the master builds says so, once: no restart is
+                // no stall (11-18: twelve landings of other crates read as a stalled self-update)
+                // (looked at once per tip)
+                if !mine.is_empty() && work != quiet_at {
+                    quiet_at = work.clone();
+                    if !work.starts_with(mine) && !touches(&ctx.repo, mine, &work, &master_dirs) {
+                        event(&ctx, Sev::Info, format!("update: nothing devhub builds changed at {} since {}: no restart", super::short(&work), super::short(mine)));
+                    }
+                }
             }
             prebuild(&ctx, &work, &closures["devhub"], (bin == MasterBin::App).then_some(&master_dirs), &mut cli_at, &mut app_at);
             prebuild_gate(&ctx, &mut gate_seen, &mut gate_try);
@@ -748,7 +760,12 @@ fn prebuild(ctx: &Arc<Ctx>, work: &str, dirs: &BTreeSet<String>, app_dirs: Optio
 /// Waiting for a moment with no lease in setup or cleanup, it never came on a busy night: up 57
 /// min with five landings pending (11-04); behind back-to-back timed leases it waited for hours
 /// (11-03).
-fn restart_blocker_of(building: bool, sweeping: bool, allapps: bool, pending: Duration) -> Option<String> {
+fn restart_blocker_of(building: bool, sweeping: bool, allapps: bool, flash: Option<String>, pending: Duration) -> Option<String> {
+    // a flash through the master's claim socket: cut, the board's image is half written (it
+    // takes seconds; a monitor holds nothing)
+    if let Some(flash) = flash {
+        return Some(format!("{flash}: it restarts as that ends"));
+    }
     if building {
         return Some("devhub builds a newer tip: the master takes that build as it ends".into());
     }
@@ -1084,7 +1101,7 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     let mut waits = UpdateWaits { ctx, node, what: "hub restart", on: false };
     let mut stall = String::new();
     loop {
-        let present = svc != "devhub" && caps().and_then(|c| c.user).is_some_and(|u| u.present);
+        let watched = svc != "devhub" && caps().is_some_and(|c| c.watched);
         // A newer apply may have moved the deployment since the master read its caps.
         let deploy = caps().map(|c| c.deploy).unwrap_or_default().split(',').next().unwrap_or("").to_string();
         // a hub that came back from a restart at the deployment already: never restarted twice
@@ -1107,7 +1124,7 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         // deployment, so it gets the sha alone
         let jobs = room.as_ref().filter(|_| caps().is_some_and(|c| c.has("hub-jobs"))).and_then(|held| ctx.leases.hub_build_jobs(&held.id));
         let line = if svc == "devhub" { format!("hub-restart {deploy}{}", jobs.map_or(String::new(), |j| format!(" jobs={j}"))) } else { format!("service-restart {svc}") };
-        let answer = if present { Ok(vec![format!("{{\"err\":\"waits: a user is at {node}\"}}")]) } else { crate::cli::ask(&ctl, Some(node), word, &line) };
+        let answer = if watched { Ok(vec![format!("{{\"err\":\"waits: someone watches {node}'s screen\"}}")]) } else { crate::cli::ask(&ctl, Some(node), word, &line) };
         if answer.is_ok() { down = None; }
         match answer {
             Err(e) if crate::lease::master::unreachable(&e) && down.get_or_insert_with(Instant::now).elapsed() < HUB_BACK => {
@@ -2364,13 +2381,15 @@ mod tests {
     fn the_master_takes_each_devhub_build_as_it_ends() {
         use std::time::Duration;
         let min = Duration::from_secs(60);
-        assert_eq!(super::restart_blocker_of(false, false, false, Duration::ZERO), None, "a build that ended: at once");
+        assert_eq!(super::restart_blocker_of(false, false, false, None, Duration::ZERO), None, "a build that ended: at once");
         // a build of a newer tip runs: that one, as it ends
-        assert!(super::restart_blocker_of(true, false, false, 9 * min).is_some_and(|w| w.contains("newer tip")));
-        assert!(super::restart_blocker_of(false, true, false, 9 * min).is_some_and(|w| w.contains("sweep")));
+        assert!(super::restart_blocker_of(true, false, false, None, 9 * min).is_some_and(|w| w.contains("newer tip")));
+        assert!(super::restart_blocker_of(false, true, false, None, 9 * min).is_some_and(|w| w.contains("sweep")));
         // an allapps run holds it for a while only
-        let waits: Vec<bool> = (0..5).map(|m| super::restart_blocker_of(false, false, true, m * min).is_some()).collect();
+        let waits: Vec<bool> = (0..5).map(|m| super::restart_blocker_of(false, false, true, None, m * min).is_some()).collect();
         assert_eq!(waits, [true, true, true, false, false]);
+        // a flash through it holds it until the flash ends, however long the wait
+        assert!(super::restart_blocker_of(false, false, false, Some("a flash of board X runs through it".into()), 9 * min).is_some_and(|w| w.contains("flash of board X")));
     }
 
     /// A hub's build room is held only while the hub builds: an answer that waits on a sync's

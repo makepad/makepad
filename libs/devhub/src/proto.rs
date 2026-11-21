@@ -219,7 +219,11 @@ pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: 
         "panic" => {
             let loc = text(&v, "location");
             let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
-            ("panic", Sev::Err, format!("panic: {}{at} [{}]", text(&v, "message"), text(&v, "thread")), false)
+            let line = format!("panic: {}{at} [{}]", text(&v, "message"), text(&v, "thread"));
+            // a crash its process said it expects (RELAX_EXPECTED_CRASH: a test that parks or
+            // crashes it on purpose and decides it) is the test's own: a note, never a red
+            let expected = text(&v, "expected");
+            if expected.is_empty() { ("panic", Sev::Err, line, false) } else { ("panic", Sev::Info, format!("{line} (expected: {expected})"), false) }
         }
         "hang" => ("hang", Sev::Err, format!("hang: {} blocked {} ms on {}", text(&v, "thread"), num(&v, "blocked_ms").unwrap_or(0.0), text(&v, "waits")), false),
         "deadlock" => ("deadlock", Sev::Err, format!("deadlock: cycle {}", text(&v, "cycle")), false),
@@ -301,6 +305,11 @@ mod tests {
         let back = Record::parse(&r.to_json()).unwrap();
         assert_eq!(back, r);
         assert!(back.stream_line().contains("ERR  node-a/foo#4412 panic: index out of bounds"));
+        // a test's own crash (RELAX_EXPECTED_CRASH) stays a panic record, as a note
+        let ev = r#"{"event":"panic","seq":2,"pid":7,"app":"stale-access","at_ms":0,"verified":true,"id":"P1","kind":"stale access","message":"stale access into the unloaded module `parker`","location":"parker.rs:7:16","thread":"main","expected":"stale_park.py parks a stale access and decides it"}"#;
+        let r = from_jit_event("node-a", "stale-access", 7, ev, HITCH_MS).unwrap();
+        assert_eq!((r.kind.as_str(), r.sev), ("panic", Sev::Info), "an expected crash is no red");
+        assert!(r.line.ends_with("(expected: stale_park.py parks a stale access and decides it)"), "{}", r.line);
     }
 
     #[test]

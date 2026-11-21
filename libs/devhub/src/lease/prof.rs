@@ -172,6 +172,8 @@ impl Phases {
 pub fn blocker(reason: &str) -> String {
     let r = reason.split_once(": ").filter(|(prefix, _)| !prefix.contains(' ') && !matches!(*prefix, "budget" | "self-update" | "class")).map_or(reason, |(_, r)| r);
     if r.starts_with("in a gap of ") { return "timed gap".into(); }
+    if r.starts_with("yields to ") { return "yields to a head".into(); }
+    if r.starts_with("shaky link") { return "shaky link".into(); }
     if let Some(held) = r.strip_prefix("held by ") {
         let kind = held.split_once('(').map_or(held, |(_, k)| k).split_whitespace().next().unwrap_or("lease");
         return format!("held by {kind}");

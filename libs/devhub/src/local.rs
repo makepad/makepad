@@ -374,7 +374,18 @@ impl Local {
                                 // parked in a lease's run: its beats say so while it is (a crash its
                                 // process said it expects is its test's own)
                                 if let (Some(mark), Some((id, text))) = (jit.lease.as_deref(), crate::lease::exec::parked_panic(&r.detail, &r.line)) {
-                                    crate::lease::exec::app_panicked(mark, jit.pid, &text);
+                                    if crate::lease::exec::app_panicked(mark, jit.pid, &text) {
+                                        // nobody attends its lease: it ends as an unattended run's
+                                        // would, and the lease's command goes on (exec.rs `app_panicked`)
+                                        let how = crate::lease::exec::unattended_release(&r.detail);
+                                        let answer = jit.client.cmd(&format!("resume {id} {how}")).map(|lines| lines.flatten().find(|l| l.starts_with("{\"err\":")));
+                                        let said = match answer {
+                                            Ok(Some(e)) => format!("{id} parked in a run of a lease nobody attends: its release ({how}) was refused: {e}; the master ends the lease once it is quiet"),
+                                            Ok(None) => format!("{id} parked in a run of a lease nobody attends (a `makepad run` its command started, not `--unattended`): released ({how}), as an unattended run is"),
+                                            Err(e) => format!("{id} parked in a run of a lease nobody attends: its release ({how}) failed: {e}; the master ends the lease once it is quiet"),
+                                        };
+                                        self.emit(hub_record(&self.machine, &jit.app, jit.pid, "panic", Sev::Info, said, String::new()));
+                                    }
                                     (parked, park_look) = (Some(id), Instant::now());
                                 }
                             }

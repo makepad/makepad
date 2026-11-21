@@ -385,35 +385,43 @@ impl Store {
             .collect()
     }
 
-    /// Checks a bundle and fetches its branch into `refs/devhub/pushed/<branch>`; returns the
-    /// commit it holds.
+    /// Checks a bundle, stores its objects and names its branch `refs/devhub/pushed/<branch>`;
+    /// returns the commit it holds for that branch, read from the bundle itself. The ref is only a
+    /// name, a base for the next bundle to this box ([`Self::refs`]), which the master's prune of
+    /// landed lanes ([`Self::prune_pushed`]) may drop at any moment: read back after a fetch, it was
+    /// gone when a lane's lease started as its lane landed, the landing's sync dropping it between
+    /// the fetch and the read, and the lease was refused on two boxes in turn ("the bundle holds no
+    /// branch", 11-19).
     pub fn fetch_bundle(&self, bundle: &Path, branch: &str) -> Result<String, String> {
-        // one fetch at a time: two leases shipping different pins of one branch at once must each
-        // read back their own commit (and not fail on the ref's lock)
+        // one at a time: two leases shipping different pins of one branch at once each name their
+        // own commit last (and do not fail on the ref's lock)
         static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = FETCH.lock().unwrap_or_else(|e| e.into_inner());
         let b = bundle.to_string_lossy();
         self.git(&["bundle", "verify", "-q", &b])?;
-        let dst = format!("{PUSHED}{branch}");
-        let fetch = || self.git(&["fetch", "-q", "--no-tags", "--no-write-fetch-head", &b, &format!("+refs/heads/{branch}:{dst}")]);
-        if let Err(e) = fetch() {
-            // A ref of the store's own it cannot read (this branch's, or another the fetch names:
-            // git reads them all) is only its copy of a master's branch: dropped, and the fetch
-            // made again. A box's store that could not resolve one refused a lane's lease start
-            // ("cannot lock ref ... unable to resolve reference", 11-13).
-            let named = e.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ':' | '!' | ',')).filter(|w| w.starts_with("refs/devhub/")).map(str::to_string);
-            let broken: std::collections::BTreeSet<String> = std::iter::once(dst.clone()).chain(named).filter(|r| self.broken_ref(r)).collect();
-            if broken.is_empty() {
-                return Err(e);
-            }
-            for r in &broken {
-                self.drop_ref(r);
-            }
-            let dropped = broken.into_iter().collect::<Vec<_>>().join(", ");
-            fetch().map_err(|again| format!("{again} (after dropping {dropped}, which it could not read: {e})"))?;
-            eprintln!("sync: {}: dropped {dropped}, which it could not read, and fetched again", self.git_dir.display());
+        // (git reads no ref of the store's for it: one it cannot read refuses nothing)
+        let heads = self.git(&["bundle", "unbundle", &b])?;
+        let head = format!("refs/heads/{branch}");
+        let sha = heads.lines().find_map(|l| l.split_once(' ').filter(|(_, r)| r.trim() == head).map(|(s, _)| s.to_string())).filter(|s| valid_sha(s)).ok_or_else(|| format!("the bundle holds no branch {branch}"))?;
+        if !self.has(&sha) {
+            return Err(format!("the bundle's {branch} {} is not in the store after its unbundle", &sha[..10]));
         }
-        self.rev(&dst).ok_or_else(|| format!("the bundle holds no branch {branch}"))
+        let dst = format!("{PUSHED}{branch}");
+        if let Err(e) = self.set_ref(&dst, &sha) {
+            // A ref of the store's own it cannot read (a crash mid-write) is only its copy of a
+            // master's branch: dropped, and named again. A box's store that could not resolve one
+            // refused a lane's lease start ("cannot lock ref ... unable to resolve reference", 11-13).
+            // Unnamed otherwise (a prune holds its lock): its commit is in the store all the same.
+            if self.broken_ref(&dst) {
+                self.drop_ref(&dst);
+                if self.set_ref(&dst, &sha).is_ok() {
+                    eprintln!("sync: {}: dropped {dst}, which it could not read, and named it again", self.git_dir.display());
+                    return Ok(sha);
+                }
+            }
+            eprintln!("sync: {}: {branch} {} stored, not named {dst}: {e}", self.git_dir.display(), &sha[..10]);
+        }
+        Ok(sha)
     }
 
     /// Whether `r` is there but names no commit the store holds: a loose ref file that is empty,
@@ -717,6 +725,12 @@ impl Store {
     /// tracked nonempty blobs truncated to zero. Anything else is someone's content and stays.
     pub fn repair(&self, work: &Path, from: &str) -> Result<Vec<String>, String> {
         if !valid_sha(from) { return Err("invalid checkout commit".into()); }
+        let mut repaired = Vec::new();
+        // a move cut in its index write (its hub restarted) left `index.lock`: every index write
+        // after it, this repair's first, met it
+        if let Some(admin) = self.admin_of(work) {
+            repaired.extend(crate::gitlock::clear_left_index(&admin)?);
+        }
         let marker = match self.admin_of(work) {
             Some(admin) => match fs::read_to_string(admin.join("devhub-move")) {
                 Ok(s) => Some(s),
@@ -725,7 +739,6 @@ impl Store {
             },
             None => None,
         };
-        let mut repaired = Vec::new();
         if let Some(marker) = marker {
             let words: Vec<_> = marker.split_whitespace().collect();
             if words.len() != 2 || !words.iter().all(|w| valid_sha(w)) { return Err("invalid devhub move marker".into()); }
@@ -1111,6 +1124,46 @@ mod tests {
         assert!(!store.admin_of(&work).unwrap().join("devhub-move").exists(), "no marker remains");
     }
 
+    /// A move cut in its index write (its hub restarted) left `index.lock` beside its marker, and
+    /// every apply after it waited on it, the box's self-update too (11-19). Repair keeps one a
+    /// live process holds open and names it; one its writer left goes, said first, the tree is put
+    /// back and the next move reaches its target.
+    #[test]
+    fn a_move_cut_in_its_index_write_is_repaired_past_its_left_lock() {
+        let (base, src) = source();
+        put(&src, &[("file", "old\n")]);
+        let from = revision(&src, "before");
+        put(&src, &[("file", "new\n")]);
+        let to = revision(&src, "after");
+        let work = base.path().join("work");
+        let store = linked(&src, &work, &from);
+        store.mark_move(&work, &from, &to).unwrap();
+        put(&work, &[("file", "new\n")]);
+        let lock = store.admin_of(&work).unwrap().join("index.lock");
+        // (left long before any git that runs now started)
+        fs::write(&lock, b"DIRC").unwrap();
+        fs::File::options().write(true).open(&lock).unwrap().set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)).unwrap();
+        #[cfg(unix)]
+        {
+            let mut holder = std::process::Command::new("sh").arg("-c").arg("exec 3<\"$1\"; exec sleep 30").arg("sh").arg(&lock).spawn().unwrap();
+            let pid = holder.id();
+            let t = std::time::Instant::now();
+            while crate::gitlock::holders(&lock).is_some_and(|p| !p.contains(&pid)) && t.elapsed() < std::time::Duration::from_secs(5) { std::thread::sleep(std::time::Duration::from_millis(10)); }
+            let held = store.repair(&work, &from);
+            let _ = holder.kill();
+            let _ = holder.wait();
+            let e = held.unwrap_err();
+            assert!(lock.exists() && e.contains(&format!("pid {pid} holds it open")), "a held lock is kept and its holder named: {e}");
+        }
+        let lines = store.repair(&work, &from).unwrap();
+        assert!(lines.len() == 2 && lines[0].contains("index.lock: cleared a stale lock (4 bytes") && lines[1].starts_with("file:"), "the lock said first, then the debris: {lines:?}");
+        assert!(!lock.exists(), "the left lock is gone");
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"old\n", "the cut move is put back");
+        store.move_checkout(&work, Some(&from), &to).unwrap();
+        assert_eq!(fs::read(work.join("file")).unwrap(), b"new\n", "the next move reaches its target");
+        assert!(sh(&work, &["status", "--porcelain"]).is_empty(), "its index matches the tree");
+    }
+
     #[test]
     fn an_unmarked_empty_file_and_a_lost_index_are_repaired() {
         let (base, src) = source();
@@ -1176,6 +1229,16 @@ mod tests {
         store.prune_pushed(&["rc-x", "rc-never"]).unwrap();
         assert_eq!(store.refs().iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["refs/devhub/pushed/work"]);
         assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane);
+        // and a prune of it racing each push of it (a landing's sync while a lease of that lane
+        // ships, 11-19): every push answers the commit its bundle holds
+        let racing = std::sync::atomic::AtomicBool::new(true);
+        let pushed: Vec<Result<String, String>> = std::thread::scope(|s| {
+            s.spawn(|| while racing.load(std::sync::atomic::Ordering::Relaxed) { let _ = store.prune_pushed(&["rc-x"]); });
+            let pushed = (0..5).map(|_| store.fetch_bundle(&bundle, "rc-x")).collect();
+            racing.store(false, std::sync::atomic::Ordering::Relaxed);
+            pushed
+        });
+        assert!(pushed.iter().all(|p| p.as_ref() == Ok(&lane)), "a push beside a prune of its ref: {pushed:?}");
         // a ref the store cannot read (empty, not a sha, a missing object) is dropped and fetched again
         for broken in ["", "garbage\n", "0123456789012345678901234567890123456789\n"] {
             std::fs::write(stores.join("makepad.git/refs/devhub/pushed/rc-x"), broken).unwrap();

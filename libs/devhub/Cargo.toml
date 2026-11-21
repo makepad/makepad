@@ -33,6 +33,7 @@ makepad-network = { path = "../../platform/network" }
 makepad-devhub-conf = { path = "../devhub_conf" }
 makepad-remote = { workspace = true }
 makepad-strict-json = { workspace = true }
+makepad-serial = { workspace = true }
 makepad-toml-parser = { path = "../toml_parser" }
 makepad-core-util = { path = "../core_util" }
 makepad-civil-time = { path = "../civil_time" }

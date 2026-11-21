@@ -531,11 +531,20 @@ pub struct Caps {
     pub hot: Vec<HotTemp>,
     /// CPU use of all cores since the previous measure (None: the first one)
     pub cpu_pct: Option<f64>,
+    /// The tasks that waited for a CPU since the previous measure, on average (Linux: the run
+    /// delay `/proc/schedstat` sums per CPU, over the time between the two looks; None elsewhere
+    /// and on the first look). With `cpu_pct` it is the box's demand: a box busy at 100% reads no
+    /// load past its cores anywhere else (16-core pool boxes at load 23-34, 11-18).
+    pub cpu_wait: Option<f64>,
     /// the box's CPU since the previous measure by whose it was ([`crate::top::cpu_split`]), cores
     /// on average: each lease's, and the busiest processes outside them (what, pid). A box measured
     /// busier than its leases' charges names a lease past its charge and these as what took the rest
     pub busy_leases: Vec<(String, f64)>,
     pub busy_outside: Vec<(String, u32, f64)>,
+    /// `cpu_wait` by lease: each lease's share of it by its run scopes' runnable threads at the
+    /// look. A box's waiting tasks read as work outside its leases while a tests shard's own
+    /// threads made them (22 waiting beside a 12-core shard, L1447930, 11-19).
+    pub wait_leases: Vec<(String, f64)>,
     /// A Mac's GPU used outside every lease since the previous look, % of the GPU, and its
     /// busiest three outside users (what, pid, % of the GPU), what a GPU timing waits on
     /// ([`sched::Req::gpu`]); None off a Mac, on the first look, or if the registry could not be read
@@ -553,6 +562,12 @@ pub struct Caps {
     /// new lease the restart would wait for until it has restarted ([`sched::Req::cut_by_wm_restart`]);
     /// empty: none waits, or a person's reason holds it (it never drains for those)
     pub wm_drain: String,
+    /// what on the box runs older code than its checkout ([`crate::sync::serve::stale_runs`]): its
+    /// WM or a JIT app whose binary a build replaced, how long ago, and a waiting WM restart's wait,
+    /// since when and on what; empty: everything there runs its checkout's build
+    pub stale: String,
+    /// since when the oldest of [`Self::stale`] has been so (wall ms; 0: none)
+    pub stale_since_ms: u64,
     /// percent and charging, on devices with a battery
     pub battery: Option<(u32, bool)>,
     pub role: Option<Role>,
@@ -625,23 +640,27 @@ pub struct Caps {
     pub jit_store: Option<std::sync::Arc<jitstore::Snapshot>>,
     /// the services the node's WM supervises (`~/.makepad/wm/<name>.state`): name, start wall ms
     pub services: Vec<(String, u64)>,
-    /// a person at the node, as its WM saw their input ([`UserSense`]); None: no WM of ours
-    /// runs there (the Macs, Windows): the dev switch alone decides
-    pub user: Option<UserSense>,
+    /// ms since a person's last input at the box, as its WM or a Mac's HID system saw it
+    /// ([`user`]; None: none since its hub started, or nothing senses it): a visible live
+    /// session there is in use meanwhile. It takes the box out of no pool.
+    pub input_idle_ms: Option<u64>,
+    /// someone watches the box's screen ([`user::UserTrack::watched`]): what they would see waits
+    /// (a WM restart, a screen lease's app ended as forgotten); leases go on as ever
+    pub watched: bool,
     /// an app of ours that runs outside every lease and that a person uses now, or did within
     /// [`hand::GRACE_MS`] ([`HandHeld`]): the box takes no work that does not name it
     pub hand_held: Option<HandHeld>,
 }
 
-/// An app of ours running outside devhub that a person uses ([`hand`]): through input at the
-/// box, a Desk Link viewer watching it, or its own say (an XR headset streaming its view).
+/// An app of ours running outside devhub that a person uses ([`hand`]), by its own say (an XR
+/// headset streaming its view).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct HandHeld {
     /// the registry's label (`Fab`)
     pub app: String,
     pub pid: u32,
-    /// how a person uses it: `an XR headset (Quest 3)`, `a Desk Link viewer`, `input at the box
-    /// (key from its device)`, and since when it ended while its grace lasts
+    /// how a person uses it: `an XR headset (Quest 3)`, and since when it ended while its grace
+    /// lasts
     pub how: String,
 }
 
@@ -683,53 +702,6 @@ impl HubMeasure {
     }
 }
 
-/// A person using a node with our WM: the node hub asks the WM (`makepad-wm activity`) how long
-/// ago its device readers took input from a physical device or the user's Desk Link viewer (a
-/// Mac: its HID system's idle time, `user::hid_idle_ms`)
-/// (never injected or agent input, never what runs). Input within `idle_min` minutes: the node
-/// drains on its own (no new lease, no network writes; running leases finish) until that long
-/// without input. The user's own dev switch stays as it is: auto-sensing never turns on a node
-/// the user switched off.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct UserSense {
-    pub present: bool,
-    /// ms since the last input (None: none seen since the hub started)
-    pub idle_ms: Option<u64>,
-    /// the last input: `key`, `pointer` or `gamepad`, from its `device` or `desk link`; a Mac's
-    /// HID idle time says `input` from its `device`
-    pub what: String,
-    /// minutes without input before the node takes work again (`lease.conf user_idle_min`)
-    pub idle_min: u32,
-}
-
-impl UserSense {
-    pub fn to_json(&self) -> String {
-        format!(
-            "{{\"present\":{},\"idle_ms\":{},\"what\":{},\"idle_min\":{}}}",
-            self.present,
-            self.idle_ms.map_or("null".to_string(), |m| m.to_string()),
-            json_str(&self.what),
-            self.idle_min
-        )
-    }
-
-    pub fn parse(v: &makepad_strict_json::Value) -> Option<UserSense> {
-        v.get("present")?;
-        Some(UserSense {
-            present: v.get("present").and_then(|x| x.as_bool()).unwrap_or(false),
-            idle_ms: v.get("idle_ms").and_then(num).map(|m| m as u64),
-            what: v.get("what").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            idle_min: v.get("idle_min").and_then(num).unwrap_or(0.0) as u32,
-        })
-    }
-
-    /// `user (key from its device 40 s ago)`.
-    pub fn line(&self) -> String {
-        let ago = self.idle_ms.map_or(String::new(), |m| format!(" {} ago", if m >= 60_000 { format!("{} min", m / 60_000) } else { format!("{} s", m / 1000) }));
-        format!("user ({}{ago})", if self.what.is_empty() { "input" } else { &self.what })
-    }
-}
-
 /// The facilities this build's hub has, by name, reported in its caps ([`Caps::features`]). A
 /// request lists the ones its fields need and goes only to a hub that reports them all, in place
 /// of the one protocol number a facility used to raise. A new facility is a new
@@ -754,6 +726,8 @@ pub const FEATURES: &[&str] = &[
     "gpu-quiet", // a GPU timing (`gpu` in its lease-start) waits for its GPU, not the box's CPU
     "jit-jobs", // a lease's JIT build admitted on fewer cores than it measures builds on those, `cost.jit_jobs`
     "live-threads", // a live session that asked its cores runs its JIT and app on them, `cost.threads`
+    "pool-cores", // a live test session's long-lived pools size from its call's charge, `cost.pool_cores`
+    "serial", // its USB serial devices, their claims and sessions (`crate::serial`)
 ];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
@@ -799,7 +773,7 @@ impl Caps {
         let hot = self.hot.iter().map(HotTemp::to_json).collect::<Vec<_>>().join(",");
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"temps\":[{temps}],\"hot\":[{hot}],\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"cef_dist\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"user\":{},\"hand_held\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"temps\":[{temps}],\"hot\":[{hot}],\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"cpu_wait\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"cef_dist\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"stale\":{},\"stale_since_ms\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"input_idle_ms\":{},\"watched\":{},\"hand_held\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -810,6 +784,7 @@ impl Caps {
             self.cpus_shared,
             self.cpus_timed,
             self.cpu_pct.map_or("null".to_string(), |p| format!("{p:.1}")),
+            self.cpu_wait.map_or("null".to_string(), |w| format!("{w:.2}")),
             self.load1,
             self.ram_gb,
             self.ram_avail_gb,
@@ -842,16 +817,20 @@ impl Caps {
             json_str(&self.wm_wire),
             json_str(&self.wm_dark),
             json_str(&self.wm_drain),
+            json_str(&self.stale),
+            self.stale_since_ms,
             json_str(&self.hub_rev),
             self.hub_rss_mb,
             self.hub_heap_mb,
             self.features.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
-            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
+            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"wait_leases\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
                 self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
-                self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(",")),
+                self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(","),
+                self.wait_leases.iter().map(|(lease, tasks)| format!("{{\"lease\":{},\"tasks\":{tasks:.2}}}", json_str(lease))).collect::<Vec<_>>().join(",")),
             self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
-            self.user.as_ref().map_or("null".to_string(), |u| u.to_json()),
+            self.input_idle_ms.map_or("null".to_string(), |m| m.to_string()),
+            self.watched,
             self.hand_held.as_ref().map_or("null".to_string(), |h| h.to_json()),
         )
     }
@@ -873,6 +852,7 @@ impl Caps {
             cpus_shared: f("cpus_shared") as u32,
             cpus_timed: f("cpus_timed") as u32,
             cpu_pct: v.get("cpu_pct").and_then(num),
+            cpu_wait: v.get("cpu_wait").and_then(num),
             load1: f("load1"),
             ram_gb: f("ram_gb"),
             ram_avail_gb: f("ram_avail_gb"),
@@ -909,6 +889,8 @@ impl Caps {
             wm_wire: s("wm_wire"),
             wm_dark: s("wm_dark"),
             wm_drain: s("wm_drain"),
+            stale: s("stale"),
+            stale_since_ms: f("stale_since_ms") as u64,
             rustc: s("rustc"),
             rust_targets: v.get("rust_targets").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             features: v.get("features").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
@@ -917,7 +899,8 @@ impl Caps {
                 Some(makepad_strict_json::Value::Obj(o)) => o.iter().filter_map(|(k, x)| num(x).map(|t| (k.clone(), t as u64))).collect(),
                 _ => Vec::new(),
             },
-            user: v.get("user").and_then(UserSense::parse),
+            input_idle_ms: v.get("input_idle_ms").and_then(num).map(|m| m as u64),
+            watched: v.get("watched").and_then(|x| x.as_bool()).unwrap_or(false),
             hand_held: v.get("hand_held").and_then(HandHeld::parse),
             ..Default::default()
         };
@@ -931,6 +914,9 @@ impl Caps {
         }
         for b in v.get("busy_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
             c.busy_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("cores").and_then(num).unwrap_or(0.0)));
+        }
+        for b in v.get("wait_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
+            c.wait_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("tasks").and_then(num).unwrap_or(0.0)));
         }
         let busy = |b: &makepad_strict_json::Value, unit: &str| (b.get("what").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("pid").and_then(num).unwrap_or(0.0) as u32, b.get(unit).and_then(num).unwrap_or(0.0));
         c.busy_outside = v.get("busy_outside").and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|b| busy(b, "cores")).collect();
@@ -1083,7 +1069,9 @@ pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String
         if let Some(name) = name.filter(|n| !named.insert(*n)) {
             return Err(format!("--rev `{spec}`: {name} twice"));
         }
-        let dir = name.map_or_else(|| repo_dir.to_path_buf(), |n| repo_dir.join(crate::nested::dir(n)));
+        // a nested side the lane lacks resolves in the user's checkout (a job's rev named Source
+        // Library at its tip, and its re-pin in the lane found no commit, #7434, 11-19)
+        let dir = name.map_or_else(|| repo_dir.to_path_buf(), |n| crate::nested::checkout(repo_dir, n).unwrap_or_else(|| repo_dir.join(crate::nested::dir(n))));
         let (branch, sha) = part.split_once('@').map_or((part, None), |(b, s)| (b, Some(s)));
         if branch.is_empty() || branch.starts_with('-') || branch.contains(char::is_whitespace) {
             return Err(format!("--rev `{spec}`: `{branch}` is not a branch name"));
@@ -1271,8 +1259,10 @@ mod tests {
             temps: vec![Temp { sensor: "k10temp:Tctl".into(), c: 87.125, limit: Some(90.0) }, Temp { sensor: "unknown:temp1".into(), c: 55.5, limit: None }],
             hot: vec![HotTemp { sensor: "k10temp:Tctl".into(), c: 87.125, limit: 90.0 }],
             cpu_pct: Some(12.5),
+            cpu_wait: Some(3.25),
             busy_leases: vec![("L7".into(), 11.5), ("L9".into(), 0.25)],
             busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
+            wait_leases: vec![("L7".into(), 2.75)],
             mac_gpu: Some((14.0, vec![("dumper".into(), 4_000_020, 14.0)])),
             display: Some("wm".into()),
             battery: None,
@@ -1308,10 +1298,13 @@ mod tests {
             wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),
             wm_dark: "its WM's window is 0x0: no output shows it".into(),
             wm_drain: "screen lease L9 of lane-s (its windows)".into(),
+            stale: "makepad-wm#41 runs a build replaced 7d 2h ago; its WM restart waits since 7d 2h ago for: makepad-sandbox runs".into(),
+            stale_since_ms: 1_700_000_000_000,
             features: FEATURES.iter().map(|f| f.to_string()).collect(),
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],
-            user: Some(UserSense { present: true, idle_ms: Some(42_000), what: "key from its device".into(), idle_min: 3 }),
+            input_idle_ms: Some(42_000),
+            watched: true,
             hand_held: Some(HandHeld { app: "Fab".into(), pid: 41, how: "an XR headset".into() }),
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
@@ -1322,7 +1315,7 @@ mod tests {
         let user = &value.get("mac_gpu").unwrap().get("on").unwrap().as_arr().unwrap()[0];
         assert_eq!(user.get("pct").and_then(num), Some(14.0), "GPU users carry percent of the GPU on the wire");
         assert!(user.get("cores").is_none(), "GPU use is not CPU cores");
-        let none = Caps { desk_link: None, user: None, mac_gpu: None, hand_held: None, ..c };
+        let none = Caps { desk_link: None, mac_gpu: None, input_idle_ms: None, watched: false, hand_held: None, ..c };
         assert_eq!(Caps::parse(&none.to_json()), Some(none.clone()));
         assert_eq!((none.cores_for(Kind::Build), none.cores_for(Kind::Test), none.cores_for(Kind::Timed)), (8, 8, 6), "each kind runs on the CPUs it is pinned to");
         let unpinned = Caps { cpus_shared: 0, cpus_timed: 0, ..none };

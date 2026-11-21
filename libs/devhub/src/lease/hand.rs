@@ -3,13 +3,11 @@
 //! beside a person's whole interactive lease: their frames share its CPU and GPU (an unpinned
 //! Metal render suite ran on a Mac beside the user's own Fab session, 11-13).
 //!
-//! A person's use holds, not an app merely open: a WM-hosted app on a pool box, opened by whom
-//! nobody knows, holds nothing by being there. A use is one of:
-//! - input at the box ([`super::user`]; such a box takes no new lease anyway, the hold names the
-//!   app);
-//! - a Desk Link viewer watching the box: the WM's count of its viewers, or a Desk Host's say
-//!   ([`in_use_records`] of a process that is no app of ours);
-//! - the app's own say (`makepad_platform::restart::set_in_use`): an XR headset streaming its view.
+//! A use is the app's own say (`makepad_platform::restart::set_in_use`): an XR headset streaming
+//! its view. An app merely open holds nothing: a WM-hosted app on a pool box, opened by whom
+//! nobody knows, holds nothing by being there. Nor does a box-wide sign: input at the box or a
+//! Desk Link viewer showing it never keeps work off a box (only its dev switch takes it out of
+//! the pool, the user, 11-18).
 //!
 //! The hold ends when its app exits, or [`GRACE_MS`] after the use ended.
 
@@ -20,22 +18,10 @@ use super::HandHeld;
 pub const GRACE_MS: u64 = 2 * 60_000;
 
 /// What a person uses now, by one look: `apps`, the apps of ours that run outside every lease
-/// (pid, label, [`crate::top::CpuSplit::apps`]); `present`, input at the box, said (`key from its
-/// device`); `viewed`, a Desk Link viewer watching the box; `records`, the uses processes said
-/// (pid, how). An app's own say names it; a box-wide sign (input, a viewer, a Desk Host's say)
-/// names the apps outside the leases, and holds nothing without one.
-pub fn sense(apps: &[(u32, String)], present: Option<&str>, viewed: bool, records: &[(u32, String)]) -> Option<HandHeld> {
-    let app_of = |pid: u32| apps.iter().find(|(p, _)| *p == pid).map(|(_, app)| app.clone());
-    if let Some((pid, how, app)) = records.iter().find_map(|(pid, how)| app_of(*pid).map(|app| (*pid, how.clone(), app))) {
-        return Some(HandHeld { app, pid, how });
-    }
-    let (pid, _) = apps.first()?;
-    let how = present.map(|p| format!("input at the box ({p})"))
-        .or_else(|| viewed.then(|| "a Desk Link viewer".to_string()))
-        .or_else(|| records.iter().find(|(p, _)| app_of(*p).is_none()).map(|(_, how)| how.clone()))?;
-    let mut names: Vec<&str> = apps.iter().map(|(_, app)| app.as_str()).collect();
-    names.dedup();
-    Some(HandHeld { app: names.join(", "), pid: *pid, how })
+/// (pid, label, [`crate::top::CpuSplit::apps`]); `records`, the uses processes said (pid, how).
+/// Only an app's own say holds, and it names that app.
+pub fn sense(apps: &[(u32, String)], records: &[(u32, String)]) -> Option<HandHeld> {
+    records.iter().find_map(|(pid, how)| apps.iter().find(|(p, _)| p == pid).map(|(_, app)| HandHeld { app: app.clone(), pid: *pid, how: how.clone() }))
 }
 
 /// The hold between looks: one ended keeps [`GRACE_MS`] while its app runs.
@@ -97,30 +83,24 @@ fn records_in(dir: &std::path::Path, alive: &dyn Fn(u32) -> bool) -> Vec<(u32, S
 mod tests {
     use super::*;
 
-    /// A hand-run app holds its box while a person uses it, by input at the box, a Desk Link
-    /// viewer or its own say (an XR headset), and not while it is merely open; a box-wide sign
-    /// holds nothing without an app of ours; a hold keeps its grace after the use while its app
-    /// runs, and ends when the app exits.
+    /// A hand-run app holds its box by its own say (an XR headset), and not while it is merely
+    /// open; another process's say (a Desk Host's viewer) holds nothing; a hold keeps its grace
+    /// after the use while its app runs, and ends when the app exits.
     #[test]
-    fn a_hand_run_app_holds_its_box_while_a_person_uses_it_and_not_while_it_is_merely_open() {
+    fn a_hand_run_app_holds_its_box_by_its_own_say_and_not_while_it_is_merely_open() {
         let fab = vec![(41, "Fab".to_string())];
         let held = |how: &str| Some(HandHeld { app: "Fab".into(), pid: 41, how: how.into() });
-        assert_eq!(sense(&fab, None, false, &[]), None, "open, unused: no hold");
-        assert_eq!(sense(&fab, Some("key from its device"), false, &[]), held("input at the box (key from its device)"), "input at the box");
-        assert_eq!(sense(&fab, None, true, &[]), held("a Desk Link viewer"), "the WM's viewer count");
-        assert_eq!(sense(&fab, None, false, &[(7, "a Desk Link viewer (viewer-a)".into())]), held("a Desk Link viewer (viewer-a)"), "a Desk Host's say");
-        assert_eq!(sense(&fab, Some("key from its device"), true, &[(41, "an XR headset".into())]), held("an XR headset"), "the app's own say comes first");
-        for (present, viewed, records) in [(Some("key from its device"), false, vec![]), (None, true, vec![]), (None, false, vec![(7, "a Desk Link viewer".to_string())])] {
-            assert_eq!(sense(&[], present, viewed, &records), None, "no app of ours outside the leases: no hold");
-        }
-        assert_eq!(sense(&[(41, "Fab".into()), (52, "Calculator".into())], None, true, &[]).map(|h| h.app), Some("Fab, Calculator".to_string()));
+        assert_eq!(sense(&fab, &[]), None, "open, unused: no hold");
+        assert_eq!(sense(&fab, &[(7, "a Desk Link viewer (viewer-a)".into())]), None, "a Desk Link session holds no box");
+        assert_eq!(sense(&fab, &[(7, "a Desk Link viewer".into()), (41, "an XR headset".into())]), held("an XR headset"), "the app's own say");
+        assert_eq!(sense(&[], &[(41, "an XR headset".into())]), None, "no app of ours outside the leases: no hold");
 
         let mut t = HandTrack::default();
-        assert_eq!(t.update(0, sense(&fab, None, false, &[(41, "an XR headset".into())]), &fab), held("an XR headset"));
+        assert_eq!(t.update(0, sense(&fab, &[(41, "an XR headset".into())]), &fab), held("an XR headset"));
         assert_eq!(t.update(60_000, None, &fab), held("an XR headset, ended 60 s ago"), "the headset off a minute: held");
         assert_eq!(t.update(GRACE_MS, None, &fab), None, "its grace over: free");
         assert_eq!(t.update(GRACE_MS + 1, None, &fab), None);
-        assert!(t.update(GRACE_MS + 2, sense(&fab, None, true, &[]), &fab).is_some());
+        assert!(t.update(GRACE_MS + 2, sense(&fab, &[(41, "an XR headset".into())]), &fab).is_some());
         assert_eq!(t.update(GRACE_MS + 3, None, &[]), None, "the app exited: free at once");
 
         // the records: a live process's lines, a dead one's file removed, a write in progress skipped

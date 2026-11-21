@@ -394,6 +394,12 @@ pub fn groups_held(_groups: &[(u32, u64)]) -> Option<u64> { None }
 
 pub fn scope_now(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> Option<u64> { None }
 
+pub fn scope_procs(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> Vec<(u32, String)> { Vec::new() }
+
+pub fn scope_runnable(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> u32 { 0 }
+
+pub fn procs_running() -> Option<u32> { None }
+
 /// What a run has done so far ([`super::Activity`]): its job's CPU (its I/O is not counted).
 /// None: a run taken back from the ledger has no job to ask.
 pub fn activity(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path, hold: &Hold) -> Option<super::Activity> {
@@ -464,6 +470,11 @@ pub fn in_group(pid: u32, leader: u32, hold: &Hold) -> bool {
 }
 
 /// The processes in the run's job (none for a run with no job left).
+/// No unit watches on Windows (land_gate.sh's run on Linux).
+pub fn watched_sessions(_pids: &[u32]) -> Vec<(u32, Vec<u32>)> {
+    Vec::new()
+}
+
 pub fn group_pids(_pid: u32, _start: u64, hold: &Hold) -> Vec<u32> {
     job_pids(hold)
 }
@@ -536,6 +547,39 @@ pub fn tool(name: &'static str) -> PathBuf {
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"))
+}
+
+/// The account's home (the unix side asks the password database): the profile folder, as
+/// USERPROFILE names it.
+/// The account's profile folder as the shell has it (`SHGetKnownFolderPath` of FOLDERID_Profile),
+/// never the environment: see the Unix one. None: no answer, or no absolute path.
+pub fn account_home() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    const FOLDERID_PROFILE: windows::core::GUID = windows::core::GUID::from_u128(0x5e6c858f_0e22_4760_9afe_ea3317b67173);
+    // SAFETY: on success the call hands back a NUL-terminated wide string it allocated, read up
+    // to its NUL here and freed once with CoTaskMemFree, as its contract asks
+    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_PROFILE, KF_FLAG_DEFAULT, None) }.ok()?;
+    if path.is_null() {
+        return None;
+    }
+    let wide = unsafe {
+        let p = path.as_ptr();
+        let mut n = 0;
+        while *p.add(n) != 0 {
+            n += 1;
+        }
+        let wide = std::slice::from_raw_parts(p, n).to_vec();
+        CoTaskMemFree(Some(p as *const _));
+        wide
+    };
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&wide))).filter(|p| p.is_absolute())
+}
+
+/// No account here has a uid (unix.rs's `account_uid`).
+pub fn account_uid(_name: &str) -> Option<u32> {
+    None
 }
 
 pub fn login() -> Option<String> {

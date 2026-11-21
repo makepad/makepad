@@ -357,8 +357,9 @@ struct Checked {
     dirty: Option<String>,
 }
 
-// Slot takes and the bot's paired merge share one write turn (11-15).
-static WRITING: std::sync::LazyLock<(Mutex<HashSet<PathBuf>>, Condvar)> = std::sync::LazyLock::new(|| (Mutex::new(HashSet::new()), Condvar::new()));
+// Slot takes, a lane's removal and the bot's paired merge share one write turn (11-15), each
+// held with what writes.
+static WRITING: std::sync::LazyLock<(Mutex<HashMap<PathBuf, &'static str>>, Condvar)> = std::sync::LazyLock::new(|| (Mutex::new(HashMap::new()), Condvar::new()));
 
 struct LaneWrite(PathBuf);
 
@@ -375,37 +376,51 @@ fn write_path(wt: &Path) -> PathBuf {
 
 #[cfg(feature = "checkout")]
 pub(crate) fn lane_write<T>(wt: &Path, f: impl FnOnce() -> T) -> T {
+    lane_write_as(wt, "a slot take", f)
+}
+
+/// `f` with the worktree's write turn, `what` writing it (`a slot take`): it waits for the turn,
+/// and the merge bot moves nothing in the tree while it holds it.
+#[cfg(feature = "checkout")]
+pub(crate) fn lane_write_as<T>(wt: &Path, what: &'static str, f: impl FnOnce() -> T) -> T {
     let path = write_path(wt);
     let mut held = WRITING.0.lock().unwrap_or_else(|e| e.into_inner());
-    while held.contains(&path) {
+    while held.contains_key(&path) {
         held = WRITING.1.wait(held).unwrap_or_else(|e| e.into_inner());
     }
-    held.insert(path.clone());
+    held.insert(path.clone(), what);
     drop(held);
     let _guard = LaneWrite(path);
     f()
 }
 
-fn try_lane_write(wt: &Path) -> Option<LaneWrite> {
+/// The worktree's write turn for the merge bot, or what holds it.
+fn try_lane_write(wt: &Path) -> Result<LaneWrite, &'static str> {
     let path = write_path(wt);
-    if WRITING.0.lock().unwrap_or_else(|e| e.into_inner()).insert(path.clone()) { Some(LaneWrite(path)) } else { None }
+    let mut held = WRITING.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(what) = held.get(&path) { return Err(what); }
+    held.insert(path.clone(), "the merge bot");
+    Ok(LaneWrite(path))
 }
 
 /// The master's jobs and live jobs at that worktree (none outside a master).
 fn lane_busy(wt: &Path) -> Option<String> {
     let path = write_path(wt);
-    if WRITING.0.lock().unwrap_or_else(|e| e.into_inner()).contains(&path) {
-        return Some("a slot take writes this worktree".into());
+    if let Some(what) = WRITING.0.lock().unwrap_or_else(|e| e.into_inner()).get(&path) {
+        return Some(format!("{what} writes this worktree"));
     }
     #[cfg(feature = "checkout")]
     if let Some(ctx) = crate::orch::ctx() {
         let p = wt.to_string_lossy();
-        if let Some(why) = ctx.leases.timed_series(&p) { return Some(why); }
+        if let Some(why) = ctx.leases.merge_held(&p) { return Some(why); }
+        // a job or live job from this worktree or a tree within it (the exact path alone missed
+        // one started from a folder of it)
+        let at = |dir: &str| !dir.is_empty() && Path::new(dir).starts_with(wt);
         return ctx.store.read(|d| {
-            if let Some(j) = d.jobs.iter().find(|j| !j.done() && j.repo_dir == p) {
+            if let Some(j) = d.jobs.iter().find(|j| !j.done() && at(&j.repo_dir)) {
                 return Some(format!("job {} runs at this worktree", j.id));
             }
-            d.lives.iter().find(|x| x.active() && x.tree == p).map(|x| format!("live job {} runs from this worktree", x.id))
+            d.lives.iter().find(|x| x.active() && at(&x.tree)).map(|x| format!("live job {} runs from this worktree", x.id))
         });
     }
     let _ = wt;
@@ -628,6 +643,8 @@ impl Lanes {
                 // the repository's commit-msg hook (all its lane worktrees share it), with the
                 // main checkout's scanner: a lane's own is gone with the lane
                 crate::private_check::install_message_check(&dir, &crate::private_check::scan_in(&w.repo))?;
+                // and its maintenance is devhub's: a lane's commit never packs other lanes' branches
+                crate::gitlock::own_maintenance(&dir)?;
             }
             self.install_once(&dir, &w.repo)?;
             listed.insert(dir.clone());
@@ -796,10 +813,17 @@ impl Lanes {
         // never got work again). A lane landed whole fast-forwards to the tip, every half in it: no
         // merge commit, so it never looks pending, and its next runs build the fixes landed after
         // it (a landed lane sat 5 h on a base whose no-checkout build work had fixed, and a job of
-        // it failed on that: J13391, 11-13). One with only the bot's merges of its own stays.
+        // it failed on that: J13391, 11-13). One with only the bot's merges of its own holds
+        // nothing the tip lacks: it moves to the tip the careful way a carried lane does, no merge
+        // commit. Left where it was, a lane whose work landed from side branches sat behind both
+        // tips, and an asked merge answered "landed" for both halves and moved neither (11-21).
         let whole = out.iter().all(|o| matches!(o, Some(Outcome::Landed)));
         let behind: Vec<usize> = (0..unit.len()).filter(|&i| matches!(out[i], Some(Outcome::Landed)) && unit[i].head != unit[i].base).collect();
-        let in_tip = |i: &usize| graphs[unit[*i].graph].hist.reach.contains(&unit[*i].head_id);
+        let mut bot_only: Vec<usize> = Vec::new();
+        for &i in &behind {
+            if !graphs[unit[i].graph].hist.reach.contains(&unit[i].head_id) && self.only_bot(graphs, &unit[i]) { bot_only.push(i); }
+        }
+        let in_tip = |i: &usize| graphs[unit[*i].graph].hist.reach.contains(&unit[*i].head_id) || bot_only.contains(i);
         let mut follow: Vec<usize> = Vec::new();
         if unit.len() > 1 && !whole || whole && !behind.is_empty() && behind.iter().all(in_tip) {
             for i in behind {
@@ -828,9 +852,12 @@ impl Lanes {
                 return out.into_iter().flatten().collect();
             }
         }
-        let Some(_write) = try_lane_write(&unit[0].wt) else {
-            wait(&mut out, "a slot take writes this worktree".into());
-            return out.into_iter().flatten().collect();
+        let _write = match try_lane_write(&unit[0].wt) {
+            Ok(w) => w,
+            Err(what) => {
+                wait(&mut out, format!("{what} writes this worktree"));
+                return out.into_iter().flatten().collect();
+            }
         };
         // the lane's own work in progress is never touched, in either half; a fast-forward leaves
         // it as it is, and only an operation in progress stops it
@@ -849,9 +876,11 @@ impl Lanes {
             if out[i].is_some() {
                 continue;
             }
-            // a half in its tip moves to the tip itself (a fast-forward, no merge commit)
+            // a half in its tip moves to the tip itself (a fast-forward, no merge commit), and so
+            // does one of a lane landed whole that holds only the bot's merges (moved as carried)
             let ff = follow.contains(&i) && graphs[h.graph].hist.reach.contains(&h.head_id);
-            match if ff { Ok((h.base.clone(), false)) } else { self.merge_commit(h, pass) } {
+            let moved = ff_only && follow.contains(&i) && bot_only.contains(&i);
+            match if ff || moved { Ok((h.base.clone(), moved)) } else { self.merge_commit(h, pass) } {
                 Ok(c) => merges.push((i, c)),
                 Err(o) => {
                     out[i] = Some(o.clone());
@@ -931,6 +960,12 @@ impl Lanes {
             });
         }
         out.into_iter().flatten().collect()
+    }
+
+    /// Whether every commit of a half beyond its tip is the bot's merge of the tip ([`only_bot_merges`]).
+    fn only_bot(&self, graphs: &mut [Graph], h: &Half) -> bool {
+        let g = &mut graphs[h.graph];
+        g.hist.own(&mut g.repo.lock().unwrap_or_else(|e| e.into_inner()), h.head_id).is_ok_and(|own| only_bot_merges(own.commits.iter().map(|c| c.3.as_str()), h.tip_branch, &h.branch))
     }
 
     /// A half's result when it has nothing to merge (or is held): None when it needs the tip.
@@ -2004,8 +2039,23 @@ mod tests {
             if f.g(&wt, &["rev-parse", "HEAD"]) == next { break; }
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert_eq!((f.g(&wt, &["rev-parse", "HEAD"]), f.result(&bot, "rc-l")), (next, Outcome::Landed), "{:?}", bot.list());
+        assert_eq!((f.g(&wt, &["rev-parse", "HEAD"]), f.result(&bot, "rc-l")), (next.clone(), Outcome::Landed), "{:?}", bot.list());
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "tip\n");
+        // its new work lands from a side branch after the bot merged the tip into the lane: the
+        // lane holds only that merge beyond the tip, and moves to the tip as it moves on, no merge
+        // commit (both halves of a lane said "landed" behind their tips and stayed, 11-21)
+        f.write(&wt, "side.txt", "side\n");
+        let side = f.commit(&wt, "lane work landed from a side branch");
+        f.write(&f.repo, "c.txt", "c\n");
+        f.commit(&f.repo, "work moves again");
+        bot.pass(&f.w()).unwrap();
+        assert!(matches!(f.result(&bot, "rc-l"), Outcome::Merged(_)), "{:?}", bot.list());
+        f.g(&f.repo, &["merge", "-q", "--no-ff", "-m", "land side", &side]);
+        f.write(&f.repo, "d.txt", "d\n");
+        let tip = f.commit(&f.repo, "work moves on");
+        bot.pass(&f.w()).unwrap();
+        assert_eq!((f.g(&wt, &["rev-parse", "HEAD"]), f.result(&bot, "rc-l")), (tip, Outcome::Landed), "{:?}", bot.list());
+        assert!(wt.join("d.txt").is_file() && wt.join("side.txt").is_file() && wt.join("scratch.log").is_file());
     }
 
     #[test]

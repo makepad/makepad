@@ -235,10 +235,12 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
 /// The pushes origin/work stands on come from the ledger, each standing on the one before
 /// (`origin_was`), the chain a push reads its `since` from. None: no push of that chain carried it,
 /// or origin/work is no push of the ledger (`devhub promote` re-pointed it). An ancestry it cannot
-/// tell (a tip it cannot read) and a blocks file whose titles repeat (an area commit is found by
-/// its title) are errors, never a guess. Intake's post gate names this commit in a close of a local
-/// sha and checks it as it would the sha itself: on origin/work, and for a port, carrying the
-/// author's credit line.
+/// tell (a tip it cannot read), a commit the chain's oldest push holds (that push stands on a
+/// commit the ledger has no push of, so the change may have gone out there or before: the ledger
+/// began later, a promote re-pointed work, or a commit reached origin outside a push) and a blocks
+/// file whose titles repeat (an area commit is found by its title) are errors, never a guess.
+/// Intake's post gate names this commit in a close of a local sha and checks it as it would the
+/// sha itself: on origin/work, and for a port, carrying the author's credit line.
 pub fn carrier(repo: &std::path::Path, pushes: &[Pushed], local: &str) -> Result<Option<String>, String> {
     let origin = git(repo, &["rev-parse", "refs/remotes/origin/work"])?;
     let mut chain: Vec<&Pushed> = Vec::new();
@@ -248,14 +250,22 @@ pub fn carrier(repo: &std::path::Path, pushes: &[Pushed], local: &str) -> Result
         at = p.origin_was.as_str();
     }
     // newest first: the oldest whose tip holds it, the one before it read and found without it
-    let mut push = None;
-    for p in chain {
+    let mut held = 0usize;
+    for p in &chain {
         if !ancestor(repo, local, &p.pair.work)? {
             break;
         }
-        push = Some(p);
+        held += 1;
     }
-    let Some(push) = push else { return Ok(None) };
+    let Some(&push) = held.checked_sub(1).map(|n| &chain[n]) else { return Ok(None) };
+    if held == chain.len() {
+        return Err(format!(
+            "push carrier: {} is in the tip of {}, the oldest push the ledger chains under origin/work, which stands on {}, no push of the ledger: it may have gone out there or before, so name its public commit",
+            super::short(local),
+            super::short(&push.commit),
+            super::short(&push.origin_was)
+        ));
+    }
     let log = git(repo, &["log", "--first-parent", "--reverse", "--format=%H %s", &format!("{}..{}", push.origin_was, push.commit)])?;
     let set: Vec<(&str, &str)> = log.lines().filter_map(|l| l.split_once(' ')).collect();
     let blocks = group::parse_blocks(&git(repo, &["show", &format!("{}:{}", push.pair.work, group::BLOCKS_FILE)])?);
@@ -408,6 +418,10 @@ mod tests {
         assert!(!message.contains("example.net"), "no other address of a person is pushed");
         assert!(rows.contains(&format!("\"coauthors\":[{}]", json_str(credit))), "the dry run lists it: {rows}");
         let mut pushes = vec![p1.clone()];
+        let held = carrier(&dir, &pushes, &port).unwrap_err();
+        assert!(held.contains("may have gone out there or before"), "the chain's oldest push holds it, and nothing tells what went out before it: {held}");
+        // the push origin's base was, which the first one stands on
+        pushes.insert(0, Pushed { pair: Pair::new(&base, ""), commit: base.clone(), origin_was: "f".repeat(40), at_ms: 0, files: 0 });
         assert_eq!(carrier(&dir, &pushes, &port).unwrap().as_deref(), Some(first[1].as_str()), "the first block holding its files");
         assert_eq!(carrier(&dir, &pushes, &ours).unwrap().as_deref(), Some(first[0].as_str()));
         let later = commit(&[("libs/a/x.rs", "3\n")], "later");
@@ -439,7 +453,7 @@ mod tests {
         assert!(carrier(&dir, &unreadable, &port).is_err(), "an older tip it cannot read: an error, never a newer push's commit");
         assert_eq!(title_twice(&group::parse_blocks("block A\nx/*\nblock B\ny/*\nblock A\n*\n")), Some("A"));
         assert_eq!(title_twice(&group::parse_blocks("block A\nx/*\nblock B\n*\n")), None);
-        git(&dir, &["update-ref", "refs/remotes/origin/work", &base]).unwrap();
+        git(&dir, &["update-ref", "refs/remotes/origin/work", &ours]).unwrap();
         assert_eq!(carrier(&dir, &pushes, &port).unwrap(), None, "origin/work is no push of the ledger");
         std::fs::remove_dir_all(dir).unwrap();
     }

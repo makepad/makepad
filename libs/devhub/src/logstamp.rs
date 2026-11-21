@@ -6,6 +6,12 @@
 //! (the new image finds it, [`KEPT_ENV`]) and a crash of the master: it writes what is left in the
 //! pipe, and ends when the last writer has. Should it end first, the master puts its output back
 //! on the log itself and says so.
+//!
+//! The master's own start, and nothing else, moves the last master's log to `<log>.old` and opens
+//! its own ([`stamp_output`]); an image after an exec writes on where its last one did, and opens
+//! the log at its name again when that is no longer where its lines went. A Dock wrapper that
+//! moved the log away at every launch left a running master writing a day into a removed file
+//! (11-19).
 
 use std::io::{Read, Write};
 
@@ -80,29 +86,87 @@ pub fn stamper() -> Result<std::process::Command, String> {
 }
 
 /// Puts this process's stdout and stderr through the one `stamper` makes (a [`log_stamp`] that
-/// writes on to where they went), first thing in a master. An image this process exec'd into from
-/// one that did so already has its stamper: it takes that one on ([`KEPT_ENV`]), and makes none.
+/// writes on to the log at `log`), first thing in a master. Its own start moves the last master's
+/// log to `<log>.old` and opens a new one. An image this process exec'd into from one that did so
+/// already has its log, and its stamper while that runs: it takes them on ([`KEPT_ENV`]) and makes
+/// none, unless the log is no longer the file named `log` (moved or removed: it opens that name
+/// again, and a stamper writes there; the old one ends once its last writer has) or its stamper
+/// had ended. Without a stamper (none built yet) the output goes to the log unstamped, Err.
 #[cfg(unix)]
-pub fn stamp_output(stamper: impl FnOnce() -> Result<std::process::Command, String>) -> Result<(), String> {
-    use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
-    if let Some((pid, log)) = kept() {
+pub fn stamp_output(stamper: impl FnOnce() -> Result<std::process::Command, String>, log: &std::path::Path) -> Result<(), String> {
+    if let Some((pid, kept)) = kept() {
         // (open over the exec that brought it here: from here on, as in the image that made it, it
         // goes to no child)
-        let _ = crate::node::close_on_exec(log, true);
-        watch(pid, log);
-        return Ok(());
+        let _ = crate::node::close_on_exec(kept, true);
+        let here = is_at(kept, log);
+        if pid > 0 && here {
+            watch(pid, kept);
+            return Ok(());
+        }
+        let file = match std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            Ok(file) => file,
+            // (on where it was: some log rather than none)
+            Err(e) => {
+                if pid > 0 { watch(pid, kept) } else { LOG.store(kept, std::sync::atomic::Ordering::Relaxed) }
+                return Err(format!("{}: {e}", log.display()));
+            }
+        };
+        let said = start(stamper, file);
+        // SAFETY: the kept descriptor, no longer anything's: its lines go to the file at `log` now
+        unsafe { close(kept) };
+        if !here {
+            eprintln!("devhub: its log was no longer {}: it goes on there", log.display());
+        }
+        return said;
     }
-    let mut stamper = stamper()?;
-    let (reader, writer) = std::io::pipe().map_err(|e| format!("its pipe: {e}"))?;
-    let log = std::io::stderr().as_fd().try_clone_to_owned().map_err(|e| format!("its log: {e}"))?;
-    let (out, err) = (log.try_clone().map_err(|e| format!("its log: {e}"))?, log.try_clone().map_err(|e| format!("its log: {e}"))?);
-    let child = stamper.stdin(reader).stdout(out).stderr(err).spawn().map_err(|e| format!("its stamper: {e}"))?;
-    let log = log.into_raw_fd();
+    let mut old = log.as_os_str().to_owned();
+    old.push(".old");
+    let file = std::fs::create_dir_all(log.parent().unwrap_or(std::path::Path::new("."))).and_then(|()| {
+        // (the last master's log says why a new one had to be started)
+        let _ = std::fs::rename(log, &old);
+        std::fs::File::create(log)
+    });
+    match file {
+        Ok(file) => start(stamper, file),
+        // stamped where its output went, which an exec keeps
+        Err(e) => {
+            let fd = std::os::fd::AsFd::as_fd(&std::io::stderr()).try_clone_to_owned().map_err(|e| format!("its log: {e}"))?;
+            let said = start(stamper, std::fs::File::from(fd));
+            eprintln!("devhub: its log {}: {e}; it goes on where its output went", log.display());
+            said
+        }
+    }
+}
+
+/// This process's stdout and stderr through a new stamper writing to `file`; without one, onto
+/// `file` themselves. Either way an exec keeps `file` as the log.
+#[cfg(unix)]
+fn start(stamper: impl FnOnce() -> Result<std::process::Command, String>, file: std::fs::File) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let (out, err) = (file.try_clone().map_err(|e| format!("its log: {e}"))?, file.try_clone().map_err(|e| format!("its log: {e}"))?);
+    let log = file.into_raw_fd();
+    let _ = crate::node::close_on_exec(log, true);
+    let unstamped = |why: String| {
+        let _ = dup2(log, 1);
+        let _ = dup2(log, 2);
+        LOG.store(log, std::sync::atomic::Ordering::Relaxed);
+        Err(why)
+    };
+    let mut cmd = match stamper() {
+        Ok(cmd) => cmd,
+        Err(e) => return unstamped(e),
+    };
+    let (reader, writer) = match std::io::pipe() {
+        Ok(p) => p,
+        Err(e) => return unstamped(format!("its pipe: {e}")),
+    };
+    let child = match cmd.stdin(reader).stdout(out).stderr(err).spawn() {
+        Ok(child) => child,
+        Err(e) => return unstamped(format!("its stamper: {e}")),
+    };
     for fd in [1, 2] {
         if let Err(e) = dup2(writer.as_raw_fd(), fd) {
-            let _ = dup2(log, 1);
-            let _ = dup2(log, 2);
-            return Err(format!("its output onto the pipe: {e}"));
+            return unstamped(format!("its output onto the pipe: {e}"));
         }
     }
     // (its Child is never waited on: [`watch`] waits for its pid, in this image and the next)
@@ -110,7 +174,25 @@ pub fn stamp_output(stamper: impl FnOnce() -> Result<std::process::Command, Stri
     Ok(())
 }
 
-/// The stamper and the log this pid's previous image left it.
+/// Whether descriptor `fd` is the file named `path` (its device and inode).
+#[cfg(unix)]
+fn is_at(fd: i32, path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: borrowed for the call only; a bad descriptor fails the clone
+    let Ok(f) = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }.try_clone_to_owned().map(std::fs::File::from) else { return false };
+    match (f.metadata(), std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn close(fd: i32) -> i32;
+}
+
+/// The stamper (0: none, its output was on the log itself) and the log this pid's previous image
+/// left it.
 #[cfg(unix)]
 fn kept() -> Option<(u32, i32)> {
     let v = std::env::var(KEPT_ENV).ok()?;
@@ -136,7 +218,8 @@ fn watch(pid: u32, log: i32) {
         let _ = dup2(log, 1);
         let _ = dup2(log, 2);
         eprintln!("devhub: its log stamper (pid {pid}) ended; the log goes on without times");
-        // (none once the output is back on the log: an exec now keeps no stamper)
+        // (none once the output is back on the log: an exec now keeps the log alone, and the next
+        // image makes a stamper again)
         STAMPER.store(0, Ordering::Relaxed);
     });
 }
@@ -151,8 +234,9 @@ pub fn stamper_pid() -> u32 {
 #[cfg(unix)]
 pub fn keep_over_exec(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
+    // (no stamper: the output is on the log itself, and the next image's log is still this one)
     let (pid, log) = (stamper_pid(), LOG.load(std::sync::atomic::Ordering::Relaxed));
-    if pid == 0 || log < 0 {
+    if log < 0 {
         cmd.env_remove(KEPT_ENV);
         return;
     }
@@ -228,7 +312,7 @@ mod tests {
                 std::process::exit(log_stamp());
             }
             "before" => {
-                stamp_output(|| Ok(stamper())).unwrap();
+                stamp_output(|| Ok(stamper()), &base.join("log")).unwrap();
                 eprintln!("before line");
                 assert!(std::process::Command::new("sh").args(["-c", "echo child line >&2"]).status().unwrap().success());
                 let mut cmd = crate::testenv::role("logstamp::tests::logstamp_role", &base);
@@ -236,13 +320,16 @@ mod tests {
                 panic!("exec: {}", crate::node::exec(&mut cmd));
             }
             "after" => {
-                stamp_output(|| Err("the image after the exec made a stamper of its own".into())).unwrap();
+                stamp_output(|| Err("the image after the exec made a stamper of its own".into()), &base.join("log")).unwrap();
                 let pid = stamper_pid();
                 eprintln!("after line");
-                // a child of this image gets no descriptor of the log
-                let fd = LOG.load(std::sync::atomic::Ordering::Relaxed);
-                let child = std::process::Command::new("sh").args(["-c", &format!(": >&{fd}")]).stderr(std::process::Stdio::null()).status().unwrap();
-                assert!(!child.success(), "the log's descriptor {fd} went to a child");
+                // a child of this image gets no descriptor of the log: it looks through its own
+                // (`: >&<fd>` passed for any descriptor at that number, and a child of the JIT's
+                // spawn on a Mac holds descriptors of its own: one at the log's number, 11-21)
+                let mut probe = crate::testenv::role("logstamp::tests::logstamp_role", &base);
+                probe.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_LOGSTAMP_ROLE", "probe");
+                let child = probe.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output().unwrap();
+                assert!(child.status.success(), "a descriptor of the log went to a child: {}", String::from_utf8_lossy(&child.stderr));
                 let log = base.join("log");
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 while !std::fs::read_to_string(&log).unwrap().contains("after line") {
@@ -259,6 +346,25 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 eprintln!("unstamped line");
+                // the log moved away under it (a launcher's rotation): the next image opens its
+                // name again, stamped by a stamper of its own
+                std::fs::rename(&log, base.join("log.moved")).unwrap();
+                let mut cmd = crate::testenv::role("logstamp::tests::logstamp_role", &base);
+                cmd.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_LOGSTAMP_ROLE", "moved");
+                panic!("exec: {}", crate::node::exec(&mut cmd));
+            }
+            "probe" => {
+                let held: Vec<i32> = (0..1024).filter(|&fd| is_at(fd, &base.join("log"))).collect();
+                assert!(held.is_empty(), "this child holds the log at descriptor(s) {held:?}");
+            }
+            "moved" => {
+                stamp_output(|| Ok(stamper()), &base.join("log")).unwrap();
+                eprintln!("moved line");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !std::fs::read_to_string(base.join("log")).unwrap_or_default().contains("moved line") {
+                    assert!(std::time::Instant::now() < deadline, "the new stamper never wrote the line");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
             }
             _ => {}
         }
@@ -266,7 +372,8 @@ mod tests {
 
     /// A master's lines and its child's go to its log stamped, by one stamper over its exec into
     /// its next image, which makes none of its own; once the stamper ends, its lines go on to the
-    /// log without times.
+    /// log without times. Its start moved the last log to `.old`; an image after an exec whose log
+    /// was moved away opens the log's name again and stamps there.
     #[cfg(unix)]
     #[test]
     fn a_masters_output_is_stamped_over_its_exec_until_its_stamper_ends() {
@@ -277,16 +384,20 @@ mod tests {
         let mut role = crate::testenv::role("logstamp::tests::logstamp_role", &base);
         role.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_LOGSTAMP_ROLE", "before").env("DEVHUB_LOGSTAMP_BASE", &base).env_remove(KEPT_ENV);
         let status = role.stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).status().unwrap();
-        let text = std::fs::read_to_string(base.join("log")).unwrap();
-        assert!(status.success(), "{text}");
-        let stamped = |line: &str| text.lines().any(|l| l.len() > 25 && l.as_bytes()[23] == b'Z' && l.as_bytes()[10] == b'T' && &l[25..] == line);
+        let text = std::fs::read_to_string(base.join("log.moved")).unwrap_or_default();
+        let moved = std::fs::read_to_string(base.join("log")).unwrap_or_default();
+        assert!(status.success(), "{text}\n{moved}");
+        let stamped = |text: &str, line: &str| text.lines().any(|l| l.len() > 25 && l.as_bytes()[23] == b'Z' && l.as_bytes()[10] == b'T' && &l[25..] == line);
         for line in ["before line", "child line", "after line"] {
-            assert!(stamped(line), "{line:?} stamped:\n{text}");
+            assert!(stamped(&text, line), "{line:?} stamped:\n{text}");
         }
+        assert!(base.join("log.old").is_file(), "the master's own start moves the last log to .old");
+        assert!(stamped(&moved, &format!("devhub: its log was no longer {}: it goes on there", base.join("log").display())), "{moved}");
+        assert!(stamped(&moved, "moved line"), "{moved}");
         assert!(text.lines().any(|l| l.starts_with("devhub: its log stamper (pid ") && l.ends_with(" ended; the log goes on without times")), "{text}");
         assert!(text.lines().any(|l| l == "unstamped line"), "{text}");
         let stampers = std::fs::read_dir(&base).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("stamper ")).count();
-        assert_eq!(stampers, 1, "the next image takes the stamper on");
+        assert_eq!(stampers, 2, "the next image takes the stamper on; the one after its end and the move makes one");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

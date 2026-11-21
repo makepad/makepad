@@ -143,7 +143,7 @@ const PREWARM_LOAD_PER_CORE: f64 = 1.25;
 const PREWARM_RAM_FREE: f64 = 0.15;
 
 /// A `nodes` line of a node that should pre-warm after its apply: up, dev on, no lease, not
-/// draining, no person at it, no timed work there (a timed lease running, waiting for it or in its
+/// draining, no timed work there (a timed lease running, waiting for it or in its
 /// series' window, `timed`), under the pre-warm's load limits.
 pub fn prewarm_suits(v: &makepad_strict_json::Value) -> bool {
     let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
@@ -151,7 +151,7 @@ pub fn prewarm_suits(v: &makepad_strict_json::Value) -> bool {
     let caps = v.get("caps").filter(|c| !matches!(c, makepad_strict_json::Value::Null)).and_then(|c| crate::lease::Caps::parse(&c.to_json())).filter(|c| c.cores > 0);
     let loaded = |c: &crate::lease::Caps| c.load1 > c.cores as f64 * PREWARM_LOAD_PER_CORE || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * PREWARM_RAM_FREE);
     let timed = v.get("timed").and_then(|x| x.as_str()).is_some();
-    b("up") && b("dev") && !b("draining") && !b("user") && leases == 0 && !timed && caps.is_some_and(|c| !loaded(&c))
+    b("up") && b("dev") && !b("draining") && leases == 0 && !timed && caps.is_some_and(|c| !loaded(&c))
 }
 
 /// The tips of the followed repositories ([`super::followed`]) in the checkout at `repo`: each

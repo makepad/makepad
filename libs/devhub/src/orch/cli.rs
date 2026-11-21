@@ -51,6 +51,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           a save during an app's start applies once it is up
                                           --home: a tar archive of files the app finds in a home of its own on
                                           its box (MAKEPAD_TEST_HOME, where an app keeps its per-user state), gone with the session
+                                          every session's app gets MAKEPAD_TEST_RUN=<lane> <id>: it is a test run (an app shows
+                                          that to other devices, so it is never taken for the user's own)
                                           --joins W<n>: its app joins that session's app (a hidden test WM it reaches
                                           through --env MAKEPAD_WM_SOCKET=<path>): it runs on that session's box, and
                                           that session is never parked or ended idle while this one runs
@@ -140,6 +142,10 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           user's display: show <app> --after landed <branch>
   after [--all] [--json] | after cancel <id>   the waiters
   allapps [kick|on|off] [--json]          makepad check of every app/example/WM package, hourly when idle
+  dockbuild [on|off <node> | run <node>] [--json]
+                                          a Mac node's Dock apps compiled the Runner's way in its synced tree
+                                          (a hidden Runner's `compile all`, yielding to timed leases); on: again
+                                          after each sync to another pair
   push [--sha <work sha>] [-m <message>] [--parent <sha>]... [--dry]
                                           the newest landed tip (or that commit) to origin/work as one commit per area
                                           (the blocks of promote; -m adds to each message); refuses credential-like text
@@ -166,7 +172,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           (tools/devhub/promote_blocks.txt), then work re-points at main's tip;
                                           --dry prints the blocks and the scan, --go validates, pushes and moves";
 
-const WORDS: [&str; 18] = ["rolls", "promote", "job", "live", "show", "shows", "lane", "lanes", "verify", "jitlegs", "warm", "after", "allapps", "push", "state", "watch", "timeline", "master"];
+const WORDS: [&str; 19] = ["rolls", "promote", "job", "live", "show", "shows", "lane", "lanes", "verify", "jitlegs", "warm", "after", "allapps", "dockbuild", "push", "state", "watch", "timeline", "master"];
 
 fn master() -> Result<Client, String> {
     let c = control()?;
@@ -279,6 +285,13 @@ pub fn main(args: &[&str]) -> Option<i32> {
             match words.first() {
                 None | Some(&"status") => done(one(&c, "allapps", &line), json, &super::allapps::render),
                 _ => done(one(&c, "allapps", &line), json, &flat),
+            }
+        }
+        "dockbuild" => {
+            let line = format!("dockbuild {}", words.join(" "));
+            match words.first() {
+                None | Some(&"status") => done(one(&c, "dockbuild", &line), json, &super::dockbuild::render),
+                _ => done(one(&c, "dockbuild", &line), json, &flat),
             }
         }
         "lane" => lane(&c, &words, json),
@@ -401,8 +414,20 @@ fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String
             ("--kind" | "--needs" | "--node" | "--series" | "--prio" | "--lane" | "--after" | "--cost" | "--est-min" | "--cores" | "--ram-gb" | "--class" | "--priority" | "--native", v) => {
                 // (`--needs -- cmd` took `--` for the needs and ran the command with none, 11-04)
                 let Some(v) = v.filter(|v| !v.starts_with("--")) else { return Err(format!("{w} needs a value")) };
+                // a repeated `--needs` adds to the ones before it, a second `--node` is refused
+                // (crate::lease::sched::add_needs): never the last alone; a base's value gives way
+                let was = words[..i].iter().any(|x| x.as_str() == w).then(|| f.iter().find(|(k, _)| k == &w[2..]).map(|(_, v)| v.clone())).flatten();
+                let v = match (w, was) {
+                    ("--needs", Some(was)) => {
+                        let mut needs = crate::lease::sched::parse_needs(&was);
+                        crate::lease::sched::add_needs(&mut needs, v)?;
+                        needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")
+                    }
+                    ("--node", Some(was)) => { crate::lease::sched::one_node(&mut Some(was), v)?; v.clone() }
+                    _ => v.clone(),
+                };
                 f.retain(|(k, _)| k != &w[2..]);
-                f.push((w[2..].to_string(), v.clone()));
+                f.push((w[2..].to_string(), v));
                 i += 2;
             }
             _ if !w.starts_with("--") => {
@@ -612,14 +637,12 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
         // how far a lease something else ended got
         ["result", id, rest @ ..] if id.starts_with('L') => match one(c, "job", &format!("job lease-log {id}")) {
             Ok(v) => {
-                let text = v.get("text").and_then(Value::as_str).unwrap_or("");
-                if rest.contains(&"--tail") {
-                    print!("{text}");
-                } else {
-                    let (errors, tail) = super::job::digest(text);
-                    errors.iter().chain(if errors.is_empty() { tail.iter() } else { [].iter() }).for_each(|l| println!("  {l}"));
-                }
-                println!("  whole log: {}", v.get("path").and_then(Value::as_str).unwrap_or(""));
+                let lines = |k: &str| v.get(k).and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+                let (errors, tail) = (lines("errors"), lines("tail"));
+                // its error lines, else (or with --tail) its last lines; the whole of it at its path
+                let shown = if rest.contains(&"--tail") || errors.is_empty() { &tail } else { &errors };
+                shown.iter().for_each(|l| println!("  {l}"));
+                println!("  whole log ({} bytes): {}", v.get("bytes").and_then(Value::as_u64).unwrap_or(0), v.get("path").and_then(Value::as_str).unwrap_or(""));
                 1
             }
             Err(e) => {
@@ -792,18 +815,26 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                         home = a.to_string_lossy().into_owned();
                         i += 1;
                     }
+                    // (repeated, as a lease's: the needs and boxes add up, a second box is refused,
+                    // crate::lease::sched::add_needs)
                     ("--needs", Some(n)) => {
-                        needs = n.to_string();
+                        let mut had = crate::lease::sched::parse_needs(&needs);
+                        if let Err(e) = crate::lease::sched::add_needs(&mut had, n) { eprintln!("makepad devhub live start: {e}"); return 2; }
+                        needs = had.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
                         i += 1;
                     }
                     // like a lease's: that box or a wait for it, never another
                     ("--node", Some(n)) if !n.is_empty() && !n.starts_with('-') => {
+                        let mut had = Some(node.clone()).filter(|n| !n.is_empty());
+                        if let Err(e) = crate::lease::sched::one_node(&mut had, n) { eprintln!("makepad devhub live start: {e}"); return 2; }
                         node = n.to_string();
                         i += 1;
                     }
                     // like a lease's: boxes it never takes
                     ("--avoid", Some(n)) if !n.is_empty() && !n.starts_with('-') => {
-                        avoid = n.to_string();
+                        let mut had = crate::lease::sched::avoid_list(&avoid);
+                        crate::lease::sched::add_avoid(&mut had, n);
+                        avoid = had.join(",");
                         i += 1;
                     }
                     ("--lane", Some(l)) => {
@@ -1022,13 +1053,26 @@ fn show_add(c: &Client, app: &str, on: &str, after: &[String], replace: bool, pi
     done(one(c, "show", &format!("show add {req}")), json, &flat)
 }
 
+/// The boxes that run older code than their checkout ([`crate::lease::Caps::stale`]), for
+/// `shows`: what a box shows may run code older than the tip it holds. Empty: none, or no master.
+fn stale_boxes(c: &Client) -> String {
+    let Ok(lines) = ask(c, None, "nodes", "nodes") else { return String::new() };
+    let rows: Vec<String> = lines.iter().filter_map(|l| {
+        let v = makepad_strict_json::parse_depth(l.as_bytes(), 16).ok()?;
+        let stale = v.get("caps")?.get("stale")?.as_str().filter(|s| !s.is_empty())?.to_string();
+        Some(format!("  {}: {stale}\n", v.get("node")?.as_str()?))
+    }).collect();
+    if rows.is_empty() { String::new() } else { format!("boxes that run older code than their checkout:\n{}", rows.concat()) }
+}
+
 fn shows(c: &Client, all: bool, json: bool) -> i32 {
+    let stale = if json { String::new() } else { stale_boxes(c) };
     done(one(c, "show", if all { "show list all" } else { "show list" }), json, &|v| {
         let list: Vec<crate::state::Show> = v.as_arr().unwrap_or(&[]).iter().map(crate::state::show_from).collect();
         if list.is_empty() {
-            return "nothing shown\n".into();
+            return format!("nothing shown\n{stale}");
         }
-        list.iter()
+        let rows: String = list.iter()
             .map(|x| {
                 let ran = if x.started_ms == 0 { String::new() } else { format!(" {}s", (if x.ended_ms > 0 { x.ended_ms } else { crate::proto::wall_ms() }).saturating_sub(x.started_ms) / 1000) };
                 let panic = x.panic.as_ref().map_or(String::new(), |p| format!(" panic {}: {} at {}", p.id, p.message, p.location));
@@ -1042,7 +1086,8 @@ fn shows(c: &Client, all: bool, json: bool) -> i32 {
                 let restart = if x.restart.is_empty() || !x.active() { String::new() } else { format!("\n           {}", x.restart) };
                 format!("{:<10} {:<24} {}{}{pinned}{wait}{args} pid={} sha={}{ran}{panic}{}{held}{restart}{stages}\n", x.device, x.app, x.state, if x.held.is_empty() || !x.active() { "" } else { " HELD" }, x.pid, super::short(&x.sha), if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) })
             })
-            .collect()
+            .collect();
+        format!("{rows}{stale}")
     })
 }
 
@@ -1586,6 +1631,14 @@ mod tests {
         assert!(r.contains("\"loader\":\"0123456789abcdef01234567\""), "{r}");
         let (common, ..) = submit_flags(&words_of("--jit 0123456789abcdef01234567 -- bash zz/x.sh"));
         assert!(job_req(&words_of("bash zz/x.sh"), &common).unwrap().contains("\"loader\":\"0123456789abcdef01234567\""));
+        // a repeated `--needs` adds to the one before it, a second `--node` is refused: never the
+        // last alone (11-21); a base's value still gives way to the line's
+        let r = job_req(&words_of("--needs os=linux --needs gpu=1 -- x"), &base).unwrap();
+        assert!(r.contains("\"needs\":\"os=linux,gpu=1\""), "{r}");
+        assert_eq!(job_req(&words_of("--node n1 --node n2 -- x"), &base), Err("--node n2 after --node n1: a lease names one box (--avoid keeps it off others)".to_string()));
+        assert!(job_req(&words_of("--needs os=linux --needs os=macos -- x"), &base).is_err_and(|e| e.contains("os=macos after os=linux")));
+        let with_node = vec![("node".to_string(), "n1".to_string())];
+        assert!(job_req(&words_of("--node n2 -- x"), &with_node).unwrap().contains("\"node\":\"n2\""));
     }
 
     #[test]

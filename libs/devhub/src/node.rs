@@ -184,6 +184,8 @@ pub fn master_endpoint(name: &str, launch: Vec<String>, local: &Arc<Local>, peer
     ep.register("jitlog", 1, lines::service("jitlog", Arc::new(move |line, out| jit_log(&l, line, out))));
     // the Desk Link endpoint of a JIT host that embeds one (`crate::embed`)
     ep.register("desk", 1, lines::service("desk", Arc::new(|line, out| out.push(crate::embed::desk_service(line)))));
+    // this machine's USB serial devices: listed always, offered to the fleet as serial.conf says
+    crate::serial::Node::of_this_machine(name).register(&ep);
     (ep, sink)
 }
 

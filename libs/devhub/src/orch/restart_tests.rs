@@ -254,8 +254,13 @@ fn a_master_restart_ends_nothing() {
             if state().is_some_and(|s| f(&s)) {
                 return;
             }
-            let now = crate::state::committed(&home.join("devhub")).map(|v| v.map(|v| v.to_json()).unwrap_or_default()).unwrap_or_else(|e| e);
-            assert!(t.elapsed() < Duration::from_secs(180), "{what}: {now}");
+            if t.elapsed() >= Duration::from_secs(180) {
+                let now = crate::state::committed(&home.join("devhub")).map(|v| v.map(|v| v.to_json()).unwrap_or_default()).unwrap_or_else(|e| e);
+                // and the master's leases, which the state leaves out: where each is, why one waits
+                let client = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(home.join("devhub/devhub.sock")), "observe");
+                let leases = crate::cli::ask(&client, None, "leases", "leases all").map(|l| l.join("\n")).unwrap_or_else(|e| e);
+                panic!("{what}: {now}\nthe master's leases:\n{leases}");
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
     };

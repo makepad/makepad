@@ -7,9 +7,7 @@
 //!   (apps/devhub_panel, shown as its own app: [`open_panel`]), Open devhub (the inbox and the
 //!   explorer, machines → JITs → inspect views), Pause landing, Run verify now, each node's dev
 //!   switch. It listens on nothing but its control socket and dials the nodes with the Mac's fleet
-//!   identity. The profiler (`libs/prof_view`: a running makepad app's timeline, answers,
-//!   recordings and inspect console) opens from the menu's Open profiler and from a JIT row's
-//!   Profile. It is a native build, never under the JIT it schedules: the Dock wrapper builds it in
+//!   identity. It is a native build, never under the JIT it schedules: the Dock wrapper builds it in
 //!   its own target dir and runs it there, and its self-update execs into the next build there
 //!   (`makepad_devhub::orch::roll::MasterBin`); "Open at login" makes the per-user LaunchAgent that
 //!   starts that wrapper at login and again after a crash ([`installed`]).
@@ -71,15 +69,6 @@ script_mod! {
                     hub_view := mod.widgets.DevhubView{}
                 }
             }
-            // the profile view of a running makepad app: timeline, answers, recordings
-            profile_window := Window{
-                create_on_start: false
-                window.title: "devhub profile"
-                window.inner_size: vec2(1280, 800)
-                body +: {
-                    prof := mod.widgets.ProfView{}
-                }
-            }
             // a node's tray dropdown: the task-manager view of this machine's JITs
             node_window := Window{
                 create_on_start: false
@@ -102,7 +91,6 @@ const SEEN: LiveId = live_id!(seen_all);
 const DEVSW: LiveId = live_id!(dev_switch);
 const OPEN: LiveId = live_id!(open_window);
 const PANEL: LiveId = live_id!(open_panel);
-const PROFILE: LiveId = live_id!(open_profile);
 const LOGIN: LiveId = live_id!(open_at_login);
 const PAUSE: LiveId = live_id!(pause_landing);
 const VERIFY: LiveId = live_id!(verify_now);
@@ -321,21 +309,93 @@ fn item_name(item: LiveId) -> String {
     }
 }
 
+/// The menu's open of the panel ([`open_panel`]) while it is under way, and why it did not open
+/// for [`OPEN_FAILED_SAID`] after: (what it says, whether it is still opening, since when).
+static OPENING: Mutex<Option<(String, bool, std::time::Instant)>> = Mutex::new(None);
+
+/// How long the `Open panel` item says why the open failed.
+const OPEN_FAILED_SAID: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The `Open panel` item's label: what the open does now (`Opening panel · building the runner
+/// (about 42 s)`), why it failed, or the plain item.
+fn panel_item() -> (String, bool) {
+    match OPENING.lock().unwrap().as_ref() {
+        Some((what, true, _)) => (format!("Opening panel \u{b7} {what}"), true),
+        Some((why, false, at)) if at.elapsed() < OPEN_FAILED_SAID => (format!("Open panel \u{b7} did not open: {why}"), false),
+        _ => ("Open panel".into(), false),
+    }
+}
+
+/// The devhub panel's package ([`open_panel`]).
+const PANEL_APP: &str = "makepad-app-devhub-panel";
+
+/// A person's launch of devhub (the Dock, Spotlight, a shell) handed to its LaunchAgent: while
+/// that agent's master runs, it opens its panel, as the menu's Open panel does, and this copy
+/// ends. It touches no log: the master's own start alone moves one to `.old`. Each launch opened
+/// nothing while a master ran, and its Dock wrapper moved the running master's log away (11-19).
+/// While the agent's master starts (its wrapper builds it first), nothing answers yet: its
+/// menu-bar item comes when it is up.
+fn launched_beside_master() {
+    let socket = proto::control_socket();
+    let Some(who) = makepad_devhub::node::who_serves(&socket) else {
+        return log_line(&format!("devhub: the master starts under {}", makepad_devhub::master::AGENT));
+    };
+    let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(socket), "devhub-launch");
+    let line = format!("show add {{\"app\":\"{PANEL_APP}\",\"on\":\"mac\",\"by\":\"a launch of devhub\"}}");
+    match makepad_devhub::cli::ask(&c, None, "show", &line) {
+        Ok(said) => log_line(&format!("devhub: the master runs (pid {}): its panel opens: {}", who.pid, said.join(" "))),
+        Err(e) => log_line(&format!("devhub: the master runs (pid {}); its panel did not open: {e}", who.pid)),
+    }
+}
+
 /// The devhub panel (apps/devhub_panel: every box's leases and load on one time axis, the queue,
 /// the landing strip), the master's menu's "Open panel": a show on the Mac (`devhub show
 /// makepad-app-devhub-panel`), so it is the latest landed panel under the JIT in a process of its
-/// own (a fault in it never ends the master), started once and brought to the front after.
+/// own (a fault in it never ends the master), started once and brought to the front after. From
+/// the click until its first frame the item says what the open does, and the glyph is busy; a
+/// refused or failed open says why on the item ([`makepad_devhub::orch::show::opening`]). A click
+/// looked dead for the 46 s cargo rebuilt the runner before the first frame (11-18).
 fn open_panel() {
-    const PANEL_APP: &str = "makepad-app-devhub-panel";
-    let Some(ctx) = makepad_devhub::orch::ctx() else {
-        return log_line("devhub: open panel: the master's jobs have not started");
+    let say = |what: &str, busy: bool| {
+        let mut o = OPENING.lock().unwrap();
+        if o.as_ref().is_none_or(|(w, b, _)| w != what || *b != busy) {
+            log_line(&format!("devhub: open panel: {what}"));
+            *o = Some((what.to_string(), busy, std::time::Instant::now()));
+        }
     };
+    if OPENING.lock().unwrap().as_ref().is_some_and(|(_, busy, _)| *busy) {
+        return log_line("devhub: open panel: it is opening already");
+    }
+    let Some(ctx) = makepad_devhub::orch::ctx() else {
+        return say("the master's jobs have not started", false);
+    };
+    say("starting", true);
     // (a show of a running app asks its JIT to come to the front: never on the UI thread)
     let _ = std::thread::Builder::new().name("devhub-open-panel".into()).spawn(move || {
         let line = format!("show add {{\"app\":\"{PANEL_APP}\",\"on\":\"mac\",\"by\":\"the devhub menu\"}}");
-        match makepad_devhub::orch::show::serve(ctx, &line) {
-            Ok(said) => log_line(&format!("devhub: open panel: {said}")),
-            Err(e) => log_line(&format!("devhub: open panel: {e}")),
+        let said = match makepad_devhub::orch::show::serve(ctx, &line) {
+            Ok(said) => said,
+            Err(e) => return say(&makepad_devhub::proto::clean(&e, 160), false),
+        };
+        let v = makepad_strict_json::parse(said.as_bytes()).ok();
+        let id = v.as_ref().and_then(|v| v.get("id")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if id.is_empty() || v.as_ref().and_then(|v| v.get("front")).is_some() {
+            log_line(&format!("devhub: open panel: {said}"));
+            *OPENING.lock().unwrap() = None;
+            return;
+        }
+        // its show, until its first frame or its end: a few looks a second on this thread
+        loop {
+            match makepad_devhub::orch::show::opening(&ctx, &id) {
+                makepad_devhub::orch::show::Opening::Doing(what) => say(&what, true),
+                makepad_devhub::orch::show::Opening::Open => {
+                    log_line(&format!("devhub: open panel: {id} open"));
+                    *OPENING.lock().unwrap() = None;
+                    return;
+                }
+                makepad_devhub::orch::show::Opening::Failed(why) => return say(&makepad_devhub::proto::clean(&why, 160), false),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
     });
 }
@@ -349,7 +409,7 @@ fn start_master() -> Result<MasterCore, String> {
     makepad_devhub::node::set_exec_hooks(makepad_widgets::makepad_platform::makepad_hal::before_exec, makepad_widgets::makepad_platform::makepad_hal::exec_failed);
     // its log with the time on every line, by a stamper that outlives its exec and a crash
     #[cfg(unix)]
-    if let Err(e) = makepad_devhub::logstamp::stamp_output(makepad_devhub::logstamp::stamper) {
+    if let Err(e) = makepad_devhub::logstamp::stamp_output(makepad_devhub::logstamp::stamper, &proto::home().join("master.log")) {
         log_line(&format!("devhub: the master's log goes on without times: {e}"));
     }
     let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
@@ -423,7 +483,7 @@ fn start_core() -> Result<Option<Core>, String> {
             // that a crash is started again (11-17: one stayed down until a person came by)
             match makepad_devhub::master::hand_to_agent() {
                 Ok(true) => {
-                    log_line(&format!("devhub: the master starts under {}", makepad_devhub::master::AGENT));
+                    launched_beside_master();
                     return Ok(None);
                 }
                 Ok(false) => {}
@@ -468,9 +528,6 @@ pub struct App {
     /// whether the fleet identity is here, and when that was looked at
     #[rust]
     fleet: Option<(std::time::Instant, bool)>,
-    /// a JIT row's Profile: the pid to attach the profile window to, taken after the action
-    #[rust]
-    profile_req: Option<u32>,
     /// the master's menu-bar item on the Mac, shown by its helper process ([`menu_item`])
     #[rust]
     item_link: Option<menu_item::ItemLink>,
@@ -480,20 +537,6 @@ pub struct App {
 }
 
 impl App {
-    /// Opens the profile window (recordings are kept in devhub's folder), attached to the app
-    /// with `pid` when given.
-    fn open_profile(&mut self, cx: &mut Cx, pid: Option<u32>) {
-        cx.show_in_dock(true);
-        self.ui.window(cx, ids!(profile_window)).show(cx);
-        let dir = proto::home().join("recordings");
-        if let Some(mut p) = self.ui.widget(cx, ids!(prof)).borrow_mut::<makepad_prof_view::panel::ProfView>() {
-            p.set_recordings_dir(cx, dir);
-            if let Some(pid) = pid {
-                p.attach_pid(cx, pid);
-            }
-        }
-    }
-
     /// The master at a glance (the fleet identity looked for at most every `FLEET_EVERY`).
     fn glance(&mut self) -> Option<Glance> {
         let Some(Core::Master(m)) = &self.core else { return None };
@@ -522,12 +565,15 @@ impl App {
     fn refresh(&mut self, cx: &mut Cx) {
         let glance = self.glance();
         let (g, status) = self.status(glance.as_ref());
-        // name, dev switch, a person at it (auto-drained: "user")
-        let nodes: Vec<(String, bool, bool)> = match &self.core {
-            Some(Core::Master(m)) => m.master.leases.nodes().into_iter().map(|n| (n.name.clone(), n.dev, n.user().is_some())).collect(),
+        // an open of the panel under way: the glyph is busy from the click on
+        let (panel, opening) = panel_item();
+        let g = if opening && matches!(self.core, Some(Core::Master(_))) { glyph::Glyph::Busy } else { g };
+        // name, dev switch (the only thing that takes a box out of the pool)
+        let nodes: Vec<(String, bool)> = match &self.core {
+            Some(Core::Master(m)) => m.master.leases.nodes().into_iter().map(|n| (n.name.clone(), n.dev)).collect(),
             _ => Vec::new(),
         };
-        let key = format!("{g:?}|{status}|{glance:?}|{:?}|{nodes:?}|{}", self.login, makepad_devhub::lease::exec::writes_allowed());
+        let key = format!("{g:?}|{status}|{glance:?}|{:?}|{nodes:?}|{}|{panel}", self.login, makepad_devhub::lease::exec::writes_allowed());
         if key != self.tray_key {
             self.tray_key = key;
             let text = |i: usize, label: String| TrayMenuItem::Item { id: LiveId(LINE_BASE + i as u64), label, enabled: false, checked: None };
@@ -542,9 +588,8 @@ impl App {
                     menu.extend(gl.events.iter().enumerate().map(|(i, e)| text(n + i, e.clone())));
                     menu.push(TrayMenuItem::Line);
                 }
-                menu.push(TrayMenuItem::item(PANEL, "Open panel"));
+                menu.push(TrayMenuItem::item(PANEL, panel));
                 menu.push(TrayMenuItem::item(OPEN, "Open devhub"));
-                menu.push(TrayMenuItem::item(PROFILE, "Open profiler"));
                 menu.push(TrayMenuItem::check(PAUSE, "Pause landing", gl.land_paused.is_some()));
                 if gl.verify != makepad_devhub::glance::Verify::None {
                     menu.push(TrayMenuItem::item(VERIFY, "Run verify now"));
@@ -554,11 +599,9 @@ impl App {
                 }
                 if !nodes.is_empty() {
                     menu.push(TrayMenuItem::Line);
-                    self.dev_nodes = nodes.iter().map(|(n, _, _)| n.clone()).collect();
-                    for (i, (name, dev, user)) in nodes.iter().enumerate() {
-                        // the switch's own label; a person at the box is said apart from it
-                        let label = if *user { format!("Dev on {name} \u{b7} in use: no new leases until 3 min idle") } else { format!("Dev on {name}") };
-                        menu.push(TrayMenuItem::check(LiveId(DEV_BASE + i as u64), label, *dev));
+                    self.dev_nodes = nodes.iter().map(|(n, _)| n.clone()).collect();
+                    for (i, (name, dev)) in nodes.iter().enumerate() {
+                        menu.push(TrayMenuItem::check(LiveId(DEV_BASE + i as u64), format!("Dev on {name}"), *dev));
                     }
                     menu.push(TrayMenuItem::Line);
                 }
@@ -583,7 +626,7 @@ impl App {
         }
         if let Some(Core::Node(n)) = &self.core {
             if self.node_drop.is_open() {
-                let head = Head { name: n.node.conf.name.clone(), lan: n.lan(), dev: makepad_devhub::lease::exec::writes_allowed(), user: makepad_devhub::lease::exec::user_present(), leases: makepad_devhub::lease::exec::held(), cache: n.cache.lock().unwrap().clone() };
+                let head = Head { name: n.node.conf.name.clone(), lan: n.lan(), dev: makepad_devhub::lease::exec::writes_allowed(), leases: makepad_devhub::lease::exec::held(), cache: n.cache.lock().unwrap().clone() };
                 if let Some(mut v) = self.ui.widget(cx, ids!(tasks)).borrow_mut::<DevhubTasks>() {
                     v.head = head;
                     v.redraw(cx);
@@ -779,7 +822,6 @@ impl App {
                 self.act(DevhubAction::SeenAll);
                 self.refresh(cx);
             }
-            id if id == PROFILE => self.open_profile(cx, None),
             id if id == PANEL => open_panel(),
             id if id == OPEN => {
                 self.window_shown = true;
@@ -787,6 +829,9 @@ impl App {
                 cx.show_in_dock(true);
                 self.ui.window(cx, ids!(main_window)).show(cx);
                 self.refresh(cx);
+                // a JIT selected before the window closed: its graphs run again as it shows (they
+                // stood still until the next click in the window)
+                self.sync_live(cx);
             }
             _ => {}
         }
@@ -853,13 +898,6 @@ impl App {
                     JitDo::Log => {
                         self.state.view = "log";
                         let _ = m.drill.send((machine, pid, "!log".into()));
-                    }
-                    JitDo::Profile => {
-                        if machine == m.master.name {
-                            self.profile_req = Some(pid);
-                        } else {
-                            *m.note.lock().unwrap() = format!("profile: {machine}'s JITs are profiled on {machine}; this window attaches to this Mac's apps");
-                        }
                     }
                     JitDo::ClearCache => {
                         let app = self.state.machines.iter().find(|x| x.name == machine).and_then(|x| x.jits.iter().find(|j| j.pid == pid)).map(|j| j.app.clone());
@@ -1024,9 +1062,6 @@ impl MatchEvent for App {
                 continue;
             }
             self.act(a);
-            if let Some(pid) = self.profile_req.take() {
-                self.open_profile(cx, Some(pid));
-            }
             self.refresh(cx);
             self.sync_live(cx);
         }
@@ -1063,7 +1098,6 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_shell_kit::eval_default_theme(vm);
         makepad_shell_kit::script_mod(vm);
-        makepad_prof_view::script_mod(vm);
         crate::view::script_mod(vm);
         crate::taskview::script_mod(vm);
         self::script_mod(vm)
@@ -1109,14 +1143,6 @@ impl AppMain for App {
                     if self.tray_item(cx, item) {
                         return;
                     }
-                }
-            }
-            Event::WindowCloseRequested(e) if self.in_tray(cx) && self.ui.window(cx, ids!(profile_window)).window_id() == Some(e.window_id) => {
-                // the profile window only hides; its sessions end with it
-                e.accept_close.set(false);
-                self.ui.window(cx, ids!(profile_window)).set_visible(cx, false);
-                if let Some(mut p) = self.ui.widget(cx, ids!(prof)).borrow_mut::<makepad_prof_view::panel::ProfView>() {
-                    p.detach(cx);
                 }
             }
             Event::WindowCloseRequested(e) if self.in_tray(cx) => {

@@ -114,6 +114,10 @@ struct Running {
     /// verdict while its client stays ([`Waiting`]); a run in flight that none waits for holds
     /// its session only while it writes ([`run_holds`])
     waiting: std::sync::atomic::AtomicUsize,
+    /// a `session relaunch` call waits for the edit in flight ([`relaunch`]): a refused edit's wait
+    /// for its recovery ends for it (the relaunch restarts on the current sources whatever that
+    /// wait would see)
+    relaunch_waits: std::sync::atomic::AtomicBool,
 }
 
 /// A caller's wait for its session's run ([`Running::waiting`]), for as long as it is held.
@@ -369,13 +373,75 @@ fn retire_replaced(ctx: &Ctx, new: &Live) {
     }
 }
 
-/// Called by the lease master only when all blockers of the best box are live jobs.
-pub fn park(ctx: &Ctx, leases: &[String], note: &str) {
+/// Called by the lease master only when all blockers of the best box are live jobs. With
+/// `resume_after` (the timed lease they park for while in use) each starts again by itself once
+/// that lease ends ([`resume_parked`]).
+pub fn park(ctx: &Ctx, leases: &[String], note: &str, resume_after: Option<&str>) {
     let list: Vec<_> = RUNNING.lock().unwrap().as_ref().map(|m| m.iter().filter(|(_, r)| leases.contains(&r.lease)).map(|(id, r)| (id.clone(), r.clone())).collect()).unwrap_or_default();
+    // (what a call refused meanwhile answers too)
+    let note = match resume_after {
+        Some(_) => format!("{note}; {RESTARTS_BY_ITSELF}"),
+        None => note.to_string(),
+    };
     for (id, r) in list {
-        r.calls.lock().unwrap().park.get_or_insert_with(|| note.to_string());
+        let first = {
+            let mut calls = r.calls.lock().unwrap();
+            let first = calls.park.is_none();
+            calls.park.get_or_insert_with(|| note.clone());
+            first
+        };
+        if let (true, Some(after)) = (first, resume_after) {
+            set(ctx, &id, |s| s.resume_after = after.to_string());
+        }
         park_ready(ctx, &id, &r);
     }
+}
+
+/// What a session parked for a timed lease while in use says of its end ([`park`]).
+const RESTARTS_BY_ITSELF: &str = "restarts by itself after it, same app, args, tree and env; in-memory state is not kept";
+
+/// Starts again, under its id, each session parked for a timed lease while in use once that
+/// lease has ended ([`crate::lease::sched::Sched::park_live`]), as a master restart places one
+/// again: same app, args, tree and env; what its app held in memory is gone. Its saves since
+/// are in its tree, and its app starts from that. One its lane has started anew meanwhile
+/// (the same app or package, active) stays ended.
+fn resume_parked(ctx: &Arc<Ctx>) {
+    for id in resume_due(ctx) {
+        let c = ctx.clone();
+        let _ = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, false));
+    }
+}
+
+/// [`resume_parked`]'s sessions due to start again, set starting: their ids.
+fn resume_due(ctx: &Ctx) -> Vec<String> {
+    let waiting: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.state == "ended" && !x.resume_after.is_empty()).cloned().collect());
+    if waiting.is_empty() { return Vec::new(); }
+    let mut due = Vec::new();
+    let open: std::collections::HashSet<String> = ctx.leases.view().into_iter().filter(|l| !matches!(l.state, crate::lease::sched::State::Ended(_))).map(|l| l.id).collect();
+    for x in waiting {
+        if open.contains(&x.resume_after) || running(&x.id).is_some() { continue; }
+        let after = x.resume_after.clone();
+        let anew = ctx.store.read(|d| d.lives.iter().find(|o| o.id != x.id && o.active() && o.lane == x.lane && o.app == x.app && o.test == x.test).map(|o| o.id.clone()));
+        let now = set(ctx, &x.id, |s| {
+            s.resume_after.clear();
+            if anew.is_some() { return; }
+            s.state = "starting".into();
+            (s.pid, s.run_pid) = (0, 0);
+            s.lease.clear();
+            s.run_n = 0;
+            s.ask.clear();
+            s.patch = None;
+            (s.touched_ms, s.left_ms, s.ended_ms) = (wall_ms(), 0, 0);
+            s.note = format!("started again by itself: timed {after}, which it was parked for, ended");
+        });
+        if let Some(other) = anew {
+            event(ctx, Sev::Info, format!("live {} ({}) of lane {}: timed {after} ended; not started again, its lane runs {other} now", x.id, x.app, x.lane), now.as_ref());
+            continue;
+        }
+        event(ctx, Sev::Info, format!("live {} ({}) of lane {}: timed {after} ended, so it starts again as it was asked; what its app held in memory is not kept", x.id, x.app, x.lane), now.as_ref());
+        due.push(x.id);
+    }
+    due
 }
 
 fn park_ready(ctx: &Ctx, id: &str, r: &Running) {
@@ -391,8 +457,8 @@ fn end_parked(ctx: &Ctx, id: &str, r: &Running, wait_run: bool) {
         note
     };
     // the one line its lane gets (its next call on it answers with it; the inbox has it too): why
-    // it ended, and the one command that starts it again
-    let note = format!("{note}; `devhub live again {id}` starts it again");
+    // it ended, and the one command that starts it again, or that it starts again by itself
+    let note = if note.ends_with(RESTARTS_BY_ITSELF) { note } else { format!("{note}; `devhub live again {id}` starts it again") };
     if let Some(x) = set(ctx, id, |s| { s.state = "ended".into(); s.note = note.clone(); s.ended_ms = wall_ms(); }) {
         ctx.store.event(if note.starts_with("parked for ") { "live_parked" } else { "live" }, Sev::Info, format!("live {id} ({}) of lane {}: {note}", x.app, x.lane), Some(crate::state::live_value(&x).to_json()));
     }
@@ -474,11 +540,28 @@ fn set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Live)) -> Option<Live> {
 }
 
 fn try_set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Live)) -> Result<Option<Live>, String> {
-    ctx.store.update(|d| {
+    let mut was = None;
+    let x = ctx.store.update(|d| {
         let x = d.lives.iter_mut().find(|x| x.id == id)?;
+        was = Some(x.state.clone());
         f(x);
         Some(x.clone())
-    })
+    })?;
+    if let (Some(x), Some(was)) = (&x, was) { say_in_log(x, &was); }
+    Ok(x)
+}
+
+/// A session's log hears each change of its state that its note explains (parked, failed,
+/// ended, started again), in a `[devhub]` line after its app's last: a lane that follows its
+/// app's output learns there that the app is gone, and why. A session parked, started again and
+/// denied its box said so only in its record, and its lane's script watched the app's output
+/// for over an hour (W12708, 11-18).
+fn say_in_log(x: &Live, was: &str) {
+    if x.state == was || x.state == "running" || x.note.is_empty() || x.log.is_empty() { return; }
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&x.log) {
+        use std::io::Write;
+        let _ = writeln!(f, "[devhub] {} {}: {}", x.id, x.state, x.note);
+    }
 }
 
 fn get(ctx: &Ctx, id: &str) -> Option<Live> {
@@ -619,6 +702,32 @@ fn session_over(e: &str, lease: &str) -> Option<String> {
     }
 }
 
+/// The app has no run and waits for a fix: its build or app check failed, and the next save or
+/// `session relaunch` starts its next run. Its `live` says `held`; its `inputs` answers "held: ..."
+/// (relax's reload::HELD_NO_RUN) while no run's watcher can start.
+fn held_app(live: &[String], inputs: &[String]) -> bool {
+    live.iter().any(|l| num(l, "held") == Some(1)) || inputs.iter().any(|l| l.contains("\"err\":\"held: "))
+}
+
+/// A save while the app has no run and waits for a fix ([`held_app`]): shipped, its files are the
+/// next run's, which `session relaunch` starts, followed as a relaunch is ([`follow_relaunch`]):
+/// its end is the edit's verdict (that run up, or its errors). A `session relaunch` call ships its
+/// saves first and relaunches itself ([`relaunch`]). The save read the app's `inputs` as the
+/// session's end before: a session started on a broken tree ended at the save that fixed it
+/// (W15724, 11-21).
+fn held_relaunch(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: LivePatch, count: usize) {
+    if r.relaunch_waits.load(std::sync::atomic::Ordering::SeqCst) { return; }
+    let log_from = std::fs::metadata(&x.log).map_or(0, |m| m.len());
+    let said = inspect(&x.node, x.pid, "session relaunch").and_then(|lines| {
+        if lines.iter().any(|l| l.contains("\"relaunch\":\"queued\"")) { follow_relaunch(ctx, id, x, p, lines, log_from) } else { Err(lines.join(" ")) }
+    });
+    let current = get(ctx, id);
+    match said {
+        Ok(_) => event(ctx, Sev::Info, format!("live {id}: {count} file(s): the app had no run (the last did not compile); the next one started on them"), current.as_ref()),
+        Err(e) => event(ctx, Sev::Warn, format!("live {id}: {count} file(s): the app had no run (the last did not compile); its relaunch: {e}"), current.as_ref()),
+    }
+}
+
 /// Whether a save that ships waits behind this edit's verdict (asked while waiting on it): an
 /// edit waiting on its verdict never holds the next one back (a save waited 39 s behind an edit
 /// the JIT never answered, 11-03). A file the session shipped before counts, and so does one git
@@ -709,6 +818,7 @@ pub fn start(ctx: Arc<Ctx>) {
         if looked.elapsed() >= ORPHAN_LOOK {
             looked = Instant::now();
             release_orphans(&c);
+            resume_parked(&c);
         }
         let list: Vec<(String, Arc<Running>)> = RUNNING.lock().unwrap().as_ref().map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         for (id, r) in list {
@@ -823,6 +933,8 @@ fn release(ctx: &Ctx, id: &str, note: &str) -> Result<String, String> {
     let r = RUNNING.lock().unwrap().as_mut().and_then(|m| m.remove(id));
     try_set(ctx, id, |s| {
         s.note = note.into();
+        // (released by its lane: it no longer starts again by itself)
+        s.resume_after.clear();
         if s.active() {
             s.state = "ended".into();
             s.ended_ms = wall_ms();
@@ -1176,6 +1288,13 @@ fn restart_session(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: &mut LivePatch
 fn relaunch(ctx: &Ctx, id: &str, resend: bool) -> Result<Vec<String>, String> {
     let r = running(id).ok_or_else(|| not_running(ctx, id))?;
     let signal = ctx.store.subscribe("live", &[id]);
+    // (a refused edit's wait for its recovery, up to WATCH_S, ends for this call: patch_verdict)
+    struct Asked<'a>(&'a Running);
+    impl Drop for Asked<'_> {
+        fn drop(&mut self) { self.0.relaunch_waits.store(false, std::sync::atomic::Ordering::SeqCst); }
+    }
+    r.relaunch_waits.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _asked = Asked(&r);
     loop {
         let seen = signal.generation();
         if get(ctx, id).is_none_or(|x| !x.active()) { return Err(not_running(ctx, id)); }
@@ -1201,7 +1320,9 @@ fn relaunch(ctx: &Ctx, id: &str, resend: bool) -> Result<Vec<String>, String> {
             if let Some(done) = resend.then(|| relaunch_applied(id, x.pid, pending)).flatten() { return Ok(vec![done]); }
             let log_from = std::fs::metadata(&x.log).map_or(0, |m| m.len());
             let lines = inspect(&x.node, x.pid, "session relaunch")?;
-            if pending == 0 || !lines.iter().any(|l| l.contains("\"relaunch\":\"queued\"")) { return Ok(lines); }
+            // (followed also with no restart pending: the run after it may fail its check, and a
+            // relaunch after a refused save answered only "queued", 11-21)
+            if !lines.iter().any(|l| l.contains("\"relaunch\":\"queued\"")) { return Ok(lines); }
             return follow_relaunch(ctx, id, &x, p, lines, log_from);
         }
         if x.patch.is_none() { set(ctx, id, |s| s.patch = Some(p.clone())); }
@@ -1288,29 +1409,53 @@ fn follow_relaunch(ctx: &Ctx, id: &str, x: &Live, mut p: LivePatch, mut lines: V
         let live = inspect(&x.node, x.pid, "live").unwrap_or_default();
         let log = log_since(&x.log, log_from);
         match relaunch_end(&live, &log) {
-            Some(Ok(())) => {
+            Some(RelaunchEnd::Done) => {
                 (p.outcome, p.reason, p.outcome_ms) = ("patched".into(), "restarted in its process on the current sources".into(), wall_ms());
                 set_test_patch(ctx, id, x, &p);
                 set(ctx, id, restart_ran);
                 lines.push(format!("live {id}: restarted in its process (pid {}) on the current sources", x.pid));
                 return Ok(lines);
             }
-            Some(Err(why)) => {
+            Some(RelaunchEnd::Postponed(why)) => {
                 p.reason = format!("the app postponed its restart: {why}");
                 set_test_patch(ctx, id, x, &p);
                 return Err(format!("{id}: the app postponed its restart: {why} (it restarts when the app allows it)"));
+            }
+            Some(RelaunchEnd::Refused(why)) => {
+                (p.outcome, p.reason, p.outcome_ms) = ("refused".into(), format!("the restarted run did not compile: {why}"), wall_ms());
+                set_test_patch(ctx, id, x, &p);
+                return Err(format!("{id}: the restarted run did not compile: {why} (the app waits with no run, its state kept: the next save starts it)"));
             }
             None => std::thread::sleep(RELAUNCH_LOOK),
         }
     }
 }
 
+/// What a relaunch queued in place came to (`relaunch_end`).
+#[derive(Debug, PartialEq)]
+enum RelaunchEnd {
+    /// no edit waits for a restart: the new run loaded the sources
+    Done,
+    /// the app's `restart postponed (<why it restarts>): <why it waits>`
+    Postponed(String),
+    /// the new run failed its app check: it ended in place, and the JIT's `run ends in place: <why>`
+    /// waits with no run for the next save (its errors are the session's diagnostics)
+    Refused(String),
+}
+
 /// What a relaunch queued in place came to, from its JIT's `live` look and the session's log since
-/// the relaunch: done (no edit waits for a restart: the new run loaded the sources), postponed
-/// (the app's `restart postponed (<why it restarts>): <why it waits>`), or on its way (None).
-fn relaunch_end(live: &[String], log: &str) -> Option<Result<(), String>> {
-    if live.iter().find_map(|l| num(l, "restart_pending")) == Some(0) { return Some(Ok(())); }
-    log.lines().find_map(|l| l.split_once("restart postponed ").map(|(_, why)| Err(why.trim().to_string())))
+/// the relaunch, or on its way (None).
+fn relaunch_end(live: &[String], log: &str) -> Option<RelaunchEnd> {
+    if let Some(why) = log.lines().find_map(|l| l.split_once("relax live: the run ends in place: ")) {
+        return Some(RelaunchEnd::Refused(why.1.split("; the next save").next().unwrap_or("").trim().to_string()));
+    }
+    // (a restart whose next run still boots or checks is not done: that run may end in place; and
+    // none is done before its run's end: a relaunch with nothing pending has no restart_pending
+    // to see fall)
+    let ended = log.contains("run's threads stayed");
+    let unfinished = live.iter().find_map(|l| num(l, "restart_unfinished")) == Some(1);
+    if ended && !unfinished && live.iter().find_map(|l| num(l, "restart_pending")) == Some(0) { return Some(RelaunchEnd::Done); }
+    log.lines().find_map(|l| l.split_once("restart postponed ").map(|(_, why)| RelaunchEnd::Postponed(why.trim().to_string())))
 }
 
 /// The session log's text from byte `from` on (empty when unreadable).
@@ -1505,10 +1650,26 @@ fn verdict_said(id: &str, x: &Live, p: &LivePatch, sev: Sev, line: String) -> (S
     (Sev::Info, format!("live {id}: replayed after a master restart, the verdict of its run that ended {}: {}", hhmmss(p.verdict_ms), verdict(p).trim_end()))
 }
 
-/// One event, rearming across an exec's closed link and reset event sequence.
-fn test_event(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch, on: &str) -> Option<Value> {
-    let x_run = x.run_n;
-    while running(id).is_some() && get(ctx, id).is_some_and(|x| x.state == "running" && x.pid > 0 && x.run_n == x_run && x.patch.as_ref().is_some_and(|old| old.edit_ms == p.edit_ms)) {
+/// Whether a test watch on `x`'s edit `p` goes on, at the session as it is now (`now`): its run
+/// and its edit, still running. A process restart behind the restart parent (the harness's fresh
+/// process for statics an earlier run left, or a warm restart) moves the session's pid: the watch
+/// moves with it, from the first of the new process's events, as its verdict comes from there.
+/// Watching the old pid, a test call waited 6 min for the verdict its restarted tests gave in 3 s
+/// (W12859, 11-18).
+fn watch_on(x: &mut Live, now: Option<&Live>, p: &mut LivePatch) -> bool {
+    let Some(now) = now.filter(|s| s.state == "running" && s.pid > 0 && s.run_n == x.run_n && s.patch.as_ref().is_some_and(|old| old.edit_ms == p.edit_ms)) else { return false };
+    if now.pid != x.pid {
+        x.pid = now.pid;
+        p.seq = 0;
+        p.cursor.clear();
+    }
+    true
+}
+
+/// One event, rearming across an exec's closed link and reset event sequence, and following the
+/// session's process across a restart ([`watch_on`]).
+fn test_event(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, on: &str) -> Option<Value> {
+    while running(id).is_some() && watch_on(x, get(ctx, id).as_ref(), p) {
         match inspect(&x.node, x.pid, &format!("watch on={on} since={} timeout_s=1", p.seq)) {
             Ok(lines) => {
                 for v in lines.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()) {
@@ -1569,7 +1730,7 @@ fn untaken(t: &crate::state::LiveTests, taken: &[String]) -> Option<Vec<String>>
 /// names it (the box's path read as its longest tail that is a file of the tree), and whether the
 /// lane changed that file ([`lane_changed`]). The tests' verdict said nothing of them: a lane's
 /// unused const reached the fast bucket as a warning of unknown origin (11-16).
-fn round_warnings(log: &str, tree: &Path) -> Vec<(String, bool)> {
+pub(crate) fn round_warnings(log: &str, tree: &Path) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     for line in log.lines().map(str::trim_end) {
         let Some((path, rest)) = crate::bucket::location(line) else { continue };
@@ -1652,11 +1813,13 @@ fn hot_event(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch, v: &Value) -> boo
     true
 }
 
-fn patch_verdict(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
+fn patch_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch) {
     // the JIT's verdict on the edit
     let asked = Instant::now();
     let r = running(id);
-    let newer = newer_saves(ctx, x, r.as_deref());
+    // (of the session as the call began: the watch below may move `x` to a restarted process)
+    let began = x.clone();
+    let newer = newer_saves(ctx, &began, r.as_deref());
     let mut ran_out = None;
     let answer = if x.test {
         let mut found = None;
@@ -1764,8 +1927,10 @@ fn patch_verdict(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
     }
     if !x.test && matches!(p.outcome.as_str(), "recovering" | "refused" | "reverted") {
         // A refused partial landing may patch on its quiet retry or next save.
-        // (a newer save ends the wait: the JIT's verdict on this edit stands)
-        let recovery = inspect_until(&x.node, x.pid, &format!("watch on=patchverified,patchrestarted,jiterror since={} timeout_s={WATCH_S}", p.seq), &newer);
+        // (a newer save ends the wait, and so does a relaunch asked meanwhile: the JIT's verdict on
+        // this edit stands. A relaunch after a refused save waited the whole WATCH_S, 11-21)
+        let relaunch_waits = || r.as_deref().is_some_and(|r| r.relaunch_waits.load(std::sync::atomic::Ordering::SeqCst));
+        let recovery = inspect_until(&x.node, x.pid, &format!("watch on=patchverified,patchrestarted,jiterror since={} timeout_s={WATCH_S}", p.seq), &|| newer() || relaunch_waits());
         if let Some(v) = recovery.ok().flatten().and_then(|lines| lines.into_iter().filter_map(|line| makepad_strict_json::parse(line.as_bytes()).ok()).find(|v| matches!(v.get("event").and_then(Value::as_str), Some("patchverified" | "patchrestarted" | "jiterror")))) {
             if !hot_event(ctx, id, x, p, &v) {
                 p.outcome = "patched".into();
@@ -1778,8 +1943,70 @@ fn patch_verdict(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
     }
 }
 
+/// A JIT run the session's app started on its box: a WM's hosted app (the session's lease, another
+/// pid), as it stood before a ship: whether the edit's files are among its sources, its event
+/// cursor and its installed patches, for its verdict on an edit the session's app does not read
+/// ([`hosted_verdict`]). Since its launch keeps the WM's edits (app_registry launch.rs), a hosted
+/// app patches the lane's saves in; the session's own app is not one of them.
+#[derive(Debug, Default)]
+struct Hosted {
+    pid: u32,
+    app: String,
+    reads: bool,
+    seq: u64,
+    patches: Option<u64>,
+}
+
+/// The runs of the session's lease on its box other than its app ([`Hosted`]), each asked about
+/// the edit's `files` (`inputs_of`); none when its hub's `ps` does not answer.
+fn hosted_runs(r: &Running, x: &Live, inputs_of: &str, files: &[String]) -> Vec<Hosted> {
+    let Ok(lines) = ask(r.held.client(), Some(&r.node), "ps", "ps") else { return Vec::new() };
+    let mine = |pid: u32| pid == x.pid || (x.run_pid > 0 && pid == x.run_pid);
+    // (a run's lease in `ps` is its mark, the hub's ledger dir and the lease id: [`lease_of_mark`])
+    crate::cli::whose_of_ps(&lines).into_iter().filter(|w| crate::cli::lease_of_mark(&w.lease) == r.lease && !mine(w.pid)).filter_map(|w| {
+        let inputs = inspect(&r.node, w.pid, inputs_of).ok()?;
+        let reads = inputs.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok())
+            .any(|v| v.get("path").and_then(Value::as_str).is_some_and(|path| files.iter().any(|f| f == path)));
+        if !reads { return Some(Hosted { pid: w.pid, app: w.app, ..Default::default() }); }
+        let seq = inspect(&r.node, w.pid, "events").ok()?.iter().filter_map(|l| num(l, "seq")).max().unwrap_or(0);
+        let patches = inspect(&r.node, w.pid, "live").ok().and_then(|l| l.iter().find_map(|l| num(l, "patches")));
+        Some(Hosted { pid: w.pid, app: w.app, reads, seq, patches })
+    }).collect()
+}
+
+/// What hosted run `h` ([`Hosted`]) did with the edit, as the session's own verdict is read
+/// ([`patch_verdict`]), without the session's restarts and frames (the app is its host's): its
+/// outcome and what it said.
+fn hosted_verdict(node: &str, h: &Hosted, newer: &dyn Fn() -> bool) -> (String, String) {
+    let watch = format!("watch on=patchverified,patchrefused,patchreverted,patchfailed,patchrestarted,jiterror since={} timeout_s={WATCH_S}", h.seq);
+    loop {
+        let lines = match inspect_until(node, h.pid, &watch, newer) {
+            Ok(Some(lines)) => lines,
+            Ok(None) => return ("superseded".into(), "a newer save shipped before its verdict came".into()),
+            Err(e) => return ("none".into(), e),
+        };
+        let Some(v) = lines.iter().filter(|l| verdict_line(l)).find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()) else {
+            return match edit_state(&inspect(node, h.pid, "live"), h.patches) {
+                Some(EditState::On(_)) => continue,
+                Some(EditState::Installed(..)) => ("patched".into(), "installed: its patch count rose after the ship; its check has not reported yet".into()),
+                Some(EditState::Unchanged) => ("unchanged".into(), "it changed nothing that run compiles".into()),
+                _ => ("none".into(), format!("no verdict from it in {WATCH_S} s")),
+            };
+        };
+        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let reasons = || v.get("reasons").and_then(Value::as_arr).unwrap_or(&[]).iter().map(|r| r.as_str().map(str::to_string).unwrap_or_else(|| r.to_json())).collect::<Vec<_>>().join("; ");
+        return match s("event").as_str() {
+            "patchverified" => { let (o, why) = verified_outcome(Some(&v)); (o.into(), why) }
+            "patchrefused" => ((if s("outcome") == "restart" { "restart" } else { "refused" }).into(), reasons()),
+            "patchreverted" => ("reverted".into(), s("error")),
+            "patchrestarted" => ("restart".into(), "it restarted on it".into()),
+            other => ("failed".into(), format!("{other}: {}", if s("error").is_empty() { s("message") } else { s("error") })),
+        };
+    }
+}
+
 /// Tests finish independently of the caller's wait timeout.
-fn test_verdict(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
+fn test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch) {
     // No verdict can come from this binary for the edit. Let finish_tests start the new JIT.
     if rebuild_tests(x, p) { return; }
     while let Some(v) = test_event(ctx, id, x, p, "testverdict,patchverified,patchrefused,patchreverted,patchfailed,patchrestarted,jiterror") {
@@ -1838,9 +2065,9 @@ fn resume_tests(ctx: &Ctx, id: &str, r: &Running) {
     if let Err(e) = x.load_text() { eprintln!("live log: {e}"); return; }
     let Some(mut p) = x.patch.clone() else { return };
     if p.outcome == "recovering" { return; }
-    if p.outcome.is_empty() { patch_verdict(ctx, id, &x, &mut p); }
+    if p.outcome.is_empty() { patch_verdict(ctx, id, &mut x, &mut p); }
     if p.tests.is_none() && matches!(p.outcome.as_str(), "initial" | "patched" | "restart" | "hot-recovery") {
-        test_verdict(ctx, id, &x, &mut p);
+        test_verdict(ctx, id, &mut x, &mut p);
     }
     if get(ctx, id).is_none_or(|s| s.run_n != x.run_n || s.pid != x.pid || s.state != "running") { return; }
     finish_tests(ctx, id, &x, &mut p);
@@ -1862,6 +2089,22 @@ fn source_of(tree: &Path, path: &str) -> Result<(String, Vec<u8>, crate::lease::
     };
     let hash = format!("{}:{}:{}", entry.link.is_some(), entry.exec, makepad_network::digest::sha256_hash(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>());
     Ok((hash, bytes, entry))
+}
+
+/// The files a session shipped (`shipped`) that its tree's dirty set (`changed`, `deleted`) no
+/// longer names: back to the pin's bytes (a revert, a checkout), so no longer dirty, while the box
+/// runs the bytes shipped before. Each ships again as the tree has it, or as gone when the tree no
+/// longer has it (a new file removed again). Such a revert went nowhere, and a lane added a blank
+/// line to get its revert shipped (11-20).
+fn back_to_pin(tree: &Path, shipped: &BTreeMap<String, String>, changed: &mut Vec<String>, deleted: &mut Vec<String>) {
+    let clean: Vec<String> = shipped.keys().filter(|p| !changed.contains(*p) && !deleted.contains(*p)).cloned().collect();
+    for path in clean {
+        match std::fs::symlink_metadata(tree.join(&path)) {
+            Ok(m) if !m.is_dir() => changed.push(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => deleted.push(path),
+            _ => {}
+        }
+    }
 }
 
 fn capture(tree: &Path, changed: &[String], deleted: &[String], old: &BTreeMap<String, String>, dir: &Path) -> Result<BTreeMap<String, String>, String> {
@@ -1966,11 +2209,14 @@ impl Steps {
 /// room or an earlier call): what follows it is devhub's, what comes before it the caller's.
 /// `queued`: how long a test call waited for the previous call's tests, and behind what.
 fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64, called_ms: u64, current: Option<(Vec<String>, Vec<String>)>, queued: Option<(u64, String)>) {
-    let Some(x) = get(ctx, id).filter(|x| x.active() && x.pid > 0) else { return };
+    let Some(mut x) = get(ctx, id).filter(|x| x.active() && x.pid > 0) else { return };
     let mut note = None;
+    let mut hosted: Vec<Hosted> = Vec::new();
     let mut unread = Vec::new();
     // the shipped files the JIT has as sources: its test verdict must be about one of them
     let mut taken: Vec<String> = Vec::new();
+    // the app has no run and waits for a fix ([`held_app`]): the files are the next run's
+    let mut held = false;
     let (queued_ms, behind) = queued.unwrap_or_default();
     let mut p = LivePatch { edit_ms: edit_ms.max(x.patch.as_ref().map_or(0, |p| p.edit_ms + 1)), called_ms, queued_ms, behind, ..Default::default() };
     let mut steps = Steps::default();
@@ -1983,9 +2229,11 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             // the save came from the monitor: its dirty set has it, no status of the tree
             None => crate::lease::ship::uncommitted_seen(&ctx.monitor, &r.tree, &pin)?,
         };
+        back_to_pin(&r.tree, &x.sources, &mut changed, &mut deleted);
         changed.extend(also_files(&r.tree, &x.also)?);
         changed.sort();
         changed.dedup();
+        deleted.sort();
         steps.lap("dirty");
         let selected: BTreeSet<&String> = files.iter().collect();
         if x.test {
@@ -2020,13 +2268,17 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         // about the edit's files only (`of`): the whole list cost the JIT 25-40 ms.
         let inputs_of = format!("{{\"cmd\":\"inputs\",\"of\":{}}}", json_str(&p.files.join("\n")));
         // (and the patches it installed so far: one more after the ship is this edit's)
-        let (events, inputs, live) = std::thread::scope(|sc| {
+        // (and an app's: the runs it started on its box, as they stood before the ship, [`Hosted`])
+        let (events, inputs, live, runs) = std::thread::scope(|sc| {
             let inputs = sc.spawn(|| inspect(&r.node, x.pid, &inputs_of));
             let live = sc.spawn(|| inspect(&r.node, x.pid, "live"));
+            let runs = (!x.test).then(|| sc.spawn(|| hosted_runs(r, &x, &inputs_of, &p.files)));
             let events = inspect(&r.node, x.pid, "events");
             let panicked = |_| Err("live: an inspect call panicked".to_string());
-            (events, inputs.join().unwrap_or_else(panicked), live.join().unwrap_or_else(panicked))
+            (events, inputs.join().unwrap_or_else(panicked), live.join().unwrap_or_else(panicked), runs.map(|h| h.join().unwrap_or_default()).unwrap_or_default())
         });
+        hosted = runs;
+        held = live.as_ref().is_ok_and(|l| held_app(l, &[]));
         p.patches_at_ship = live.ok().and_then(|l| l.iter().find_map(|l| num(l, "patches")));
         let cursor = events?.into_iter().filter(|l| num(l, "seq").is_some()).max_by_key(|l| num(l, "seq").unwrap_or(0)).unwrap_or_default();
         p.seq = num(&cursor, "seq").unwrap_or(0);
@@ -2058,6 +2310,9 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         // One query for the exact shipped set. Unknown or incomplete inputs cannot
         // justify waiting for a patch event (nor claiming this edit missed the target).
         let lines = inputs?;
+        // (its inputs answer says so too, when its wait began after the look at `live`)
+        held |= held_app(&[], &lines);
+        if held { return Ok(true); }
         let mut inputs = BTreeSet::new();
         let mut outside = BTreeSet::new();
         let mut read = BTreeSet::new();
@@ -2084,7 +2339,13 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
                 }
             }
         } else if !p.files.iter().any(|p| inputs.contains(p)) {
-            note = Some(format!("edit does not reach {}: {} is not one of its sources", x.app, p.files[0]));
+            // (unless an app it started reads it: [`hosted_verdict`] answers)
+            hosted.retain(|h| h.reads);
+            if hosted.is_empty() {
+                note = Some(format!("edit does not reach {}: {} is not one of its sources, nor of an app it started", x.app, p.files[0]));
+            }
+        } else {
+            hosted.clear();
         }
         Ok(true)
     };
@@ -2116,6 +2377,31 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         let x = set(ctx, id, |s| s.patch = Some(p.clone()));
         event(ctx, Sev::Warn, format!("live {id}: shipping {count} file(s) failed: {e}"), x.as_ref());
         if let Some(x) = &x { unapplied(ctx, x, &p); }
+        return;
+    }
+    if held {
+        held_relaunch(ctx, id, &x, r, p, count);
+        return;
+    }
+    // An edit the session's app does not read and an app it started does (a WM's hosted app):
+    // that app's verdict, named. Read literally, "edit does not reach makepad-app-wm" sent a lane
+    // after an edit its hosted Calculator had patched in (11-20).
+    if !hosted.is_empty() {
+        let newer = newer_saves(ctx, &x, Some(r));
+        let said: Vec<(String, String)> = hosted.iter().map(|h| {
+            let (outcome, why) = hosted_verdict(&r.node, h, &newer);
+            let line = format!("{outcome} in {} (pid {}), which {} started{}", h.app, h.pid, x.app, if why.is_empty() { String::new() } else { format!(": {why}") });
+            (outcome, line)
+        }).collect();
+        // the worst of them is the edit's (one app, as a rule)
+        let rank = |o: &str| match o { "patched" | "unchanged" => 0, "superseded" => 1, "restart" => 2, _ => 3 };
+        p.outcome = said.iter().map(|(o, _)| o.clone()).max_by_key(|o| rank(o)).unwrap_or_default();
+        p.reason = format!("{}; {} itself does not read {}", said.into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("; "), x.app, p.files[0]);
+        p.outcome_ms = wall_ms();
+        let Some(current) = set_patch(ctx, id, &p) else { return };
+        if matches!(p.outcome.as_str(), "none" | "failed") { unapplied(ctx, &current, &p); }
+        let sev = if matches!(p.outcome.as_str(), "patched" | "unchanged" | "superseded") { Sev::Info } else { Sev::Warn };
+        event(ctx, sev, format!("live {id}: {count} file(s) {}: {}", p.outcome, p.reason), Some(&current));
         return;
     }
     if let Some(note) = note {
@@ -2152,7 +2438,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         }
     });
     if get(ctx, id).is_some_and(|s| s.pid == x.pid && s.run_n == x.run_n && s.patch.as_ref().is_some_and(|p| p.outcome.is_empty())) {
-        patch_verdict(ctx, id, &x, &mut p);
+        patch_verdict(ctx, id, &mut x, &mut p);
     } else {
         wait_tests(ctx, id);
         return;
@@ -2160,7 +2446,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
     if x.test {
         if p.tests.is_none() && set_test_patch(ctx, id, &x, &p).is_none() { wait_tests(ctx, id); return; }
         if p.tests.is_none() && matches!(p.outcome.as_str(), "patched" | "restart" | "hot-recovery") {
-            test_verdict(ctx, id, &x, &mut p);
+            test_verdict(ctx, id, &mut x, &mut p);
         }
         // A verdict on a round that took none of them is not about this edit: a JIT miss, never
         // a pass (a ship's folder answered for the file in it, 11-17)
@@ -2326,7 +2612,7 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
     let tree = PathBuf::from(&x.tree);
     // an app's ships wait for its pid, as a started session's do (the run's watcher frees them):
     // one shipped before it found no app and dropped its files
-    let r = Arc::new(Running { node: x.node.clone(), lease: x.lease.clone(), held, tree, test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test), fault: Mutex::new(None), waiting: Default::default() });
+    let r = Arc::new(Running { node: x.node.clone(), lease: x.lease.clone(), held, tree, test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default() });
     join(&ctx.monitor, &x.id, r.clone());
     set(ctx, &x.id, |s| s.touched_ms = wall_ms());
     let len = std::fs::metadata(&x.log).map_or(0, |m| m.len());
@@ -2355,11 +2641,11 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
     }
     match cut_by_restart(x, wall_ms()) {
         Some(Cut::Watch) => {
-            let (c, id, r2, x2) = (ctx.clone(), x.id.clone(), r.clone(), x.clone());
+            let (c, id, r2, mut x2) = (ctx.clone(), x.id.clone(), r.clone(), x.clone());
             let _ = std::thread::Builder::new().name("devhub-live-rewatch".into()).spawn(move || {
                 let Some(mut p) = x2.patch.clone() else { return };
                 if !wait_up(&c, &id, &r2, x2.pid) { return; }
-                patch_verdict(&c, &id, &x2, &mut p);
+                patch_verdict(&c, &id, &mut x2, &mut p);
                 set_patch(&c, &id, &p);
                 event(&c, Sev::Info, format!("live {id}: the edit the master's restart cut is {} ({} file(s))", p.outcome, p.files.len()), None);
             });
@@ -2530,6 +2816,8 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         for name in crate::nested::names(&tree) {
             rev.push_str(&format!(",{name}={}@{}", x.lane, ctx.monitor.dirty(&tree.join(crate::nested::dir(&name)))?.head));
         }
+        // each followed one the worktree lacks at its landed tip, as the lane's runs pin it
+        rev.push_str(&crate::nested::absent_sides(&tree));
         let pin = crate::lease::Pin::of_rev(&rev).ok_or("live: missing pin")?;
         let (mut changed, deleted) = crate::lease::ship::uncommitted(&tree, &pin)?;
         changed.extend(also_files(&tree, &x.also)?);
@@ -2640,7 +2928,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         Ok(f) => f,
         Err(e) => return fail(format!("{}: {e}", log.display())),
     };
-    let r = Arc::new(Running { node: held.node.clone(), lease: held.id.clone(), held, tree: tree.clone(), test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test && !first_call), fault: Mutex::new(None), waiting: Default::default() });
+    let r = Arc::new(Running { node: held.node.clone(), lease: held.id.clone(), held, tree: tree.clone(), test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test && !first_call), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default() });
     join(&ctx.monitor, id, r.clone());
     let x = set(ctx, id, |s| {
         s.state = "running".into();
@@ -2689,6 +2977,9 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         argv.extend(x.env.iter().map(|(k, v)| format!("{k}={v}")));
         argv.extend(cef_env(x.test, &x.env, &dist));
         if !x.home_dir.is_empty() { argv.push(format!("MAKEPAD_TEST_HOME={}", x.home_dir)); }
+        // Marks the app as a test run (its lane and session) for anything it shows to other
+        // devices, so a lane's instance is never mistaken for the user's own.
+        if !x.env.iter().any(|(k, _)| k == "MAKEPAD_TEST_RUN") { argv.push(format!("MAKEPAD_TEST_RUN={} {}", x.lane, x.id)); }
         argv.extend(hide.iter().chain(live).chain(&["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--"]).map(|s| s.to_string()));
         argv.extend(if x.test { ["test", "--live", &x.app].into_iter().chain(crate::lease::JIT_TEST_PROFILE).map(String::from).collect() } else { vec!["run".into(), x.app.clone()] });
         argv.extend(x.test_args.iter().cloned());
@@ -2870,6 +3161,28 @@ mod verified_outcome_tests {
         assert!(reason.contains("struct `ClosedBox` changed its layout") && reason.contains("no field `5`"), "the reason names what is held: {reason}");
         let whole = makepad_strict_json::parse(br#"{"event":"patchverified","seq":8,"edit":"a.rs","group":4,"verified_events":[]}"#).unwrap();
         assert_eq!(super::verified_outcome(Some(&whole)), ("patched", String::new()), "a patch that held nothing is patched");
+    }
+
+    /// A test watch follows its session's process: a restart behind the restart parent moves the
+    /// pid, and the watch reads the new process's events from its first (W12859 waited 6 min on
+    /// the old pid for the verdict its restarted tests gave in 3 s, 11-18). Another run, a newer
+    /// edit, an ended session or one with no process yet ends it.
+    #[test]
+    fn a_test_watch_follows_its_sessions_restarted_process() {
+        use crate::state::{Live, LivePatch};
+        let edit = LivePatch { edit_ms: 5, seq: 2, cursor: "{\"seq\":2,\"pid\":7}".into(), ..Default::default() };
+        let session = Live { state: "running".into(), pid: 7, run_n: 1, patch: Some(edit.clone()), ..Default::default() };
+        let (mut x, mut p) = (session.clone(), edit.clone());
+        assert!(super::watch_on(&mut x, Some(&session), &mut p));
+        assert_eq!((x.pid, p.seq, p.cursor.as_str()), (7, 2, edit.cursor.as_str()), "the same process: the watch goes on where it was");
+        let moved = Live { pid: 9, ..session.clone() };
+        assert!(super::watch_on(&mut x, Some(&moved), &mut p));
+        assert_eq!((x.pid, p.seq, p.cursor.as_str()), (9, 0, ""), "a restarted process: its events from the first");
+        let newer = LivePatch { edit_ms: 6, ..edit.clone() };
+        for (now, why) in [(Live { run_n: 2, ..moved.clone() }, "another run"), (Live { patch: Some(newer), ..moved.clone() }, "a newer edit"), (Live { state: "ended".into(), ..moved.clone() }, "an ended session"), (Live { pid: 0, ..moved.clone() }, "no process yet")] {
+            assert!(!super::watch_on(&mut x.clone(), Some(&now), &mut p.clone()), "{why} ends the watch");
+        }
+        assert!(!super::watch_on(&mut x, None, &mut p), "a session that is gone ends it");
     }
 }
 
@@ -3199,11 +3512,19 @@ mod owner_tests {
 
         // released by its id alone, with no run of it followed here
         assert!(running("WR1").is_none());
+        let log = home.join("WR1.log");
+        std::fs::write(&log, "app line\n").unwrap();
+        ctx.store.update(|d| d.lives.iter_mut().find(|x| x.id == "WR1").unwrap().log = log.to_string_lossy().into_owned()).unwrap();
         let reply = serve(&ctx, "live release WR1").unwrap();
         assert_eq!(field(&reply, "lease"), "its lease L1 freed", "{reply}");
         assert!(!open("L1"), "the session's release frees the lease its record names");
         assert_eq!(get(&ctx, "WR1").map(|x| (x.state, x.note)), Some(("ended".into(), "released".into())));
         assert_eq!(field(&serve(&ctx, "live release WR1").unwrap(), "lease"), "its lease L1 had ended", "a second release says what became of it");
+        // its end is said in its log after its app's last line, once, and a wait on it fails at
+        // once with how it ended (W12708, 11-18)
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "app line\n[devhub] WR1 ended: released\n", "its log says it ended, and why");
+        let e = serve(&ctx, "live wait WR1 settled 1").unwrap_err();
+        assert!(e.starts_with("WR1 ended: released") && e.contains("live again WR1"), "a wait on an ended session fails, saying how it ended: {e}");
         assert!(serve(&ctx, "live release WR-gone").unwrap_err().contains("no live job WR-gone"), "a release names what is missing");
 
         // a release by a lease's id frees what it names; a running session's lease is refused
@@ -3229,6 +3550,24 @@ mod owner_tests {
         assert_eq!((lines("WR3"), lines("WR4")), (1, 1), "and says nothing more");
         let reply = serve(&ctx, "live release WR2").unwrap();
         assert!(field(&reply, "lease") == "its lease L2 freed" && !open("L2") && owner("L2").is_none(), "the session's own release ends its lease: {reply}");
+
+        // sessions parked in use for a timed lease start again by themselves once it ends, under
+        // their id; one whose lane runs the same app anew meanwhile, or released it, stays ended
+        ctx.leases.test_sched(|s| { s.restore(&format!("{{\"id\":\"L7\",\"node\":\"node\",\"req\":{}}}", req.to_json()), 1); });
+        let parked = |id: &str, app: &str, after: &str| Live { id: id.into(), app: app.into(), lane: "lane".into(), state: "ended".into(), resume_after: after.into(), ..Default::default() };
+        ctx.store.update(|d| d.lives.extend([parked("WR7", "app7", "L7"), parked("WR8", "app", "L8"), parked("WR9", "app9", "L8")])).unwrap();
+        serve(&ctx, "live release WR9").unwrap();
+        assert!(resume_due(&ctx).is_empty(), "its timed lease runs: none is due");
+        let x = get(&ctx, "WR8").unwrap();
+        assert!(x.state == "ended" && x.resume_after.is_empty(), "the lane runs the same app anew (WR5, WR6): it stays ended");
+        assert!(said.lock().unwrap().iter().any(|l| l.contains("live WR8 ") && l.contains("not started again, its lane runs WR5 now")), "{:?}", said.lock().unwrap());
+        assert!(get(&ctx, "WR9").is_some_and(|x| x.state == "ended" && x.resume_after.is_empty()), "released by its lane: it stays ended");
+        assert_eq!(resume_due(&ctx), Vec::<String>::new(), "WR7's timed lease still runs");
+        ctx.leases.test_sched(|s| { assert!(s.release("L7", "released", 3)); });
+        assert_eq!(resume_due(&ctx), ["WR7"], "its timed lease ended: it is due");
+        let x = get(&ctx, "WR7").unwrap();
+        assert!(x.state == "starting" && x.resume_after.is_empty() && x.lease.is_empty() && x.note.contains("timed L7"), "{x:?}");
+        assert!(resume_due(&ctx).is_empty(), "once");
         drop(ctx);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -3249,6 +3588,22 @@ mod owner_tests {
         assert_eq!(sources.keys().map(String::as_str).collect::<Vec<_>>(), ["src/a.rs", "src/was.rs"]);
         assert_eq!(sources["src/was.rs"], "-");
         assert!(base.join("ship/src/a.rs").exists());
+        // a file back to the pin's bytes is no longer dirty: it ships again as the tree has it, and
+        // one shipped that is gone again ships gone (a revert shipped nothing, 11-20)
+        let shipped = std::collections::BTreeMap::from([
+            ("src/a.rs".to_string(), "false:false:edited".to_string()),
+            ("src/new.rs".to_string(), "false:false:added".to_string()),
+            ("src/del.rs".to_string(), "-".to_string()),
+        ]);
+        let (mut changed, mut deleted) = (Vec::new(), Vec::new());
+        super::back_to_pin(&tree, &shipped, &mut changed, &mut deleted);
+        assert_eq!((changed.as_slice(), deleted.as_slice()), (&["src/a.rs".to_string()][..], &["src/del.rs".to_string(), "src/new.rs".to_string()][..]));
+        let sources = super::capture(&tree, &changed, &deleted, &shipped, &base.join("ship")).unwrap();
+        assert!(sources["src/a.rs"] != shipped["src/a.rs"] && base.join("ship/src/a.rs").exists(), "the revert ships: {sources:?}");
+        assert_eq!((sources["src/new.rs"].as_str(), sources["src/del.rs"].as_str()), ("-", "-"));
+        let (mut again, mut gone) = (vec!["src/a.rs".to_string()], Vec::new());
+        super::back_to_pin(&tree, &shipped, &mut again, &mut gone);
+        assert_eq!(again, ["src/a.rs"], "a dirty file is named once");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3527,16 +3882,28 @@ mod owner_tests {
 
     /// A relaunch its JIT queued in place ends when no edit waits for a restart any more (the new
     /// run loaded the sources, in the same process), or fails with the app's reason when it
-    /// postponed it; until then it is on its way. The session said "queued" and stayed "restart
-    /// pending" over a restart that had happened (11-06).
+    /// postponed it, or with the new run's check errors when it did not compile (it ended in place;
+    /// its run loaded the sources, so `restart_pending` alone read as restarted); until then it is
+    /// on its way. The session said "queued" and stayed "restart pending" over a restart that had
+    /// happened (11-06).
     #[test]
     fn a_relaunch_in_place_ends_when_the_new_run_has_the_sources() {
+        use super::RelaunchEnd;
         let live = |pending: u32| vec![format!(r#"{{"now_ms":1.0,"frames":40,"patches":3,"frame_patch":3,"restart_pending":{pending}}}"#)];
         let postponed = "[I] platform/src/restart.rs:433:17 - restart postponed (struct `Plate` changed): unsaved: plate 1\n";
         assert_eq!(super::relaunch_end(&live(2), "relax live: restarting (struct `Plate` changed)\n"), None, "on its way");
-        assert_eq!(super::relaunch_end(&live(2), postponed), Some(Err("(struct `Plate` changed): unsaved: plate 1".to_string())));
-        assert_eq!(super::relaunch_end(&live(0), postponed), Some(Ok(())), "the app allowed it after all");
+        assert_eq!(super::relaunch_end(&live(2), postponed), Some(RelaunchEnd::Postponed("(struct `Plate` changed): unsaved: plate 1".to_string())));
+        let end = "relax: run end: 60 threads, 148.2 ms; run's threads stayed: []; 1289 ms in all\n";
+        assert_eq!(super::relaunch_end(&live(0), &format!("{postponed}{end}")), Some(RelaunchEnd::Done), "the app allowed it after all");
+        assert_eq!(super::relaunch_end(&live(0), "relax live: restarting (session relaunch)\n"), None,
+            "a relaunch with nothing pending: not done before its run's end");
+        assert_eq!(super::relaunch_end(&live(0), end), Some(RelaunchEnd::Done), "its run ended and the next one runs");
+        let checking = vec![r#"{"now_ms":1.0,"restart_pending":0,"restart_unfinished":1}"#.to_string()];
+        assert_eq!(super::relaunch_end(&checking, ""), None, "the new run still boots or checks: on its way");
         assert_eq!(super::relaunch_end(&[], ""), None, "a look that failed: looked at again");
+        let refused = "relax live: restarting (struct `Plate` changed)\nrelax live: the run ends in place: its app check found 1 error: src/a.rs:3:8: E0277: the trait bound `f32: Eq` is not satisfied; the next save or `session relaunch` starts the next one\n";
+        assert_eq!(super::relaunch_end(&live(0), refused), Some(RelaunchEnd::Refused("its app check found 1 error: src/a.rs:3:8: E0277: the trait bound `f32: Eq` is not satisfied".to_string())),
+            "a new run that failed its check: its errors, though it loaded the sources");
     }
 
     /// Every call's reply says its wait for room: a look's, a wait's and a sync's said nothing
@@ -3581,7 +3948,7 @@ mod owner_tests {
     fn a_session_answers_a_call_its_placement_suits() {
         let args = vec!["--lib".to_string()];
         let x = crate::state::Live { id: "W1".into(), state: "running".into(), lane: "lane-x".into(), app: "pkg-x".into(), test: true, test_args: args.clone(), needs: "os=linux,gpu=1".into(), node: "box-a".into(), ..Default::default() };
-        let call = |needs: &str, pin: &str, avoid: &str| super::answers(&x, "lane-x", "pkg-x", true, false, &args, needs, pin, avoid);
+        let call = |needs: &str, pin: &str, avoid: &str| super::answers(&x, "lane-x", "pkg-x", true, false, &args, needs, pin, avoid, "", &[]);
         assert!(call("gpu=1, os=linux", "", ""), "the same needs in another order");
         assert!(!call("os=macos", "", ""), "another OS starts its own session");
         assert!(call("", "", ""), "no placement: the lane's session, wherever it runs");
@@ -3589,19 +3956,26 @@ mod owner_tests {
         assert!(call("", "box-a", ""), "the box it runs on");
         assert!(!call("", "", "box-c,box-a"), "a box the call avoids");
         assert!(call("", "", "box-c"), "it runs on none of the avoided");
-        let other = |lane: &str, app: &str, test_args: &[String]| super::answers(&x, lane, app, true, false, test_args, "", "", "");
+        let other = |lane: &str, app: &str, test_args: &[String]| super::answers(&x, lane, app, true, false, test_args, "", "", "", "", &[]);
         assert!(!other("lane-y", "pkg-x", &args) && !other("lane-x", "pkg-y", &args) && !other("lane-x", "pkg-x", &["--test".into(), "t".into()]), "another lane, package or target");
         // started with --node box-p, still waiting for it: a call that names none takes it, one that avoids box-p does not
         let waiting = crate::state::Live { pin: "box-p".into(), node: String::new(), needs: String::new(), ..x.clone() };
-        assert!(super::answers(&waiting, "lane-x", "pkg-x", true, false, &args, "", "", ""));
-        assert!(super::answers(&waiting, "lane-x", "pkg-x", true, false, &args, "", "box-p", ""));
-        assert!(!super::answers(&waiting, "lane-x", "pkg-x", true, false, &args, "", "", "box-p"));
+        assert!(super::answers(&waiting, "lane-x", "pkg-x", true, false, &args, "", "", "", "", &[]));
+        assert!(super::answers(&waiting, "lane-x", "pkg-x", true, false, &args, "", "box-p", "", "", &[]));
+        assert!(!super::answers(&waiting, "lane-x", "pkg-x", true, false, &args, "", "", "box-p", "", &[]));
         let unplaced = crate::state::Live { node: String::new(), avoid: "box-c".into(), ..x.clone() };
-        assert!(super::answers(&unplaced, "lane-x", "pkg-x", true, false, &args, "", "", "box-c"), "not placed yet, it avoids the same");
-        assert!(!super::answers(&unplaced, "lane-x", "pkg-x", true, false, &args, "", "", "box-d"), "not placed yet: it could still land there");
+        assert!(super::answers(&unplaced, "lane-x", "pkg-x", true, false, &args, "", "", "box-c", "", &[]), "not placed yet, it avoids the same");
+        assert!(!super::answers(&unplaced, "lane-x", "pkg-x", true, false, &args, "", "", "box-d", "", &[]), "not placed yet: it could still land there");
         let app = crate::state::Live { test: false, test_args: Vec::new(), ..x.clone() };
-        let start = |needs: &str, pin: &str, avoid: &str| super::answers(&app, "lane-x", "pkg-x", false, false, &[], needs, pin, avoid);
+        let start = |needs: &str, pin: &str, avoid: &str| super::answers(&app, "lane-x", "pkg-x", false, false, &[], needs, pin, avoid, "", &[]);
         assert!(start("os=linux,gpu=1", "", "") && !start("", "", "") && !start("os=linux,gpu=1", "box-a", "") && !start("os=linux,gpu=1", "", "box-c"), "an app: placed exactly as it is");
+        // another JIT or other env is another session: a saved JIT state replays in its own
+        let jit = crate::state::Live { loader: "0123456789abcdef01234567".into(), env: vec![("RELAX_X".into(), "1".into())], ..x.clone() };
+        let env = [("RELAX_X".to_string(), "1".to_string())];
+        assert!(super::answers(&jit, "lane-x", "pkg-x", true, false, &args, "", "", "", "0123456789abcdef01234567", &env), "the same JIT and env");
+        assert!(!super::answers(&jit, "lane-x", "pkg-x", true, false, &args, "", "", "", "", &env), "the default JIT is another session");
+        assert!(!super::answers(&jit, "lane-x", "pkg-x", true, false, &args, "", "", "", "0123456789abcdef01234567", &[]), "without its env");
+        assert!(!super::answers(&x, "lane-x", "pkg-x", true, false, &args, "", "", "", "0123456789abcdef01234567", &[]), "a JIT asked of a session on the default one");
     }
 
     #[test]
@@ -3744,6 +4118,12 @@ mod owner_tests {
         assert!(super::session_over("box ship-have: no lease L3034881 on box", "L303488").is_none());
         assert!(super::session_over("live: inputs: this run watches no sources (not a live session, or its watcher ended)", "L1").is_some());
         assert!(super::session_over("live: inputs did not return the complete source list", "L1").is_none());
+        // an app that waits for a fix takes the save as its next run's: never the session's end
+        let held = "{\"err\":\"held: no run: the last one did not compile; the next save or `session relaunch` starts the next one\"}".to_string();
+        assert!(super::session_over(&format!("live: inputs: {held}"), "L1").is_none(), "a held app's answer ends no session");
+        assert!(super::held_app(&[], &[held]), "the inputs answer says held");
+        assert!(super::held_app(&["{\"now_ms\":1.0,\"held\":1,\"editing\":0}".into()], &[]), "the live look says held");
+        assert!(!super::held_app(&["{\"now_ms\":1.0,\"held\":0,\"editing\":0}".into()], &["{\"count\":0}".into()]), "a running app is not held");
     }
 
     #[test]
@@ -3782,7 +4162,9 @@ fn act(ctx: &Arc<Ctx>, id: &str, arg: &str, held: Option<&Call<'_>>) -> Result<S
         return Ok(format!("{{\"ms\":0,\"png\":null,\"lines\":[{}]}}", json_str(&line)));
     }
     if x.pid == 0 {
-        return Err(format!("{id}: its JIT is not up yet (live wait {id} frame)"));
+        // (and why, when it starts again: what its app held is gone)
+        let why = if x.note.is_empty() { String::new() } else { format!(": {}", x.note) };
+        return Err(format!("{id}: its JIT is not up yet{why} (live wait {id} frame)"));
     }
     try_set(ctx, id, |s| s.touched_ms = wall_ms())?;
     let t = Instant::now();
@@ -3895,8 +4277,11 @@ fn wait<'a>(ctx: &'a Arc<Ctx>, id: &'a str, arg: &str, held: &mut Option<Call<'a
             if r.test { (!inflight, pending.0.len()) } else { (pending.0.is_empty() && !inflight, 0) }
         } else { (true, 0) };
         let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
+        // a session that ended or failed answers its waits at once, with why: a test session's
+        // verdict wait has its answer in the record; any other wait has none, and answered as met
+        // (exit 0) a lane's script waited on as if its app ran (W12708, 11-18)
         if !x.active() {
-            return Ok(crate::state::live_value(&x).to_json());
+            return if what == "verdict" { Ok(crate::state::live_value(&x).to_json()) } else { Err(no_frame(&x)) };
         }
         let done = match what {
             // the newest edit has its verdict: nothing waits to ship or for a verdict, and an
@@ -3994,7 +4379,10 @@ fn joined(lives: &[Live], id: &str) -> bool {
     lives.iter().any(|x| x.active() && x.joins == id)
 }
 
-fn answers(x: &Live, lane: &str, app: &str, test: bool, offline: bool, test_args: &[String], needs: &str, pin: &str, avoid: &str) -> bool {
+/// A session asked with another JIT (`--jit`) or other `--env` is not one either: its call ran in
+/// the lane's session under its old JIT and environment, the asked ones dropped unsaid, and a saved
+/// JIT state could not be replayed (11-18).
+fn answers(x: &Live, lane: &str, app: &str, test: bool, offline: bool, test_args: &[String], needs: &str, pin: &str, avoid: &str, loader: &str, env: &[(String, String)]) -> bool {
     let placed = |s: &str| {
         let mut n = crate::lease::sched::parse_needs(s);
         n.sort();
@@ -4005,7 +4393,7 @@ fn answers(x: &Live, lane: &str, app: &str, test: bool, offline: bool, test_args
         n.sort();
         n
     };
-    x.active() && x.lane == lane && x.app == app && x.test == test && x.offline == offline && x.test_args == test_args
+    x.active() && x.lane == lane && x.app == app && x.test == test && x.offline == offline && x.test_args == test_args && x.loader == loader && x.env == env
         && if test { suits(x, needs, pin, avoid) } else { placed(&x.needs) == placed(needs) && x.pin == pin && avoided(&x.avoid) == avoided(avoid) }
 }
 
@@ -4118,7 +4506,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let mut asked = crate::lease::sched::Req::new(&lane, Kind::Test);
             asked.place(&pin, &needs, &avoid, &series, &pin_why);
             asked.check_series().map_err(|e| format!("live: {e}"))?;
-            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| answers(x, &lane, &app, test, offline, &test_args, &needs, &pin, &avoid) && accepting(&x.id)).cloned()) {
+            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| answers(x, &lane, &app, test, offline, &test_args, &needs, &pin, &avoid, &s("loader"), &env) && accepting(&x.id)).cloned()) {
                 if verb == "test" {
                     // (a call from another checkout read the session's log, its run before the
                     // edit, as this call's verdict: ELANG took W9372's 221 for stale code, 11-15)

@@ -3,7 +3,7 @@
 //! tree and its workspace takes their crates in. A pin, a lease's tree and its overlay name each
 //! by its `name`, which is also the name of its store on a node.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A nested repository's directory in the tree: `apps/<name>`.
 pub fn dir(name: &str) -> String {
@@ -57,6 +57,46 @@ pub fn branches(root: &Path) -> Vec<(String, String)> {
     std::iter::once((paired.to_string(), "main".to_string())).chain(others).collect()
 }
 
+/// The user's checkout of makepad that the checkout at `root` is a worktree of (`root` itself when
+/// it is that checkout): it holds each nested repository the buckets follow ([`branches`]), which a
+/// lane's worktree may lack. None for a tree that is no worktree of a checkout (a node's lease tree
+/// is one of a bare store).
+pub fn hub(root: &Path) -> Option<PathBuf> {
+    let paths = makepad_git::repository_paths(root).ok().flatten()?;
+    let hub = paths.common_dir.parent()?;
+    (paths.common_dir.file_name()? == ".git" && hub.join(".git").is_dir()).then(|| hub.to_path_buf())
+}
+
+/// Where nested repository `name` of the tree at `root` is checked out: its own `apps/<name>`, else
+/// the user's checkout's ([`hub`]). None: neither holds it.
+pub fn checkout(root: &Path, name: &str) -> Option<PathBuf> {
+    std::iter::once(root.to_path_buf()).chain(hub(root)).map(|r| r.join(dir(name))).find(|d| d.join(".git").exists())
+}
+
+/// The followed nested repositories besides the paired one ([`branches`] of the user's checkout,
+/// [`hub`]), each at the tip of its branch there: (name, branch, sha). What a hand-in lands beside.
+pub fn tips(root: &Path) -> Vec<(String, String, String)> {
+    let Some(hub) = hub(root) else { return Vec::new() };
+    branches(&hub).into_iter().filter(|(n, _)| n != crate::state::PAIRED).filter_map(|(n, branch)| {
+        let sha = crate::gitread::rev(&hub.join(dir(&n)), &format!("refs/heads/{branch}"))?;
+        Some((n, branch, sha))
+    }).collect()
+}
+
+/// Those of [`tips`] the checkout at `root` does not hold: a lane's worktree has makepad and
+/// commercial alone. A lane's run pins each at its landed tip, so its packages are in the lease's
+/// tree as they are in the buckets': #7425 broke Source Library's build, and its lane could not
+/// test it, nor its hand-in's check see it (11-19).
+pub fn absent(root: &Path) -> Vec<(String, String, String)> {
+    let here = names(root);
+    tips(root).into_iter().filter(|(n, _, _)| !here.contains(n)).collect()
+}
+
+/// [`absent`] as sides of a pinned `--rev`: `,<name>=<branch>@<sha>` each.
+pub fn absent_sides(root: &Path) -> String {
+    absent(root).iter().map(|(n, branch, sha)| format!(",{n}={branch}@{sha}")).collect()
+}
+
 /// The nested repository among `names` that tree path `path` is in, with the path inside it.
 pub fn split<'a, 'n>(path: &'a str, names: impl IntoIterator<Item = &'n str>) -> Option<(&'n str, &'a str)> {
     names.into_iter().find_map(|n| path.strip_prefix("apps/")?.strip_prefix(n)?.strip_prefix('/').map(|rest| (n, rest)))
@@ -104,6 +144,32 @@ mod tests {
         git(&d.join(super::dir("repo-d")), &["init", "-q", "-b", "fresh"]);
         let followed = |pairs: &[(&str, &str)]| pairs.iter().map(|(n, b)| (n.to_string(), b.to_string())).collect::<Vec<_>>();
         assert_eq!(super::branches(&d), followed(&[(crate::state::PAIRED, "main"), ("repo-b", "side")]));
+        // a lane's worktree of the checkout holds none of them: each followed one is the checkout's,
+        // at its branch's tip, for the lane's runs to pin (11-19)
+        let lane = std::env::temp_dir().join(format!("devhub-nested-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&lane);
+        assert!(super::tips(&d).is_empty() && super::hub(&d).is_none(), "no checkout: nothing to follow");
+        git(&d, &["init", "-q", "-b", "work"]);
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&d, &["worktree", "add", "-q", "-b", "rc-lane", &lane.to_string_lossy()]);
+        let side = std::process::Command::new("git").arg("-C").arg(d.join(super::dir("repo-b"))).args(["rev-parse", "side"]).output().unwrap();
+        let side = String::from_utf8_lossy(&side.stdout).trim().to_string();
+        let tips = vec![("repo-b".to_string(), "side".to_string(), side.clone())];
+        let canon = |p: Option<std::path::PathBuf>| p.map(|p| p.canonicalize().unwrap());
+        assert_eq!(canon(super::hub(&lane)), canon(Some(d.clone())), "a lane's worktree reads the user's checkout");
+        assert_eq!((super::tips(&lane), super::absent(&lane)), (tips.clone(), tips), "the lane lacks the followed repository");
+        assert_eq!(super::absent_sides(&lane), format!(",repo-b=side@{side}"));
+        assert_eq!(canon(super::checkout(&lane, "repo-b")), canon(Some(d.join(super::dir("repo-b")))), "read in the user's checkout");
+        assert!(super::absent(&d).is_empty() && super::checkout(&lane, "repo-x").is_none(), "the checkout holds them all");
+        // a job's rev naming it is pinned again in the lane, where it resolves in the user's
+        // checkout (a carry gate's job found "no commit" in the lane, #7434), and the lane's
+        // uncommitted files leave it alone: nothing of it is the lane's, nothing deleted
+        let head = std::process::Command::new("git").arg("-C").arg(&lane).args(["rev-parse", "HEAD"]).output().unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert_eq!(crate::lease::pin_revs(&lane, "rc-lane,repo-b=side"), Ok(format!("rc-lane@{head},repo-b=side@{side}")));
+        let pin = crate::lease::Pin::at(&head).with("repo-b", &side);
+        assert_eq!(crate::lease::ship::uncommitted(&lane, &pin), Ok((Vec::new(), Vec::new())));
+        let _ = std::fs::remove_dir_all(&lane);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

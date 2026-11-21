@@ -198,11 +198,11 @@ fn simulate(dir: &Path, from: u64, to: u64) -> Result<Simulation, String> {
         if let Some(mut caps) = v.get("caps").filter(|c| !c.is_null()).and_then(|c| Caps::parse(&c.to_json())) {
             let name = string(v, "node");
             if name.is_empty() { return Err("nodes record with caps has no node".into()); }
-            // What the box said of the moment `take` asked (a person at it, its hub's build, a
+            // What the box said of the moment `take` asked (someone watching it, its hub's build, a
             // deployment's apply, a pre-warm, memory stalls, its sickness): the ledger keeps none
             // of it over time, so the replay holds none. A morning replay took a box's "user present"
             // and hub build from the night's take and gave the box nothing all morning (11-11).
-            caps.user = None;
+            (caps.watched, caps.input_idle_ms) = (false, None);
             (caps.applying, caps.hub_building, caps.prewarming) = (false, false, false);
             caps.sick.clear();
             caps.stalls.clear();

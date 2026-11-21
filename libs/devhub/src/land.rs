@@ -48,6 +48,18 @@ pub const WIRE_SOURCES: [&str; 10] = [
     "platform/studio/src/native_app.rs",
 ];
 
+/// The files of the AI bus between the WM and its hosted apps: what they send each other has no
+/// fingerprint, so a WM and an app of different builds drop each other's tool calls without a
+/// word (#7751 made `ServiceCall.origin` required and landed unmarked, 11-21). A landing that
+/// changes one needs the `wire-change` mark as one of [`WIRE_SOURCES`] does.
+pub const AI_BUS_SOURCES: [&str; 5] = [
+    "libs/ai/services/src/wire.rs",
+    "libs/ai/services/src/port.rs",
+    "libs/ai/services/src/app_service.rs",
+    "apps/wm/src/ai_bus.rs",
+    "apps/aichat/src/bus.rs",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum St {
     Queued,
@@ -137,8 +149,10 @@ pub struct Entry {
     pub agent: String,
     /// Only ci.toml changes.
     pub proof: bool,
-    /// It may change the hosted wire ([`WIRE_SOURCES`]): `land --wire-change`.
+    /// It may change the hosted wire ([`WIRE_SOURCES`], [`AI_BUS_SOURCES`]): `land --wire-change`.
     pub wire: bool,
+    /// the land rule's ledger witness as this landing left it (empty: none)
+    pub witness: String,
     pub asked_ms: u64,
     pub changed_ms: u64,
 }
@@ -182,6 +196,7 @@ impl Entry {
             ("agent", s(&self.agent)),
             ("proof", Value::Bool(self.proof)),
             ("wire", Value::Bool(self.wire)),
+            ("witness", s(&self.witness)),
             ("asked_ms", Value::Int(self.asked_ms as i64)),
             ("changed_ms", Value::Int(self.changed_ms as i64)),
         ])
@@ -217,6 +232,7 @@ impl Entry {
             agent: s("agent"),
             proof: v.get("proof").and_then(Value::as_bool).unwrap_or(false),
             wire: v.get("wire").and_then(Value::as_bool).unwrap_or(false),
+            witness: s("witness"),
             asked_ms: n("asked_ms"),
             changed_ms: n("changed_ms"),
         })
@@ -598,11 +614,12 @@ pub fn merges_checked(dir: &Path, target: &str, sha: &str, branch: &str) -> Resu
     if refused.is_empty() { Ok(said) } else { Err(refused.join("; ")) }
 }
 
-/// The hosted wire's files ([`WIRE_SOURCES`]) that differ between makepad commits `from` and `to`;
-/// Err: the diff did not read.
+/// The hosted wire's files ([`WIRE_SOURCES`], [`AI_BUS_SOURCES`]) that differ between makepad
+/// commits `from` and `to`; Err: the diff did not read.
 fn wire_changed(dir: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
     let mut args = vec!["diff", "--name-only", "--no-renames", from, to, "--"];
     args.extend(WIRE_SOURCES);
+    args.extend(AI_BUS_SOURCES);
     let (ok, files) = git(dir, &args);
     if !ok {
         return Err(format!("the hosted wire's files from {from:.10} to {to:.10} did not read: {files}"));
@@ -618,11 +635,17 @@ fn wire_refusal(dir: &Path, from: &str, to: &str, marked: bool) -> Option<Vec<St
     }
     match wire_changed(dir, from, to) {
         Ok(files) if files.is_empty() => None,
-        Ok(files) => Some(vec![
-            format!("it changes the hosted wire: {}", files.join(" ")),
-            "an edit of these files (a comment too) changes the wire fingerprint: every WM built before it refuses every app built after it, and the reverse, until both are rebuilt".into(),
-            "if that is meant: makepad devhub land --wire-change (each node's WM then restarts on the new wire as its deployment moves); if not, leave these files as work has them".into(),
-        ]),
+        Ok(files) => {
+            let mut said = vec![format!("it changes the hosted wire: {}", files.join(" "))];
+            if files.iter().any(|f| WIRE_SOURCES.contains(&f.as_str())) {
+                said.push("an edit of the studio and key_code files (a comment too) changes the wire fingerprint: every WM built before it refuses every app built after it, and the reverse, until both are rebuilt".into());
+            }
+            if files.iter().any(|f| AI_BUS_SOURCES.contains(&f.as_str())) {
+                said.push("the AI bus files say what the WM and its apps send each other, with no fingerprint: a WM and an app of different builds drop each other's tool calls without a word until both are rebuilt".into());
+            }
+            said.push("if that is meant: makepad devhub land --wire-change (each node's WM then restarts on the new wire as its deployment moves); if not, leave these files as work has them".into());
+            Some(said)
+        }
         Err(e) => Some(vec![e]),
     }
 }
@@ -652,6 +675,7 @@ pub fn failure_lines(log: &str) -> Vec<String> {
             || l.starts_with("GATEUNIT ")
             || l.starts_with("GATESTEP ")
             || l.starts_with("GATEOUT ")
+            || l.starts_with("GATEKEPT ")
             || l.starts_with("GATEPROOF ")
             || l.starts_with("NODEGATE-")
             || (l.starts_with('L') && l.split_whitespace().next().is_some_and(|w| w[1..].bytes().all(|b| b.is_ascii_digit())))
@@ -689,7 +713,7 @@ pub struct Train {
 }
 
 /// [`Train::rule`]: the land rule's answer for one landing over its repositories.
-pub type RuleFn = fn(&Path, crate::gate::Verb, &str, &[crate::gate::Side]) -> Result<Vec<String>, crate::gate::No>;
+pub type RuleFn = fn(&Path, crate::gate::Verb, &str, &[crate::gate::Side], &str, &str) -> Result<Vec<String>, crate::gate::No>;
 
 /// The packages two entries' sets share. A members package ([`Train::members`]) counts only for
 /// an entry that touched it (its manifest): it is in every commercial hand-in's set and builds none
@@ -756,20 +780,41 @@ impl Train {
     pub fn set_rule_off(&self, why: Option<&str>) -> Result<(), String> {
         let why = why.map(|w| if w.trim().is_empty() { "switched off" } else { w.trim() }).unwrap_or("").to_string();
         let was = self.store().read(|d| d.land_rule_off.clone());
-        self.store.update(|d| d.land_rule_off = why.clone())?;
+        // off drops the ledger witness: the first landing after `on` starts a fresh one
+        self.store.update(|d| {
+            d.land_rule_off = why.clone();
+            if !why.is_empty() {
+                d.land_witness.clear();
+            }
+        })?;
         if was.is_empty() != why.is_empty() {
-            self.event(Sev::Warn, if why.is_empty() { "land rule on: every landing runs it again".into() } else { format!("land rule off ({why}): no landing runs it, and the master neither builds nor ticks its binary") }, &[]);
+            self.event(Sev::Warn, if why.is_empty() { "land rule on: every landing runs it again, the first one starting a fresh ledger witness".into() } else { format!("land rule off ({why}): no landing runs it, and the master neither builds nor ticks its binary") }, &[]);
         }
         Ok(())
     }
 
     /// The land rule's answer ([`Self::rule`]), or while it is switched off ([`Self::rule_off`])
-    /// its one note: it runs nothing and needs no binary then.
-    fn ruled(&self, repo: &Path, verb: crate::gate::Verb, branch: &str, sides: &[crate::gate::Side]) -> Result<Vec<String>, crate::gate::No> {
-        match self.rule_off() {
-            Some(why) => Ok(vec![format!("land rule off ({why}): nothing checked")]),
-            None => (self.rule)(repo, verb, branch, sides),
+    /// its one note: it runs nothing and needs no binary then. It gets the last landing's ledger
+    /// witness; a `land`'s new one is kept for the next run (and returned, for its entry), never
+    /// said as a note.
+    fn ruled(&self, repo: &Path, verb: crate::gate::Verb, branch: &str, sides: &[crate::gate::Side]) -> Result<(Vec<String>, Option<String>), crate::gate::No> {
+        if let Some(why) = self.rule_off() {
+            return Ok((vec![format!("land rule off ({why}): nothing checked")], None));
         }
+        let last = self.store().read(|d| d.land_witness.clone());
+        // none since an off and on: the last landed entry's, so the rule says what was lost since
+        let before = if last.is_empty() { self.st.lock().unwrap().iter().filter(|e| e.state == St::Landed && !e.witness.is_empty()).max_by_key(|e| e.id).map(|e| e.witness.clone()).unwrap_or_default() } else { String::new() };
+        let said = (self.rule)(repo, verb, branch, sides, &last, &before)?;
+        if verb != crate::gate::Verb::Land {
+            return Ok((said, None));
+        }
+        let (notes, witness) = crate::gate::witness_of(said);
+        if let Some(w) = &witness {
+            if let Err(e) = self.store.update(|d| d.land_witness = w.clone()) {
+                self.event(Sev::Err, format!("land rule: the ledger witness is not kept ({e}): the next landing is checked against the one before"), &[]);
+            }
+        }
+        Ok((notes, witness))
     }
 
     /// The open entries by state.
@@ -1128,7 +1173,7 @@ impl Train {
             None => {
                 // (a counter in the state document: numbers of trimmed or lost entries are not reused)
                 let id = self.store().read(|d| d.land_next).max(list.iter().map(|e| e.id).max().unwrap_or(0) + 1);
-                list.push(Entry { id, branch: branch.into(), cwt: cwt.into(), cbranch: cb.into(), nested, state: St::Queued, held: String::new(), ms, cs, checked, touched, wide, set, node, job: String::new(), unchecked, gate_ms, landed: String::new(), pre: String::new(), detail: Vec::new(), agent, proof, wire, asked_ms: now, changed_ms: now });
+                list.push(Entry { id, branch: branch.into(), cwt: cwt.into(), cbranch: cb.into(), nested, state: St::Queued, held: String::new(), ms, cs, checked, touched, wide, set, node, job: String::new(), unchecked, gate_ms, landed: String::new(), pre: String::new(), detail: Vec::new(), agent, proof, wire, witness: String::new(), asked_ms: now, changed_ms: now });
                 id
             }
         };
@@ -1458,7 +1503,10 @@ impl Train {
                 }, Some((Sev::Err, format!("land refused {label}: {}", why[0]))));
                 return false;
             }
-            Ok(notes) => {
+            Ok((notes, witness)) => {
+                if let Some(w) = witness {
+                    self.set(id, |e| e.witness = w.clone(), None);
+                }
                 for note in notes {
                     self.set(id, |_| {}, Some((Sev::Warn, format!("land rule at {label}: {note}"))));
                 }
@@ -1521,6 +1569,8 @@ impl Train {
             e.detail.clear();
         }, Some((if wire_note.is_empty() { Sev::Info } else { Sev::Warn }, format!("land landed {label}: work {tm:.10} main {tc:.10}{nested}{wire_note}"))));
         unlock();
+        // the maintenance its writes call for, kept from the lanes' commits (gitlock::own_maintenance)
+        for repo in [r, &c] { crate::gitlock::maintain(repo); }
         if proof {
             for (repo, branch, pin, tip) in [(r, &branch, ms, &tm), (&c, &cbranch, cs, &tc)] {
                 if branch.starts_with("ci-proof-") && rev(repo, branch).as_deref() == Some(pin) && is_ancestor(repo, pin, tip) {
@@ -1631,7 +1681,7 @@ mod tests {
 
     #[test]
     fn entries_round_trip_and_label() {
-        let e = Entry { id: 3, branch: "rc-x".into(), cwt: "/w/x/apps/commercial".into(), cbranch: "rc-x".into(), nested: vec![Side { name: "extra".into(), branch: "rc-x".into(), sha: "c".repeat(40), landed: String::new() }], state: St::Failed, held: String::new(), ms: "a".repeat(40), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: String::new(), pre: format!("work {} main {}", "a".repeat(40), "b".repeat(40)), detail: vec!["stage: 1 errors".into(), "src/a.rs:3:4: \"quoted\"".into()], agent: "x".into(), proof: true, wire: true, asked_ms: 1, changed_ms: 2 };
+        let e = Entry { id: 3, branch: "rc-x".into(), cwt: "/w/x/apps/commercial".into(), cbranch: "rc-x".into(), nested: vec![Side { name: "extra".into(), branch: "rc-x".into(), sha: "c".repeat(40), landed: String::new() }], state: St::Failed, held: String::new(), ms: "a".repeat(40), cs: String::new(), checked: String::new(), touched: Vec::new(), wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0, landed: String::new(), pre: format!("work {} main {}", "a".repeat(40), "b".repeat(40)), detail: vec!["stage: 1 errors".into(), "src/a.rs:3:4: \"quoted\"".into()], agent: "x".into(), proof: true, wire: true, witness: "ports.jsonl=1:aa".into(), asked_ms: 1, changed_ms: 2 };
         assert_eq!(Entry::parse(&e.to_json()).unwrap(), e);
         assert_eq!(e.label(), "rc-x+rc-x+extra=rc-x");
         assert!(e.names("rc-x") && !e.names("rc-y") && e.names("rc-x+rc-x+extra=rc-x"));
@@ -1778,7 +1828,7 @@ mod tests {
 
     #[cfg(unix)]
     fn train(home: &Path, repo: &Path, exe: &Path, events: Arc<Mutex<Vec<String>>>) -> Arc<Train> {
-        train_ruled(home, repo, exe, events, |_, _, _, _| Ok(Vec::new()))
+        train_ruled(home, repo, exe, events, |_, _, _, _, _, _| Ok(Vec::new()))
     }
 
     #[cfg(unix)]
@@ -1977,7 +2027,10 @@ mod tests {
         branch(&r, "rc-hard", "AGENTS.md");
         g(&r, &["checkout", "-q", "work"]);
         g(&c, &["checkout", "-q", "main"]);
-        fn rule(_: &Path, verb: crate::gate::Verb, branch: &str, sides: &[crate::gate::Side]) -> Result<Vec<String>, crate::gate::No> {
+        // the witnesses the rule was handed, in order
+        static HANDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn rule(_: &Path, verb: crate::gate::Verb, branch: &str, sides: &[crate::gate::Side], witness: &str, before: &str) -> Result<Vec<String>, crate::gate::No> {
+            HANDED.lock().unwrap().push(format!("{branch} {witness}{}", if before.is_empty() { String::new() } else { format!(" before {before}") }));
             let names: Vec<&str> = sides.iter().map(|s| s.name).collect();
             assert_eq!(names, ["makepad", "commercial"], "the rule sees both repositories");
             assert!(sides.iter().all(|s| s.from != s.merge || s.name == "commercial"), "each from its branch's tip to the merge");
@@ -1985,7 +2038,7 @@ mod tests {
                 "rc-no" => Err(crate::gate::No::Refused(vec!["the rule says no".into()])),
                 "rc-hard" => Err(crate::gate::No::Refused(vec!["AGENTS.md is T1-hard".into()])),
                 "rc-later" => Err(crate::gate::No::Wait("not built yet".into())),
-                _ if verb == crate::gate::Verb::Land => Ok(vec!["noted".into()]),
+                _ if verb == crate::gate::Verb::Land => Ok(vec!["noted".into(), format!("witness\tafter {branch}")]),
                 _ => Ok(Vec::new()),
             }
         }
@@ -2005,6 +2058,10 @@ mod tests {
         assert_eq!(st("rc-ok").state, St::Landed, "{:?}", st("rc-ok"));
         assert!(c.join("cok").exists(), "with its commercial half");
         assert!(events.lock().unwrap().iter().any(|l| l.contains("land rule at") && l.contains("noted")), "the rule's note is said");
+        assert!(!events.lock().unwrap().iter().any(|l| l.contains("witness")), "its witness is no note");
+        assert_eq!((st("rc-ok").witness.as_str(), t.store().read(|d| d.land_witness.clone())), ("after rc-ok", "after rc-ok".to_string()), "the landing's entry and the master keep its witness");
+        assert_eq!(HANDED.lock().unwrap().iter().filter(|h| h.starts_with("rc-ok ")).cloned().collect::<Vec<_>>(), ["rc-ok ", "rc-ok "], "the first landing had none to hand on");
+        assert!(HANDED.lock().unwrap().iter().any(|h| h == "rc-no after rc-ok" || h == "rc-later after rc-ok"), "a later run gets it: {:?}", HANDED.lock().unwrap());
         assert_eq!((st("rc-no").state, st("rc-no").detail.clone()), (St::Failed, vec!["the rule says no".to_string()]), "a refusal fails the landing");
         assert_eq!((st("rc-later").state, st("rc-later").detail.clone()), (St::Waiting, vec!["not built yet".to_string()]), "a rule not built yet holds it");
         assert!(!r.join("no").exists() && !r.join("later").exists(), "neither landed");
@@ -2021,6 +2078,7 @@ mod tests {
         assert_eq!(line(&["on"], &["DEVHUB_AGENT"], false), Ok("rule on".to_string()), "switching it on adds protection: anyone may");
         let off = line(&["off", "user", "11-15"], &["HOME"], true).expect("the user at a terminal switches it off");
         assert_eq!(ask(&off), vec!["{\"rule\":\"off\",\"why\":\"user 11-15\"}".to_string()]);
+        assert_eq!(t.store().read(|d| d.land_witness.clone()), "", "the user's off drops the witness: the next landing after on starts a fresh one");
         assert_eq!(train_ruled(&home, &r, Path::new("/usr/bin/true"), events.clone(), rule).rule_off().as_deref(), Some("user 11-15"), "the switch outlives a master restart");
         assert!(ask("add rc-hard")[0].contains("\"id\":4"));
         t.start_ready();
@@ -2033,6 +2091,7 @@ mod tests {
         t.start_ready();
         assert_eq!((st("rc-no").state, st("rc-no").detail.clone()), (St::Failed, vec!["the rule says no".to_string()]), "on, the rule refuses again");
         assert!(!r.join("no").exists(), "nothing of it landed");
+        assert_eq!(HANDED.lock().unwrap().last().map(String::as_str), Some("rc-no  before after rc-ok"), "with no witness since the off, the last landed entry's goes with it, for the rule to say what was lost");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2209,6 +2268,7 @@ mod tests {
         let (r, home) = (d.join("repo"), d.join("home"));
         let c = r.join("apps/commercial");
         std::fs::create_dir_all(r.join("platform/studio/src")).unwrap();
+        std::fs::create_dir_all(r.join("libs/ai/services/src")).unwrap();
         std::fs::create_dir_all(&c).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         let g = |dir: &Path, args: &[&str]| assert!(git(dir, args).0, "git {args:?} in {}", dir.display());
@@ -2220,14 +2280,15 @@ mod tests {
         std::fs::write(r.join(".gitignore"), "apps/commercial\n").unwrap();
         std::fs::write(r.join("platform/studio/src/studio.rs"), "pub struct Hosted;\n").unwrap();
         std::fs::write(r.join("platform/studio/src/other.rs"), "pub struct Other;\n").unwrap();
+        std::fs::write(r.join("libs/ai/services/src/wire.rs"), "pub struct ServiceCall;\n").unwrap();
         g(&r, &["add", "."]);
         g(&r, &["commit", "-qm", "base"]);
         std::fs::write(c.join("s"), "1\n").unwrap();
         g(&c, &["add", "."]);
         g(&c, &["commit", "-qm", "cbase"]);
-        for (b, file) in [("rc-wire", "studio.rs"), ("rc-plain", "other.rs")] {
+        for (b, file) in [("rc-wire", "platform/studio/src/studio.rs"), ("rc-plain", "platform/studio/src/other.rs"), ("rc-bus", "libs/ai/services/src/wire.rs")] {
             g(&r, &["checkout", "-qb", b, "work"]);
-            std::fs::write(r.join("platform/studio/src").join(file), "// a comment\n").unwrap();
+            std::fs::write(r.join(file), "// a comment\n").unwrap();
             g(&r, &["commit", "-qam", b]);
         }
         g(&r, &["checkout", "-q", "work"]);
@@ -2242,10 +2303,14 @@ mod tests {
         let st = |b: &str| Entry::parse(&ask(&format!("status {b}"))[0]).unwrap();
         assert!(ask("add rc-wire")[0].contains("\"id\":1"));
         assert!(ask("add rc-plain")[0].contains("\"id\":2"));
+        assert!(ask("add rc-bus")[0].contains("\"id\":3"));
         t.start_ready();
-        let (wire, plain) = (st("rc-wire"), st("rc-plain"));
+        let (wire, plain, bus) = (st("rc-wire"), st("rc-plain"), st("rc-bus"));
         assert_eq!((wire.state, wire.detail[0].as_str()), (St::Failed, "it changes the hosted wire: platform/studio/src/studio.rs"), "{wire:?}");
         assert!(wire.detail.iter().any(|l| l.contains("makepad devhub land --wire-change")), "{wire:?}");
+        // the AI bus's wire has no fingerprint: an unmarked change of it fails the same way, saying so
+        assert_eq!((bus.state, bus.detail[0].as_str()), (St::Failed, "it changes the hosted wire: libs/ai/services/src/wire.rs"), "{bus:?}");
+        assert!(bus.detail.iter().any(|l| l.contains("drop each other's tool calls")) && !bus.detail.iter().any(|l| l.contains("wire fingerprint")), "{bus:?}");
         assert_eq!(plain.state, St::Landed, "{plain:?}");
         assert!(!is_ancestor(&r, &rev(&r, "rc-wire").unwrap(), &rev(&r, "refs/heads/work").unwrap()), "work has no wire change");
         // marked, it lands, and says so

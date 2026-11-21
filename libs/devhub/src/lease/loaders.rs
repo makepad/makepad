@@ -533,6 +533,12 @@ pub fn find_overlay(work: &Path, lane: &str, edits: &Path, lease: &str, pin: &su
         (build.say)(&format!("devhub: the lane's edits change the JIT's inputs ({}{}): its own JIT {id}", changed.iter().take(3).cloned().collect::<Vec<_>>().join(", "), if changed.len() > 3 { ", ..." } else { "" }));
     }
     let base = if apply.is_some() { lane_jit_dir(work, lane) } else { work.join("dev") };
+    // the lane's own tree is its lane's: a reclaim deletes it only under the lane's lock, so a
+    // build waits behind that, then finds the tree gone and builds it cold ([`super::disk::item_lock`])
+    let _lane_tree = match &apply {
+        Some(_) => Some(super::disk::lane_jit_hold(&work.join("dev"), lane, build.active, &|| (build.pending)("waiting for the lane's JIT tree: a disk reclaim removes it"))?),
+        None => None,
+    };
     let selected = requested.unwrap_or(&id);
     (build.active)()?;
     let binary = if selected == id {

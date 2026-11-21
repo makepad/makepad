@@ -12,9 +12,12 @@
 //! Mac node), keeps it up for the settle window ([`SETTLE`]) and requires no panic, pause, hang,
 //! deadlock, patch or script error on any thread and no early exit. A failed pre-boot is an error
 //! on the running show: a `show_failed` event (the inbox: the manager, and the lane that asked, by
-//! name). A pair that passed is not booted again for later shows of that app. A landing builds
-//! nothing on the Mac: a show builds the JIT first, then opens, and a running app offers the update
-//! (reload_host). The devboxes have theirs from the prebuild ([`super::warm`]).
+//! name). A pair that passed is not booted again for later shows of that app. A running app offers
+//! a landing's update (reload_host). The JIT itself is built ahead: once work moves to inputs the
+//! Mac's runner was not built at, the master builds it in the user's checkout in the background
+//! ([`prebuild_runner`]), so a show's `cargo run` only finds it fresh and a click never waits on
+//! cargo. The devboxes have theirs from the prebuild ([`super::warm`]). What an open the person
+//! asked for does meanwhile, and why it did not open, is [`opening`] (the master's menu says it).
 //!
 //! A show is what the person asked to see: its launch says so (`MAKEPAD_SHOW=1`), and the app's
 //! platform brings it to the front once it started and opens a tray app's panel, as a launch from
@@ -48,6 +51,7 @@ use crate::state::{Cond, JobPanic, Pair, Show};
 use makepad_remote::json_str;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -139,7 +143,10 @@ pub fn start(ctx: Arc<Ctx>) {
         let mut out = Vec::new();
         for x in d.shows.iter_mut().filter(|x| x.device == "mac" && matches!(x.state.as_str(), "running" | "paused")) {
             if x.pid > 0 && crate::procinfo::exited(x.pid).is_none() {
-                x.note = "the master restarted: still running, its close is seen by its pid".into();
+                x.note = match no_display(x.pid) {
+                    Some(why) => format!("the master restarted: still running, but {why}: a show of it starts a new run"),
+                    None => "the master restarted: still running, its close is seen by its pid".into(),
+                };
             } else {
                 x.state = "closed".into();
                 x.ended_ms = wall_ms();
@@ -167,6 +174,7 @@ pub fn start(ctx: Arc<Ctx>) {
     }
     let _ = std::thread::Builder::new().name("devhub-shows".into()).spawn(move || {
         let mut work = crate::gitread::rev(&ctx.repo, "refs/heads/work").unwrap_or_default();
+        prebuild_runner(&ctx);
         loop {
             tick(&ctx, &mut work);
             ctx.store.wait(TICK);
@@ -183,6 +191,7 @@ fn tick(ctx: &Arc<Ctx>, work: &mut String) {
     let landed = !now_work.is_empty() && now_work != *work;
     if landed {
         *work = now_work.clone();
+        prebuild_runner(ctx);
     }
     let mut ps: HashMap<String, Option<crate::explorer::MachineRow>> = HashMap::new();
     for x in shows {
@@ -498,7 +507,7 @@ fn ended(ctx: &Ctx, x: &Show, code: Option<i32>) {
 /// A node or Quest show: its JIT in the device's `ps` (gone = ended; the device's hub says no more).
 fn remote_watch(ctx: &Ctx, x: &Show, row: Option<&crate::explorer::MachineRow>) {
     let Some(row) = row.filter(|r| r.err.is_none()) else { return };
-    let jit = row.jits.iter().find(|j| (x.pid != 0 && j.pid == x.pid) || (x.pid == 0 && same_app(&j.app, &x.app)));
+    let jit = show_jit(&row.jits, x, wall_ms());
     match jit {
         Some(j) if x.pid == 0 => {
             // a node's WM started it: its log is the WM's of the client, on the node
@@ -517,6 +526,35 @@ fn remote_watch(ctx: &Ctx, x: &Show, row: Option<&crate::explorer::MachineRow>) 
         // its JIT is gone: the device's hub saw no crash event for it, so the user closed it
         None => ended(ctx, x, Some(0)),
     }
+}
+
+/// Node show `x`'s run among its device's `jits`: by its pid, or, while the WM starts it (no pid
+/// yet), an instance of its app that started since its launch asked (`now` and the node's `up_s`
+/// of it, both read here, so no clock of the node's counts). One that ran before is another's: a
+/// replace's new show took the instance it was to replace, which ran on, as its own, and listed
+/// it at its own sha (V152, 11-21).
+fn show_jit<'a>(jits: &'a [crate::explorer::JitRow], x: &Show, now: u64) -> Option<&'a crate::explorer::JitRow> {
+    jits.iter().find(|j| if x.pid != 0 { j.pid == x.pid } else { same_app(&j.app, &x.app) && now.saturating_sub(j.up_s.saturating_mul(1000)) >= x.launch_ms })
+}
+
+/// Before a replace on node `dev` launches `app`: each instance of it the node's `ps` lists is
+/// quit as its person would (`launch stop <pid> <app>`), the one no show follows as well (its
+/// show took its end while it ran on, or the person opened it from the dock). One that does not
+/// stop keeps the launch from happening: a replace stopped only the pid of a show still running,
+/// and with that show ended while its app ran on, a second instance started beside the first and
+/// quit at once on the port it held (V151, V152, 11-21).
+fn stop_instances(dev: &str, app: &str) -> Result<(), String> {
+    let row = crate::explorer::parse_ps(dev, &crate::cli::ask(&ctl(), Some(dev), "ps", "ps")?);
+    if let Some(e) = row.err {
+        return Err(format!("{dev} did not say what of {app} runs there, so nothing was launched: {e}"));
+    }
+    for pid in row.jits.iter().filter(|j| same_app(&j.app, app)).map(|j| j.pid) {
+        let said = crate::cli::ask(&ctl(), Some(dev), "launch", &format!("stop {pid} {app}"))?;
+        if let Some(e) = said.first().filter(|l| l.starts_with("{\"err\":")) {
+            return Err(format!("{app} runs on {dev} (pid {pid}) and did not stop, so nothing was launched: {e}"));
+        }
+    }
+    Ok(())
 }
 
 fn cargo() -> PathBuf {
@@ -907,12 +945,146 @@ fn watch_log(ctx: &Ctx, x: &Show) {
     }
 }
 
+/// A Mac show's `cargo run` of the JIT (its runner) in the user's checkout, with the flags and
+/// environment that decide whether cargo rebuilds it: [`mac_launch`] and [`prebuild_runner`] give
+/// it the same, so the build ahead is the one the show finds. `nice`: under `nice -n 10`.
+fn runner_cargo(ctx: &Ctx, verb: &str, nice: bool) -> std::process::Command {
+    let mut cmd = if nice {
+        let mut c = makepad_remote::group::command(crate::os::tool("nice"));
+        c.args(["-n", "10"]).arg(cargo());
+        c
+    } else {
+        makepad_remote::group::command(cargo())
+    };
+    cmd.args([verb, "--profile", "host", "-p", "makepad-run", "--bin", "makepad"]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0");
+    cmd
+}
+
+/// The inputs key the Mac's runner was last built at ahead ([`prebuild_runner`]) and the seconds
+/// of the last such build that compiled (0: none measured yet).
+fn runner_built(ctx: &Ctx) -> Option<(String, u64)> {
+    let text = std::fs::read_to_string(ctx.home.join("mac-runner.built")).ok()?;
+    let mut w = text.split_whitespace();
+    Some((w.next()?.to_string(), w.next()?.parse().ok()?))
+}
+
+/// One build of the Mac's runner ahead at a time.
+static RUNNER_BUILDING: AtomicBool = AtomicBool::new(false);
+
+/// The Mac's runner built ahead, in the background: a show on the Mac is `cargo run` of the JIT in
+/// the user's checkout, and a landing that reached the runner's crates (tools/run's, relax among
+/// them) made the click after it wait on cargo (`Open panel` built relax for 41.7 s before the
+/// panel's first frame, and looked dead, 11-18). So once work stands at inputs the runner was not
+/// built at, the master builds it there (`nice`, the launch's own flags: [`runner_cargo`]). A
+/// show that opens meanwhile waits on cargo's lock and says so ([`opening`]). One build at a time;
+/// work that moved during it is built after it. A failed build is said; the next show builds it.
+fn prebuild_runner(ctx: &Arc<Ctx>) {
+    // only the master on the Mac, in a checkout with the runner (no test's)
+    if cfg!(test) || !cfg!(target_os = "macos") || !ctx.repo.join("tools/run/Cargo.toml").exists() {
+        return;
+    }
+    if RUNNER_BUILDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new().name("devhub-mac-runner".into()).spawn(move || {
+        let key_now = || {
+            let work = crate::gitread::rev(&ctx.repo, "refs/heads/work").unwrap_or_default();
+            (inputs_key(&ctx, &super::roll::crate_dirs(&ctx.repo, "tools/run"), &work, "main"), work)
+        };
+        let mut said_fail = String::new();
+        loop {
+            let (key, work) = key_now();
+            if runner_built(&ctx).is_some_and(|(k, _)| k == key) {
+                break;
+            }
+            let t = std::time::Instant::now();
+            let r = std::fs::File::create(ctx.logs("shows").join("mac-runner.log")).map_err(|e| e.to_string()).and_then(|out| {
+                let err = out.try_clone().map_err(|e| e.to_string())?;
+                let st = runner_cargo(&ctx, "build", true).stdin(std::process::Stdio::null()).stdout(out).stderr(err).status().map_err(|e| format!("cargo: {e}"))?;
+                if st.success() { Ok(()) } else { Err(format!("cargo build failed ({st}); log {}", ctx.logs("shows").join("mac-runner.log").display())) }
+            });
+            let secs = t.elapsed().as_secs().max(1);
+            match r {
+                Ok(()) => {
+                    // a build that compiled nothing (cargo found it fresh) is no measure of one
+                    let compiled = std::fs::read_to_string(ctx.logs("shows").join("mac-runner.log")).is_ok_and(|l| l.lines().any(|l| l.trim_start().starts_with("Compiling ")));
+                    let measured = if compiled { secs } else { runner_built(&ctx).map_or(0, |(_, s)| s) };
+                    let _ = std::fs::write(ctx.home.join("mac-runner.built"), format!("{key} {measured}\n"));
+                    if compiled {
+                        event(&ctx, Sev::Info, format!("show: the Mac's runner built for work {} in {secs} s: a show opens without building it", super::short(&work)), None);
+                    }
+                }
+                Err(e) => {
+                    if e != said_fail {
+                        event(&ctx, Sev::Warn, format!("show: the Mac's runner did not build for work {}: {e}; the next show builds it as it opens", super::short(&work)), None);
+                    }
+                    // (work that moved since is built after; the same inputs are not built again)
+                    if key_now().0 == key { break; }
+                    said_fail = e;
+                }
+            }
+        }
+        RUNNER_BUILDING.store(false, Ordering::Release);
+    });
+    if spawned.is_err() {
+        RUNNER_BUILDING.store(false, Ordering::Release);
+    }
+}
+
+/// Where an open the person asked for stands ([`opening`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Opening {
+    /// what it does now: `building the runner (about 42 s)`, `starting`, `waits: ...`
+    Doing(String),
+    /// its first frame came (or it ran already and came to the front)
+    Open,
+    /// why it did not open
+    Failed(String),
+}
+
+/// The open of show `id` (the master's menu's `Open panel`): from its state, then its launch log
+/// until the app's first frame.
+pub fn opening(ctx: &Ctx, id: &str) -> Opening {
+    let Some(x) = ctx.store.read(|d| d.shows.iter().find(|x| x.id == id).cloned()) else { return Opening::Failed(format!("show {id} is gone")) };
+    match x.state.as_str() {
+        "waiting" if x.held.is_empty() => Opening::Doing(format!("waits for {}", x.cond.describe())),
+        "waiting" => Opening::Doing(format!("waits: {}", x.held)),
+        "starting" => Opening::Doing("starting".into()),
+        "running" => launch_phase(&log_tail(&x.log), runner_built(ctx).map(|(_, s)| s).filter(|s| *s > 0)),
+        "failed" => Opening::Failed(x.note),
+        "paused" => Opening::Failed(format!("it paused on a panic{}", x.panic.as_ref().map_or(String::new(), |p| format!(": {}", crate::proto::clean(&p.message, 120))))),
+        other => Opening::Failed(format!("it {other}{}", x.exit.map_or(String::new(), |c| format!(" (exit {c})")))),
+    }
+}
+
+/// A running show's open by its launch log: cargo's build of the runner (or its wait for the
+/// build ahead), then the app's start, until its first frame. `secs`: the last runner build's.
+fn launch_phase(log: &str, secs: Option<u64>) -> Opening {
+    if log.contains(" first frame at ") {
+        return Opening::Open;
+    }
+    let about = secs.map_or(String::new(), |s| format!(" (about {s} s)"));
+    for l in log.lines().rev().map(str::trim_start) {
+        if l.starts_with("Running `") {
+            return Opening::Doing("starting".into());
+        }
+        if l.starts_with("Blocking waiting for file lock") {
+            return Opening::Doing(format!("waits for the runner's build{about}"));
+        }
+        if l.starts_with("Compiling ") || l.starts_with("Building ") {
+            return Opening::Doing(format!("building the runner{about}"));
+        }
+    }
+    Opening::Doing("starting".into())
+}
+
 /// The master's own launch on the Mac, detached in its own process group.
 fn mac_launch(ctx: &Ctx, x: &Show) -> Result<(u32, String), String> {
     let (path, out) = log_file(ctx, x)?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
-    let mut cmd = makepad_remote::group::command(cargo());
-    cmd.args(["run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "run", &x.app]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").env("MAKEPAD_SHOW", "1").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    let mut cmd = runner_cargo(ctx, "run", false);
+    cmd.args(["--", "run", &x.app]).env("MAKEPAD_SHOW", "1").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
     if !x.args.is_empty() {
         cmd.arg("--").args(&x.args);
     }
@@ -973,6 +1145,31 @@ fn ask_jit(x: &Show, line: &str) -> Result<Vec<String>, String> {
         true
     })?;
     Ok(out)
+}
+
+/// Why a run on the Mac can never show a window again: its app's process started before the
+/// window server the screen has now. A process that outlives a restart of the window server keeps
+/// running with no window and gets none again: the devhub panel ran a day like that after the
+/// window server restarted (11-19 16:47; AppKit said "WindowServer event port death" in its log),
+/// and each Open panel asked it to come to the front, which it said it did, and nothing showed.
+/// None: it may show one (or there is no window server here, or no such process).
+fn no_display(pid: u32) -> Option<String> {
+    let server = window_server_since()?;
+    // the app's own process: the run's, or the child its JIT restarted it in
+    let app = makepad_remote::discovery::apps().into_iter().find(|a| a.answers_to(pid)).map_or(pid, |a| a.pid);
+    let since = makepad_remote::group::start_time(app)?;
+    (since < server).then(|| format!("it started before the window server did (at {}), so it has no window", crate::logstamp::stamp(server / 1000)))
+}
+
+/// When the window server the Mac's screen has now started (µs since the epoch).
+#[cfg(target_os = "macos")]
+fn window_server_since() -> Option<u64> {
+    crate::top::newest_start("WindowServer")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_server_since() -> Option<u64> {
+    None
 }
 
 fn pin_said(said: &[String]) -> Result<(), String> {
@@ -1356,7 +1553,8 @@ fn stop(x: &Show) -> Result<(), String> {
             let st = makepad_remote::group::command(crate::os::tool("adb")).args(["-s", &serial, "shell", "am", "force-stop", "dev.makepad.run"]).stdin(std::process::Stdio::null()).status().map_err(|e| e.to_string())?;
             st.success().then_some(()).ok_or_else(|| "adb am force-stop failed".into())
         }
-        node if x.pid > 0 => crate::cli::ask(&ctl(), Some(node), "launch", &format!("stop {}", x.pid)).and_then(|l| match l.first() {
+        // (the app named: the node quits its dock's instance, which no launch of its hub started)
+        node if x.pid > 0 => crate::cli::ask(&ctl(), Some(node), "launch", &format!("stop {} {}", x.pid, x.app)).and_then(|l| match l.first() {
             Some(e) if e.starts_with("{\"err\":") => Err(e.clone()),
             _ => Ok(()),
         }),
@@ -1429,7 +1627,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             }
             let dev = device(ctx, &s("on"))?;
             let cond = if after.is_empty() { Cond::None } else { super::after::parse_cond(ctx, &after.iter().map(String::as_str).collect::<Vec<_>>())? };
-            let replace = v.get("replace").and_then(|x| x.as_bool()).unwrap_or(false);
+            let mut replace = v.get("replace").and_then(|x| x.as_bool()).unwrap_or(false);
             let pin = v.get("pin").and_then(|x| x.as_bool()).unwrap_or(false);
             let args: Vec<String> = v.get("args").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
             // (a node's show asks its WM's dock to launch or focus, the Quest's starts its activity:
@@ -1447,8 +1645,14 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 if matches!(old.state.as_str(), "running" | "paused") && !replace && pin && args.is_empty() {
                     return pin_show(ctx, &old, true, &ask_jit);
                 }
-                // the person asks to see it again: it comes to the front, its work as it is
-                if old.state == "running" && old.pid > 0 && !replace && args.is_empty() && dev == "mac" {
+                // the person asks to see it again: it comes to the front, its work as it is. A run
+                // that can show no window any more is replaced: nothing of it is in reach either way.
+                let gone = (old.state == "running" && old.pid > 0 && !replace && args.is_empty() && dev == "mac").then(|| no_display(old.pid));
+                if let Some(Some(why)) = &gone {
+                    event(ctx, Sev::Info, format!("show {app} on {dev}: its run (pid {}) cannot come to the front: {why}; a new run replaces it", old.pid), Some(&old));
+                    replace = true;
+                }
+                if let Some(None) = gone {
                     return match ask_jit(&old, "front") {
                         Ok(said) if said.iter().any(|l| l.contains("\"front\"")) => {
                             event(ctx, Sev::Info, format!("show {app} on {dev}: running (pid {}): brought to the front", old.pid), Some(&old));
@@ -1462,12 +1666,15 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     return Err(format!("{app} already runs on {dev} ({}, pid {}, {} s): it may hold unsaved work; ask the user, then `devhub show {app} --on {dev} --replace`", old.state, old.pid, wall_ms().saturating_sub(old.started_ms) / 1000));
                 }
                 if matches!(old.state.as_str(), "running" | "paused") {
-                    stop(&old)?;
+                    stop(&old).map_err(|e| format!("{app} runs on {dev} (pid {}) and did not stop, so nothing was launched: {e}", old.pid))?;
                 }
                 try_set(ctx, &old.id, |s| {
                     s.state = "replaced".into();
                     s.ended_ms = wall_ms();
                 })?;
+            }
+            if replace && !matches!(dev.as_str(), "mac" | "quest") {
+                stop_instances(&dev, &app)?;
             }
             // its own unit red at the tip: it waits for a tip that is not
             let red = if cond == Cond::None && dev == "mac" { launch_red(ctx, &app).unwrap_or_default() } else { String::new() };
@@ -1571,6 +1778,22 @@ fn stop_compiled(ctx: &Ctx, app: &str, dev: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::lease::master::LeaseMaster;
+
+    /// What the master's menu says of an open the person asked for, from its launch log: cargo
+    /// building the runner (the panel looked dead for 46 s of it, 11-18), waiting for the build
+    /// ahead, starting, then open at the first frame.
+    #[test]
+    fn an_open_says_what_it_does_until_its_first_frame() {
+        let building = "   Compiling relax-base v0.1.0 (libs/relax/base)\n   Compiling relax-compiler v0.1.0 (libs/relax/compiler)\n";
+        assert_eq!(launch_phase("", None), Opening::Doing("starting".into()), "cargo said nothing yet");
+        assert_eq!(launch_phase(building, Some(42)), Opening::Doing("building the runner (about 42 s)".into()));
+        assert_eq!(launch_phase(building, None), Opening::Doing("building the runner".into()), "no build measured yet");
+        assert_eq!(launch_phase("    Blocking waiting for file lock on build directory\n", Some(42)), Opening::Doing("waits for the runner's build (about 42 s)".into()));
+        let started = format!("{building}    Finished `host` profile [optimized] target(s) in 41.70s\n     Running `target/host/makepad run makepad-app-devhub-panel`\n");
+        assert_eq!(launch_phase(&started, Some(42)), Opening::Doing("starting".into()));
+        let open = format!("{started}makepad: makepad-app-devhub-panel first frame at 4.58 s (main at 1.55 s, cache cold)\n   Compiling later output\n");
+        assert_eq!(launch_phase(&open, Some(42)), Opening::Open);
+    }
     use crate::state::Store;
     use std::collections::BTreeMap;
 
@@ -1955,6 +2178,17 @@ mod tests {
         assert!(super::same_app("makepad-app-calculator", "makepad-app-calculator"));
         assert!(super::same_app("calculator", "makepad-app-calculator"));
         assert!(!super::same_app("bar", "makepad-foo"));
+        // a node show takes its app's instance by its pid, or, before it knows one, only an
+        // instance started since its launch: never the one that ran before it (V152)
+        let row = |pid: u32, app: &str, up_s: u64| crate::explorer::JitRow { pid, app: app.into(), up_s, ..Default::default() };
+        let jits = [row(10, "party", 600), row(11, "foo", 3), row(12, "party", 3)];
+        let now = 1_000_000;
+        let mut x = Show { app: "makepad-app-party".into(), device: "node".into(), launch_ms: now - 5_000, ..Default::default() };
+        assert_eq!(super::show_jit(&jits, &x, now).map(|j| j.pid), Some(12), "the instance its launch started");
+        x.launch_ms = now - 2_000;
+        assert_eq!(super::show_jit(&jits, &x, now).map(|j| j.pid), None, "none started since its launch yet");
+        x.pid = 10;
+        assert_eq!(super::show_jit(&jits, &x, now).map(|j| j.pid), Some(10), "its own pid, however long it ran");
     }
 }
 
