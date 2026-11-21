@@ -20,8 +20,10 @@ use std::time::{Duration, Instant};
 /// sends poses for n seconds and then none (linked, idle: taken off, asleep), and
 /// `MAKEPAD_XR_REMOTE_SELFTEST_LINK_S=m` ends the session after m seconds (gone). Its eyes are
 /// 1680x1760 px unless `MAKEPAD_XR_REMOTE_SELFTEST_EYE=<w>x<h>` says (a Quest 3: 2016x2112), its
-/// display rate 72 Hz unless `MAKEPAD_XR_REMOTE_SELFTEST_HZ=<hz>` says. Its fields of view are
-/// ±45° unless `MAKEPAD_XR_REMOTE_SELFTEST_FOV=<left>,<right>,<up>,<down>` (the left eye's
+/// display rate 72 Hz unless `MAKEPAD_XR_REMOTE_SELFTEST_HZ=<hz>` says.
+/// `MAKEPAD_XR_REMOTE_SELFTEST_MONO=1` makes it a handheld with one view at the head pose,
+/// sized as in a hello, with the left field of view. Its fields of view are ±45° unless
+/// `MAKEPAD_XR_REMOTE_SELFTEST_FOV=<left>,<right>,<up>,<down>` (the left eye's
 /// tangent angles, radians; the right eye mirrored) says (a Quest 3: `-0.94,0.72,0.84,-0.96`),
 /// `MAKEPAD_XR_REMOTE_SELFTEST_STILL=1` keeps the head from turning (pictures to compare) and
 /// `MAKEPAD_XR_REMOTE_SELFTEST_PITCH=<radians>` tilts it (negative: looking down). While the file
@@ -34,21 +36,36 @@ use std::time::{Duration, Instant};
 /// removes it: `head=<x>,<y>,<z>,<yaw>` puts the head there in the tracking space from then on
 /// (turned `yaw` radians about y; it starts at 1.6 m over the origin), `session` links it again
 /// (a session of its own) and `recenter` is its wearer recentering, each a new tracking space.
+/// A device held near the content, for a picture the content fills as a person's near a model
+/// does: `MAKEPAD_XR_REMOTE_SELFTEST_NEAR=<part>` steps the head, once the app's content has
+/// stayed put two seconds (`XrServer::set_content_bounds`; 2 s after the start at the soonest:
+/// the app sets its content down first), to where the ball around the content's boxes
+/// (`XrServer::set_content_bounds`) spans that part of the view's width, facing its centre;
+/// from then on the head sways a little (a hand's hold) instead of turning.
 pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<AtomicBool>, busy: Arc<AtomicBool>) {
     let log = shared.log.clone();
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
     let codec = if VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
     let hz: u32 = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(72).clamp(30, 120);
-    let core = match Core::start(shared.clone(), eye, hz, codec) {
+    let handheld = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_MONO").as_deref() == Ok("1");
+    let views = if handheld { 1 } else { 2 };
+    let eye = if handheld { super::session::aligned_eye(eye) } else { eye };
+    let core = match Core::start(shared.clone(), eye, hz, codec, views, handheld) {
         Ok(c) => c,
         Err(e) => {
             busy.store(false, Ordering::Release);
             return log(&format!("xr selftest: {e}"));
         }
     };
+    // Check the layout published to the app too: the dump labels its columns from the encoder side.
+    if handheld && (core.size != [eye[0], eye[1] * 3 / 2] || shared.session_tiles() != 1 || shared.session_fovea() != Some((Fovea::OFF, eye))) {
+        core.stop();
+        busy.store(false, Ordering::Release);
+        return log("xr selftest: the handheld needs one unfoveated tile at its view size");
+    }
     log(&format!("xr selftest: {}x{} {codec:?} in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
     hal::hal_xr_remote_enable();
-    hal::hal_xr_remote_attach(eye[0], eye[1], hz * 1000);
+    hal::hal_xr_remote_attach(eye[0], eye[1], hz * 1000, core.views, if handheld { makepad_hal::xr_display_kind::HANDHELD } else { makepad_hal::xr_display_kind::WORN });
     shared.new_space("the headset linked");
     *shared.live_headset.lock().unwrap() = Some(super::LiveHeadset { instance: 0, name: "Selftest headset".into(), session: 0 });
     let secs = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).map(Duration::from_secs_f64);
@@ -60,9 +77,14 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
     let pause_file = std::env::var_os("MAKEPAD_XR_REMOTE_SELFTEST_PAUSE_FILE").map(std::path::PathBuf::from);
     let space_file = std::env::var_os("MAKEPAD_XR_REMOTE_SELFTEST_SPACE_FILE").map(std::path::PathBuf::from);
     let fov_l = fov.unwrap_or([-0.785, 0.785, 0.785, -0.785]);
-    let fov_r = [-fov_l[1], -fov_l[0], fov_l[2], fov_l[3]];
+    let fov_r = if handheld { fov_l } else { [-fov_l[1], -fov_l[0], fov_l[2], fov_l[3]] };
     let still = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_STILL").as_deref() == Ok("1");
-    let pitch: f32 = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let mut pitch: f32 = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let mut near: Option<f32> = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_NEAR").ok().and_then(|v| v.parse().ok()).filter(|p: &f32| *p > 0.0);
+    // the head's turn either way (rad): a slow look about, or a hand's sway once near
+    let mut turn = 0.6f32;
+    // the content's ball as last seen, and since when (s) it stayed put (`NEAR`)
+    let mut seen: Option<([f32; 3], f32, f32)> = None;
     if fov.is_some() || still || pitch != 0.0 {
         log(&format!("xr selftest: left eye fov {fov_l:?}, right {fov_r:?}{}, pitch {pitch}", if still { ", the head still" } else { "" }));
     }
@@ -147,13 +169,49 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
             }
             seq += 1;
             let t = start.elapsed().as_secs_f32();
-            let yaw = head_yaw + if still { 0.0 } else { (t * 0.5).sin() * 0.6 };
+            // near the content (`NEAR`): still until the step, then a hand's sway
+            if let Some(part) = near.filter(|_| t >= 2.0) {
+                let boxes = shared.content.lock().unwrap().clone();
+                let ball = boxes.filter(|b| !b.is_empty()).map(|b| {
+                    let (lo, hi) = b.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), [l, h]| (std::array::from_fn(|i| lo[i].min(l[i])), std::array::from_fn(|i| hi[i].max(h[i]))));
+                    let c: [f32; 3] = std::array::from_fn(|i| (lo[i] + hi[i]) * 0.5);
+                    (c, (0..3).map(|i| (hi[i] - lo[i]) * 0.5).map(|v| v * v).sum::<f32>().sqrt())
+                });
+                // (the ball as it stays: the app may set its content down after it first says)
+                let moved = |b: &([f32; 3], f32), s: &([f32; 3], f32, f32)| (0..3).any(|i| (b.0[i] - s.0[i]).abs() > 0.01) || (b.1 - s.1).abs() > 0.01;
+                match ball {
+                    Some(b) if seen.as_ref().is_none_or(|s| moved(&b, s)) => seen = Some((b.0, b.1, t)),
+                    _ => {}
+                }
+                let ball = ball.filter(|_| seen.is_some_and(|s| t - s.2 >= 2.0));
+                match ball {
+                    // (the app has not said yet, or its content still moves)
+                    None if t < 60.0 => {}
+                    None => {
+                        (near, turn) = (None, 0.05);
+                        log("xr selftest: near: the app said nothing of its content in a minute; the head stays");
+                    }
+                    Some((c, r)) => {
+                        (near, turn) = (None, 0.05);
+                        let d: [f32; 3] = std::array::from_fn(|i| c[i] - head_at[i]);
+                        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3);
+                        let away = r / (part * fov_l[1].tan()).max(1e-3);
+                        head_at = std::array::from_fn(|i| c[i] - d[i] / l * away);
+                        (head_yaw, pitch) = ((-d[0]).atan2(-d[2]), (d[1] / l).asin());
+                        log(&format!("xr selftest: near: the head {away:.2} m from the content's centre ({:.3}, {:.3}, {:.3}; a ball of {r:.2} m), facing it", c[0], c[1], c[2]));
+                    }
+                }
+            }
+            let sway = if still || near.is_some() { 0.0 } else { (t * 0.5).sin() * turn };
+            let yaw = head_yaw + sway;
             // the turn about y after the tilt about x
             let (sy, cy, sx, cx) = ((yaw * 0.5).sin(), (yaw * 0.5).cos(), (pitch * 0.5).sin(), (pitch * 0.5).cos());
             let q = [cy * sx, sy * cx, -sy * sx, cy * cx];
             let right = [yaw.cos(), 0.0, -yaw.sin()];
             let at = |s: f32| XrPose { orientation: q, position: [head_at[0] + right[0] * s * 0.032, head_at[1], head_at[2] + right[2] * s * 0.032] };
-            let frame = XrFrame { head: at(0.0), eyes: [XrEye { pose: at(-1.0), fov: fov_l }, XrEye { pose: at(1.0), fov: fov_r }], ..Default::default() };
+            let head = at(0.0);
+            let eyes = if handheld { [XrEye { pose: head, fov: fov_l }; 2] } else { [XrEye { pose: at(-1.0), fov: fov_l }, XrEye { pose: at(1.0), fov: fov_r }] };
+            let frame = XrFrame { head, eyes, ..Default::default() };
             let mut wire = Vec::with_capacity(<XrFrame as Wire>::SIZE);
             frame.write(&mut wire);
             stats.poses += 1;
@@ -170,7 +228,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
                     let Out::Video(mut head, data, encoded_at) = m;
                     #[cfg(target_os = "macos")]
                     if let Some(d) = decoded.as_mut() {
-                        d.take(&head, &data, &log);
+                        d.take(&head, &data, core.views, &log);
                     }
                     head.stages[stage::SEND] = encoded_at.elapsed().as_micros() as u32;
                     core.tiles_out(stats.sent(&head, data.len(), Duration::ZERO));
@@ -215,20 +273,23 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
     });
 }
 
-/// `MAKEPAD_XR_REMOTE_DUMP=<dir>`: the 300th picture's planes as `<dir>/picture.pgm` (its luma:
-/// both eye columns, each its colour over its band of coverage and inverse depth) once its GPU
-/// work completed, and a line of each eye's numbers. A check of what the GPU packed.
+/// `MAKEPAD_XR_REMOTE_DUMP=<dir>`: the 300th picture's planes (the nth with
+/// `MAKEPAD_XR_REMOTE_DUMP_AT=<n>`) as `<dir>/picture.pgm` (its luma: its views side by side,
+/// each its colour over its band of coverage and inverse depth) once its GPU work completed, and
+/// a line of each eye's numbers. A check of what the GPU packed.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn dump_picture(_dir: &std::ffi::OsStr, _p: &Picture, _size: [u32; 2], _log: &Log) {}
+pub(crate) fn dump_picture(_dir: &std::ffi::OsStr, _p: &Picture, _size: [u32; 2], _views: u32, _log: &Log) {}
 
 /// The display time of the picture the dump measured: the selftest's decoder measures that one.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static DUMPED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], log: &Log) {
+pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], views: u32, log: &Log) {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    if N.fetch_add(1, Ordering::AcqRel) != 300 {
+    static AT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let at = *AT.get_or_init(|| std::env::var("MAKEPAD_XR_REMOTE_DUMP_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(300));
+    if N.fetch_add(1, Ordering::AcqRel) != at {
         return;
     }
     if p.ready.wait(Duration::from_secs(2)).is_err() {
@@ -244,16 +305,16 @@ pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], l
     pgm.extend_from_slice(&px[..(w * h) as usize]);
     let path = std::path::Path::new(dir).join("picture.pgm");
     let _ = std::fs::write(&path, &pgm);
-    let line = format!("xr host: dumped {} ({w}x{h}){}", path.display(), picture_numbers(&px, w, h, 2));
+    let line = format!("xr host: dumped {} ({w}x{h}){}", path.display(), picture_numbers(&px, w, h, views));
     log(&line);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-/// Per eye of a packed picture (`w` bytes a row: `h` luma rows, then the chroma rows, `eyes` eye columns of it): its
+/// Per view of a packed picture (`w` bytes a row: `h` luma rows, then the chroma rows, `views` columns of it): its
 /// colour's luma and chroma, its band's coverage and inverse depth, as numbers.
-fn picture_numbers(px: &[u8], w: u32, h: u32, eyes: usize) -> String {
+fn picture_numbers(px: &[u8], w: u32, h: u32, views: u32) -> String {
     // per eye column: its colour's luma, its band's coverage (left half) and inverse depth (right half)
-    let (ew, eh) = (w / eyes as u32, h * 2 / 3);
+    let (ew, eh) = (w / views, h * 2 / 3);
     let area = |x0: u32, x1: u32, y0: u32, y1: u32| {
         let (mut n, mut sum, mut max, mut nonzero) = (0u64, 0u64, 0u8, 0u64);
         for y in y0..y1 {
@@ -268,7 +329,7 @@ fn picture_numbers(px: &[u8], w: u32, h: u32, eyes: usize) -> String {
         (sum as f64 / n.max(1) as f64, max, nonzero as f64 * 100.0 / n.max(1) as f64)
     };
     let mut line = String::new();
-    for (e, name) in ["left", "right"].iter().take(eyes).enumerate() {
+    for (e, name) in ["left", "right"].iter().take(views as usize).enumerate() {
         let x = e as u32 * ew;
         let (l_mean, _, _) = area(x, x + ew, 0, eh);
         let (a_mean, a_max, a_cov) = area(x, x + ew / 2, eh, h);
@@ -371,7 +432,7 @@ struct Decoded {
 
 #[cfg(target_os = "macos")]
 impl Decoded {
-    fn take(&mut self, head: &VideoHead, data: &[u8], log: &Log) {
+    fn take(&mut self, head: &VideoHead, data: &[u8], views: u32, log: &Log) {
         let codec = if head.codec == CODEC_HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
         if self.decoder.is_none() {
             match makepad_widgets::makepad_platform::video_file::VideoStreamDecoder::new(codec) {
@@ -389,7 +450,8 @@ impl Decoded {
         for f in frames {
             if !self.measured && dumped != 0 && head.display_ns >= dumped {
                 self.measured = true;
-                log(&format!("xr selftest: decoded ({}x{}){}", f.width, f.height, picture_numbers(&f.nv12, f.width, f.height, ((f.width * 2 / head.size[0].max(1)) as usize).clamp(1, 2))));
+                let columns = (f.width * views / head.size[0].max(1)).clamp(1, views);
+                log(&format!("xr selftest: decoded ({}x{}){}", f.width, f.height, picture_numbers(&f.nv12, f.width, f.height, columns)));
             }
         }
     }

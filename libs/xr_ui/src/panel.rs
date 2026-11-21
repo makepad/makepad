@@ -17,6 +17,8 @@ script_mod! {
     mod.draw.DrawXrCard = mod.std.set_type_default() do #(DrawXrCard::script_shader(vm)){
         ..mod.draw.DrawCube
         image: texture_2d(float)
+        // the part of the texture the face shows, from its top left (1, 1: all of it)
+        uv_span: uniform(vec2(1.0, 1.0))
         v_uv: varying(vec2f)
         v_front: varying(float)
         vertex: fn() {
@@ -24,7 +26,7 @@ script_mod! {
             let model_view = self.draw_list.view_transform * self.transform
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
             // the texture's rows run down from its top; the cube face's v runs up
-            self.v_uv = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y)
+            self.v_uv = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y) * self.uv_span
             self.v_front = step(0.5, self.geom.geom_normal.z)
             self.lit_color = self.color
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
@@ -210,6 +212,10 @@ pub struct XrPanel {
     /// The space between list rows (texels).
     #[live(4.0)]
     pub list_gap: f64,
+    /// The card is only as wide as its texts reach (a chip that fits its label): it shows the
+    /// texture's left part, and its size follows.
+    #[live(false)]
+    pub fit_width: bool,
     #[live]
     draw_card: DrawXrCard,
     #[live]
@@ -249,6 +255,9 @@ pub struct XrPanel {
     dirty: bool,
     #[rust]
     tex: Option<PanelTexture>,
+    /// How much of the texture's width the card shows (texels; 0 before the rows are set).
+    #[rust]
+    shown: f64,
 }
 
 struct PanelTexture {
@@ -260,7 +269,14 @@ struct PanelTexture {
 impl XrPanel {
     /// The card's size in the room (m).
     pub fn size(&self) -> Vec2f {
-        vec2f(self.meters, self.meters * (self.height / self.width.max(1.0)) as f32)
+        let width = self.width.max(1.0);
+        vec2f(self.meters * (self.shown_width() / width) as f32, self.meters * (self.height / width) as f32)
+    }
+
+    /// The texels of the texture's width the card shows: all of it, or with `fit_width` as far
+    /// as its texts reach.
+    fn shown_width(&self) -> f64 {
+        if self.fit_width && self.shown > 0.0 { self.shown } else { self.width }
     }
 
     /// The rows: `fill` writes them when `key` (what they show) changed since the last call.
@@ -272,6 +288,13 @@ impl XrPanel {
         self.rows.clear();
         fill(&mut self.rows);
         self.layout();
+        if self.fit_width {
+            // as far as the widest text reaches (the estimate of the glyphs' advance `render`
+            // draws with), and the same margin again on its right
+            let font = self.draw_text.text_style.font_size as f64;
+            let reach = self.rows.cells.iter().filter(|c| c.kind != CellKind::Blank && !matches!(c.kind, CellKind::Slider(_))).map(|c| c.rect.pos.x + 12.0 + self.rows.text[c.text.clone()].chars().count() as f64 * font * 0.58).fold(0.0, f64::max);
+            self.shown = (reach + 12.0 + self.pad).min(self.width);
+        }
         self.dirty = true;
     }
 
@@ -306,7 +329,7 @@ impl XrPanel {
     pub fn slider_at(&self, id: u32, uv: Vec2f) -> Option<f32> {
         let c = self.rows.cells.iter().find(|c| c.id == id && matches!(c.kind, CellKind::Slider(_)))?;
         let (left, width) = slider_track(c.rect);
-        Some(((uv.x as f64 * self.width - left) / width.max(1.0)).clamp(0.0, 1.0) as f32)
+        Some(((uv.x as f64 * self.shown_width() - left) / width.max(1.0)).clamp(0.0, 1.0) as f32)
     }
 
     fn layout(&mut self) {
@@ -351,7 +374,7 @@ impl XrPanel {
     pub fn cell_uv(&self, id: u32) -> Option<Vec2f> {
         let c = self.rows.cells.iter().find(|c| c.id == id)?;
         let at = c.rect.pos + c.rect.size * 0.5;
-        Some(vec2f((at.x / self.width) as f32, (at.y / self.height) as f32))
+        Some(vec2f((at.x / self.shown_width()) as f32, (at.y / self.height) as f32))
     }
 
     /// Where the lit cells (toggles that are on) sit on the card, down from its top: their mean
@@ -368,7 +391,7 @@ impl XrPanel {
 
     /// The pressable cell at (u, v) in 0..1 of the card.
     pub fn cell_at(&self, uv: Vec2f) -> Option<u32> {
-        let p = dvec2(uv.x as f64 * self.width, uv.y as f64 * self.height);
+        let p = dvec2(uv.x as f64 * self.shown_width(), uv.y as f64 * self.height);
         self.rows.cells.iter().find(|c| c.kind.pressable() && c.rect.contains(p)).map(|c| c.id)
     }
 
@@ -464,10 +487,12 @@ impl XrPanel {
         self.draw_card.transform = Mat4f::mul(room_to_scene, &card.matrix());
         self.draw_card.cube_pos = vec3f(0.0, 0.0, 0.0);
         self.draw_card.cube_size = vec3f(card.size.x, card.size.y, 0.003);
+        let shown = self.shown_width();
+        self.draw_card.draw_vars.set_uniform(cx.cx, live_id!(uv_span), &[(shown / self.width.max(1.0)) as f32, 1.0]);
         self.draw_card.draw(cx);
         let draw = &mut self.draw_slider;
         draw.transform = self.draw_card.transform;
-        let scale = vec2f(card.size.x / self.width as f32, card.size.y / self.height as f32);
+        let scale = vec2f(card.size.x / shown as f32, card.size.y / self.height as f32);
         for c in &self.rows.cells {
             let CellKind::Slider(value) = c.kind else { continue };
             let (left, width) = slider_track(c.rect);
@@ -477,7 +502,7 @@ impl XrPanel {
                 (left + width * value as f64, 16.0, c.rect.size.y.min(28.0), 0.003, self.color_on),
             ] {
                 draw.color = color;
-                draw.cube_pos = vec3f((x as f32 - self.width as f32 * 0.5) * scale.x, (self.height as f32 * 0.5 - mid as f32) * scale.y, z);
+                draw.cube_pos = vec3f((x as f32 - shown as f32 * 0.5) * scale.x, (self.height as f32 * 0.5 - mid as f32) * scale.y, z);
                 draw.cube_size = vec3f(w as f32 * scale.x, h as f32 * scale.y, 0.001);
                 draw.draw(cx);
             }

@@ -1,22 +1,19 @@
-//! The XR stream's control in an app's caption: [`XrCaptionButton`], a headset icon (grey: off,
-//! slate: paused from the headset, amber: waiting for a headset, green: streaming) opening a
-//! compact panel. On top the stream switch (the real off: nothing listens, answers probes,
-//! encodes or sends; `XrServer::set_enabled`), the state and the headset; below the quality
-//! settings, the room scan and the desktop mirror; at the bottom the diagnostics, collapsed: key
-//! numbers as tiles, the last minute as a sparkline, and under "Raw stats" every number the
-//! stream has (the headset's and the server's lines, the bars, the last seconds frame by frame).
+//! [`XrCaptionButton`] opens the XR panel from an app's caption. Each paired device has a
+//! switch that selects it to receive the view. Switching devices keeps their pairings.
+//! A selected device stays selected while offline. Forget removes its pairing.
+//! The panel also offers PIN entry, stream quality, room scan, desktop mirror and diagnostics.
 //!
-//! An app adds it with one line in its caption (`xr := XrCaptionButton{app: "sandbox"}`), which
-//! also installs the app's XR server (once enabled, headsets find it; one linking gives the app
-//! its XR display). The settings are kept per app (`app`) in its data folder (`home::app_data_dir`,
-//! file `xr-stream`) and applied at start and on every change. The stream switch defaults to
-//! off; `stream_lan=on` records the user's LAN opt-in. Legacy `stream` values are ignored because
-//! they were saved without an explicit opt-in. `MAKEPAD_XR_STREAM=off|on` or `--xr-stream=off|on`
-//! overrides the kept switch for this launch.
+//! Adding `xr := XrCaptionButton{app: "sandbox"}` to the caption installs the app's XR server.
+//! The selected device in the app's pairing file is its LAN opt-in. Entering a PIN also lets
+//! the server listen. At install the server applies `MAKEPAD_XR_STREAM` or `--xr-stream` for
+//! this launch. The on override starts listening and the off override holds the listener off.
+//! Both preserve the device switches. The app keeps its other settings in `xr-stream`.
 //!
 //! For automation and assistive technology the caption button is one switch node ("Stream to
-//! headset", `ui act q='role=switch name="Stream to headset"' toggle`; `set_value v=off|on`;
-//! its value is the state line), and the panel's own switch is the same control.
+//! a device", `ui act q='role=switch name="Stream to a device"' toggle`; `set_value v=off|on`;
+//! its value is the state line): on while the server listens. Off is the real off (nothing
+//! listens, answers probes, encodes or sends) and remembers the selected device; on restores
+//! it, or listens with all devices off and opens the panel to choose one.
 
 use crate::auto::{Lever, XrAuto};
 #[cfg(not(target_arch = "wasm32"))]
@@ -24,7 +21,7 @@ use crate::verdict::{Evidence, Stage, VerdictFilter};
 use crate::verdict::StageTime;
 use crate::settings_types::{StreamAa, StreamView, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::XrServer;
+use crate::server::{XrDevice, XrDeviceKind, XrDeviceLink, XrServer};
 use makepad_widgets::*;
 
 /// The panel's own shaders (their own script module: the draw prelude).
@@ -141,10 +138,10 @@ script_mod! {
     let xr_waiting = #xE0A548
     let xr_paused = #x8EA0B8
 
-    mod.widgets.XrHeadsetIconBase = #(XrHeadsetIcon::register_widget(vm))
-    mod.widgets.XrHeadsetIcon = set_type_default() do mod.widgets.XrHeadsetIconBase {
+    mod.widgets.XrDeviceIconBase = #(XrDeviceIcon::register_widget(vm))
+    mod.widgets.XrDeviceIcon = set_type_default() do mod.widgets.XrDeviceIconBase {
         width: 26 height: 22
-        icon +: { svg: crate_resource("self:resources/icons/headset.svg") }
+        icon +: { svg: crate_resource("self:resources/icons/xr.svg") }
         color_off: theme.color_text_meta
         color_paused: xr_paused
         color_waiting: xr_waiting
@@ -235,6 +232,33 @@ script_mod! {
         caption := Label{ padding: 0 text: "" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 7.5} } }
     }
 
+    mod.widgets.XrPairedDevicesBase = #(XrPairedDevices::register_widget(vm))
+    mod.widgets.XrPairedDevices = set_type_default() do mod.widgets.XrPairedDevicesBase {
+        width: Fill height: Fit flow: Down
+        XrSection{ text: "Paired devices" }
+        viewer_rows := FlatList{
+            width: Fill height: Fit spacing: 4
+            scroll_bars +: { show_scroll_y: false }
+            Row := View{
+                width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                XrSwitchText{
+                    viewer_name := XrSwitchTitle{ width: Fill max_lines: 1 text_overflow: Ellipsis }
+                    View{
+                        width: Fill height: Fit flow: Right spacing: 6
+                        kind := XrSwitchHelp{ width: Fit }
+                        link := XrSwitchHelp{ width: Fit }
+                    }
+                }
+                show_on := XrSwitch{}
+                forget := ButtonFlat{
+                    height: 24 padding: Inset{left: 10 right: 10} text: "Forget"
+                    draw_bg +: { color: theme.color_inset border_radius: 12.0 border_size: 0.0 }
+                    draw_text +: { text_style: theme.font_regular{font_size: 9} }
+                }
+            }
+        }
+    }
+
     mod.widgets.XrCaptionButtonBase = #(XrCaptionButton::register_widget(vm))
     mod.widgets.XrCaptionButton = set_type_default() do mod.widgets.XrCaptionButtonBase {
         width: Fit height: Fit
@@ -243,7 +267,7 @@ script_mod! {
             width: Fit height: Fit
             trigger: mod.widgets.Click
             placement: mod.widgets.BottomStart
-            icon := mod.widgets.XrHeadsetIcon{}
+            icon := mod.widgets.XrDeviceIcon{}
             content := View{
                 width: 392 height: Fit flow: Down padding: Inset{left: 16 right: 16 top: 12 bottom: 10}
                 header := View{
@@ -251,14 +275,8 @@ script_mod! {
                     dot := mod.widgets.XrStateDot{}
                     View{
                         width: Fill height: Fit flow: Down spacing: 4
-                        title := Label{ padding: 0 text: "Stream to headset" draw_text +: { color: theme.color_text text_style: theme.font_bold{font_size: 11} } }
+                        title := Label{ padding: 0 text: "Stream to a device" draw_text +: { color: theme.color_text text_style: theme.font_bold{font_size: 11} } }
                         status := Label{ width: Fill padding: 0 text: "" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 9} } }
-                    }
-                    streaming := Toggle{
-                        text: "" width: 36 height: 24 padding: 0 label_walk +: { margin: 0 }
-                        draw_bg +: { size: 22.0 color_active: xr_live }
-                        // the caption button is this switch for assistive technology and automation (one node)
-                        a11y: { hidden: true }
                     }
                 }
                 headset := View{
@@ -266,7 +284,7 @@ script_mod! {
                     chip := RoundedView{
                         width: Fit height: 24 padding: Inset{left: 10 right: 10} align: Align{y: 0.5}
                         show_bg: true draw_bg +: { color: theme.color_inset border_radius: 12.0 border_size: 0.0 }
-                        chip_text := Label{ padding: 0 text: "No headset" draw_text +: { color: theme.color_text text_style: theme.font_regular{font_size: 9} } }
+                        chip_text := Label{ padding: 0 text: "" draw_text +: { color: theme.color_text text_style: theme.font_regular{font_size: 9} } }
                     }
                     // the PIN, beside the headset: a click edits it (a headset showing the PIN typed pairs)
                     pin_tip := mod.widgets.PopoverHover{
@@ -274,16 +292,16 @@ script_mod! {
                         pin_chip := ButtonFlat{
                             height: 24 padding: Inset{left: 10 right: 10}
                             text: "Set PIN"
-                            a11y: { label: "Headset PIN" }
+                            a11y: { label: "Device PIN" }
                             draw_bg +: { color: theme.color_inset border_radius: 12.0 border_size: 0.0 }
                             draw_text +: { text_style: theme.font_regular{font_size: 9} }
                         }
                         content := View{
                             width: Fit height: Fit padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                            Label{ padding: 0 text: "Click to re-pair: type the PIN the headset shows" draw_text +: { color: theme.color_text text_style: theme.font_regular{font_size: 8.5} } }
+                            Label{ padding: 0 text: "Type the PIN shown on the device" draw_text +: { color: theme.color_text text_style: theme.font_regular{font_size: 8.5} } }
                         }
                     }
-                    pin := TextInput{ visible: false width: 64 height: 24 empty_text: "PIN" a11y: { label: "Headset PIN entry" } }
+                    pin := TextInput{ visible: false width: 64 height: 24 empty_text: "PIN" a11y: { label: "Device PIN entry" } }
                     resume := ButtonFlat{
                         visible: false height: 24 padding: Inset{left: 10 right: 10}
                         text: "Resume"
@@ -295,6 +313,7 @@ script_mod! {
                     width: Fill height: Fit
                     inner := View{
                         width: Fill height: Fit flow: Down
+                        paired_devices := mod.widgets.XrPairedDevices{ visible: false }
                         XrDivider{}
                         View{
                             width: Fill height: Fit flow: Right align: Align{y: 0.5}
@@ -318,8 +337,14 @@ script_mod! {
                                 room_scan := XrSwitch{ a11y: { role: "switch" label: "Room scan" } }
                             }
                             XrSwitchRow{
-                                XrSwitchText{ XrSwitchTitle{ text: "Desktop mirror" } XrSwitchHelp{ text: "The headset's view, live" } }
+                                XrSwitchText{ XrSwitchTitle{ text: "Desktop mirror" } XrSwitchHelp{ text: "The device's view, live" } }
                                 mirror := XrSwitch{ a11y: { role: "switch" label: "Desktop mirror" } }
+                            }
+                            // only for an app with a plate of its own to leave out (`XrServer::set_ground_offered`)
+                            ground_row := XrSwitchRow{
+                                visible: false
+                                XrSwitchText{ XrSwitchTitle{ text: "Ground plate" } XrSwitchHelp{ text: "Off: the real table or floor is the ground" } }
+                                ground := XrSwitch{ a11y: { role: "switch" label: "Ground plate" } }
                             }
                         }
                         XrDivider{}
@@ -338,6 +363,10 @@ script_mod! {
                                 tile_late := XrTile{ caption +: { text: "late, lost" } }
                             }
                             stages := mod.widgets.XrStageBars{}
+                            XrSwitchRow{
+                                XrSwitchText{ XrSwitchTitle{ text: "Reframe to the content" } XrSwitchHelp{ text: "A handheld's picture spent on what the app draws" } }
+                                reframe := XrSwitch{ a11y: { role: "switch" label: "Reframe to the content" } }
+                            }
                             spark := mod.widgets.XrSparkline{}
                             spark_legend := Label{ text: "last minute: frames shown (green), motion to photon (amber)" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 7.5} } }
                             raw_toggle := mod.widgets.XrDisclosure{ text: "RAW STATS" }
@@ -368,12 +397,11 @@ const PULSE_HZ: f64 = 8.0;
 /// The panel's widest (narrower when the window is).
 const PANEL_WIDTH: f64 = 392.0;
 
-/// The user's stream settings, kept per app. `None`: the setting is on Auto (`crate::auto`).
+/// The app keeps stream quality, room scan and mirror settings here. An optional setting
+/// uses Auto when it is `None`. The pairing file holds the selected device for LAN opt-in.
+/// The server applies the listener override for this launch when it is installed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct XrStreamSettings {
-    /// The LAN opt-in (`XrServer::set_enabled`), kept as `stream_lan`: off by default, with no
-    /// listener or pairing probe responder until enabled.
-    pub streaming: bool,
     pub room_scan: bool,
     pub kbps: Option<u32>,
     pub hz: u32,
@@ -383,11 +411,14 @@ pub struct XrStreamSettings {
     /// The desktop's mirror of the headset's view repaints from its frames (else only when
     /// the desktop's own UI changes).
     pub mirror: bool,
+    /// The app's own ground plate (a floor, a bed) is drawn for the device; off (the default)
+    /// the real table or floor is the ground (`XrServer::show_ground`).
+    pub ground: bool,
 }
 
 impl Default for XrStreamSettings {
     fn default() -> Self {
-        XrStreamSettings { streaming: false, room_scan: true, kbps: None, hz: 90, aa: None, render_scale_pct: None, view: StreamView::App, mirror: true }
+        XrStreamSettings { room_scan: true, kbps: None, hz: 90, aa: None, render_scale_pct: None, view: StreamView::App, mirror: true, ground: false }
     }
 }
 
@@ -396,8 +427,7 @@ impl XrStreamSettings {
         Some(makepad_widgets::makepad_platform::home::app_data_dir(app)?.join("xr-stream"))
     }
 
-    /// The app's kept settings (defaults where none are kept). Only `stream_lan=on` opts into
-    /// LAN streaming; the legacy `stream` key never does.
+    /// Loads the app's kept settings and uses defaults for missing values.
     pub fn load(app: &str) -> Self {
         let Some(text) = Self::path(app).and_then(|p| std::fs::read_to_string(p).ok()) else { return Self::default() };
         Self::parse(&text)
@@ -409,9 +439,9 @@ impl XrStreamSettings {
             let Some((k, v)) = line.trim().split_once('=') else { continue };
             let v = v.trim();
             match k.trim() {
-                "stream_lan" => s.streaming = v == "on",
                 "room_scan" => s.room_scan = v != "off",
                 "mirror" => s.mirror = v != "off",
+                "ground" => s.ground = v == "on",
                 "kbps" => s.kbps = v.parse().ok(),
                 "hz" => s.hz = v.parse().unwrap_or(s.hz),
                 "aa" => s.aa = StreamAa::from_id(v),
@@ -430,7 +460,7 @@ impl XrStreamSettings {
         }
         let on = |b: bool| if b { "on" } else { "off" };
         let auto = |v: Option<String>| v.unwrap_or_else(|| "auto".to_string());
-        let text = format!("stream_lan={}\nroom_scan={}\nkbps={}\nhz={}\naa={}\nrender_scale={}\nview={}\nmirror={}\n", on(self.streaming), on(self.room_scan), auto(self.kbps.map(|k| k.to_string())), self.hz, auto(self.aa.map(|a| a.id.to_string())), auto(self.render_scale_pct.map(|p| p.to_string())), self.view.label(), on(self.mirror));
+        let text = format!("room_scan={}\nkbps={}\nhz={}\naa={}\nrender_scale={}\nview={}\nmirror={}\nground={}\n", on(self.room_scan), auto(self.kbps.map(|k| k.to_string())), self.hz, auto(self.aa.map(|a| a.id.to_string())), auto(self.render_scale_pct.map(|p| p.to_string())), self.view.label(), on(self.mirror), on(self.ground));
         let _ = std::fs::write(path, text);
     }
 
@@ -443,7 +473,7 @@ impl XrStreamSettings {
         }
     }
 
-    /// To the stream server (live): the manual values, Auto's for the rest, and the switch.
+    /// Applies the user's choices and Auto's current values to the server.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn apply(&self, auto: &XrAuto, server: &XrServer) {
         let a = auto.values;
@@ -452,21 +482,21 @@ impl XrStreamSettings {
         server.set_view(self.view);
         server.set_mirror(self.mirror);
         server.set_room_scan(self.room_scan);
+        server.set_show_ground(self.ground);
         server.set_bitrate_kbps(self.kbps.unwrap_or(a.kbps));
         server.set_refresh_hz(self.hz);
-        server.set_enabled(self.streaming);
     }
 }
 
 /// The stream's state as the icon, the dot and the switch node show it.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum XrLinkState {
-    /// This process serves no XR, or the stream is switched off: nothing runs.
+    /// The server is off.
     #[default]
     Off,
     /// The headset paused it (its menu button): linked, nothing streamed.
     Paused,
-    /// The server listens; no headset is linked (a server: not on the web).
+    /// The server is listening for a device to stream to.
     #[cfg(not(target_arch = "wasm32"))]
     Waiting,
     /// A headset is linked but sends no frames (taken off, asleep): nothing is held for it.
@@ -476,25 +506,18 @@ pub enum XrLinkState {
     Live,
 }
 
-fn link_state(cx: &mut Cx) -> XrLinkState {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let Some(server) = XrServer::get(cx) else { return XrLinkState::Off };
-        if !server.enabled() {
-            return XrLinkState::Off;
-        }
-        if !server.streaming() {
-            return XrLinkState::Paused;
-        }
-        if server.session_eye().is_some() {
-            return if server.frames_flowing() { XrLinkState::Live } else { XrLinkState::Idle };
-        }
-        XrLinkState::Waiting
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = cx;
+#[cfg(not(target_arch = "wasm32"))]
+fn link_state(server: &XrServer, listening: bool, devices: &[XrDevice]) -> XrLinkState {
+    if !listening {
         XrLinkState::Off
+    } else if !devices.iter().any(|d| d.link == XrDeviceLink::Streaming) && server.session_eye().is_none() {
+        XrLinkState::Waiting
+    } else if !server.streaming() {
+        XrLinkState::Paused
+    } else if server.frames_flowing() {
+        XrLinkState::Live
+    } else {
+        XrLinkState::Idle
     }
 }
 
@@ -506,7 +529,7 @@ fn report_value(report: &[f32], i: usize) -> f32 {
 
 /// The caption's headset icon (the popover's anchor), coloured by the stream's state.
 #[derive(Script, ScriptHook, Widget)]
-pub struct XrHeadsetIcon {
+pub struct XrDeviceIcon {
     #[uid]
     uid: WidgetUid,
     #[walk]
@@ -526,7 +549,7 @@ pub struct XrHeadsetIcon {
     state: XrLinkState,
 }
 
-impl XrHeadsetIcon {
+impl XrDeviceIcon {
     fn set_state(&mut self, cx: &mut Cx, state: XrLinkState) {
         if state != self.state {
             self.state = state;
@@ -535,7 +558,7 @@ impl XrHeadsetIcon {
     }
 }
 
-impl Widget for XrHeadsetIcon {
+impl Widget for XrDeviceIcon {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let r = cx.walk_turtle(walk);
         let s = 16.0;
@@ -899,7 +922,7 @@ impl Widget for XrStageBars {
             self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x0, y + 3.0), size: dvec2(width, 8.0) });
             if b.measured {
                 self.draw_bar.color = if b.ms > budget { self.color_over } else if b.ms > budget * 0.8 { self.color_near } else { self.color_ok };
-                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x0, y + 3.0), size: dvec2((width * b.ms / scale).clamp(1.0, width), 8.0) });
+                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x0, y + 3.0), size: dvec2((width * b.ms / scale).clamp(1.0, width.max(1.0)), 8.0) });
             }
             self.draw_bar.color = self.color_budget;
             self.draw_bar.draw_abs(cx, Rect { pos: dvec2(budget_x, y + 1.0), size: dvec2(1.0, 12.0) });
@@ -920,7 +943,7 @@ impl Widget for XrStageBars {
                 if b.measured && b.ms > 0.0 {
                     self.draw_bar.color = if b.ms > budget { self.color_near } else { self.color_ok };
                     let from = x0 + width * (at / total).min(1.0);
-                    self.draw_bar.draw_abs(cx, Rect { pos: dvec2(from, y + 3.0), size: dvec2((width * b.ms / total).clamp(1.0, x0 + width - from), 8.0) });
+                    self.draw_bar.draw_abs(cx, Rect { pos: dvec2(from, y + 3.0), size: dvec2((width * b.ms / total).clamp(1.0, (x0 + width - from).max(1.0)), 8.0) });
                     at += b.ms;
                 }
                 let value = if b.measured { format!("{:.1}", b.ms) } else { "-".to_string() };
@@ -1008,11 +1031,11 @@ fn raw_stats_text(server: &XrServer) -> String {
     let mut lines = Vec::new();
     if let Some(last) = reports.last() {
         let v = |i: usize| report_value(last, i);
-        lines.push(format!("headset {:.0} Hz · shown {:.0}/s · BLANK {:.1}/s · skipped {:.1}/s · received {:.0}/s · battery {}{}", v(r::DISPLAY), v(r::SHOWN), v(r::BLANK), v(r::SKIPPED), v(r::RECEIVED),
+        lines.push(format!("device {:.0} Hz · shown {:.0}/s · BLANK {:.1}/s · skipped {:.1}/s · received {:.0}/s · battery {}{}", v(r::DISPLAY), v(r::SHOWN), v(r::BLANK), v(r::SKIPPED), v(r::RECEIVED),
             if v(r::BATTERY_PCT) < 0.0 { "?".to_string() } else { format!("{:.0}%", v(r::BATTERY_PCT)) }, if v(r::BATTERY_CHARGING) > 0.5 { " charging" } else { "" }));
         lines.push(format!("repeats {:.1}/s: late {:.1} · server skipped {:.1} · queue cap {:.1} · no pose {:.1}", v(r::REPEATS), v(r::REPEAT_LATE), v(r::REPEAT_SERVER), v(r::REPEAT_DROPPED), v(r::REPEAT_NOPOSE)));
         lines.push(format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)));
-        lines.push(format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms · headset GPU {:.1} of {:.1} ms, eye buffers {:.0}%", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS), v(r::CLIENT_GPU_MS), 1000.0 / v(r::DISPLAY).max(1.0), v(r::EYE_SCALE_PCT)));
+        lines.push(format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms · device GPU {:.1} of {:.1} ms, eye buffers {:.0}%", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS), v(r::CLIENT_GPU_MS), 1000.0 / v(r::DISPLAY).max(1.0), v(r::EYE_SCALE_PCT)));
         lines.push(format!("{} · AA {}", server.server_line(), server.aa().name));
         if let Some(h) = server.host_load() {
             lines.push(format!("host app per s: GPU eyes {:.0} ms · desktop windows {:.0} ms · stream passes {:.0} ms{} · UI thread {:.0} ms (draws {:.0}, frame builds {:.0}, submits {:.0})",
@@ -1022,12 +1045,12 @@ fn raw_stats_text(server: &XrServer) -> String {
             format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · lost {:.0} · underruns {:.0} · drift {:+.0} ppm",
                 v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_DRIFT_PPM))
         } else {
-            "audio: the headset hears none".to_string()
+            "audio: the device hears none".to_string()
         });
     } else {
         lines.push(match server.port() {
-            Some(port) if server.enabled() => format!("no headset linked · listening on port {port} · AA {}", server.aa().name),
-            _ if server.enabled() => "no headset linked · binding a port".to_string(),
+            Some(port) if server.enabled() => format!("no device linked · listening on port {port} · AA {}", server.aa().name),
+            _ if server.enabled() => "no device linked · binding a port".to_string(),
             _ => "switched off: no port, no pairing probe answered, nothing drawn, encoded or sent".to_string(),
         });
         let line = server.server_line();
@@ -1154,6 +1177,99 @@ impl XrStatsView {
     }
 }
 
+/// Each paired device has its own switch and Forget button.
+#[derive(Script, ScriptHook, Widget)]
+pub struct XrPairedDevices {
+    #[deref]
+    view: View,
+    #[rust]
+    rows: Vec<WidgetRef>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, PartialEq)]
+struct DevicePoint(String);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl XrPairedDevices {
+    fn set_devices(&mut self, cx: &mut Cx, devices: &[XrDevice]) {
+        let list = self.view.child_by_path(ids!(viewer_rows));
+        let Some(mut list) = list.borrow_mut::<FlatList>() else { return };
+        self.rows.clear();
+        for device in devices {
+            let Some(row) = list.item(cx, LiveId::from_str(&device.point_hex), live_id!(Row)) else { continue };
+            Self::bind_row(cx, &row, device);
+            self.rows.push(row);
+        }
+        list.items.retain_visible();
+        drop(list);
+        self.view.set_visible(cx, !devices.is_empty());
+        self.view.redraw(cx);
+    }
+
+    fn bind_row(cx: &mut Cx, row: &WidgetRef, device: &XrDevice) {
+        let name = row.child_by_path(ids!(viewer_name)).as_label();
+        let mut switch = row.child_by_path(ids!(show_on));
+        if switch.action_data().is_none() || name.text() != device.name {
+            name.set_text(cx, &device.name);
+            let label = format!("Show on {}", device.name);
+            cx.with_vm(|vm| {
+                let source = switch.script_source();
+                let script = script! { __script_source__{a11y: {role: "switch" label: #(label)}} };
+                let value = vm.eval_with_source(script, source);
+                switch.script_apply(vm, &Apply::New, &mut Scope::empty(), value);
+            });
+            switch.set_action_data(DevicePoint(device.point_hex.clone()));
+            row.child_by_path(ids!(forget)).set_action_data(DevicePoint(device.point_hex.clone()));
+        }
+        let kind = match device.kind {
+            Some(XrDeviceKind::Headset) => "Quest",
+            Some(XrDeviceKind::Handheld) => {
+                let name = device.name.to_ascii_lowercase();
+                if name.contains("ipad") {
+                    "iPad"
+                } else if name.contains("iphone") {
+                    "iPhone"
+                } else {
+                    "Handheld"
+                }
+            }
+            None => "",
+        };
+        let label = row.child_by_path(ids!(kind));
+        label.set_visible(cx, !kind.is_empty());
+        label.as_label().set_text(cx, kind);
+        let elsewhere = device.elsewhere.as_deref().map(crate::server::uppercase_first);
+        let link = match device.link {
+            XrDeviceLink::Streaming => "Streaming",
+            XrDeviceLink::Standby => "Standby",
+            XrDeviceLink::Offline => elsewhere.as_deref().unwrap_or("Offline"),
+        };
+        row.child_by_path(ids!(link)).as_label().set_text(cx, link);
+        let toggle = switch.as_check_box();
+        if toggle.active(cx) != device.on {
+            toggle.set_active(cx, device.on, Animate::No);
+        }
+    }
+}
+
+impl Widget for XrPairedDevices {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if item.borrow::<FlatList>().is_some() {
+                for row in &self.rows {
+                    row.draw_all(cx, scope);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
 /// The caption control (see the module). `app`: the name the settings are kept under.
 #[derive(Script, ScriptHook, Widget)]
 pub struct XrCaptionButton {
@@ -1180,8 +1296,7 @@ pub struct XrCaptionButton {
     #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     verdict: VerdictFilter,
-    /// The once-a-second tick: only while the stream is on or the panel is open (off and
-    /// closed, nothing of the stream wakes the app).
+    /// The panel ticks once a second while open or while the server listens.
     #[rust]
     timer: Timer,
     /// The state dot's pulse while streaming and open: a few steps a second on its own timer (the
@@ -1191,6 +1306,17 @@ pub struct XrCaptionButton {
     /// The PIN's field shows (in place of its chip).
     #[rust]
     editing_pin: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    devices: Vec<XrDevice>,
+    /// Enabling runs on the server's worker. Open the panel if it listens with no selection.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    open_on_listen: bool,
+    /// A PIN can restart listening before the caption restores the device it turned off.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    caption_off_device: Option<String>,
     #[rust]
     state: XrLinkState,
     /// The state line (the status label and the switch node's value).
@@ -1203,8 +1329,7 @@ pub struct XrCaptionButton {
 }
 
 impl XrCaptionButton {
-    /// Once, at the first event or draw: in a process that serves XR, the kept settings (the
-    /// launch's switch over the kept one) to the server and the tick.
+    /// Installs the server and applies the app's quality, room scan and mirror settings.
     fn start(&mut self, cx: &mut Cx) {
         if self.checked {
             return;
@@ -1214,13 +1339,11 @@ impl XrCaptionButton {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(server) = XrServer::install(cx, &self.app) else { return };
-            let mut s = XrStreamSettings::load(&self.app);
-            if let Some(on) = crate::server::launch_enabled() {
-                s.streaming = on;
-            }
+            let s = XrStreamSettings::load(&self.app);
             s.apply(&self.auto, &server);
             self.streaming_seen = server.streaming_changes();
             self.settings = Some(s);
+            self.sync_link(cx);
             self.refresh(cx);
         }
         #[cfg(target_arch = "wasm32")]
@@ -1237,7 +1360,7 @@ impl XrCaptionButton {
 
     /// The tick runs while it has something to follow.
     fn arm_timer(&mut self, cx: &mut Cx) {
-        let want = self.settings.as_ref().is_some_and(|s| s.streaming) || self.open();
+        let want = self.state != XrLinkState::Off || self.open();
         if want && self.timer.is_empty() {
             self.timer = cx.start_interval(1.0);
         } else if !want && !self.timer.is_empty() {
@@ -1249,9 +1372,16 @@ impl XrCaptionButton {
     /// The controls to the settings (when the panel opens and after a change from elsewhere).
     fn show_settings(&self, cx: &mut Cx) {
         let Some(s) = &self.settings else { return };
-        self.content(ids!(streaming)).as_check_box().set_active(cx, s.streaming, Animate::No);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.show_devices(cx);
         self.content(ids!(room_scan)).as_check_box().set_active(cx, s.room_scan, Animate::No);
         self.content(ids!(mirror)).as_check_box().set_active(cx, s.mirror, Animate::No);
+        self.content(ids!(ground)).as_check_box().set_active(cx, s.ground, Animate::No);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let on = XrServer::get(cx).is_none_or(|s| s.reframe());
+            self.content(ids!(reframe)).as_check_box().set_active(cx, on, Animate::No);
+        }
         // the dropdowns' first entry is Auto
         let pick = |i: Option<usize>| i.map_or(0, |i| i + 1);
         let bitrate = pick(s.kbps.and_then(|kbps| STREAM_BITRATES_KBPS.iter().position(|k| *k == kbps)));
@@ -1273,12 +1403,15 @@ impl XrCaptionButton {
     /// The state line: off, paused, waiting, or streaming with its rate and latency.
     fn status_line(&self, cx: &mut Cx) -> String {
         match self.state {
-            XrLinkState::Off => "Off · turn the switch on, then open the headset app (nothing listens until then)".to_string(),
-            XrLinkState::Paused => "Paused from the headset · linked, nothing streamed".to_string(),
+            XrLinkState::Off => "Off".to_string(),
+            XrLinkState::Paused => "Paused from the device · linked, nothing streamed".to_string(),
             #[cfg(not(target_arch = "wasm32"))]
-            XrLinkState::Waiting => "Waiting for a headset · open XR Remote on it".to_string(),
+            XrLinkState::Waiting => match self.devices.iter().find(|d| d.on && d.link == XrDeviceLink::Offline) {
+                Some(device) => format!("Waiting · {} is {}", device.name, device.elsewhere.as_deref().unwrap_or("offline")),
+                None => "Waiting for a device".to_string(),
+            },
             #[cfg(not(target_arch = "wasm32"))]
-            XrLinkState::Idle => "Linked · the headset is idle (not worn or asleep)".to_string(),
+            XrLinkState::Idle => "Linked · the device is idle (put down, not worn or asleep)".to_string(),
             XrLinkState::Live => {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(last) = XrServer::get(cx).and_then(|s| s.headset_reports().pop()) {
@@ -1296,33 +1429,21 @@ impl XrCaptionButton {
         }
     }
 
-    /// The headset chip: the headset (paired, linked, or the one the PIN found), its battery and
-    /// link, in a few words.
+    /// The linked device's name and battery status.
     fn headset_chip(&self, cx: &mut Cx) -> String {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use makepad_desk_link::xr::report as r;
             let Some(server) = XrServer::get(cx) else { return String::new() };
-            let Some(p) = server.pairing() else { return String::new() };
-            let live = server.live_headset();
-            if p.clash {
-                return "Two headsets show this PIN".to_string();
-            }
-            let name = live.as_ref().map(|l| l.name.clone()).or_else(|| p.paired.as_ref().map(|h| h.name.clone()));
-            let Some(name) = name else {
-                return match &p.matched {
-                    Some(h) => format!("{} · linking", h.name),
-                    None => "No headset".to_string(),
-                };
-            };
-            let mut parts = vec![name];
-            if let Some(last) = server.headset_reports().pop().filter(|_| live.is_some()) {
+            let Some(live) = server.live_headset() else { return String::new() };
+            let mut parts = vec![live.name];
+            if let Some(last) = server.headset_reports().pop() {
                 let pct = report_value(&last, r::BATTERY_PCT);
                 if pct >= 0.0 {
                     parts.push(format!("{pct:.0}%{}", if report_value(&last, r::BATTERY_CHARGING) > 0.5 { " charging" } else { "" }));
                 }
             }
-            parts.push(if live.is_some() { "linked".to_string() } else { "not linked".to_string() });
+            parts.push("linked".to_string());
             parts.join(" · ")
         }
         #[cfg(target_arch = "wasm32")]
@@ -1332,7 +1453,7 @@ impl XrCaptionButton {
         }
     }
 
-    /// The PIN chip: the PIN typed here (the paired headset's), or none yet.
+    /// The PIN chip shows the typed PIN until a viewer pairs.
     fn pin_chip(&self, cx: &mut Cx) -> String {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(p) = XrServer::get(cx).and_then(|s| s.pairing()).filter(|p| !p.pin.is_empty()) {
@@ -1399,23 +1520,49 @@ impl XrCaptionButton {
         self.refresh(cx);
     }
 
-    /// The stream switch (the panel's, the switch node's): kept, applied, shown.
+    /// The caption switch restores the remembered device or lets the user choose one.
     pub fn set_streaming(&mut self, cx: &mut Cx, on: bool) {
-        if self.settings.as_ref().is_some_and(|s| s.streaming == on) {
-            return;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(server) = XrServer::get(cx) {
+            if !on {
+                if let Some(device) = server.devices().into_iter().find(|d| d.on) {
+                    self.caption_off_device = Some(device.point_hex);
+                }
+            }
+            self.open_on_listen = on;
+            server.set_enabled(on);
+            self.sync_link(cx);
+            self.refresh(cx);
         }
-        makepad_widgets::log!("xr panel: stream to headset {}", if on { "on" } else { "off" });
-        self.change(cx, |s| s.streaming = on);
-        self.content(ids!(streaming)).as_check_box().set_active(cx, on, Animate::Yes);
+        #[cfg(target_arch = "wasm32")]
+        let _ = (cx, on);
     }
 
+    /// The server listens (the caption's switch node is on).
+    fn listening(&self) -> bool {
+        self.state != XrLinkState::Off
+    }
+
+    /// A device is selected to get the view.
     pub fn streaming(&self) -> bool {
-        self.settings.as_ref().is_some_and(|s| s.streaming)
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.devices.iter().any(|d| d.on) }
+        #[cfg(target_arch = "wasm32")]
+        { false }
     }
 
     fn settings_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if let Some(on) = self.content(ids!(streaming)).as_check_box().changed(actions) {
-            self.set_streaming(cx, on);
+        #[cfg(not(target_arch = "wasm32"))]
+        for action in actions.iter().filter_map(|a| a.as_widget_action()) {
+            let Some(DevicePoint(point_hex)) = action.data.as_deref().and_then(|d| d.downcast_ref()) else { continue };
+            let Some(server) = XrServer::get(cx) else { continue };
+            if let CheckBoxAction::Change(on) = action.cast() {
+                server.set_device_on(point_hex, on);
+                // Keep both switches on their published values until the server signals the change.
+                self.show_devices(cx);
+            } else if matches!(action.cast(), ButtonAction::Clicked(_)) {
+                server.forget_viewer(point_hex);
+            }
         }
         if self.content(ids!(resume)).as_button().clicked(actions) {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1446,6 +1593,16 @@ impl XrCaptionButton {
         if let Some(on) = self.content(ids!(mirror)).as_check_box().changed(actions) {
             self.change(cx, |s| s.mirror = on);
         }
+        if let Some(on) = self.content(ids!(ground)).as_check_box().changed(actions) {
+            self.change(cx, |s| s.ground = on);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(on) = self.content(ids!(reframe)).as_check_box().changed(actions) {
+            if let Some(server) = XrServer::get(cx) {
+                server.set_reframe(on);
+                makepad_widgets::log!("xr panel: reframing {}", if on { "on" } else { "off" });
+            }
+        }
         if let Some(k) = self.content(ids!(bitrate)).as_drop_down().changed(actions) {
             let kbps = k.checked_sub(1).and_then(|k| STREAM_BITRATES_KBPS.get(k).copied());
             self.change(cx, |s| s.kbps = kbps);
@@ -1468,8 +1625,7 @@ impl XrCaptionButton {
                 self.change(cx, |s| s.view = view);
             }
         }
-        // the PIN: any edit unpairs the paired headset (the headset is told, the link drops,
-        // both forget); five digits then look for the headset showing them
+        // The server matches a viewer once all five digits have been entered.
         if let Some(text) = self.content(ids!(pin)).as_text_input().changed(actions) {
             let pin: String = text.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
             if pin != text {
@@ -1487,14 +1643,55 @@ impl XrCaptionButton {
         }
     }
 
-    /// The state now: the icon, the dot and the state line (and the tick armed for it).
-    fn refresh(&mut self, cx: &mut Cx) {
-        let state = link_state(cx);
-        self.state = state;
-        if let Some(mut icon) = self.popover.child_by_path(ids!(icon)).borrow_mut::<XrHeadsetIcon>() {
-            icon.set_state(cx, state);
+    /// Reads the published switches and links together for the caption and its rows.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_link(&mut self, cx: &mut Cx) -> bool {
+        let Some(server) = XrServer::get(cx) else { return false };
+        let listening = server.enabled();
+        let devices = server.devices();
+        let state = link_state(&server, listening, &devices);
+        let rows_changed = self.devices != devices;
+        let changed = rows_changed || self.state != state;
+        if rows_changed {
+            self.devices = devices;
+            if self.streaming() || !self.devices.iter().any(|d| Some(&d.point_hex) == self.caption_off_device.as_ref()) {
+                self.caption_off_device = None;
+            }
+            if self.open() {
+                self.show_devices(cx);
+            }
         }
-        self.status = self.status_line(cx);
+        self.state = state;
+        if changed {
+            self.popover.redraw(cx);
+        }
+        if listening && self.open_on_listen {
+            self.open_on_listen = false;
+            if self.caption_off_device.is_none() && !self.streaming() && !self.open() {
+                self.popover.as_popover().open(cx);
+                self.show_settings(cx);
+                return true;
+            }
+        }
+        changed
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn show_devices(&self, cx: &mut Cx) {
+        if let Some(mut rows) = self.content(ids!(paired_devices)).borrow_mut::<XrPairedDevices>() {
+            rows.set_devices(cx, &self.devices);
+        }
+    }
+
+    fn refresh(&mut self, cx: &mut Cx) {
+        if let Some(mut icon) = self.popover.child_by_path(ids!(icon)).borrow_mut::<XrDeviceIcon>() {
+            icon.set_state(cx, self.state);
+        }
+        let status = self.status_line(cx);
+        if self.status != status {
+            self.status = status;
+            self.popover.redraw(cx);
+        }
         self.arm_timer(cx);
         if self.open() {
             self.fill(cx);
@@ -1509,11 +1706,16 @@ impl XrCaptionButton {
         }
         self.content(ids!(status)).as_label().set_text(cx, &self.status);
         let chip = self.headset_chip(cx);
+        self.content(ids!(chip)).set_visible(cx, !chip.is_empty());
         self.content(ids!(chip_text)).as_label().set_text(cx, &chip);
         let pin = self.pin_chip(cx);
         self.content(ids!(pin_chip)).as_button().set_text(cx, &pin);
-        self.content(ids!(headset)).set_visible(cx, self.state != XrLinkState::Off);
         self.content(ids!(resume)).set_visible(cx, self.state == XrLinkState::Paused);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let offered = XrServer::get(cx).is_some_and(|s| s.ground_offered());
+            self.content(ids!(ground_row)).set_visible(cx, offered);
+        }
         let auto = self.auto_line();
         self.content(ids!(auto_note)).as_label().set_text(cx, auto.lines().next().unwrap_or(""));
         if self.content(ids!(diagnostics)).visible() {
@@ -1577,12 +1779,12 @@ impl XrCaptionButton {
     fn tick(&mut self, cx: &mut Cx) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(server) = XrServer::get(cx) {
-            // the headset's menu button paused or resumed the stream: shown, not kept (the
-            // switch stays the user's)
+            self.sync_link(cx);
+            // The headset's menu button can pause or resume the selected device's stream.
             let changes = server.streaming_changes();
             if changes != self.streaming_seen {
                 self.streaming_seen = changes;
-                makepad_widgets::log!("xr panel: the headset {} the stream", if server.streaming() { "resumed" } else { "paused" });
+                makepad_widgets::log!("xr panel: the device {} the stream", if server.streaming() { "resumed" } else { "paused" });
             }
             match evidence(&server) {
                 Some(e) => {
@@ -1641,6 +1843,10 @@ impl Widget for XrCaptionButton {
         if self.settings.is_none() {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(event, Event::Signal) && self.sync_link(cx) {
+            self.refresh(cx);
+        }
         if self.timer.is_event(event).is_some() {
             self.tick(cx);
         }
@@ -1672,9 +1878,9 @@ impl Widget for XrCaptionButton {
 
     fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
         node.role = a11y_tree::Role::Switch;
-        makepad_platform::a11y::set_string(&mut node.name, "Stream to headset");
+        makepad_platform::a11y::set_string(&mut node.name, "Stream to a device");
         makepad_platform::a11y::set_string(&mut node.value, &self.status);
-        node.toggle = if self.streaming() { a11y_tree::Toggle::On } else { a11y_tree::Toggle::Off };
+        node.toggle = if self.listening() { a11y_tree::Toggle::On } else { a11y_tree::Toggle::Off };
         node.actions = a11y_tree::Actions::TOGGLE | a11y_tree::Actions::SELECT | a11y_tree::Actions::SET_VALUE | a11y_tree::Actions::SHOW_MENU | a11y_tree::Actions::FOCUS;
         node.states = a11y_tree::States::FOCUSABLE | a11y_tree::States::HAS_POPUP;
         node.states.set(a11y_tree::States::EXPANDED, self.open());
@@ -1686,7 +1892,7 @@ impl Widget for XrCaptionButton {
             return ActionResult::Disabled;
         }
         let on = if action.action == A::TOGGLE {
-            !self.streaming()
+            !self.listening()
         } else if action.action == A::SELECT {
             true
         } else if action.action == A::SET_VALUE {
@@ -1710,21 +1916,5 @@ impl Widget for XrCaptionButton {
         self.set_streaming(cx, on);
         self.popover.redraw(cx);
         ActionResult::Handled
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::XrStreamSettings;
-
-    #[test]
-    fn streaming_requires_lan_opt_in() {
-        assert!(!XrStreamSettings::default().streaming);
-        for text in ["", "stream=on\n", "stream=on\nstream_lan=off\n", "stream_lan=off\nstream=on\n", "stream_lan=\n", "stream_lan=invalid\n"] {
-            assert!(!XrStreamSettings::parse(text).streaming, "{text:?}");
-        }
-        for text in ["stream_lan=on\n", "stream=off\nstream_lan=on\n", "stream_lan=on\nstream=off\n"] {
-            assert!(XrStreamSettings::parse(text).streaming, "{text:?}");
-        }
     }
 }

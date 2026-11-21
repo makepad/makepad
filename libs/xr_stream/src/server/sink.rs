@@ -3,14 +3,14 @@
 //! desktop's mirror is fed:
 //!
 //! ```text
-//! window pass   the app's own UI, and a mirror (the left eye, letterboxed) on its own clock
+//! window pass   the app's own UI, and a mirror (the first view, letterboxed) on its own clock
 //! picture       w/4 x 9h/4 shared BGRA8, NV12 packed (draw_nv12_pack): per eye column its colour
 //!  (no parent,  (luma rows 0..h, chroma rows), below it a band h/2 tall: coverage (left half)
 //!   paints      and inverse depth (right half) at half resolution in the luma, neutral chroma;
 //!   after XR)   `w x h` the eyes' encoded (foveated) columns
 //! foveation     each eye's colour and inverse depth warped into its encoded column (fewer pixels
 //!               towards the view's edges, `makepad_desk_link::xr::Fovea`), painted before the pack
-//! XR pass       both eyes side by side into the app's colour + depth textures (paints first)
+//! XR pass       its views side by side into the app's colour + depth textures (paints first)
 //! ```
 //!
 //! The picture has three slots: one is never drawn into while its encode reads it. A frame is
@@ -20,10 +20,10 @@
 //! Without room the app renders nothing more until the encoder or the headset catches up (the
 //! server's wake signals): the stream never queues stale pictures.
 
-use super::pipeline::{Picture, RenderedPose};
+use super::pipeline::{Layout, Picture, RenderedPose};
 use super::external::ExternalFrame;
 use super::{ServerShared, XrServer};
-use makepad_desk_link::xr::{Fovea, DEPTH_NEAR_M};
+use makepad_desk_link::xr::DEPTH_NEAR_M;
 use makepad_widgets::makepad_draw::render_target::{Nv12Target, RenderTarget, RenderTargetFormat};
 use makepad_widgets::makepad_draw::shader::draw_fxaa::DrawFxaa;
 use makepad_widgets::makepad_draw::shader::draw_nv12_pack::{DrawNv12Chroma, DrawNv12Luma};
@@ -270,7 +270,7 @@ script_mod! {
 pub struct DrawXrBand {
     #[deref]
     pub draw_super: DrawQuad,
-    /// The foveated columns' size (both eyes side by side, px).
+    /// The foveated picture's size (its views side by side, px).
     #[live]
     pub extent: Vec2f,
     /// x: one eye's encoded column width (px).
@@ -318,11 +318,11 @@ use makepad_widgets::makepad_platform::makepad_hal::{XR_EYE_FAR_M as EYE_FAR, XR
 const DEFAULT_FOCUS_M: f32 = 1.0;
 
 struct Slot {
-    /// The packed picture (`nv12` off): BGRA8 texels holding the NV12 bytes, both eye columns.
+    /// The packed picture (`nv12` off): BGRA8 texels holding the NV12 bytes of its views side by side.
     target: RenderTarget,
     /// Its texture as the encoder's surface, once exported.
     handle: Option<(SurfaceHandle, Texture)>,
-    /// `nv12` on: an NV12 picture per tile (eye column), rendered into its planes, each the
+    /// `nv12` on: an NV12 picture per tile, rendered into its planes, each the
     /// encoder's surface of its tile.
     planes: Vec<(Nv12Target, Option<(SurfaceHandle, Texture)>)>,
     /// The picture it holds (pixels; the texture is its packed NV12 texels).
@@ -342,6 +342,7 @@ impl Drop for Held {
 /// A frame packed this draw, handed on once submitted.
 struct Packed {
     slot: usize,
+    generation: u64,
     display_ns: u64,
     built_at: Instant,
     asked: Option<Instant>,
@@ -424,7 +425,7 @@ impl XrPack {
         &self.server.as_ref().unwrap().shared
     }
 
-    /// After the app drew its XR pass (its colour and depth, eyes side by side): a new XR frame
+    /// After the app drew its XR pass (its colour and depth, its views side by side): a new XR frame
     /// is packed into the stream picture.
     fn pack(&mut self, cx: &mut Cx2d, color: &Texture, depth: &Texture, linear: bool) {
         self.pack_images(cx, color, depth, linear, None);
@@ -434,6 +435,7 @@ impl XrPack {
         self.packed.is_none() && (self.slots.is_empty() || self.slots.iter().any(|s| !s.busy.load(Ordering::Acquire))) && self.shared().streaming() && self.shared().room()
     }
 
+    /// External renderers supply two views. The hello refuses a one-view client on these hosts.
     pub(super) fn pack_external(&mut self, cx: &mut Cx2d, frame: &ExternalFrame<'_>) -> Result<bool, String> {
         if !frame.focus_m.is_finite() || frame.focus_m <= 0.0 { return Err("invalid external XR focus distance".into()); }
         for eye in &frame.eyes {
@@ -463,17 +465,21 @@ impl XrPack {
         }
         let shared = self.shared().clone();
         self.counts.draws += 1;
+        let session = shared.session_layout();
         // the desktop's mirrors read the XR pass (on their own clock, `XrMirrorClock`); the
         // desktop renders nothing for the headset's frames (the platform paints no window for them)
+        // (the picture's place in the device's view: the eyes this frame was rendered with)
+        let drawn = cx.cx.xr_frame_wire().and_then(|(_, w)| makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&w, 1).next()).map(|f| f.eyes[0].fov);
+        let part = shared.mirror_part(drawn);
         let source = cx.cx.global::<crate::mirror::XrMirrorSource>();
-        if external.is_none() {
+        if let (None, Some((_, layout))) = (external, session) {
             source.color = Some(color.clone());
             source.linear = linear;
+            source.eye = layout.eye;
+            source.views = layout.views;
+            source.part = part;
         }
         source.mirror = external.is_none() && shared.mirror.load(Ordering::Acquire);
-        if let Some(eye) = shared.session_eye() {
-            source.eye = eye;
-        }
         self.counts.desktop_now = cx.cx.window_paints();
         self.counts.frozen += u32::from(shared.interaction.load(Ordering::Acquire));
         self.host_load(cx.cx, &shared);
@@ -506,7 +512,7 @@ impl XrPack {
         let rendered = external.map(|f| RenderedPose { seq: f.tracking.seq, eyes: [f.eyes[0].rendered, f.eyes[1].rendered], arrived: f.tracking.arrived });
         let focus_m = external.map_or(DEFAULT_FOCUS_M, |f| f.focus_m);
         let fxaa_on = external.is_none() && aa.fxaa;
-        let Some(eye) = shared.session_eye() else { return };
+        let Some((generation, layout)) = session else { return };
         if display_ns == self.last_display_ns {
             return;
         }
@@ -525,31 +531,31 @@ impl XrPack {
         };
         self.next = (slot + 1) % SLOTS;
         // the picture: each eye's encoded column (foveated), its colour over its band
-        let (fovea, [ew, eh]) = shared.session_fovea().unwrap_or((Fovea::OFF, eye));
-        let (w, h) = (ew * 2, eh * 3 / 2);
+        let Layout { views, eye, fovea, encoded: [ew, eh], size: [w, h], .. } = layout;
         let s = &mut self.slots[slot];
         if !self.nv12 && s.target.ensure(cx.cx, (w / 4, h + h / 2), RenderTargetFormat::SharedBgra8) {
             s.handle = None;
         }
-        s.picture = [w as u32, h as u32];
+        s.picture = [w, h];
         // the colour and depth as the XR pass rendered them: `ss` of their pixels per eye
         // pixel (a supersampled pass; the same rounding as the pass's size)
         let ss = cx.cx.xr_supersample() as f64;
         let (sw, sh) = ((eye[0] as f64 * ss).round() as u32, (eye[1] as f64 * ss).round() as u32);
-        let extent = vec2((2 * sw) as f32, sh as f32);
+        let source_w = views * sw;
+        let extent = vec2(source_w as f32, sh as f32);
         // FXAA (a mode with it): the eyes anti-aliased into a target of their size, each eye
         // on its own; the foveation reads that (it paints after the XR pass, before the pack)
         let fxaa = if fxaa_on {
             let target = self.fxaa.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_fxaa"));
             // linear light stays linear (a float target) until the foveation encodes it
-            target.ensure(cx.cx, (2 * sw, sh), if linear { RenderTargetFormat::Rgba16f } else { RenderTargetFormat::Bgra8 });
+            target.ensure(cx.cx, (source_w, sh), if linear { RenderTargetFormat::Rgba16f } else { RenderTargetFormat::Bgra8 });
             target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
             self.draw_fxaa.draw_vars.set_texture(0, color);
             self.draw_fxaa.extent = extent;
-            self.draw_fxaa.split = 2.0;
+            self.draw_fxaa.split = views as f32;
             self.draw_fxaa.subpix = 0.5;
             self.draw_fxaa.linear = if linear { 1.0 } else { 0.0 };
-            self.draw_fxaa.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((2 * sw) as f64, sh as f64) });
+            self.draw_fxaa.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(source_w as f64, sh as f64) });
             target.end(cx);
             Some(target.texture.clone())
         } else {
@@ -560,15 +566,16 @@ impl XrPack {
         // the eyes into their encoded columns, warped by the frame's own fields of view (the
         // headset unwarps by the ones the picture's head carries: the same)
         let fovs = if let Some(f) = external { [f.eyes[0].rendered.fov, f.eyes[1].rendered.fov] } else { match cx.cx.xr_frame_wire().and_then(|(_, w)| makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&w, 1).next()) {
+            Some(f) if views == 1 => [f.eyes[0].fov; 2],
             Some(f) => [f.eyes[0].fov, f.eyes[1].fov],
             None => [[-0.785, 0.785, 0.785, -0.785]; 2],
         }};
         let [fov_color, fov_depth] = self.foveated.get_or_insert_with(|| [RenderTarget::new(cx.cx, "xr_stream_foveated"), RenderTarget::new(cx.cx, "xr_stream_foveated_depth")]);
         let (n, f) = (EYE_NEAR, EYE_FAR);
         for (mode, target) in [(0.0f32, &mut *fov_color), (1.0, &mut *fov_depth)] {
-            target.ensure(cx.cx, (2 * ew, eh), RenderTargetFormat::Bgra8);
+            target.ensure(cx.cx, (w, eh), RenderTargetFormat::Bgra8);
             target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
-            for e in 0..2 {
+            for e in 0..views as usize {
                 let [fx, fy] = fovea.axes(fovs[e]);
                 let d = &mut self.draw_foveate;
                 let (color, depth, extent, column, clip, opaque) = if let Some(frame) = external {
@@ -602,13 +609,13 @@ impl XrPack {
             target.end(cx);
         }
         let (fov_color, fov_depth) = (fov_color.texture.clone(), fov_depth.texture.clone());
-        let fextent = vec2((2 * ew) as f32, eh as f32);
+        let fextent = vec2(w as f32, eh as f32);
         if self.nv12 {
-            self.pack_planes(cx, slot, &fov_color, &fov_depth, [ew, eh], fextent);
+            self.pack_planes(cx, slot, &fov_color, &fov_depth, layout, fextent);
             self.chain_foveation(cx, slot, fxaa_on);
             self.slots[slot].busy.store(true, Ordering::Release);
             self.counts.packed += 1;
-            self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
+            self.packed = Some(Packed { slot, generation, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
             if let Some(signal) = &self.signal {
                 signal.set_for_hooks();
             }
@@ -648,7 +655,8 @@ impl XrPack {
                 let [fx, fy] = fovea.axes(fov);
                 vec2(fx.to_encoded(-l / (r - l)), fy.to_encoded(u / (u - d)))
             };
-            let (al, ar) = (axis(fovs[0]), axis(fovs[1]));
+            let al = axis(fovs[0]);
+            let ar = if views == 1 { al } else { axis(fovs[1]) };
             self.draw_test.eye = vec2(ew as f32, eh as f32);
             self.draw_test.axis = vec4(al.x, al.y, ar.x, ar.y);
             for (mode, y, rows) in [(0.0, 0, eh), (1.0, h, eh / 2), (2.0, eh, h - eh)] {
@@ -664,7 +672,7 @@ impl XrPack {
         self.chain_foveation_to(cx, first, fxaa_on);
         self.slots[slot].busy.store(true, Ordering::Release);
         self.counts.packed += 1;
-        self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
+        self.packed = Some(Packed { slot, generation, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
         if let Some(signal) = &self.signal {
             signal.set_for_hooks();
         }
@@ -689,16 +697,14 @@ impl XrPack {
         }
     }
 
-    /// The foveated picture (`color` / `depth`: both eyes' encoded columns, `extent` px; eyes
-    /// `eye` px encoded) into the slot's NV12 textures, a tile (eye column) each: per tile a luma
+    /// The foveated picture (`color` / `depth`: its views side by side, `extent` px)
+    /// into the slot's NV12 textures, one per encoder tile: per tile a luma
     /// pass (the colour's luma rows, then the band's coverage and inverse depth) and a chroma
     /// pass (the colour's U V, then the band's neutral chroma). The passes paint in a chain
     /// after the foveation's (`chain_foveation`).
-    fn pack_planes(&mut self, cx: &mut Cx2d, slot: usize, color: &Texture, depth: &Texture, eye: [u32; 2], extent: Vec2f) {
-        let [ew, eh] = eye;
-        let h = eh * 3 / 2;
-        let tiles = self.shared().session_tiles().max(1);
-        let tw = ew * 2 / tiles;
+    fn pack_planes(&mut self, cx: &mut Cx2d, slot: usize, color: &Texture, depth: &Texture, layout: Layout, extent: Vec2f) {
+        let Layout { encoded: [ew, eh], size: [w, h], tiles, .. } = layout;
+        let tw = w / tiles;
         let s = &mut self.slots[slot];
         while s.planes.len() < tiles as usize {
             s.planes.push((Nv12Target::new(cx.cx, "xr_stream_picture_nv12"), None));
@@ -862,6 +868,7 @@ impl XrPack {
             }
         };
         let picture = Picture {
+            generation: p.generation,
             surfaces,
             ready,
             held: Box::new(Held(busy.clone())),
@@ -871,7 +878,7 @@ impl XrPack {
             focus_m: p.focus_m,
             rendered: p.rendered,
         };
-        // dropped (and the slot freed) when no headset streams
+        // dropped (and the slot freed) if its session ended
         if self.shared().submit(picture) {
             self.counts.handed += 1;
         }

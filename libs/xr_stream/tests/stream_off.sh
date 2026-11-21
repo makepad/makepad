@@ -2,10 +2,10 @@
 # stream_off.sh [package] [package dir] [binary]: the XR stream switch is a real off, checked from outside the app.
 # Linux (x86_64 node), from the root of a makepad checkout with apps/commercial: builds the app (default
 # makepad-sandbox) and the remote client, launches the app hidden with a fresh data folder, and drives its `ui`
-# switch node ("Stream to headset"):
+# switch node ("Stream to a device"):
 #   on      the app listens on a TCP port and answers the pairing probe (xr-host-listen, xr-pair-answer threads)
-#   off     the port is closed (a connect is refused), every xr-host-*/xr-pair-* thread is gone, the switch is
-#           kept (stream_lan=off); on again a new port listens with the same pairing (the server's instance id)
+#   off     the port is closed (a connect is refused), every xr-host-*/xr-pair-* thread is gone, no device is
+#           left on in the pairing file; on again a new port listens with the same pairing (the server's instance id)
 #   live    with the server's headset on a loop (MAKEPAD_XR_REMOTE_SELFTEST=1: poses, pictures, encodes, reports)
 #           the session's picture and encode threads run; off, they end with the listener
 #   away    a headset that streams, goes idle (no poses) and leaves: the desktop UI answers a UI action
@@ -60,7 +60,7 @@ stop_app() {
   wait "$app_pid" 2>/dev/null
   app_pid=""
 }
-SWITCH='role=switch name="Stream to headset"'
+SWITCH='role=switch name="Stream to a device"'
 ui() { "$R" app "$app_pid" ui "$@"; }
 # the app's TCP listening ports, its UDP ports, its XR thread names
 tcp_ports() { ss -ltnpH 2>/dev/null | grep "pid=$app_pid," | awk '{print $4}' | sed 's/.*://' | sort -u | tr '\n' ' '; }
@@ -102,7 +102,7 @@ grab closed-on
 ui act q="$SWITCH" show_menu wait=1 > /dev/null 2>&1
 sleep 1; grab open-waiting
 ui > "$out/ui-waiting.txt" 2>&1
-ui act q='role=button name="Headset PIN"' press wait=1 > /dev/null 2>&1
+ui act q='role=button name="Device PIN"' press wait=1 > /dev/null 2>&1
 sleep 1; grab open-pin-edit
 
 # ---- off: nothing listens, answers, encodes or sends
@@ -110,7 +110,7 @@ ui act q="$SWITCH" toggle wait=1 > "$out/act-off.txt" 2>&1
 wait_for 5 port_closed "$port" || bad off-port "port $port still accepts"
 wait_for 5 no_xr_threads || bad off-threads "threads left: $(xr_threads)"
 [ -z "$(probe_fds)" ] || bad off-probe-port "udp $PROBE_PORT still held (fds $(probe_fds))"
-grep -q '^stream_lan=off$' "$out"/data-on-$$/makepad/*/xr-stream 2>/dev/null || bad off-kept "the switch was not kept"
+grep -q '^on=' "$out"/data-on-$$/makepad/*/xr-pairing 2>/dev/null && bad off-kept "a device is still on in the pairing file"
 ui find q="$SWITCH" > "$out/switch-off.txt" 2>&1
 t0=$(cpu_ticks); sleep 3; t1=$(cpu_ticks)
 note "off: tcp [$(tcp_ports)] · udp [$(udp_ports)] · threads [$(xr_threads)] · CPU over 3 s $(( t1 - t0 )) ticks (the app's own UI)"

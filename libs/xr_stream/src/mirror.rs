@@ -1,7 +1,7 @@
 //! The desktop's view of what a remote headset sees: [`XrMirrorView`], a widget an app places
 //! where it likes (a dock tab beside its other panels), or [`DrawXrMirror::draw_headset`] in an
-//! app's own view (Sandbox draws it in its game view while a headset streams). It shows the left
-//! eye of the app's XR pass, repainted on its own clock ([`XrMirrorClock`], a few times a second)
+//! app's own view. It shows the first view (the left eye on a headset), repainted on its own
+//! clock ([`XrMirrorClock`], a few times a second)
 //! while it is shown, a headset streams and the user's mirror switch is on. Nothing else on the
 //! desktop renders for the headset: a mirror that is not shown mirrors nothing.
 
@@ -17,15 +17,22 @@ pub(crate) mod shader {
         use mod.shader.*
         use mod.draw
 
-        // The desktop's mirror of what streams: the left eye's half of the side-by-side colour
+        // The desktop's mirror of what streams: the first view of the side-by-side colour
         // (premultiplied on black: the room shows black where nothing was drawn). `linear` 1:
         // the colour holds linear light, encoded (gamma 2.2) as the stream encodes it.
         mod.draw.DrawXrMirror = mod.std.set_type_default() do #(DrawXrMirror::script_shader(vm)){
             ..mod.draw.DrawQuad
             image: texture_2d(float)
             linear: 0.0
+            views: 2.0
             pixel: fn() {
-                var c = self.image.sample(vec2(self.pos.x * 0.5, self.pos.y))
+                // the picture's part of the device's view (a reframed handheld's: the content's
+                // rect; else all of it), the device's view around it empty
+                let q = (self.pos - self.part.xy) / max(self.part.zw - self.part.xy, vec2(0.0001, 0.0001))
+                if q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0 {
+                    return vec4(0.04, 0.045, 0.05, 1.0)
+                }
+                var c = self.image.sample(vec2(q.x / self.views, q.y))
                 if self.linear > 0.5 && c.w > 0.0 {
                     let g = 1.0 / 2.2
                     c = vec4(pow(max(c.xyz / c.w, vec3(0.0, 0.0, 0.0)), vec3(g, g, g)) * c.w, c.w)
@@ -43,6 +50,11 @@ pub(crate) mod shader {
         /// 1: the XR pass's colour holds linear light.
         #[live]
         pub linear: f32,
+        #[live]
+        pub views: f32,
+        /// Where the picture lies in the device's view (uv: x0, y0, x1, y1).
+        #[live]
+        pub part: Vec4f,
     }
 }
 
@@ -60,7 +72,7 @@ script_mod! {
     }
 }
 
-/// The app's XR pass as the desktop mirrors it: its side-by-side colour and the streamed eye
+/// The app's XR pass as the desktop mirrors it: its side-by-side colour, view count and per-view
 /// size, set by the server's pack each XR frame; `live`: a headset's frames flow; `mirror`: the
 /// user's mirror switch.
 #[derive(Default)]
@@ -69,6 +81,10 @@ pub(crate) struct XrMirrorSource {
     /// The colour holds linear light (`XrPresented::linear_light`).
     pub(crate) linear: bool,
     pub(crate) eye: [u32; 2],
+    pub(crate) views: u32,
+    /// Where the picture lies in the device's view (uv: x0, y0, x1, y1; None: all of it): a
+    /// reframed handheld's picture is its content's part (`server::reframe`).
+    pub(crate) part: Option<[f32; 4]>,
     pub(crate) live: bool,
     pub(crate) mirror: bool,
 }
@@ -129,13 +145,16 @@ pub(crate) fn fit(rect: Rect, eye: [u32; 2]) -> Rect {
 }
 
 impl DrawXrMirror {
-    /// The headset's left eye fitted into `rect`; false (nothing drawn) while no headset
+    /// The first view (the left eye on a headset) fitted into `rect`; false while no display
     /// streams.
     pub fn draw_headset(&mut self, cx: &mut Cx2d, rect: Rect) -> bool {
         let source = cx.cx.global::<XrMirrorSource>();
         let Some(color) = source.color.clone().filter(|_| source.live && source.mirror) else { return false };
         let eye = if source.eye == [0, 0] { [1680, 1760] } else { source.eye };
+        self.views = source.views as f32;
         self.linear = if source.linear { 1.0 } else { 0.0 };
+        let [x0, y0, x1, y1] = source.part.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        self.part = vec4(x0, y0, x1, y1);
         self.draw_vars.set_texture(0, &color);
         self.draw_abs(cx, fit(rect, eye));
         true

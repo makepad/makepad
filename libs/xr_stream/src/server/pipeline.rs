@@ -25,11 +25,13 @@ pub(crate) enum Out {
 }
 
 /// A picture the app packed (`makepad_xr_stream`) for the encoder: the shared surface (the
-/// packed NV12 layout of the whole picture, both eye columns), when the GPU work that drew it
+/// packed NV12 layout of the whole picture, its views side by side), when the GPU work that drew it
 /// completes (`ready`), the display time of the pose it was drawn with. `held` is dropped once
 /// every eye's encode read the surface: the app may draw into it again.
 pub(crate) struct Picture {
-    /// One surface (both eye columns, each tile encodes its column) or one per tile.
+    /// The live layout this picture was packed for, before its deferred submit.
+    pub generation: u64,
+    /// One surface holding all views, or one per encoder tile.
     pub surfaces: Vec<SurfaceHandle>,
     pub ready: GpuCompletion,
     pub held: Box<dyn Send + Sync>,
@@ -95,6 +97,10 @@ impl Flow {
     /// waits for it.
     fn no_eyes(&self, tiles: u32) {
         self.no_eyes.fetch_add(1, Ordering::AcqRel);
+        self.lost_picture(tiles);
+    }
+
+    pub(crate) fn lost_picture(&self, tiles: u32) {
         self.lost.fetch_add(1, Ordering::AcqRel);
         self.encoded_tiles.fetch_add(tiles as u64, Ordering::AcqRel);
     }
@@ -365,6 +371,9 @@ fn take_pose(shared: &ServerShared, poses: &Mutex<VecDeque<(u64, Arrived)>>, seq
     shared.pose_ns.store(makepad_hal::clock_ns(), Ordering::Release);
     shared.note_pose();
     let frame = masked.as_deref().unwrap_or(frame);
+    // a handheld that takes a narrowed view: the view narrowed to the app's content
+    let reframed = if shared.reframe_ok.load(Ordering::Acquire) { reframe(shared, sample_ns, frame) } else { None };
+    let frame = reframed.as_deref().unwrap_or(frame);
     if shared.external.load(Ordering::Acquire) {
         let Some(frame) = makepad_hal::buffers::read_items::<makepad_hal::XrFrame>(frame, 1).next() else { return false };
         let snapshot = Arc::new(super::external::TrackingSnapshot { seq, sample_ns, display_ns,
@@ -387,6 +396,35 @@ fn take_pose(shared: &ServerShared, poses: &Mutex<VecDeque<(u64, Arrived)>>, seq
     hal::hal_xr_remote_pose(seq, display_ns, frame)
 }
 
+/// A handheld's pose with its view narrowed to the app's content (`super::reframe`): its one
+/// view (both eyes) given the content's part of it, the pose unchanged. None: the view stays.
+fn reframe(shared: &ServerShared, sample_ns: u64, frame: &[u8]) -> Option<Vec<u8>> {
+    use makepad_hal::{buffers::{read_items, Wire}, XrFrame};
+    let mut f = read_items::<XrFrame>(frame, 1).next()?;
+    // (switched off: the full view, and the rect starts afresh when it is on again)
+    let boxes = if shared.reframe_on.load(Ordering::Acquire) { shared.content.lock().unwrap().clone() } else { None };
+    let eye = f.eyes[0];
+    let fov = {
+        let mut r = shared.reframe.lock().unwrap();
+        let fov = r.step(sample_ns, eye.pose.orientation, eye.pose.position, eye.fov, boxes.as_deref());
+        // what it does, every few seconds
+        if sample_ns.saturating_sub(r.logged_ns) >= 3_000_000_000 {
+            r.logged_ns = sample_ns;
+            (shared.log)(&format!("xr host: reframe: {}", r.describe(eye.pose.position, boxes.as_deref())));
+        }
+        fov
+    };
+    if fov == eye.fov {
+        return None;
+    }
+    for e in &mut f.eyes {
+        e.fov = fov;
+    }
+    let mut bytes = Vec::with_capacity(frame.len());
+    f.write(&mut bytes);
+    Some(bytes)
+}
+
 /// A pose that came: when, the eyes it gives, its sequence number.
 struct Arrived {
     at: Instant,
@@ -397,6 +435,8 @@ struct Arrived {
 /// The live session's encode side (also the selftest's): the eye encoders and their threads.
 pub(crate) struct Core {
     pub(crate) shared: Arc<ServerShared>,
+    pub(crate) views: u32,
+    pub(crate) handheld: bool,
     pub(crate) size: [u32; 2],
     pub(crate) tiles: u32,
     pub(crate) codec: u8,
@@ -415,29 +455,43 @@ pub(crate) struct Core {
     pub(crate) fovea: Fovea,
 }
 
-/// The session the app's pictures go to.
-pub(crate) struct Live {
+/// The render columns, packed picture and encoder tiles of one session.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Layout {
+    pub(crate) views: u32,
     pub(crate) eye: [u32; 2],
-    pub(crate) refresh_mhz: u32,
-    /// The picture's foveation and the eye column's encoded size (`Fovea::encoded`).
     pub(crate) fovea: Fovea,
     pub(crate) encoded: [u32; 2],
+    pub(crate) size: [u32; 2],
+    pub(crate) tiles: u32,
+}
+
+pub(crate) fn layout(eye: [u32; 2], views: u32, handheld: bool, engines: u32, fovea_setting: Fovea) -> Layout {
+    let fovea = if handheld { Fovea::OFF } else { fovea_setting };
+    let encoded = fovea.encoded(eye);
+    let size = picture_size(encoded, views);
+    let tiles = if views == 2 && engines >= 2 { 2 } else { 1 };
+    Layout { views, eye, fovea, encoded, size, tiles }
+}
+
+/// The session the app's pictures go to.
+pub(crate) struct Live {
+    pub(crate) generation: u64,
+    pub(crate) stale_logged: bool,
+    pub(crate) layout: Layout,
+    pub(crate) refresh_mhz: u32,
     pub(crate) tx: SyncSender<Picture>,
     pub(crate) flow: Arc<Flow>,
-    pub(crate) tiles: u32,
     pub(crate) limit: u64,
 }
 
 impl Core {
-    pub(crate) fn start(shared: Arc<ServerShared>, eye: [u32; 2], fps: u32, codec: StreamVideoCodec) -> Result<Core, String> {
+    pub(crate) fn start(shared: Arc<ServerShared>, eye: [u32; 2], fps: u32, codec: StreamVideoCodec, views: u32, handheld: bool) -> Result<Core, String> {
         let log = shared.log.clone();
-        let fovea = fovea_setting();
-        let encoded = fovea.encoded(eye);
-        let size = picture_size(encoded);
+        let layout = layout(eye, views, handheld, VideoStreamEncoder::caps().engines, fovea_setting());
+        let Layout { fovea, encoded, size, tiles, .. } = layout;
         let rate = Arc::new(Rate::new(shared.clone()));
         let kbps = rate.current();
-        // a stream per eye on its own engine when the GPU has two
-        let tiles = if VideoStreamEncoder::caps().engines >= 2 { 2 } else { 1 };
         let flow = Arc::new(Flow::default());
         let keyframe: Arc<[AtomicBool; 2]> = Arc::new([AtomicBool::new(true), AtomicBool::new(true)]);
         let ending = Arc::new(AtomicBool::new(false));
@@ -545,8 +599,9 @@ impl Core {
                             continue;
                         };
                         if let Some(dir) = &dump {
-                            dump_picture(dir, &p, size, &log);
+                            dump_picture(dir, &p, size, views, &log);
                         }
+                        let eyes = if views == 1 { [eyes[0]; 2] } else { eyes };
                         let head = VideoHead { seq, tile: 0, key: false, display_ns: p.display_ns, eyes, focus_m: p.focus_m, stages: [render_us, 0, 0, 0], size, codec: codec_byte };
                         let held: Arc<dyn Send + Sync> = Arc::new(p.held);
                         let kbps = rate.current();
@@ -565,9 +620,12 @@ impl Core {
         if !fovea.is_off() {
             log(&format!("xr host: foveated encode: eyes of {}x{} as {}x{} ({:.0}% of the pixels)", eye[0], eye[1], encoded[0], encoded[1], (encoded[0] * encoded[1]) as f64 * 100.0 / (eye[0] * eye[1]).max(1) as f64));
         }
-        *shared.live.lock().unwrap() = Some(Live { eye, refresh_mhz: fps * 1000, fovea, encoded, tx, flow: flow.clone(), tiles, limit: in_flight_limit() });
+        // A fresh identity even when a reconnect (or a new selftest) uses the same layout.
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        *shared.live.lock().unwrap() = Some(Live { generation, stale_logged: false, layout, refresh_mhz: fps * 1000, tx, flow: flow.clone(), limit: in_flight_limit() });
         shared.wake();
-        Ok(Core { shared, size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending, fps, eye, fovea })
+        Ok(Core { shared, views, handheld, size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending, fps, eye, fovea })
     }
 
     /// A pose from the headset: to the app's XR window, and kept to match its picture.
@@ -606,16 +664,25 @@ pub(crate) fn render_eyes(frame: &[u8]) -> [XrRenderEye; 2] {
     f.eyes.map(|e| XrRenderEye { orientation: e.pose.orientation, position: e.pose.position, fov: e.fov })
 }
 
-/// The picture for eye columns of `encoded` pixels (`Fovea::encoded`): both side by side, each its
+/// The picture for `views` columns of `encoded` pixels (`Fovea::encoded`): side by side, each its
 /// colour over a band half its height (coverage and inverse depth at half resolution; `crate::xr`).
-pub fn picture_size(encoded: [u32; 2]) -> [u32; 2] {
-    [encoded[0] * 2, encoded[1] * 3 / 2]
+pub fn picture_size(encoded: [u32; 2], views: u32) -> [u32; 2] {
+    [encoded[0] * views, encoded[1] * 3 / 2]
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stereo_and_handheld_layouts() {
+        let eye = [2016, 2112];
+        let stereo = Layout { views: 2, eye, fovea: Fovea::DEFAULT, encoded: [1280, 1216], size: [2560, 1824], tiles: 2 };
+        assert_eq!(layout(eye, 2, false, 2, Fovea::DEFAULT), stereo);
+        assert_eq!(layout(eye, 2, false, 1, Fovea::DEFAULT), Layout { tiles: 1, ..stereo });
+        assert_eq!(layout(eye, 1, true, 2, Fovea::DEFAULT), Layout { views: 1, eye, fovea: Fovea::OFF, encoded: eye, size: [2016, 3168], tiles: 1 });
+    }
 
     fn eyes(w: f32) -> [XrRenderEye; 2] {
         [XrRenderEye { orientation: [0.0, 0.0, 0.0, w], ..Default::default() }; 2]

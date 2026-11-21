@@ -1,19 +1,20 @@
-//! The server's network side: the listener (and the pairing probe's responder), and per
-//! headset its session: the TLS link (hello, welcome, the settings the headset is told, its
-//! poses, stats and reports in, the pictures out) and its per-window numbers.
+//! The listener answers pairing probes. Each viewer has a TLS link that can wait on standby
+//! or serve a stream. Only the streaming link owns the render, encode and audio session.
 
+use super::links::{Link, Point, XrDeviceKind};
 use super::pipeline::{Core, Out, Uplink};
 use super::{LiveHeadset, MicEvent, ServerShared};
 use crate::settings_types::HeadsetSettings;
-use makepad_desk_link::server::{fleet_identity, lan_address};
+use makepad_desk_link::server::lan_address;
 use makepad_desk_link::xr::*;
 use makepad_desk_link::xr_capture::CaptureAssembler;
-use makepad_desk_link::xr_pair::{self, ServerPairing};
+use makepad_desk_link::xr_pair::{self, ServerPairing, ViewerProof};
 use makepad_desk_link::{write_all, Inbox};
 use makepad_widgets::makepad_platform::makepad_hal::{self, xr_remote as hal};
-use makepad_widgets::makepad_platform::makepad_network::fleet::id::{self, now_secs, Need};
-use makepad_widgets::makepad_platform::makepad_network::tls::{self as net_tls, TlsServer};
+use makepad_widgets::makepad_platform::makepad_network::fleet::id;
+use makepad_widgets::makepad_platform::makepad_network::tls::{self as net_tls, TlsServer, TlsStream};
 use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
+use makepad_widgets::makepad_platform::thread::{Class, Strand, TaskPool, Ticket};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
@@ -24,31 +25,106 @@ use std::time::{Duration, Instant};
 /// The room field's bricks from a headset: (voxel size m, chunk edge voxels, bricks).
 pub type WorldSink = Arc<dyn Fn(f32, i32, Vec<WorldBrick>) + Send + Sync>;
 
-/// What the server keeps while it is switched off and on ([`Host::set_listening`]): its TLS
-/// identity, its pairing (the PIN, the paired headset; this instance's claim on the pairing file
-/// is held for the process, `xr_pair::claim`), the room field's sink and the one-headset flag.
-/// Off, nothing of it runs: no listener, no probe answers, no session, no encoder.
+/// The host keeps its identity and pairing claim across listener restarts.
 pub(crate) struct Host {
     app: String,
-    name: String,
+    me: Arc<id::Me>,
     tls: Arc<TlsServer>,
-    verifier: Arc<id::Verifier>,
-    pairing: Arc<Mutex<ServerPairing>>,
+    pub(super) pairing: Arc<Mutex<ServerPairing>>,
     world: WorldSink,
-    /// A headset is linked (shared by every listener this host starts: a session of the last
-    /// one still ending refuses the next listener's headset until it ended).
-    busy: Arc<AtomicBool>,
+    shared: Arc<ServerShared>,
+    control: Strand<Control>,
     _claim: Option<std::fs::File>,
-    /// The running listener (None: off).
     listener: Mutex<Option<Listener>>,
-    /// The port listened on (0: none).
-    port: Arc<AtomicU16>,
+}
+
+pub(super) enum Change {
+    Listen,
+    /// The launch override (`MAKEPAD_XR_STREAM`, `--xr-stream`): on listens with the kept
+    /// switches as they are; off holds the listener off for this run, the kept switches
+    /// untouched, until the user changes a switch or types a PIN.
+    Launch(bool),
+    Enabled(bool),
+    Device(Point, bool),
+    Forget(Point),
+    Pin(String),
+}
+
+/// The strand owns the durable pairing and the listening overrides in submission order.
+struct Control {
+    pairing: ServerPairing,
+    forced: bool,
+    /// The launch override held the listener off (see [`Change::Launch`]).
+    held_off: bool,
+    remembered: Option<Point>,
+    pin_suspended: bool,
+}
+
+impl Control {
+    fn apply(&mut self, change: Change) -> std::io::Result<Option<Point>> {
+        let pairing = &mut self.pairing;
+        if !matches!(change, Change::Listen | Change::Launch(_)) {
+            self.held_off = false;
+        }
+        match change {
+            Change::Listen => {}
+            Change::Launch(on) => {
+                self.forced = on;
+                self.held_off = !on;
+            }
+            Change::Enabled(true) => {
+                if pairing.on.is_none() {
+                    pairing.set_on(self.remembered.as_ref())?;
+                }
+                self.remembered = None;
+                self.forced = true;
+                self.pin_suspended = false;
+            }
+            Change::Enabled(false) => {
+                let previous = pairing.on;
+                pairing.set_on(None)?;
+                self.remembered = previous.or(self.remembered);
+                self.forced = false;
+                self.pin_suspended = true;
+            }
+            Change::Device(point, true) => {
+                pairing.set_on(Some(&point))?;
+                self.remembered = None;
+            }
+            Change::Device(point, false) => {
+                if pairing.on == Some(point) {
+                    pairing.set_on(None)?;
+                    self.remembered = None;
+                }
+            }
+            Change::Forget(point) => {
+                pairing.forget_viewer(&point)?;
+                if self.remembered == Some(point) {
+                    self.remembered = None;
+                }
+                return Ok(Some(point));
+            }
+            Change::Pin(pin) => {
+                if pairing.pin != pin {
+                    pairing.pin = pin;
+                    pairing.save();
+                }
+                self.pin_suspended = false;
+            }
+        }
+        Ok(None)
+    }
+
+    fn listens(&self) -> bool {
+        !self.held_off && (self.forced || self.pairing.on.is_some() || (!self.pin_suspended && xr_pair::valid_pin(&self.pairing.pin)))
+    }
 }
 
 /// A running listener: its thread, its probe answerer and its sessions end when this drops
 /// (the listener and the probe socket close within a poll, each session at its next turn).
 struct Listener {
     stop: Arc<AtomicBool>,
+    port: Arc<AtomicU16>,
 }
 
 impl Drop for Listener {
@@ -58,10 +134,11 @@ impl Drop for Listener {
 }
 
 impl Host {
-    /// The host for `app`'s headsets (`pairing`: the base of its pairing file; None: not kept);
+    /// The host for `app`'s viewers (`pairing`: the base of its pairing file; None: not kept);
     /// `world` takes a headset's room field. Not listening yet.
-    pub(crate) fn new(shared: &ServerShared, app: &str, pairing: Option<std::path::PathBuf>, world: WorldSink) -> Result<Host, String> {
-        let (identity, verifier, name) = fleet_identity("makepad xr host").map_err(|why| format!("xr host: {why}"))?;
+    pub(crate) fn new(shared: &Arc<ServerShared>, pool: &TaskPool, app: &str, pairing: Option<std::path::PathBuf>, world: WorldSink) -> Result<Arc<Host>, String> {
+        let me = id::Me::load(&id::dir()).map_err(|e| format!("xr host: has no fleet identity ({e})"))?;
+        let identity = me.tls_identity("makepad xr host").map_err(|e| format!("xr host: cannot make its TLS identity ({e})"))?;
         let tls = Arc::new(TlsServer::new(identity).map_err(|e| format!("xr host: TLS server: {e}"))?);
         let (path, claim) = match pairing {
             Some(base) => {
@@ -70,20 +147,118 @@ impl Host {
             }
             None => (None, None),
         };
-        let pairing = Arc::new(Mutex::new(ServerPairing::load(path)));
-        *shared.pairing.lock().unwrap() = Some(pairing.clone());
-        Ok(Host {
+        let mut pairing = ServerPairing::load(path);
+        // A PIN pairs within the run it was typed in: one left from an earlier run would open
+        // the LAN at every start without the user asking.
+        if !pairing.pin.is_empty() {
+            pairing.pin.clear();
+            pairing.save();
+        }
+        let viewers = viewer_rows(&pairing);
+        shared.links.lock().unwrap().paired(pairing.on, viewers);
+        let published = Arc::new(Mutex::new(pairing.clone()));
+        let control = Control { pairing, forced: false, held_off: false, remembered: None, pin_suspended: false };
+        Ok(Arc::new(Host {
             app: app.to_string(),
-            name,
+            me: Arc::new(me),
             tls,
-            verifier: Arc::new(verifier),
-            pairing,
+            pairing: published,
             world,
-            busy: Arc::new(AtomicBool::new(false)),
+            shared: shared.clone(),
+            control: Strand::with_state(pool, "XR viewer settings", control),
             _claim: claim,
             listener: Mutex::new(None),
-            port: Arc::new(AtomicU16::new(0)),
-        })
+        }))
+    }
+
+    pub(super) fn change(self: &Arc<Self>, change: Change) {
+        let host = self.clone();
+        self.control.submit(Class::Interactive, Ticket::none(), move |control| {
+            match control.apply(change) {
+                Ok(forgotten) => {
+                    host.publish(&control.pairing, forgotten.as_ref());
+                    host.listen_for(control);
+                }
+                Err(e) => (host.shared.log)(&format!("xr host: could not change viewer settings: {e}")),
+            }
+        }).detach();
+    }
+
+    fn listen_for(self: &Arc<Self>, control: &Control) {
+        if let Err(e) = self.set_listening(control.listens()) {
+            (self.shared.log)(&format!("xr host: cannot listen: {e}"));
+        }
+    }
+
+    fn publish(&self, pairing: &ServerPairing, forgotten: Option<&Point>) {
+        let shared = &self.shared;
+        // Only the control strand writes the published pairing. Prepare its replacement
+        // and the panel's names before taking the link table lock.
+        if *self.pairing.lock().unwrap() == *pairing {
+            return;
+        }
+        let next = pairing.clone();
+        let previous = std::mem::replace(&mut *self.pairing.lock().unwrap(), next);
+        let changed = previous.on != pairing.on;
+        if changed || previous.viewers != pairing.viewers {
+            let viewers = viewer_rows(pairing);
+            let mut links = shared.links.lock().unwrap();
+            if let Some(point) = forgotten {
+                links.forget(point);
+            }
+            links.paired(pairing.on, viewers);
+            if changed || forgotten.is_some() {
+                shared.selection_generation.fetch_add(1, Ordering::Release);
+            }
+        }
+        if changed {
+            let name = |p: &ServerPairing| p.viewers.iter().find(|v| Some(v.point) == p.on)
+                .map_or_else(|| "nothing".into(), |v| v.name.clone());
+            (shared.log)(&format!("xr host: the view goes from {} to {}", name(&previous), name(pairing)));
+        }
+        shared.wake();
+    }
+
+    fn admit(self: &Arc<Self>, proof: ViewerProof, instance: u64, link: Link, stop: Arc<AtomicBool>) -> Result<Vec<u8>, String> {
+        let host = self.clone();
+        // Only the TLS thread waits for admission. A PIN confirmation follows a durable save.
+        self.control.submit(Class::Interactive, Ticket::none(), move |control| {
+            if stop.load(Ordering::Acquire) {
+                return Err("the desktop switched the stream off".into());
+            }
+            let pairing = &mut control.pairing;
+            let (testing, occupied) = {
+                let links = host.shared.links.lock().unwrap();
+                (links.testing(), links.occupied())
+            };
+            if testing {
+                return Err("another headset is connected".into());
+            }
+            if !link.standby {
+                // A viewer without standby must get its PIN confirmation in Welcome: it is
+                // admitted only when it can stream now.
+                let eligible = match pairing.on {
+                    Some(point) => point == link.point,
+                    None => !pairing.viewers.iter().any(|v| v.point == link.point),
+                };
+                if pairing.on.is_none() && !eligible {
+                    return Err("this device is switched off in the app's headset panel".into());
+                }
+                if occupied || !eligible {
+                    return Err("another headset is connected".into());
+                }
+            }
+            let previous = pairing.on;
+            let pin_ok = pairing.admit_viewer(&proof, instance, &link.name)?;
+            if previous != pairing.on {
+                control.remembered = None;
+            }
+            host.publish(pairing, None);
+            host.shared.links.lock().unwrap().join(link);
+            host.listen_for(control);
+            host.shared.wake();
+            Ok(pin_ok)
+        }).join().map_err(|e| format!("viewer admission: {e}"))?
     }
 
     pub(crate) fn listening(&self) -> bool {
@@ -92,34 +267,38 @@ impl Host {
 
     /// The port headsets link to (None: off, or not bound yet).
     pub(crate) fn port(&self) -> Option<u16> {
-        Some(self.port.load(Ordering::Acquire)).filter(|p| *p != 0)
+        let port = self.listener.lock().unwrap().as_ref()?.port.load(Ordering::Acquire);
+        (port != 0).then_some(port)
     }
 
-    /// On: listens on a port the OS picks and answers the headsets' pairing probe. Off: the
+    /// On: listens on a port the OS picks and answers viewer probes. Off: the
     /// listener, the probe answerer and any session end (its encoders with it). Never waits.
-    pub(crate) fn set_listening(&self, shared: &Arc<ServerShared>, on: bool) -> Result<(), String> {
-        let mut listener = self.listener.lock().unwrap();
-        if listener.is_some() == on {
+    fn set_listening(self: &Arc<Self>, on: bool) -> Result<(), String> {
+        let shared = &self.shared;
+        if self.listening() == on {
             return Ok(());
         }
         if !on {
-            *listener = None;
+            *self.listener.lock().unwrap() = None;
+            shared.wake();
             (shared.log)(&format!("xr host: {} stops listening (switched off)", self.app));
             return Ok(());
         }
         let stop = Arc::new(AtomicBool::new(false));
-        let shared_for_test = shared.clone();
         // the headset on a loop (debug) is this server's one headset: no probe is answered and a
         // real headset is refused while it runs (a paired headset on the LAN never joins a test)
         let selftest = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST").as_deref() == Ok("1");
-        if selftest {
-            self.busy.store(true, Ordering::Release);
+        if !makepad_widgets::makepad_platform::makepad_network::lan::service("xr host") {
+            return Ok(());
         }
-        let (shared, stop2, port) = (shared.clone(), stop.clone(), self.port.clone());
-        let (app, name, tls, verifier, pairing, world, busy) = (self.app.clone(), self.name.clone(), self.tls.clone(), self.verifier.clone(), self.pairing.clone(), self.world.clone(), self.busy.clone());
+        let running = Listener { stop: stop.clone(), port: Arc::new(AtomicU16::new(0)) };
+        let (thread_shared, stop2, port) = (shared.clone(), stop.clone(), running.port.clone());
+        let (app, me, tls, pairing, world) = (self.app.clone(), self.me.clone(), self.tls.clone(), self.pairing.clone(), self.world.clone());
+        let host = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("xr-host-listen".into())
             .spawn(move || {
+                let shared = thread_shared;
                 let log = shared.log.clone();
                 // the port may still be held a moment by a host this process just dropped (an app
                 // restart): bind again until it is free
@@ -138,29 +317,47 @@ impl Host {
                 };
                 let bound = listener.local_addr().map(|a| a.port()).unwrap_or(0);
                 port.store(bound, Ordering::Release);
-                log(&format!("xr host: {app} listens on port {bound} as {name} (the admin or a paired headset), instance {:016x}", pairing.lock().unwrap().instance));
-                // headsets find this server by their probe (answered while paired, or for the
-                // PIN typed here; never beside the headset on a loop)
-                let responder = if selftest { None } else { match xr_pair::identity("pairing headsets") {
-                    Ok((me, fleet)) => match xr_pair::Responder::start(me, fleet, pairing.clone(), app.clone(), bound, log.clone()) {
+                let name = me.cred.name.clone();
+                let instance = pairing.lock().unwrap().instance;
+                log(&format!("xr host: {app} listens on port {bound} as {name}, instance {instance:016x}"));
+                // The probe answer and the TLS certificate use the same server key.
+                let responder = if selftest {
+                    None
+                } else {
+                    let ad = xr_pair::HostAd { app: super::uppercase_first(&app), test: shared.test_run.clone() };
+                    let links = shared.links.clone();
+                    match xr_pair::Responder::start(
+                        me, pairing.clone(), ad, bound,
+                        Arc::new(move |p| links.lock().unwrap().linked(p)),
+                        shared.whereabouts.clone(), log.clone(),
+                    ) {
                         Ok(r) => Some(r),
                         Err(e) => {
                             log(&format!("xr host: {e}"));
                             None
                         }
-                    },
-                    Err(e) => {
-                        log(&format!("xr host: no pairing: {e}"));
-                        None
                     }
-                } };
+                };
+                let mut test_pending = selftest;
                 while !stop2.load(Ordering::Acquire) {
+                    if test_pending {
+                        // A previous listener can still be tearing down its Core.
+                        let slot = shared.links.lock().unwrap().take_selftest();
+                        if let Some(slot) = slot {
+                            let eye = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_EYE").ok().and_then(|v| {
+                                let (w, h) = v.split_once('x')?;
+                                Some([w.trim().parse().ok()?, h.trim().parse().ok()?])
+                            });
+                            super::debug::selftest(shared.clone(), eye.unwrap_or([1680, 1760]), stop2.clone(), slot);
+                            test_pending = false;
+                        }
+                    }
                     match listener.accept() {
                         Ok((tcp, peer)) => {
                             if !lan_address(peer.ip()) {
                                 continue;
                             }
-                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), shared: shared.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), world: world.clone(), pairing: pairing.clone(), pictures: AtomicU64::new(0), decoded: AtomicU64::new(0) };
+                            let ctx = Session { peer, tls: tls.clone(), shared: shared.clone(), stop: stop2.clone(), host: host.clone(), server: name.clone(), app: super::uppercase_first(&app), world: world.clone(), server_instance: instance, pictures: AtomicU64::new(0), decoded: AtomicU64::new(0) };
                             let _ = std::thread::Builder::new().name("xr-host-session".into()).spawn(move || ctx.run(tcp));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
@@ -172,38 +369,124 @@ impl Host {
                 }
                 drop(responder);
                 drop(listener);
-                let _ = port.compare_exchange(bound, 0, Ordering::AcqRel, Ordering::Acquire);
                 log(&format!("xr host: port {bound} closed, pairing probe no longer answered"));
             })
             .map_err(|e| e.to_string())?;
-        // the headset on a loop (debug): a session of this listener's, ended by the off switch
-        if selftest {
-            // its eye size: `MAKEPAD_XR_REMOTE_SELFTEST_EYE=<w>x<h>` (a headset's: Quest 3 2016x2112)
-            let eye = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_EYE").ok().and_then(|v| {
-                let (w, h) = v.split_once('x')?;
-                Some([w.trim().parse().ok()?, h.trim().parse().ok()?])
-            });
-            super::debug::selftest(shared_for_test, eye.unwrap_or([1680, 1760]), stop.clone(), self.busy.clone());
-        }
-        *listener = Some(Listener { stop });
+        *self.listener.lock().unwrap() = Some(running);
+        shared.wake();
         Ok(())
     }
+}
+
+fn viewer_rows(pairing: &ServerPairing) -> Vec<(Point, String, String)> {
+    pairing.viewers.iter().map(|v| (v.point, net_tls::to_hex(&v.point), v.name.clone())).collect()
 }
 
 struct Session {
     world: WorldSink,
     peer: SocketAddr,
     tls: Arc<TlsServer>,
-    verifier: Arc<id::Verifier>,
     shared: Arc<ServerShared>,
     stop: Arc<AtomicBool>,
-    busy: Arc<AtomicBool>,
+    host: std::sync::Weak<Host>,
     server: String,
-    pairing: Arc<Mutex<ServerPairing>>,
+    /// The app's name as its pairing answer gives it (`Welcome`, `Standby`).
+    app: String,
+    server_instance: u64,
     /// The pictures written to the headset and those it reported decoded, for the line that says
     /// how the session ended.
     pictures: AtomicU64,
     decoded: AtomicU64,
+}
+
+struct Viewer {
+    id: u64,
+    name: String,
+    who: String,
+    instance: u64,
+    eye: [u32; 2],
+    refresh_mhz: u32,
+    decodes: u32,
+    views: u32,
+}
+
+struct Connection {
+    stream: TlsStream,
+    inbox: Inbox,
+    buf: Vec<u8>,
+    unknown_logged: [bool; 256],
+    visible: bool,
+    last_heard: Instant,
+    pin_ok: Vec<u8>,
+}
+
+impl Connection {
+    fn send(&mut self, msg: XrServerMsg) -> Result<(), String> {
+        write_all(&mut self.stream, &msg.encode()).map_err(|e| format!("write: {e}"))
+    }
+
+    fn read(&mut self) -> Result<(), String> {
+        match self.stream.read(&mut self.buf) {
+            Ok(0) => return Err("the headset closed the connection".into()),
+            Ok(n) => {
+                self.inbox.feed(&self.buf[..n]);
+                self.last_heard = Instant::now();
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
+            Err(e) => return Err(format!("read: {e}")),
+        }
+        Ok(())
+    }
+
+    fn next(&mut self, log: &super::Log, standby: bool) -> Result<Option<(XrClientMsg, usize)>, String> {
+        while let Some((ty, payload)) = self.inbox.next().map_err(|e| e.to_string())? {
+            let decoded = if standby {
+                XrClientMsg::decode_standby(ty, &payload)
+            } else {
+                XrClientMsg::decode(ty, &payload).map(Some)
+            };
+            match decoded {
+                Ok(Some(msg)) => return Ok(Some((msg, payload.len()))),
+                Ok(None) => continue,
+                Err(e) if is_unknown_message(&e) => {
+                    if !self.unknown_logged[ty as usize] {
+                        self.unknown_logged[ty as usize] = true;
+                        log(&format!("xr host: skipping unknown client message {ty} (a newer client)"));
+                    }
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Tells the viewer it is on standby (`server`, `instance`, `app`, `test`: this server's, as in `Welcome`).
+    fn standby(&mut self, (server, instance, app, test): (&str, u64, &str, &str), viewer: &Viewer, showing: &str, log: &super::Log) -> Result<(), String> {
+        let pin_ok = std::mem::take(&mut self.pin_ok);
+        self.send(XrServerMsg::Standby { server: server.to_string(), instance, showing: showing.to_string(), pin_ok, app: app.to_string(), test: test.to_string() })?;
+        log(&format!("xr host: {} ({}) on standby, showing {}", viewer.who, viewer.name, if showing.is_empty() { "nothing" } else { showing }));
+        self.stream.set_read_timeout(Some(Duration::from_millis(100))).map_err(|e| e.to_string())
+    }
+
+    fn state(&mut self, visible: bool, focused: bool, log: &super::Log) {
+        self.visible = visible;
+        log(&format!("xr host: headset {} {}", if visible { "visible" } else { "not visible" }, if focused { "focused" } else { "not focused" }));
+    }
+
+    fn pong(&mut self, client_ns: u64) -> Result<(), String> {
+        self.send(XrServerMsg::Pong { client_ns, server_ns: makepad_hal::clock_ns() })
+    }
+
+    fn refuse_busy(&mut self) -> Result<String, String> {
+        let reason = "another headset is connected".to_owned();
+        self.send(XrServerMsg::Refused { reason: reason.clone() })?;
+        Ok(reason)
+    }
+
+    fn unpaired(&mut self) -> String {
+        let _ = self.send(XrServerMsg::Unpaired);
+        "the desktop unpaired the headset".into()
+    }
 }
 
 impl Session {
@@ -236,7 +519,7 @@ impl Session {
                 return Err("no hello".into());
             }
         };
-        let refuse = |stream: &mut makepad_widgets::makepad_platform::makepad_network::tls::TlsStream, reason: String| -> Result<String, String> {
+        let refuse = |stream: &mut TlsStream, reason: String| -> Result<String, String> {
             let _ = write_all(stream, &XrServerMsg::Refused { reason: reason.clone() }.encode());
             stream.shutdown();
             Err(format!("refused: {reason}"))
@@ -247,50 +530,127 @@ impl Session {
         if version != XR_VERSION {
             return refuse(&mut stream, format!("XR protocol version {version}; this server speaks {XR_VERSION}"));
         }
-        let peer = match self.verifier.check(&authorization, self.peer.ip(), now_secs()) {
-            Ok(peer) => peer,
-            Err(e) => return refuse(&mut stream, format!("fleet credential: {e}")),
-        };
-        if let Err(why) = id::require(&peer, Need::XrViewer) {
-            return refuse(&mut stream, format!("may not view XR here: {why}"));
+        if !authorization.starts_with(xr_pair::VIEWER_PREFIX) {
+            return refuse(&mut stream, "pair this device with the PIN it shows".into());
         }
+        let proof = match ViewerProof::verify(&authorization, &self.tls.identity().fingerprint, id::now_secs()) {
+            Ok(proof) => proof,
+            Err(why) => return refuse(&mut stream, why),
+        };
         if self.stop.load(Ordering::Acquire) {
             return refuse(&mut stream, "the desktop switched the stream off".into());
         }
-        if self.busy.swap(true, Ordering::AcqRel) {
-            return refuse(&mut stream, "another headset is connected".into());
+        let views: u32 = if decodes & codecs::MONO != 0 { 1 } else { 2 };
+        if views == 1 && self.shared.external.load(Ordering::Acquire) {
+            return refuse(&mut stream, "this app renders its own stereo XR frames: a one-view display is not served".into());
         }
-        // the headset the PIN typed here matched: paired from now on (kept)
-        let paired = {
-            let mut p = self.pairing.lock().unwrap();
-            if p.matched.as_ref().is_some_and(|h| h.instance == instance) {
-                p.paired = p.matched.take();
-                p.save();
-                (self.shared.log)(&format!("xr host: paired with {name} ({instance:016x})"));
-            }
-            p.paired.as_ref().is_some_and(|h| h.instance == instance)
+        let id = session_id(net_tls::os_random)?;
+        let name = name.replace(['\r', '\n'], " ");
+        let who = format!("viewer {}", net_tls::to_hex(&proof.point()[..4]));
+        let kind = if decodes & codecs::HANDHELD != 0 { XrDeviceKind::Handheld } else { XrDeviceKind::Headset };
+        let link = Link { id, point: *proof.point(), name: name.clone(), kind, standby: decodes & codecs::STANDBY != 0 };
+        let host = self.host.upgrade().ok_or("the XR host ended")?;
+        let pin_ok = match host.admit(proof, instance, link, self.stop.clone()) {
+            Ok(pin_ok) => pin_ok,
+            Err(why) => return refuse(&mut stream, why),
         };
-        let result = self.session(&mut stream, inbox, buf, &name, &peer.name, instance, paired, eye, refresh_mhz, decodes);
-        self.busy.store(false, Ordering::Release);
-        result
+        drop(host);
+        let viewer = Viewer { id, name, who, instance, eye: aligned_eye(eye), refresh_mhz, decodes, views };
+        let mut conn = Connection { stream, inbox, buf, visible: true, unknown_logged: [false; 256], last_heard: Instant::now(), pin_ok };
+        let mut standby = false;
+        let result = self.linked(&mut conn, &viewer, &mut standby);
+        self.shared.links.lock().unwrap().leave(id);
+        self.shared.wake();
+        let why = result.unwrap_or_else(|e| e);
+        if standby {
+            (self.shared.log)(&format!("xr host: {} ({}) standby link ended: {why}", viewer.who, viewer.name));
+        }
+        let _ = conn.send(XrServerMsg::Bye { reason: why.clone() });
+        conn.stream.shutdown();
+        Ok(why)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn session(&self, stream: &mut makepad_widgets::makepad_platform::makepad_network::tls::TlsStream, mut inbox: Inbox, mut buf: Vec<u8>, name: &str, who: &str, instance: u64, paired: bool, eye: [u32; 2], refresh_mhz: u32, decodes: u32) -> Result<String, String> {
-        let eye = [eye[0].clamp(64, 4096) & !3, eye[1].clamp(64, 4096) & !3];
-        // (before anything starts: a link without its own session id never runs)
-        let session = session_id(net_tls::os_random)?;
+    fn linked(&self, conn: &mut Connection, viewer: &Viewer, standby: &mut bool) -> Result<String, String> {
+        conn.stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
+        let mut first_session = Some(viewer.id);
+        loop {
+            let mut links = self.shared.links.lock().unwrap();
+            let stopped = self.stop.load(Ordering::Acquire);
+            if links.get(viewer.id).is_none() {
+                drop(links);
+                return Ok(conn.unpaired());
+            }
+            if !stopped && links.take(viewer.id) {
+                let generation = self.shared.selection_generation.load(Ordering::Acquire);
+                drop(links);
+                *standby = false;
+                self.shared.wake();
+                let session = match first_session.take() {
+                    Some(id) => id,
+                    None => session_id(net_tls::os_random)?,
+                };
+                self.session(conn, viewer, session, generation)?;
+                if viewer.decodes & codecs::STANDBY == 0 {
+                    return conn.refuse_busy();
+                }
+                let showing = self.shared.links.lock().unwrap().handoff_name(viewer.id);
+                *standby = true;
+                conn.standby((&self.server, self.server_instance, &self.app, &self.shared.test_run), viewer, &showing, &self.shared.log)?;
+                self.shared.links.lock().unwrap().release(viewer.id);
+                self.shared.wake();
+                conn.last_heard = Instant::now();
+                continue;
+            }
+            // PIN recovery can consume the last reason to listen. Send its confirmation
+            // before telling that viewer that the listener closed.
+            if stopped && conn.pin_ok.is_empty() {
+                return Ok("the desktop switched the stream off".into());
+            }
+            if links.testing() || viewer.decodes & codecs::STANDBY == 0 {
+                drop(links);
+                return conn.refuse_busy();
+            }
+            let showing = (!*standby).then(|| links.showing());
+            drop(links);
+            if let Some(showing) = showing {
+                *standby = true;
+                conn.standby((&self.server, self.server_instance, &self.app, &self.shared.test_run), viewer, &showing, &self.shared.log)?;
+            }
+            if stopped {
+                return Ok("the desktop switched the stream off".into());
+            }
+            if conn.last_heard.elapsed() >= Duration::from_secs(15) {
+                return Ok("the viewer was silent for 15 s".into());
+            }
+            conn.read()?;
+            while let Some((msg, _)) = conn.next(&self.shared.log, true)? {
+                match msg {
+                    XrClientMsg::Ping { client_ns } => conn.pong(client_ns)?,
+                    XrClientMsg::State { visible, focused } => conn.state(visible, focused, &self.shared.log),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn session(&self, conn: &mut Connection, viewer: &Viewer, session: u64, generation: u64) -> Result<(), String> {
+        let Viewer { eye, refresh_mhz, decodes, views, instance, .. } = *viewer;
+        let (name, who) = (&viewer.name, &viewer.who);
         // H.265 when both ends have it
         let codec = if decodes & codecs::HEVC != 0 && VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
         let fps = (refresh_mhz / 1000).clamp(30, 120);
-        let core = Core::start(self.shared.clone(), eye, fps, codec)?;
-        (self.shared.log)(&format!("xr host: {who} ({name}) from {}: eyes {}x{} at {fps} Hz, {codec:?} {}x{} in {} tile(s) on {}", self.peer, eye[0], eye[1], core.size[0], core.size[1], core.tiles, core.description));
+        let handheld = decodes & codecs::HANDHELD != 0;
+        // The old viewer's last pose and menu press belong to its own tracking space.
+        self.shared.pose_ns.store(0, Ordering::Release);
+        *self.shared.menu.lock().unwrap() = Default::default();
+        let core = Core::start(self.shared.clone(), eye, fps, codec, views, handheld)?;
+        let view_label = if views == 1 { "one view" } else { "eyes" };
+        (self.shared.log)(&format!("xr host: {who} ({name}) from {}: {view_label} {}x{} at {fps} Hz, {codec:?} {}x{} in {} tile(s) on {}", self.peer, eye[0], eye[1], core.size[0], core.size[1], core.tiles, core.description));
         // the app's XR display from now on (it presents on it at its next drawing)
         hal::hal_xr_remote_enable();
-        hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
+        hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz, core.views, if handheld { makepad_hal::xr_display_kind::HANDHELD } else { makepad_hal::xr_display_kind::WORN });
         // a session of its own: the headset's origin need not be the last session's
-        self.shared.new_space("the headset linked");
-        let server_instance = self.pairing.lock().unwrap().instance;
+        self.shared.new_space("the viewer started streaming");
         *self.shared.live_headset.lock().unwrap() = Some(LiveHeadset { instance, name: name.to_string(), session });
         // a person uses the app through the headset while it is linked, however the session ends:
         // a node's devhub keeps other work off the machine meanwhile (its frames share the GPU)
@@ -302,42 +662,49 @@ impl Session {
         }
         makepad_widgets::makepad_platform::restart::set_in_use("xr headset", Some(&format!("an XR headset ({name})")));
         let _in_use = InUse;
-        let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone(), eye: core.eye, fovea: core.fovea };
-        write_all(stream, &welcome.encode()).map_err(|e| format!("write: {e}"))?;
-        // the poses come as datagrams: a socket of the session's own, a key for it
-        let uplink = Uplink::open(self.peer.ip(), &core)?;
-        // the app's game audio goes down from the same socket to where the poses come from
-        let audio = makepad_desk_link::xr_audio::AudioOut::start(uplink.socket.try_clone().map_err(|e| format!("audio socket: {e}"))?, uplink.key, uplink.from.clone(), self.shared.log.clone())?;
-        write_all(stream, &XrServerMsg::Uplink { port: uplink.port, key: uplink.key.to_vec() }.encode()).map_err(|e| format!("write: {e}"))?;
-        stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
-        stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
-        self.shared.haptics.lock().unwrap().clear();
-        self.shared.haptics_ok.store(decodes & codecs::HAPTICS != 0, Ordering::Release);
-        self.shared.capture_ok.store(decodes & codecs::CAPTURE != 0, Ordering::Release);
-        self.shared.mic_ok.store(decodes & codecs::MIC != 0, Ordering::Release);
-        let why = self.pump(stream, &mut inbox, &mut buf, &core, (paired, instance), session);
-        self.decoded.store(core.flow.decoded_tiles.load(Ordering::Acquire) / core.tiles.max(1) as u64, Ordering::Release);
+        let mut uplink = None;
+        let mut audio = None;
+        let result = (|| {
+            let pin_ok = std::mem::take(&mut conn.pin_ok);
+            conn.send(XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: self.server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone(), eye: core.eye, fovea: core.fovea, caps: server_caps::MONO | server_caps::HANDHELD | server_caps::STANDBY, pin_ok, app: self.app.clone(), test: self.shared.test_run.clone() })?;
+            let up = uplink.insert(Uplink::open(self.peer.ip(), &core)?);
+            audio = Some(makepad_desk_link::xr_audio::AudioOut::start(up.socket.try_clone().map_err(|e| format!("audio socket: {e}"))?, up.key, up.from.clone(), self.shared.log.clone())?);
+            conn.send(XrServerMsg::Uplink { port: up.port, key: up.key.to_vec() })?;
+            conn.stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
+            self.shared.haptics.lock().unwrap().clear();
+            self.shared.haptics_ok.store(decodes & codecs::HAPTICS != 0, Ordering::Release);
+            self.shared.capture_ok.store(decodes & codecs::CAPTURE != 0, Ordering::Release);
+            self.shared.mic_ok.store(decodes & codecs::MIC != 0, Ordering::Release);
+            // a handheld that shows a narrowed view gets its view narrowed to the app's content
+            // (`MAKEPAD_XR_REFRAME=0`: never, for a side by side without it)
+            *self.shared.reframe.lock().unwrap() = Default::default();
+            let reframe = handheld && decodes & codecs::REFRAME != 0;
+            self.shared.reframe_ok.store(reframe, Ordering::Release);
+            if reframe {
+                let on = self.shared.reframe_on.load(Ordering::Acquire);
+                (self.shared.log)(if on { "xr host: reframing: the handheld's view narrowed to the app's content (where it says it is)" } else { "xr host: reframing off (the diagnostics' switch, MAKEPAD_XR_REFRAME=0): the handheld gets its whole view" });
+            }
+            conn.last_heard = Instant::now();
+            self.pump(conn, &core, viewer.id, session, generation)
+        })();
+        self.decoded.fetch_add(core.flow.decoded_tiles.load(Ordering::Acquire) / core.tiles.max(1) as u64, Ordering::Release);
         self.shared.haptics_ok.store(false, Ordering::Release);
         self.shared.capture_ok.store(false, Ordering::Release);
         self.shared.mic_ok.store(false, Ordering::Release);
+        self.shared.reframe_ok.store(false, Ordering::Release);
         self.shared.mic_link_ended(session);
         *self.shared.live_headset.lock().unwrap() = None;
         self.shared.reports.lock().unwrap().clear();
-        audio.stop();
-        uplink.stop();
+        if let Some(audio) = audio { audio.stop(); }
+        if let Some(up) = uplink { up.stop(); }
         core.stop();
         // the app's side hears that the headset went (the desktop paints as always again)
         self.shared.wake();
-        let _ = write_all(stream, &XrServerMsg::Bye { reason: why.clone() }.encode());
-        stream.shutdown();
-        Ok(why)
+        result
     }
 
-    /// `paired`: whether the headset (its instance id) is the one paired here: when the desktop
-    /// unpairs it, it is told and the link ends.
-    fn pump(&self, stream: &mut makepad_widgets::makepad_platform::makepad_network::tls::TlsStream, inbox: &mut Inbox, buf: &mut [u8], core: &Core, paired: (bool, u64), session: u64) -> String {
-        let mut last_heard = Instant::now();
-        let mut visible = true;
+    /// Returns to standby when the selected point changes. Other exits end the link.
+    fn pump(&self, conn: &mut Connection, core: &Core, link: u64, session: u64, mut generation: u64) -> Result<(), String> {
         let mut stats = PumpStats::new();
         // the room field, the stream's on/off and the see-through the headset was told (None:
         // not yet: told at once)
@@ -347,23 +714,38 @@ impl Session {
         let mut headset_told: Option<HeadsetSettings> = None;
         let mut capture_told = None;
         let mut mic_told = false;
+        let mut handheld_rate_logged = false;
         let mut capture = CaptureAssembler::default();
         let mut flowing = false;
         loop {
             let sh = &self.shared;
+            let current = sh.selection_generation.load(Ordering::Acquire);
+            if generation != current || self.stop.load(Ordering::Acquire) {
+                let links = sh.links.lock().unwrap();
+                let stopped = self.stop.load(Ordering::Acquire);
+                let paired = links.get(link).is_some();
+                let selected = links.wants_stream(link, links.on.as_ref());
+                drop(links);
+                if !paired {
+                    return Err(conn.unpaired());
+                }
+                if stopped {
+                    return Err("the desktop switched the stream off".into());
+                }
+                if !selected {
+                    return Ok(());
+                }
+                generation = current;
+            }
             let wanted = sh.room_field_wanted.load(Ordering::Acquire) && sh.room_scan.load(Ordering::Acquire);
             if room_field_told != Some(wanted) {
-                if let Err(e) = write_all(stream, &XrServerMsg::RoomField { wanted }.encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(XrServerMsg::RoomField { wanted })?;
                 (self.shared.log)(&format!("xr host: room field {}", if wanted { "wanted" } else { "not wanted" }));
                 room_field_told = Some(wanted);
             }
             let on = sh.streaming();
             if streaming_told != Some(on) {
-                if let Err(e) = write_all(stream, &XrServerMsg::Streaming { on }.encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(XrServerMsg::Streaming { on })?;
                 (self.shared.log)(&format!("xr host: stream {}", if on { "on" } else { "off" }));
                 if streaming_told.is_some() {
                     // a paused headset drops the pictures that reach it, and one that resumes has
@@ -379,9 +761,7 @@ impl Session {
             }
             let headset = *sh.headset_settings.lock().unwrap();
             if headset_told != Some(headset) {
-                if let Err(e) = write_all(stream, &headset_message(&headset).encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(headset_message(&headset))?;
                 (self.shared.log)(&format!("xr host: headset settings {headset:?}"));
                 headset_told = Some(headset);
             }
@@ -392,18 +772,14 @@ impl Session {
                     Some(a) => XrServerMsg::Capture { on: true, step_deg: a.step_deg, step_m: a.step_m, preview_hz: a.preview_hz },
                     None => XrServerMsg::Capture { on: false, step_deg: 0.0, step_m: 0.0, preview_hz: 0 },
                 };
-                if let Err(e) = write_all(stream, &msg.encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(msg)?;
                 (self.shared.log)(&format!("xr host: capture {}", if ask.is_some() { "on" } else { "off" }));
                 capture_told = Some(ask);
             }
             // the app's ask of the microphone (only of a headset that has one)
             let mic = sh.mic_asked(session);
             if sh.mic_ok.load(Ordering::Acquire) && mic_told != mic {
-                if let Err(e) = write_all(stream, &XrServerMsg::Mic { on: mic }.encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(XrServerMsg::Mic { on: mic })?;
                 (self.shared.log)(&format!("xr host: microphone {}", if mic { "on" } else { "off" }));
                 mic_told = mic;
             }
@@ -411,32 +787,26 @@ impl Session {
             let haptics = std::mem::take(&mut *sh.haptics.lock().unwrap());
             for h in &haptics {
                 let msg = XrServerMsg::Haptic { hand: h.hand, amplitude: h.amplitude, duration_us: (h.seconds * 1e6) as u32 };
-                if let Err(e) = write_all(stream, &msg.encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(msg)?;
             }
             let see = sh.see_through.load(Ordering::Acquire);
             if see_through_told != Some(see) {
-                if let Err(e) = write_all(stream, &XrServerMsg::SeeThrough { on: see }.encode()) {
-                    return format!("write: {e}");
-                }
+                conn.send(XrServerMsg::SeeThrough { on: see })?;
                 see_through_told = Some(see);
             }
             // another display rate asked (`set_refresh_hz`): the headset is told and the session
             // ends; it links again at that rate (new encoders)
             let hz = sh.refresh_hz.load(Ordering::Acquire);
             if hz != 0 && hz != core.fps {
-                if let Err(e) = write_all(stream, &XrServerMsg::Refresh { mhz: hz * 1000 }.encode()) {
-                    return format!("write: {e}");
+                if core.handheld {
+                    if !handheld_rate_logged {
+                        (sh.log)("xr host: a handheld keeps its camera's rate; no refresh asked");
+                        handheld_rate_logged = true;
+                    }
+                } else {
+                    conn.send(XrServerMsg::Refresh { mhz: hz * 1000 })?;
+                    return Err(format!("the display rate goes from {} to {hz} Hz", core.fps));
                 }
-                return format!("the display rate goes from {} to {hz} Hz", core.fps);
-            }
-            if self.stop.load(Ordering::Acquire) {
-                return "the desktop switched the stream off".into();
-            }
-            if paired.0 && self.pairing.lock().unwrap().paired.as_ref().map(|h| h.instance) != Some(paired.1) {
-                let _ = write_all(stream, &XrServerMsg::Unpaired.encode());
-                return "the desktop unpaired the headset".into();
             }
             // the headset's poses stopped (asleep, taken off, not visible): the app is woken once so
             // its desktop is no longer held for the headset (`ServerShared::frames_flowing`)
@@ -445,8 +815,8 @@ impl Session {
                 sh.wake();
             }
             flowing = now_flowing;
-            if last_heard.elapsed() > Duration::from_secs(6) {
-                return "the headset was silent for 6 s".into();
+            if conn.last_heard.elapsed() > Duration::from_secs(6) {
+                return Err("the headset was silent for 6 s".into());
             }
             loop {
                 match core.out.try_recv() {
@@ -455,38 +825,20 @@ impl Session {
                         head.stages[stage::SEND] = encoded_at.elapsed().as_micros() as u32;
                         let msg = encode_xr_video(&head, &data);
                         let write_at = Instant::now();
-                        if let Err(e) = write_all(stream, &msg) {
-                            return format!("write: {e}");
+                        if let Err(e) = write_all(&mut conn.stream, &msg) {
+                            return Err(format!("write: {e}"));
                         }
                         core.tiles_out(stats.sent(&head, msg.len(), write_at.elapsed()));
                         self.pictures.fetch_add(1, Ordering::AcqRel);
                     }
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return "the encoder stopped".into(),
+                    Err(TryRecvError::Disconnected) => return Err("the encoder stopped".into()),
                 }
             }
-            let n = match stream.read(buf) {
-                Ok(0) => return "the headset closed the connection".into(),
-                Ok(n) => n,
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => 0,
-                Err(e) => return format!("read: {e}"),
-            };
-            if n > 0 {
-                inbox.feed(&buf[..n]);
-                last_heard = Instant::now();
-            }
-            loop {
-                let (ty, payload) = match inbox.next() {
-                    Ok(Some(m)) => m,
-                    Ok(None) => break,
-                    Err(e) => return e.to_string(),
-                };
-                let msg = match XrClientMsg::decode(ty, &payload) {
-                    Ok(m) => m,
-                    Err(e) => return e.to_string(),
-                };
+            conn.read()?;
+            while let Some((msg, bytes)) = conn.next(&self.shared.log, false)? {
                 match msg {
-                    XrClientMsg::Pose { seq, sample_ns, display_ns, frame } if visible => {
+                    XrClientMsg::Pose { seq, sample_ns, display_ns, frame } if conn.visible => {
                         stats.poses += 1;
                         if !core.pose(seq, sample_ns, display_ns, &frame) {
                             stats.refused_poses += 1;
@@ -494,30 +846,25 @@ impl Session {
                     }
                     XrClientMsg::Pose { .. } => {}
                     XrClientMsg::State { visible: v, focused } => {
-                        if v && !visible {
+                        if v && !conn.visible {
                             core.keyframe();
                         }
-                        visible = v;
-                        (self.shared.log)(&format!("xr host: headset {} {}", if v { "visible" } else { "not visible" }, if focused { "focused" } else { "not focused" }));
+                        conn.state(v, focused, &self.shared.log);
                     }
                     XrClientMsg::Stats { seq, decode_us, .. } => {
                         stats.decode_us.push(decode_us);
                         core.tiles_out(stats.reported(seq, decode_us));
                     }
-                    XrClientMsg::Ping { client_ns } => {
-                        if let Err(e) = write_all(stream, &XrServerMsg::Pong { client_ns, server_ns: makepad_hal::clock_ns() }.encode()) {
-                            return format!("write: {e}");
-                        }
-                    }
+                    XrClientMsg::Ping { client_ns } => conn.pong(client_ns)?,
                     XrClientMsg::Keyframe => core.keyframe(),
                     XrClientMsg::World { voxel_size, chunk_edge, bricks } => {
                         stats.bricks += bricks.len() as u64;
-                        stats.brick_bytes += payload.len() as u64;
+                        stats.brick_bytes += bytes as u64;
                         (self.world)(voxel_size, chunk_edge, bricks);
                     }
                     XrClientMsg::Report { values } => self.shared.push_report(values),
                     XrClientMsg::Capture { seq, part, parts, data } => {
-                        stats.capture_bytes += payload.len() as u64;
+                        stats.capture_bytes += bytes as u64;
                         match capture.push(seq, part, parts, &data) {
                             Some(Ok(record)) => self.shared.capture_record(session, record),
                             // (the error names the record's fault, never its contents)
@@ -534,7 +881,7 @@ impl Session {
                         }
                     }
                     XrClientMsg::Recenter => self.shared.new_space("the wearer recentered"),
-                    XrClientMsg::Hello { .. } => return "a second hello".into(),
+                    XrClientMsg::Hello { .. } => return Err("a second hello".into()),
                 }
             }
             stats.window(core);
@@ -584,6 +931,11 @@ impl RateWindow {
     fn new() -> RateWindow {
         RateWindow { at: Instant::now(), pictures: 0, bytes: 0, trip_us: Vec::new() }
     }
+}
+
+/// The view size accepted by the pack (four luma bytes per shared texel).
+pub(super) fn aligned_eye(eye: [u32; 2]) -> [u32; 2] {
+    eye.map(|n| n.clamp(64, 4096) & !3)
 }
 
 /// A link's own session id, from the OS's random source. The capture ask is tied to it, so a
@@ -749,4 +1101,47 @@ impl PumpStats {
 
 fn headset_message(h: &HeadsetSettings) -> XrServerMsg {
     XrServerMsg::Headset { foveation: h.foveation, eye_min_pct: h.eye_min_pct, eye_max_pct: h.eye_max_pct, multimodal: h.multimodal, occlusion: h.occlusion, ahead: h.ahead }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Change, Control};
+    use makepad_desk_link::xr_pair::{ServerPairing, ViewerPair};
+
+    /// The LAN rule: the server listens only while a device is on, a PIN typed in this run waits
+    /// for its device, or the launch asked; neither the launch's off nor the caption's off loses
+    /// which device the user turned on.
+    #[test]
+    fn listens_only_when_asked_and_keeps_the_choice() {
+        let (a, b) = ([1u8; 65], [2u8; 65]);
+        let viewers = vec![ViewerPair { point: a, name: "quest".into() }, ViewerPair { point: b, name: "ipad".into() }];
+        // (no file: kept in memory only)
+        let mut pairing = ServerPairing::load(None);
+        pairing.viewers = viewers;
+        let mut c = Control { pairing, forced: false, held_off: false, remembered: None, pin_suspended: false };
+        assert!(!c.listens(), "all off and no PIN: nothing listens");
+        c.apply(Change::Pin("1234".into())).unwrap();
+        assert!(!c.listens(), "a PIN still being typed opens nothing");
+        c.apply(Change::Pin("12345".into())).unwrap();
+        assert!(c.listens(), "a whole PIN listens for its device");
+        c.apply(Change::Pin(String::new())).unwrap();
+        c.apply(Change::Device(b, true)).unwrap();
+        assert!(c.listens() && c.pairing.on == Some(b), "a device switched on listens");
+        c.apply(Change::Device(a, true)).unwrap();
+        assert_eq!(c.pairing.on, Some(a), "one device on at a time");
+        c.apply(Change::Device(b, false)).unwrap();
+        assert_eq!(c.pairing.on, Some(a), "switching off a device that is off changes nothing");
+        c.apply(Change::Launch(false)).unwrap();
+        assert!(!c.listens() && c.pairing.on == Some(a), "the launch's off holds the listener off and keeps the choice");
+        c.apply(Change::Device(a, true)).unwrap();
+        assert!(c.listens(), "a switch the user changes listens again");
+        c.apply(Change::Enabled(false)).unwrap();
+        assert!(!c.listens() && c.pairing.on.is_none(), "the caption's off is the real off");
+        c.apply(Change::Enabled(true)).unwrap();
+        assert!(c.listens() && c.pairing.on == Some(a), "the caption's on brings the same device back");
+        c.apply(Change::Forget(a)).unwrap();
+        c.apply(Change::Enabled(false)).unwrap();
+        c.apply(Change::Enabled(true)).unwrap();
+        assert!(c.listens() && c.pairing.on.is_none(), "with none to bring back the caption's on listens with all off");
+    }
 }

@@ -258,6 +258,19 @@ impl XrShapes {
     /// Start a new list without discarding its allocation.
     pub fn clear(&mut self) { self.instances.clear(); }
 
+    /// The box (min, max corners) holding every shape in the list, from each one's bounding
+    /// radius (None: an empty list).
+    pub fn bounds(&self) -> Option<(Vec3f, Vec3f)> {
+        self.instances.iter().fold(None, |acc, i| {
+            let r = vec3f(i.bound, i.bound, i.bound);
+            let (lo, hi) = (i.center - r, i.center + r);
+            Some(match acc {
+                None => (lo, hi),
+                Some((a, b)) => (vec3f(a.x.min(lo.x), a.y.min(lo.y), a.z.min(lo.z)), vec3f(b.x.max(hi.x), b.y.max(hi.y), b.z.max(hi.z))),
+            })
+        })
+    }
+
     pub fn sphere(&mut self, at: Vec3f, radius: f32, style: XrShapeStyle) {
         if radius <= 0.0 { return; }
         self.instances.push(Instance { kind: XrShapeKind::Sphere, center: at, axes: AXES, params: vec4(radius, 0.0, 0.0, 0.0), bound: radius, edge_radius: radius, style });

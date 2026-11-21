@@ -3,30 +3,33 @@
 //! (`DrawPass::set_as_xr_pass`) and the server takes each frame from there (the Cx XR frame
 //! sink, `makepad_draw::xr_sink`). The caption's XR control (`crate::panel`) installs it.
 //!
-//! A headset links (fleet TLS, `Need::XrViewer`; found by its PIN, `makepad_desk_link::xr_pair`)
-//! and says its eye size and refresh: the process gets a remote headset slot (an offscreen XR
+//! A viewer pairs by PIN and proves its device key on each TLS connection. It sends its eye
+//! size and refresh rate. The process gets a remote headset slot (an offscreen XR
 //! display, `makepad_hal::xr_remote`) whose frames are the headset's poses. Each frame's colour
 //! and depth are packed on the GPU into an encode surface ([`sink`]), the picture's eye columns
 //! encoded at once on the GPU's encode engines ([`pipeline`], the tile fan-out and rate
 //! controller of every Desk Link stream) and sent with the eyes of the pose it was drawn with
-//! ([`session`]). One headset at a time.
+//! ([`session`]). One view at a time, many links.
 //!
 //! Pipelined and bounded: the app is asked for the next pose as soon as it built a frame and
 //! there is room (a picture slot free, fewer than `in_flight` pictures built and not yet
 //! decoded by the headset); while there is none it renders nothing more, woken when there is
 //! again. A slow link or decoder makes the server render less, never queue more.
 //!
-//! Threads: the listener; per session its TLS thread (reads poses and stats, writes pictures),
-//! its picture thread (matches a picture to its pose and fans it out) and an encode thread per
-//! eye. Nothing runs on the app's UI thread but the pack ([`sink`]).
+//! A serial task on the app's pool saves pairings and starts or stops the listener. Each link has a TLS
+//! thread. The active stream also has a picture thread and an encode thread per eye. The
+//! app's UI thread packs its frames ([`sink`]) and reads the published device list.
 
 mod debug;
 pub mod external;
 mod foveation;
+mod links;
 mod pipeline;
+mod reframe;
 mod session;
 mod sink;
 
+pub use links::{XrDevice, XrDeviceKind, XrDeviceLink};
 pub use pipeline::picture_size;
 pub use sink::DrawXrBand;
 pub(crate) use sink::script_mod;
@@ -34,13 +37,26 @@ use crate::settings_types::{HeadsetSettings, StreamAa, StreamView, STREAM_AA_MOD
 
 use makepad_desk_link::xr::WorldBrick;
 use makepad_desk_link::xr_capture::{CaptureAsk, CaptureRecord};
-use makepad_desk_link::xr_pair::ServerPairing;
+use makepad_desk_link::xr_pair::{HostRef, ServerPairing};
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::makepad_network::tls;
 use makepad_widgets::makepad_platform::pass_load::{PassClass, PassLoadSample};
-use pipeline::Live;
-use std::collections::VecDeque;
+use pipeline::{Layout, Live};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub(super) fn uppercase_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
+/// Linked devices probe about every five seconds. After three missed probes their whereabouts expire.
+const WHEREABOUTS_TTL: Duration = Duration::from_secs(15);
 
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 /// The lowest eye render scale (percent of the encoded eye size): the floor of
@@ -64,7 +80,7 @@ pub type MicSink = Arc<dyn Fn(u64, MicEvent) + Send + Sync>;
 
 /// The pictures are NV12 textures, one per tile, the pack rendering into their planes (the
 /// encoder takes each as it lies): D3D11. Elsewhere one packed picture (BGRA8 texels holding
-/// the NV12 bytes of both eye columns) the encoders read their columns of.
+/// the NV12 bytes of its views side by side) the encoders read their tiles of.
 pub(crate) fn nv12_planes() -> bool {
     cfg!(target_os = "windows")
 }
@@ -224,7 +240,22 @@ pub(crate) struct ServerShared {
     pub(crate) mic_ask: Mutex<Option<(u64, bool)>>,
     pub(crate) mic_ok: AtomicBool,
     pub(crate) mic_sink: Mutex<Option<MicSink>>,
-    pub(crate) pairing: Mutex<Option<Arc<Mutex<ServerPairing>>>>,
+    /// Where the app's content lies (`XrServer::set_content_bounds`), and the linked handheld
+    /// takes a narrowed view (`codecs::REFRAME`, not turned off by `MAKEPAD_XR_REFRAME=0`):
+    /// each pose's view is narrowed to the content (`reframe`).
+    pub(crate) content: Mutex<Option<Arc<[[[f32; 3]; 2]]>>>,
+    /// The app has a ground plate of its own to leave out (`XrServer::set_ground_offered`), and
+    /// the user's switch for it (off: the real table or floor is the ground).
+    pub(crate) ground_offered: AtomicBool,
+    pub(crate) ground: AtomicBool,
+    pub(crate) reframe_ok: AtomicBool,
+    pub(crate) reframe: Mutex<reframe::Reframe>,
+    /// The diagnostics' switch for it (`XrServer::set_reframe`; `MAKEPAD_XR_REFRAME=0`: off).
+    pub(crate) reframe_on: AtomicBool,
+    links: Arc<Mutex<links::Links>>,
+    whereabouts: Arc<Mutex<HashMap<[u8; 65], (HostRef, Instant)>>>,
+    test_run: String,
+    selection_generation: AtomicU64,
     pub(crate) live_headset: Mutex<Option<LiveHeadset>>,
     pub(crate) server_line: Mutex<String>,
     pub(crate) server_stats: Mutex<ServerStats>,
@@ -272,7 +303,19 @@ impl ServerShared {
             mic_ask: Mutex::new(None),
             mic_ok: AtomicBool::new(false),
             mic_sink: Mutex::new(None),
-            pairing: Mutex::new(None),
+            content: Mutex::new(None),
+            ground_offered: AtomicBool::new(false),
+            ground: AtomicBool::new(false),
+            reframe_ok: AtomicBool::new(false),
+            reframe: Mutex::default(),
+            reframe_on: AtomicBool::new(!std::env::var("MAKEPAD_XR_REFRAME").is_ok_and(|v| v == "0")),
+            links: Arc::default(),
+            whereabouts: Arc::default(),
+            test_run: std::env::var("MAKEPAD_TEST_RUN").map(|value| {
+                let label = value.trim();
+                label[..label.floor_char_boundary(48)].to_owned()
+            }).unwrap_or_default(),
+            selection_generation: AtomicU64::new(0),
             live_headset: Mutex::new(None),
             server_line: Mutex::new(String::new()),
             server_stats: Mutex::new(ServerStats::default()),
@@ -280,6 +323,18 @@ impl ServerShared {
             app_line: Mutex::new(String::new()),
             wake: Mutex::new(None),
         }
+    }
+
+    /// Where a picture rendered with `drawn` (its first eye's fov) lies in the device's own
+    /// view, for the desktop's mirror: a reframed handheld's picture is a part of it. None: all
+    /// of it.
+    pub(crate) fn mirror_part(&self, drawn: Option<[f32; 4]>) -> Option<[f32; 4]> {
+        let drawn = drawn?;
+        if !self.reframe_ok.load(Ordering::Acquire) {
+            return None;
+        }
+        let (full, _) = self.reframe.lock().unwrap().last?;
+        (full != drawn).then(|| reframe::TanRect::of_fov(drawn).uv_in(&reframe::TanRect::of_fov(full)))
     }
 
     /// News the app's side may poll for: an `Event::Signal`, which the sink hears first.
@@ -404,16 +459,21 @@ impl ServerShared {
 
     /// The tiles (eye columns encoded apart) of the session now (0: none streams).
     pub(crate) fn session_tiles(&self) -> u32 {
-        self.live.lock().unwrap().as_ref().map_or(0, |l| l.tiles)
+        self.live.lock().unwrap().as_ref().map_or(0, |l| l.layout.tiles)
     }
 
     pub(crate) fn session_eye(&self) -> Option<[u32; 2]> {
-        self.live.lock().unwrap().as_ref().map(|l| l.eye)
+        self.live.lock().unwrap().as_ref().map(|l| l.layout.eye)
     }
 
     /// The session's foveation and its eye columns' encoded size.
     pub(crate) fn session_fovea(&self) -> Option<(makepad_desk_link::xr::Fovea, [u32; 2])> {
-        self.live.lock().unwrap().as_ref().map(|l| (l.fovea, l.encoded))
+        self.live.lock().unwrap().as_ref().map(|l| (l.layout.fovea, l.layout.encoded))
+    }
+
+    /// The pack takes the layout and its session generation together, once per frame.
+    pub(crate) fn session_layout(&self) -> Option<(u64, Layout)> {
+        self.live.lock().unwrap().as_ref().map(|l| (l.generation, l.layout))
     }
 
     /// Whether the app may build the next frame: a headset streams, fewer than its limit of
@@ -422,26 +482,33 @@ impl ServerShared {
     pub(crate) fn room(&self) -> bool {
         let live = self.live.lock().unwrap();
         let Some(l) = live.as_ref() else { return false };
-        if l.flow.in_flight(l.tiles) >= l.limit {
+        if l.flow.in_flight(l.layout.tiles) >= l.limit {
             l.flow.held.fetch_add(1, Ordering::AcqRel);
             return false;
         }
-        l.flow.backlog(l.tiles) < 2
+        l.flow.backlog(l.layout.tiles) < 2
     }
 
-    /// A picture for the headset; false when no headset streams (it is dropped, and with it
-    /// its hold on the slot).
+    /// Queue a picture only for the session that packed it. Dropping it frees its slot.
     pub(crate) fn submit(&self, picture: pipeline::Picture) -> bool {
-        let live = self.live.lock().unwrap();
-        let Some(l) = live.as_ref() else { return false };
+        let mut live = self.live.lock().unwrap();
+        let Some(l) = live.as_mut() else { return false };
         l.flow.built_total.fetch_add(1, Ordering::AcqRel);
         l.flow.built.fetch_add(1, Ordering::AcqRel);
+        if picture.generation != l.generation {
+            l.flow.lost_picture(l.layout.tiles);
+            let log = !std::mem::replace(&mut l.stale_logged, true);
+            drop(live);
+            if log {
+                (self.log)("xr host: a picture packed for the last session dropped");
+            }
+            return false;
+        }
         match l.tx.try_send(picture) {
             Ok(()) => true,
             Err(_) => {
                 // the picture thread is behind (cannot be with the app's slots): out of flight
-                l.flow.lost.fetch_add(1, Ordering::AcqRel);
-                l.flow.encoded_tiles.fetch_add(l.tiles as u64, Ordering::AcqRel);
+                l.flow.lost_picture(l.layout.tiles);
                 false
             }
         }
@@ -477,9 +544,10 @@ struct XrServerSlot {
     tried: bool,
 }
 
-/// The stream switch this launch starts with, when one is given: `MAKEPAD_XR_STREAM=off|on`
-/// (also `0|1`) or `--xr-stream=off|on`; it overrides the app's kept switch for this launch (a
-/// change in the panel is kept again).
+/// The listener this launch starts with, when one is given: `MAKEPAD_XR_STREAM=off|on` (also
+/// `0|1`) or `--xr-stream=off|on`. On listens from the start; off keeps it off for this launch
+/// with the kept device switches untouched (a switch changed or a PIN typed in the panel listens
+/// again).
 pub fn launch_enabled() -> Option<bool> {
     let parse = |v: &str| match v.trim().to_ascii_lowercase().as_str() {
         "off" | "0" | "false" | "no" => Some(false),
@@ -492,9 +560,9 @@ pub fn launch_enabled() -> Option<bool> {
 impl XrServer {
     /// Installs this process's XR server for the app `app` (once: later calls return the same
     /// server; None where none can run: the web, or the LAN not allowed for this instance).
-    /// It listens only with the app's kept LAN opt-in or an explicit launch opt-in: on a port
-    /// the OS picks, found by headsets with the pairing probe. The pairing is kept in the
-    /// app's data folder (`xr-pairing`); the app's XR pass frames go to a linked headset.
+    /// A selected viewer, a pending PIN or an explicit opt-in starts the LAN listener.
+    /// Viewers find its port with the pairing probe. The app keeps its pairings and its
+    /// selected viewer in `xr-pairing` in its data folder.
     pub fn install(cx: &mut Cx, app: &str) -> Option<XrServer> {
         if cx.global::<XrServerSlot>().tried {
             return XrServer::get(cx);
@@ -521,16 +589,18 @@ impl XrServer {
             mirror.get_or_insert_with(BrickMirror::default).apply(&makepad_widgets::makepad_platform::xr_tsdf::xr_tsdf_store(), BrickGrid { voxel_size, chunk_edge }, &bricks);
         });
         let pairing = makepad_widgets::makepad_platform::home::app_data_dir(app).map(|d| d.join("xr-pairing"));
-        let host = match session::Host::new(&shared, app, pairing, world) {
-            Ok(h) => Arc::new(h),
+        let host = match session::Host::new(&shared, &cx.task_pool(), app, pairing, world) {
+            Ok(h) => h,
             Err(e) => {
                 log(&e);
                 return None;
             }
         };
         let server = XrServer { shared, host };
-        let on = launch_enabled().unwrap_or_else(|| crate::panel::XrStreamSettings::load(app).streaming);
-        server.set_enabled(on);
+        server.host.change(match launch_enabled() {
+            Some(on) => session::Change::Launch(on),
+            None => session::Change::Listen,
+        });
         // the app's XR pass frames from now on, and its sound
         let pack = sink::XrPack::new(cx, server.clone(), signal);
         makepad_widgets::makepad_draw::xr_sink::set_xr_frame_sink(cx, Box::new(pack));
@@ -556,22 +626,13 @@ impl XrServer {
         self.shared.interaction.load(Ordering::Acquire)
     }
 
-    /// The desktop's stream switch: off, nothing of the server runs: it listens on no port,
-    /// answers no pairing probe, a linked headset is told and its session ends (its encoders
-    /// with it), the desktop paints as always. On: it listens again (on a new port; headsets
-    /// find it by their probe) and a paired headset links again. The pairing and the PIN are
-    /// kept either way. Also un-pauses ([`Self::set_streaming`]).
+    /// Forces the listener on and restores the viewer selected before the last off.
+    /// Switching off remembers that viewer, stops listening and ends the links.
     pub fn set_enabled(&self, on: bool) {
         if on {
-            if !makepad_widgets::makepad_platform::makepad_network::lan::service("xr host") {
-                return;
-            }
             self.shared.set_streaming(true);
         }
-        if let Err(e) = self.host.set_listening(&self.shared, on) {
-            (self.shared.log)(&format!("xr host: cannot listen: {e}"));
-        }
-        self.shared.wake();
+        self.host.change(session::Change::Enabled(on));
     }
 
     pub fn enabled(&self) -> bool {
@@ -618,6 +679,46 @@ impl XrServer {
     /// field and this is on).
     pub fn set_room_scan(&self, on: bool) {
         self.shared.room_scan.store(on, Ordering::Release);
+    }
+
+    /// Where the app's content lies: boxes (min, max corners) in the XR frame's space (the
+    /// space of `XrState`'s poses); what it draws lies in them and the rest of its view is
+    /// transparent. A handheld that can show a narrowed view (`codecs::REFRAME`) then gets each
+    /// pose's view narrowed to the content, so the content takes the whole picture. None (the
+    /// default): the full view. Cheap to call every frame (the boxes are swapped, read per pose
+    /// on the link's thread).
+    pub fn set_content_bounds(&self, boxes: Option<Vec<[[f32; 3]; 2]>>) {
+        *self.shared.content.lock().unwrap() = boxes.map(Arc::from);
+    }
+
+    /// A handheld's view narrowed to the app's content ([`Self::set_content_bounds`]): on by
+    /// default (`MAKEPAD_XR_REFRAME=0`: off), a switch in the panel's diagnostics to compare.
+    pub fn set_reframe(&self, on: bool) {
+        self.shared.reframe_on.store(on, Ordering::Release);
+    }
+
+    pub fn reframe(&self) -> bool {
+        self.shared.reframe_on.load(Ordering::Acquire)
+    }
+
+    /// The app draws a ground plate of its own for the device (a floor, a bed) it can leave
+    /// out: the stream panel offers the user's "Ground plate" switch ([`Self::show_ground`]).
+    pub fn set_ground_offered(&self, on: bool) {
+        self.shared.ground_offered.store(on, Ordering::Release);
+    }
+
+    pub fn ground_offered(&self) -> bool {
+        self.shared.ground_offered.load(Ordering::Acquire)
+    }
+
+    /// The user's "Ground plate" switch (`XrStreamSettings::ground`): the app draws its own
+    /// ground plate for the device. Off (the default) the real table or floor is the ground.
+    pub fn show_ground(&self) -> bool {
+        self.shared.ground.load(Ordering::Acquire)
+    }
+
+    pub fn set_show_ground(&self, on: bool) {
+        self.shared.ground.store(on, Ordering::Release);
     }
 
     /// Ask the headset of the link `session` ([`LiveHeadset::session`]) to capture its cameras,
@@ -745,27 +846,48 @@ impl XrServer {
         self.shared.live_headset.lock().unwrap().clone()
     }
 
-    /// The server's pairing: its instance id, the PIN typed, the paired headset, the headset
-    /// that PIN matched, a clash.
+    /// The server's instance ID, pending PIN and remembered viewers.
     pub fn pairing(&self) -> Option<ServerPairing> {
-        self.shared.pairing.lock().unwrap().as_ref().map(|p| p.lock().unwrap().clone())
+        Some(self.host.pairing.lock().unwrap().clone())
     }
 
-    /// The PIN as the user types it (a headset's PIN once it has
-    /// `makepad_desk_link::xr_pair::PIN_DIGITS` digits; empty: none). Any change unpairs the
-    /// paired headset (told, its link ends; both forget); a whole PIN then looks for the
-    /// headset showing it.
-    pub fn set_pin(&self, pin: &str) {
-        let Some(p) = self.shared.pairing.lock().unwrap().clone() else { return };
-        let mut p = p.lock().unwrap();
-        if p.pin == pin {
-            return;
+    /// Every remembered viewer in pairing order, with its switch and current link.
+    pub fn devices(&self) -> Vec<XrDevice> {
+        let rows = self.shared.links.lock().unwrap().devices.clone();
+        rows.iter().map(|(point, device)| {
+            let mut device = device.clone();
+            if device.link == XrDeviceLink::Offline {
+                let whereabouts = self.shared.whereabouts.lock().unwrap();
+                if let Some((r, _)) = whereabouts.get(point).filter(|(_, seen)| seen.elapsed() < WHEREABOUTS_TTL) {
+                    let test = if r.test.is_empty() { "" } else { " (test run)" };
+                    device.elsewhere = Some(format!("with {} on {}{test}", r.app, r.machine));
+                }
+            }
+            device
+        }).collect()
+    }
+
+    /// Selects this viewer, or clears its switch if it is selected.
+    pub fn set_device_on(&self, point_hex: &str, on: bool) {
+        if let Some(point) = tls::from_hex(point_hex) {
+            self.host.change(session::Change::Device(point, on));
         }
-        p.pin = pin.to_string();
-        p.paired = None;
-        p.matched = None;
-        p.clash = false;
-        p.save();
+    }
+
+    /// The remembered viewers, each with its display name and public point in hex.
+    pub fn viewers(&self) -> Vec<(String, String)> {
+        self.devices().into_iter().map(|d| (d.name, d.point_hex)).collect()
+    }
+
+    pub fn forget_viewer(&self, point_hex: &str) {
+        if let Some(point) = tls::from_hex(point_hex) {
+            self.host.change(session::Change::Forget(point));
+        }
+    }
+
+    /// Once the typed PIN is complete, the server can pair the viewer showing it.
+    pub fn set_pin(&self, pin: &str) {
+        self.host.change(session::Change::Pin(pin.to_owned()));
     }
 
     /// The server's numbers of its last stats window, one line.

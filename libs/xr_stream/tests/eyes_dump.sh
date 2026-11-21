@@ -5,7 +5,8 @@
 # (MAKEPAD_XR_REMOTE_SELFTEST=1) and the 300th packed picture dumped (MAKEPAD_XR_REMOTE_DUMP), then
 # compares the eyes' numbers: each eye's colour luma and band coverage must be drawn, and the left
 # within reach of the right (a right-eye pass whose clear wiped the left left it empty).
-# Prints "XR-EYES-OK <numbers>" or "XR-EYES-FAIL: <why>"; exit 0 / 1.
+# XR_EYES_MONO=1 runs the one-view handheld selftest and checks that only the left column is
+# present, with drawn luma and coverage. Prints "XR-EYES-OK [mono] <numbers>" or "XR-EYES-FAIL: <why>"; exit 0 / 1.
 set -u
 pkg=${1:-makepad-sandbox}
 dir=${2:-apps/commercial}
@@ -21,6 +22,7 @@ bin=$T/release/${3:-$pkg}
 dump=$out/dump-$$
 data=$out/data-$$
 mkdir -p "$dump" "$data"
+export MAKEPAD_XR_REMOTE_SELFTEST_MONO=${XR_EYES_MONO:-0}
 MAKEPAD_LAN=1 MAKEPAD_XR_STREAM=on MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_DUMP="$dump" XDG_DATA_HOME="$data" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$bin" > "$out/app.log" 2>&1 &
 app_pid=$!
 line=""
@@ -36,7 +38,18 @@ grep -E "xr selftest|xr host: (eye|dump)" "$out/app.log" | head -8
 [ -n "$line" ] || { tail -20 "$out/app.log"; echo "XR-EYES-FAIL: no dump"; exit 1; }
 echo "$line"
 num() { echo "$line" | sed -n "s/.*$1 eye: luma mean \([0-9.]*\), coverage mean [0-9.]* max [0-9]* drawn \([0-9]*\)%.*/\\$2/p"; }
-ll=$(num left 1); lc=$(num left 2); rl=$(num right 1); rc=$(num right 2)
+ll=$(num left 1); lc=$(num left 2)
+if [ "$MAKEPAD_XR_REMOTE_SELFTEST_MONO" = 1 ]; then
+  [[ "$line" == *"; right eye"* ]] && { echo "XR-EYES-FAIL: a handheld picture has a right column"; exit 1; }
+  # The pack uses limited-range luma: black is 16.
+  awk -v ll="$ll" -v lc="$lc" 'BEGIN {
+    if (ll + 0 <= 16) { print "XR-EYES-FAIL: the left eye has no drawn luma"; exit 1 }
+    if (lc + 0 < 1) { print "XR-EYES-FAIL: the left eye has no coverage"; exit 1 }
+    printf "XR-EYES-OK mono luma %s coverage %s%%\n", ll, lc
+  }'
+  exit $?
+fi
+rl=$(num right 1); rc=$(num right 2)
 awk -v ll="$ll" -v lc="$lc" -v rl="$rl" -v rc="$rc" 'BEGIN {
   if (rc + 0 < 1) { print "XR-EYES-FAIL: the right eye has no coverage (nothing drawn?)"; exit 1 }
   if (lc + 0 < rc * 0.5 || ll + 0 < rl * 0.5) { printf "XR-EYES-FAIL: the left eye is empty (luma %s vs %s, coverage %s%% vs %s%%)\n", ll, rl, lc, rc; exit 1 }

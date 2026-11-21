@@ -23,7 +23,7 @@ wrist menu, cards, pointing, haptic ticks and grab-to-edit.
    ```
 
 3. **Put the caption control in the window's caption:**
-   `xr := XrCaptionButton{app: "my-app"}`. It starts the app's XR server and pairs a headset
+   `xr := XrCaptionButton{app: "my-app"}`. It starts the app's XR server and pairs a device
    by its PIN. When a headset links, the process gets an XR display (`cx.xr_display()`).
    Optionally, an `XrMirrorView{}` somewhere shows the headset's left eye.
 
