@@ -20,7 +20,14 @@ fn describe(p: &Box<dyn Any + Send>) -> String {
 struct Custom(u8);
 
 #[test]
+#[allow(deprecated)]
 fn a01_catch_unwind_payloads() {
+    use core::panic::{PanicInfo, PanicMessage};
+    let payload: for<'a> fn(&'a PanicInfo<'static>) -> &'a (dyn Any + Send) = PanicInfo::<'static>::payload;
+    let as_str: fn(&PanicMessage<'static>) -> Option<&'static str> = PanicMessage::<'static>::as_str;
+    let message: for<'a> fn(&'a PanicInfo<'static>) -> PanicMessage<'a> = PanicInfo::<'static>::message;
+    std::hint::black_box((payload, as_str, message));
+    println!("| PanicInfo payload and message, PanicMessage as_str signatures");
     panic::set_hook(Box::new(|_| {}));
     let r = panic::catch_unwind(|| panic!("literal"));
     println!("| literal: {}", describe(&r.unwrap_err()));

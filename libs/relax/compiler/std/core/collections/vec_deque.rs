@@ -325,13 +325,19 @@ impl<T> VecDeque<T> {
     }
 
     pub fn insert(&mut self, index: usize, value: T) {
+        let _ = self.insert_mut(index, value);
+    }
+
+    /// rustc 1.95.0 (push_mut): inserts at `index` and returns a mutable reference to the new element.
+    #[must_use = "if you don't need a reference to the value, use `VecDeque::insert` instead"]
+    pub fn insert_mut(&mut self, index: usize, value: T) -> &mut T {
         if index > self.len {
             crate::panicking::panic_str("index out of bounds");
         }
         if self.len == self.capacity() {
             self.grow_for(1);
         }
-        if index < self.len - index {
+        if index <= self.len - index {
             // shift the front part one to the left
             self.head = if self.head == 0 { self.capacity() - 1 } else { self.head - 1 };
             let mut i = 0;
@@ -346,8 +352,10 @@ impl<T> VecDeque<T> {
                 i -= 1;
             }
         }
-        unsafe { ptr::write(self.slot(index), value) };
+        let slot = self.slot(index);
+        unsafe { ptr::write(slot, value) };
         self.len += 1;
+        unsafe { &mut *slot }
     }
 
     pub fn remove(&mut self, index: usize) -> Option<T> {

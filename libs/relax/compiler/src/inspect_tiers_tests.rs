@@ -153,6 +153,19 @@ fn inlined_fn_versions_probes_and_pins() {
     });
     assert_eq!(unsafe { run(up, caller) }, 9984);
 
+    // ---- cache verify: caller's copy of leaf is one an edit of leaf rebuilds; with that edge
+    // gone (leaf no longer names caller a host: the bug class it looks for) it is the one
+    // untracked copy, named, unguarded (no live session) and among the recorded inputs
+    crate::owner::call(crate::owner::Class::Program, || {
+        let c = codever::check_copies(&u, &[caller], 8);
+        assert!(c.copies >= 1 && c.untracked == 0, "caller's copy of leaf is tracked: {} copies, {} untracked", c.copies, c.untracked);
+        let kept = std::mem::take(&mut u.fns[leaf as usize].history.get_or_insert_with(Default::default).inlined_into);
+        let c = codever::check_copies(&u, &[caller], 8);
+        u.fns[leaf as usize].history.get_or_insert_with(Default::default).inlined_into = kept;
+        assert_eq!((c.untracked, c.unguarded), (1, 1), "the copy whose edge is gone: {:?}", c.rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        assert!(c.rows.iter().any(|r| r.0 == caller && r.1.contains(&leaf_d) && !r.2 && r.3), "named as leaf's copy in caller, recorded");
+    });
+
     // ---- count leaf: leaf's own code is instrumented; its inliners are rebuilt at their own tier
     // (caller at O3, caller2 at O1) without leaf inlined, so all calls count
     let (group, sites, inliners) = crate::inspect::instrument::count_for_test("inspect_tiers::leaf").unwrap();
@@ -276,6 +289,102 @@ fn inlined_fn_versions_probes_and_pins() {
     });
     assert_eq!(unsafe { run(up, caller) }, 9984);
     assert_eq!(crate::inspect::instrument::site_hits_for_test(site), 1);
+    unsafe { UNIT = std::ptr::null_mut() };
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `if !plain(a) { two stores; an empty patchable call }` inside an inlined callee, after a call
+/// (a wait point, so the callee's copies keep their guards): the callee's O3 body holds the empty
+/// call's guarded copy, its jumps threaded, so the `if`'s body ends in the copy's guard and the
+/// guard's fast side is the `if`'s join (an emulator's lane bus read)
+const SPLIT_SOURCE: &str = r#"
+pub struct Bus { pub tick: u32, pub seen: u32 }
+pub struct Lane<'a> { pub bus: &'a mut Bus, pub tick: u32, pub slow: u32 }
+#[inline]
+pub fn note(_a: u32) {}
+#[inline]
+pub fn plain(a: u32) -> bool { a >= 64 }
+#[inline(never)]
+pub fn probe(a: u32) -> u32 { a }
+#[inline]
+pub fn lane_read(l: &mut Lane, a: u32) -> u32 {
+    let a = probe(a);
+    if !plain(a) {
+        l.slow = a | 1;
+        l.bus.tick = l.tick;
+        note(a);
+    }
+    l.bus.seen = l.bus.seen.wrapping_mul(31).wrapping_add(l.bus.tick);
+    a
+}
+pub fn caller(out: &mut u32) {
+    let mut bus = Bus { tick: 0, seen: 0 };
+    let mut i = 0u32;
+    let mut s = 0u32;
+    while i < 100 {
+        let mut l = Lane { bus: &mut bus, tick: i, slow: 0 };
+        s = s.wrapping_add(lane_read(&mut l, i));
+        s = s.wrapping_add(l.slow);
+        i += 1;
+    }
+    *out = s.wrapping_add(bus.seen);
+}
+"#;
+
+#[test]
+fn a_split_keeps_a_branch_whose_body_ends_in_an_empty_guarded_copy() {
+    isolated_test!(a_split_keeps_a_branch_whose_body_ends_in_an_empty_guarded_copy);
+    // A live session's O3 build of `caller` splits (relax_codegen::patched). The fast half must
+    // keep `lane_read`'s `if` and both stores of its body: the split read the `if` as a guard test
+    // (its body's block ends in `note`'s guard, with the same fast side) and the fast half went
+    // straight to the join, so `slow` stayed 0 and the bus kept its old stamp (rustc: 1980309814;
+    // with the stores lost: 4950, which this returned before the fix). An emulator's register
+    // accesses lost their stamps (11-19).
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-split-branch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, SPLIT_SOURCE).unwrap();
+    let mut session = crate::Session::default();
+    session.options.live = true;
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "split_branch", false).unwrap();
+    let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let defs = ["note", "plain", "probe", "lane_read", "caller"].map(|n| def(&prog, n));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    assert!(u.tier1.is_some(), "the fixture needs O3");
+    let ids = crate::owner::call(crate::owner::Class::Program, || {
+        let ids = defs.map(|d| u.fn_id(FnKey::Inst(d, Vec::new())));
+        for &id in &ids {
+            let c = unsafe { compile_fn(up, id) }.unwrap();
+            u.install(id, &c.0, &c.2, c.1, 0).unwrap();
+        }
+        ids
+    });
+    let caller = ids[4];
+    assert_eq!(unsafe { run(up, caller) }, 1980309814, "the O1 build");
+    // `lane_read` hot first: its O3 body is the one `caller`'s build takes in, guards threaded
+    assert!(unsafe { compile_tier1(up, ids[3]) }, "O3 build of lane_read");
+    assert!(unsafe { compile_tier1(up, caller) }, "O3 build of caller");
+    crate::owner::call(crate::owner::Class::Program, || {
+        let mut pat = false;
+        u.fns[caller as usize].pc_map.each(|o, p| {
+            pat |= o != u32::MAX && relax_backend::rir::pos_patched(p);
+            true
+        });
+        assert!(pat, "caller's O3 code has a patched path: {}", u.fns[caller as usize].rir.as_ref().map(|r| r.dump()).unwrap_or_default());
+    });
+    assert_eq!(unsafe { run(up, caller) }, 1980309814, "the split O3 build's fast half keeps the branch and both stores");
     unsafe { UNIT = std::ptr::null_mut() };
     std::fs::remove_dir_all(&dir).ok();
 }

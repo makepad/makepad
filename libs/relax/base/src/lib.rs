@@ -107,6 +107,7 @@ pub unsafe fn reset_statics() {
     pool::reset_statics();
     preempt::reset_statics();
     progress::reset_statics();
+    progenv::reset_statics();
     query::reset_statics();
     relaxed::reset_statics();
     solver_work::reset_statics();

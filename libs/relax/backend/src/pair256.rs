@@ -20,7 +20,7 @@
 use crate::passes::is_mem_effect;
 use crate::regalloc::{term_uses, uses_defs};
 use crate::rir::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// What this CPU has for 256-bit vectors (AVX is required to run the pass at all).
 #[derive(Clone, Copy)]
@@ -455,7 +455,10 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
             }
         }
         let def_pairs = |b: u32, x: VReg| -> Vec<(u32, u32)> { dp.get(&(b, x.0)).cloned().unwrap_or_default() };
-        let keys: Vec<(u32, u32)> = von.iter().filter(|e| *e.1).map(|e| *e.0).collect();
+        // in vreg order, not the map's: which pair a round drops first, and so the code, must not
+        // differ from run to run (the map's order is seeded per process)
+        let mut keys: Vec<(u32, u32)> = von.iter().filter(|e| *e.1).map(|e| *e.0).collect();
+        keys.sort_unstable();
         for (x, y) in keys {
             let (xv, yv) = (VReg(x), VReg(y));
             let mut ok = cx.defs[x as usize].len() == cx.defs[y as usize].len()
@@ -548,7 +551,8 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
     // ---- cost: one instruction saved per pair, one spent per half / join / broadcast
     let mut covered: HashSet<(u32, u32, u32)> = HashSet::new();
     let mut extra = 0usize;
-    let mut same: HashSet<u32> = HashSet::new();
+    // ordered: the rewrite numbers the joined registers in this order
+    let mut same: BTreeSet<u32> = BTreeSet::new();
     for p in &on {
         let (l, h) = (sh(p, true), sh(p, false));
         for k in 0..l.n {
@@ -643,7 +647,10 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
     // ---- rewrite
     let mut big: HashMap<u32, VReg> = HashMap::new();
     let mut same_big: HashMap<u32, VReg> = HashMap::new();
-    let pair_of: Vec<(u32, u32)> = von.iter().filter(|e| *e.1).map(|e| *e.0).collect();
+    // in vreg order: the new registers' numbers steer register allocation, so the same kernel gets
+    // the same code in every run
+    let mut pair_of: Vec<(u32, u32)> = von.iter().filter(|e| *e.1).map(|e| *e.0).collect();
+    pair_of.sort_unstable();
     for (x, y) in pair_of {
         let w = f.vreg(Cls::V256);
         big.insert(x, w);

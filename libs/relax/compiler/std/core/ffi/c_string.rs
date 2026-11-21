@@ -279,3 +279,12 @@ impl From<CString> for Box<CStr> {
         s.into_boxed_c_str()
     }
 }
+
+impl CStr {
+    /// rustc 1.20.0 (into_boxed_c_str): converts a boxed C string into a CString without copying it.
+    #[must_use = "`self` will be dropped if the result is not used"]
+    pub fn into_c_string(self: Box<Self>) -> CString {
+        let raw = Box::into_raw(self) as *mut [u8];
+        CString { inner: unsafe { Box::from_raw(raw) } }
+    }
+}

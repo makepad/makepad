@@ -911,14 +911,110 @@ extern "C" fn query() {
     drop(tx);
     flags(a)[1].fetch_add(1, Ordering::SeqCst);
 }
+/// The same, through a native function of the host's (`native`) that the run ends in.
+extern "C" fn query_through(native: extern "C" fn()) {
+    let a = FLAGS.load(Ordering::SeqCst) as usize;
+    flags(a)[0].fetch_add(1, Ordering::SeqCst);
+    native();
+    flags(a)[1].fetch_add(1, Ordering::SeqCst);
+}
 fn fixture(p: *mut u64) {
     let a = p as usize;
     FLAGS.store(a as u64, Ordering::SeqCst);
+    let through: extern "C" fn(extern "C" fn()) = query_through;
+    flags(a)[2].store(through as usize as u64, Ordering::SeqCst);
     let q: extern "C" fn() = query;
     flags(a)[3].store(q as usize as u64, Ordering::SeqCst);
     loop { std::thread::park(); }
 }
 "#;
+
+/// A native caller that goes on after its call into a run: it waits in a read of a pipe nobody
+/// writes, which a kick (what the next run's end sends it) ends. It tells its handle and the pipe's
+/// other end, and answers whether a kick ended the read.
+#[cfg(unix)]
+fn takes_a_kick(told: std::sync::mpsc::Sender<(u64, i32)>) -> bool {
+    extern "C" {
+        fn pipe(fds: *mut i32) -> i32;
+        fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
+    }
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    told.send((crate::os::thread::current(), fds[1])).unwrap();
+    let mut b = [0u8; 1];
+    let n = unsafe { read(fds[0], b.as_mut_ptr().cast(), 1) };
+    // (EINTR)
+    n == -1 && std::io::Error::last_os_error().raw_os_error() == Some(4)
+}
+
+/// Kicks the caller `takes_a_kick` told of until it has gone; one no kick reaches is let go by a
+/// write to its pipe after 10 s (its answer says so).
+#[cfg(unix)]
+fn kick_until_gone<T>(caller: &std::thread::JoinHandle<T>, told: std::sync::mpsc::Receiver<(u64, i32)>) {
+    extern "C" {
+        fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+    }
+    let (t, w) = told.recv().unwrap();
+    let start = std::time::Instant::now();
+    while !caller.is_finished() {
+        if start.elapsed() > Duration::from_secs(10) {
+            unsafe { write(w, b"x".as_ptr().cast(), 1) };
+            break;
+        }
+        crate::os::thread::kick(t);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// In a call into the run as the run ends: the end's kick (SIGEMT) and a SIGBUS pending together,
+/// as when a fetch of the ended code faults while a kick is on its way. Darwin sets the kick up
+/// first and delivers the SIGBUS at its trampoline's entry; the call leaves from there.
+#[cfg(target_vendor = "apple")]
+extern "C" fn faults_over_a_kick() {
+    extern "C" {
+        fn pthread_sigmask(how: i32, set: *const [u64; 16], old: *mut [u64; 16]) -> i32;
+        fn sigpending(set: *mut u32) -> i32;
+        fn pthread_kill(t: usize, sig: i32) -> i32;
+        fn pthread_self() -> usize;
+    }
+    const SIG_BLOCK: i32 = 1;
+    const SIG_UNBLOCK: i32 = 2;
+    const SIGBUS: i32 = 10;
+    let kick = 1u32 << (crate::os::fault::watchdog_signal() - 1);
+    let mut both = [0u64; 16];
+    both[0] = (kick | 1 << (SIGBUS - 1)) as u64;
+    while !crate::domain::current_is_ending() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    unsafe {
+        pthread_sigmask(SIG_BLOCK, &both, std::ptr::null_mut());
+        // (the end kicks its threads until they have gone)
+        let mut pending = 0u32;
+        while sigpending(&mut pending) == 0 && pending & kick == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        pthread_kill(pthread_self(), SIGBUS);
+        pthread_sigmask(SIG_UNBLOCK, &both, std::ptr::null_mut());
+    }
+}
+
+/// Whether the calling thread is on its signal stack, as the kernel has it.
+#[cfg(target_vendor = "apple")]
+fn on_the_signal_stack() -> bool {
+    #[repr(C)]
+    struct StackT {
+        sp: *mut u8,
+        size: usize,
+        flags: i32,
+    }
+    extern "C" {
+        fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
+    }
+    let mut old = StackT { sp: std::ptr::null_mut(), size: 0, flags: 0 };
+    assert_eq!(unsafe { sigaltstack(std::ptr::null(), &mut old) }, 0);
+    // (SS_ONSTACK)
+    old.flags & 1 != 0
+}
 
 /// A host call into the program (an inspect app command, `Callback::call`) that waits in there when
 /// the run ends comes back None at once: the end kicks its wait and the call leaves the ended code
@@ -926,6 +1022,11 @@ fn fixture(p: *mut u64) {
 /// go on with what they hold (its lock is free), and the run's end is not held. Without the
 /// recovery point the thread stayed in the ended code with an inspect request's run gate, and a
 /// restart in place never finished (11-08).
+///
+/// The caller goes on after its call, and the next run's end still reaches it: a kick ends its
+/// wait. On Darwin a second call leaves through a SIGBUS delivered over a kick the kernel had only
+/// set up, which once left the caller with the kick's signal blocked and marked as on its signal
+/// stack (11-21).
 #[test]
 fn a_host_call_into_the_program_ends_with_the_run() {
     isolated_test!(a_host_call_into_the_program_ends_with_the_run);
@@ -938,17 +1039,56 @@ fn a_host_call_into_the_program_ends_with_the_run() {
     let query = flags[3].load(Ordering::SeqCst) as usize;
     let scope = domains().iter().find(|d| d.info.base == base).map(|d| Callback { id: d.info.id, base, started: d.started }).unwrap();
     static CALLER_LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
-    let caller = std::thread::spawn(move || {
-        let _g = CALLER_LOCK.lock().unwrap();
-        let q: extern "C" fn() = unsafe { std::mem::transmute(query) };
-        scope.call(|| q())
+    let (called, calls) = std::sync::mpsc::channel::<Option<()>>();
+    let (told, tells) = std::sync::mpsc::channel::<(u64, i32)>();
+    let caller = std::thread::spawn({
+        let called = called.clone();
+        move || {
+            let answer = {
+                let _g = CALLER_LOCK.lock().unwrap();
+                let q: extern "C" fn() = unsafe { std::mem::transmute(query) };
+                scope.call(|| q())
+            };
+            called.send(answer).unwrap();
+            #[cfg(unix)]
+            return takes_a_kick(told);
+            #[cfg(not(unix))]
+            return { drop(told); true };
+        }
     });
-    wait(|| flags[0].load(Ordering::SeqCst) == 1);
+    #[cfg(target_vendor = "apple")]
+    let (nested_told, nested_tells) = std::sync::mpsc::channel::<(u64, i32)>();
+    #[cfg(target_vendor = "apple")]
+    let nested = std::thread::spawn({
+        let through = flags[2].load(Ordering::SeqCst) as usize;
+        let called = called.clone();
+        move || {
+            let q: extern "C" fn(extern "C" fn()) = unsafe { std::mem::transmute(through) };
+            called.send(scope.call(|| q(faults_over_a_kick))).unwrap();
+            (on_the_signal_stack(), takes_a_kick(nested_told))
+        }
+    });
+    let callers = if cfg!(target_vendor = "apple") { 2 } else { 1 };
+    wait(|| flags[0].load(Ordering::SeqCst) == callers);
     // (a grace far past a kick's round trip: a call that stays is named in `left`, not waited for)
     let end = end_run(up, Duration::from_secs(60));
     assert!(end.left.is_empty(), "the call left with the run: {:?}", end.left);
-    assert!(caller.join().unwrap().is_none(), "the call came back saying the run ended");
+    for _ in 0..callers {
+        assert!(calls.recv().unwrap().is_none(), "the call came back saying the run ended");
+    }
     assert!(CALLER_LOCK.try_lock().is_ok());
+    #[cfg(unix)]
+    kick_until_gone(&caller, tells);
+    #[cfg(not(unix))]
+    drop(tells);
+    assert!(caller.join().unwrap(), "the caller went on and a kick still reached it");
+    #[cfg(target_vendor = "apple")]
+    {
+        kick_until_gone(&nested, nested_tells);
+        let (on_stack, kicked) = nested.join().unwrap();
+        assert!(!on_stack, "the call that left over a kick left its caller on the signal stack");
+        assert!(kicked, "the call that left over a kick left its caller with kicks blocked");
+    }
     assert_eq!(flags[1].load(Ordering::SeqCst), 0, "code of the ended run ran");
     assert!(scope.call(|| ()).is_none(), "a call after the run's end comes back at once");
     main.join().unwrap();

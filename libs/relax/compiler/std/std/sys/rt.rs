@@ -34,7 +34,12 @@ static mut STD_HOOK: Option<fn(&str, &core::panic::Location<'_>)> = None;
 /// What core::panicking calls before the runtime's own report/abort: records the payload
 /// catch_unwind / JoinHandle::join hand out, then runs std's hook if one was set.
 fn core_hook(info: &core::panic::PanicInfo<'_>) {
-    report_panic(info.message(), info.location());
+    // (a message with no runtime formatting stays a `&'static str`: the payload rustc's std gives)
+    let message = info.message();
+    match message.as_str() {
+        Some(text) => report_panic(core::fmt::Arguments::new_const(&[text]), info.location()),
+        None => report_panic(format_args!("{message}"), info.location()),
+    }
 }
 
 fn report_panic(message: core::fmt::Arguments<'_>, location: Option<&core::panic::Location<'_>>) {

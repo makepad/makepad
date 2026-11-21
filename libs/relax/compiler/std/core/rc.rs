@@ -14,7 +14,7 @@ use crate::fmt;
 use crate::hash::{Hash, Hasher};
 use crate::ops::{Deref, DispatchFromDyn};
 use crate::marker::Unsize;
-use crate::pin::PinSafePointer;
+use crate::pin::{Pin, PinSafePointer};
 
 // library/alloc/src/rcs/rc.rs:357,2604 @8d1a764
 impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Rc<U>> for Rc<T> {}
@@ -126,6 +126,13 @@ impl<T> Rc<T> {
         let p = p as *mut T;
         unsafe { ptr::write(p, value) };
         Rc { ptr: unsafe { ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
+    }
+
+    /// rustc 1.33.0 (pin): allocates a reference-counted value pinned in place.
+    #[must_use]
+    pub fn pin(value: T) -> Pin<Rc<T>> {
+        // SAFETY: the newly allocated value can only be reached through the pinned pointer.
+        unsafe { Pin::new_unchecked(Rc::new(value)) }
     }
 
     pub fn new_cyclic<F: FnOnce(&Weak<T>) -> T>(data_fn: F) -> Rc<T> {

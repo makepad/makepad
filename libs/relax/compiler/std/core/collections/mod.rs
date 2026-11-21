@@ -20,7 +20,7 @@ pub use linked_list::LinkedList;
 pub use vec_deque::VecDeque;
 
 use crate::fmt;
-use crate::ops::{Bound, RangeBounds};
+use crate::ops::RangeBounds;
 
 /// Returned by the `try_reserve` methods: the capacity overflowed, or the allocator returned an
 /// error (library/alloc/src/collections/mod.rs @1.100.0).
@@ -59,32 +59,11 @@ impl fmt::Display for TryReserveError {
 
 impl crate::error::Error for TryReserveError {}
 
-/// Resolves a `usize` range against a length to (start, end), panicking with real core's
-/// slice-range messages.
+/// rustc's `slice::range`, as the collections call it: (start, end) of a `usize` range against a
+/// length, panicking with slice indexing's messages.
+#[track_caller]
 pub(crate) fn resolve_range<R: RangeBounds<usize>>(r: &R, len: usize) -> (usize, usize) {
-    let start = match r.start_bound() {
-        Bound::Included(s) => *s,
-        Bound::Excluded(s) => match s.checked_add(1) {
-            Some(v) => v,
-            None => crate::panicking::panic_str("attempted to index slice from after maximum usize"),
-        },
-        Bound::Unbounded => 0,
-    };
-    let end = match r.end_bound() {
-        Bound::Included(e) => match e.checked_add(1) {
-            Some(v) => v,
-            None => crate::panicking::panic_str("attempted to index slice up to maximum usize"),
-        },
-        Bound::Excluded(e) => *e,
-        Bound::Unbounded => len,
-    };
-    if start > end {
-        crate::panicking::slice_index_order_fail(start, end);
-    }
-    if end > len {
-        crate::panicking::slice_end_index_len_fail(end, len);
-    }
-    (start, end)
+    crate::slice::range(r, len)
 }
 
 /// Formats a key/value pair as a tuple `(k, v)` (map iterators' Debug).

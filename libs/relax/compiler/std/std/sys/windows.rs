@@ -136,6 +136,8 @@ extern "system" {
     pub fn CreateThread(attrs: *mut c_void, stack: usize, start: extern "system" fn(*mut c_void) -> DWORD, arg: *mut c_void, flags: DWORD, id: *mut DWORD) -> HANDLE;
     pub fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
     pub fn SetThreadDescription(t: HANDLE, desc: *const u16) -> i32;
+    pub fn GetThreadDescription(t: HANDLE, desc: *mut *mut u16) -> i32;
+    pub fn LocalFree(p: *mut c_void) -> *mut c_void;
     pub fn FlsAlloc(callback: extern "system" fn(*mut c_void)) -> DWORD;
     pub fn FlsFree(index: DWORD) -> BOOL;
     pub fn FlsGetValue(index: DWORD) -> *mut c_void;
@@ -315,6 +317,30 @@ pub fn set_thread_name(name: *const c_char) {
         w.push(0);
         SetThreadDescription(GetCurrentThread(), w.as_ptr());
     }
+}
+
+/// The calling thread's description (UTF-8, cut to fit) into `buf`: its length (0: none).
+pub fn thread_os_name(buf: &mut [u8; 64]) -> usize {
+    let mut p: *mut u16 = core::ptr::null_mut();
+    let mut n = 0;
+    unsafe {
+        if GetThreadDescription(GetCurrentThread(), &mut p) < 0 || p.is_null() {
+            return 0;
+        }
+        let mut k = 0;
+        while *p.add(k) != 0 {
+            k += 1;
+        }
+        for c in core::char::decode_utf16(core::slice::from_raw_parts(p, k).iter().copied()) {
+            let c = c.unwrap_or(core::char::REPLACEMENT_CHARACTER);
+            if n + c.len_utf8() > buf.len() {
+                break;
+            }
+            n += c.encode_utf8(&mut buf[n..]).len();
+        }
+        LocalFree(p as *mut c_void);
+    }
+    n
 }
 
 /// The program's argv (UTF-8, as the runtime records it at boot).

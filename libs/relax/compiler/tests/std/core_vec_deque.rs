@@ -183,6 +183,11 @@ fn a02_search_and_misc() {
     }
     a.clear();
     assert!(a.is_empty());
+    *a.insert_mut(0, 1) += 10;
+    *a.insert_mut(0, 2) += 20;
+    *a.insert_mut(1, 3) += 30;
+    *a.insert_mut(3, 4) += 40;
+    println!("| insert_mut {:?}", a);
     std::panic::set_hook(Box::new(|_| {}));
     let index = panic_message(|| {
         let a: VecDeque<u8> = VecDeque::new();

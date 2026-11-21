@@ -2,7 +2,9 @@
 //! (library/test: lib.rs run_test, test_result.rs calc_result, console.rs, cli.rs), running in
 //! the program. The loader collects the crate's `#[test]` fns and hands their table to `main`;
 //! the command line after `--` is libtest's (filters, --exact, --skip, --ignored,
-//! --include-ignored, --test-threads, --list, --nocapture, -q). Relax's own `--precompile` builds
+//! --include-ignored, --test-threads, --list, --nocapture, -q, and `-Z unstable-options` with
+//! --report-time where libtest takes them: with RUSTC_BOOTSTRAP, as stable's libtest does).
+//! Relax's own `--precompile` builds
 //! the selected tests and all they reach before the first one starts, so no lazy compile runs
 //! inside a test's own deadlines.
 //! Not here: output capture (every test prints as under --nocapture), benches, --format.
@@ -52,6 +54,10 @@ pub struct Tests {
     pub context: usize,
     pub revision: u64,
     pub verbose: u32,
+    /// main's fact for the host: name filters were given and no test passed (none matched, or
+    /// all it matched were ignored). The exit status stays libtest's (0); `makepad test` holds
+    /// such a run no pass (relax-compiler harness.rs `run`).
+    pub unmatched: u32,
 }
 
 struct Desc {
@@ -95,6 +101,14 @@ struct Opts {
     threads: usize,
     /// `--precompile`: build every selected test's code graph before any test starts
     precompile: bool,
+    /// libtest `--report-time` (with `-Z unstable-options`): each test's time after its result
+    report_time: bool,
+}
+
+/// libtest cli.rs is_nightly as a stable toolchain's libtest has it (CFG_DISABLE_UNSTABLE_FEATURES
+/// set): unstable options only with RUSTC_BOOTSTRAP.
+fn is_nightly() -> bool {
+    crate::env::var_os("RUSTC_BOOTSTRAP").is_some()
 }
 
 /// libtest cli.rs get_format: `--format` (pretty, terse; json and junit only on nightly with
@@ -109,8 +123,10 @@ fn format_terse(v: &str) -> Result<bool, String> {
 }
 
 fn parse_args() -> Result<Opts, String> {
-    let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0, precompile: false };
+    let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0, precompile: false, report_time: false };
     let mut format: Option<bool> = None;
+    // libtest get_allow_unstable (`-Z <opt>`, its last one) and unstable_optflag (`--report-time`)
+    let mut z: Option<String> = None;
     let mut args = crate::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -126,11 +142,23 @@ fn parse_args() -> Result<Opts, String> {
             "--test-threads" => o.threads = args.next().and_then(|v| v.parse().ok()).filter(|&n| n > 0).ok_or("--test-threads must be a positive integer")?,
             _ if a.starts_with("--test-threads=") => o.threads = a[15..].parse().ok().filter(|&n| n > 0).ok_or("--test-threads must be a positive integer")?,
             _ if a.starts_with("--skip=") => o.skip.push(a[7..].into()),
+            "-Z" => z = Some(args.next().ok_or("Argument to option 'Z' missing")?),
+            _ if a.starts_with("-Z") => z = Some(a[2..].into()),
+            "--report-time" => o.report_time = true,
             "--format" => format = Some(format_terse(&args.next().ok_or("--format needs a value")?)?),
             _ if a.starts_with("--format=") => format = Some(format_terse(&a[9..])?),
             _ if a.starts_with('-') => return Err(format!("Unrecognized option: '{}'", a.trim_start_matches('-'))),
             _ => o.filters.push(a),
         }
+    }
+    let allow_unstable = match z.as_deref() {
+        None => false,
+        Some(_) if !is_nightly() => return Err("the option `Z` is only accepted on the nightly compiler".into()),
+        Some("unstable-options") => true,
+        Some(_) => return Err("Unrecognized option to `Z`".into()),
+    };
+    if o.report_time && !allow_unstable {
+        return Err("The \"report-time\" flag is only accepted on the nightly compiler with -Z unstable-options".into());
     }
     // an explicit --format wins over --quiet (get_format: `None if quiet => Terse`)
     if let Some(terse) = format {
@@ -177,7 +205,9 @@ fn calc_result(d: &Desc, panic: Option<&(dyn crate::any::Any + Send)>) -> Outcom
     }
 }
 
-fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool) -> Outcome {
+/// The test's outcome, and its time (libtest run_test_in_process's TestExecTime: the test fn's
+/// call and its unwind) when `timed`.
+fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool, timed: bool) -> (Outcome, Option<crate::time::Duration>) {
     let record: Option<extern "C" fn(usize, u32)> = if reach == 0 { None } else { Some(unsafe { crate::mem::transmute(reach) }) };
     if let Some(record) = record { record(d.index, 0); }
     let (run, start) = (d.run, d.start);
@@ -196,7 +226,9 @@ fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool) -> Outcome {
         }
         if verbose { body_end.set(Some(crate::time::Instant::now())); }
     });
+    let start = timed.then(crate::time::Instant::now);
     let r = if d.should_panic != 0 { crate::panic::catch_unwind(body) } else { crate::panic::catch_boundary(body) };
+    let exec_time = start.map(|start| start.elapsed());
     let caught = verbose.then(crate::time::Instant::now);
     let faulted = if fault != 0 {
         let fault: extern "C" fn() -> u32 = unsafe { crate::mem::transmute(fault) };
@@ -214,7 +246,7 @@ fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool) -> Outcome {
             d.name, body_ms, catch_ms, caught.elapsed().as_secs_f64() * 1000.0);
     }
     if let Some(record) = record { record(d.index, if faulted { 2 } else { 1 }); }
-    result
+    (result, exec_time)
 }
 
 /// Runs the table's tests; a live host callback waits for the next verified edit.
@@ -322,7 +354,7 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
     let (mut test_count, mut test_column) = (0usize, 0usize);
     let total_count = selected.len();
     // libtest's pretty formatter names the mode of a `#[should_panic]` test
-    let mut report = |name: &str, should_panic: bool, o: Outcome, failures: &mut Vec<(String, Option<String>)>| {
+    let mut report = |name: &str, should_panic: bool, o: Outcome, time: Option<crate::time::Duration>, failures: &mut Vec<(String, Option<String>)>| {
         let mode = if should_panic { " - should panic" } else { "" };
         let word = match &o {
             Outcome::Ok => "ok",
@@ -353,7 +385,11 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
                 }
             }
         } else {
-            println!("test {}{} ... {}", name, mode, word);
+            // (libtest pretty write_time: ` <{:.3}s>` after the result of a test that ran)
+            match time {
+                Some(t) => println!("test {}{} ... {} <{:.3}s>", name, mode, word, t.as_secs_f64()),
+                None => println!("test {}{} ... {}", name, mode, word),
+            }
         }
         let _ = crate::io::stdout().flush();
         match o {
@@ -363,7 +399,7 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
         }
     };
     // libtest run_tests: up to `threads` tests at once, each on a thread named after it
-    let (tx, rx) = mpsc::channel::<(usize, Outcome)>();
+    let (tx, rx) = mpsc::channel::<(usize, Outcome, Option<crate::time::Duration>)>();
     let mut next = 0;
     let mut running = 0usize;
     let mut done = 0usize;
@@ -372,6 +408,7 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
     let fault = t.fault;
     let reach = t.reach;
     let verbose = t.verbose != 0;
+    let timed = opts.report_time;
     let mut threads = Vec::new();
     let mut spawn_ms = 0.0;
     let mut report_ms = 0.0;
@@ -385,22 +422,22 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
                 if let Some(launched) = launched {
                     eprintln!("relax test timing: test={:?} thread_start_ms={:.3}", d[i].name, launched.elapsed().as_secs_f64() * 1000.0);
                 }
-                run_one(&d[i], fault, reach, verbose)
+                run_one(&d[i], fault, reach, verbose, timed)
             };
             // A panic before recording must finish the run with unknown reach.
-            let o = if live {
+            let (o, time) = if live {
                 match crate::panic::catch_boundary(crate::panic::AssertUnwindSafe(run)) {
-                    Ok(o) => o,
-                    Err(_) => Outcome::Failed(Some(String::from("test thread panicked outside the test body"))),
+                    Ok(r) => r,
+                    Err(_) => (Outcome::Failed(Some(String::from("test thread panicked outside the test body"))), None),
                 }
             } else { run() };
-            let _ = thread_tx.send((i, o));
+            let _ = thread_tx.send((i, o, time));
         });
         if let Some(launched) = launched { spawn_ms += launched.elapsed().as_secs_f64() * 1000.0; }
         match h {
             Ok(h) => { if live { threads.push(h); } *running += 1; }
             Err(e) => {
-                let _ = tx.send((i, Outcome::Failed(Some(format!("could not spawn test thread: {}", e)))));
+                let _ = tx.send((i, Outcome::Failed(Some(format!("could not spawn test thread: {}", e))), None));
                 *running += 1;
             }
         }
@@ -411,20 +448,20 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
             let i = selected[next];
             next += 1;
             if descs[i].ignore {
-                let _ = tx.send((i, Outcome::Ignored));
+                let _ = tx.send((i, Outcome::Ignored, None));
                 running += 1;
                 continue;
             }
             spawn(i, &mut running);
         }
-        let Ok((i, o)) = rx.recv() else { break };
+        let Ok((i, o, time)) = rx.recv() else { break };
         running -= 1;
         done += 1;
         if live {
             unsafe { (*t.tests.add(descs[i].index)).result = match &o { Outcome::Ok => 1, Outcome::Failed(_) => 2, Outcome::Ignored => 3 }; }
         }
         let reporting = verbose.then(crate::time::Instant::now);
-        report(&descs[i].name, descs[i].should_panic != 0, o, &mut failures);
+        report(&descs[i].name, descs[i].should_panic != 0, o, time, &mut failures);
         if let Some(reporting) = reporting { report_ms += reporting.elapsed().as_secs_f64() * 1000.0; }
     }
     // A live patch must not race the previous run's thread-local destructors.
@@ -467,13 +504,9 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
     );
     println!();
     let _ = crate::io::stdout().flush();
-    // a filter that ran no test is no pass (makepad_remote::hot::NO_TESTS_EXIT); under
-    // `makepad test` (TEST_PACKAGE_ENV) it says so once for all its targets
-    if ok && passed == 0 && !opts.filters.is_empty() {
-        if crate::env::var("RELAX_TEST_PACKAGE").is_err() {
-            eprintln!("error: no test matched {}{}", opts.filters.join(" "), if ignored > 0 { format!(" ({} matched and ignored: --ignored runs them)", ignored) } else { String::new() });
-        }
-        return 87;
-    }
+    // libtest's exit status whatever the filters ran (console.rs run_tests_console: success is no
+    // failure). That a filter ran no test is the host's to judge (`makepad test`: no pass), so it
+    // goes to the host as a fact, never into what the program prints or returns.
+    t.unmatched = (ok && passed == 0 && !opts.filters.is_empty()) as u32;
     if ok { 0 } else { 101 }
 }

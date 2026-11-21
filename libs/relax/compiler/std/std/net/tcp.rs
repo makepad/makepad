@@ -116,6 +116,89 @@ impl TcpStream {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) mod linux_ext {
+    use super::{c_int, sn};
+    use crate::{io, net};
+
+    const TCP_QUICKACK: c_int = 12;
+
+    /// Os-specific extensions for [`TcpStream`]
+    ///
+    /// [`TcpStream`]: net::TcpStream
+    pub trait TcpStreamExt: crate::sealed::Sealed {
+        /// Enable or disable `TCP_QUICKACK`.
+        ///
+        /// This flag causes Linux to eagerly send ACKs rather than delaying them.
+        /// Linux may reset this flag after further operations on the socket.
+        ///
+        /// See [`man 7 tcp`](https://man7.org/linux/man-pages/man7/tcp.7.html) and
+        /// [TCP delayed acknowledgement](https://en.wikipedia.org/wiki/TCP_delayed_acknowledgment)
+        /// for more information.
+        ///
+        /// # Examples
+        ///
+        #[cfg_attr(
+            any(target_os = "linux", target_os = "android", target_os = "cygwin"),
+            doc = "```no_run"
+        )]
+        #[cfg_attr(
+            not(any(target_os = "linux", target_os = "android", target_os = "cygwin")),
+            doc = "```ignore (needs linux)"
+        )]
+        /// use std::net::TcpStream;
+        /// #[cfg(target_os = "linux")]
+        /// use std::os::linux::net::TcpStreamExt;
+        /// #[cfg(target_os = "android")]
+        /// use std::os::android::net::TcpStreamExt;
+        ///
+        /// let stream = TcpStream::connect("127.0.0.1:8080")
+        ///         .expect("Couldn't connect to the server...");
+        /// stream.set_quickack(true).expect("set_quickack call failed");
+        /// ```
+        fn set_quickack(&self, quickack: bool) -> io::Result<()>;
+
+        /// Gets the value of the `TCP_QUICKACK` option on this socket.
+        ///
+        /// For more information about this option, see [`TcpStreamExt::set_quickack`].
+        ///
+        /// # Examples
+        ///
+        #[cfg_attr(
+            any(target_os = "linux", target_os = "android", target_os = "cygwin"),
+            doc = "```no_run"
+        )]
+        #[cfg_attr(
+            not(any(target_os = "linux", target_os = "android", target_os = "cygwin")),
+            doc = "```ignore (needs linux)"
+        )]
+        /// use std::net::TcpStream;
+        /// #[cfg(target_os = "linux")]
+        /// use std::os::linux::net::TcpStreamExt;
+        /// #[cfg(target_os = "android")]
+        /// use std::os::android::net::TcpStreamExt;
+        ///
+        /// let stream = TcpStream::connect("127.0.0.1:8080")
+        ///         .expect("Couldn't connect to the server...");
+        /// stream.set_quickack(true).expect("set_quickack call failed");
+        /// assert_eq!(stream.quickack().unwrap_or(false), true);
+        /// ```
+        fn quickack(&self) -> io::Result<bool>;
+    }
+
+    impl crate::sealed::Sealed for net::TcpStream {}
+
+    impl TcpStreamExt for net::TcpStream {
+        fn set_quickack(&self, quickack: bool) -> io::Result<()> {
+            self.sock.set_int(sn::IPPROTO_TCP, TCP_QUICKACK, quickack as c_int)
+        }
+
+        fn quickack(&self) -> io::Result<bool> {
+            Ok(self.sock.get_int(sn::IPPROTO_TCP, TCP_QUICKACK)? != 0)
+        }
+    }
+}
+
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.sock.read(buf)
@@ -134,6 +217,10 @@ impl Write for TcpStream {
     fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         self.sock.write_vectored(bufs)
     }
+    #[cfg(unix)]
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -145,6 +232,10 @@ impl Write for &TcpStream {
     #[cfg(unix)]
     fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         self.sock.write_vectored(bufs)
+    }
+    #[cfg(unix)]
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -199,6 +290,16 @@ impl TcpListener {
     }
     pub fn ttl(&self) -> io::Result<u32> {
         Ok(self.sock.get_int(sn::IPPROTO_IP, sn::IP_TTL)? as u32)
+    }
+    /// rustc 1.9.0 (net2_mutators): Sets the listener's IPV6_V6ONLY socket option.
+    #[deprecated(since = "1.16.0", note = "this option can only be set before the socket is bound")]
+    pub fn set_only_v6(&self, only_v6: bool) -> io::Result<()> {
+        self.sock.set_int(sn::IPPROTO_IPV6, sn::IPV6_V6ONLY, only_v6 as c_int)
+    }
+    /// rustc 1.9.0 (net2_mutators): Returns the listener's IPV6_V6ONLY socket option.
+    #[deprecated(since = "1.16.0", note = "this option can only be set before the socket is bound")]
+    pub fn only_v6(&self) -> io::Result<bool> {
+        Ok(self.sock.get_int(sn::IPPROTO_IPV6, sn::IPV6_V6ONLY)? != 0)
     }
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
         self.sock.take_error()

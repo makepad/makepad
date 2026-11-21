@@ -320,15 +320,28 @@ pub fn cmd_test_package(args: &[String], grants: &[String]) -> i32 {
             stop::ended();
             status
         });
+        // ended by a signal: the run it started has ended with it, and so does the command
+        if let Some(sig) = stop::signalled() { return 128 + sig; }
+        let what = match &run {
+            Some((path, _)) => path.strip_prefix(pkg_dir.as_str()).map_or(path.as_str(), |r| r.trim_start_matches(['/', '\\'])).to_string(),
+            None => "the lib's unit tests".to_string(),
+        };
         let c = match status {
-            Ok(s) => s.code().unwrap_or(101),
+            Ok(s) => match s.code() {
+                Some(c) => c,
+                // ended by a signal of its own (a crash, a kill from outside): it printed no test
+                // result or panic for it, so this line is the only word of it (a bucket's listing
+                // printed its list, then failed and said nothing else: 11-18)
+                None => {
+                    eprintln!("relax test: the run of {what} ended by {}: no test result is from it", ended_by(&s));
+                    101
+                }
+            },
             Err(e) => {
                 eprintln!("relax test: starting {}: {e}", exe.display());
                 101
             }
         };
-        // ended by a signal: the run it started has ended with it, and so does the command
-        if let Some(sig) = stop::signalled() { return 128 + sig; }
         if c == makepad_remote::hot::NO_TESTS_EXIT {
             unmatched = true;
             continue;
@@ -341,6 +354,9 @@ pub fn cmd_test_package(args: &[String], grants: &[String]) -> i32 {
             if c == makepad_remote::hot::LOAD_ERROR_EXIT { return 101; }
             if run.as_ref().is_some_and(|r| r.1) {
                 eprintln!("error: test failed (harness = false target exited with status {c})");
+            } else if c != 101 {
+                // (the harness's failing tests end the run so, named above it)
+                eprintln!("relax test: the run of {what} exited with status {c}");
             }
             code = 101;
         }
@@ -549,6 +565,18 @@ fn finish_bin_checks(checks: &mut BinChecks, package: &str, verbose: bool) -> bo
 /// as the build host ends the cargo it started (reload_host.rs end_group). Before, the command
 /// alone ended: a `--live` session's run kept watching the sources and testing every save, about
 /// 1 GB each (relax issue 88).
+/// How a run that has no exit code ended: its signal (and whether it dumped core) on unix.
+fn ended_by(s: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = s.signal() {
+            return format!("signal {sig}{}", if s.core_dumped() { " (core dumped)" } else { "" });
+        }
+    }
+    format!("{s}")
+}
+
 mod stop {
     use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
 

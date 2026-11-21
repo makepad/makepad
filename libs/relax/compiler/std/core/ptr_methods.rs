@@ -55,6 +55,11 @@ impl<T: crate::marker::PointeeSized> *const T {
     pub const fn byte_offset(self, count: isize) -> *const T {
         self.wrapping_byte_add(count as usize)
     }
+    /// rustc 1.75.0 (pointer_byte_offsets): offsets the address by signed bytes, preserving metadata.
+    #[must_use]
+    pub const fn wrapping_byte_offset(self, count: isize) -> Self {
+        self.wrapping_byte_add(count as usize)
+    }
     /// Distance in bytes to `origin`, which may point to another type; both into the same
     /// allocation (core const_ptr.rs: the `u8` casts' offset_from).
     pub const unsafe fn byte_offset_from<U: crate::marker::PointeeSized>(self, origin: *const U) -> isize {
@@ -231,6 +236,11 @@ impl<T: crate::marker::PointeeSized> *mut T {
         self.wrapping_byte_sub(count)
     }
     pub const fn byte_offset(self, count: isize) -> *mut T {
+        self.wrapping_byte_add(count as usize)
+    }
+    /// rustc 1.75.0 (pointer_byte_offsets): offsets the address by signed bytes, preserving metadata.
+    #[must_use]
+    pub const fn wrapping_byte_offset(self, count: isize) -> Self {
         self.wrapping_byte_add(count as usize)
     }
     // (core mut_ptr.rs: the unsigned form takes a `*mut U`, the signed one a `*const U`)

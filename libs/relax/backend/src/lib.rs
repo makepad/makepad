@@ -49,6 +49,7 @@ pub mod profile;
 pub mod regalloc;
 pub mod remark;
 pub mod rir;
+pub mod standalone;
 pub mod stats;
 pub mod switch;
 pub mod tail;

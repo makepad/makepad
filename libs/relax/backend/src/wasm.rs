@@ -3800,6 +3800,8 @@ impl<'a> Fx<'a> {
             _ => None,
         };
         match callee {
+            // black_box's block: no instruction to run (the passes kept what it stands for)
+            Callee::Asm(a) if a.is_empty() => return Ok(()),
             Callee::Asm(_) => return Err("inline assembly (asm!) has no wasm form".to_string()),
             Callee::Fn(id) | Callee::CFn(id, _) => match self.fn_ix.get(id) {
                 Some(&u) => {

@@ -27,11 +27,13 @@ What each check proves (red = which fails without which change):
     program captured, no verdict stored, from tables that hold them) to costing the next start
     nothing;
   - "restored": the second run restores the collected program the first run recorded before the
-    edit: the edit and the exit's writes leave it in place. Checked only when the record landed
-    before the edit (the first run waits up to EDIT_UNDONE_RECORD_WAIT s for it); a run whose edit
-    came first records none (its tables hold the edit's versions).
+    edit: the edit and the exit's writes leave it in place. The first run's edits wait for that
+    record (an edited run records none: its tables hold the edit's versions); a record that lands
+    more than EDIT_UNDONE_RECORD_WAIT s after the run is up fails the case as "the record took N s".
 Prints `edit_undone_warm: ok` or `edit_undone_warm: FAIL ...`; exit 1 on failure.
-EDIT_UNDONE_TRACE=1 also prints each run's cache, collection and live lines.
+Every run traces its cache lookups (RELAX_CACHE_TRACE, per run in the case's folder); a case whose
+second run misses names the fns it missed and what its first run did not record. EDIT_UNDONE_TRACE=1
+also prints each run's cache, collection and live lines and those lookups.
 """
 import json, os, re, shutil, subprocess, sys, tempfile, threading, time
 
@@ -76,7 +78,7 @@ def edit(pkg, old, new):
 
 class Run:
     """One run of the fixture: its stderr lines with their arrival times, and its probe lines."""
-    def __init__(self, work, home, pkg, secs):
+    def __init__(self, work, home, pkg, secs, tag):
         self.err, self.out = [], []
         self.ready = os.path.join(work, "ready")
         if os.path.exists(self.ready):
@@ -84,6 +86,10 @@ class Run:
         env = dict(os.environ, RELAX_LIVE_READY=self.ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
                    RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1",
                    LIVE_KINDS_SECS=str(secs), RELAX_LIVE_TRACE="1", RELAX_BOOT_TRACE="1", MAKEPAD_REMOTE="1")
+        # traced: each lookup of the cache, so a miss names its fn (cache.rs trace_keyed; kept in
+        # memory, written at the exit)
+        self.trace = os.path.join(work, "cache-trace-%s" % tag)
+        env["RELAX_CACHE_TRACE"] = self.trace
         self.p = subprocess.Popen(JIT + ["run", "--quiet", "--verbose", "--ahead=minimal", "relax-live-kinds"], cwd=pkg, env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         threading.Thread(target=self.pump, args=(self.p.stdout, self.out), daemon=True).start()
@@ -134,6 +140,13 @@ class Run:
             return "the run did not end"
         return next(("broke: " + l.strip()[:200] for l in self.lines() if any(b in l for b in BROKE)), None)
 
+    def missed(self):
+        """The cache lookups of this run that missed, and what it did not record and why."""
+        if not os.path.exists(self.trace):
+            return []
+        lines = [l.rstrip("\n") for l in open(self.trace, errors="replace")]
+        return [l for l in lines if "\tmiss" in l or ("\tnorecord" in l and "norecord:exists" not in l)]
+
     def stats(self):
         """(cache misses, gandalf fns checked, manifest slots without cached code); None: not printed."""
         def num(pattern):
@@ -150,6 +163,8 @@ def show(tag, r):
                     or "startup manifest of" in l or ("relax live:" in l and "watch round" not in l and "rewatch" not in l):
                 print("  %s | %s" % (tag, l[:220]), flush=True)
         print("  %s | stats (misses, checked, uncached manifest slots): %s" % (tag, r.stats()), flush=True)
+        for l in r.missed()[:20]:
+            print("  %s | cache %s" % (tag, l[:220]), flush=True)
 
 
 def case(root, name, base):
@@ -158,18 +173,26 @@ def case(root, name, base):
     pkg, home = os.path.join(work, "pkg"), os.path.join(work, "home")
     os.makedirs(work)
     copy_pkg(pkg)
-    r = Run(work, home, pkg, RUN_SECS)
+    r = Run(work, home, pkg, RUN_SECS, "1")
     if not r.up():
         r.p.kill()
         return ["first run: not up: %s" % (r.lines()[-1][:160] if r.err else "")], None
-    recorded_first = r.wait(lambda: r.has(RECORDED), RECORD_WAIT)
+    t_up = time.time()
+    # the edits wait for the record: an edited run records none (its tables hold the edit's versions)
+    if not r.wait(lambda: r.has(RECORDED), WAIT):
+        r.p.kill()
+        r.p.wait()
+        return ["first run: the collected program was not recorded while it ran (not before its edits)"], None
+    fails = []
+    took = max(0.0, r.at(RECORDED) - t_up)
+    if took > RECORD_WAIT:
+        fails.append("first run: the record took %.1f s after the run was up (EDIT_UNDONE_RECORD_WAIT %.0f s)" % (took, RECORD_WAIT))
     steps = {"none": [], "refused": [(BAD, "NOT applied", "the type error was not refused"), ((BAD[1], BAD[0]), ": patched (", "putting the text back was not patched")],
              "undone": [(BODY, ": patched (", "the edit was not patched"), ((BODY[1], BODY[0]), ": patched (", "the undo was not patched")]}[name]
     for (old, new), verdict, why in steps:
         if not r.live(pkg, old, new, verdict):
             r.p.kill()
-            return [why], None
-    fails = []
+            return fails + [why], None
     if name != "none" and not r.has("relax live: not edited"):
         fails.append("the mark did not clear: the crate stayed edited")
     broke = r.end()
@@ -181,7 +204,7 @@ def case(root, name, base):
     t_rec = r.at(RECORDED)
     if t_rec is None or t_rec > t_end:
         fails.append("first run: the collected program was not recorded while it ran (%s)" % ("at its exit" if t_rec else "not at all"))
-    r2 = Run(work, home, pkg, 4)
+    r2 = Run(work, home, pkg, 4, "2")
     r2.up()
     broke = r2.end()
     show(name + " 2", r2)
@@ -194,11 +217,15 @@ def case(root, name, base):
                 fails.append("second run: no %s count" % what)
             elif g > b:
                 fails.append("second run: %s %d, the unedited baseline's %d" % (what, g, b))
-    if recorded_first and not r2.has("relax collected: restored "):
+    if got and base and got[0] is not None and base[0] is not None and got[0] > base[0]:
+        # which fns: the second run's misses, and what the first run did not record
+        # (time, what, thread, crate, fn, stable name, code key, identity)
+        for tag, run in (("second run", r2), ("first run", r)):
+            for l in run.missed()[:12]:
+                print("%s: %s cache %s" % (name, tag, l[:240]), flush=True)
+    if not r2.has("relax collected: restored "):
         why = [l for l in r2.lines() if "relax collected: not restored" in l or "relax collected: prefix" in l]
         fails.append("second run: the collected program was not restored (%s)" % (why[0].strip()[:160] if why else "no restore line"))
-    if not recorded_first:
-        print("%s: the record did not land before the edit in %.0f s: the restore is not checked" % (name, RECORD_WAIT), flush=True)
     return fails, got
 
 

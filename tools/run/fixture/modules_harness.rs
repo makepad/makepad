@@ -205,6 +205,16 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> (std::process::ExitStatus, St
     (output.status, String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
+/// An executable at `to`, a copy of `from` that a `cp` of its own writes: this process never holds
+/// it open for writing. A test that spawns on another thread meanwhile would inherit that
+/// descriptor, and until its child's exec, starting the copy failed with ETXTBSY ("Text file
+/// busy"; a rename does not help: the descriptor is on the same file).
+#[cfg(unix)]
+fn copy_executable(from: &std::path::Path, to: &std::path::Path) {
+    let status = Command::new("cp").arg(from).arg(to).status().unwrap();
+    assert!(status.success(), "cp {} {}: {status}", from.display(), to.display());
+}
+
 /// The runner's command in the workspace at `dir`, with a cache and target directory of its own
 /// (under the scratch folder it returns).
 fn runner_in(dir: &std::path::Path) -> (Command, std::path::PathBuf) {
@@ -458,6 +468,71 @@ fn a_live_test_sessions_records_reach_the_next_sessions_macro_world() {
     let world = second.last().filter(|_| built);
     let imaged = world.and_then(|l| l.split_once(" crates from images)")).and_then(|(head, _)| head.rsplit_once('(')).and_then(|(_, n)| n.split_once(" of "));
     assert!(imaged.is_some_and(|(n, m)| n == m && m != "0"), "the second session's macro world takes std from the first's images: {world:?}\n{}", second.join("\n"));
+}
+
+/// A live test session's verdict needs the borrow check of what its tests ran: a save that leaves
+/// an error rustc rejects (E0502; memory-safe here, so only the check can tell) makes a red run that
+/// names it, and the save that fixes it is green again. (A save's borrow check errors were
+/// checked and dropped, so such a save went green, 11-18.)
+#[cfg(unix)]
+#[test]
+fn a_live_test_sessions_verdict_is_red_while_a_save_breaks_the_borrow_check() {
+    use std::io::BufRead;
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let base = std::env::temp_dir().join(format!("live-borrowck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("src")).unwrap();
+    std::fs::write(base.join("Cargo.toml"), "[package]\nname = \"live-borrowck\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n").unwrap();
+    let clean = "pub fn first(v: &mut Vec<u32>) -> u32 {\n    v.reserve(0);\n    v[0]\n}\n\n#[test]\nfn reads_the_first() {\n    assert_eq!(first(&mut vec![3]), 3);\n}\n";
+    let broken = clean.replace("    v.reserve(0);\n    v[0]\n", "    let f = &v[0];\n    v.reserve(0);\n    *f\n");
+    let lib = base.join("src/lib.rs");
+    std::fs::write(&lib, clean).unwrap();
+    let (mut command, scratch) = runner_in(&base);
+    let mut child = command.args(["test", "--live", "live-borrowck"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let readers: Vec<_> = [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())]
+        .into_iter()
+        .map(|from| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(from).lines().map_while(Result::ok) {
+                    let _ = tx.send(line);
+                }
+            })
+        })
+        .collect();
+    drop(tx);
+    // the verdicts: the first run's, the breaking save's, the fixing save's (each save after the
+    // verdict before it)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let (mut saves, mut verdicts, mut lines) = (vec![clean.to_string(), broken], Vec::new(), Vec::new());
+    while let Ok(line) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        if line.starts_with("testverdict ") {
+            verdicts.push(line.clone());
+            if let Some(text) = saves.pop() {
+                std::fs::write(&lib, text).unwrap();
+            }
+        }
+        lines.push(line);
+        if verdicts.len() == 3 {
+            break;
+        }
+    }
+    unsafe { kill(child.id() as i32, 15) };
+    let _ = child.wait();
+    for r in readers {
+        let _ = r.join();
+    }
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&scratch);
+    let all = lines.join("\n");
+    let v = |k: usize| verdicts.get(k).map_or("", String::as_str);
+    assert!(v(0).contains(" failed=0 ") && v(0).contains(" borrowck=clean"), "the first run is green, its borrow check clean: {:?}\n{all}", v(0));
+    assert!(v(1).contains(" failed=1 ") && v(1).contains(" borrowck=failed errors=1 ") && v(1).contains("E0502"), "the breaking save's run is red with its error: {:?}\n{all}", v(1));
+    assert!(lines.iter().any(|l| l.starts_with("relax live:   error[E0502]")), "the save prints its error\n{all}");
+    assert!(v(2).contains(" failed=0 ") && v(2).contains(" borrowck=clean"), "the fixing save's run is green again: {:?}\n{all}", v(2));
 }
 
 /// A sandboxed module's escapes in its fn bodies are refused when the program that loads it is a
@@ -1275,6 +1350,36 @@ fn checkouts_of_a_shared_workspace_keep_their_own_script_outputs() {
     }
 }
 
+/// A test's package binary started by a shell in a real folder, of a package in a mount (here a
+/// shared workspace's, vfs.rs SHARE; makepad-agents' tests under devhub's overlay are a git store's):
+/// the shell gets no mount (progenv.rs `child_env`), and the binary's wrapper (unitgraph.rs) starts
+/// its run with the mount its package is in, so the run reads its own package; and the shell's
+/// CARGO_MANIFEST_DIR is the folder on disk, which it can read (progenv.rs `outside_mount`). Before,
+/// the binary's run found no package at its virtual folder and the shell read a folder on no disk.
+// gap on Windows: its fixtures are bash scripts or use Unix tools (bash, pwd), which a Windows box lacks
+#[cfg(not(windows))]
+#[test]
+fn a_shell_in_a_real_folder_starts_a_shared_workspaces_package_binary() {
+    let base = std::env::temp_dir().join(format!("shared-shell-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"shell-bin\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n\n[workspace]\n"),
+        ("src/main.rs", "fn main() {\n    println!(\"shell-bin ran\");\n}\n"),
+        ("tests/shell.rs", "#[test]\nfn a_shell_starts_the_binary() {\n    let out = std::process::Command::new(\"/bin/sh\")\n        .current_dir(std::env::temp_dir())\n        .args([\"-c\", \"\\\"$0\\\"; test -d \\\"$CARGO_MANIFEST_DIR\\\" && echo manifest dir on disk\", env!(\"CARGO_BIN_EXE_shell-bin\")])\n        .output()\n        .unwrap();\n    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));\n    assert!(stdout.contains(\"shell-bin ran\"), \"the binary the shell started: {stdout}{stderr}\");\n    assert!(stdout.contains(\"manifest dir on disk\"), \"the shell's CARGO_MANIFEST_DIR: {stdout}{stderr}\");\n}\n"),
+    ];
+    for (path, text) in files {
+        let path = base.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let (mut command, scratch) = runner_in(&base);
+    let output = command.args(["test", "shell-bin"]).env("RELAX_SHARE", "share-shell").output().unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&scratch);
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success() && stdout.contains("test a_shell_starts_the_binary ... ok"), "{stdout}\n{stderr}");
+}
+
 /// A shared workspace's script output that is its checkout's own is not another checkout's (relax
 /// review B-M8): one script prints its folder on disk as a `rustc-env`, one writes it into a file in
 /// its OUT_DIR, one reads the commit in the repository's git metadata and declares `.git/HEAD`,
@@ -1619,7 +1724,7 @@ fn main() {
     // a loader file of this test's own: the runner's has the links of every test running at once
     let loader = ws.join("loader/makepad");
     std::fs::create_dir_all(loader.parent().unwrap()).unwrap();
-    std::fs::copy(runner(), &loader).unwrap();
+    copy_executable(std::path::Path::new(&runner()), &loader);
     let links = || std::fs::metadata(&loader).unwrap().nlink();
     let before = links();
     let start = |feature: &str, mark: &str| {
@@ -2320,14 +2425,16 @@ fn runs_and_keeps_its_binary() {
         ("app/Cargo.toml", pkg("rn-app", "\n[dependencies]\nrn-native = { path = \"../native\" }\n")),
         ("app/src/main.rs", "fn main() {\n    println!(\"{}\", rn_native::value());\n}\n".to_string()),
         ("app/tests/keep.rs", keep.to_string()),
-        ("cc-wrapper", "#!/bin/sh\nif [ -e \"$(dirname \"$0\")/refuse\" ]; then\n    case \" $* \" in *\" -shared \"*|*\" -dynamiclib \"*) echo \"refusing cc: links no shared library\" >&2; exit 1;; esac\nfi\nexec cc \"$@\"\n".to_string()),
+        ("cc-wrapper.sh", "#!/bin/sh\nif [ -e \"$(dirname \"$0\")/refuse\" ]; then\n    case \" $* \" in *\" -shared \"*|*\" -dynamiclib \"*) echo \"refusing cc: links no shared library\" >&2; exit 1;; esac\nfi\nexec cc \"$@\"\n".to_string()),
     ];
     for (path, text) in &files {
         let path = ws.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
+    // (the run starts it: written here as text, the executable a copy, as the loader's above)
     let cc = ws.join("cc-wrapper");
+    copy_executable(&ws.join("cc-wrapper.sh"), &cc);
     std::fs::set_permissions(&cc, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
     // `makepad test --allow-c rn-app` with the C library's source returning `value` plus `salt`,
     // the C compiler refusing shared links or not

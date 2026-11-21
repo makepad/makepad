@@ -65,6 +65,10 @@ pub trait ExitStatusExt {
     fn from_raw(raw: i32) -> Self;
     fn signal(&self) -> Option<i32>;
     fn core_dumped(&self) -> bool;
+    /// rustc 1.58.0 (unix_process_wait_more): Returns the signal that stopped the process.
+    fn stopped_signal(&self) -> Option<i32>;
+    /// rustc 1.58.0 (unix_process_wait_more): Reports whether the stopped process was continued.
+    fn continued(&self) -> bool;
     fn into_raw(self) -> i32;
 }
 
@@ -77,6 +81,29 @@ impl ExitStatusExt for ExitStatus {
     }
     fn core_dumped(&self) -> bool {
         self.signal_number().is_some() && self.raw() & 0x80 != 0
+    }
+    fn stopped_signal(&self) -> Option<i32> {
+        let status = self.raw();
+        #[cfg(target_vendor = "apple")]
+        {
+            let signal = status >> 8;
+            if status & 0x7f == 0x7f && signal != 0x13 { Some(signal) } else { None }
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            if status & 0xff == 0x7f { Some((status >> 8) & 0xff) } else { None }
+        }
+    }
+    fn continued(&self) -> bool {
+        let status = self.raw();
+        #[cfg(target_vendor = "apple")]
+        {
+            status & 0x7f == 0x7f && status >> 8 == 0x13
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            status == 0xffff
+        }
     }
     fn into_raw(self) -> i32 {
         self.raw()

@@ -1,6 +1,8 @@
 // String random mutations and panics, UTF conversions, formatting and iterator traits.
 // Differential file: `| ` lines equal under rustc --test and makepad test.
 
+extern crate alloc;
+
 struct D(u64, u32);
 impl D {
     fn new() -> D {
@@ -150,6 +152,33 @@ fn a02_conversions() {
         d.add(&String::from_utf16_lossy(&units));
     }
     d.line("string conversions");
+
+    // Exercise both byte alignments, including a surrogate pair, a lone surrogate, and an odd byte.
+    for offset in 0..2 {
+        let mut bytes = [0u8; 8];
+        bytes[offset..offset + 7].copy_from_slice(&[0xd8, 0x34, 0xdd, 0x1e, 0xdc, 0x00, 0x41]);
+        let be = &bytes[offset..offset + 7];
+        println!("| be {:?} {} {} {:?}", String::from_utf16be(&be[..4]),
+            String::from_utf16be(&be[..6]).unwrap_err(), String::from_utf16be(be).unwrap_err(),
+            String::from_utf16be_lossy(be));
+        bytes[offset..offset + 7].copy_from_slice(&[0x34, 0xd8, 0x1e, 0xdd, 0x00, 0xdc, 0x41]);
+        let le = &bytes[offset..offset + 7];
+        println!("| le {:?} {} {} {:?}", String::from_utf16le(&le[..4]),
+            String::from_utf16le(&le[..6]).unwrap_err(), String::from_utf16le(le).unwrap_err(),
+            String::from_utf16le_lossy(le));
+    }
+    let mut bytes = Vec::with_capacity(17);
+    bytes.extend_from_slice("hé".as_bytes());
+    let capacity = bytes.capacity();
+    let original = bytes.as_ptr();
+    let (ptr, len, cap) = String::from_utf8_lossy_owned(bytes).into_raw_parts();
+    let same_allocation = original == ptr && cap == capacity;
+    let text = unsafe { String::from_raw_parts(ptr, len, cap) };
+    println!("| raw {:?} {} {}", text, len, same_allocation);
+    println!("| invalid {:?}", String::from_utf8_lossy_owned(vec![b'a', 0xff, b'b']));
+    let boxed = "λ".as_bytes().to_vec().into_boxed_slice();
+    let text = unsafe { alloc::str::from_boxed_utf8_unchecked(boxed) };
+    println!("| boxed {:?}", text);
 }
 
 #[test]

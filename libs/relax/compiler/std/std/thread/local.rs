@@ -293,6 +293,13 @@ impl<T: 'static> LocalKey<T> {
 }
 
 impl<T: 'static> LocalKey<Cell<T>> {
+    /// rustc 1.99.0 (local_key_cell_update): updates the current thread's cell using its copied value.
+    pub fn update(&'static self, f: impl FnOnce(T) -> T)
+    where
+        T: Copy,
+    {
+        self.with(|cell| cell.update(f))
+    }
     pub fn set(&'static self, value: T) {
         self.with(|cell| cell.set(value))
     }

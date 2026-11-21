@@ -18,7 +18,7 @@ fn run(f: &Func, n: u64) -> u64 {
 
 #[cfg(target_arch = "x86_64")]
 fn try_run(f: &Func, n: u64) -> Result<u64, String> {
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let c = relax_backend::x64::compile(&relax_session::Options::default(), f, &env)?;
     let code = Code::new(&c.code[..c.text_len as usize]).unwrap();
     let g: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
@@ -32,7 +32,7 @@ fn run(f: &Func, n: u64) -> u64 {
 
 #[cfg(target_arch = "aarch64")]
 fn try_run(f: &Func, n: u64) -> Result<u64, String> {
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::arm64::Env::standalone(true);
     let c = relax_backend::arm64::compile(&relax_session::Options::default(), f, &env)?;
     let code = Code::new(&c.code[..c.text_len as usize]).unwrap();
     let g: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };

@@ -51,6 +51,11 @@ fn a01_files() {
     drop(w);
     let gm = fs::metadata(&g).unwrap();
     println!("| {:?} {:o} {}", fs::read(&g).unwrap(), gm.mode() & 0o777, gm.nlink());
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::linux::fs::MetadataExt;
+        println!("| linux file type {:o} size {} links {}", gm.st_mode() & 0o170000, gm.st_size(), gm.st_nlink());
+    }
     let mut perm = gm.permissions();
     perm.set_readonly(true);
     fs::set_permissions(&g, perm).unwrap();
@@ -61,8 +66,41 @@ fn a01_files() {
     fs::remove_file(d.join("d.txt")).unwrap();
     println!("| {:?}", fs::remove_file(d.join("d.txt")).map_err(|e| e.kind()));
     println!("| {:?} {:?}", fs::exists(&f), fs::exists(d.join("nope")));
+    #[cfg(all(unix, not(target_os = "fuchsia")))]
+    {
+        let e = std::os::unix::fs::chroot(d.join("missing")).unwrap_err();
+        println!("| chroot missing {:?}", e.kind());
+    }
+    #[cfg(unix)]
+    #[allow(deprecated)]
+    {
+        use std::os::unix::raw::{gid_t, pid_t, uid_t};
+        println!("| raw sizes gid {} pid {} uid {}", std::mem::size_of::<gid_t>(),
+                 std::mem::size_of::<pid_t>(), std::mem::size_of::<uid_t>());
+    }
     fs::remove_dir_all(&d).unwrap();
     println!("| {}", d.exists());
+    // A reader opened read-only before a writer appends reads the appended bytes and the new length
+    // (a database's log reader follows its writer this way). The folder is under the current one, so
+    // in a run whose current folder is virtual (agree.sh's RELAX_SHARE leg) the file is a virtual one
+    // the run wrote.
+    let d = PathBuf::from(format!("target/hr-os-fs-follow-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    let f = d.join("log.txt");
+    fs::write(&f, "one\n").unwrap();
+    let mut r = File::open(&f).unwrap();
+    let mut w = OpenOptions::new().append(true).open(&f).unwrap();
+    w.write_all(b"two\n").unwrap();
+    let mut s = String::new();
+    r.read_to_string(&mut s).unwrap();
+    println!("| follow {:?} {} {}", s, r.metadata().unwrap().len(), fs::metadata(&f).unwrap().len());
+    w.write_all(b"three\n").unwrap();
+    let mut tail = [0u8; 6];
+    std::os::unix::fs::FileExt::read_exact_at(&r, &mut tail, 8).unwrap();
+    println!("| follow at {:?} {}", std::str::from_utf8(&tail), r.metadata().unwrap().len());
+    drop((r, w));
+    fs::remove_dir_all(&d).unwrap();
 }
 
 #[test]

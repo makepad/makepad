@@ -354,8 +354,6 @@ pub fn load(g: &Units, check_all_bins: bool, allow_c: bool) -> Result<Graph, Str
         if !g.bins.is_empty() {
             if let Ok(exe) = self_exe() {
                 let (pkg_dir, pkg_name, _) = &pkg[integration_tests[0]];
-                let bin_dir = target_dir.join("relax-bin");
-                let _ = std::fs::create_dir_all(&bin_dir);
                 // absolute: the wrapper runs wherever a test starts it from (its own folder, a copy)
                 let absolute = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).display().to_string();
                 let td_str = absolute(&target_dir);
@@ -370,7 +368,7 @@ pub fn load(g: &Units, check_all_bins: bool, allow_c: bool) -> Result<Graph, Str
                     if std::fs::read(path).ok().as_deref() == Some(text.as_bytes()) {
                         return;
                     }
-                    let tmp = bin_dir.join(format!(".{}.tmp{}", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
+                    let tmp = path.with_file_name(format!(".{}.tmp{}", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
                     if std::fs::write(&tmp, text).is_ok() {
                         #[cfg(unix)]
                         {
@@ -380,6 +378,27 @@ pub fn load(g: &Units, check_all_bins: bool, allow_c: bool) -> Result<Graph, Str
                         let _ = std::fs::rename(&tmp, path);
                     }
                 };
+                // a package in a mount (a git run's, devhub's overlay, a shared workspace's): its
+                // run is started with the mount its --workspace-dir is in, as a build script in a
+                // virtual folder is (`run_one`): the table, the edits folder over it and the share's
+                // name. A test's shell in a real folder gets no mount (progenv.rs `child_env`), and
+                // the binary it started could not read its own package. The wrappers of a mount are
+                // in a folder of its own: two checkouts of a shared workspace share a run dir, and
+                // one's test never starts the other's binary. (Windows: a .cmd sets no value of
+                // several lines; its binaries start from Relax std's spawn, in the test's folder.)
+                let mut mount = String::new();
+                let bin_dir = if crate::vfs::is_virtual(pkg_dir) {
+                    for (name, value) in [("RELAX_VFS", Some(crate::vfs::mounts_text().into())), ("RELAX_EDITS", std::env::var_os("RELAX_EDITS")), ("RELAX_SHARE", std::env::var_os("RELAX_SHARE"))] {
+                        match value.filter(|v| !v.is_empty()) {
+                            Some(v) => mount.push_str(&format!("{name}={}\nexport {name}\n", sh_quote(&v.to_string_lossy()))),
+                            None => mount.push_str(&format!("unset {name}\n")),
+                        }
+                    }
+                    target_dir.join("relax-bin").join(format!("m-{:016x}", fnv(mount.as_bytes(), 0xcbf29ce484222325)))
+                } else {
+                    target_dir.join("relax-bin")
+                };
+                let _ = std::fs::create_dir_all(&bin_dir);
                 for bin_name in &g.bins {
                     // the bin's run: the loader's command line before the bin's own arguments. A
                     // run no one attends, as the test's own: a panic unwinds and a compile error
@@ -412,7 +431,7 @@ pub fn load(g: &Units, check_all_bins: bool, allow_c: bool) -> Result<Graph, Str
                         put(&wrapper.with_extension("words"), &words.join("\u{1f}"));
                     } else {
                         let line: Vec<String> = words.iter().map(|w| sh_quote(w)).collect();
-                        put(&wrapper, &format!("#!/bin/sh\nunset RELAX_SELF_EXEC RELAX_SELF_EXEC_SILENT_ADDED\nRELAX_ARG0=$0\nexport RELAX_ARG0\nexec {} \"$@\"\n", line.join(" ")));
+                        put(&wrapper, &format!("#!/bin/sh\nunset RELAX_SELF_EXEC RELAX_SELF_EXEC_SILENT_ADDED\n{mount}RELAX_ARG0=$0\nexport RELAX_ARG0\nexec {} \"$@\"\n", line.join(" ")));
                     }
                     let wrapper_str = wrapper.display().to_string();
                     for &ci in &integration_tests {

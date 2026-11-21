@@ -1548,6 +1548,17 @@ pub fn edited_disk_path(path: &str) -> Option<std::path::PathBuf> {
     (!rel.starts_with(".makepad-run-") && p.exists()).then_some(p)
 }
 
+/// The disk file a read-only open of the virtual `path` reads, so that it sees later writes as it
+/// would natively: a file the run wrote (its edits folder's copy) or a folder mount's file. None
+/// while a held landing answers the file's reads ([`hold_read`]), which every read then gives
+/// alike, and for a file only the store holds (read from a copy).
+pub fn read_disk_path(path: &str) -> Option<std::path::PathBuf> {
+    if landing_read(std::path::Path::new(path)).is_some() {
+        return None;
+    }
+    edited_disk_path(path)
+}
+
 /// Whether `path`'s edit is gone from the edits folder while the ledger still names it and no
 /// whiteout does: taken back, its ledger not rewritten yet. devhub's ship-done removes such a
 /// file first, then renames the ship's files in, the whiteouts and the ledger last, so until then
@@ -1758,15 +1769,18 @@ fn reconcile_seeded(dir: &std::path::Path) {
 }
 
 /// std's write into a virtual path (fs_vfs.rs): mode 0 the edited file or folder if any, 1 a
-/// write keeping the content, 2 a write replacing it, 3 a folder. The disk path, held until
-/// `relax_vfs_release`; 0 when the path cannot be written.
+/// write keeping the content, 2 a write replacing it, 3 a folder; and its read-only open, mode 4:
+/// the disk file it opens ([`read_disk_path`]). The disk path, held until `relax_vfs_release`; 0
+/// when there is none (the path cannot be written, or a read-only open reads a copy).
 pub extern "C" fn relax_vfs_edit(p: *const u8, n: usize, mode: u32, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     let r = match mode {
         0 => edited_disk_path(path).ok_or_else(|| not_found(path)),
         1 => prepare_edit(path, true),
         2 => prepare_edit(path, false),
-        _ => prepare_edit_dir(path),
+        3 => prepare_edit_dir(path),
+        4 => read_disk_path(path).ok_or_else(|| not_found(path)),
+        _ => Err(io::Error::new(io::ErrorKind::Unsupported, "an unknown edit mode")),
     };
     match r {
         Ok(d) => hold(d.to_string_lossy().into_owned().into_bytes(), out, out_len),
@@ -1811,6 +1825,21 @@ mod tests {
         assert_eq!(read(&removed).unwrap(), b"was here", "one release, one file");
         release_read(None);
         assert!(!exists(&removed) && read(&added).unwrap() == b"new");
+        // A read-only open of a held file under a folder mount reads what every other read gives
+        // (std reads the held copy): no disk file while it is held, the disk's after the release.
+        {
+            let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+            let root = normalize_path(&dir.join("vfs/share/held").to_string_lossy());
+            mount_folder(&root, &dir);
+            let virt = format!("{root}/changed.rs");
+            assert_eq!(read_disk_path(&virt), Some(dir.join("changed.rs")), "an unheld folder-mount file opens on the disk");
+            hold_read(&virt, Some(Arc::from(&b"before"[..])));
+            assert_eq!(read_disk_path(&virt), None, "a held file has no disk file to open");
+            assert_eq!(read(&virt).unwrap(), b"before");
+            release_read(Some(&virt));
+            assert_eq!(read_disk_path(&virt), Some(dir.join("changed.rs")), "released, it opens on the disk again");
+            FOLDER_MOUNTS.write().unwrap().retain(|m| m.0 != root);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

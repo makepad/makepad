@@ -7,11 +7,14 @@
 //! compile. An error is reported at once, as a compile error of code that has not run (stderr, the
 //! launcher's report, the run's diagnostics), whether that code ever runs or not; the program
 //! itself never runs unchecked code (a build checks its body first, jit.rs). A crate whose every
-//! body is clean stores its verdict (cache.rs crate_check_key), so a later run checks only what
-//! changed, as cargo builds a dependency once. Not checked here: the app's own crates (checked
-//! whole before main, run.rs), proc-macro crates (they run in the macro host) and the sysroot
-//! (shipped checked, as rustc ships it). The bodies checked here are not kept
-//! (Tcx::typeck_unstored): the program's builds keep only the ones they use.
+//! body is clean stores its verdict (cache.rs crate_check_key and app_check_key).
+//! The run checks the app's bodies and items before main, or beside main with a first-frame gate.
+//! Proc-macro crates run in the macro host and the sysroot ships checked. The background check uses
+//! Tcx::typeck_unstored, so the program's builds keep only the bodies they use.
+//!
+//! For `makepad run`, this thread also checks each dependency's items once its skipped files
+//! have loaded. Only a clean item verdict is reused, by fingerprint first, then by interface.
+//! The load reports its resolution errors independently on every run.
 //!
 //! `makepad test` runs it too (relax issue 231, item 7), over the registry crates the tests see
 //! (their path dependencies have the strict test-deps check, check.rs start_test_deps): a body of
@@ -21,8 +24,11 @@
 //! completion thread waits for a first present. A crate's check stores its progress file by file
 //! (`Files`): a run that ends before a crate's verdict leaves the next run only the files not in.
 
+use crate::borrowck::lazy::StoredVerdict;
+use crate::check::{audit_dir, CheckAudit, ItemKeys, ReadBarrier};
 use crate::jit::{self, FrontShared, Unit};
 use crate::program::{DefId, DefKind, Program};
+use crate::tcx::Tcx;
 use crate::typeck::{Body, Res};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -44,7 +50,7 @@ pub fn running() -> bool {
 
 /// What a run's background check covers.
 pub struct Scope {
-    /// the program's crate (checked before main, not here)
+    /// the program's crate (covered by the app gate)
     pub root: u32,
     /// where `makepad run`'s reachability walk starts
     pub main: Option<DefId>,
@@ -54,6 +60,12 @@ pub struct Scope {
     /// per program crate: `` `name` version `` of a registry or git package, whose findings are Relax
     /// gaps (cargo builds it)
     pub registry: Vec<Option<String>>,
+}
+
+impl Scope {
+    fn registry_warning(&self, k: u32, subject: &'static str) -> Option<(&str, &'static str)> {
+        self.registry.get(k as usize)?.as_deref().map(|label| (label, subject))
+    }
 }
 
 /// Starts the background check of unit `up`.
@@ -82,29 +94,36 @@ fn stopping() -> bool {
     crate::preempt::is_stopped() || crate::owner::exit_tid() != 0 || crate::jit::QUIT_SEEN.load(Ordering::Relaxed)
 }
 
-/// The crates this check covers -- not the app's (checked before main), not a proc-macro crate,
-/// not the sysroot, in a test run only the registry crates the tests see, and no verdict stored
-/// for it -- with their verdicts' cache keys; and the stored findings of the crates it skips.
-fn todo_crates(u: &Unit, scope: &Scope, skipped: &[u128]) -> (Vec<bool>, Vec<Option<u128>>, Vec<(u32, usize)>) {
-    use crate::borrowck::lazy::StoredVerdict;
+/// On the owner, look up dependency fingerprints. Return the body selection and keys, stored
+/// body findings, and the union of body and item misses that can try an interface key.
+fn todo_crates(u: &Unit, scope: &Scope, skipped: &[u128], items: &mut ItemPass) -> (Vec<bool>, Vec<Option<u128>>, Vec<(u32, usize)>, Vec<u32>) {
     use crate::vfs::canonical as canon;
     let std_dir = format!("{}/", canon(&crate::std_dir()).trim_end_matches('/'));
     let prog = &u.prog;
     let mut findings = Vec::new();
+    let mut misses = Vec::new();
     let (todo, keys) = (0..prog.crates.len() as u32).map(|k| {
         let c = &prog.crates[k as usize];
-        if c.proc_macro || k == scope.root || crate::borrowck::event::app_crate(prog, k)
+        if c.proc_macro
             || matches!(prog.syms.str(c.name), "core" | "alloc" | "std" | "proc_macro")
             || canon(c.root_path()).starts_with(&std_dir) {
             return (false, None);
         }
+        if k == scope.root || crate::borrowck::event::app_crate(prog, k) { return (false, None); }
         if !scope.test_subjects.is_empty()
             && !(scope.registry.get(k as usize).is_some_and(|r| r.is_some()) && scope.test_subjects.iter().any(|&s| prog.crate_sees(s, k))) {
             return (false, None);
         }
-        let Some(c) = u.cache.as_ref() else { return (true, None) };
+        let Some(c) = &u.cache else {
+            if scope.test_subjects.is_empty() { items.pending.insert(k, ItemKeys::default()); }
+            return (true, None);
+        };
         let c = unsafe { &mut *c.get() };
-        match c.crate_check_key(k, skipped[k as usize], 0) {
+        if scope.test_subjects.is_empty() {
+            if let Some(keys) = ItemKeys::missed(c, k, skipped[k as usize]) { items.pending.insert(k, keys); }
+            else { items.stored += 1; }
+        }
+        let body = match c.crate_check_key(k, skipped[k as usize], 0) {
             Some(key) => match c.borrowck_stored(key) {
                 Some(StoredVerdict::Clean) => (false, None),
                 Some(StoredVerdict::Failed(errors)) => {
@@ -114,9 +133,11 @@ fn todo_crates(u: &Unit, scope: &Scope, skipped: &[u128]) -> (Vec<bool>, Vec<Opt
                 _ => (true, Some(key)),
             },
             None => (true, None),
-        }
+        };
+        if body.1.is_some() || items.pending.contains_key(&k) { misses.push(k); }
+        body
     }).unzip();
-    (todo, keys, findings)
+    (todo, keys, findings, misses)
 }
 
 enum Checked {
@@ -207,7 +228,6 @@ impl Files {
 /// The progress keys of the files of `crates` (crate, its check key) not in `known` yet, and
 /// whether each one's entry is stored (on the owner: the cache is the owner's).
 fn file_keys(u: &Unit, crates: &[(u32, u128)], known: &HashSet<u32>) -> Vec<(u32, u128, bool)> {
-    use crate::borrowck::lazy::StoredVerdict;
     let Some(c) = u.cache.as_ref() else { return Vec::new() };
     let c = unsafe { &mut *c.get() };
     let prog = &u.prog;
@@ -234,7 +254,125 @@ fn no_present_coming() -> bool {
     jit::past_startup_headless() && !jit::FIRST_PRESENT.load(Ordering::Acquire) && jit::background_loads()
 }
 
+/// The program's compiles go first, including between individual definitions.
+fn checker_turn() -> bool {
+    while !jit::tier1_workers_ready() {
+        if stopping() { return false; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    !stopping()
+}
+
+#[derive(Default)]
+struct ItemPass {
+    pending: HashMap<u32, ItemKeys>,
+    /// Headless loading gives crates with fewer skipped files priority.
+    next_load: Option<u32>,
+    checked: usize,
+    stored: usize,
+    defs: usize,
+    errors: usize,
+    cpu_ns: u64,
+    all_done_ns: Option<u64>,
+}
+
+impl ItemPass {
+    fn mark_done(&mut self, start: u64) {
+        if self.all_done_ns.is_none() && self.pending.is_empty() {
+            self.all_done_ns = Some(jit::wall_ns() - start);
+        }
+    }
+
+    /// Collect definitions of whole, uncached crates in one front read. Each check below takes
+    /// its own read so a writer can load a file or apply an edit between definitions.
+    fn check_ready(&mut self, f: &FrontShared, scope: &Scope, start: u64) -> bool {
+        if self.pending.is_empty() { return true; }
+        if !checker_turn() { return false; }
+        let cpu = relax_session::clock::cpu_ns();
+        let mut ready: Vec<_> = {
+            let r = jit::front_read("item check crates");
+            let (prog, _) = r.of(f);
+            let mut skipped = HashMap::<u32, usize>::new();
+            for &m in prog.skipped_files.keys() {
+                *skipped.entry(prog.mods[m as usize].krate).or_default() += 1;
+            }
+            self.next_load = self.pending.keys().filter_map(|&k| Some((*skipped.get(&k)?, k))).min().map(|(_, k)| k);
+            let mut defs: HashMap<u32, Vec<DefId>> = self.pending.keys().filter(|k| !skipped.contains_key(*k))
+                .map(|&k| (k, Vec::new())).collect();
+            if !defs.is_empty() {
+                for (i, d) in prog.defs.iter().enumerate() {
+                    if let Some(v) = defs.get_mut(&d.krate) { v.push(DefId(i as u32)); }
+                }
+            }
+            defs.into_iter().collect()
+        };
+        ready.sort_unstable_by_key(|(k, defs)| (defs.len(), *k));
+        for (k, defs) in ready {
+            let mut errors = Vec::new();
+            let mut ice = false;
+            let checks: [fn(&Program, &Tcx, DefId) -> crate::check::ItemErrors; 2] = [crate::check::def_item_errors, crate::check::def_wf_errors];
+            for check in checks {
+                if ice || !errors.is_empty() { break; }
+                for &d in &defs {
+                    match check_item_def(f, d, check) {
+                        ItemResult::Done(found) => errors.extend(found),
+                        ItemResult::Panic => { ice = true; self.errors += 1; }
+                        ItemResult::Stop => return false,
+                    }
+                }
+            }
+            errors.sort_by_cached_key(|e| crate::check::error_position(e));
+            errors.dedup();
+            report(&errors, scope.registry_warning(k, "an item"));
+            self.errors += errors.len();
+            self.defs += defs.len();
+            self.checked += 1;
+            let keys = self.pending.remove(&k).unwrap();
+            if errors.is_empty() && !ice && !stopping() && crate::reload::program_edits() == 0 {
+                let r = jit::front_read("dependency item verdict");
+                for key in keys.keys(r.of(f).0, k) { crate::borrowck::lazy::push_verdict_key(key, StoredVerdict::Clean); }
+            }
+            self.mark_done(start);
+        }
+        self.cpu_ns += relax_session::clock::cpu_ns() - cpu;
+        true
+    }
+}
+
+enum ItemResult { Done(Vec<String>), Panic, Stop }
+
+fn check_item_def(f: &FrontShared, d: DefId, check: fn(&Program, &Tcx, DefId) -> crate::check::ItemErrors) -> ItemResult {
+    loop {
+        if !checker_turn() { return ItemResult::Stop; }
+        let r = jit::front_read("item check def");
+        let (prog, tcx) = r.of(f);
+        // A live edit can retire a definition between front reads.
+        if d.0 as usize >= prog.defs.len() { return ItemResult::Done(Vec::new()); }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _p = crate::preempt::Preemptible::on();
+            crate::preempt::point();
+            check(prog, tcx, d)
+        })) {
+            Ok(errors) => return ItemResult::Done(errors.messages()),
+            Err(p) if crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::OwnerBusy>() => {
+                drop(r);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(p) => {
+                if let Some(fatal) = p.downcast_ref::<relax_types::infer::diagnostics::FatalError>() {
+                    return ItemResult::Done(vec![fatal.0.clone()]);
+                }
+                let path = prog.def_path(d);
+                drop(r);
+                report_checker_panic(&path, &jit::payload_text(&*p));
+                return ItemResult::Panic;
+            }
+        }
+    }
+}
+
 fn run(up: *mut Unit, scope: &Scope) {
+    use crate::borrowck::lazy::{push_verdict_key, StoredVerdict};
     while !jit::past_startup() {
         if stopping() { return; }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -246,13 +384,59 @@ fn run(up: *mut Unit, scope: &Scope) {
     let n = { let r = jit::front_read("typeck bg crates"); r.of(&f).0.crates.len() as u32 };
     let skipped_text: Vec<u128> = (0..n).map(crate::check::skipped_text_hash).collect();
     let upn = up as usize;
-    let (todo, keys, stored_findings) = crate::owner::call(crate::owner::Class::Publish, || todo_crates(unsafe { &*(upn as *const Unit) }, scope, &skipped_text));
+    let mut items = ItemPass::default();
+    let (mut todo, mut keys, mut stored_findings, misses) = crate::owner::call(crate::owner::Class::Publish, || {
+        todo_crates(unsafe { &*(upn as *const Unit) }, scope, &skipped_text, &mut items)
+    });
+    let mut fp_keys = Vec::new();
+    let mut audit = audit_dir().map(CheckAudit::new);
+    if !misses.is_empty() {
+        let inputs = {
+            let r = jit::front_read("typeck bg keys");
+            let body_crates: Vec<_> = misses.iter().copied().filter(|&k| keys[k as usize].is_some()).collect();
+            crate::check::iface_inputs_with_skipped(r.of(&f).0, &misses, &body_crates, &skipped_text)
+        };
+        crate::owner::call(crate::owner::Class::Publish, || {
+            // An edit can change the cache's interfaces between the two owner calls.
+            if crate::reload::program_edits() != 0 { return; }
+            let u = unsafe { &*(upn as *const Unit) };
+            let Some(c) = u.cache.as_ref() else { return };
+            let cache = unsafe { &mut *c.get() };
+            fp_keys = std::mem::replace(&mut keys, vec![None; todo.len()]);
+            for (i, &k) in misses.iter().enumerate() {
+                if let Some(item) = items.pending.get_mut(&k) {
+                    if item.iface_hit(cache, u, k, &inputs, i) {
+                        if let Some(fp) = item.fp { push_verdict_key(fp, StoredVerdict::Clean); }
+                        items.pending.remove(&k);
+                        items.stored += 1;
+                    }
+                }
+                if fp_keys[k as usize].is_none() { continue; }
+                let key = cache.app_check_key(k, inputs.own[k as usize], inputs.skipped[&k], inputs.deps(i));
+                match key.and_then(|key| cache.borrowck_stored(key)) {
+                    Some(verdict @ (StoredVerdict::Clean | StoredVerdict::Failed(_))) => {
+                        if let (Some(audit), Some(key), StoredVerdict::Clean) = (&mut audit, key, &verdict) {
+                            audit.hit(k, key);
+                            keys[k as usize] = Some(key);
+                            continue;
+                        }
+                        todo[k as usize] = false;
+                        if let StoredVerdict::Failed(errors) = &verdict { stored_findings.push((k, errors.len())); }
+                        if let Some(fp_key) = fp_keys[k as usize] { push_verdict_key(fp_key, verdict); }
+                    }
+                    _ => keys[k as usize] = key,
+                }
+            }
+        });
+    }
     *STORED_FINDINGS.lock().unwrap_or_else(|p| p.into_inner()) = stored_findings;
-    if !todo.contains(&true) { return finish(t0, w0); }
+    items.mark_done(w0);
+    if !items.check_ready(&f, scope, w0) { return; }
     // the files' progress: the keys of the files loaded so far (more as skipped files load)
     let crate_keys: Vec<(u32, u128)> = keys.iter().enumerate().filter_map(|(k, key)| key.filter(|_| todo[k]).map(|key| (k as u32, key))).collect();
     let mut files = Files::default();
     let refresh = |files: &mut Files| {
+        if crate_keys.is_empty() { return; }
         let known: HashSet<u32> = files.keys.keys().copied().collect();
         let ck = &crate_keys;
         let new = crate::owner::call(crate::owner::Class::Publish, || file_keys(unsafe { &*(upn as *const Unit) }, ck, &known));
@@ -269,7 +453,9 @@ fn run(up: *mut Unit, scope: &Scope) {
     let mut ice: HashSet<u32> = HashSet::new();
     let mut stored: HashSet<u32> = HashSet::new();
     // what main (a test run: its test fns) reaches, depth first (named_fns' order)
-    let mut stack: Vec<DefId> = if scope.test_subjects.is_empty() {
+    let mut stack: Vec<DefId> = if !todo.contains(&true) {
+        Vec::new()
+    } else if scope.test_subjects.is_empty() {
         scope.main.into_iter().collect()
     } else {
         let r = jit::front_read("typeck bg tests");
@@ -277,7 +463,7 @@ fn run(up: *mut Unit, scope: &Scope) {
     };
     while let Some(d) = stack.pop() {
         if !seen.insert(d) { continue; }
-        match check(&f, d, &todo, &files, scope, &mut failed, &mut ice) {
+        match check(&f, d, &todo, &files, scope, &mut failed, &mut ice, audit.as_mut()) {
             Checked::Done(named) => {
                 clean.insert(d);
                 stack.extend(named.into_iter().rev().filter(|d| !seen.contains(d)));
@@ -297,11 +483,12 @@ fn run(up: *mut Unit, scope: &Scope) {
     // edit's versions are in the tables: the bodies checked were not all the boot's)
     let store_file = |key: u128| {
         if crate::reload::program_edits() == 0 {
-            crate::borrowck::lazy::push_verdict_key(key, crate::borrowck::lazy::StoredVerdict::Clean);
+            push_verdict_key(key, StoredVerdict::Clean);
             STATS[5].fetch_add(1, Ordering::Relaxed);
         }
     };
-    loop {
+    while !todo_list.is_empty() {
+        if !items.check_ready(&f, scope, w0) { return; }
         refresh(&mut files);
         let (owners, skipped) = {
             let r = jit::front_read("typeck bg owners");
@@ -321,7 +508,7 @@ fn run(up: *mut Unit, scope: &Scope) {
         let mut pending: HashSet<u32> = HashSet::new();
         for (d, file) in owners {
             seen.insert(d);
-            match check(&f, d, &todo, &files, scope, &mut failed, &mut ice) {
+            match check(&f, d, &todo, &files, scope, &mut failed, &mut ice, audit.as_mut()) {
                 Checked::Done(_) => {
                     clean.insert(d);
                     if let Some(key) = files.checked(file, true) { store_file(key); }
@@ -348,10 +535,22 @@ fn run(up: *mut Unit, scope: &Scope) {
         for &k in &todo_list {
             if boot && !ice.contains(&k) && !given_up.contains(&k) && !skipped.contains(&k) && !pending.contains(&k) && stored.insert(k) {
                 let verdict = match failed.get(&k) {
-                    Some(errors) => crate::borrowck::lazy::StoredVerdict::Failed(errors.clone()),
-                    None => crate::borrowck::lazy::StoredVerdict::Clean,
+                    Some(errors) => StoredVerdict::Failed(errors.clone()),
+                    None => StoredVerdict::Clean,
                 };
-                if let Some(key) = keys[k as usize] { crate::borrowck::lazy::push_verdict_key(key, verdict); }
+                if let Some(audit) = &mut audit {
+                    let name = {
+                        let r = jit::front_read("typeck bg audit");
+                        let (prog, _) = r.of(&f);
+                        audit.collect_reads(prog);
+                        prog.syms.str(prog.crates[k as usize].name).to_owned()
+                    };
+                    let crate_keys = fp_keys.get(k as usize).copied().flatten().into_iter().chain(keys[k as usize]);
+                    let errors = failed.get(&k).into_iter().flatten().map(String::as_str);
+                    if !audit.verdict(k, &name, crate_keys, errors) && matches!(verdict, StoredVerdict::Clean) { continue; }
+                }
+                if let Some(&Some(fp_key)) = fp_keys.get(k as usize) { push_verdict_key(fp_key, verdict.clone()); }
+                if let Some(key) = keys[k as usize] { push_verdict_key(key, verdict); }
                 STATS[2].fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -364,7 +563,7 @@ fn run(up: *mut Unit, scope: &Scope) {
                 let r = jit::front_read("typeck bg load");
                 let (prog, _) = r.of(&f);
                 let all: HashSet<u32> = prog.skipped_files.keys().map(|&m| prog.mods[m as usize].krate).collect();
-                skipped.iter().copied().min().or_else(|| {
+                items.next_load.or_else(|| skipped.iter().copied().min()).or_else(|| {
                     let mut wanted: Vec<u32> = pending.iter().flat_map(|&k| crate::check::dependency_closure(prog, k)).filter(|k| all.contains(k)).collect();
                     wanted.sort_unstable();
                     wanted.first().copied()
@@ -372,11 +571,7 @@ fn run(up: *mut Unit, scope: &Scope) {
             };
             match next {
                 Some(k) => {
-                    while !jit::tier1_workers_ready() {
-                        if stopping() { return; }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    if stopping() { return; }
+                    if !checker_turn() { return; }
                     unsafe { jit::load_skipped_of(up, &[k]) };
                 }
                 // no file left to load for them: they wait on nothing that will come
@@ -393,18 +588,50 @@ fn run(up: *mut Unit, scope: &Scope) {
             std::thread::sleep(std::time::Duration::from_millis(200));
             let r = jit::front_read("typeck bg skipped");
             let (prog, _) = r.of(&f);
-            let now: HashSet<u32> = prog.skipped_files.keys().map(|&m| prog.mods[m as usize].krate).filter(|&k| todo.get(k as usize).copied().unwrap_or(false)).collect();
+            let mut now: HashSet<u32> = prog.skipped_files.keys().map(|&m| prog.mods[m as usize].krate).collect();
+            if items.pending.keys().any(|k| !now.contains(k)) { break; }
+            now.retain(|&k| todo.get(k as usize).copied().unwrap_or(false));
             if now != skipped || no_present_coming() { break; }
         }
     }
-    finish(t0, w0)
+    if let Some(audit) = &mut audit {
+        // An ICE, an unresolved load or an edit leaves the crate without a verdict. Keep the
+        // previous snapshot and account for the incomplete check in the replay's summary.
+        let remaining: Vec<_> = {
+            let r = jit::front_read("typeck bg audit end");
+            let (prog, _) = r.of(&f);
+            audit.collect_reads(prog);
+            todo_list.iter().copied().filter(|k| !stored.contains(k))
+                .map(|k| (k, prog.syms.str(prog.crates[k as usize].name).to_owned())).collect()
+        };
+        for (k, name) in remaining {
+            if !ice.contains(&k) {
+                let why = if given_up.contains(&k) { "a body still needs a skipped file" } else { "the program was edited" };
+                audit.incomplete(k, format!("check incomplete: {why}"));
+            }
+            audit.verdict(k, &name, std::iter::empty(), failed.get(&k).into_iter().flatten().map(String::as_str));
+        }
+    }
+    while !items.pending.is_empty() {
+        if !items.check_ready(&f, scope, w0) { return; }
+        if let Some(k) = items.next_load {
+            if no_present_coming() {
+                if !checker_turn() { return; }
+                unsafe { jit::load_skipped_of(up, &[k]) };
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+    finish(t0, w0, audit.as_ref(), &items)
 }
 
 /// The crates a warm run skipped for their stored Failed verdicts, with their error counts
 /// (`--verbose`'s done line).
 static STORED_FINDINGS: relax_session::sync::Mutex<Vec<(u32, usize)>> = relax_session::sync::Mutex::new(Vec::new());
 
-fn finish(t0: u64, w0: u64) {
+fn finish(t0: u64, w0: u64, audit: Option<&CheckAudit>, items: &ItemPass) {
+    if let Some(audit) = audit { audit.summary(" (background)"); }
     STATS[3].store(relax_session::clock::cpu_ns() - t0, Ordering::Relaxed);
     STATS[4].store((jit::wall_ns() - w0).max(1), Ordering::Relaxed);
     if crate::run::VERBOSE.load(Ordering::Relaxed) {
@@ -416,22 +643,22 @@ fn finish(t0: u64, w0: u64) {
         let files = if files == 0 && skipped == 0 { String::new() } else {
             format!(", {} files' progress stored, {} owners not checked for their files' stored progress", files, skipped)
         };
-        eprintln!("relax: background type check done: {} body owners checked, {} with errors, {} crates' verdicts stored{}{}, cpu {:.0} ms over {:.1} s",
+        let item_stats = if items.checked == 0 && items.stored == 0 { String::new() } else {
+            format!("; dependency item checks: {} crates checked ({} stored), {} defs, {} error{}, cpu {:.0} ms; done at {:.1} s",
+                items.checked, items.stored, items.defs, items.errors, if items.errors == 1 { "" } else { "s" }, items.cpu_ns as f64 / 1e6,
+                items.all_done_ns.unwrap_or_default() as f64 / 1e9)
+        };
+        eprintln!("relax: background type check done: {} body owners checked, {} with errors, {} crates' verdicts stored{}{}, cpu {:.0} ms over {:.1} s{}",
             STATS[0].load(Ordering::Relaxed), STATS[1].load(Ordering::Relaxed), STATS[2].load(Ordering::Relaxed), stored, files,
-            STATS[3].load(Ordering::Relaxed) as f64 / 1e6, STATS[4].load(Ordering::Relaxed) as f64 / 1e9);
+            STATS[3].load(Ordering::Relaxed) as f64 / 1e6, STATS[4].load(Ordering::Relaxed) as f64 / 1e9, item_stats);
     }
 }
 
 /// Type-checks body owner `d` of a crate this check covers and reports its errors; a body of any
 /// other crate is only read when a build checked it already (the walk goes on through it).
-fn check(f: &FrontShared, d: DefId, todo: &[bool], files: &Files, scope: &Scope, failed: &mut HashMap<u32, Vec<String>>, ice: &mut HashSet<u32>) -> Checked {
+fn check(f: &FrontShared, d: DefId, todo: &[bool], files: &Files, scope: &Scope, failed: &mut HashMap<u32, Vec<String>>, ice: &mut HashSet<u32>, audit: Option<&mut CheckAudit>) -> Checked {
     loop {
-        if stopping() { return Checked::Stop; }
-        // the program's own compiles go first (a burst of the UI thread's lazy compiles)
-        while !jit::tier1_workers_ready() {
-            if stopping() { return Checked::Stop; }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        if !checker_turn() { return Checked::Stop; }
         let r = jit::front_read("typeck bg");
         let (prog, tcx) = r.of(f);
         if d.0 as usize >= prog.defs.len() || crate::borrowck::body::CheckedBody::item(prog, d).is_none() { return Checked::Done(Vec::new()); }
@@ -440,11 +667,12 @@ fn check(f: &FrontShared, d: DefId, todo: &[bool], files: &Files, scope: &Scope,
             return Checked::Done(tcx.typeck_peek(prog, d).filter(|b| b.errors.is_empty()).map(|b| named_fns(prog, &b)).unwrap_or_default());
         }
         // an earlier run checked every owner of its file clean (the file's progress entry)
-        if !files.todo(prog.def(d).file) {
+        if audit.is_none() && !files.todo(prog.def(d).file) {
             STATS[6].fetch_add(1, Ordering::Relaxed);
             return Checked::Done(Vec::new());
         }
         let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _reads = audit.as_ref().map(|a| ReadBarrier::begin(prog, d, &a.reads));
             let _p = crate::preempt::Preemptible::on();
             crate::preempt::point();
             tcx.typeck_unstored(prog, d)
@@ -462,34 +690,43 @@ fn check(f: &FrontShared, d: DefId, todo: &[bool], files: &Files, scope: &Scope,
             Err(p) => {
                 // the checker failed on a body: a makepad run bug, reported like a build's
                 // internal error, and the crate's verdict is not stored
-                crate::hot_failure::checker_panic(&prog.def_path(d), &jit::payload_text(&*p));
-                let e = format!("internal compiler error while checking {} -- Relax bug, report it{}", prog.def_path(d), jit::take_ice_location());
+                let path = prog.def_path(d);
+                drop(r);
                 STATS[1].fetch_add(1, Ordering::Relaxed);
                 ice.insert(krate);
-                report(&[e], None);
+                let e = report_checker_panic(&path, &jit::payload_text(&*p));
+                if let Some(audit) = audit { audit.incomplete(krate, e); }
                 return Checked::Failed;
             }
         };
         STATS[0].fetch_add(1, Ordering::Relaxed);
-        if body.errors.is_empty() { return Checked::Done(named_fns(prog, &body)); }
         // a name in a file the lazy selection skipped: checked again once it is loaded
-        if !body.deferred_misses.is_empty() && !prog.skipped_files.is_empty() { return Checked::Later; }
+        if !body.errors.is_empty() && !body.deferred_misses.is_empty() && !prog.skipped_files.is_empty() { return Checked::Later; }
+        if let Some(audit) = audit { audit.body(prog, tcx, d, &body); }
+        if body.errors.is_empty() { return Checked::Done(named_fns(prog, &body)); }
         STATS[1].fetch_add(1, Ordering::Relaxed);
         failed.entry(krate).or_default().extend(body.errors.iter().cloned());
-        report(&body.errors, scope.registry.get(krate as usize).and_then(|r| r.as_deref()));
+        report(&body.errors, scope.registry_warning(krate, "a body"));
         return Checked::Failed;
     }
 }
 
-/// A body's errors: compile errors of code that has not run (it may never run), each once in the
+pub(crate) fn report_checker_panic(path: &str, message: &str) -> String {
+    crate::hot_failure::checker_panic(path, message);
+    let e = format!("internal compiler error while checking {path}: {message} -- Relax bug, report it{}", jit::take_ice_location());
+    report(std::slice::from_ref(&e), None);
+    e
+}
+
+/// Body and item errors: compile errors of code that has not run (it may never run), each once in the
 /// process (a call of the body may have reported it already, run.rs first_report). A registry
 /// crate's (`registry`: its `` `name` version ``) are a Relax gap: cargo builds that crate, so the
 /// run says so and they are warnings, never an error the run's exit counts.
-fn report(errors: &[String], registry: Option<&str>) {
+fn report(errors: &[String], registry: Option<(&str, &str)>) {
     let new: Vec<&String> = errors.iter().filter(|e| crate::run::first_report(0, e)).collect();
     if new.is_empty() { return; }
-    if let Some(label) = registry {
-        eprintln!("relax: {label}: a body Relax cannot compile (if cargo builds it, a Relax gap: report it)");
+    if let Some((label, subject)) = registry {
+        eprintln!("relax: {label}: {subject} Relax cannot compile (if cargo builds it, a Relax gap: report it)");
     }
     for e in new {
         if crate::run_state::observed() {

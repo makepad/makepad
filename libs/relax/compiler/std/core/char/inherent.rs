@@ -6,6 +6,10 @@ use super::methods::*;
 impl char {
     pub const MIN: char = '\0';
     pub const MAX: char = '\u{10FFFF}';
+    /// rustc 1.93.0 (char_max_len_assoc): Maximum number of bytes in the UTF-8 encoding of a char.
+    pub const MAX_LEN_UTF8: usize = 4;
+    /// rustc 1.93.0 (char_max_len_assoc): Maximum number of code units in the UTF-16 encoding of a char.
+    pub const MAX_LEN_UTF16: usize = 2;
     pub const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
     pub const UNICODE_VERSION: (u8, u8, u8) = crate::unicode::UNICODE_VERSION;
 

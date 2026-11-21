@@ -29,6 +29,14 @@ fn a01_unsigned() {
     *e.get_mut() += 41;
     e.store(e.load(Ordering::Relaxed) + 1, Ordering::Release);
     println!("| {:?} {}", e, AtomicUsize::from(3).into_inner());
+    let mut words = [7u32, 11, 13];
+    AtomicU32::from_mut(&mut words[0]).store(17, Ordering::Relaxed);
+    let atomic = AtomicU32::from_mut_slice(&mut words[1..]);
+    let prev = atomic[1].swap(19, Ordering::Relaxed);
+    let plain = AtomicU32::get_mut_slice(atomic);
+    plain[0] += 1;
+    let view = unsafe { AtomicU32::from_ptr(words.as_mut_ptr()) };
+    println!("| atomic words {} {} {:?}", prev, view.swap(23, Ordering::Relaxed), words);
 }
 
 #[test]
@@ -64,6 +72,26 @@ fn a03_bool_ptr() {
     println!("| {} {}", unsafe { *old }, unsafe { *p.load(Ordering::SeqCst) });
     println!("| {:?}", p.compare_exchange(old, old, Ordering::SeqCst, Ordering::SeqCst).is_err());
     println!("| {}", AtomicPtr::<u8>::default().load(Ordering::SeqCst).is_null());
+    let mut flags = [true, false];
+    AtomicBool::from_mut(&mut flags[0]).store(false, Ordering::Relaxed);
+    let atomic = AtomicBool::from_mut_slice(&mut flags);
+    atomic[1].store(true, Ordering::Relaxed);
+    let plain = AtomicBool::get_mut_slice(atomic);
+    let flag = unsafe { AtomicBool::from_ptr(plain.as_mut_ptr()) };
+    println!("| atomic flags {} {:?}", flag.swap(true, Ordering::Relaxed), flags);
+
+    let base = xs.as_mut_ptr();
+    let mid = unsafe { base.add(1) };
+    let end = unsafe { base.add(2) };
+    let mut pointers = [base, mid];
+    AtomicPtr::from_mut(&mut pointers[0]).store(end, Ordering::Relaxed);
+    let atomic = AtomicPtr::from_mut_slice(&mut pointers);
+    let prev = atomic[1].swap(base, Ordering::Relaxed);
+    let plain = AtomicPtr::get_mut_slice(atomic);
+    let view = unsafe { AtomicPtr::from_ptr(plain.as_mut_ptr()) };
+    unsafe {
+        println!("| atomic pointers {} {} {}", *prev, *view.load(Ordering::Relaxed), *pointers[1]);
+    }
     fence(Ordering::SeqCst);
     fence(Ordering::Acquire);
 }

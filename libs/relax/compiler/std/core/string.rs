@@ -48,11 +48,23 @@ impl fmt::Display for FromUtf8Error {
 }
 
 #[derive(Debug)]
-pub struct FromUtf16Error(());
+pub struct FromUtf16Error {
+    kind: FromUtf16ErrorKind,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum FromUtf16ErrorKind {
+    LoneSurrogate,
+    OddBytes,
+}
 
 impl fmt::Display for FromUtf16Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt("invalid utf-16: lone surrogate found", f)
+        let message = match self.kind {
+            FromUtf16ErrorKind::LoneSurrogate => "invalid utf-16: lone surrogate found",
+            FromUtf16ErrorKind::OddBytes => "invalid utf-16: odd number of bytes",
+        };
+        fmt::Display::fmt(message, f)
     }
 }
 
@@ -128,6 +140,12 @@ impl String {
         String { vec: Vec::from_raw_parts(buf, length, capacity) }
     }
 
+    /// rustc 1.93.0 (vec_into_raw_parts): decomposes a string into its allocation pointer, length, and capacity.
+    #[must_use = "losing the pointer will leak memory"]
+    pub fn into_raw_parts(self) -> (*mut u8, usize, usize) {
+        self.vec.into_raw_parts()
+    }
+
     pub fn from_utf8(vec: Vec<u8>) -> Result<String, FromUtf8Error> {
         match crate::str::from_utf8(&vec[..]) {
             Ok(..) => Ok(String { vec }),
@@ -140,12 +158,16 @@ impl String {
     }
 
     pub fn from_utf16(v: &[u16]) -> Result<String, FromUtf16Error> {
-        let mut ret = String::with_capacity(v.len());
-        let mut it = crate::char::decode_utf16(v.iter().cloned());
+        Self::from_utf16_units(v.iter().cloned(), v.len())
+    }
+
+    fn from_utf16_units(units: impl Iterator<Item = u16>, capacity: usize) -> Result<String, FromUtf16Error> {
+        let mut ret = String::with_capacity(capacity);
+        let mut it = crate::char::decode_utf16(units);
         while let Some(c) = it.next() {
             match c {
                 Ok(c) => ret.push(c),
-                Err(_) => return Err(FromUtf16Error(())),
+                Err(_) => return Err(FromUtf16Error { kind: FromUtf16ErrorKind::LoneSurrogate }),
             }
         }
         Ok(ret)
@@ -161,6 +183,62 @@ impl String {
             }
         }
         ret
+    }
+
+    /// rustc 1.98.0 (str_from_utf16_endian): decodes little-endian UTF-16 bytes, returning an error for invalid input.
+    pub fn from_utf16le(v: &[u8]) -> Result<String, FromUtf16Error> {
+        let (chunks, []) = v.as_chunks::<2>() else {
+            return Err(FromUtf16Error { kind: FromUtf16ErrorKind::OddBytes });
+        };
+        match (cfg!(target_endian = "little"), unsafe { v.align_to::<u16>() }) {
+            (true, ([], v, [])) => Self::from_utf16(v),
+            _ => {
+                Self::from_utf16_units(chunks.iter().copied().map(u16::from_le_bytes), chunks.len())
+            }
+        }
+    }
+
+    /// rustc 1.98.0 (str_from_utf16_endian): decodes little-endian UTF-16, replacing invalid units and a trailing byte.
+    pub fn from_utf16le_lossy(v: &[u8]) -> String {
+        match (cfg!(target_endian = "little"), unsafe { v.align_to::<u16>() }) {
+            (true, ([], v, [])) => Self::from_utf16_lossy(v),
+            (true, ([], v, [_remainder])) => Self::from_utf16_lossy(v) + "\u{FFFD}",
+            _ => {
+                let (chunks, remainder) = v.as_chunks::<2>();
+                let string = crate::char::decode_utf16(chunks.iter().copied().map(u16::from_le_bytes))
+                    .map(|r| r.unwrap_or(crate::char::REPLACEMENT_CHARACTER))
+                    .collect();
+                if remainder.is_empty() { string } else { string + "\u{FFFD}" }
+            }
+        }
+    }
+
+    /// rustc 1.98.0 (str_from_utf16_endian): decodes big-endian UTF-16 bytes, returning an error for invalid input.
+    pub fn from_utf16be(v: &[u8]) -> Result<String, FromUtf16Error> {
+        let (chunks, []) = v.as_chunks::<2>() else {
+            return Err(FromUtf16Error { kind: FromUtf16ErrorKind::OddBytes });
+        };
+        match (cfg!(target_endian = "big"), unsafe { v.align_to::<u16>() }) {
+            (true, ([], v, [])) => Self::from_utf16(v),
+            _ => {
+                Self::from_utf16_units(chunks.iter().copied().map(u16::from_be_bytes), chunks.len())
+            }
+        }
+    }
+
+    /// rustc 1.98.0 (str_from_utf16_endian): decodes big-endian UTF-16, replacing invalid units and a trailing byte.
+    pub fn from_utf16be_lossy(v: &[u8]) -> String {
+        match (cfg!(target_endian = "big"), unsafe { v.align_to::<u16>() }) {
+            (true, ([], v, [])) => Self::from_utf16_lossy(v),
+            (true, ([], v, [_remainder])) => Self::from_utf16_lossy(v) + "\u{FFFD}",
+            _ => {
+                let (chunks, remainder) = v.as_chunks::<2>();
+                let string = crate::char::decode_utf16(chunks.iter().copied().map(u16::from_be_bytes))
+                    .map(|r| r.unwrap_or(crate::char::REPLACEMENT_CHARACTER))
+                    .collect();
+                if remainder.is_empty() { string } else { string + "\u{FFFD}" }
+            }
+        }
     }
 
     pub const fn into_bytes(self) -> Vec<u8> {
@@ -410,6 +488,16 @@ impl String {
             return crate::borrow::Cow::Borrowed(chunk.valid());
         }
         crate::borrow::Cow::Owned(lossy_string(v))
+    }
+
+    /// rustc 1.99.0 (string_from_utf8_lossy_owned): converts bytes to a string, reusing the allocation for valid UTF-8.
+    #[must_use]
+    pub fn from_utf8_lossy_owned(v: Vec<u8>) -> String {
+        if let crate::borrow::Cow::Owned(string) = Self::from_utf8_lossy(&v) {
+            string
+        } else {
+            unsafe { Self::from_utf8_unchecked(v) }
+        }
     }
 }
 

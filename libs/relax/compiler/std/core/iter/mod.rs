@@ -17,7 +17,6 @@ pub use sources::{
 };
 
 use crate::cmp::Ordering;
-use crate::ops::{Add, Mul};
 
 #[lang = "iterator"]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
@@ -35,12 +34,11 @@ pub trait Iterator {
     where
         Self: Sized,
     {
-        let mut n = 0;
-        let mut s = self;
-        while let Some(_) = s.next() {
-            n += 1;
-        }
-        n
+        self.fold(
+            0,
+            #[rustc_inherit_overflow_checks]
+            |accum, _elem| accum + 1,
+        )
     }
 
     fn last(self) -> Option<Self::Item>
@@ -352,10 +350,13 @@ pub trait Iterator {
         None
     }
 
+    #[rustc_inherit_overflow_checks]
     fn position<P: FnMut(Self::Item) -> bool>(&mut self, predicate: P) -> Option<usize>
     where
         Self: Sized,
     {
+        // rustc counts in a #[rustc_inherit_overflow_checks] closure given to try_fold; the loop is
+        // half the time here, and the count checks as rustc's does
         let mut predicate = predicate;
         let mut i = 0;
         while let Some(x) = self.next() {
@@ -898,13 +899,4 @@ pub trait Sum<A = Self>: Sized {
 
 pub trait Product<A = Self>: Sized {
     fn product<I: Iterator<Item = A>>(iter: I) -> Self;
-}
-
-/// Shared bodies for the generated Sum/Product impls of numeric types.
-pub(crate) fn sum_from<T: Add<Output = T>, I: Iterator<Item = T>>(zero: T, iter: I) -> T {
-    iter.fold(zero, |a, b| a + b)
-}
-
-pub(crate) fn product_from<T: Mul<Output = T>, I: Iterator<Item = T>>(one: T, iter: I) -> T {
-    iter.fold(one, |a, b| a * b)
 }

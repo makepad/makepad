@@ -215,6 +215,7 @@ extern "C" {
     pub fn fstat(fd: c_int, buf: *mut stat_t) -> c_int;
     pub fn readdir(dir: *mut c_void) -> *mut dirent_t;
     fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
+    fn pthread_getname_np(thread: usize, name: *mut c_char, len: usize) -> c_int;
     fn pthread_self() -> usize;
     fn syscall(num: c_long, ...) -> c_long;
     // the loader's: a signal ended a futex wait's system call (a test's watch may end the wait)
@@ -418,6 +419,14 @@ pub fn set_thread_name(name: *const c_char) {
     unsafe {
         pthread_setname_np(pthread_self(), name);
     }
+}
+
+/// The calling thread's name at the OS into `buf`: its length (0: none).
+pub fn thread_os_name(buf: &mut [u8; 64]) -> usize {
+    if unsafe { pthread_getname_np(pthread_self(), buf.as_mut_ptr() as *mut c_char, buf.len()) } != 0 {
+        return 0;
+    }
+    buf.iter().position(|&c| c == 0).unwrap_or(0)
 }
 
 pub fn fill_random(buf: &mut [u8]) {

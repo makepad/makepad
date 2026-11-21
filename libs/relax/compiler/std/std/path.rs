@@ -682,6 +682,15 @@ pub struct PathBuf {
     inner: OsString,
 }
 
+/// rustc's validate_extension: `set_extension` and `add_extension` panic on a separator in the extension.
+fn validate_extension(extension: &OsStr) {
+    for &b in extension.as_encoded_bytes() {
+        if is_sep_byte(b) {
+            panic!("extension cannot contain path separators: {:?}", extension);
+        }
+    }
+}
+
 /// (stem-or-name, extension) split of a file name at its last dot.
 fn rsplit_file_at_dot(file: &OsStr) -> (Option<&OsStr>, Option<&OsStr>) {
     let b = file.as_encoded_bytes();
@@ -811,6 +820,23 @@ impl Path {
     pub fn ends_with<P: AsRef<Path>>(&self, child: P) -> bool {
         iter_after_back(self.components(), child.as_ref().components())
     }
+    /// rustc 1.91.0 (path_file_prefix): the file name up to its first dot past the first byte (`a` of
+    /// `a.tar.gz`, `.x` of `.x.y`), the whole name when there is none or it is `..`
+    pub fn file_prefix(&self) -> Option<&OsStr> {
+        let name = self.file_name()?;
+        let b = name.as_encoded_bytes();
+        if b == b".." {
+            return Some(name);
+        }
+        match b[1..].iter().position(|c| *c == b'.') {
+            Some(i) => Some(OsStr::from_raw_bytes(&b[..i + 1])),
+            None => Some(name),
+        }
+    }
+    /// rustc 1.98.0 (path_is_empty)
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
     pub fn file_stem(&self) -> Option<&OsStr> {
         match self.file_name() {
             Some(name) => {
@@ -848,6 +874,12 @@ impl Path {
     pub fn with_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
         let mut buf = self.to_path_buf();
         buf.set_extension(extension);
+        buf
+    }
+    /// rustc 1.91.0 (path_add_extension): `self` with `extension` appended to its file name (`add_extension`)
+    pub fn with_added_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
+        let mut buf = self.to_path_buf();
+        buf.add_extension(extension);
         buf
     }
     pub fn components(&self) -> Components<'_> {
@@ -990,11 +1022,7 @@ impl PathBuf {
     }
     pub fn set_extension<S: AsRef<OsStr>>(&mut self, extension: S) -> bool {
         let extension = extension.as_ref();
-        for b in extension.as_encoded_bytes() {
-            if is_sep_byte(*b) {
-                panic!("extension cannot contain path separators: {:?}", extension);
-            }
-        }
+        validate_extension(extension);
         let end = match self.file_stem() {
             None => return false,
             Some(stem) => {
@@ -1011,11 +1039,41 @@ impl PathBuf {
         }
         true
     }
+    /// rustc 1.91.0 (path_add_extension): `extension` appended to the file name after a dot, a trailing
+    /// separator dropped; false (nothing done) without a file name, an empty `extension` changes nothing
+    pub fn add_extension<S: AsRef<OsStr>>(&mut self, extension: S) -> bool {
+        let extension = extension.as_ref();
+        validate_extension(extension);
+        let end = match self.file_name() {
+            None => return false,
+            Some(name) => {
+                let base = self.inner.as_encoded_bytes().as_ptr() as usize;
+                name.as_encoded_bytes().as_ptr() as usize + name.len() - base
+            }
+        };
+        let new = extension.as_encoded_bytes();
+        if !new.is_empty() {
+            let v = self.inner.vec_mut();
+            v.truncate(end);
+            v.reserve_exact(new.len() + 1);
+            v.push(b'.');
+            v.extend_from_slice(new);
+        }
+        true
+    }
     pub fn as_mut_os_string(&mut self) -> &mut OsString {
         &mut self.inner
     }
     pub fn into_os_string(self) -> OsString {
         self.inner
+    }
+    /// rustc 1.98.0 (pathbuf_into_string): the path as a `String` when it is UTF-8, else itself back
+    pub fn into_string(self) -> Result<String, PathBuf> {
+        self.inner.into_string().map_err(PathBuf::from)
+    }
+    /// rustc 1.89.0 (os_string_pathbuf_leak)
+    pub fn leak<'a>(self) -> &'a mut Path {
+        unsafe { &mut *(self.inner.leak() as *mut OsStr as *mut Path) }
     }
     pub fn into_boxed_path(self) -> Box<Path> {
         let raw = Box::into_raw(self.inner.into_boxed_os_str()) as *mut Path;

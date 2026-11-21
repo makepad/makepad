@@ -795,7 +795,7 @@ fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str, di
         if is_enum && shapes.len() > 1 {
             // deriving/hash.rs: the discriminant's value (explicit `= n` included) as the
             // discriminant type (`#[repr(u8)]` ..), then the variant's fields
-            tg!(g; let __sd = unsafe { #core() :: intrinsics_mem :: discriminant_value (self) } as #word(disc_ty) ;);
+            tg!(g; let __sd = #core() :: intrinsics_mem :: discriminant_value (self) as #word(disc_ty) ;);
             tg!(g; #core() :: hash :: Hash :: hash (& __sd , state) ;);
         }
         tg!(g; match self);
@@ -846,7 +846,7 @@ fn gen_ord(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], partial: boo
         // variants order by their discriminant values (explicit `= n` included), compared as
         // the discriminant type
         for (local, of) in [("__si", "self"), ("__oi", "other")] {
-            tg!(g; let #word(local) = unsafe { #core() :: intrinsics_mem :: discriminant_value (#word(of)) } as #word(disc_ty) ;);
+            tg!(g; let #word(local) = #core() :: intrinsics_mem :: discriminant_value (#word(of)) as #word(disc_ty) ;);
         }
         tg!(g; if __si != __oi { return #core() :: cmp :: #word(tr) :: #word(m) (& __si , & __oi) ; });
     }
@@ -1250,7 +1250,7 @@ impl Parser<'_> {
             return out;
         }
         let mut discr = Gen::new(self.edition);
-        tg!(&mut discr; unsafe { #core() :: intrinsics_mem :: discriminant_value (self) == #core() :: intrinsics_mem :: discriminant_value (other) });
+        tg!(&mut discr; #core() :: intrinsics_mem :: discriminant_value (self) == #core() :: intrinsics_mem :: discriminant_value (other));
         if variants.iter().all(|v| v.2.is_empty()) { return discr; }
         tg!(&mut out; (#append(&discr)) && match (self , other) { #append(&arms) _ => true });
         out

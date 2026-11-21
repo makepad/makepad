@@ -534,6 +534,9 @@ pub fn guard<R>(deadline_ms: u64, f: impl FnOnce() -> R) -> Result<R, String> {
 /// 16 MiB, so reserved/committed pages and RSS are not the reported growth. The existing
 /// module lifetime memory limit also applies. Shadow-stack and compiler memory are not
 /// heap growth. Reset starts a new accounting interval without clearing the module heap.
+///
+/// A run granted unmetered modules (`--allow-unmetered-modules`) meters no module code: fuel is
+/// never charged there, so it never ends a call; the allocation cap still applies.
 pub struct Budget {
     fuel: u64,
     token: u64,

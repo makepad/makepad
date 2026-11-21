@@ -486,6 +486,14 @@ impl OpenOptions {
             vfs::note(&abs, b'f');
             return match k {
                 vfs::Kind::File(stat) => {
+                    // a file the run wrote (its edits folder's copy, a folder mount's file) opens on
+                    // the disk, so its reader sees later writes, as it would natively. A file only
+                    // the repository's store holds reads from a copy: the run's own first write to
+                    // it makes the edits folder's copy, which a reader opened before does not see
+                    // (an overlay's copy-up). A held landing's file reads as every read of it does.
+                    if let Some(Ok(disk)) = vfs::edit_target(&*abs, vfs::Edit::Read) {
+                        return self.open_native(&maybe_verbatim(&disk)?);
+                    }
                     let data = vfs::read(&*abs)?;
                     let mut file = virtual_file()?;
                     file.write_all(&data)?;
@@ -1837,6 +1845,24 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
     let p = maybe_verbatim(path.as_ref())?;
     cvt(unsafe { SetFileAttributesW(p.as_ptr(), perm.attrs) })?;
     Ok(())
+}
+
+fn set_path_times(path: &Path, times: FileTimes, extra_flags: u32) -> io::Result<()> {
+    let p = maybe_verbatim(path)?;
+    let mut opts = OpenOptions::new();
+    opts.set_access_mode(FILE_WRITE_ATTRIBUTES);
+    opts.set_custom_flags(FILE_FLAG_BACKUP_SEMANTICS | extra_flags);
+    opts.open_native(&p)?.set_times(times)
+}
+
+/// rustc 1.99.0 (fs_set_times): Sets a file's timestamps, following symbolic links.
+pub fn set_times<P: AsRef<Path>>(path: P, times: FileTimes) -> io::Result<()> {
+    set_path_times(path.as_ref(), times, 0)
+}
+
+/// rustc 1.99.0 (fs_set_times): Sets a file's timestamps without following the final symbolic link.
+pub fn set_times_nofollow<P: AsRef<Path>>(path: P, times: FileTimes) -> io::Result<()> {
+    set_path_times(path.as_ref(), times, FILE_FLAG_OPEN_REPARSE_POINT)
 }
 
 /// CreateSymbolicLinkW for std::os::windows::fs::symlink_file / symlink_dir: unprivileged

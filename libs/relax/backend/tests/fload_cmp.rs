@@ -47,7 +47,7 @@ fn holds(c: Cond, x: f64, y: f64) -> bool {
 
 #[test]
 fn float_load_compare_branches_as_the_register_compare() {
-    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = x64::Env::standalone(true);
     let vals: [f64; 8] = [0.0, -0.0, 1.0, -1.5, 2.5, f64::INFINITY, f64::NEG_INFINITY, f64::NAN];
     let conds = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge];
     let mut n = 0;

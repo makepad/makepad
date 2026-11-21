@@ -38,6 +38,9 @@ makepad_hal::backend::apple::appkit::test_resize::STATE	test only
 makepad_hal::backend::apple::appkit::test_resize::enabled::ON	env MAKEPAD_TEST_LIVE_RESIZE read once, nothing sets it
 makepad_hal::backend::apple::appkit::window::focus_allowed::ALLOWED	env MAKEPAD_FOCUS read once, nothing sets it
 makepad_hal::backend::apple::appkit::window::windows_hidden::HIDDEN	env MAKEPAD_HIDE_WINDOWS read once, nothing sets it
+makepad_hal::backend::apple::media::ar::ACTIVE	the running AR session; its drop clears it, and session_closed drops it (media/mod.rs:645)
+makepad_hal::backend::apple::media::ar::NEXT_SEQ	frame sequence numbers never reused: a reader of a past session never takes a new frame as seen
+makepad_hal::backend::apple::media::ar::delegate_class::CLASS	ObjC class
 makepad_hal::backend::apple::media::audio_tap::delegate_class::CLASS	ObjC class
 makepad_hal::backend::apple::media::camera::delegate_class::CLASS	ObjC class
 makepad_hal::backend::apple::media::capture::SKIPPED	screen capture skip count, only incremented (capture.rs:128)
@@ -442,6 +445,7 @@ relax_compiler::forkexec::table::T	pointer to the shared anonymous page for fork
 relax_compiler::front::verify::ON	env RELAX_FRONT_VERIFY read once, nothing sets it
 relax_compiler::gate::gate_trace::ON	env RELAX_GATE_TRACE read once, nothing sets it
 relax_compiler::gate::probe_parts::P	env RELAX_GATE_PROBE read once, nothing sets it
+relax_compiler::harness::TEST_PACKAGE	the process's own: `makepad test` started it as a target, read once at its start (take_test_package); a restart hands it on (next_run_env)
 relax_compiler::hot_failure::ACTIVE	a recovery spans the restart: the replacement's completed restore (restored) ends it (STATE keeps recovery)
 relax_compiler::hot_failure::ERROR	a failed restart's JIT error verdict: no run follows it in place
 relax_compiler::hot_failure::PUMP	lock around pump (hot_failure.rs:240), holds no state
@@ -801,6 +805,7 @@ relax_compiler::restart_parent::unix::CHILD	the restart parent's own, a process 
 relax_compiler::restart_parent::unix::STOP	the restart parent's own, a process that runs no program (no run ends in place in it): the signal it passed on, after which no run starts
 relax_compiler::run::APP_START	set only in cmd_run_app, which restart skips
 relax_compiler::run::BOOTING	the boot gate: the restart that ends a run sets it for the next run's boot, which clears it (run_end)
+relax_compiler::run::BOOT_IN_DOMAIN	the boot gate's hand-off to the app domain's load: set by a hosted run's boot, cleared by the next boot's closure (run.rs Boot)
 relax_compiler::run::CHECK_RECORDS_COLLECTED	`makepad check` only
 relax_compiler::run::HARNESS_RUN	`makepad test` only, the harness restarts by exec
 relax_compiler::run::HOSTED_RUN	set only in cmd_run, which restart skips
@@ -808,6 +813,7 @@ relax_compiler::run::HOST_THREAD	the host's main thread, set only in cmd_run, wh
 relax_compiler::run::MAIN_HOST	native host, set once
 relax_compiler::run::ONE	lock
 relax_compiler::run::QUIET	from args, same next run, only ever set true
+relax_compiler::run::QUIT_AFTER_PRESENT	from args (cmd_run, which restart skips), only ever set true: the process quits, read once by the process's monitor
 relax_compiler::run::REPORT_FILE	launcher FIFO, reopened by --report-to
 relax_compiler::run::REPORT_PATH	env RELAX_REPORT, same next run
 relax_compiler::run::SOURCE_FAILURE	set only before the app's source is had (cmd_run_app), which restart skips
@@ -820,9 +826,12 @@ relax_compiler::run::link_trace::ON	env RELAX_LINK_TRACE read once, nothing sets
 relax_compiler::run::spill_cache::LIM	env RELAX_CACHE_SPILL_MB read once, nothing sets it
 relax_compiler::run::spill_cache::SEEN	compared to monotone SERVED and RECORDS
 relax_compiler::run::start_monitor::STEP	env RELAX_MEM_TRIM_GROWTH_MB read once, nothing sets it
+relax_compiler::run_end::CHECK_FAILED	why the run that failed its app check ended: kept across that end until the host's next run takes it (take_check_failure)
+relax_compiler::run_end::ENDS	the runs ended in place so far: a run's threads compare it with the count their run began with (ended_in_place)
 relax_compiler::run_end::HANDED	the next run's inputs: the restart that starts it hands them over (run_input)
 relax_compiler::run_end::NATIVE_END	native host hook, set once
 relax_compiler::run_end::RESTARTING	run_end's own latch
+relax_compiler::run_end::THIS_RUN	the count of runs ended in place when the run going now began: the restart that starts it sets it (run_gen)
 relax_compiler::run_end::leftovers::START	the test's start image
 relax_compiler::sandbox::sandbox_dump::VALUE	env RELAX_SANDBOX_DUMP read once, nothing sets it
 relax_compiler::serve_os::STOP	serve mode, stored false at its start, not a run
@@ -1001,6 +1010,7 @@ relax_base::dirs::anchors::ANCHORS	the process's path anchors (workspace, std, h
 relax_base::dirs::cargo_exe::CARGO	the cargo this process found at start
 relax_base::progenv::BUILD	the build environment the process started with (or was handed)
 relax_base::progenv::GIVEN	the names a confined build script's parent handed its process (SCRIPT_ENV), read once at the process's start like BUILD; that run is a process of its own that ends with its script and never restarts in place, and another process never has it set
+relax_base::progenv::HIDDEN	the reserved names only the handed build environment set (take_build's hidden ones), set once at the process's start with PROGRAM_START from the same hand-off, like BUILD; a run in place keeps the same handed environment, and restart_env reads it with PROGRAM_START
 relax_base::progenv::HOST_ENV	the host's environment table, set once (set_host)
 relax_base::progenv::PREPARED	package binaries prepared for a test command, whose process runs it once; a run in place prepares the same ones
 relax_base::progenv::PROGRAM_START	the program's environment as the process started

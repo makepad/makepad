@@ -39,6 +39,16 @@ OUT=$("$1" test --allow-unmetered-modules "$D/guard_threads.rs" 2>&1)
 STATUS=$?
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$STATUS" = 0 ] && [ "$GOT" = $'out concurrent guards: true\nout nested guards: true' ]; then echo "modules guard threads: PASS"; else echo "modules guard threads: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); fi
+# O3 keeps a twin's guarantees: fuel charges and stops, memory bounds and indirect calls are the
+# same with O3 off and with the twins' O3 code installed (tiers.rs waits for it; each twin it
+# warms must have been installed).
+SE=$(mktemp); PROG=$(mktemp -u)
+LOW=$(RELAX_O3=0 "$1" test --allow-unchecked-modules "$D/tiers.rs" 2>/dev/null | grep '^out ')
+HIGH=$(RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 RELAX_O3_PROGRESS="$PROG" "$1" test --allow-unchecked-modules "$D/tiers.rs" 2>"$SE" | grep '^out ')
+MISSING=""
+for F in mix fill zero zero_const table read_at write_at call_at; do grep -q "^tier1: sandbox:tiers::$F installed" "$SE" || MISSING="$MISSING $F"; done
+if [ -n "$LOW" ] && [ "$LOW" = "$HIGH" ] && [ -z "$MISSING" ]; then echo "modules tiers (O3 against O3 off): PASS"; else echo "modules tiers (O3 against O3 off): FAIL"; echo "  twins without O3 code:${MISSING:- none}"; diff <(echo "$LOW") <(echo "$HIGH"); grep -c '^tier1: sandbox:tiers::' "$SE"; tail -8 "$SE"; FAILS=$((FAILS + 1)); fi
+rm -f "$SE" "$PROG" "$PROG.tmp"
 # Exercise the sandbox wrappers/twins and the trusted host-code inlining path.
 for TRUSTED in 0 1; do
 for TIER in 1 0; do
@@ -71,6 +81,12 @@ if [ "$GOT" = "$(cat "$D/expect-scale.out")" ]; then echo "modules scale: PASS (
 OUT=$("$1" test --allow-unchecked-modules "$D/contain.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-contain.out")" ]; then echo "modules contain: PASS"; else echo "modules contain: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+# A fault contained in fault-safe host code leaves the thread as it was: a later host-code fault on
+# it still ends the process (contain_leak.rs ends by it, after its first line).
+OUT=$("$1" test --allow-unchecked-modules "$D/contain_leak.rs" 2>&1)
+STATUS=$?
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$STATUS" != 0 ] && [ "$GOT" = "out module fault contained: true" ] && echo "$OUT" | grep -q 'fault in host code (not JIT code), not contained'; then echo "modules contain leak: PASS"; else echo "modules contain leak: FAIL (status $STATUS)"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
 # Append-only module code (MEMRECLAIM): 400 load/edit/unload cycles keep a live module stable;
 # prints the twin code growth per hot patch. Its harness deadline includes compilation.
 OUT=$(RELAX_WATCHDOG_MS=120000 "$1" test "$D/growth.rs" 2>&1)
@@ -102,6 +118,16 @@ if [ "$GOT" = $'out each thread its own: true\nout thread ids differ: true\nout 
 OUT=$("$1" test "$D/fn_values.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = $'out distinct fn values: 9000\nout calls land: true' ]; then echo "modules fn values: PASS"; else echo "modules fn values: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
+# No-codegen mode (arm64 macOS only): fn values of twins without machine code -- the 9000 of
+# fn_values.rs, and a fn pointer, a trait object, catch_unwind's closure and a forged pointer.
+if [ "$(uname -sm)" = "Darwin arm64" ]; then
+OUT=$(RELAX_NO_CODEGEN=1 "$1" test "$D/fn_values.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = $'out distinct fn values: 9000\nout calls land: true' ]; then echo "modules fn values (no codegen): PASS"; else echo "modules fn values (no codegen): FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
+OUT=$(RELAX_NO_CODEGEN=1 "$1" test --allow-unchecked-modules "$D/nc_fn_values.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-nc-fn-values.out")" ]; then echo "modules fn value kinds (no codegen): PASS ($(echo "$OUT" | grep -o 'fn value cost: .*'))"; else echo "modules fn value kinds (no codegen): FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
+fi
 # More threads than segments: the rest wait for one, every call returns.
 OUT=$("$1" test --allow-unchecked-modules --allow-unmetered-modules "$D/segment_wait.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
@@ -114,6 +140,14 @@ if [ "$GOT" = "$(cat "$D/expect-fuel.out")" ]; then echo "modules fuel: PASS"; e
 OUT=$("$1" test --allow-module-fuel=1000000 "$D/fuel_cleanup.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-fuel-cleanup.out")" ]; then echo "modules fuel cleanup: PASS"; else echo "modules fuel cleanup: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+# Metering follows the grant: metered, a long call is charged and its Budget stops it; unmetered,
+# the module's code pays no fuel, so the same call is charged nothing and completes.
+for GRANT in "" --allow-unmetered-modules; do
+OUT=$("$1" test $GRANT "$D/unmetered.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ -z "$GRANT" ]; then WANT=$'out long call completes: false\nout stopped for fuel: true\nout fuel charged: true'; else WANT=$'out long call completes: true\nout stopped for fuel: false\nout fuel charged: false'; fi
+if [ "$GOT" = "$WANT" ]; then echo "modules metering (${GRANT:-metered}): PASS"; else echo "modules metering (${GRANT:-metered}): FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+done
 bash "$D/milk.sh" "$1" || FAILS=$((FAILS + 1))
 OUT=$("$1" test --allow-unmetered-modules "$D/deadline.rs" 2>&1)
 STATUS=$?
@@ -122,5 +156,9 @@ if [ "$STATUS" = 0 ] && echo "$OUT" | grep -q '^out deadlines: true$'; then echo
 OUT=$("$1" test "$D/unsafe_impl.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-unsafe-impl.out")" ]; then echo "modules unsafe impl: PASS"; else echo "modules unsafe impl: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+# The built-in derives on an enum load in a module (their discriminant reads are safe code); its own unsafe does not.
+OUT=$("$1" test "$D/derive_enum.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-derive-enum.out")" ]; then echo "modules derive enum: PASS"; else echo "modules derive enum: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
 if [ "$FAILS" != 0 ]; then echo "modules: $FAILS case(s) FAILED"; exit 1; fi
 echo "modules: every case PASS"

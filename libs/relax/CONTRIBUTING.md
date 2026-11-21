@@ -138,3 +138,18 @@ stands in for one, is closed. A test that needs a built binary runs under cargo,
 - There is no GitHub CI for Relax. Maintainers run their own gates before merging, so put the
   commands you ran (the build, the tests, `relax test` on your test file) and their results in the
   PR description.
+
+## Credits
+
+A commit that ports a pull request, or fixes what a report found, credits its author with a
+`Co-Authored-By` line. Some ports went out without one; they are credited here:
+
+- kioku's relax#235 and ymote's makepad#1534, #1536, #1538, #1539, #1540, #1542 and #1543, the
+  module sandbox (2026-11-18): modules that run unmetered carry no fuel accounting; a module's
+  panic text is read from its own arena, bounded, and a host read of a module's memory faults as
+  the module's own; a twin's fn values work without code generation; O3 code over twins keeps
+  their bounds; an enum's derived discriminant reads are safe code; vectored writes take every
+  buffer; and a test filter that runs no test exits as libtest does, a test target restarted in
+  place staying one.
+- ymote's makepad#1550-#1553 (2026-11-16): the memo table walks, a sandboxed module's data image
+  pointer words, the module load's cached twins and the run-time module's definition maps.

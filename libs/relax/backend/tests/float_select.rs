@@ -48,16 +48,7 @@ fn compile(w: bool, cond: Option<Cond>, swap_cmp: bool, swap_select: bool, share
         f.blocks[0].term = Term::Ret(vec![d]);
     }
     f.verify().unwrap();
-    let env = x64::Env {
-        slots: relax_backend::rir::SlotsPtr::NONE,
-        tls_key: 0,
-        tls_slow: 0,
-        resume: 0,
-        opt_regs: regs,
-        syms: 0,
-        sym_class: 0,
-        near: false,
-    };
+    let env = x64::Env::standalone(regs);
     let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     assert!(c.relocs.is_empty());
     Code::new(&c.code).unwrap()
@@ -163,16 +154,7 @@ fn unrelated_float_compare_and_redefined_input() {
             push(&mut f, Inst::Sel(d, c, a, b));
             f.blocks[0].term = Term::Ret(vec![d]);
             f.verify().unwrap();
-            let env = x64::Env {
-                slots: relax_backend::rir::SlotsPtr::NONE,
-                tls_key: 0,
-                tls_slow: 0,
-                resume: 0,
-                opt_regs: true,
-                syms: 0,
-                sym_class: 0,
-                near: false,
-            };
+            let env = x64::Env::standalone(true);
             let compiled = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
             let code = Code::new(&compiled.code).unwrap();
             let run: extern "sysv64" fn(f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(code.ptr()) };
@@ -212,16 +194,7 @@ fn f64_compare_selects_f32() {
     push(&mut f, Inst::Sel(d, c, a, b));
     f.blocks[0].term = Term::Ret(vec![d]);
     f.verify().unwrap();
-    let env = x64::Env {
-        slots: relax_backend::rir::SlotsPtr::NONE,
-        tls_key: 0,
-        tls_slow: 0,
-        resume: 0,
-        opt_regs: true,
-        syms: 0,
-        sym_class: 0,
-        near: false,
-    };
+    let env = x64::Env::standalone(true);
     let compiled = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     let code = Code::new(&compiled.code).unwrap();
     let run: extern "sysv64" fn(f32, f32, f64, f64) -> f32 = unsafe { std::mem::transmute(code.ptr()) };

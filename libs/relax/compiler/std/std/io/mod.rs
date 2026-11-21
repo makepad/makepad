@@ -36,6 +36,12 @@ pub trait Read {
         self.read(&mut [])
     }
 
+    /// Real std's (unstable `can_vector`): whether `read_vectored` reads into more than the first
+    /// non-empty buffer.
+    fn is_read_vectored(&self) -> bool {
+        false
+    }
+
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
         default_read_to_end(self, buf)
     }
@@ -143,6 +149,12 @@ pub trait Write {
             }
         }
         self.write(&[])
+    }
+
+    /// Real std's (unstable `can_vector`): whether `write_vectored` writes more than the first
+    /// non-empty buffer. BufWriter and LineWriter take a vectored write apart by it.
+    fn is_write_vectored(&self) -> bool {
+        false
     }
 
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
@@ -428,6 +440,10 @@ impl<T, U> Chain<T, U> {
     pub fn get_ref(&self) -> (&T, &U) {
         (&self.first, &self.second)
     }
+    /// rustc 1.20.0 (more_io_inner_methods): mutably borrows both readers in chain order.
+    pub fn get_mut(&mut self) -> (&mut T, &mut U) {
+        (&mut self.first, &mut self.second)
+    }
 }
 
 impl<T: Read, U: Read> Read for Chain<T, U> {
@@ -543,21 +559,28 @@ impl<S: Seek + ?Sized> Seek for alloc::boxed::Box<S> {
         (**self).seek_relative(offset)
     }
 }
+// rustc's alloc/io/impls.rs and core/io/impls.rs: a reference and a box read, write and buffer
+// as their target does, every method passed on, so the target's own (a vectored write's writev,
+// a reader's read_to_string) is the one that runs. (Passing on only `read` / `write`, a writer
+// behind `Box<dyn Write>` wrote the first buffer of a vectored write alone.)
 impl<R: Read + ?Sized> Read for &mut R {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         (**self).read(buf)
     }
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
-        (**self).read_to_end(buf)
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> Result<usize> {
+        (**self).read_vectored(bufs)
     }
-}
-
-impl<R: Read + ?Sized> Read for alloc::boxed::Box<R> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        (**self).read(buf)
+    fn is_read_vectored(&self) -> bool {
+        (**self).is_read_vectored()
     }
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
         (**self).read_to_end(buf)
+    }
+    fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
+        (**self).read_to_string(buf)
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        (**self).read_exact(buf)
     }
 }
 
@@ -565,17 +588,20 @@ impl<W: Write + ?Sized> Write for &mut W {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         (**self).write(buf)
     }
-    fn flush(&mut self) -> Result<()> {
-        (**self).flush()
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        (**self).write_vectored(bufs)
     }
-}
-
-impl<W: Write + ?Sized> Write for alloc::boxed::Box<W> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        (**self).write(buf)
+    fn is_write_vectored(&self) -> bool {
+        (**self).is_write_vectored()
     }
     fn flush(&mut self) -> Result<()> {
         (**self).flush()
+    }
+    fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        (**self).write_all(buf)
+    }
+    fn write_fmt(&mut self, args: fmt::Arguments) -> Result<()> {
+        (**self).write_fmt(args)
     }
 }
 
@@ -586,6 +612,60 @@ impl<B: BufRead + ?Sized> BufRead for &mut B {
     fn consume(&mut self, amt: usize) {
         (**self).consume(amt)
     }
+    fn has_data_left(&mut self) -> Result<bool> {
+        (**self).has_data_left()
+    }
+    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> Result<usize> {
+        (**self).read_until(byte, buf)
+    }
+    fn skip_until(&mut self, byte: u8) -> Result<usize> {
+        (**self).skip_until(byte)
+    }
+    fn read_line(&mut self, buf: &mut String) -> Result<usize> {
+        (**self).read_line(buf)
+    }
+}
+
+impl<R: Read + ?Sized> Read for alloc::boxed::Box<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        (**self).read(buf)
+    }
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> Result<usize> {
+        (**self).read_vectored(bufs)
+    }
+    fn is_read_vectored(&self) -> bool {
+        (**self).is_read_vectored()
+    }
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+        (**self).read_to_end(buf)
+    }
+    fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
+        (**self).read_to_string(buf)
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        (**self).read_exact(buf)
+    }
+}
+
+impl<W: Write + ?Sized> Write for alloc::boxed::Box<W> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        (**self).write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        (**self).write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        (**self).is_write_vectored()
+    }
+    fn flush(&mut self) -> Result<()> {
+        (**self).flush()
+    }
+    fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        (**self).write_all(buf)
+    }
+    fn write_fmt(&mut self, args: fmt::Arguments) -> Result<()> {
+        (**self).write_fmt(args)
+    }
 }
 
 impl<B: BufRead + ?Sized> BufRead for alloc::boxed::Box<B> {
@@ -595,7 +675,20 @@ impl<B: BufRead + ?Sized> BufRead for alloc::boxed::Box<B> {
     fn consume(&mut self, amt: usize) {
         (**self).consume(amt)
     }
+    fn has_data_left(&mut self) -> Result<bool> {
+        (**self).has_data_left()
+    }
+    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> Result<usize> {
+        (**self).read_until(byte, buf)
+    }
+    fn skip_until(&mut self, byte: u8) -> Result<usize> {
+        (**self).skip_until(byte)
+    }
+    fn read_line(&mut self, buf: &mut String) -> Result<usize> {
+        (**self).read_line(buf)
+    }
 }
+
 
 // library/std/src/io/impls.rs: a reference seeks as its target does (as a box does, above),
 // every method forwarded so the target's own rewind / stream_position / seek_relative are the
@@ -625,6 +718,9 @@ impl Read for &[u8] {
             }
         }
         Ok(n)
+    }
+    fn is_read_vectored(&self) -> bool {
+        true
     }
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let n = if buf.len() < self.len() { buf.len() } else { self.len() };
@@ -661,6 +757,9 @@ impl Write for Vec<u8> {
         }
         Ok(len)
     }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         self.extend_from_slice(buf);
         Ok(buf.len())
@@ -681,6 +780,20 @@ impl Write for &mut [u8] {
         a.copy_from_slice(&data[..n]);
         *self = b;
         Ok(n)
+    }
+    /// rustc's: buffer after buffer until the slice is full
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        let mut n = 0;
+        for b in bufs {
+            n += self.write(&**b)?;
+            if self.is_empty() {
+                break;
+            }
+        }
+        Ok(n)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -729,6 +842,12 @@ impl Write for Empty {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         Ok(buf.len())
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        Ok(bufs.iter().map(|b| b.len()).sum())
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn flush(&mut self) -> Result<()> {
         Ok(())
     }
@@ -736,6 +855,12 @@ impl Write for Empty {
 impl Write for &Empty {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         Ok(buf.len())
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        Ok(bufs.iter().map(|b| b.len()).sum())
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -749,6 +874,12 @@ impl Seek for Empty {
 impl Write for &Sink {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         Ok(buf.len())
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        Ok(bufs.iter().map(|b| b.len()).sum())
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -924,8 +1055,29 @@ impl Write for Sink {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         Ok(buf.len())
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        Ok(bufs.iter().map(|b| b.len()).sum())
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn flush(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+/// One writev(2) of `bufs` on descriptor `fd`, at most the OS's limit of buffers (the rest is
+/// the caller's next write, as a short write is): real std's sys/fd/unix.rs
+/// FileDesc::write_vectored, which its File, stdio, pipes, ChildStdin and UnixStream call.
+/// `IoSlice` is a `struct iovec` on unix.
+#[cfg(unix)]
+pub(crate) fn fd_write_vectored(fd: core::ffi::c_int, bufs: &[IoSlice<'_>]) -> Result<usize> {
+    let n = bufs.len().min(crate::sys::os::MAX_IOV) as core::ffi::c_int;
+    let r = unsafe { crate::sys::writev(fd, bufs.as_ptr() as *const core::ffi::c_void, n) };
+    if r < 0 {
+        Err(Error::last_os_error())
+    } else {
+        Ok(r as usize)
     }
 }
 

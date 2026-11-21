@@ -13,10 +13,12 @@
 //!
 //! Inputs outside the crate key travel with the verdict and are checked before it is used:
 //! the interface of each checked crate of the closure (cache/items.rs: its items outside the fn
-//! bodies that are holes; a file the load skipped by its text), the macro inputs outside the
-//! source that the crate and its closure read (include_str!, include!, env!: session sip.rs late
-//! inputs, which lazily parsed bodies read after the load), and the text of every other crate a
-//! stored diagnostic points into. So a body edit in a dependency checks that dependency again,
+//! bodies that are holes; a file the load skipped by its text), and what a type check reads
+//! beyond it (items.rs `check_extra`: the statics with their initializers, and the file's places
+//! where a constant can read a position), as one always node per file; the macro inputs outside
+//! the source that the crate and its closure read (include_str!, include!, env!: session sip.rs
+//! late inputs, which lazily parsed bodies read after the load); and the text of every other crate
+//! a stored diagnostic points into. So a body edit in a dependency checks that dependency again,
 //! not every crate above it.
 //!
 //! An interface that changed is compared by node (`KIND_TABLE` holds each checked crate's
@@ -75,7 +77,7 @@ use crate::sip::Sip128;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 const KIND_CRATE: u32 = 1;
 const KIND_RUN: u32 = 2;
 /// a checked crate's interface by node (`Table`), under its identity and interface hash
@@ -150,6 +152,8 @@ struct CurFile {
     path: String,
     file: Option<usize>,
     iface: u128,
+    /// the file's check extra (items.rs `check_extra`); 0 for a skipped file
+    extra: u128,
 }
 
 /// One check's reuse: the checked crates' keys, the hits and their diagnostics.
@@ -169,6 +173,8 @@ pub(crate) struct Reuse {
     closures: Vec<Vec<u32>>,
     /// by crate: checked, non-proc-macro and in some checked crate's closure
     iface_of: Vec<bool>,
+    /// by crate: a constant in it can read a position with no `caller` token (items.rs places_crates)
+    places: Vec<bool>,
     stored: Vec<Stored>,
     run_key: u128,
     run_hit: bool,
@@ -303,7 +309,7 @@ fn crate_files(prog: &Program, skipped: &[(u32, String, u128)]) -> Vec<Vec<(Stri
 /// loaded ones' digests, by file. The fragments (the expansions of item macros the load expanded
 /// after the file's parse, under its path) are files of the crate's interface too: an edit of a
 /// macro another crate defines changes them.
-fn iface_files(prog: &Program, of: &[bool], skipped: &[(u32, String, u128)]) -> (Vec<Vec<CurFile>>, Vec<Option<std::sync::Arc<crate::cache::FileDigest>>>) {
+fn iface_files(prog: &Program, of: &[bool], skipped: &[(u32, String, u128)], places: &[bool]) -> (Vec<Vec<CurFile>>, Vec<Option<std::sync::Arc<crate::cache::FileDigest>>>) {
     let mut files: Vec<Vec<CurFile>> = (0..prog.crates.len()).map(|_| Vec::new()).collect();
     let want: Vec<usize> = (0..prog.files.len())
         .filter(|f| prog.file_crate.get(*f).is_some_and(|&c| of.get(c as usize).copied().unwrap_or(false)))
@@ -311,11 +317,19 @@ fn iface_files(prog: &Program, of: &[bool], skipped: &[(u32, String, u128)]) -> 
     let digests = crate::cache::file_digests_of(prog, &want);
     for f in want {
         let (Some(&c), Some(path), Some(Some(d))) = (prog.file_crate.get(f), prog.file_paths.get(f), digests.get(f)) else { continue };
-        files[c as usize].push(CurFile { path: path.clone(), file: Some(f), iface: d.iface });
+        let extra = crate::cache::check_extra(&prog.files[f], places[c as usize]);
+        let iface = if extra == 0 { d.iface } else {
+            let mut h = Sip128::new();
+            h.str("check-file");
+            h.u128(d.iface);
+            h.u128(extra);
+            h.finish128()
+        };
+        files[c as usize].push(CurFile { path: path.clone(), file: Some(f), iface, extra });
     }
     for (c, path, h) in skipped {
         if of.get(*c as usize).copied().unwrap_or(false) {
-            files[*c as usize].push(CurFile { path: path.clone(), file: None, iface: *h });
+            files[*c as usize].push(CurFile { path: path.clone(), file: None, iface: *h, extra: 0 });
         }
     }
     for v in &mut files {
@@ -544,7 +558,8 @@ impl Reuse {
         let skipped = skipped_files(prog, None);
         let text_files = crate_files(prog, &skipped);
         let texts: Vec<u128> = (0..n).map(|c| crate_hash("check-text", heads[c], text_files[c].iter().map(|(p, h)| (p.as_str(), *h)))).collect();
-        let (cur, digests) = iface_files(prog, &iface_of, &skipped);
+        let places = crate::cache::places_crates(prog);
+        let (cur, digests) = iface_files(prog, &iface_of, &skipped, &places);
         let ifaces: Vec<u128> = (0..n).map(|c| if iface_of[c] { crate_hash("check-iface", heads[c], cur[c].iter().map(|f| (f.path.as_str(), f.iface))) } else { 0 }).collect();
         let mut deep: HashMap<u32, u128> = HashMap::new();
         let env = env_key(prog);
@@ -597,7 +612,7 @@ impl Reuse {
         let checkout = if write { crate::cache::CheckoutText::of(&anchors) } else { None };
         let mut r = Reuse {
             path, write, hit: vec![false; checked.len()], raw: vec![None; checked.len()],
-            vkeys: vec![0; checked.len()], late_names: vec![None; checked.len()], keys, checked, closures, iface_of,
+            vkeys: vec![0; checked.len()], late_names: vec![None; checked.len()], keys, checked, closures, iface_of, places,
             stored: Vec::new(), run_key, run_hit: false, idents, texts, heads, ifaces, cur, table_stored: vec![false; n],
             digests, tables: (0..n).map(|_| None).collect(), deps, restore: Vec::new(), store_entries: 0, sig_clean: false, t_keys: Default::default(),
             skipped: (skipped.iter().filter(|s| is_checked[s.0 as usize]).count(), skipped.iter().filter(|s| !is_checked[s.0 as usize]).count()),
@@ -724,16 +739,21 @@ impl Reuse {
         which.iter().map(|&c| {
             let mut v = Vec::new();
             for f in &self.cur[c as usize] {
-                match f.file {
-                    Some(k) => v.extend(by_file.get_mut(k).and_then(Option::take).unwrap_or_default()),
-                    None => {
-                        let mut h = Sip128::new();
-                        h.str("check-skipped-file");
-                        h.str(&crate::dirs::anchored(&f.path));
-                        h.u128(f.iface);
-                        v.push(CheckNode { piece: h.finish128(), keys: Vec::new(), names: Vec::new(), wide: Vec::new(), named_head: true, trait_def: false, always: true, coarse: false });
+                let (tag, hash) = match f.file {
+                    Some(k) => {
+                        v.extend(by_file.get_mut(k).and_then(Option::take).unwrap_or_default());
+                        if f.extra == 0 { continue; }
+                        // The item pieces omit the statics' initializers and the file's places.
+                        // A change to this always node checks every crate that can see the file again.
+                        ("check-file-extra", f.extra)
                     }
-                }
+                    None => ("check-skipped-file", f.iface),
+                };
+                let mut h = Sip128::new();
+                h.str(tag);
+                h.str(&crate::dirs::anchored(&f.path));
+                h.u128(hash);
+                v.push(CheckNode { piece: h.finish128(), keys: Vec::new(), names: Vec::new(), wide: Vec::new(), named_head: true, trait_def: false, always: true, coarse: false });
             }
             (c, v)
         }).collect()
@@ -959,7 +979,7 @@ impl Reuse {
         let iface = if self.iface_of[c as usize] { self.ifaces[c as usize] } else {
             let mut of = vec![false; prog.crates.len()];
             of[c as usize] = true;
-            let (cur, digests) = iface_files(prog, &of, &skipped_files(prog, Some(c)));
+            let (cur, digests) = iface_files(prog, &of, &skipped_files(prog, Some(c)), &self.places);
             if self.digests.len() < digests.len() { self.digests.resize(digests.len(), None); }
             for (f, d) in digests.into_iter().enumerate() {
                 if d.is_some() && self.digests[f].is_none() { self.digests[f] = d; }

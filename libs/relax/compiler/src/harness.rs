@@ -42,6 +42,34 @@ struct Tests {
     context: usize,
     revision: u64,
     verbose: u32,
+    unmatched: u32,
+}
+
+/// `makepad test` started this process as one of its targets (TEST_PACKAGE_ENV): read once at the
+/// start (`take_test_package`) and taken out of the environment, so neither the program nor a
+/// process it starts sees it. A test that runs its own binary again (with a filter) starts a test
+/// binary of its own, whose exit is libtest's: carried, the name made that child's no-match exit
+/// NO_TESTS_EXIT.
+static TEST_PACKAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// At the process start, before any thread reads the environment (session_from_env).
+pub(crate) fn take_test_package() {
+    if std::env::var_os(makepad_remote::hot::TEST_PACKAGE_ENV).is_some() {
+        std::env::remove_var(makepad_remote::hot::TEST_PACKAGE_ENV);
+        TEST_PACKAGE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// TEST_PACKAGE_ENV for the next process of this run (a restart in place, a rebuilt loader): it
+/// goes on when this process is a target of `makepad test`, so that run's no-match exit is
+/// NO_TESTS_EXIT too, and is taken out otherwise.
+pub(crate) fn test_package_env() -> (&'static str, Option<std::ffi::OsString>) {
+    (makepad_remote::hot::TEST_PACKAGE_ENV, TEST_PACKAGE.load(std::sync::atomic::Ordering::Relaxed).then(|| "1".into()))
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_package(on: bool) {
+    TEST_PACKAGE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 struct Found {
@@ -119,8 +147,10 @@ fn find_fn(u: &Unit, path: &str) -> Option<DefId> {
 }
 
 /// Runs each crate's tests through the program's harness, crate after crate as cargo runs test
-/// binaries (`label`: what cargo's "Running" line names); the exit status (101 after a failing
-/// crate; the crates after it still run; NO_TESTS_EXIT when a filter matched no test in any).
+/// binaries (`label`: what cargo's "Running" line names); the exit status: libtest's (101 after a
+/// failing crate; the crates after it still run), and for a target of `makepad test`
+/// (`TEST_PACKAGE`) NO_TESTS_EXIT when the filters ran no test in any crate, which `makepad test`
+/// sums over its targets.
 pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 {
     let (mut code, mut matched, mut unmatched) = (0, false, false);
     for (label, krate) in groups {
@@ -128,14 +158,14 @@ pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 
         if !crate::run::silent() {
             eprintln!("     Running {label}");
         }
-        let c = match run_crate(u, up, *krate) {
+        let (c, none) = match run_crate(u, up, *krate) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("relax test: {e}");
-                101
+                (101, false)
             }
         };
-        if c == makepad_remote::hot::NO_TESTS_EXIT {
+        if none {
             unmatched = true;
             continue;
         }
@@ -144,7 +174,7 @@ pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 
             code = 101;
         }
     }
-    if unmatched && !matched { makepad_remote::hot::NO_TESTS_EXIT } else { code }
+    if unmatched && !matched && TEST_PACKAGE.load(std::sync::atomic::Ordering::Relaxed) { makepad_remote::hot::NO_TESTS_EXIT } else { code }
 }
 
 struct Run {
@@ -211,7 +241,8 @@ fn prepare(u: &mut Unit, krate: u32) -> Result<(Vec<Found>, Vec<Test>, u64), Str
     Ok((found, table, main_entry))
 }
 
-fn run_crate(u: &mut Unit, up: *mut Unit, krate: u32) -> Result<i32, String> {
+/// The program's exit status and whether its filters ran no test (`Tests::unmatched`).
+fn run_crate(u: &mut Unit, up: *mut Unit, krate: u32) -> Result<(i32, bool), String> {
     let (tests, main_entry) = crate::zone_alloc::kept_with(|| -> Result<_, String> {
         let (found, table, main_entry) = crate::owner::call(crate::owner::Class::Program, || prepare(u, krate))?;
         let run = Box::leak(Box::new(Run { up, krate, found, table, why: None, initial: true, overhead_ms: 0.0 }));
@@ -224,13 +255,14 @@ fn run_crate(u: &mut Unit, up: *mut Unit, krate: u32) -> Result<i32, String> {
             context: run as *mut Run as usize,
             revision: 0,
             verbose: u.session.options.verbose as u32,
+            unmatched: 0,
         }));
         Ok((tests, main_entry))
     })?;
     let tests: *mut Tests = tests;
     let _program = crate::os::program_thread();
     match unsafe { jit::call_jit(up, main_entry, tests as u64) } {
-        Ok(_) => Ok(unsafe { std::ptr::read_volatile(&(*tests).code) }),
+        Ok(_) => Ok(unsafe { (std::ptr::read_volatile(&(*tests).code), std::ptr::read_volatile(&(*tests).unmatched) != 0) }),
         Err(p) => Err(format!("the test harness {}: {}", p.kind, p.message)),
     }
 }

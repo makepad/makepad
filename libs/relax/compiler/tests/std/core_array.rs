@@ -1,5 +1,6 @@
 // std-core differential test (core_diff.sh): arrays by value, Default/Eq/TryFrom.
 #[test]
+#[allow(deprecated)]
 fn a01() {
     let mut s = 0u32;
     for x in [1u32, 2, 3] { s += x; }
@@ -11,6 +12,13 @@ fn a01() {
     println!("| eq {}", [1, 2] == [1, 2]);
     let t: [u8; 2] = (&[9u8, 8][..]).try_into().unwrap();
     println!("| t {}", t[1]);
+    let value = String::from("repeat");
+    let original = value.as_ptr();
+    let copies: [String; 3] = std::array::repeat(value);
+    let empty: [String; 0] = std::array::repeat(String::from("empty"));
+    println!("| repeat {:?} {} {}", copies, copies[2].as_ptr() == original, empty.len());
+    let mut owned = std::array::IntoIter::new(copies);
+    println!("| array iterator {:?} {:?} {}", owned.next(), owned.next_back(), owned.len());
 }
 #[test]
 fn a02_try_from_assoc() {

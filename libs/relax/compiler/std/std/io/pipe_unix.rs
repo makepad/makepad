@@ -113,13 +113,12 @@ impl Write for &PipeWriter {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         write_fd(self.0 .0.as_raw_fd(), buf)
     }
+    /// One writev(2) of the buffers, as real std's pipe
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
-        for b in bufs.iter() {
-            if !b.is_empty() {
-                return self.write(&**b);
-            }
-        }
-        Ok(0)
+        crate::io::fd_write_vectored(self.0 .0.as_raw_fd(), bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -131,6 +130,9 @@ impl Write for PipeWriter {
     }
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
         (&*self).write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())

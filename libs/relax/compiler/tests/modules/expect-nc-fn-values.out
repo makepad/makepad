@@ -1,0 +1,4 @@
+out fn value: Ok(12)
+out trait object: Ok(16)
+out catch_unwind closure: Ok(12)
+out forged pointer contained: true

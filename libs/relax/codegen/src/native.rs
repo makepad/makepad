@@ -2,7 +2,7 @@
 //! profilers as the back end's probe, and on AArch64 sends the functions selected for the
 //! threaded interpreter (RELAX_INTERP / RELAX_NO_CODEGEN) there instead.
 
-use relax_backend::rir::Func;
+use relax_backend::rir::{Func, Reloc, RelocAt, RelocKind};
 #[cfg(target_arch = "aarch64")]
 use relax_backend::arm64 as target;
 #[cfg(not(target_arch = "aarch64"))]
@@ -73,6 +73,7 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &target::Env) ->
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     let mut c = compile_freq_inner(options, f, env, freq)?;
+    c.relocs.extend(f.notes.iter().map(|&s| RelocAt { at: 0, kind: RelocKind::Note, target: Reloc::Sym(s) }));
     // the inline stack goes with the code, in its pc map (rir::inline_pc_entries)
     if !f.inl.is_empty() && !c.pc_map.is_empty() {
         c.pc_map.extend(relax_backend::rir::inline_pc_entries(f));

@@ -4,6 +4,7 @@
 
 use super::pattern::{DoubleEndedSearcher, IsWhitespace, Pattern, ReverseSearcher, Searcher};
 use super::sub;
+use crate::fmt;
 use crate::iter::{DoubleEndedIterator, FusedIterator, Iterator};
 use crate::option::Option::{self, None, Some};
 
@@ -27,6 +28,21 @@ where
             allow_trailing_empty: self.allow_trailing_empty,
             finished: self.finished,
         }
+    }
+}
+
+impl<'a, P: Pattern<'a>> fmt::Debug for SplitInternal<'a, P>
+where
+    P::Searcher: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SplitInternal")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .field("matcher", &self.matcher)
+            .field("allow_trailing_empty", &self.allow_trailing_empty)
+            .field("finished", &self.finished)
+            .finish()
     }
 }
 
@@ -305,6 +321,15 @@ where
     }
 }
 
+impl<'a, P: Pattern<'a>> fmt::Debug for SplitInclusive<'a, P>
+where
+    P::Searcher: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SplitInclusive").field("0", &self.0).finish()
+    }
+}
+
 // ---------------------------------------------------------------- SplitN / RSplitN
 
 pub struct SplitN<'a, P: Pattern<'a>> {
@@ -515,6 +540,40 @@ where
 /// `str::lines`: split_inclusive('\n') with one trailing "\n" or "\r\n" removed per line.
 #[derive(Clone)]
 pub struct Lines<'a>(pub(crate) SplitInclusive<'a, char>);
+
+impl<'a> fmt::Debug for Lines<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Lines").field(&self.0.clone().map(strip_line_end)).finish()
+    }
+}
+
+/// rustc 1.0.0 (rust1): the line iterator returned by `str::lines_any`.
+#[deprecated(since = "1.4.0", note = "use lines()/Lines instead now")]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+#[derive(Clone, Debug)]
+#[allow(deprecated)]
+pub struct LinesAny<'a>(pub(super) Lines<'a>);
+
+#[allow(deprecated)]
+impl<'a> Iterator for LinesAny<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<&'a str> {
+        self.0.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+#[allow(deprecated)]
+impl<'a> DoubleEndedIterator for LinesAny<'a> {
+    fn next_back(&mut self) -> Option<&'a str> {
+        self.0.next_back()
+    }
+}
+
+#[allow(deprecated)]
+impl<'a> FusedIterator for LinesAny<'a> {}
 
 fn strip_line_end(line: &str) -> &str {
     let b = line.as_bytes();

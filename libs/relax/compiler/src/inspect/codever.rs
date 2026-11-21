@@ -1054,7 +1054,7 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
                     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { crate::jit::compile_tier1(up, id) })).unwrap_or(false);
                     let row = crate::owner::call(crate::owner::Class::Program, || {
                         let u = unsafe { &*up };
-                        let r: Result<bool, String> = if ok { Ok(true) } else { Err("the O3 build was dropped (not verified, instrumented by a probe, outdated, or failed: RELAX_TIER1_TRACE=1 says why)".into()) };
+                        let r: Result<bool, String> = if ok { Ok(true) } else { Err("the O3 build was dropped (not verified, instrumented by a probe, outdated, or failed: RELAX_O3_TRACE=1 says why)".into()) };
                         let mut s = format!("{{\"o3\":{},\"slot\":{},\"installed\":{},{}", json_str(&short(&super::display_name(u, id, 0), 160)), id, ok, patched_row(u, id, &before, &r));
                         if !ok {
                             s.push_str(&format!(",\"why\":{}", json_str(r.as_ref().err().unwrap())));
@@ -1127,7 +1127,10 @@ pub(crate) fn owner_rows(owners: Vec<(super::patches::Owner, String)>) -> Option
 /// `cache`: where this session's code came from -- the warm cache's lookups by outcome (misses by
 /// reason), the startup image, and the installed code by tier and origin (fresh = compiled in this
 /// run). Markdown, answer first.
-pub fn cmd_cache(_req: &Req, out: &mut Out) {
+pub fn cmd_cache(req: &Req, out: &mut Out) {
+    if req.pos.first().map(String::as_str) == Some("verify") {
+        return cmd_cache_verify(req, out);
+    }
     let up = crate::jit::current_unit();
     if up.is_null() {
         return out.err("no running unit");
@@ -1174,6 +1177,248 @@ pub fn cmd_cache(_req: &Req, out: &mut Out) {
             out.line("more: pf jit  versions <fn>  why-tier <fn>");
         }
         None => out.err(&format!("the owner did not answer in 10 s ({})", crate::owner::serving_note())),
+    }
+}
+
+/// The fn item slot `id` runs: an instance's own, a twin's base's, a closure's enclosing fn's.
+fn slot_def(u: &Unit, id: u32) -> Option<crate::program::DefId> {
+    let mut s = id;
+    for _ in 0..8 {
+        if s as usize >= u.fns.len() {
+            return None;
+        }
+        match &u.fns[s as usize].key {
+            FnKey::Inst(d, _) => return Some(*d),
+            FnKey::Plain(b) | FnKey::Sandbox(b) | FnKey::Ctfe(b) => s = *b,
+            FnKey::Closure(_, _, p) => s = *p,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// What `cache verify` found in the code of a set of slots.
+#[derive(Default)]
+pub(crate) struct CopyCheck {
+    /// slots with installed code
+    pub checked: u64,
+    /// inlined copies their line tables name (one per inlined fn per slot)
+    pub copies: u64,
+    /// copies no edit of their fn rebuilds: an edit leaves them running the old text
+    pub untracked: u64,
+    /// of those, the ones no patch flag of the fn guards
+    pub unguarded: u64,
+    /// of those, the ones the inputs the code was recorded with miss (a later session's edit
+    /// leaves the entry valid)
+    pub unrecorded: u64,
+    /// inline levels without a source position (generated code: glue, shims) and levels whose
+    /// position no fn item spans
+    pub positionless: u64,
+    pub unresolved: u64,
+    /// levels in fns no slot runs (a trait's declaration a call shim forwards through)
+    pub unmapped: u64,
+    /// bodies with inline positions but no inline table (code from before the tables)
+    pub no_table: u64,
+    /// untracked copies by the host code's tier and origin
+    pub by_code: std::collections::BTreeMap<String, u64>,
+    /// the first `n` untracked copies: (host slot, the inlined fn items, guarded, recorded)
+    pub rows: Vec<(u32, Vec<crate::program::DefId>, bool, bool)>,
+}
+
+/// The inlined copies in the installed code of `targets` that no edit of the inlined fn
+/// rebuilds (see cmd_cache_verify), the first `n` of them listed. On the owner.
+pub(crate) fn check_copies(u: &Unit, targets: &[u32], n: usize) -> CopyCheck {
+    let mut by_def: std::collections::HashMap<crate::program::DefId, Vec<u32>> = Default::default();
+    // the reload's host walk the other way round: per slot, the slots an edit of which builds
+    // it again -- those whose `inlined_into` names it, and the base of a twin (reload: a
+    // rebuilt slot's hosts and twins, transitively)
+    let mut took: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+    for c in 0..u.fns.len() as u32 {
+        if let Some(d) = slot_def(u, c) {
+            by_def.entry(d).or_default().push(c);
+        }
+        let f = &u.fns[c as usize];
+        for &h in &f.history().inlined_into {
+            took.entry(h).or_default().push(c);
+        }
+        if let FnKey::Plain(b) | FnKey::Sandbox(b) | FnKey::Ctfe(b) = f.key {
+            took.entry(c).or_default().push(b);
+        }
+    }
+    let mut r = Resolver::new();
+    let mut fns_at: std::collections::HashMap<u64, Vec<crate::program::DefId>> = Default::default();
+    let mut out = CopyCheck::default();
+    for &x in targets {
+        let f = &u.fns[x as usize];
+        if !f.compiled || f.code_len == 0 {
+            continue;
+        }
+        out.checked += 1;
+        let start = f.code;
+        let own = slot_def(u, x);
+        // the line table's inline levels (call, anchor) and, per level, a position inside it
+        let mut table: Vec<u64> = Vec::new();
+        let mut inside: std::collections::HashMap<u64, u64> = Default::default();
+        f.pc_map.each(|o, p| {
+            if o == u32::MAX {
+                table.push(p);
+            } else if o != relax_backend::dbgloc::PC_VARS {
+                let c = relax_backend::rir::pos_ctx(p);
+                if c != 0 && c != relax_backend::rir::POS_CTX_LOST {
+                    inside.entry(c).or_insert(p);
+                }
+            }
+            true
+        });
+        if table.is_empty() {
+            out.no_table += !inside.is_empty() as u64;
+            continue;
+        }
+        // per level the fn items it can be (one; several where they share a span: derived impls)
+        let mut levels: Vec<Vec<crate::program::DefId>> = Vec::new();
+        for c in 1..=(table.len() / 2) as u64 {
+            let at: Vec<u64> = [Some(table[(c as usize - 1) * 2 + 1]), inside.get(&c).copied()].into_iter().flatten().filter(|&p| p as u32 != 0).collect();
+            if at.is_empty() {
+                out.positionless += 1;
+                continue;
+            }
+            let mut ds = Vec::new();
+            for p in at {
+                ds = fns_at.entry(p).or_insert_with(|| r.fns_at(u, p)).clone();
+                if !ds.is_empty() {
+                    break;
+                }
+            }
+            if ds.is_empty() {
+                out.unresolved += 1;
+            } else if !ds.iter().any(|d| Some(*d) == own) {
+                ds.sort_unstable();
+                levels.push(ds);
+            }
+        }
+        levels.sort_unstable();
+        levels.dedup();
+        if levels.is_empty() {
+            continue;
+        }
+        // the slots an edit of which rebuilds this code, and the inputs its entry recorded (what
+        // it inlined and, transitively, their body deps)
+        let mut reach: std::collections::HashSet<u32> = Default::default();
+        let mut work = vec![x];
+        while let Some(s) = work.pop() {
+            if reach.insert(s) {
+                if let Some(v) = took.get(&s) {
+                    work.extend(v.iter().copied());
+                }
+            }
+        }
+        let mut rec: std::collections::HashSet<u32> = Default::default();
+        let mut work: Vec<u32> = u.code.read().unwrap_or_else(|e| e.into_inner()).inlined_at(start).map_or_else(Vec::new, |s| s.to_vec());
+        work.push(x);
+        while let Some(s) = work.pop() {
+            if (s as usize) < u.fns.len() && rec.insert(s) {
+                if let Some(d) = u.body_deps.get(&s) {
+                    work.extend(d.iter().copied());
+                }
+            }
+        }
+        let kind = kind_at(u, start);
+        for ds in levels {
+            out.copies += 1;
+            let slots: Vec<u32> = ds.iter().flat_map(|d| by_def.get(d).into_iter().flatten().copied()).collect();
+            if slots.is_empty() {
+                out.unmapped += 1;
+                continue;
+            }
+            if slots.iter().any(|s| reach.contains(s)) {
+                continue;
+            }
+            out.untracked += 1;
+            let guarded = slots.iter().any(|&s| u.fns[s as usize].history().copy_hosts.binary_search(&x).is_ok());
+            let recorded = slots.iter().any(|s| rec.contains(s));
+            out.unguarded += !guarded as u64;
+            out.unrecorded += !recorded as u64;
+            *out.by_code.entry(label(kind)).or_default() += 1;
+            if out.rows.len() < n {
+                out.rows.push((x, ds, guarded, recorded));
+            }
+        }
+    }
+    out
+}
+
+/// `cache verify [fn|all] [n=40]`: whether every inlined copy in the installed code is one an
+/// edit rebuilds. The code's line table names each fn its build took in (an inline stack level);
+/// an edit of that fn rebuilds the slots its own slots list as hosts (`inlined_into`, reload
+/// hosts_of, transitively, with their twins), and code from the disk cache or the startup image
+/// stays valid across sessions only through the inputs its entry recorded (the slots it inlined,
+/// their body deps: the certificate). A copy no edit of its fn rebuilds keeps running the old
+/// text after the edit (unless a patch-flag guard exits it: `guarded`); one the recorded inputs
+/// miss too is taken from the cache again after an edit in a later session. Runs on the owner
+/// (tens of ms for a few thousand slots).
+pub fn cmd_cache_verify(req: &Req, out: &mut Out) {
+    let q = req.pos.get(1).cloned().unwrap_or_else(|| "all".to_string());
+    let n = req.num("n", 40) as usize;
+    let up = crate::jit::current_unit();
+    if up.is_null() {
+        return out.err("no running unit");
+    }
+    let r = crate::owner::call_within(crate::owner::Class::Job, 120_000, move || -> Result<(String, Vec<String>), String> {
+        let u = unsafe { &*up };
+        let targets: Vec<u32> = if q == "all" {
+            (0..u.fns.len() as u32).collect()
+        } else {
+            let mut v: Vec<u32> = super::instrument::find_all(u, &q, 64).into_iter().map(|x| x.0).collect();
+            if v.is_empty() {
+                return Err(format!("no fn or line matches `{}`{}", q, super::instrument::closest(u, &q)));
+            }
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let c = check_copies(u, &targets, n);
+        let rows = c
+            .rows
+            .iter()
+            .map(|(x, ds, guarded, recorded)| {
+                let names: Vec<String> = ds.iter().map(|&d| crate::lower::display_path(&u.prog, d)).collect();
+                format!(
+                    "{{\"host\":{},\"slot\":{},\"code\":{},\"copy_of\":{},\"guarded\":{},\"recorded_input\":{}}}",
+                    json_str(&short(&super::display_name(u, *x, 0), 140)),
+                    x,
+                    json_str(&label(kind_at(u, u.fns[*x as usize].code))),
+                    json_str(&short(&names.join(" | "), 200)),
+                    guarded,
+                    recorded
+                )
+            })
+            .collect();
+        let by: Vec<String> = c.by_code.iter().map(|(k, v)| format!("{} {}", v, k)).collect();
+        let head = format!(
+            "{} untracked inlined copies of {} in {} slots' code ({} unguarded, {} missing from the recorded inputs{}); inline levels left out: {} without a position (generated code), {} in no fn item, {} in fns without a slot{}",
+            c.untracked,
+            c.copies,
+            c.checked,
+            c.unguarded,
+            c.unrecorded,
+            if by.is_empty() { String::new() } else { format!("; by code: {}", by.join(", ")) },
+            c.positionless,
+            c.unresolved,
+            c.unmapped,
+            if c.no_table > 0 { format!("; {} bodies without an inline table", c.no_table) } else { String::new() },
+        );
+        Ok((head, rows))
+    });
+    match r {
+        Some(Ok((head, rows))) => {
+            out.measured(&head, "owner: the installed code's line tables", &[]);
+            for l in rows {
+                out.line(&l);
+            }
+            out.line("more: versions <fn>  cache");
+        }
+        Some(Err(e)) => out.err(&e),
+        None => out.err(&format!("the owner did not answer in 120 s ({})", crate::owner::serving_note())),
     }
 }
 

@@ -73,7 +73,12 @@ struct StackT {
     size: usize,
     flags: i32,
 }
-const SIGSEGV: i32 = 11;
+// the signal a write to a page mapped without access raises: SIGSEGV on Linux, SIGBUS on macOS
+// (a protection fault on a mapped page; macOS raises SIGSEGV only for an unmapped address)
+#[cfg(target_os = "linux")]
+const ACCESS_FAULT: i32 = 11;
+#[cfg(target_vendor = "apple")]
+const ACCESS_FAULT: i32 = 10;
 #[cfg(target_os = "linux")]
 const SA_ONSTACK: i32 = 0x0800_0000;
 #[cfg(target_vendor = "apple")]
@@ -248,7 +253,7 @@ extern "C" fn on_segv(_sig: i32, _info: *mut u8, _uc: *mut u8) {
 
 pub fn install_segv(_out: &mut [u64; 8]) {
     let a = action(on_segv as *const () as usize, SA_SIGINFO | SA_ONSTACK);
-    assert_eq!(unsafe { sigaction(SIGSEGV, &a, null_mut()) }, 0, "SIGSEGV installation must succeed");
+    assert_eq!(unsafe { sigaction(ACCESS_FAULT, &a, null_mut()) }, 0, "the access fault's installation must succeed");
 }
 
 /// A 64 KB signal stack (above a guard) placed above the calling thread's stack, a page it
@@ -667,13 +672,13 @@ fn queued_realtime_signals_in_a_compile_keep_their_count_and_values() {
     assert_eq!(crate::os::progsig::counts(50)[0], 3, "all three realtime handler runs must be counted");
 }
 
-/// A program's SIGSEGV handler runs on a 64 KB signal stack of the program's, and its first call
-/// compiles with 256 KB of stack (the compile hook): the compile moves to a stack segment and
-/// the handler fixes the page; the write lands. Before the stack check knew its stack, the
-/// compile ran on the signal stack and overflowed it with SIGSEGV blocked (the kernel's kill, no
-/// report). And right after the program's `sigaction`, the host's handler stays in the kernel
-/// with the program's behind it: the host's policy sees every fault without waiting for the run
-/// monitor to put it back.
+/// A program's handler of the access fault (SIGSEGV; SIGBUS on macOS) runs on a 64 KB signal
+/// stack of the program's, and its first call compiles with 256 KB of stack (the compile hook):
+/// the compile moves to a stack segment and the handler fixes the page; the write lands. Before
+/// the stack check knew its stack, the compile ran on the signal stack and overflowed it with the
+/// signal blocked (the kernel's kill, no report). And right after the program's `sigaction`, the
+/// host's handler stays in the kernel with the program's behind it: the host's policy sees every
+/// fault without waiting for the run monitor to put it back.
 #[test]
 fn a_fault_handler_that_compiles_on_a_small_signal_stack_runs() {
     const TEST: &str = "a_fault_handler_that_compiles_on_a_small_signal_stack_runs";
@@ -687,8 +692,8 @@ fn a_fault_handler_that_compiles_on_a_small_signal_stack_runs() {
     let mut out = [0u64; 8];
     let arg = out.as_mut_ptr() as u64;
     call(&mut u, krate, "install_segv", arg);
-    assert_eq!(crate::os::progsig::kernel_handler(SIGSEGV), crate::os::fault::host_handler(), "the host's handler stays in the kernel");
-    assert_eq!(crate::os::fault::chained_handler(SIGSEGV), crate::os::progsig::trampoline_addr(), "the program's handler is chained behind it");
+    assert_eq!(crate::os::progsig::kernel_handler(ACCESS_FAULT), crate::os::fault::host_handler(), "the host's handler stays in the kernel");
+    assert_eq!(crate::os::fault::chained_handler(ACCESS_FAULT), crate::os::progsig::trampoline_addr(), "the program's handler is chained behind it");
     call(&mut u, krate, "segv_on_small_stack", arg);
     assert_eq!(out[0], 1, "the program's handler ran once");
     assert_eq!(out[1], 7, "the write landed once the handler gave the page back");
@@ -715,8 +720,8 @@ fn a_fault_inside_a_compile_ends_the_process_with_a_report() {
         assert_eq!(crate::os::fault::host_code(libc), cfg!(relax), "the C library's code is not the host's");
         let output = child(TEST, "target_in_compile,11,fault");
         let err = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.signal(), Some(SIGSEGV), "the fault ends the process by its signal: {:?}\n{err}", output.status);
-        let line = err.lines().find(|l| l.starts_with("relax: fatal signal 11 on thread ")).unwrap_or_else(|| panic!("no fatal signal report:\n{err}"));
+        assert_eq!(output.status.signal(), Some(ACCESS_FAULT), "the fault ends the process by its signal: {:?}\n{err}", output.status);
+        let line = err.lines().find(|l| l.starts_with(&format!("relax: fatal signal {ACCESS_FAULT} on thread "))).unwrap_or_else(|| panic!("no fatal signal report:\n{err}"));
         let at = err.lines().find_map(|l| l.strip_prefix("relax test: a fault at ")).and_then(|l| l.split(' ').next()).unwrap_or_else(|| panic!("no fault address from the hook:\n{err}"));
         assert!(line.contains(&format!(" addr {at}")) && line.contains("inside a compile"), "the report names the address and why: {line}");
         assert!(err.contains("in the compile of slot ") && err.contains("target_in_compile"), "the report names the compile:\n{err}");
@@ -731,7 +736,12 @@ fn a_fault_inside_a_compile_ends_the_process_with_a_report() {
     panic!("the fault inside the compile must end the process");
 }
 
-const SIGSEGV: i32 = 11;
+/// The signal the fixture's write to a page mapped without access raises (its ACCESS_FAULT):
+/// SIGSEGV on Linux, SIGBUS on macOS. Each platform's own, so the tests pin which one it is.
+#[cfg(target_os = "linux")]
+const ACCESS_FAULT: i32 = 11;
+#[cfg(target_vendor = "apple")]
+const ACCESS_FAULT: i32 = 10;
 
 extern "C" {
     #[link_name = "write"]
@@ -776,6 +786,15 @@ fn a_program_sigusr1_and_its_send_of_the_watchdog_signal_run_its_handlers() {
 /// `send_at_its_end`'s send: 1 + what pthread_kill returned (0: not sent).
 static SENT_AT_ITS_END: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// What that send returns on each platform. Linux sends it: the thread's signals stay open while
+/// its thread-locals' destructors run. macOS refuses it with ESRCH: its pthread_exit closes the
+/// thread's signals before it runs them (the thread-local destructors), natively too, so the
+/// signal never leaves the sender there.
+#[cfg(target_os = "linux")]
+const SEND_AT_ITS_END: i32 = 0;
+#[cfg(target_vendor = "apple")]
+const SEND_AT_ITS_END: i32 = 3;
+
 /// On a thread of the program: once its program code has returned (a thread-local's destructor),
 /// the watchdog's signal is sent at it, as the program's own kick of it would come then.
 extern "C" fn send_at_its_end() {
@@ -813,7 +832,7 @@ fn a_kick_aimed_at_a_thread_at_its_end_stays_on_that_thread() {
     call(&mut u, krate, "install_usr1", arg);
     out[4] = send_at_its_end as *const () as usize as u64;
     call(&mut u, krate, "a_thread_calls_and_ends", arg);
-    assert_eq!(SENT_AT_ITS_END.load(std::sync::atomic::Ordering::SeqCst), 1, "the thread must send the signal at itself at its end");
+    assert_eq!(SENT_AT_ITS_END.load(std::sync::atomic::Ordering::SeqCst), 1 + SEND_AT_ITS_END, "the thread's send of the signal at itself at its end must return the platform's answer (Linux: sent, macOS: ESRCH)");
     assert_eq!(crate::os::progsig::counts(watch)[2], 0, "a signal aimed at a thread at its end must not go on to the process");
     out[1] = 0;
     call(&mut u, krate, "raise_and_count", arg);

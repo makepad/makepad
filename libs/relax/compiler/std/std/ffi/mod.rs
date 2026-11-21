@@ -4,6 +4,13 @@ pub use alloc::ffi::{CString, FromVecWithNulError, IntoStringError, NulError};
 pub use core::ffi::{c_char, c_double, c_float, c_int, c_long, c_longlong, c_schar, c_short, c_uchar, c_uint, c_ulong, c_ulonglong, c_ushort, c_void};
 pub use core::ffi::{CStr, FromBytesUntilNulError, FromBytesWithNulError};
 
-mod os_str;
+/// rustc 1.88.0 (c_str_module): borrowed and owned C strings and their conversion errors.
+pub mod c_str {
+    pub use alloc::ffi::c_str::{CString, FromVecWithNulError, IntoStringError, NulError};
+    pub use core::ffi::c_str::{CStr, FromBytesUntilNulError, FromBytesWithNulError};
+}
+
+/// rustc 1.87.0 (os_str_display): operating-system strings and their display adapter.
+pub mod os_str;
 
 pub use self::os_str::{Display, OsStr, OsString};

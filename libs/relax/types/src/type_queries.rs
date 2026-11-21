@@ -751,6 +751,40 @@ impl Providers<'_> {
 /// of what its startup checked.
 pub static BODIES_CHECKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+thread_local! {
+    /// The audit's read barrier (compiler check.rs, RELAX_CHECK_AUDIT): while set, the crate whose
+    /// bodies this thread checks, and the type checks of other crates' owners asked for meanwhile.
+    static READ_BARRIER: std::cell::RefCell<Option<(u32, Vec<DefId>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Starts recording, on this thread, the type checks asked for of owners outside crate `krate`.
+pub fn read_barrier_begin(krate: u32) {
+    let _ = READ_BARRIER.try_with(|cell| {
+        if let Ok(mut barrier) = cell.try_borrow_mut() {
+            *barrier = Some((krate, Vec::new()));
+        }
+    });
+}
+
+/// Ends the recording and returns the owners recorded (typeck roots, deduplicated).
+pub fn read_barrier_end() -> Vec<DefId> {
+    let mut reads = READ_BARRIER.try_with(|cell| cell.try_borrow_mut().ok()?.take())
+        .ok().flatten().map(|(_, reads)| reads).unwrap_or_default();
+    reads.sort_unstable();
+    reads.dedup();
+    reads
+}
+
+#[inline]
+fn read_barrier_note(prog: &Program, def: DefId) {
+    let _ = READ_BARRIER.try_with(|cell| {
+        let Ok(mut barrier) = cell.try_borrow_mut() else { return };
+        if let Some((krate, reads)) = barrier.as_mut() {
+            if prog.def(def).krate != *krate { reads.push(def); }
+        }
+    });
+}
+
 /// rustc_middle ty/util.rs typeck_root_def_id (is_typeck_child): a closure or an inline const
 /// (`const { .. }`) is type-checked with the body that holds it, never on its own: an inline
 /// const's type is that body's, never fed, so its own typeck failed `anonymous const type`.
@@ -766,6 +800,7 @@ impl Tcx {
     /// rustc_hir_typeck/src/lib.rs:84-101: closures share their typeck root.
     pub fn typeck(&self, prog: &Program, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
         let def = typeck_root_def_id(prog, def);
+        read_barrier_note(prog, def);
         // an anonymous constant's type comes from its holder's lowering, which a warm run may not
         // have done (feed_anon_const_from_holder): done before the query, which a holder's body
         // evaluating the constant enters
@@ -789,6 +824,7 @@ impl Tcx {
     /// one, else the check done without storing its body (Providers::typeck_unstored).
     pub fn typeck_unstored(&self, prog: &Program, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
         let def = typeck_root_def_id(prog, def);
+        read_barrier_note(prog, def);
         self.feed_anon_const_from_holder(prog, def);
         (Providers { tcx: self, prog }).typeck_unstored(def)
     }

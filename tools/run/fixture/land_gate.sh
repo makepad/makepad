@@ -30,6 +30,8 @@
 #           GATE_PROVEN skips a package whose inputs passed; GATE_RETRY runs what failed until it passes;
 #           GATE_FULL=1 runs every package's (the full bucket). After landing; it gates nothing.
 #           GATE_ONLY (units joined by ;) runs those units alone: a run's units a lost shard left without verdicts.
+#           A target measured past GATE_SPLIT_S runs in parts, its tests dealt by their last measures
+#           (GATE_TEST_TIMES, deal_part).
 #   tests : the fast bucket's test-target check alone (step_testcheck), in any cargo workspace (merge_break.sh)
 #   deps  : the fast bucket's depcheck alone (affected.py's cargo lines, step_depcheck), in any cargo workspace
 #           holding the gate's packages (merge_break.sh)
@@ -77,6 +79,23 @@ KEEP_LOGS=$here/keep_logs.sh
 BUSY_TIMES=3 BUSY_FLOOR_S=600
 trap '[ -z "$fail" ] || bash "$KEEP_LOGS" "$log"; rm -rf -- "$log"' EXIT
 fail=""; sum=""
+# The run's queue values (GATE_PROVEN, GATE_TIMES, GATE_PEAKS, GATE_JOBS, GATE_TEST_TIMES) are read in this shell
+# alone, never passed on in the environment, and the python helpers read them from files ($queue/<name>): a devhub
+# bucket hands them over as files of $GATE_QUEUE_DIR (its lease's input, bucket.rs QueueInput); a hand run's values
+# from the environment are written to files here. In the environment every process of the units inherited them,
+# 88-140 KB growing with the queue, and a JIT that packed its run's environment into one string failed its exec past
+# 128 KiB, a red part of the Fab bin in every tests run on one box (11-19); Linux takes no single argument over that.
+QUEUE_VARS="GATE_PROVEN GATE_TIMES GATE_PEAKS GATE_JOBS GATE_TEST_TIMES"
+if [ -n "${GATE_QUEUE_DIR:-}" ]; then
+  queue=$GATE_QUEUE_DIR
+  for v in $QUEUE_VARS; do
+    if [ -f "$queue/$v" ]; then printf -v "$v" '%s' "$(< "$queue/$v")"; else printf -v "$v" '%s' ""; fi
+  done
+else
+  queue=$log/queue; mkdir -p "$queue"
+  for v in $QUEUE_VARS; do printf '%s' "${!v:-}" > "$queue/$v"; done
+fi
+export -n $QUEUE_VARS GATE_QUEUE_DIR
 # The master classifies before acquiring either lease; the shell only carries its verdict.
 if [ -n "${DEVHUB_ARM64_VERDICT:-}" ]; then
   echo "$DEVHUB_ARM64_VERDICT"
@@ -126,8 +145,14 @@ check_pkg() { # check_pkg <label> <pkg> <dir> [check options: --also=<libs> from
     echo "$1: $(echo "$full" | grep -oE -- "--also [^ ]+: not in [^ ]+'s build" | head -1) (not compiled there)"; return 0
   fi
   line=$(echo "$full" | grep -E " errors$|load error" | sed "s/^.*all, /$1: /")
-  # the errors themselves (bare `path:line:col: message` lines and their notes), not the stats lines
-  echo "$line" | grep -qE "^$1: 0 errors$" || echo "$full" | grep -vE "^relax check:|^relax |^ *$" | head -60
+  # the errors themselves (bare `path:line:col: message` lines and their notes), not the stats lines; a check
+  # that stopped before its count (a crash, a JIT's exit) its stream's end, its relax lines too, where a run says
+  # why it stopped: the head of a crashed check's stream was all its red kept, the reason cut at line 60 (11-18)
+  if [ -z "$line" ]; then
+    echo "$1: no count of its errors came; its stream's last lines:"; echo "$full" | grep -vE "^ *$" | tail -40
+  else
+    echo "$line" | grep -qE "^$1: 0 errors$" || echo "$full" | grep -vE "^relax check:|^relax |^ *$" | head -60
+  fi
   echo "$line"; echo "$line" | grep -qE "^$1: 0 errors$" || fail="$fail $1"
   # a warning fails it too (0 warnings; devhub ci's Judge::Check the same): only errors counted here, and two
   # dead-code warnings of the JIT build stood from 10-31
@@ -158,7 +183,9 @@ step_checks() {
   # a build script of a workspace mounted from a git store, as a devhub overlay's is: its child run inherits
   # the mount's std, a path on no disk, with the mount table
   mm=$(bash libs/relax/compiler/tests/mounted_build_script/run.sh "$jit" 2>&1); case "$mm" in *"mounted_build_script: ok"*) echo "$mm" | grep -E '^mounted_build_script';; *) echo "$mm" | tail -9 | cut -c1-230; step_fail mounted-build-script;; esac
-  lc=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" 2>&1) || step_fail live-cases; echo "$lc" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]' | cut -c1-230
+  # (its whole output kept in the run's logs, a failing case's last session lines with it; here every case's
+  # messages, an exit or a missing run as well as an edit's)
+  python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" > "$log/live-cases" 2>&1 || step_fail live-cases; grep -aE '^(FAIL|XPASS|live cases)|^         [^|]' "$log/live-cases" | cut -c1-230
   # code a rejected edit left invalidated while a thread was inside it: the return into it parks, with its report
   # (its whole output kept in the run's logs; a failure shows its steps' detail and names the file)
   python3 libs/relax/compiler/tests/live_invalid/run.py --makepad "$jit" > "$log/live-invalid" 2>&1 || { step_fail live-invalid; grep -aE '^(FAIL|  )' "$log/live-invalid" | head -40 | cut -c1-230; echo "GATEOUT live-invalid :: live-invalid"; }; grep -aE '^live invalid' "$log/live-invalid" | cut -c1-230
@@ -166,7 +193,7 @@ step_checks() {
   python3 libs/relax/compiler/tests/live_selfvariant/run.py --makepad "$jit" > "$log/live-selfvariant" 2>&1 || { step_fail live-selfvariant; grep -aE '^FAIL' "$log/live-selfvariant"; echo "GATEOUT live-selfvariant :: live-selfvariant"; }; grep -aE '^live selfvariant' "$log/live-selfvariant"
   # the real-time case beside two more copies of itself: their compiles stay off its thread's cores
   # (its failure names the copies that failed and each one's longest call: `rt-lock-copies[1:5289us,3:5056us]`)
-  rl=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 2>&1) || step_fail rt-lock-copies "rt-lock-copies[$(echo "$rl" | sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' | paste -sd, -)]"; echo "$rl" | grep -E '^(FAIL|XPASS|live cases)|^         v[0-9]|copy [0-9]' | cut -c1-230
+  rl=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 2>&1) || step_fail rt-lock-copies "rt-lock-copies[$(echo "$rl" | sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' | paste -sd, -)]"; echo "$rl" | grep -E '^(FAIL|XPASS|live cases)|^         [^|]|copy [0-9]' | cut -c1-230
 }
 step_check_stage() { as_step check_pkg stage makepad-stage apps/commercial; }
 present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh home; 1 when the app reports `present`
@@ -213,8 +240,22 @@ present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh
   wait $pid 2>/dev/null
   n=$(grep -cx present $s/report 2>/dev/null)
   echo "$name present: $n${settled:+ (settle: $settled)}"
-  [ "$n" = 1 ] || { fail="$fail $name-present"; bad=$(settle_errors "$s"); echo "$name: no present ${bad:+(failed before its first frame: $bad)}${bad:-within ${PRESENT_WAIT:-120} s}; its last log lines:"; tail -30 "$s/out.log"; return 1; }
-  [ -z "$settled" ] || { fail="$fail $name-settle"; echo "$name: failed in the settle window after its first frame; its last log lines:"; tail -30 "$s/out.log"; return 1; }
+  [ "$n" = 1 ] || { fail="$fail $name-present"; bad=$(settle_errors "$s"); echo "$name: no present ${bad:+(failed before its first frame: $bad)}${bad:-within ${PRESENT_WAIT:-120} s}; its last log lines:"; tail -30 "$s/out.log"; present_keep; return 1; }
+  [ -z "$settled" ] || { fail="$fail $name-settle"; echo "$name: failed in the settle window after its first frame; its last log lines:"; tail -30 "$s/out.log"; present_keep; return 1; }
+}
+# present_keep: a failed present's run log, report and the JIT's session log (`relax: session log kept at
+# <path>`, in the lease's $TMPDIR) into the lease's keep dir as present-<name>/ (keep_logs.sh), which its holder
+# copies to the master before the lease's scratch goes: a settle failure seen once (Sandbox's bare E0080 at
+# audio_output_tap.rs, fast-1795108813739.log, 11-19) left only its 30 last lines, its session log gone with
+# its lease. Not the app's home or the JIT cache.
+present_keep() {
+  [ -n "${DEVHUB_KEEP:-}" ] || return 0
+  local k=$log/present-$name f
+  mkdir -p "$k" && cp -p "$s/out.log" "$k/" 2>/dev/null; cp -p "$s/report" "$k/" 2>/dev/null
+  f=$(sed -n 's/^relax: session log kept at \([^ :]*\).*/\1/p' "$s/out.log" | tail -1)
+  [ -n "$f" ] && [ -f "$f" ] && cp -p "$f" "$k/"
+  bash tools/run/fixture/keep_logs.sh "$k"
+  echo "$name: its logs are kept in the lease's keep dir as present-$name/${f:+ (with its JIT session log)}"
 }
 settle_errors() { bash tools/run/fixture/settle_errors.sh "$1"; } # the run's panics and JIT compile errors, one line (settle_errors.sh)
 step_present_calc() { as_step present calc . makepad-app-calculator --no-default-features --features standalone; }
@@ -398,7 +439,13 @@ reap_one() {
   local reaped="" p
   wait -n -p reaped "${!running[@]}" 2>/dev/null
   if [ -n "$reaped" ]; then set -- "$reaped"; else set -- "${!running[@]}"; fi
-  for p; do echo "GATEEND ${running[$p]}"; unset "running[$p]"; done
+  for p; do echo "GATEEND ${running[$p]}"; unset "running[$p]" "taken[$p]"; done
+}
+# slots_used: the slots at_once's runs still going take (`taken`: each one's by pid, one where none is said)
+slots_used() {
+  local n=0 p
+  for p in "${!running[@]}"; do n=$((n + ${taken[$p]:-1})); done
+  echo "$n"
 }
 # fast: the affected apps' checks and presents all at once on this one warm box, on its one JIT cache; each in its
 # own subshell, so its output and failures are gathered here in affected.py's order
@@ -408,21 +455,24 @@ reap_one() {
 # its shard 73 min with nothing said (11-07). A run's fd 4 is this live output: its unit watch says a stall there
 # (GATEBUSY, unit_watch_body.sh), which the check-in lists with its sample.
 # A line is taken once a run's slot is free: from the file, or from a next fn (into `f`, false at the end: the
-# tests run's queue, next_told).
-at_once() { # at_once <fn> <lines file> [at most N] [next fn]: runs `<fn> <fields of a line>` per line in parallel
-  i=0; local max=${3:-0} next=${4:-next_line} running=() outs=() o f lines n_line=0
+# tests run's queue, next_told). A slots fn, given the free slots, says how many of them the line's run takes (`w`)
+# and its threads (`unit_jobs`: its TEST_JOBS; empty, the slot's): a tests shard's long unit (unit_slots).
+at_once() { # at_once <fn> <lines file> [at most N] [next fn] [slots fn]: runs `<fn> <fields of a line>` per line in parallel
+  i=0; local max=${3:-0} next=${4:-next_line} slots=${5:-} running=() taken=() outs=() o f lines n_line=0 w unit_jobs
   mapfile -t lines < "$2"
   while :; do
-    while [ "$max" -gt 0 ] && [ "${#running[@]}" -ge "$max" ]; do reap_one; done
+    while [ "$max" -gt 0 ] && [ "$(slots_used)" -ge "$max" ]; do reap_one; done
     "$next" || break
     i=$((i + 1))
+    w=1; unit_jobs=""
+    [ -z "$slots" ] || [ "$max" -le 0 ] || "$slots" $((max - $(slots_used)))
     # each run's files by its step and package (qcheck-4-makepad-widgets.out): numbered alone, the presents' runs
     # wrote over the checks' par-N files, and a failed check's output was gone from the kept logs (11-05)
     o="$log/${1%_one}-$i-${f[1]}"; outs+=("$o")
     # both files open here: present's own `for i` loop changed $i inside the subshell, so its failures
     # went to another run's .fail and the verdict passed with GATEUNIT fail lines
-    ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) 4>&1 > "$o.out" 2>&1 3> "$o.fail" &
-    running[$!]=$(unit_of "${f[@]}")
+    ( fail=""; [ -z "$unit_jobs" ] || TEST_JOBS=$unit_jobs; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) 4>&1 > "$o.out" 2>&1 3> "$o.fail" &
+    running[$!]=$(unit_of "${f[@]}"); taken[$!]=$w
     echo "GATESTART ${running[$!]} $(date +%s)"
   done
   # only its own: a bare wait also reaped the depcheck running beside it, whose `wait` then found no
@@ -449,7 +499,11 @@ filter_units() {
 qcheck_one() {
   local unit=$(unit_of "$@")
   check_pkg "$2" "$2" "$3" "${@:4}"
-  if [ -z "$fail" ]; then unit_line ok "$unit"; else echo "GATEREPRO $unit :: cd $3 && makepad check${4:+ ${*:4}} $2"; unit_line fail "$unit"; fi
+  [ -z "$fail" ] && { unit_line ok "$unit"; return; }
+  # its whole stream beside at_once's output file of it, which the bucket keeps under the lease (GATEOUT:
+  # `devhub job result L<id>`) and its red points at
+  [ -z "${o:-}" ] || { printf '%s\n' "$full" > "$o.full"; echo "GATEOUT $unit :: ${o##*/}.full"; }
+  echo "GATEREPRO $unit :: cd $3 && makepad check${4:+ ${*:4}} $2"; unit_line fail "$unit"
 }
 qpresent_one() {
   local unit=$(unit_of "$@")
@@ -630,8 +684,9 @@ step_qpresent() {
 # setsid execs in place) with unit_watch.sh beside it; its exit code, and <out>.hung when it hung. The watch is
 # this gate's own file, wherever the gate runs from (test_run.sh runs it in a stub repo: a path from the tree's
 # root started no watch there, and its hung stub sat 37 min, 11-08). Whichever of the two ends first is seen at
-# once: the watch ends by itself only once it stopped a hung unit, and a watch gone otherwise would leave its unit
-# unbounded, so that unit is stopped and fails HUNG, saying why (UNIT_WATCH: another watch, for that test).
+# once: the watch ends by itself once it stopped a hung unit, or once the unit ended (<out>.ended: its status is
+# then the one this shell kept of it; a status lost even there is no pass), and a watch gone otherwise would leave
+# its unit unbounded, so that unit is stopped and fails HUNG, saying why (UNIT_WATCH: another watch, for that test).
 watched() {
   local out=$1 pid watcher code ended
   shift
@@ -642,6 +697,11 @@ watched() {
   wait -n -p ended "$pid" "$watcher"; code=$?
   if [ "$ended" = "$pid" ]; then
     kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+    return "$code"
+  fi
+  if [ -s "$out.ended" ]; then
+    wait "$pid"; code=$?
+    [ "$code" != 127 ] || { echo "== $(< "$out.ended"), and its exit status is lost: counted as failed" >> "$out"; code=1; }
     return "$code"
   fi
   if [ ! -s "$out.hung" ]; then
@@ -663,7 +723,9 @@ hung_tests() {
     open && s == k - 1 && /: test$/ { name = substr($0, 1, length($0) - 6); if (!(name in done)) print name }' "$2"
 }
 # test_failures <log>: a test run's failures as the bucket log keeps them: every failing test named in full, each
-# with its first panics whole (where, and the message's first line), then the rest that says why (errors, the
+# with its first panics whole (where, and the message's first line; a first line that ends in a colon announces what
+# follows, which the message is, so its last 12 lines come under it: a fixture harness's "run.sh failed:" said
+# nothing of its failing case, 11-21), then the rest that says why (errors, the
 # runner's own lines, its failed results), that middle cut to 12 lines of 400 characters (`head -20 | cut -c1-400`
 # dropped the third failing test's name and every long assertion, 11-07). A panic is a test's when its thread
 # is named for the test, else (a JIT report, a thread of its own) when it came after the run's last test status
@@ -693,26 +755,32 @@ test_failures() {
     return v
   }
   function add(name, loc, msg,    k) {
-    k = name SUBSEP loc; if (k in seen) return; seen[k] = 1
-    if (msg == "Box<dyn Any>") { if (!(name in boxed)) boxed[name] = loc " -- " msg; return }
-    np[name]++; pan[name, np[name]] = loc " -- " msg
+    k = name SUBSEP loc; if (k in seen) return 0; seen[k] = 1
+    if (msg == "Box<dyn Any>") { if (!(name in boxed)) boxed[name] = loc " -- " msg; return 0 }
+    np[name]++; pan[name, np[name]] = loc " -- " msg; return 1
   }
   function failed(name) { if (!(name in isfail)) { isfail[name] = 1; nf++; order[nf] = name } }
   function loose(loc, msg) { ns++; sl[ns] = loc; sm[ns] = msg; last_loc = loc; last_msg = msg; have_last = 1 }
   { sub(/\r$/, "") }
   { arrow = pend; pend = 0 }
+  # the lines a panic message announced (its first line ends in a colon), up to what the runner says next
+  cont && (/^note: / || /^  report: \{"kind":"panic"/ || /^test .* \.\.\. / || /^thread '\''/ || /^failures:$/ || /^---- / || /^stack backtrace:/ || /^GATE/) { cont = 0 }
+  cont { if ($0 != "") { n = ++nt[cn, cj]; tl[cn, cj, n] = substr(rel($0), 1, 400) }; next }
   /^[^ ]+:[0-9]+:[0-9]+: (E[0-9]+|error)/ { nd++; if (nd <= 8) dg[nd] = substr(rel($0), 1, 400); next }
   /^error\[E[0-9]+\]/ { nd++; if (nd <= 8) { dg[nd] = substr($0, 1, 400); pend = nd }; next }
   arrow && /^ *--> / { l = $0; sub(/^ *--> /, "", l); dg[arrow] = substr(rel(l) ": " dg[arrow], 1, 400); next }
-  want { want = 0; if (wname != "") add(wname, wloc, $0); else loose(wloc, $0); next }
+  # (a message whose first line ends in a colon says its case after it: a harness says "run.sh failed:" and then the
+  # output of its child; any other keeps its first line alone, its later lines most often the dump of a value)
+  want { want = 0; if (wname != "") { if (add(wname, wloc, $0) && $0 ~ /:$/) { cont = 1; cn = wname; cj = np[wname] } } else loose(wloc, $0); next }
   /^thread '\''.*'\''( \([0-9]+\))? panicked at .*:$/ {
     t = $0; sub(/^thread '\''/, "", t); sub(/'\''( \([0-9]+\))? panicked at .*$/, "", t)
     wloc = $0; sub(/^.* panicked at /, "", wloc); sub(/:$/, "", wloc)
     wname = (t == "main" || t == "<unnamed>") ? "" : t; want = 1; next
   }
   /^  report: \{"kind":"panic"/ { loose(jstr($0, "location"), jstr($0, "message")); next }
-  /^test .* \.\.\. FAILED$/ {
-    name = substr($0, 6, length($0) - 16); failed(name)
+  # (the lines of a part end in their time, its --report-time: ... FAILED <1.234s>)
+  /^test .* \.\.\. FAILED( <[0-9.]+s>)?$/ {
+    name = $0; sub(/ <[0-9.]+s>$/, "", name); name = substr(name, 6, length(name) - 16); failed(name)
     for (i = 1; i <= ns; i++) add(name, sl[i], sm[i])
     if (!ns && !np[name] && !(name in boxed) && have_last) add(name, last_loc, last_msg)
     ns = 0; next
@@ -726,7 +794,12 @@ test_failures() {
   END {
     for (i = 1; i <= nf; i++) {
       name = order[i]; print "FAILED " name
-      for (j = 1; j <= np[name] && j <= 3; j++) print "  panicked at " pan[name, j]
+      for (j = 1; j <= np[name] && j <= 3; j++) {
+        print "  panicked at " pan[name, j]
+        n = nt[name, j]; from = n > 12 ? n - 11 : 1
+        if (from > 1) print "    (" from - 1 " lines before these in the log)"
+        for (k = from; k <= n; k++) print "    " tl[name, j, k]
+      }
       if (np[name] > 3) print "  (and " np[name] - 3 " more of its panics in the log)"
       if (!np[name] && (name in boxed)) print "  panicked at " boxed[name]
     }
@@ -749,12 +822,54 @@ keep_artifacts() {
   [ "$n" -gt 0 ] && echo "$3: its test artifacts kept as artifacts-$2 ($n files) in the lease's keep"
   return 0
 }
+# test_times <out> <unit>: a part's tests by their time (--report-time: `test <name> ... ok <1.234s>`) and the RSS its
+# processes held while each ran, read against its watch's looks (<out>.rss: `<s in> <KB> <results so far>`,
+# unit_watch_body.sh): a test ended at the first look that counts its result (a look late at most, HUNG_LOOK s) and
+# began its time before that. Into <out>.tests, slowest first (`<s>\t<MB>\t<name>`, MB the most the part's processes
+# held at a look while it ran: the tests beside it held their share), all of them as GATETESTS (`<name>=<s>/<MB>`
+# by spaces: the next run deals the target's parts by them, GATE_TEST_TIMES) and the tests that ran at its highest look as GATEPEAKTESTS (`<MB> <s in> <name>..`), which the bucket's
+# ledger keeps, each said for people too. A part of 151 Fab tests ran 17 min and held 14 GB, and its log named no
+# test that took either (11-18).
+test_times() {
+  local out=$1 unit=$2 timed peak_mb peak_s at said
+  awk -v rss="$out.rss" '
+    BEGIN { while ((getline l < rss) > 0) { n++; split(l, f, " "); T[n] = f[1] + 0; R[n] = f[2] + 0; C[n] = f[3] + 0; if (!pk || R[n] > R[pk]) pk = n } }
+    /^test .* \.\.\. / {
+      k++
+      if (!match($0, / <[0-9.]+s>$/)) next
+      s = substr($0, RSTART + 2, RLENGTH - 4) + 0; l = substr($0, 1, RSTART - 1)
+      if (!match(l, / \.\.\. (ok|FAILED)$/)) next
+      name = substr(l, 6, RSTART - 6); sub(/ - should panic$/, "", name)
+      for (e = 1; e < n && C[e] < k; e++) ;
+      start = T[e] - s; kb = 0
+      for (i = 1; i <= n; i++) if (T[i] >= start && T[i] <= T[e] && R[i] > kb) kb = R[i]
+      if (!kb && n) kb = R[e]
+      printf "%.1f\t%d\t%d\t%s\n", s, kb / 1024, (n && C[pk] < k && start <= T[pk]), name
+    }' "$out" | LC_ALL=C sort -t "$(printf '\t')" -k1,1nr > "$out.tests.at"
+  cut -f1,2,4 "$out.tests.at" > "$out.tests"
+  timed=$(wc -l < "$out.tests"); timed=${timed// /}
+  if [ "$timed" -gt 0 ]; then
+    echo "GATETESTS $unit :: $(awk -F'\t' '{ printf "%s%s=%s/%s", (NR > 1 ? " " : ""), $3, $1, $2 }' "$out.tests")"
+    echo "$unit: its slowest tests (of $timed timed; testrun-${out##*/testrun-}.tests in the run's kept logs): $(head -5 "$out.tests" | awk -F'\t' '{ printf "%s%s %s s%s", (NR > 1 ? ", " : ""), $3, $1, ($2 > 0 ? sprintf(" (the part held %.1f GB while it ran)", $2 / 1024) : "") }')"
+  fi
+  read -r peak_mb peak_s < <(awk '$2 + 0 > m { m = $2 + 0; t = $1 } END { if (m) print int(m / 1024), t }' "$out.rss" 2>/dev/null)
+  if [ -n "${peak_mb:-}" ]; then
+    at=$(awk -F'\t' '$3 == 1 { printf "%s%s", (n++ ? " " : ""), $4 }' "$out.tests.at")
+    echo "GATEPEAKTESTS $unit :: $peak_mb $peak_s${at:+ $at}"
+    said=$(awk -F'\t' '$3 == 1 { printf "%s%s (%s s)", (n++ ? ", " : ""), $4, $1 }' "$out.tests.at")
+    [ -n "$said" ] && said="these ran: $said" || said="no timed test ran then"
+    echo "$unit: at its highest look, $(awk -v m="$peak_mb" 'BEGIN { printf "%.1f", m / 1024 }') GB $peak_s s in, $said"
+  fi
+  rm -f "$out.tests.at"
+}
 # one package's test targets under the JIT, as `cargo test -p <pkg>` runs them (doc tests aside): its failing
 # tests and panics, or HUNG and the tests it still ran, and the command that runs it alone (GATEREPRO)
 testrun_one() {
   # (a split package's target: `test <pkg> <dir> --lib`, its unit `test <pkg> --lib`, its log its own)
-  local unit code r hung run repro name=$2${4:+-${*:4}} busy_unit busy_s measure_s m pk was ran=
-  unit=$(unit_of "$@"); name=${name// /-}
+  # (a long target's part: `test <pkg> <dir> --bin B part <i>/<k>`, shard_units: its share of the target's tests)
+  local unit code r hung run repro name=$2${4:+-${*:4}} busy_unit busy_s measure_s m pk was ran= part= dealt names=()
+  unit=$(unit_of "$@"); name=${name// /-}; name=${name//\//of}
+  if [ "$#" -ge 6 ] && [ "${*: -2:1}" = part ]; then part=${*: -1}; set -- "${@:1:$#-2}"; fi
   # a stall said once its tests give no new result far past its last measure (watched)
   m=${TIME_S[$unit]:-0}; busy_unit=$unit busy_s=$(( m * BUSY_TIMES > BUSY_FLOOR_S ? m * BUSY_TIMES : BUSY_FLOOR_S )) measure_s=$m
   if [ -n "${NATIVE[$unit]+set}" ]; then
@@ -766,7 +881,34 @@ testrun_one() {
     run=(env ${TEST_JOBS:+RELAX_JOBS=$TEST_JOBS MAKEPAD_CPU_CORES=$TEST_JOBS RUST_TEST_THREADS=$TEST_JOBS} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 $B test "$2" $TP "${@:4}")
     repro="makepad test $2 $TP${4:+ ${*:4}}"
   fi
+  # (a part's seconds include its --list: what it costs its shard)
   local t0=$SECONDS
+  if [ -n "$part" ]; then
+    # its share of the target's tests (--list, deal_part by their last measures), run --exact; the same names
+    # in every shard (one tree, one GATE_TEST_TIMES). A target that lists none (a harness of its own) runs whole
+    # in part 1
+    watched "$log/testrun-$name.list" "${run[@]}" -- --list; code=$?
+    if [ "$code" != 0 ]; then
+      echo "$unit: FAILED (its --list ended with exit $code)"
+      tail -20 "$log/testrun-$name.list" | cut -c1-400
+      echo "GATEREPRO $unit :: $repro -- --list"
+      echo "GATEOUT $unit :: testrun-$name.list"
+      unit_line fail "$unit"; fail="$fail test:$name"; return
+    fi
+    dealt=$(deal_part "${unit% part *}" "$part" "$log/testrun-$name.list" "$log/testrun-$name.names")
+    mapfile -t names < "$log/testrun-$name.names"
+    if [ "${#names[@]}" -gt 0 ]; then
+      echo "$unit: ${#names[@]} of its target's tests${dealt:+, $dealt} (testrun-$name.names in the run's kept logs)"
+      # each test's time after its result (libtest's --report-time, which stable's libtest and the JIT's harness
+      # take with RUSTC_BOOTSTRAP), which test_times reads: only a target that lists its tests gets it, a harness
+      # of its own may refuse the flags
+      run=("${run[0]}" RUSTC_BOOTSTRAP=1 "${run[@]:1}" -- "${names[@]}" --exact -Z unstable-options --report-time)
+    elif grep -q ': test$' "$log/testrun-$name.list" || [ "${part%/*}" != 1 ]; then
+      echo "$unit: no test of its target in its share"; echo "GATETIME $unit $((SECONDS - t0))"; unit_line ok "$unit"; return
+    else
+      echo "$unit: its target lists no tests (a harness of its own): this part runs it whole"
+    fi
+  fi
   watched "$log/testrun-$name" "${run[@]}"; code=$?
   # its seconds, which the next run deals the slowest units out by (GATE_TIMES); a hung unit's are no measure:
   # one stopped after 78 min took a shard of its own in the next run's deal, and every unit not measured yet with
@@ -775,6 +917,8 @@ testrun_one() {
   # against that, 11-16
   grep -qE '^running [0-9]+ tests?$' "$log/testrun-$name" && ran=1
   [ -z "$ran" ] || { [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ]; } || echo "GATETIME $unit $((SECONDS - t0))"
+  # the threads it ran on, which its seconds and peak were measured at (GATE_JOBS: unit_slots reads them by these)
+  [ -z "$ran" ] || [ -z "${TEST_JOBS:-}" ] || echo "GATEJOBS $unit $TEST_JOBS"
   # its peak RSS, which the next run's shards start it by (GATE_PEAKS)
   if [ -n "$ran" ] && [ -s "$log/testrun-$name.peak" ]; then
     pk=$(< "$log/testrun-$name.peak"); was=${PEAK_MB[$unit]:-0}
@@ -787,20 +931,27 @@ testrun_one() {
       awk -v u="$unit" -v a="$pk" -v b="$was" 'BEGIN { printf "%s: peaked %.1f GB, %.1fx the %.1f GB of its last run\n", u, a / 1024, a / b, b / 1024 }'
     fi
   fi
+  # its tests' times and the RSS each ran at: the slowest, and those that ran at its highest look
+  [ -z "$ran" ] || [ "${#names[@]}" -eq 0 ] || test_times "$log/testrun-$name" "$unit"
   # (its targets' own results: a child's run of a test inside its target's is counted there)
   r=$(awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ && d && !--d { for (i = 1; i <= NF; i++) if ($i ~ /^(passed|failed);?$/) s[$i] += $(i - 1) } END { printf "%d passed, %d failed", s["passed;"], s["failed;"] }' "$log/testrun-$name")
   # (a unit that ended by itself as its watch said HUNG: it ended)
   if [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ]; then
     # inside a target: its tests, listed (watched too), less those it reported
     if awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ { if (d) d-- } END { exit !d }' "$log/testrun-$name"; then
-      watched "$log/testrun-$name.list" "${run[@]}" -- --list
-      hung=$(hung_tests "$log/testrun-$name" "$log/testrun-$name.list" | paste -sd' ' -)
+      if [ "${#names[@]}" -gt 0 ]; then
+        # (a part: its own tests that did not finish, not the other parts')
+        hung=$(hung_tests "$log/testrun-$name" "$log/testrun-$name.list" | grep -Fxf "$log/testrun-$name.names" | paste -sd' ' -)
+      else
+        watched "$log/testrun-$name.list" "${run[@]}" -- --list
+        hung=$(hung_tests "$log/testrun-$name" "$log/testrun-$name.list" | paste -sd' ' -)
+      fi
     fi
     echo "$unit: HUNG ($(head -1 "$log/testrun-$name.hung" | sed 's/^== //; s/; their state$//'): stopped; $r before it)"
     echo "HUNG: ${hung:-no test of a target: between its targets or before them}; its stacks: testrun-$name.hung in the run's kept logs"
     grep -E '"verdict"' "$log/testrun-$name.hung" | head -4 | cut -c1-400
     echo "GATEREPRO $unit :: $repro${hung:+ -- $hung --exact}"
-    echo "GATEOUT $unit :: testrun-$name testrun-$name.hung"
+    echo "GATEOUT $unit :: testrun-$name testrun-$name.hung${part:+ testrun-$name.names}"
     keep_artifacts "$2" "$name" "$unit"
     unit_line fail "$unit"; fail="$fail test:$name"; return
   fi
@@ -808,9 +959,48 @@ testrun_one() {
   echo "$unit: FAILED (exit $code; $r)"
   test_failures "$log/testrun-$name"
   echo "GATEREPRO $unit :: $repro"
-  echo "GATEOUT $unit :: testrun-$name"
+  echo "GATEOUT $unit :: testrun-$name${part:+ testrun-$name.names}"
   keep_artifacts "$2" "$name" "$unit"
   unit_line fail "$unit"; fail="$fail test:$name"
+}
+# deal_part <target unit> <i>/<k> <list> <names file>: part i of k's share of a target's tests (<list>: its --list,
+# `<name>: test`) into <names file>, sorted. Each test is dealt, the slowest first, to the part whose dealt tests' seconds are fewest
+# (fewest tests, then the lowest part, on a tie), by its last measure (GATE_TEST_TIMES: `<target> :: <name>=<s> ..`
+# by `;`, the bucket's newest of each test's GATETESTS); one not measured yet as the median measured, each 1 s when
+# none is: then it is every k-th by sorted name. Every shard deals the same parts from the same list and times. Says
+# the part's seconds when any test was measured. Dealt by sorted name, part 1 of the Fab bin's five held its slowest
+# tests and ran 17 min beside parts of 3-4 (11-18).
+deal_part() {
+  python3 -I - "$1" "$2" "$3" "$4" "$queue/GATE_TEST_TIMES" <<'PY'
+import os, statistics, sys
+target, part, listed, out, times = sys.argv[1:6]
+times = open(times).read() if os.path.exists(times) else ""
+i, k = (int(n) for n in part.split("/"))
+names = sorted({l[:-len(": test")] for l in open(listed).read().splitlines() if l.endswith(": test")})
+secs = {}
+for group in times.split(";"):
+    unit, sep, tests = group.partition(" :: ")
+    if sep and unit == target:
+        for t in tests.split():
+            name, _, s = t.rpartition("=")
+            try:
+                secs[name] = float(s)
+            except ValueError:
+                pass
+known = [secs[n] for n in names if n in secs]
+unknown = statistics.median(known) if known else 1.0
+took = {n: secs.get(n, unknown) for n in names}
+load, count, mine = [0.0] * k, [0] * k, []
+for n in sorted(names, key=lambda n: (-took[n], n)):
+    p = min(range(k), key=lambda p: (load[p], count[p], p))
+    load[p] += took[n]
+    count[p] += 1
+    if p == i - 1:
+        mine.append(n)
+open(out, "w").write("".join(n + "\n" for n in sorted(mine)))
+if known:
+    print(f"{load[i - 1]:.0f} s of their last measures (the parts {min(load):.0f}-{max(load):.0f} s; {len(known)} of the target's {len(names)} measured)")
+PY
 }
 # shard_units <runs file>: the run's units, slowest first (GATE_TIMES: `<unit>=<s>` by `;`, each one's last
 # measured seconds; one not measured yet as the median measured, at least 60 s: as the slowest, one hung unit's
@@ -823,9 +1013,10 @@ testrun_one() {
 # a tab, why); makepad-run's confined_macros re-runs its own binary as each case's runner, and under `makepad test`
 # each runner was a JIT of its own: six at once took 41 GB, red in every tests bucket from the day it came (11-13).
 shard_units() {
-  python3 -I - "$1" "${GATE_TIMES:-}" "${GATE_PROVEN:-}" "${GATE_SPLIT_S:-600}" "${GATE_ONLY:-}" <<'PY'
-import json, statistics, subprocess, sys
+  python3 -I - "$1" "$queue/GATE_TIMES" "$queue/GATE_PROVEN" "${GATE_SPLIT_S:-600}" "${GATE_ONLY:-}" <<'PY'
+import json, os, statistics, subprocess, sys
 path, times, proven, split, only = sys.argv[1:6]
+times, proven = (open(f).read() if os.path.exists(f) else "" for f in (times, proven))
 only = {u for u in only.split(";") if u}
 secs = {}
 for t in times.split(";"):
@@ -892,25 +1083,62 @@ def targets(pkg, d):
         elif "test" in kinds:
             out.append(["--test", t["name"]])
     return sorted(out)
+def target_measure(u):
+    """A target's seconds: its parts' (`<unit> part <i>/<k>`, each measured on its own) summed over
+    the largest whole set measured (one missing a part, a hung one, as its parts' mean k times), else
+    its own last measure as one unit."""
+    groups = {}
+    for name, s in secs.items():
+        if name.startswith(u + " part "):
+            i, _, k = name[len(u) + 6:].partition("/")
+            if i.isdigit() and k.isdigit() and 0 < int(i) <= int(k):
+                groups.setdefault(int(k), []).append(s)
+    sums = [sum(g) if len(g) >= k else sum(g) / len(g) * k for k, g in groups.items()]
+    return max(sums) if sums else secs.get(u, 0.0)
+def parts(u):
+    """How many parts a target runs in: one per GATE_SPLIT_S of its measure, as a package splits into its
+    targets. makepad-fab's bin took 2242 s on 5 threads, its RAM capping how far it widened, while the
+    run's even wall was 934 s: its shard ran 31 min past the others (11-18). GATE_ONLY's part of it
+    (`<unit> part <i>/<k>`) says k itself: a bisect's probe has no measures."""
+    for o in only:
+        i, _, k = o[len(u) + 6:].partition("/") if o.startswith(u + " part ") else ("", "", "")
+        if i.isdigit() and k.isdigit() and 0 < int(i) <= int(k):
+            return int(k)
+    m = target_measure(u)
+    return int(-(-m // float(split))) if m > float(split) else 1
 lines, native = [], []
 for l in open(path).read().splitlines():
     w = l.split()
     if not w:
         continue
     declared = native_tests(w[1], w[2])
-    if (len(w) == 3 and measure(w[1]) > float(split)) or declared:
+    # (a package GATE_ONLY names a target of runs split however long it measured: a bisect's probe
+    # has no GATE_TIMES, and its makepad-fab stayed one unit that GATE_ONLY then left out; the probe
+    # ran nothing and read as green at its red tip, 11-20)
+    named = any(o.startswith(f"test {w[1]} ") for o in only) if len(w) == 3 else False
+    if (len(w) == 3 and (named or measure(w[1]) > float(split))) or declared:
         sels = targets(w[1], w[2])
         for t in sorted(set(declared) - {key(sel) for sel in sels}):
             print(f"testrun: {w[1]}'s native-tests names {t}, which is none of its test targets")
         for sel in sels:
             u = unit(w + sel)
-            if u in proven:
-                print(f"{u}: proven")
-                print(f"GATEUNIT proven {u}")
-            else:
-                lines.append(" ".join(w + sel))
-                if key(sel) in declared:
-                    native.append(f"{u}\t{declared[key(sel)]}")
+            # a target past GATE_SPLIT_S runs as k parts of its tests, dealt by their last measures
+            # (deal_part); one under cargo stays whole
+            k = 1 if key(sel) in declared else parts(u)
+            if k > 1:
+                m = target_measure(u)
+                print(f"testrun: {u}: {m:.0f} s of its last measure, in {k} parts of its tests")
+            for part in ([[]] if k == 1 else [["part", f"{i}/{k}"] for i in range(1, k + 1)]):
+                pu = unit(w + sel + part)
+                if part and pu not in secs:
+                    secs[pu] = target_measure(u) / k
+                if pu in proven:
+                    print(f"{pu}: proven")
+                    print(f"GATEUNIT proven {pu}")
+                else:
+                    lines.append(" ".join(w + sel + part))
+                    if key(sel) in declared:
+                        native.append(f"{pu}\t{declared[key(sel)]}")
     else:
         lines.append(l)
 open(f"{path}.native", "w").write("".join(n + "\n" for n in native))
@@ -989,13 +1217,60 @@ step_testrun() {
   local cores=${RELAX_JOBS:-8} at
   at=$(( cores / ${TEST_CORES:-4} )); [ "$at" -ge 1 ] || at=1
   TEST_JOBS=$(( cores / at ))
+  even_wall
   if [ "${GATE_QUEUE:-}" = 1 ]; then
     echo "testrun: units of the run's queue, at most $at at once"
-    at_once testrun_one "$log/runs" "$at" next_told
+    at_once testrun_one "$log/runs" "$at" next_told unit_slots
   else
     echo "testrun: $(grep -c . "$log/runs") units, at most $at at once"
-    at_once testrun_one "$log/runs" "$at"; got=$(grep -c . "$log/runs")
+    at_once testrun_one "$log/runs" "$at" next_line unit_slots; got=$(grep -c . "$log/runs")
   fi
+}
+# even_wall: EVEN_S, the run's wall were its units' work (each one's last measured seconds by the threads it ran on,
+# GATE_TIMES by GATE_JOBS; one not measured yet at a minute on a slot's threads) spread over all its shards' cores
+# (GATE_SHARDS: `<shards> <cores each>`). None without GATE_SHARDS: every unit takes one slot.
+even_wall() {
+  EVEN_S=""
+  local n c ts=0 u l
+  read -r n c <<< "${GATE_SHARDS:-}"
+  [ -n "$n" ] && [ -n "$c" ] && [ "$((n * c))" -gt 0 ] || return 0
+  while read -r -a l; do
+    [ "${#l[@]}" -gt 0 ] || continue
+    u=$(unit_of "${l[@]}")
+    ts=$((ts + ${TIME_S[$u]:-60} * ${JOBS_N[$u]:-$TEST_JOBS}))
+  done < "$log/runs"
+  EVEN_S=$((ts / (n * c)))
+  echo "testrun: the run's work is $ts thread-s over $n shards of $c cores: an even wall of $EVEN_S s, which a longer unit takes more of a shard's slots to end in"
+}
+# unit_slots <free slots>: how many slots the unit in `f` takes (w) and its threads (unit_jobs). One, on a slot's
+# TEST_JOBS; a long one more of the free ones, the threads that end its work in the run's even wall (EVEN_S), so the
+# run's wall is no longer its own: makepad-fab's bin ran 18-30 min on 4 threads while its shards' other units
+# ended (11-18). Within the lease's RAM (DEVHUB_RAM_MB): its last peak by the threads it ran on, a thread's share,
+# beside its running units' last peaks; past that its threads are cut, said, never below a slot's.
+unit_slots() {
+  local unit free=$1 work want had per ran_mb room u
+  unit=$(unit_of "${f[@]}")
+  [ -n "${EVEN_S:-}" ] && [ "$EVEN_S" -gt 0 ] && [ -n "${TIME_S[$unit]:-}" ] || return 0
+  had=${JOBS_N[$unit]:-$TEST_JOBS}
+  work=$((${TIME_S[$unit]} * had))
+  want=$(((work + EVEN_S - 1) / EVEN_S))
+  [ "$want" -gt "$TEST_JOBS" ] || return 0
+  w=$(((want + TEST_JOBS - 1) / TEST_JOBS)); [ "$w" -le "$free" ] || w=$free
+  [ "$w" -gt 1 ] || { w=1; return 0; }
+  unit_jobs=$((w * TEST_JOBS))
+  if [ -n "${DEVHUB_RAM_MB:-}" ] && [ -n "${PEAK_MB[$unit]:-}" ]; then
+    per=$(((${PEAK_MB[$unit]} + had - 1) / had)); [ "$per" -gt 0 ] || per=1
+    ran_mb=0
+    for u in "${running[@]}"; do ran_mb=$((ran_mb + ${PEAK_MB[$u]:-$((DEVHUB_RAM_MB / at))})); done
+    room=$(((DEVHUB_RAM_MB - ran_mb) / per))
+    if [ "$room" -lt "$unit_jobs" ]; then
+      [ "$room" -ge "$TEST_JOBS" ] || room=$TEST_JOBS
+      echo "testrun: $unit: $unit_jobs threads end its work in the even wall, $room fit the lease's $((DEVHUB_RAM_MB / 1024)) GB at its last peak ($((${PEAK_MB[$unit]} / 1024)) GB on $had threads) beside its running units' ${ran_mb} MB: it runs on $room"
+      unit_jobs=$room; w=$(((room + TEST_JOBS - 1) / TEST_JOBS)); [ "$w" -le "$free" ] || w=$free
+    fi
+  fi
+  [ "$unit_jobs" -gt "$TEST_JOBS" ] || { w=1; unit_jobs=""; return 0; }
+  echo "testrun: $unit takes $w of the shard's $at slots, $unit_jobs threads: its last run ${TIME_S[$unit]} s on $had threads, the run's even wall $EVEN_S s"
 }
 if [ "$mode" = testrun ]; then
   QBASE=${2:?testrun <base sha> <commercial base sha|->}; QCBASE=${3:--}
@@ -1008,12 +1283,14 @@ if [ "$mode" = testrun ]; then
     else echo "test ${f[*]:1}" >> "$log/runs"; fi
   done < <(grep '^tests ' "$log/affected")
   shard_units "$log/runs" || { echo "GATESTEP fail shard"; echo "NODEGATE-FAIL: shard"; exit 1; }
-  declare -A PEAK_MB=() TIME_S=() NATIVE=()
+  declare -A PEAK_MB=() TIME_S=() JOBS_N=() NATIVE=()
   while IFS=$'\t' read -r nu why; do [ -z "$nu" ] || NATIVE[$nu]=$why; done < "$log/runs.native"
   IFS=';' read -r -a peaks <<< "${GATE_PEAKS:-}"
   for pk in "${peaks[@]}"; do [ -z "$pk" ] || PEAK_MB[${pk%=*}]=${pk##*=}; done
   IFS=';' read -r -a times <<< "${GATE_TIMES:-}"
   for tm in "${times[@]}"; do [ -z "$tm" ] || TIME_S[${tm%=*}]=${tm##*=}; done
+  IFS=';' read -r -a jobs <<< "${GATE_JOBS:-}"
+  for jb in "${jobs[@]}"; do [ -z "$jb" ] || JOBS_N[${jb%=*}]=${jb##*=}; done
   got=0; wants=0
   if [ "${GATE_QUEUE:-}" = 1 ]; then
     [ -n "${DEVHUB_TOLD:-}" ] || { echo "GATESTEP fail queue"; echo "NODEGATE-FAIL: queue (no \$DEVHUB_TOLD: no devhub lease of a hub that tells one)"; exit 1; }

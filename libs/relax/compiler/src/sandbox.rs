@@ -40,6 +40,7 @@ use crate::program::DefKind;
 use relax_backend::rir::{Callee, Cls, Cond, Conv, Func, IOp, Inst, Sym, Term, VReg, U32, U64};
 use crate::syms::SymKind;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use relax_session::sync::Mutex;
 
@@ -51,6 +52,10 @@ use relax_backend::x64 as tgt;
 pub const WINDOW: u64 = 1 << 32;
 /// unmapped bytes on both sides of a window, and the largest offset a masked access may add
 const GUARD: u64 = 1 << 16;
+
+/// The most bytes of a twin's panic message, and of its file name, the runtime reads (core's
+/// panic_at formats a message into 4096 bytes; longer text is cut there).
+const PANIC_TEXT_MAX: i64 = 4096;
 /// window layout (offsets): [0, 64K) never mapped (null and small dangling pointers fault)
 const RO_BASE: u32 = 64 << 10;
 const RO_END: u32 = 96 << 20;
@@ -112,6 +117,8 @@ pub struct Arena {
     /// into it: no unit there)
     sbt_base: u64,
     sbt_span: u64,
+    /// no-codegen mode: its unit's table entries' targets (`Sb::nc_fns`)
+    nc_fns: Option<NcFns>,
     /// the bytes of a segment's thread-local area in use (its unit's layout): zeroed at a claim
     tls_used: Arc<std::sync::atomic::AtomicU32>,
     /// std's runtime keys of its code (`relax_key_*`) and each segment's values; the segments
@@ -173,6 +180,78 @@ impl State {
 /// name, address)))); None: not this domain's. Run-time modules add nothing (`MODULES`).
 pub type Allow = fn(&str) -> Option<Option<(&'static str, u64)>>;
 
+/// No-codegen mode's thunk table targets (`Sb::nc_fns`), shared with the unit's arenas.
+type NcFns = Arc<NcTable>;
+
+/// Entries per chunk of an NcTable (32 KB).
+const NC_CHUNK: usize = 1 << 12;
+
+/// No-codegen mode: the target of each thunk table entry, read by every indirect call of a twin
+/// (sb_nc_fn) without a lock: the chunks, made zero when an entry of theirs is first given out, are
+/// published once with a release store and never move or go before the table; an entry is written
+/// once, by sbthunk under the unit's sandbox lock (the only writer). An entry not given out (0, or
+/// its chunk not made) is the trap's. The chunk pointers cover the whole table (its span over a
+/// thunk's size), allocated zero: untouched pages of them cost no memory.
+pub(crate) struct NcTable {
+    trap: u64,
+    chunks: Box<[std::sync::atomic::AtomicPtr<[AtomicU64; NC_CHUNK]>]>,
+}
+
+impl NcTable {
+    fn new(entries: u64, trap: u64) -> NcTable {
+        let n = (entries as usize).div_ceil(NC_CHUNK).max(1);
+        NcTable { trap, chunks: zeroed_box(n) }
+    }
+
+    /// The owner (sbthunk, under the sandbox lock): entry `k` goes to `target`.
+    fn set(&self, k: usize, target: u64) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let slot = &self.chunks[k / NC_CHUNK];
+        let mut c = slot.load(Acquire);
+        if c.is_null() {
+            c = Box::into_raw(zeroed_box::<AtomicU64>(NC_CHUNK)) as *mut [AtomicU64; NC_CHUNK];
+            slot.store(c, Release);
+        }
+        unsafe { (*c)[k % NC_CHUNK].store(target, Release) };
+    }
+
+    /// Entry `k`'s target, the trap's when none was given out. No lock, no allocation.
+    fn get(&self, k: u64) -> u64 {
+        let k = k as usize;
+        let Some(slot) = self.chunks.get(k / NC_CHUNK) else { return self.trap };
+        let c = slot.load(std::sync::atomic::Ordering::Acquire);
+        if c.is_null() {
+            return self.trap;
+        }
+        match unsafe { (*c)[k % NC_CHUNK].load(std::sync::atomic::Ordering::Acquire) } {
+            0 => self.trap,
+            t => t,
+        }
+    }
+}
+
+impl Drop for NcTable {
+    fn drop(&mut self) {
+        for slot in self.chunks.iter() {
+            let c = slot.load(std::sync::atomic::Ordering::Acquire);
+            if !c.is_null() {
+                drop(unsafe { Box::from_raw(c as *mut [AtomicU64]) });
+            }
+        }
+    }
+}
+
+/// `n` atomics of zero bits (a null AtomicPtr, a zero AtomicU64), allocated zero: no page of it
+/// is written here.
+fn zeroed_box<T>(n: usize) -> Box<[T]> {
+    let layout = std::alloc::Layout::array::<T>(n).expect("table size");
+    let p = unsafe { std::alloc::alloc_zeroed(layout) } as *mut T;
+    if p.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, n)) }
+}
+
 /// A confinement domain: its name, what its code may call beyond what every domain may, whether
 /// its code meters fuel and whether its twins always get the clean-up. The name is part of its
 /// twins' cache keys: code one domain's policy made is never linked into another domain's unit
@@ -199,6 +278,11 @@ pub use relax_base::compile_time::{policy, set_policy, Policy};
 /// arena may set a per-call budget).
 pub const MODULES: Domain = Domain { name: "modules", allow: modules_allow, fuel: true, clean_up: false };
 
+/// The run-time modules' domain under `--allow-unmetered-modules` (`Options::sandbox_fuel` off):
+/// `MODULES`' policy, its twins without any fuel accounting. A name of its own, so a metered
+/// unit never links code made for this one.
+pub const MODULES_UNMETERED: Domain = Domain { name: "modules-unmetered", allow: modules_allow, fuel: false, clean_up: false };
+
 fn modules_allow(_: &str) -> Option<Option<(&'static str, u64)>> {
     None
 }
@@ -221,6 +305,11 @@ struct Sb {
     sbt_of: HashMap<u32, u32>,
     /// the thunk every unused index holds: a jump through the trap slot
     trap: Vec<u8>,
+    /// no-codegen mode (no machine code is written: the table holds none): each index's target,
+    /// the slot thunk of its twin (index 0 and any index given out to none: the trap slot's).
+    /// A twin's fn value is its table address all the same, so it is confined as with code
+    /// (`mask_fn`); a call through it goes to that target (`sb_nc_fn`, `arena_fn`)
+    nc_fns: Option<NcFns>,
     /// thread-locals of the twins: symbol -> offset in a segment's thread-local area; the bytes
     /// in use (shared with the arenas, which zero them when a segment is claimed)
     tls: HashMap<u32, u32>,
@@ -335,6 +424,7 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
     // the slot every unused sandbox thunk jumps through: its code panics with the reason
     let trap_slot = u.fn_id(FnKey::Sandbox(u32::MAX));
     let trap = tgt::thunk(u.slots.table(trap_slot));
+    let nc_fns = u.prog.session.options.no_codegen.then(|| Arc::new(NcTable::new(sbt_span / ts, u.slots.callable(trap_slot))));
     *u.sandbox.sb.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(Sb {
         tls_sym,
         domain: domain.name,
@@ -347,6 +437,7 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
         sbt_filled: 0,
         sbt_of: HashMap::new(),
         trap,
+        nc_fns,
         tls: HashMap::new(),
         // (words 0 and 1: the thread block's two words)
         tls_used: Arc::new(std::sync::atomic::AtomicU32::new(TLS_ERRNO + 8)),
@@ -374,9 +465,10 @@ fn with_sb<R>(u: &Unit, f: impl FnOnce(&mut Sb) -> R) -> R {
 }
 
 /// Marks crates of unit `up` whose code runs only as twins (a module's crate; std's are added
-/// with the first), in the run-time modules' domain.
+/// with the first), in the run-time modules' domain: metered unless the run was granted
+/// unmetered modules.
 pub unsafe fn add_sandboxed_crate(up: *mut Unit, krate: u32) -> Result<(), String> {
-    sb_init(up, MODULES)?;
+    sb_init(up, if (&*up).prog.session.options.sandbox_fuel { MODULES } else { MODULES_UNMETERED })?;
     let u = &*up;
     let std_crates: Vec<u32> = (0..u.prog.crates.len() as u32).filter(|&c| matches!(u.prog.syms.str(u.prog.crates[c as usize].name), "core" | "alloc" | "std")).collect();
     with_sb(u, |s| {
@@ -404,7 +496,9 @@ pub unsafe fn confine_unit(up: *mut Unit, domain: Domain, host_too: &[u32]) -> R
 /// thunk (on the owner thread).
 pub unsafe fn fn_value(up: *mut Unit, base: u32) -> Result<u64, String> {
     let t = twin(up, base);
-    sbthunk(up, t)
+    let at = sbthunk(up, t)?;
+    // no-codegen mode: host code calls the twin's slot thunk (its table entry holds no code)
+    Ok(if (&*up).prog.session.options.no_codegen { (&*up).slots.callable(t) } else { at })
 }
 
 pub fn add_wrapper_crate(u: &Unit, krate: u32) {
@@ -503,6 +597,7 @@ unsafe fn sbthunk(up: *mut Unit, t: u32) -> Result<u64, String> {
     let u = &*up;
     let ts = jit::thunk_size() as u64;
     let table = u.slots.table(t);
+    let target = u.slots.callable(t);
     with_sb(u, |s| {
         if let Some(&k) = s.sbt_of.get(&t) {
             return Ok(s.sbt_base + k as u64 * ts);
@@ -511,6 +606,13 @@ unsafe fn sbthunk(up: *mut Unit, t: u32) -> Result<u64, String> {
         // (a twin is a slot, and the table has room for every slot the unit's code area can hold)
         if k as u64 * ts >= s.sbt_span {
             return Err(format!("the sandbox thunk table has more entries than the unit has slots ({})", k));
+        }
+        if let Some(nc) = &s.nc_fns {
+            // no-codegen mode: the index's target, the twin's slot thunk (`Sb::nc_fns`)
+            nc.set(k as usize, target);
+            s.sbt_n += 1;
+            s.sbt_of.insert(t, k);
+            return Ok(s.sbt_base + k as u64 * ts);
         }
         while k >= s.sbt_filled {
             let at = s.sbt_base + s.sbt_filled as u64 * ts;
@@ -859,6 +961,7 @@ pub fn new_arena(up: *mut Unit, module: u32, name: &str, mem: u64, fuel: i64) ->
             segs_mapped: std::sync::atomic::AtomicU64::new(0),
             sbt_base: s.sbt_base,
             sbt_span: s.sbt_span,
+            nc_fns: s.nc_fns.clone(),
             tls_used: s.tls_used.clone(),
             keys: Mutex::new(Keys::default()),
             keyed: std::sync::atomic::AtomicU64::new(0),
@@ -1058,6 +1161,39 @@ fn cur_arena() -> Option<&'static Arena> {
     } else {
         Some(unsafe { &*p })
     }
+}
+
+/// Reads one byte of each page of [pm, pm + len) of the current window as fault-safe code, before
+/// host code reads the range: an unmapped page faults here, where the module's own read would
+/// have, and is contained like it (the module's call ends with the fault) instead of ending the
+/// process in host code. A live window's mapped memory only grows until it is unloaded (an
+/// access after that is stale: stale.rs parks the thread), so a range this read stays readable
+/// for the host code after it. One read per 4 KB page; no lock, no allocation.
+fn touch_in(pm: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let _safe = crate::jit::FaultSafe::enter();
+    let end = pm.saturating_add(len);
+    let mut p = pm;
+    while p < end {
+        unsafe { std::ptr::read_volatile(p as *const u8) };
+        p = (p | 4095) + 1;
+    }
+}
+
+/// `touch_in` for text a runtime entry was handed (rt_panic_impl's): a range in the current
+/// arena's window is the module's, and faults as its own read would; any other range is the
+/// host's own memory, which the host reads as before.
+pub(crate) fn touch_module_text(p: u64, len: u64) {
+    if !sb_ready() {
+        return;
+    }
+    let Some(a) = cur_arena() else { return };
+    if p & !(WINDOW - 1) != a.base {
+        return;
+    }
+    touch_in(p, len.min(WINDOW - (p & (WINDOW - 1))));
 }
 
 /// Masks a module pointer into the current window.
@@ -1514,7 +1650,7 @@ pub(crate) fn call_in_arena(f: u64, arg: u64) {
     }
     let s = save();
     let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
-    g(mask_thunk(f), m(arg));
+    g(arena_fn(f), m(arg));
     restore(s);
 }
 
@@ -1737,6 +1873,9 @@ fn fill_random(p: u64, len: u64) -> bool {
     }
     let out = unsafe { std::slice::from_raw_parts_mut(pm as *mut u8, len as usize) };
     let seed = std::collections::hash_map::RandomState::new();
+    // the writes into the module's memory: an unmapped or read-only page faults as the module's
+    // own write would (contained, its call ends), not in host code (the seed is made above)
+    let _safe = crate::jit::FaultSafe::enter();
     for (k, c) in out.chunks_mut(8).enumerate() {
         let mut h = seed.build_hasher();
         h.write_usize(k);
@@ -1920,11 +2059,17 @@ extern "C" fn sb_getpid() -> i32 {
 extern "C" fn sb_pthread_self() -> u64 {
     cur_seg().map_or(0, |(_, k)| k as u64 + 1)
 }
+/// A host thread's OS name: none for a module's (ERANGE, as for a buffer too small; nothing written)
+extern "C" fn sb_getname_np() -> i32 {
+    34
+}
 
 rt_fn! {
 fn sb_fmt_str(p: u64, len: u64, spec: u64) {
     let pm = m(p);
     let len = if fits(pm, len) { len } else { 0 };
+    // an unmapped page of the text faults here, as the module's own read (rt_fmt_str allocates)
+    touch_in(pm, len);
     let f: rt_fn_ty!(fn(u64, u64, u64)) = unsafe { std::mem::transmute(jit::rt_entry("fmt_str") as usize) };
     f(pm, len, spec)
 }
@@ -1936,6 +2081,8 @@ fn sb_str_eq(p1: u64, l1: u64, p2: u64, l2: u64) -> u64 {
     if l1 != l2 || !fits(a, l1) || !fits(b, l2) {
         return 0;
     }
+    // reads of the module's memory: a fault is the module's (no lock, no allocation here)
+    let _safe = crate::jit::FaultSafe::enter();
     let (x, y) = unsafe { (std::slice::from_raw_parts(a as *const u8, l1 as usize), std::slice::from_raw_parts(b as *const u8, l2 as usize)) };
     (x == y) as u64
 }
@@ -1963,7 +2110,7 @@ rt_fn! {
 /// catch_unwind inside a module: the target and data are masked; the shadow stack comes back.
 fn sb_catch_panic(f: u64, data: u64) -> u64 {
     let s = save();
-    let fm = mask_thunk(f);
+    let fm = arena_fn(f);
     let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
     let r = g(fm, m(data));
     restore(s);
@@ -1971,11 +2118,33 @@ fn sb_catch_panic(f: u64, data: u64) -> u64 {
 }
 }
 
-/// A fn pointer of the current arena's code masked into its unit's thunk table (0: no arena).
-fn mask_thunk(f: u64) -> u64 {
+/// A fn pointer of the current arena's code masked into its unit's thunk table (0: no arena),
+/// as code to call: in no-codegen mode the target of the entry it lands on (`Sb::nc_fns`).
+fn arena_fn(f: u64) -> u64 {
     let Some(a) = cur_arena() else { return 0 };
     let (base, span, ts) = (a.sbt_base, a.sbt_span, jit::thunk_size() as u64);
-    base + ((f.wrapping_sub(base)) & (span - 1) & !(ts - 1))
+    let at = base + ((f.wrapping_sub(base)) & (span - 1) & !(ts - 1));
+    match &a.nc_fns {
+        Some(nc) => nc_target(nc, (at - base) / ts),
+        None => at,
+    }
+}
+
+/// No-codegen mode: the target of thunk table index `k` (the trap's when none was given out).
+fn nc_target(nc: &NcFns, k: u64) -> u64 {
+    nc.get(k)
+}
+
+rt_fn! {
+/// No-codegen mode: where a twin's indirect call through masked table address `at` goes
+/// (`mask_fn`): every indirect call of a twin, so a leaf (no lock, no allocation, cannot panic).
+leaf fn sb_nc_fn(at: u64) -> u64 {
+    let Some(a) = cur_arena() else { return 0 };
+    match &a.nc_fns {
+        Some(nc) => nc_target(nc, at.wrapping_sub(a.sbt_base) / jit::thunk_size() as u64),
+        None => 0,
+    }
+}
 }
 
 /// The runtime entries a twin may call: kept (scalar arguments or no memory access), or
@@ -1989,6 +2158,8 @@ fn rt_policy(name: &str) -> Option<Option<(&'static str, u64)>> {
         "memcpy" | "memmove" => Some(("sb_rt_memcpy", sb_rt_memcpy as *const () as u64)),
         "memset" => Some(("sb_rt_memset", sb_rt_memset as *const () as u64)),
         "catch_panic" => Some(("sb_catch_panic", sb_catch_panic as *const () as u64)),
+        // (no runtime entry of this name: what `mask_fn` calls in no-codegen mode)
+        "nc_fn" => Some(("sb_nc_fn", sb_nc_fn as *const () as u64)),
         _ => return None,
     })
 }
@@ -2037,6 +2208,9 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
         // std's default hook (install_core_hook): none, a module's std has no stdio; its panics
         // reach the host as their payload
         "relax_std_default_hook" => Some(("sb_no_symbol", sb_no_symbol as *const () as u64)),
+        // std::backtrace: no frames (a twin's walk would cross the host's frames; Unsupported, as
+        // real std's capture on a target without unwind info)
+        "relax_backtrace_capture" | "relax_backtrace_resolve" => Some(("sb_no_symbol", sb_no_symbol as *const () as u64)),
         // std's handle_alloc_error (the runtime's message and abort): a twin's call is the fault
         // an abort is, contained to the module's call
         "relax_alloc_error" => Some(("abort", 0)),
@@ -2051,6 +2225,8 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
         "pthread_main_np" => Some(("sb_main_np", sb_main_np as *const () as u64)),
         "gettid" => Some(("sb_gettid", sb_gettid as *const () as u64)),
         "pthread_self" => Some(("sb_pthread_self", sb_pthread_self as *const () as u64)),
+        // (std's unnamed spawn reads its spawner's OS name, thread/mod.rs Thread::spawned: none)
+        "pthread_getname_np" => Some(("sb_getname_np", sb_getname_np as *const () as u64)),
         "getpid" => Some(("sb_getpid", sb_getpid as *const () as u64)),
         "abort" => Some(("abort", 0)),
         // std's catch_unwind names its recovery point (jit.rs relax_catch_caught: a thread-local flag)
@@ -2284,8 +2460,33 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                         emit(Inst::Copy(d2, s2, len), &mut insts, &mut pos);
                     }
                 }
-                Inst::Call(callee, args, rets) => {
+                Inst::Call(callee, mut args, rets) => {
+                    // the panic message and file name a twin hands the runtime (`panic_impl`:
+                    // pointer, length, pointer, length, line, column) are module memory the host
+                    // reads as text: each pointer masked into the window, each length cut to the
+                    // bytes from there to the window's end and to PANIC_TEXT_MAX
+                    if let Callee::Host(s) = &callee {
+                        if matches!(u.syms.kind(s.id), Some(SymKind::Rt("panic_impl"))) && args.len() >= 4 {
+                            for k in [0, 2] {
+                                let (text, len) = (args[k], args[k + 1]);
+                                let (masked, _) = mask(f, &mut insts, &mut pos, &mut cache, text, 0);
+                                let [lo, end, room, fits, cut, max, under, bounded] = std::array::from_fn(|_| f.vreg(Cls::I));
+                                emit(Inst::Conv(Conv::IntToInt(U32), lo, text), &mut insts, &mut pos);
+                                emit(Inst::Iconst(end, WINDOW as i64), &mut insts, &mut pos);
+                                emit(Inst::IBin(IOp::Sub, U64, room, end, lo), &mut insts, &mut pos);
+                                emit(Inst::ICmp(Cond::Lt, false, fits, len, room), &mut insts, &mut pos);
+                                emit(Inst::Sel(cut, fits, len, room), &mut insts, &mut pos);
+                                emit(Inst::Iconst(max, PANIC_TEXT_MAX), &mut insts, &mut pos);
+                                emit(Inst::ICmp(Cond::Lt, false, under, cut, max), &mut insts, &mut pos);
+                                emit(Inst::Sel(bounded, under, cut, max), &mut insts, &mut pos);
+                                args[k] = masked;
+                                args[k + 1] = bounded;
+                            }
+                        }
+                    }
                     let callee = match callee {
+                        // (black_box's block runs no instruction)
+                        Callee::Asm(b) if b.is_empty() => Callee::Asm(b),
                         Callee::Asm(_) => return Err(format!("{}: inline assembly, which sandboxed code cannot run", f.name)),
                         Callee::Fn(id) => Callee::Fn(call_target(up, id, &sandboxed, allow)?),
                         Callee::CFn(id, sig) => Callee::CFn(call_target(up, id, &sandboxed, allow)?, sig),
@@ -2408,7 +2609,9 @@ unsafe fn tls_offset(up: *mut Unit, sym: Sym) -> Result<u32, String> {
 }
 
 /// An indirect call's target masked into unit `u`'s sandbox thunk table. (The span is the code
-/// area's slots' (Unit::exec_size, a compile-time constant): an immediate like any other.)
+/// area's slots' (Unit::exec_size, a compile-time constant): an immediate like any other.) In
+/// no-codegen mode the table holds no code: the call goes to the target of the entry the mask
+/// lands on (`sb_nc_fn`).
 fn mask_fn(u: &Unit, f: &mut Func, insts: &mut Vec<Inst>, pos: &mut Vec<u64>, p: u64, v: VReg) -> VReg {
     let span = with_sb(u, |s| s.sbt_span);
     let ts = jit::thunk_size() as u64;
@@ -2423,7 +2626,14 @@ fn mask_fn(u: &Unit, f: &mut Func, insts: &mut Vec<Inst>, pos: &mut Vec<u64>, p:
     for _ in 0..4 {
         pos.push(p);
     }
-    t3
+    if !u.prog.session.options.no_codegen {
+        return t3;
+    }
+    let target = f.vreg(Cls::I);
+    let nc = host_sym(u, "rt:nc_fn").expect("rt_policy has nc_fn");
+    insts.push(Inst::Call(Callee::Host(nc), vec![t3], vec![target]));
+    pos.push(p);
+    target
 }
 
 /// What a call to slot `id` from a twin goes to: the host's own function for a host API

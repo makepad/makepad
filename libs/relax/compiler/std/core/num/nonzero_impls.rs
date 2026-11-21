@@ -3,7 +3,7 @@
 //! Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr, Neg), as real core's nonzero.rs macros generate it.
 
 use super::nonzero::NonZero;
-use crate::num::TryFromIntError;
+use crate::num::{IntErrorKind, ParseIntError, TryFromIntError};
 use crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};
 
 impl NonZero<u8> {
@@ -21,6 +21,26 @@ impl NonZero<u8> {
     pub const fn saturating_mul(self, other: NonZero<u8>) -> NonZero<u8> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<u8>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<u8> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match u8::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe { Self::new_unchecked(v) }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<i8> { unsafe { NonZero::new_unchecked(self.get().cast_signed()) } }
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(Self::BITS - self.leading_zeros()) } }
     pub const fn checked_add(self, other: u8) -> Option<NonZero<u8>> { match self.get().checked_add(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_add(self, other: u8) -> NonZero<u8> { unsafe { NonZero::new_unchecked(self.get().saturating_add(other)) } }
     pub const fn checked_next_power_of_two(self) -> Option<NonZero<u8>> { match self.get().checked_next_power_of_two() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
@@ -52,6 +72,26 @@ impl NonZero<u16> {
     pub const fn saturating_mul(self, other: NonZero<u16>) -> NonZero<u16> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<u16>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<u16> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match u16::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe { Self::new_unchecked(v) }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<i16> { unsafe { NonZero::new_unchecked(self.get().cast_signed()) } }
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(Self::BITS - self.leading_zeros()) } }
     pub const fn checked_add(self, other: u16) -> Option<NonZero<u16>> { match self.get().checked_add(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_add(self, other: u16) -> NonZero<u16> { unsafe { NonZero::new_unchecked(self.get().saturating_add(other)) } }
     pub const fn checked_next_power_of_two(self) -> Option<NonZero<u16>> { match self.get().checked_next_power_of_two() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
@@ -83,6 +123,26 @@ impl NonZero<u32> {
     pub const fn saturating_mul(self, other: NonZero<u32>) -> NonZero<u32> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<u32>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<u32> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match u32::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe { Self::new_unchecked(v) }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<i32> { unsafe { NonZero::new_unchecked(self.get().cast_signed()) } }
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(Self::BITS - self.leading_zeros()) } }
     pub const fn checked_add(self, other: u32) -> Option<NonZero<u32>> { match self.get().checked_add(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_add(self, other: u32) -> NonZero<u32> { unsafe { NonZero::new_unchecked(self.get().saturating_add(other)) } }
     pub const fn checked_next_power_of_two(self) -> Option<NonZero<u32>> { match self.get().checked_next_power_of_two() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
@@ -114,6 +174,26 @@ impl NonZero<u64> {
     pub const fn saturating_mul(self, other: NonZero<u64>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<u64>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<u64> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match u64::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe { Self::new_unchecked(v) }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<i64> { unsafe { NonZero::new_unchecked(self.get().cast_signed()) } }
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(Self::BITS - self.leading_zeros()) } }
     pub const fn checked_add(self, other: u64) -> Option<NonZero<u64>> { match self.get().checked_add(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_add(self, other: u64) -> NonZero<u64> { unsafe { NonZero::new_unchecked(self.get().saturating_add(other)) } }
     pub const fn checked_next_power_of_two(self) -> Option<NonZero<u64>> { match self.get().checked_next_power_of_two() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
@@ -145,6 +225,26 @@ impl NonZero<u128> {
     pub const fn saturating_mul(self, other: NonZero<u128>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<u128>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<u128> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match u128::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe { Self::new_unchecked(v) }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<i128> { unsafe { NonZero::new_unchecked(self.get().cast_signed()) } }
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(Self::BITS - self.leading_zeros()) } }
     pub const fn checked_add(self, other: u128) -> Option<NonZero<u128>> { match self.get().checked_add(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_add(self, other: u128) -> NonZero<u128> { unsafe { NonZero::new_unchecked(self.get().saturating_add(other)) } }
     pub const fn checked_next_power_of_two(self) -> Option<NonZero<u128>> { match self.get().checked_next_power_of_two() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
@@ -176,6 +276,26 @@ impl NonZero<usize> {
     pub const fn saturating_mul(self, other: NonZero<usize>) -> NonZero<usize> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<usize>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<usize> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match usize::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe { Self::new_unchecked(v) }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<isize> { unsafe { NonZero::new_unchecked(self.get().cast_signed()) } }
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(Self::BITS - self.leading_zeros()) } }
     pub const fn checked_add(self, other: usize) -> Option<NonZero<usize>> { match self.get().checked_add(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_add(self, other: usize) -> NonZero<usize> { unsafe { NonZero::new_unchecked(self.get().saturating_add(other)) } }
     pub const fn checked_next_power_of_two(self) -> Option<NonZero<usize>> { match self.get().checked_next_power_of_two() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
@@ -207,6 +327,19 @@ impl NonZero<i8> {
     pub const fn saturating_mul(self, other: NonZero<i8>) -> NonZero<i8> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<i8>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<i8> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match i8::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<u8> { unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) } }
     pub const fn abs(self) -> NonZero<i8> { unsafe { NonZero::new_unchecked(self.get().abs()) } }
     pub const fn checked_abs(self) -> Option<NonZero<i8>> { match self.get().checked_abs() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn overflowing_abs(self) -> (NonZero<i8>, bool) { let (v, f) = self.get().overflowing_abs(); (unsafe { NonZero::new_unchecked(v) }, f) }
@@ -244,6 +377,19 @@ impl NonZero<i16> {
     pub const fn saturating_mul(self, other: NonZero<i16>) -> NonZero<i16> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<i16>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<i16> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match i16::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<u16> { unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) } }
     pub const fn abs(self) -> NonZero<i16> { unsafe { NonZero::new_unchecked(self.get().abs()) } }
     pub const fn checked_abs(self) -> Option<NonZero<i16>> { match self.get().checked_abs() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn overflowing_abs(self) -> (NonZero<i16>, bool) { let (v, f) = self.get().overflowing_abs(); (unsafe { NonZero::new_unchecked(v) }, f) }
@@ -281,6 +427,19 @@ impl NonZero<i32> {
     pub const fn saturating_mul(self, other: NonZero<i32>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<i32>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<i32> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match i32::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<u32> { unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) } }
     pub const fn abs(self) -> NonZero<i32> { unsafe { NonZero::new_unchecked(self.get().abs()) } }
     pub const fn checked_abs(self) -> Option<NonZero<i32>> { match self.get().checked_abs() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn overflowing_abs(self) -> (NonZero<i32>, bool) { let (v, f) = self.get().overflowing_abs(); (unsafe { NonZero::new_unchecked(v) }, f) }
@@ -318,6 +477,19 @@ impl NonZero<i64> {
     pub const fn saturating_mul(self, other: NonZero<i64>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<i64>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<i64> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match i64::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<u64> { unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) } }
     pub const fn abs(self) -> NonZero<i64> { unsafe { NonZero::new_unchecked(self.get().abs()) } }
     pub const fn checked_abs(self) -> Option<NonZero<i64>> { match self.get().checked_abs() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn overflowing_abs(self) -> (NonZero<i64>, bool) { let (v, f) = self.get().overflowing_abs(); (unsafe { NonZero::new_unchecked(v) }, f) }
@@ -355,6 +527,19 @@ impl NonZero<i128> {
     pub const fn saturating_mul(self, other: NonZero<i128>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<i128>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<i128> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match i128::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<u128> { unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) } }
     pub const fn abs(self) -> NonZero<i128> { unsafe { NonZero::new_unchecked(self.get().abs()) } }
     pub const fn checked_abs(self) -> Option<NonZero<i128>> { match self.get().checked_abs() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn overflowing_abs(self) -> (NonZero<i128>, bool) { let (v, f) = self.get().overflowing_abs(); (unsafe { NonZero::new_unchecked(v) }, f) }
@@ -392,6 +577,19 @@ impl NonZero<isize> {
     pub const fn saturating_mul(self, other: NonZero<isize>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(self.get().saturating_mul(other.get())) } }
     pub const fn checked_pow(self, other: u32) -> Option<NonZero<isize>> { match self.get().checked_pow(other) { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn saturating_pow(self, other: u32) -> NonZero<isize> { unsafe { NonZero::new_unchecked(self.get().saturating_pow(other)) } }
+    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
+        let n = match isize::from_str_radix(src, radix) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        match Self::new(n) {
+            Some(n) => Ok(n),
+            None => Err(ParseIntError { kind: IntErrorKind::Zero }),
+        }
+    }
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<usize> { unsafe { NonZero::new_unchecked(self.get().cast_unsigned()) } }
     pub const fn abs(self) -> NonZero<isize> { unsafe { NonZero::new_unchecked(self.get().abs()) } }
     pub const fn checked_abs(self) -> Option<NonZero<isize>> { match self.get().checked_abs() { Some(v) => Some(unsafe { NonZero::new_unchecked(v) }), None => None } }
     pub const fn overflowing_abs(self) -> (NonZero<isize>, bool) { let (v, f) = self.get().overflowing_abs(); (unsafe { NonZero::new_unchecked(v) }, f) }

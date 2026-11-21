@@ -232,7 +232,7 @@ impl FrontImages {
         // clean ones load from their crate images (proc-macro and build crates load after the
         // app's, so an app edit leaves clean crates behind it). The std crates may depend on
         // one another despite their load order: a change there uses the ordinary path.
-        (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some((first, unknown))
+        (first >= crate::std_pre_crates(&pre[0].cfg.session, false, false).len()).then_some((first, unknown))
     }
 
     /// How many leading crates of `pre` a restore keeps when every record holds but the
@@ -322,6 +322,7 @@ impl FrontImages {
         let phase = |name: &str| if crate::preload::trace() {
             eprintln!("relax collected: {} at {:.1} ms", name, started.elapsed().as_secs_f64() * 1e3);
         };
+        self.reload_current.store(false, std::sync::atomic::Ordering::Relaxed);
         let restored = (|| {
         if crate::syms::perturb(&session.options) != 0 { return None; }
         self.begin_load(pre);
@@ -412,6 +413,12 @@ impl FrontImages {
         // keeps them downward closed, and their records hold their inputs to the files now. The
         // graph's identity, the image's key, covers every crate's cfg, edition and dependencies.
         let whole = image.bytes(0, 0)? == certificate(graph).to_le_bytes();
+        // a load of crates again (reload_crates) whose graph is certified whole, all its inputs as
+        // they were, and whose image was recorded of that graph: what it loads again is what the
+        // image holds (the run records nothing again, run.rs COLLECTED_CURRENT)
+        if self.reloading() && cert.as_ref().is_some_and(|c| image.bytes(0, 0) == Some(&certificate(c).to_le_bytes()[..])) {
+            self.reload_current.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let moved: Vec<bool> = graph.crates.iter().zip(image_fps).map(|((_, fp), k)| *fp != k.get()).collect();
         why = "certificate mismatch (the crate graph changed since the image)";
         if !whole && validated { return None; }

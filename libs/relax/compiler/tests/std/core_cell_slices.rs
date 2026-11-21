@@ -48,3 +48,21 @@ fn a04_no_niche() {
     // UnsafeCell hides its value's niche (rustc_layout_no_niche): Option needs its own tag
     println!("| option cell ref {} option cell nonzero {}", std::mem::size_of::<Option<UnsafeCell<&u8>>>(), std::mem::size_of::<Option<Cell<std::num::NonZeroU32>>>());
 }
+
+#[test]
+fn a05_lazy_cell() {
+    use std::cell::LazyCell;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let mut cell = LazyCell::new(|| 7);
+    println!("| lazy before {:?} {:?}", LazyCell::get(&cell).copied(), LazyCell::get_mut(&mut cell));
+    *LazyCell::force_mut(&mut cell) += 2;
+    *LazyCell::get_mut(&mut cell).unwrap() *= 3;
+    println!("| lazy after {:?} {}", LazyCell::get(&cell).copied(), LazyCell::force_mut(&mut cell));
+
+    let mut poisoned = LazyCell::new(|| -> u8 { panic!("initialization failed") });
+    let first = catch_unwind(AssertUnwindSafe(|| {
+        LazyCell::force_mut(&mut poisoned);
+    }));
+    let again = catch_unwind(AssertUnwindSafe(|| LazyCell::force(&poisoned)));
+    println!("| lazy poisoned {} {} {:?}", first.is_err(), again.is_err(), LazyCell::get_mut(&mut poisoned));
+}

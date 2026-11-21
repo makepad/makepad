@@ -9,9 +9,9 @@ pub mod fd;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
-// std::os::android has the same abstract-namespace SocketAddrExt as std::os::linux (unix(7))
+// std::os::android::net shares SocketAddrExt and TcpStreamExt with std::os::linux::net.
 #[cfg(target_os = "android")]
-#[path = "linux.rs"]
+#[path = "linux/mod.rs"]
 pub mod android;
 pub mod raw;
 #[cfg(unix)]

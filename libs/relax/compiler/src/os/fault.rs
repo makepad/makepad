@@ -623,6 +623,8 @@ mod imp {
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         unsafe {
+            // the interrupted code's errno is what it reads after the handler (progsig KeepErrno)
+            let _errno = crate::os::progsig::KeepErrno::new();
             // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
             let _kept = crate::zone_alloc::kept();
             let gregs = uc.add(40) as *mut u64;
@@ -897,6 +899,8 @@ mod imp {
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         unsafe {
+            // the interrupted code's errno is what it reads after the handler (progsig KeepErrno)
+            let _errno = crate::os::progsig::KeepErrno::new();
             // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
             let _kept = crate::zone_alloc::kept();
             let reg = |i: usize| uc.add(OFFSETS[i]) as *mut u64;
@@ -1090,6 +1094,8 @@ mod imp {
         // macOS only: iOS has no MAP_JIT pages (no executable memory at all)
         #[cfg(target_os = "macos")]
         fn pthread_jit_write_protect_np(enabled: i32);
+        fn pthread_self() -> usize;
+        fn pthread_kill(t: usize, sig: i32) -> i32;
     }
 
     /// Darwin `struct sigaction` (user side): handler, sa_mask (u32), sa_flags.
@@ -1121,6 +1127,54 @@ mod imp {
     const SS_FP: usize = SS + 232;
     const SS_PC: usize = SS + 256;
     const SS_SP: usize = SS + 248;
+    /// ucontext_t: uc_onstack (int) at 0, uc_sigmask (u32) at 4
+    const UC_ONSTACK: usize = 0;
+    const UC_SIGMASK: usize = 4;
+    /// How far above its stack pointer a delivery the kernel set up keeps its siginfo, ucontext and
+    /// mcontext (about 1 KB of it), and how far into the trampoline its call of the handler is
+    /// (a dozen instructions).
+    const SET_UP_FRAME: u64 = 4096;
+    const TRAMP_CALL: u64 = 128;
+
+    /// The address this handler returns to, in the trampoline that called it: its frame record's
+    /// (Apple arm64 keeps one in every function that calls another).
+    #[inline(always)]
+    unsafe fn handler_return() -> u64 {
+        let fp: u64;
+        std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+        *((fp + 8) as *const u64)
+    }
+
+    /// The delivery under this one, when it is one of this handler's the kernel only set up: its
+    /// mcontext and ucontext, and its signal. Darwin takes the lowest-numbered pending signal
+    /// first, so a run's end kick (SIGEMT, 7) pending as a fetch of the ended code faults (SIGBUS,
+    /// 10) is set up first, and the SIGBUS comes in at that trampoline's entry. The kernel gave the
+    /// trampoline its arguments, x0 the handler, x2 the signal, x4 the ucontext on the stack it set
+    /// up, and a pc just before the trampoline's call of the handler, whose return is `ret` (the same
+    /// trampoline calls this delivery's handler).
+    unsafe fn not_begun_under(mc: *mut u8, ret: u64) -> Option<(*mut u8, *mut u8, i32)> {
+        let x = |i: usize| *(mc.add(SS + 8 * i) as *const u64);
+        let (pc, sp) = (*(mc.add(SS_PC) as *const u64), *(mc.add(SS_SP) as *const u64));
+        let set_up = |a: u64| a & 7 == 0 && a >= sp && a - sp < SET_UP_FRAME;
+        if x(0) != on_signal as *const () as u64 || !(1..32).contains(&x(2)) || pc >= ret || ret - pc > TRAMP_CALL || !set_up(x(4)) {
+            return None;
+        }
+        let uc = x(4) as *mut u8;
+        let umc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
+        set_up(umc as u64).then_some((umc, uc, x(2) as i32))
+    }
+
+    /// This delivery leaves for a recovery point over one that never ran: the thread goes on as
+    /// that delivery's return would have left it, with its signal mask and off the signal stack
+    /// as before it (this delivery's return restores both from `uc`). Its kick is counted off as its
+    /// handler would have; any other signal is sent to this thread again.
+    unsafe fn give_back_not_begun(uc: *mut u8, under: *mut u8, sig: i32) {
+        *(uc.add(UC_ONSTACK) as *mut i32) = *(under.add(UC_ONSTACK) as *const i32);
+        *(uc.add(UC_SIGMASK) as *mut u32) = *(under.add(UC_SIGMASK) as *const u32);
+        if !(sig == SIG_WATCHDOG && crate::os::thread::take_kick()) {
+            pthread_kill(pthread_self(), sig);
+        }
+    }
 
     pub(crate) fn default_action(sig: i32) {
         let act = SigAction { handler: 0, mask: 0, flags: 0 };
@@ -1256,6 +1310,8 @@ mod imp {
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         unsafe {
+            // the interrupted code's errno is what it reads after the handler (progsig KeepErrno)
+            let _errno = crate::os::progsig::KeepErrno::new();
             // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
             let _kept = crate::zone_alloc::kept();
             if sig == SIGABRT {
@@ -1283,7 +1339,11 @@ mod imp {
             }
             let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
             let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
-            let f = Fault { kind: kind(sig), sig, pc: *reg(SS_PC), sp: *reg(SS_SP), fp: *reg(SS_FP), addr: *(info.add(SI_ADDR) as *const u64), lr: *reg(SS + 240) };
+            // over a delivery of ours that has not begun, the fault is in what that one interrupted
+            let under = not_begun_under(mc, handler_return());
+            let at = under.map_or(mc, |u| u.0);
+            let at = |off: usize| -> u64 { *(at.add(off) as *const u64) };
+            let f = Fault { kind: kind(sig), sig, pc: at(SS_PC), sp: at(SS_SP), fp: at(SS_FP), addr: *(info.add(SI_ADDR) as *const u64), lr: at(SS + 240) };
             // the program may fault while it has its own MAP_JIT pages in write mode
             // (pthread_jit_write_protect_np(0)); recovery continues in execute mode
             #[cfg(target_os = "macos")]
@@ -1304,6 +1364,9 @@ mod imp {
                     *reg(SS_PC) = pc;
                     *reg(SS) = a0;
                     *reg(SS + 8) = a1;
+                    if let Some((_, under_uc, under_sig)) = under {
+                        give_back_not_begun(uc, under_uc, under_sig);
+                    }
                 }
             }
         }

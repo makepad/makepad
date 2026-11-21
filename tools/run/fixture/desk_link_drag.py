@@ -5,9 +5,9 @@ another device (a wireless mouse that lost its release, one left under a book).
 It presses and drags on the real desktop of the box it runs on, so it only runs on a named pool box
 with nobody on it. Pin the job to that box, from the workspace root:
 `devhub job submit --kind screen --node <pool box> -- python3 -I tools/run/fixture/desk_link_drag.py --test-box [app]`
-Without `--test-box` it refuses, and it refuses whenever the WM senses a person, what devhub's lease
-sense reads: a Desk Link viewer attached, or a person's input in the last IDLE_S (its own input
-counts, so a rerun on one box waits that long), or a WM that does not answer. Everything it pressed
+Without `--test-box` it refuses, and it refuses whenever the WM senses a person: a Desk Link viewer
+attached, or a person's input in the last IDLE_S (its own input counts, so a rerun on one box waits
+that long), or a WM that does not answer. Everything it pressed
 goes up, and the WM gets to read those ups, before its devices go away: on a failed assert and on
 SIGTERM/SIGHUP/SIGINT too. (A WM from before the per-device tracking never hears a release for a
 device that is destroyed holding a button.)
@@ -34,7 +34,7 @@ INPUT_PROP_DIRECT = 1
 BUS_USB, BUS_VIRTUAL = 3, 6
 RESCAN_S = 2.5  # raw input finds new devices within a second; a loaded box gets a margin
 RELEASE_S = 0.5  # the WM's read of the last ups, before the device goes
-IDLE_S = 180  # lease.conf's default user_idle_min
+IDLE_S = 180  # a person's input this recent: the desktop is theirs
 
 
 def wm_activity():

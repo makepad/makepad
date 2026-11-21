@@ -172,6 +172,13 @@ fn count_lines<R: BufRead>(r: R) -> usize {
 
 #[test]
 fn a05_chain_bufread() {
+    let mut readers = Cursor::new(&b"abc"[..]).chain(Cursor::new(&b"def"[..]));
+    let (first, second) = readers.get_mut();
+    first.set_position(1);
+    second.set_position(2);
+    let mut text = String::new();
+    readers.read_to_string(&mut text).unwrap();
+    println!("| chain get_mut {}", text);
     let chained = Cursor::new("a\nb".to_string()).chain(Cursor::new("\nc".to_string()));
     let lines: Vec<String> = chained.lines().map(Result::unwrap).collect();
     println!("| {lines:?}");
@@ -216,4 +223,20 @@ fn a05_chain_bufread() {
     let nested = (&b"1\n"[..]).chain(&b"2"[..]).chain((&b"\n3"[..]).chain(&b"\n"[..]));
     let lines: Vec<String> = nested.lines().map(Result::unwrap).collect();
     println!("| {lines:?}");
+}
+
+#[test]
+fn a06_line_writer_into_inner() {
+    let mut writer = io::LineWriter::new(Vec::new());
+    writer.write_all(b"one\ntwo").unwrap();
+    println!("| line writer {:?}", writer.into_inner().ok().unwrap());
+
+    let mut storage = [0u8; 2];
+    let mut writer = io::LineWriter::new(&mut storage[..]);
+    writer.write_all(b"abcd").unwrap();
+    let (error, mut writer) = writer.into_inner().unwrap_err().into_parts();
+    let mut retry = [0u8; 2];
+    *writer.get_mut() = &mut retry[..];
+    let recovered = writer.into_inner().is_ok();
+    println!("| line writer recovery {:?} {:?} {:?} {}", error.kind(), storage, retry, recovered);
 }

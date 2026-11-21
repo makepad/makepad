@@ -1,0 +1,4 @@
+[package]
+name = "tdk-side"
+version = "0.1.0"
+edition = "2021"

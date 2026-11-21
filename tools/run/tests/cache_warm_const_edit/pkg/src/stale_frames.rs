@@ -17,18 +17,13 @@ fn f3_loop_reader() {
     }
 }
 
-// stale_blocked_copy: a reader blocked in a call inside its copy: its host waits there for ever,
-// holding what it read before the edit
+// stale_blocked_copy: a host blocked in a call inside its copy: it waits there for ever, holding
+// what it read before the edit. black_box uses the copy after the call, so the call keeps the
+// host's frame (no sibling call), as rustc's black_box keeps it. The copy is the host's own: an
+// inlined reader's was only when its build inlined it (a sibling call when it did, while
+// black_box was an identity: the frame was gone, and a stale value never asked for a restart)
 pub const F3_BLOCK_K: u64 = 1;
 pub static F3_BLOCK_SEEN: AtomicU64 = AtomicU64::new(0);
-
-#[inline(always)]
-fn f3_block_reader() -> u64 {
-    let k = F3_BLOCK_K;
-    F3_BLOCK_SEEN.store(k, Relaxed);
-    f3_wait();
-    k
-}
 
 #[inline(never)]
 fn f3_wait() {
@@ -39,7 +34,10 @@ fn f3_wait() {
 
 #[inline(never)]
 fn f3_block_host() {
-    black_box(f3_block_reader());
+    let k = F3_BLOCK_K;
+    F3_BLOCK_SEEN.store(k, Relaxed);
+    f3_wait();
+    black_box(k);
 }
 
 // stale_std_loop: an associated const read by a std instance's loop: a thread drives std's

@@ -13,7 +13,7 @@ use relax_types::consts::GenericArg;
 use crate::lang_items::LangItem;
 use crate::lit::{unescape_str, unescape_bytes, strip_paren, is_assignee_pattern, parse_fmt, FmtPiece, FmtSpec};
 use crate::ast::*;
-use crate::jit::{FnKey, Unit, ShimInstance};
+use crate::jit::{rt_host_notes, rt_share_note, rt_sig_note, rt_trait_key, rt_virtual_note, FnKey, RtBoundary, RtNote, ShimInstance, Unit};
 use relax_types::instance::{Instance, InstanceKind, ShimKind};
 use crate::layout::{Layout, Leaf};
 use crate::program::{DefId, DefKind, Prim};
@@ -31,6 +31,25 @@ pub const VT_DROP: u32 = 0;
 pub const VT_SIZE: u32 = 1;
 pub const VT_ALIGN: u32 = 2;
 pub const VT_METHODS: u32 = 3;
+
+/// Records a slot whose completed lowering calls indirectly without a call-site note.
+pub(crate) fn rt_check_notes(u: &Unit, id: u32, f: &Func) {
+    let indirect = f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+        matches!(i, Inst::Call(Callee::Indirect(_) | Callee::CIndirect(..), ..))
+    });
+    if !indirect { return; }
+    for sym in &f.notes {
+        let Some(crate::syms::SymKind::Note(name)) = u.syms.kind(sym.id) else { continue };
+        if matches!(RtNote::parse(&name),
+            Some(RtNote::Virtual(..) | RtNote::All { host: false, .. } | RtNote::Sig { host: false, .. })) {
+            return;
+        }
+    }
+    let first = crate::zone_alloc::kept_with(|| u.rt_unnoted.lock().unwrap_or_else(|e| e.into_inner()).insert(id));
+    if first && crate::jit::rt_trace() {
+        eprintln!("relax realtime: indirect call without a call-site note in #{} {}", id, f.name);
+    }
+}
 
 #[derive(Clone)]
 pub enum Val {
@@ -229,7 +248,8 @@ pub struct Lcx<'a> {
     /// lowering a const/static initializer: borrowed temporaries live in static memory
     /// (rustc's constant promotion), not on the initializer's stack
     const_init: bool,
-    // N:rustc_mir_build/src/builder/mod.rs:777-785: const owners always check overflow.
+    // N:rustc_mir_build/src/builder/mod.rs:777-785: const owners always check overflow; a body
+    // marked #[rustc_inherit_overflow_checks] checks as the program does (`inherited_checks`).
     overflow_checks: bool,
     /// a #[track_caller] fn: its implicit `&'static Location` parameter
     caller_loc: Option<VReg>,
@@ -806,6 +826,14 @@ impl<'a> Lcx<'a> {
         }
         let prog = &self.u.prog;
         self.errors.push(prog.record_error(self.b.file, pos, "lower", msg));
+    }
+
+    /// The overflow checks code that inherits them has (rustc's `#[rustc_inherit_overflow_checks]`,
+    /// `intrinsics::overflow_checks`): in a std crate the program's, which std is compiled for
+    /// (relax_overflow_checks, lib.rs std_cfg); in another crate its own profile's (KNOWN_GAPS 16:
+    /// rustc's are the instantiating crate's).
+    fn inherited_checks(&self) -> bool {
+        self.u.prog.file_crate.get(self.b.file as usize).and_then(|&k| self.u.prog.crates.get(k as usize)).is_some_and(|c| c.cfg.holds("relax_overflow_checks") || c.cfg.holds("overflow_checks"))
     }
 
     fn ast(&self) -> &'a Ast {
@@ -2085,10 +2113,13 @@ impl<'a> Lcx<'a> {
     }
 
     pub fn lower_fn_body(&mut self, def: DefId) {
-        self.overflow_checks |= matches!(self.u.prog.def(def).kind, DefKind::Const | DefKind::AssocConst | DefKind::Static | DefKind::AnonConst);
-        self.scan_addr_taken();
         let ast = self.ast();
         let prog_def_item = self.u.prog.def(def).item;
+        if matches!(self.u.prog.def(def).kind, DefKind::Fn | DefKind::AssocFn) && crate::lang_items::has_attr(&self.u.prog, self.u.prog.def(def).file, ast.list(ast.item(prog_def_item).attrs), "rustc_inherit_overflow_checks") {
+            self.overflow_checks = self.inherited_checks();
+        }
+        self.overflow_checks |= matches!(self.u.prog.def(def).kind, DefKind::Const | DefKind::AssocConst | DefKind::Static | DefKind::AnonConst);
+        self.scan_addr_taken();
         if self.u.prog.def(def).kind == DefKind::AnonConst {
             let e = relax_types::const_eval::const_body(&self.u.prog, def).expect("anonymous const body");
             let out = self.f.vreg(Cls::I);
@@ -2298,7 +2329,15 @@ impl<'a> Lcx<'a> {
         }
         self.scan_addr_taken();
         let (params, body) = match &ast.expr(ExprId(ce)).kind {
-            ExprKind::Closure(row) => { let r = ast.row(*row); (r.params.clone(), r.body) }
+            ExprKind::Closure(row) => {
+                let r = ast.row(*row);
+                // a closure checks as the crate it is written in unless it is marked itself
+                // (rustc: the body owner's own attributes), as std's sum and product folds are
+                if r.inherit_overflow_checks {
+                    self.overflow_checks = self.inherited_checks();
+                }
+                (r.params.clone(), r.body)
+            }
             // a closure slot whose expression id names something else in this parse (a code
             // cache entry made from another numbering of the file): an error, never empty code
             _ => {
@@ -2816,15 +2855,23 @@ impl<'a> Lcx<'a> {
         next
     }
 
+    fn rt_note(&mut self, name: String) {
+        let sym = self.u.syms.note(name);
+        if !self.f.notes.contains(&sym) { self.f.notes.push(sym); }
+    }
+
     /// C-family pointers use the existing C ABI classifier, including the fixed
     /// parameter count of a variadic call (rustc_ty_utils/src/abi.rs:597).
-    fn fn_ptr_callee(&mut self, f: VReg, ps: &[TyId], ret: TyId, header: crate::types::FnHeader, args: &mut Vec<(Val, TyId)>) -> Callee {
+    fn fn_ptr_callee(&mut self, f: VReg, sig: &TyKind, call_ret: TyId, args: &mut Vec<(Val, TyId)>) -> Callee {
+        let TyKind::FnPtr(ps, ret, header, _) = sig else { unreachable!("fn pointer callee") };
+        let ps = self.u.tcx.tys.list(*ps);
+        self.rt_note(rt_sig_note(self.u, ps, *ret, header.abi.is_c_like(), false));
         if header.abi == crate::types::Abi::RustCall { self.spread_tuple_argument(args); }
         if header.abi.is_c_like() {
             let fixed = if header.c_variadic { Some(ps.len()) } else { None };
             let mut params = Vec::new();
             for (_, ty) in args { params.push(*ty); }
-            let cs = crate::cabi::c_sig(self.u, &params, ret, fixed, header.abi);
+            let cs = crate::cabi::c_sig(self.u, &params, call_ret, fixed, header.abi);
             Callee::CIndirect(f, Box::new(cs))
         } else {
             Callee::Indirect(f)
@@ -5374,6 +5421,7 @@ impl<'a> Lcx<'a> {
             }
             TyKind::Dyn(..) => {
                 // a `dyn` tail: through the vtable's drop entry (0 when nothing to drop)
+                self.rt_note(rt_virtual_note(self.u, t, VT_DROP));
                 let fp = self.f.vreg(Cls::I);
                 let pm = self.pmem();
                 self.emit(Inst::Load(pm, fp, len, (VT_DROP * self.pb()) as i32));
@@ -7198,7 +7246,12 @@ impl<'a> Lcx<'a> {
                 // The same principal trait (`dyn Any + 'static` to `dyn Any`, an auto trait
                 // dropped) keeps its vtable (rustc codegen unsized_info): the value is unchanged,
                 // whatever holds the pointer (`Ref<'_, dyn Any>` passed on as `Ref<'_, T>`).
-                let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else { return v };
+                let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else {
+                    if rt_trait_key(self.u, dd) == "-" && rt_trait_key(self.u, sd) != "-" {
+                        self.rt_note(rt_share_note(self.u, sd));
+                    }
+                    return v;
+                };
                 // (data, vtable of Sub) -> (data, Sub's stored vtable for Super); a smart
                 // pointer's other fields stay (a Box's allocator)
                 let st = from;
@@ -9523,6 +9576,27 @@ impl<'a> Lcx<'a> {
                     if self.overflow_checks { self.shift_check(*op, self.int_ty(t).bits as u32, (y.0, Some(y.1))); }
                     return Val::L(vec![self.arith(*op, t, x.0, y.0, bt)]);
                 }
+                // A factor whose value fits one 64-bit word (`a as i128` of a 64-bit or narrower integer,
+                // a literal): `a as i128 * b as i128` never overflows, so it is one widening multiply
+                // (imul / smulh; mul / umulh) and no check -- rustc's, where a general 128-bit product
+                // and its overflow check take eleven 64-bit multiplies (exact geometry predicates: a large app's
+                // slicer cross and dot products, 18% of its segment splitting under the JIT); a full
+                // 128-bit value by one word (`d as i128 * num`, `2 * n`) is four multiplies and the
+                // check of its third word (rustc's inline smulo of a sign-extended factor)
+                if *op == BinOp::Mul && self.is_wide(t) {
+                    let signed = self.wide_signed(t);
+                    let (wa, wb) = (self.fits_word(*a, signed), self.fits_word(*b, signed));
+                    if wa && wb {
+                        let lo = self.ibin(IOp::Mul, false, x.0, y.0);
+                        let hi = self.ibin(IOp::MulHi, signed, x.0, y.0);
+                        return Val::L(vec![lo, hi]);
+                    }
+                    if self.overflow_checks && (wa || wb) {
+                        let (full, word) = if wb { (x, y.0) } else { (y, x.0) };
+                        let (lo, hi) = self.checked_mul_by_word(signed, full, word);
+                        return Val::L(vec![lo, hi]);
+                    }
+                }
                 match self.checked_wide_arith(*op, t, x, y) {
                     Some((lo, hi)) => Val::L(vec![lo, hi]),
                     None => {
@@ -9862,6 +9936,70 @@ impl<'a> Lcx<'a> {
     // N:rustc_mir_build/src/builder/expr/as_rvalue.rs:103-123,457-541.
     // Round-30 design: checked arithmetic's flag is computed with existing RIR ops.
     // N:rustc_mir_build/src/thir/cx/expr.rs:676-683 lowers -literal as a literal.
+    /// Does the value of the 128-bit operand `expr` fit one 64-bit word -- signed (i64) for a
+    /// signed type, unsigned (u64) for an unsigned one -- whatever it is at run time? Then its
+    /// high word is its low word's sign (zero). `x as T` of a narrower integer (a signed one into
+    /// a signed type, or one of fewer than 64 bits; an unsigned one into an unsigned type), an
+    /// integer literal in range, a negated literal in a signed type; parenthesized or not.
+    fn fits_word(&self, mut expr: ExprId, signed: bool) -> bool {
+        let mut negated = false;
+        loop {
+            let ex = self.ast().expr(expr);
+            match ex.kind {
+                ExprKind::Paren(inner) => expr = inner,
+                ExprKind::Unary(UnOp::Neg, inner) if signed && !negated => {
+                    negated = true;
+                    expr = inner;
+                }
+                ExprKind::Cast(inner, _) if !negated => {
+                    let xt = self.body_ty(inner);
+                    if !matches!(self.kind_ref(xt), TyKind::Int(_)) || self.is_wide(xt) {
+                        return false;
+                    }
+                    let it = self.int_ty(xt);
+                    return if signed { it.signed || it.bits < 64 } else { !it.signed };
+                }
+                ExprKind::Lit(LitKind::Int) => {
+                    let Some(v) = crate::const_fold::parse_int_lit(&self.src_text(ex.lo, ex.hi)) else { return false };
+                    return if negated { v <= 1u128 << 63 } else if signed { v <= i64::MAX as u128 } else { v <= u64::MAX as u128 };
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// `full * word` under overflow checks, `word` a 64-bit value (its high word its sign, or zero
+    /// for unsigned): full = x1 * 2^64 + x0, so the product is x0 * word (x0 unsigned) plus
+    /// x1 * word shifted up a word. Its three words: the 128-bit result and a third, which must
+    /// be the result's sign (zero) for the product to fit.
+    fn checked_mul_by_word(&mut self, signed: bool, full: (VReg, VReg), word: VReg) -> (VReg, VReg) {
+        let lo = self.ibin(IOp::Mul, false, full.0, word);
+        let mut hi0 = self.ibin(IOp::MulHi, false, full.0, word);
+        if signed {
+            // the unsigned high product counts a negative word as word + 2^64: take x0 back off
+            let k63 = self.iconst(63);
+            let mask = self.ibin(IOp::Shr, true, word, k63);
+            let over = self.ibin(IOp::And, false, full.0, mask);
+            hi0 = self.ibin(IOp::Sub, false, hi0, over);
+        }
+        let lo1 = self.ibin(IOp::Mul, false, full.1, word);
+        let hi1 = self.ibin(IOp::MulHi, signed, full.1, word);
+        let hi = self.ibin(IOp::Add, false, hi0, lo1);
+        let carry = self.icmp(Cond::Lt, false, hi, hi0);
+        let mut third = self.ibin(IOp::Add, false, hi1, carry);
+        let expected = if signed {
+            let k63 = self.iconst(63);
+            let sign0 = self.ibin(IOp::Shr, true, hi0, k63);
+            third = self.ibin(IOp::Add, false, third, sign0);
+            self.ibin(IOp::Shr, true, hi, k63)
+        } else {
+            self.iconst(0)
+        };
+        let overflow = self.icmp(Cond::Ne, false, third, expected);
+        self.overflow_assert(overflow, arithmetic_overflow_message(BinOp::Mul));
+        (lo, hi)
+    }
+
     fn negated_literal(&self, mut expr: ExprId) -> bool {
         loop {
             match self.ast().expr(expr).kind {
@@ -11205,6 +11343,7 @@ impl<'a> Lcx<'a> {
         let args = instance.compact_args(&self.u.tcx);
         match instance.def {
             InstanceKind::Virtual(d, index) => {
+                self.rt_note(rt_virtual_note(self.u, args[0], index as u32));
                 let receiver = self.to_leaves(vals[0].0.clone(), vals[0].1);
                 assert_eq!(receiver.len(), 2, "virtual receiver metadata");
                 let ptr = self.f.vreg(Cls::I);
@@ -11244,7 +11383,8 @@ impl<'a> Lcx<'a> {
                 self.read_place(&Place::Mem(p[0], 0), ret)
             }
             InstanceKind::Item(d) => {
-                let sig = self.u.tcx.fn_item_sig(&self.u.prog, d).expect("item signature");
+                let u = self.u;
+                let sig = u.tcx.fn_item_sig(&u.prog, d).expect("item signature");
                 let foreign = self.u.prog.def(d).kind == DefKind::ForeignFn;
                 let mut types = Vec::new();
                 for value in &vals { types.push(value.1); }
@@ -11261,6 +11401,7 @@ impl<'a> Lcx<'a> {
                         return self.dummy_val(ret);
                     };
                     let fixed = if sig.header.c_variadic { Some(sig.params.len()) } else { None };
+                    rt_host_notes(u, &types, RtBoundary::Foreign, |name| self.rt_note(name));
                     Callee::CHost(address, Box::new(crate::cabi::c_sig(self.u, &types, ret, fixed, sig.header.abi)))
                 } else if sig.header.abi.is_c_like() {
                     let cs = crate::cabi::c_sig(self.u, &types, ret, None, sig.header.abi);
@@ -11354,20 +11495,20 @@ impl<'a> Lcx<'a> {
             if let TyKind::FnDef(..) = self.kind(pt) {
                 ft = pt;
             } else {
-                return match self.kind(pt) {
-                    TyKind::FnPtr(ps, _, c, _) => {
+                return match self.kind_ref(pt) {
+                    sig @ TyKind::FnPtr(ps, ..) => {
                         let fv = self.read_place(&pl, pt);
                         let fv = self.to_leaves(fv, pt);
                         let mut vals = Vec::new();
                         let mut guards = Vec::new();
                         for (i, a) in args.iter().enumerate() {
-                            let p = self.u.tcx.tys.list(ps).get(i).copied().unwrap_or_else(|| self.body_ty(*a));
+                            let p = self.u.tcx.tys.list(*ps).get(i).copied().unwrap_or_else(|| self.body_ty(*a));
                             let v = self.lower_expr_coerced(*a, p);
                             let v = self.guard_operand(&args[i + 1..], v, p, &mut guards);
                             vals.push((v, p));
                         }
                         self.unguard(&guards);
-                        let callee = self.fn_ptr_callee(fv[0], self.u.tcx.tys.list(ps), t, c, &mut vals);
+                        let callee = self.fn_ptr_callee(fv[0], sig, t, &mut vals);
                         self.emit_call(callee, vals, t)
                     }
                     _ => {
@@ -11429,7 +11570,7 @@ impl<'a> Lcx<'a> {
                 self.emit_instance(instance, vals, t)
             }
 
-            TyKind::FnPtr(ps, _, c, _) => {
+            sig @ TyKind::FnPtr(ps, ..) => {
                 let fv = self.lower_expr(f);
                 let fv = self.to_leaves(fv, ft);
                 let mut vals = Vec::new();
@@ -11441,7 +11582,7 @@ impl<'a> Lcx<'a> {
                     vals.push((v, pt));
                 }
                 self.unguard(&guards);
-                let callee = self.fn_ptr_callee(fv[0], self.u.tcx.tys.list(*ps), t, *c, &mut vals);
+                let callee = self.fn_ptr_callee(fv[0], sig, t, &mut vals);
                 self.emit_call(callee, vals, t)
             }
             _ => {
@@ -11770,6 +11911,7 @@ impl<'a> Lcx<'a> {
                 if let Some(g) = g0 {
                     if let TyKind::Dyn(..) = self.kind(g) {
                         // through the vtable's drop entry (0 when the type has no drop)
+                        self.rt_note(rt_virtual_note(self.u, g, VT_DROP));
                         let fp = self.f.vreg(Cls::I);
                         let pm = self.pmem();
                         self.emit(Inst::Load(pm, fp, p[1], (VT_DROP * self.pb()) as i32));
@@ -12150,7 +12292,23 @@ impl<'a> Lcx<'a> {
                 self.emit(Inst::Call(Callee::Host(rt), vec![slot, z, n], Vec::new()));
                 self.load_val(slot, 0, g)
             }
-            "black_box" => vals[0].0.clone(),
+            // rustc_codegen_llvm (intrinsic black_box): the value goes to the result's place and
+            // an empty asm block takes its address with a memory clobber (a ZST: the clobber
+            // alone), so no pass sees through it: the value is made, kept and read back. (As an
+            // identity it was dead after a call, which then became a sibling call: the frame
+            // that held the value was gone from the stack a live edit's landing check reads.)
+            "black_box" => {
+                let g = g0?;
+                if self.layout(g).size == 0 {
+                    self.emit(Inst::Call(Callee::Asm(Box::new(AsmBlock::opaque(Vec::new()))), Vec::new(), Vec::new()));
+                    vals[0].0.clone()
+                } else {
+                    let slot = self.new_slot_for(g);
+                    self.store_val(slot, 0, g, vals[0].0.clone());
+                    self.emit(Inst::Call(Callee::Asm(Box::new(AsmBlock::opaque(vec![relax_backend::asm::PReg::int(0)]))), vec![slot], Vec::new()));
+                    self.load_val(slot, 0, g)
+                }
+            }
             "type_name" => {
                 let s = match g0 {
                     Some(g) => crate::typeck::type_name(&self.u.prog, &self.u.tcx, g),
@@ -12955,6 +13113,12 @@ impl<'a> Lcx<'a> {
                 self.emit(Inst::Call(Callee::Host(rt), Vec::new(), vec![r]));
                 Some(Val::L(vec![r]))
             }
+            "overflow_checks" => {
+                // intrinsics::overflow_checks() -> bool: true in constant evaluation, as rustc's (one
+                // value there for every crate); in code, the checks its crate inherits
+                let on = self.const_init || self.inherited_checks();
+                Some(Val::L(vec![self.iconst(on as i64)]))
+            }
             "rethrow" => {
                 // intrinsics_rt::rethrow(): Rt::rethrow (the next panic continues a reported one)
                 let rt = self.u.rs.rethrow;
@@ -13489,12 +13653,16 @@ pub fn bridge_func(u: &Unit, d: DefId, name: String, shim: relax_backend::rir::S
     let s = u.tcx.fn_sig(&u.prog, d).cloned()?;
     let ps: Vec<TyId> = s.params.iter().map(|p| u.tcx.normalize_erasing_late_bound_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), *p)).collect();
     let ret = u.tcx.normalize_erasing_late_bound_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), s.ret);
-    Some(bridge_func_sig(u, &ps, ret, name, shim, last_panic))
+    Some(bridge_func_sig(u, u.prog.def(d).krate, &ps, ret, name, shim, last_panic))
 }
 
 /// bridge_func for an explicit signature (a derived method of an opaque type).
-pub fn bridge_func_sig(u: &Unit, ps: &[TyId], ret: TyId, name: String, shim: relax_backend::rir::Sym, last_panic: relax_backend::rir::Sym) -> Func {
+pub fn bridge_func_sig(u: &Unit, krate: u32, ps: &[TyId], ret: TyId, name: String, shim: relax_backend::rir::Sym, last_panic: relax_backend::rir::Sym) -> Func {
     let mut f = Func::new(name, 0);
+    rt_host_notes(u, ps, RtBoundary::Provided(krate), |name| {
+        let sym = u.syms.note(name);
+        if !f.notes.contains(&sym) { f.notes.push(sym); }
+    });
     let b = f.block();
     let rl = u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, ret);
     let mut rets = Vec::new();
@@ -14399,8 +14567,10 @@ leaf fn rt_wide_f64(signed: u64, lo: u64, hi: u64) -> f64 {
 
 rt_fn! {
 /// 128-bit quotient or remainder (mode bit 0: remainder, bit 1: signed). The caller has checked a
-/// zero divisor and signed MIN / -1. (A host helper for now; candidate for an Rt entry.)
-fn rt_divrem128(mode: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> WideRet {
+/// zero divisor and signed MIN / -1 (wide_divrem), so it cannot panic: a leaf entry, without the
+/// panic guard each call paid (two divisions a crossing point in a large app's slicer). (A host helper
+/// for now; candidate for an Rt entry.)
+leaf fn rt_divrem128(mode: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> WideRet {
     let a = ((ahi as u128) << 64) | alo as u128;
     let b = ((bhi as u128) << 64) | blo as u128;
     let r: u128 = if mode & 2 != 0 {
@@ -16429,9 +16599,9 @@ pub fn shim_func(u: &Unit, shim: &ShimInstance, id: u32) -> Result<Func, String>
                 call_args.push((l.read_place(&place, ty), ty));
             }
             let callee = match l.kind(callable) {
-                TyKind::FnPtr(inputs, _, header, _) => {
+                ref sig @ TyKind::FnPtr(..) => {
                     let ptr = l.to_leaves(receiver, callable)[0];
-                    l.fn_ptr_callee(ptr, u.tcx.tys.list(inputs), ret, header, &mut call_args)
+                    l.fn_ptr_callee(ptr, sig, ret, &mut call_args)
                 }
                 TyKind::FnDef(d, args, _) => {
                     let instance = u.tcx.resolve_instance_raw(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, u.tcx.tys.list(args)).map_err(|e| format!("shim callee: {e:?}"))?;

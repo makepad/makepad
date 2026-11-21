@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 tdk-base = { path = "../base" }
+tdk-side = { path = "../side" }

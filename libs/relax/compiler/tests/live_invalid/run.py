@@ -27,7 +27,9 @@ pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
 work = os.path.join(pkg, "src", "work.rs")
 base = open(work).read()
-env = dict(os.environ, RELAX_CACHE="0", RELAX_STALE_PARK="1")
+# the park is this test's own: a devhub node does not release it, as it does a park in the run of a
+# lease nobody attends
+env = dict(os.environ, RELAX_CACHE="0", RELAX_STALE_PARK="1", RELAX_EXPECTED_CRASH="live_invalid parks a stale access and decides it")
 out, err = [], []
 def pump(f, acc):
     for line in f:

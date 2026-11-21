@@ -35,6 +35,8 @@ pub use core::iter;
 pub use core::marker;
 pub use core::mem;
 pub use core::ops;
+/// rustc 1.96.0 (new_range_api): range values and their iterators.
+pub use core::range;
 pub use core::option;
 /// std's preludes (library/std/src/prelude): std's own modules over core's (the resolver injects core's
 /// into every crate; these are what `std::prelude::..` paths name). They differ from core's in the macro
@@ -61,7 +63,10 @@ pub use core::primitive;
 pub use core::ptr;
 pub use core::result;
 pub use core::slice;
-pub use core::str;
+pub mod str {
+    pub use ::alloc::str::from_boxed_utf8_unchecked;
+    pub use core::str::*;
+}
 pub use core::i8;
 pub use core::i16;
 pub use core::i32;

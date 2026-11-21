@@ -373,6 +373,11 @@ pub enum Cmp {
     K(Cond, bool, VReg, i64),
     /// `FCmp(cond, f64, _, a, b)`
     F(Cond, bool, VReg, VReg),
+    /// `a op b` overflows the signed type (Add, Sub or Mul at 32 or 64 bits): rustc's checked
+    /// arithmetic, branched on the op's own overflow flag. Made by
+    /// `regalloc::overflows_into_branches` for a `Term::BranchCmp` only, after every pass that
+    /// turns a compare back into an instruction (`inst`) or reads its condition (`cond`).
+    O(IOp, IntTy, VReg, VReg),
 }
 
 impl Cmp {
@@ -391,11 +396,13 @@ impl Cmp {
             Cmp::R(c, s, a, b) => Inst::ICmp(c, s, d, a, b),
             Cmp::K(c, s, a, k) => Inst::ICmpI(c, s, d, a, k),
             Cmp::F(c, w, a, b) => Inst::FCmp(c, w, d, a, b),
+            Cmp::O(..) => unreachable!("an overflow branch is made after every pass that makes a compare's instruction"),
         }
     }
     pub fn cond(self) -> Cond {
         match self {
             Cmp::R(c, ..) | Cmp::K(c, ..) | Cmp::F(c, ..) => c,
+            Cmp::O(..) => unreachable!("an overflow branch is made after every pass that reads a compare's condition"),
         }
     }
     /// The compare that is true exactly when this one is false (None: an ordered float compare,
@@ -406,6 +413,8 @@ impl Cmp {
             Cmp::K(c, s, a, k) => Some(Cmp::K(c.not(), s, a, k)),
             Cmp::F(c @ (Cond::Eq | Cond::Ne), w, a, b) => Some(Cmp::F(c.not(), w, a, b)),
             Cmp::F(..) => None,
+            // (no Cond says "does not overflow")
+            Cmp::O(..) => None,
         }
     }
     /// Whether it reads v.
@@ -417,7 +426,7 @@ impl Cmp {
     /// The registers it reads.
     pub fn uses(self, mut f: impl FnMut(VReg)) {
         match self {
-            Cmp::R(_, _, a, b) | Cmp::F(_, _, a, b) => {
+            Cmp::R(_, _, a, b) | Cmp::F(_, _, a, b) | Cmp::O(_, _, a, b) => {
                 f(a);
                 f(b);
             }
@@ -426,7 +435,7 @@ impl Cmp {
     }
     pub fn vregs_mut(&mut self, mut f: impl FnMut(&mut VReg)) {
         match self {
-            Cmp::R(_, _, a, b) | Cmp::F(_, _, a, b) => {
+            Cmp::R(_, _, a, b) | Cmp::F(_, _, a, b) | Cmp::O(_, _, a, b) => {
                 f(a);
                 f(b);
             }
@@ -563,6 +572,9 @@ pub enum RelocKind {
     X64Branch32,
     /// arm64 `b`/`bl` at `at`: (value - pc) / 4 in imm26 (+-128 MB); out of reach: a veneer
     A64Branch26,
+    /// An embedder note with no code effect. `at` is zero and `target` names a symbol from
+    /// `Func::notes`. Relax uses these notes for the call sites of its real-time reach.
+    Note,
 }
 
 /// Reach of a pc-relative branch field from the branch's own pc (`RelocKind::X64Branch32`: from
@@ -744,6 +756,9 @@ pub fn link(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(Reloc
 /// (None: no veneer, the link fails).
 pub fn link_with(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(Reloc) -> u64, veneer: &dyn Fn(RelocKind, u64, u64) -> Option<u64>) -> Result<(), String> {
     for r in relocs {
+        if r.kind == RelocKind::Note {
+            continue;
+        }
         let at = r.at as usize;
         let mut v = value(r.target);
         if matches!(r.kind, RelocKind::X64Branch32 | RelocKind::A64Branch26) {
@@ -760,6 +775,7 @@ pub fn link_with(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(
         };
         let wr32 = |c: &mut [u8], o: usize, w: u32| c[o..o + 4].copy_from_slice(&w.to_le_bytes());
         match r.kind {
+            RelocKind::Note => {}
             RelocKind::A64CoverageBit { bit, words } => {
                 if bit >= 64 || words == 0 || words >= 1 << 25 || at % 4 != 0 || at + words as usize * 4 > code.len() || rd32(code, at)? != 0xD503_201F {
                     return Err(format!("invalid coverage probe at {}", at));
@@ -897,6 +913,23 @@ pub struct AsmBlock {
     pub writes: u64,
     /// ASM_* bits
     pub opts: u32,
+}
+
+impl AsmBlock {
+    /// The empty block rustc makes `black_box` of (rustc_codegen_llvm intrinsic.rs: an empty
+    /// `asm!` with the value's address as its input and a memory clobber; for a ZST the clobber
+    /// alone): it runs no instruction, but every pass sees a call that may read and write any
+    /// memory, the input's included, so none sees through it.
+    pub fn opaque(ins: Vec<crate::asm::PReg>) -> AsmBlock {
+        let regs = ins.iter().fold(0u64, |m, r| m | 1 << r.bit());
+        AsmBlock { code: Vec::new(), fixups: Vec::new(), ins, outs: Vec::new(), regs, writes: 0, opts: ASM_NOSTACK | ASM_PRESERVES_FLAGS }
+    }
+
+    /// A block of no instructions (`opaque`): code that cannot run inline assembly (wasm,
+    /// sandboxed code) keeps it as the barrier it is to the passes and emits nothing for it.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_empty() && self.fixups.is_empty() && self.outs.is_empty()
+    }
 }
 
 /// An aggregate passed or returned by value under the C ABI.
@@ -1368,6 +1401,10 @@ pub struct Func {
     /// slot passed there is written by the call, not read (forward_slot_dests_x builds such a
     /// result straight where it is copied to)
     pub sret_callees: Vec<u32>,
+    /// Symbols the embedder attaches to this body for Relax's real-time call-site notes.
+    /// `relax_codegen::native::compile_freq` emits them as `RelocKind::Note` after the code's
+    /// relocations. A caller that inlines this body takes its notes too (opt.rs).
+    pub notes: Vec<Sym>,
     /// (callee, argument index, may return it) of calls whose callee keeps no copy of that
     /// pointer argument (codegen opt::param_escape over its body): a frame address passed there
     /// does not escape for sibling calls (tail.rs), the call's result is one when it may be
@@ -1602,7 +1639,7 @@ impl Func {
     /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
     /// injective maps: the bodies are equal up to a renaming of their slots.
     pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, notes, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
         let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
             (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
             (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
@@ -1639,6 +1676,7 @@ impl Func {
             && *sret == o.sret
             && sret_callees.len() == o.sret_callees.len()
             && sret_callees.iter().zip(&o.sret_callees).all(|(x, y)| ma(*x) == mb(*y))
+            && *notes == o.notes
             && nocapture.len() == o.nocapture.len()
             && nocapture.iter().zip(&o.nocapture).all(|(x, y)| x.1 == y.1 && x.2 == y.2 && x.3 == y.3 && callee_eq(&x.0, ma, &y.0, mb))
             && nounwind_inputs.len() == o.nounwind_inputs.len()
@@ -1671,7 +1709,7 @@ impl Func {
     /// noalias facts count as one set, withheld or not (SPEC-V moves them by verdict, not text).
     pub fn lowering_digest(&self) -> BodyDigest {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file: _, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline: _, lowering: _, pending: _, full: _, owned, nonnull, param_ints, ranged, naked, inl: _, inl_slots: _, dbg: _, halves, patch_flag: _, guard_calls: _, unguarded_flags: _, copy_ver: _, guard_size: _, patched_path: _, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file: _, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, notes, nocapture, nounwind_inputs, baseline: _, lowering: _, pending: _, full: _, owned, nonnull, param_ints, ranged, naked, inl: _, inl_slots: _, dbg: _, halves, patch_flag: _, guard_calls: _, unguarded_flags: _, copy_ver: _, guard_size: _, patched_path: _, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
         fn sym(s: &Sym, h: &mut relax_session::sip::Sip128, sy: &mut FirstSeen) {
             sy.get(s.id).hash(h);
             s.off.hash(h);
@@ -1742,6 +1780,10 @@ impl Func {
         for x in sret_callees {
             sl.get(*x).hash(&mut h);
         }
+        notes.len().hash(&mut h);
+        for note in notes {
+            sym(note, &mut h, &mut sy);
+        }
         nocapture.len().hash(&mut h);
         for (c, i, r, e) in nocapture {
             callee(c, &mut h, &mut sl, &mut sy);
@@ -1759,7 +1801,7 @@ impl Func {
     /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
     pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, notes, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path, keep_frames, digest: _, inl_digest: _, inl_waits: _ } = self;
         fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
             match c {
                 Callee::Fn(x) => {
@@ -1808,6 +1850,7 @@ impl Func {
         for x in sret_callees {
             m(*x).hash(h);
         }
+        notes.hash(h);
         nocapture.len().hash(h);
         for (c, i, r, e) in nocapture {
             callee(c, h, m);
@@ -2006,7 +2049,7 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false, keep_frames: false, digest: None, inl_digest: Vec::new(), inl_waits: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), notes: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false, keep_frames: false, digest: None, inl_digest: Vec::new(), inl_waits: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
@@ -2057,7 +2100,7 @@ impl Func {
     /// A compare's operands against its kind.
     fn check_cmp(&self, c: &Cmp, what: &str) -> Result<(), String> {
         let want = match c {
-            Cmp::R(..) | Cmp::K(..) => Cls::I,
+            Cmp::R(..) | Cmp::K(..) | Cmp::O(..) => Cls::I,
             Cmp::F(_, true, ..) => Cls::F64,
             Cmp::F(_, false, ..) => Cls::F32,
         };

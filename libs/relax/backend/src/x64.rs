@@ -107,6 +107,13 @@ pub struct Env {
 }
 
 impl Env {
+    /// The environment of standalone code (code outside Relax's Rust JIT): no function slots, no
+    /// thread-local block, no resume trampoline, no symbol table; host calls go through pool words, so
+    /// the code is position independent. `opt_regs`: thorough register allocation.
+    pub fn standalone(opt_regs: bool) -> Env {
+        Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs, syms: 0, sym_class: 0, near: false }
+    }
+
     /// The current value of a relocated word.
     pub fn reloc_value(&self, r: Reloc) -> u64 {
         match r {
@@ -128,9 +135,29 @@ struct Asm {
     b: Vec<u8>,
     /// pending scaled index (index reg, shift) for the next memory operand
     sib: Option<(u8, u8)>,
+    /// Flags an instruction set for a later jcc (`mark_flags`): where the run of it and the
+    /// flag-neutral code after it ends. The neutral encoders (mov, load, store, lea, movsx /
+    /// movzx) extend the run (`neutral`); any other byte leaves the code past it, and the flags
+    /// count as gone (`flags_kept`): what reads them makes them again.
+    flags: Option<usize>,
 }
 
 impl Asm {
+    /// The flags of the instruction just emitted are read later, past flag-neutral code only.
+    fn mark_flags(&mut self) {
+        self.flags = Some(self.pos());
+    }
+    /// The flags `mark_flags` marked still hold here.
+    fn flags_kept(&self) -> bool {
+        self.flags == Some(self.pos())
+    }
+    /// A flag-neutral encoder wrote the bytes from `p` on: a run of marked flags it continues
+    /// goes on (it may start inside the run: one neutral encoder calling another).
+    fn neutral(&mut self, p: usize) {
+        if let Some(e) = self.flags {
+            self.flags = (p <= e).then_some(self.pos());
+        }
+    }
     fn byte(&mut self, x: u8) {
         self.b.push(x);
     }
@@ -222,12 +249,15 @@ impl Asm {
     }
     fn mov_rr(&mut self, dst: u8, src: u8) {
         if dst != src {
+            let p = self.pos();
             self.alu_rr(0x89, dst, src);
+            self.neutral(p);
         }
     }
     /// mov_ri that leaves the flags alone (no `xor r, r` for 0): operands materialised between a
     /// fused compare and its jcc / cmovcc / setcc
     fn mov_ri_nf(&mut self, dst: u8, v: i64) {
+        let p = self.pos();
         if v == 0 {
             self.rex(false, 0, 0, dst, false);
             self.byte(0xb8 + (dst & 7));
@@ -235,6 +265,7 @@ impl Asm {
         } else {
             self.mov_ri(dst, v);
         }
+        self.neutral(p);
     }
     fn mov_ri(&mut self, dst: u8, v: i64) {
         if v == 0 {
@@ -258,9 +289,11 @@ impl Asm {
         }
     }
     fn load64(&mut self, dst: u8, base: u8, disp: i32) {
+        let p = self.pos();
         self.rex(true, dst, 0, base, false);
         self.byte(0x8b);
         self.modrm_mem(dst, base, disp);
+        self.neutral(p);
     }
     /// add dst, [base + disp] (64-bit)
     fn add_load64(&mut self, dst: u8, base: u8, disp: i32) {
@@ -269,14 +302,18 @@ impl Asm {
         self.modrm_mem(dst, base, disp);
     }
     fn store64(&mut self, base: u8, disp: i32, src: u8) {
+        let p = self.pos();
         self.rex(true, src, 0, base, false);
         self.byte(0x89);
         self.modrm_mem(src, base, disp);
+        self.neutral(p);
     }
     fn lea(&mut self, dst: u8, base: u8, disp: i32) {
+        let p = self.pos();
         self.rex(true, dst, 0, base, false);
         self.byte(0x8d);
         self.modrm_mem(dst, base, disp);
+        self.neutral(p);
     }
     /// and dst, k (64-bit, k sign-extended)
     fn and_ri(&mut self, dst: u8, k: i32) {
@@ -369,6 +406,7 @@ impl Asm {
     /// d = the low `bits` of s, sign/zero extended: one instruction, no copy first (movzx / movsx
     /// read any source register)
     fn extend_from(&mut self, d: u8, s: u8, bits: u8, signed: bool) {
+        let p = self.pos();
         match (bits, signed) {
             (8, true) => {
                 self.rex(true, d, 0, s, s >= 4);
@@ -404,6 +442,7 @@ impl Asm {
             }
             _ => self.mov_rr(d, s),
         }
+        self.neutral(p);
     }
     fn load_ext(&mut self, dst: u8, base: u8, disp: i32, bytes: u8, signed: bool) {
         match (bytes, signed) {
@@ -1163,6 +1202,14 @@ struct Gen<'a> {
     /// the integer compare the flags hold, made by the instruction just emitted (a compare for its
     /// value, or a select on it): its condition code. A select or branch on it next reads them.
     sel_flags: Option<(Cmp, u8)>,
+    /// The overflow branch (`Cmp::O`) this block ends with, when the block's last instruction is
+    /// its op: `ibin` makes that op once with flags that are the check's (`ovf_form`)
+    ovf_op: Option<Cmp>,
+    /// `ibin` is making `ovf_op`'s op now: in a form whose overflow flag is the check's
+    ovf_form: bool,
+    /// `ovf_op`'s op set the flags (`Asm::mark_flags`): its branch is a `jo` while they are
+    /// kept (`Asm::flags_kept`: flag-neutral code only between)
+    ovf_flags: Option<Cmp>,
     /// C ABI body: its plan, per-argument buffer (rbp disp, 0 = none), result buffer,
     /// the cell keeping an indirect result address for rax
     cplan: Option<Plan>,
@@ -1889,6 +1936,17 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            // a checked op that ends the block, its overflow the branch's: made once, flags kept
+            self.ovf_op = None;
+            self.ovf_flags = None;
+            self.a.flags = None;
+            if let (Some(cmp @ Cmp::O(op, t, x, y)), true) = (bcmp, ne >= 1) {
+                if let Inst::IBin(op2, t2, _, a2, b2) = &b.insts[ne - 1] {
+                    if (*op2, *t2) == (op, t) && ((*a2, *b2) == (x, y) || (op != IOp::Sub && (*a2, *b2) == (y, x))) && !crate::stats::opt_off(options, "-ovfonce") {
+                        self.ovf_op = Some(cmp);
+                    }
+                }
+            }
             // the instruction emitted with the branch
             let into_branch = self.test_fuse.is_some() || self.load_cmp.is_some() || self.fload_cmp.is_some() || self.load_fuse.is_some();
             // a block start can be a jump target: no spill store before it carries over, nor
@@ -1980,7 +2038,9 @@ impl<'a> Gen<'a> {
                     }
                     break;
                 }
+                self.ovf_form = self.ovf_op.is_some() && ii + 1 == ne;
                 self.inst(options, inst);
+                self.ovf_form = false;
                 // an integer compare made for its value leaves its flags for a select or branch on it next
                 if let Some((d, cmp @ (Cmp::R(cc, sg, ..) | Cmp::K(cc, sg, ..)))) = Cmp::of(inst) {
                     if !cmp.reads(d) {
@@ -3212,6 +3272,10 @@ impl<'a> Gen<'a> {
                             Some(icc(cond, signed))
                         }
                     },
+                    // the op just made for its value set them (ovf_op), and only flag-neutral code
+                    // came after it
+                    Some(cmp @ Cmp::O(..)) if self.ovf_flags == Some(cmp) && self.a.flags_kept() => Some(CC_O),
+                    Some(cmp @ Cmp::O(..)) => Some(self.cmp_flags(options, cmp).0),
                     Some(Cmp::F(cond, f64_, x, y)) => {
                         let pfx = if f64_ { 0x66 } else { 0 };
                         if let Some((base, off, t)) = self.fload_cmp.take() {
@@ -5501,6 +5565,40 @@ impl<'a> Gen<'a> {
                 self.cmp_imm(rx, k);
                 (icc(cc, signed), None)
             }
+            Cmp::O(IOp::Sub, it, x, y) => {
+                // cmp sets the flags of the subtraction without writing it
+                let rx = self.use_i(options, x, R10);
+                let ry = self.use_i(options, y, R11);
+                if it.bits == 64 {
+                    self.a.alu_rr(0x39, rx, ry);
+                } else {
+                    self.a.alu_rr32(0x39, rx, ry);
+                }
+                (CC_O, None)
+            }
+            Cmp::O(op, it, x, y) => {
+                // the op again in r11 for its overflow flag (its value is the one the code keeps)
+                let rx = self.use_i(options, x, R10);
+                self.a.mov_rr(R11, rx);
+                let ry = self.use_i(options, y, R10);
+                let wide = it.bits == 64;
+                match op {
+                    IOp::Add if wide => self.a.alu_rr(0x01, R11, ry),
+                    IOp::Add => self.a.alu_rr32(0x01, R11, ry),
+                    IOp::Sub if wide => self.a.alu_rr(0x29, R11, ry),
+                    IOp::Sub => self.a.alu_rr32(0x29, R11, ry),
+                    IOp::Mul if wide => self.a.imul_rr(R11, ry),
+                    IOp::Mul => {
+                        // imul r32, r/m32 (0F AF /r)
+                        self.a.rex(false, R11, 0, ry, false);
+                        self.a.byte(0x0f);
+                        self.a.byte(0xaf);
+                        self.a.modrm_rr(R11, ry);
+                    }
+                    _ => unreachable!("an overflow branch is an add, a sub or a mul"),
+                }
+                (CC_O, None)
+            }
             Cmp::F(cc, w, x, y) => {
                 let xa = self.use_f(x, XS);
                 let xb = self.use_f(y, XS2);
@@ -5685,6 +5783,9 @@ impl<'a> Gen<'a> {
 
     fn ibin(&mut self, options: &relax_session::Options, op: IOp, it: IntTy, d: VReg, a: VReg, b: VReg) {
         assert!(!matches!(op.crc32(), Some((_, false))), "crc32 (IEEE) is lowered for aarch64 targets only");
+        // the block's branch reads this op's overflow flag (ovf_op): the op at its type's width (a
+        // 32-bit op for i32, then the extension), never lea or neg + add
+        let ovf = std::mem::take(&mut self.ovf_form);
         // a spilled first operand of a register result loads straight into it, unless b lives there
         // (uloc covers a spilled b's window; a rematerialised b's window register counts too: b's
         // last read can share d's register, and the load would overwrite b before the operation
@@ -5706,8 +5807,9 @@ impl<'a> Gen<'a> {
             let disp = self.spill_disp(o);
             let rd = self.def_i(d, R10);
             self.a.mov_rr(rd, ra);
-            // 32-bit forms read the slot's low half and zero-extend: u32 as the register forms
-            let w = it != U32;
+            // 32-bit forms read the slot's low half and zero-extend: u32 as the register forms (and
+            // an i32 whose overflow the branch reads, extended after)
+            let w = if ovf { it.bits == 64 } else { it != U32 };
             self.a.rex(w, rd, 0, RBP, false);
             match op {
                 IOp::Mul => {
@@ -5721,7 +5823,11 @@ impl<'a> Gen<'a> {
                 _ => self.a.byte(0x33),
             }
             self.a.modrm_mem(rd, RBP, disp);
-            if w && it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) && !self.low_only[d.0 as usize] {
+            if ovf {
+                self.a.mark_flags();
+                self.ovf_flags = self.ovf_op;
+            }
+            if (w || ovf) && it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) && !self.low_only[d.0 as usize] {
                 self.a.extend(rd, it.bits, it.signed);
             }
             self.fin_i(d, rd);
@@ -5859,14 +5965,14 @@ impl<'a> Gen<'a> {
         let (ra, rb) = if rd == rb && rd != ra && commutative { (rb, ra) } else { (ra, rb) };
         // a 64-bit sum into a third register: lea rd, [ra + rb] (one instruction for mov + add;
         // flags are not read after a register-register add, see last_alu)
-        if op == IOp::Add && it.bits == 64 && rd != ra && rd != rb && rb != RSP {
+        if op == IOp::Add && it.bits == 64 && rd != ra && rd != rb && rb != RSP && !ovf {
             self.a.sib = Some((rb, 0));
             self.a.lea(rd, ra, 0);
             self.fin_i(d, rd);
             return;
         }
         // d = a - b with d in b's register: neg d; add d, a (no copy through rax and back)
-        if op == IOp::Sub && rd == rb && rd != ra && !crate::stats::opt_off(options, "-negadd") {
+        if op == IOp::Sub && rd == rb && rd != ra && !ovf && !crate::stats::opt_off(options, "-negadd") {
             self.a.rex(it != U32, 0, 0, rd, false);
             self.a.byte(0xf7);
             self.a.modrm_rr(3, rd);
@@ -5884,8 +5990,9 @@ impl<'a> Gen<'a> {
         // (r10: rb is never r10 -- its scratch is r11 -- and ra may be r10 already)
         let work = if rd == rb && rd != ra { R10 } else { rd };
         self.a.mov_rr(work, ra);
-        if it == U32 {
-            // 32-bit forms zero-extend for free
+        if it == U32 || (ovf && it.bits == 32) {
+            // 32-bit forms zero-extend for free (an i32 is extended after: its overflow is the
+            // 32-bit op's)
             match op {
                 IOp::Add => self.a.alu_rr32(0x01, work, rb),
                 IOp::Sub => self.a.alu_rr32(0x29, work, rb),
@@ -5900,6 +6007,13 @@ impl<'a> Gen<'a> {
                     self.a.modrm_rr(work, rb);
                 }
             }
+            if ovf {
+                self.a.mark_flags();
+                self.ovf_flags = self.ovf_op;
+            }
+            if it != U32 && !self.low_only[d.0 as usize] {
+                self.a.extend(work, it.bits, it.signed);
+            }
             self.a.mov_rr(rd, work);
             self.fin_i(d, rd);
             return;
@@ -5912,6 +6026,10 @@ impl<'a> Gen<'a> {
             IOp::Xor => self.a.alu_rr(0x31, work, rb),
             IOp::Mul => self.a.imul_rr(work, rb),
             _ => {}
+        }
+        if ovf {
+            self.a.mark_flags();
+            self.ovf_flags = self.ovf_op;
         }
         if it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) && !self.low_only[d.0 as usize] {
             self.a.extend(work, it.bits, it.signed);
@@ -6765,6 +6883,9 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // branches and selects on their compares' flags (cmp + jcc, cmp + cmov)
     let cmps = if env.opt_regs || f.full { regalloc::compares_into_readers(options, f, x64_sel_ok) } else { None };
     let f = cmps.as_ref().unwrap_or(f);
+    // overflow checks on the op's own flag (mov; add / sub / imul; jo)
+    let ovfs = if env.opt_regs || f.full { regalloc::overflows_into_branches(options, f, true) } else { None };
+    let f = ovfs.as_ref().unwrap_or(f);
     // the backend-internal rewrites above run after the last pipeline verify
     f.verify_after("x64 backend rewrites (legalize/pair256/switch/hoist/sink)")?;
     let mut cfg = reg_config(options);
@@ -6806,7 +6927,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         (w, ws)
     };
     let mut g = Gen {
-        a: Asm { b: Vec::with_capacity(256), sib: None },
+        a: Asm { b: Vec::with_capacity(256), sib: None, flags: None },
         f,
         al,
         saved: 0,
@@ -6869,6 +6990,9 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         byte_masks: crate::bitops::vector_byte_masks(f),
         sel_cmp: None,
         sel_flags: None,
+        ovf_op: None,
+        ovf_form: false,
+        ovf_flags: None,
         vpool: Vec::new(),
         apool: Vec::new(),
         asm_veneers: Vec::new(),
@@ -6968,7 +7092,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
 /// `jmp target` through r11 (caller-saved, never an argument register): every argument
 /// register (incl. al for variadic calls) and the stack arrive at `target` unchanged.
 pub fn jump_to(target: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.mov_ri(R11, target as i64);
     a.jmp_r(R11);
     a.b
@@ -6976,7 +7100,7 @@ pub fn jump_to(target: u64) -> Vec<u8> {
 
 /// `rdi = arg; jmp target` (tail jump: [rsp] stays the JIT caller's return address).
 pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.mov_ri(RDI, arg as i64);
     a.mov_ri(R11, target as i64);
     a.jmp_r(R11);
@@ -6989,7 +7113,7 @@ pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
 /// prologue that needs the domain base calls it directly. Entered with rsp = 8 mod 16.
 pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     const XMM: u32 = TLS_SLOW_FRAME - 7 * 8;
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     // mov r11, seg:[disp32]: modrm 00/011/100 + SIB 0x25 (no base, no index)
     a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x1c, 0x25]);
     if matches!(cabi::HOST, cabi::Target::Win64) {
@@ -7050,7 +7174,7 @@ pub const TLS_SLOW_FRAME: u32 = 7 * 8 + 264;
 /// restores everything and returns to the interrupted pc. The host never returns when it
 /// unwinds the call with a hang report.
 pub fn hang_tramp(host: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.byte(0x9c); // pushfq
     let regs = [RAX, RCX, RDX, RBX, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15];
     for r in regs {
@@ -7129,7 +7253,7 @@ pub fn fs_reader() -> Vec<u8> {
 /// `compile_fn(slot) -> code address`, restores them and jumps to the code.
 /// On entry rax holds the slot index.
 pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.push(RBP);
     a.mov_rr(RBP, RSP);
     // A 128-byte area saves rdi rsi rdx rcx r8 r9 and the low words of xmm0-7, 16-byte aligned.
@@ -7180,7 +7304,7 @@ pub const LAZY_ENTRY_FRAME: u32 = 128 + 160;
 /// head (`thunk_head`) is `jmp rel32` straight to the slot's code, or, when that is out of reach
 /// or not known, to `+8`: `mov rax, table_word; jmp [rax]`. Built with the head to `+8`.
 pub fn thunk(slot_addr: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::with_capacity(THUNK_SIZE), sib: None };
+    let mut a = Asm { b: Vec::with_capacity(THUNK_SIZE), sib: None, flags: None };
     a.u64(THUNK_HEAD_TABLE);
     a.mov_ri(RAX, slot_addr as i64);
     a.jmp_mem(RAX, 0);
@@ -7193,7 +7317,7 @@ pub fn thunk(slot_addr: u64) -> Vec<u8> {
 /// Loader-only entry mark, followed by a jump through the replaceable body word. Slot ids
 /// and TLS addresses belong to this process; none of these bytes are part of a cached body.
 pub fn entry_thunk(id: u32, tls: u32, key: u64, slow: u64, body: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x1c, 0x25]); // mov r11, seg:[disp32]
     if matches!(cabi::HOST, cabi::Target::Win64) {
         a.u32((key >> 32) as u32);
@@ -7251,7 +7375,7 @@ pub const COUNT_STUB_SIZE: usize = 64;
 /// jumps to `hot` (lazy_entry-style glue: rax = slot, returns the address to continue at), else to
 /// the code: `jmp rel32` when in reach, else through r11. Uses rax and r11 only.
 pub fn count_stub(at: u64, counter: u64, slot: u32, code: u64, hot: u64, weight: u32) -> Vec<u8> {
-    let mut a = Asm { b: Vec::with_capacity(COUNT_STUB_SIZE), sib: None };
+    let mut a = Asm { b: Vec::with_capacity(COUNT_STUB_SIZE), sib: None, flags: None };
     a.mov_ri(RAX, counter as i64);
     // sub qword [rax], imm32
     for x in [0x48u8, 0x81, 0x28] {
@@ -7286,7 +7410,7 @@ pub fn count_stub(at: u64, counter: u64, slot: u32, code: u64, hot: u64, weight:
 
 /// Per-slot stub: `mov eax, slot; jmp lazy_entry` (absolute via r11).
 pub fn stub(slot: u32, lazy: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::with_capacity(48), sib: None };
+    let mut a = Asm { b: Vec::with_capacity(48), sib: None, flags: None };
     a.mov_ri(RAX, slot as i64);
     a.mov_ri(R11, lazy as i64);
     a.rex(false, 0, 0, R11, false);
@@ -7303,7 +7427,7 @@ pub const ENTER_FRAME: u32 = 5 * 8 + 8;
 /// Returns 0 normally. `leave_with(ctx, code)` restores them and returns `code`
 /// from enter (used by panics, faults and hangs to get back to the host).
 pub fn enter_leave() -> (Vec<u8>, usize) {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     // enter: rdi = fn, rsi = arg, rdx = ctx
     a.push(RBP);
     a.mov_rr(RBP, RSP);
@@ -7345,7 +7469,7 @@ pub fn enter_leave() -> (Vec<u8>, usize) {
 /// register block `regs` ([rbp, return address, rbx, r12, r13, r14, r15], the panic
 /// trampoline's layout), rbp = fp and rsp = sp. Never returns.
 pub fn land() -> Vec<u8> {
-    let mut a = Asm { b: Vec::new(), sib: None };
+    let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.load64(RBX, RDI, 16);
     a.load64(R12, RDI, 24);
     a.load64(R13, RDI, 32);
@@ -7392,7 +7516,7 @@ mod tests {
         push(&mut f, b4, Inst::Iconst(one, 1));
         f.blocks[b4 as usize].term = Term::Ret(vec![one]);
         f.blocks[b5 as usize].term = Term::Ret(vec![x]);
-        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+        let env = Env::standalone(true);
         let r = compile(options, &f, &env).expect("compiles");
         let code = &r.code[..r.text_len as usize];
         // add r64, 12: REX.W(+B) 83 /0 ib
@@ -7428,7 +7552,7 @@ mod tests {
             f.blocks[b0 as usize].insts.push(Inst::IBinI(op, u64t, p, p, k));
             f.blocks[b0 as usize].pos.push(0);
             f.blocks[b0 as usize].term = Term::Ret(vec![p]);
-            let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+            let env = Env::standalone(true);
             let r = compile(options, &f, &env).expect("compiles");
             let code = &r.code[..r.text_len as usize];
             // no REX.W 81 /n with an imm32 that is not k (the truncated constant)

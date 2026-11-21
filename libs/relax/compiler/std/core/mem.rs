@@ -9,12 +9,34 @@ pub const fn size_of<T>() -> usize {
 pub const fn size_of_val<T: ?Sized>(val: &T) -> usize {
     unsafe { im::size_of_val(val) }
 }
+/// rustc 1.99.0 (layout_for_ptr): returns the size of a pointee from its raw pointer and metadata.
+#[must_use]
+pub const unsafe fn size_of_val_raw<T: ?Sized>(val: *const T) -> usize {
+    unsafe { im::size_of_val(val) }
+}
 #[rustc_promotable]
 pub const fn align_of<T>() -> usize {
     unsafe { im::align_of::<T>() }
 }
 pub const fn align_of_val<T: ?Sized>(val: &T) -> usize {
     unsafe { im::align_of_val(val) }
+}
+/// rustc 1.99.0 (layout_for_ptr): returns the alignment of a pointee from its raw pointer and metadata.
+#[must_use]
+pub const unsafe fn align_of_val_raw<T: ?Sized>(val: *const T) -> usize {
+    unsafe { im::align_of_val(val) }
+}
+/// rustc 1.0.0 (rust1): returns the required alignment of a type.
+#[must_use]
+#[deprecated(since = "1.2.0", note = "use `align_of` instead")]
+pub fn min_align_of<T>() -> usize {
+    align_of::<T>()
+}
+/// rustc 1.0.0 (rust1): returns the required alignment of a value.
+#[must_use]
+#[deprecated(since = "1.2.0", note = "use `align_of_val` instead")]
+pub fn min_align_of_val<T: ?Sized>(val: &T) -> usize {
+    align_of_val(val)
 }
 pub const fn needs_drop<T: ?Sized>() -> bool {
     unsafe { im::needs_drop::<T>() }
@@ -80,7 +102,7 @@ pub struct Discriminant<T>(<T as crate::marker::DiscriminantKind>::Discriminant)
 pub const fn discriminant<T>(v: &T) -> Discriminant<T> {
     // the intrinsic's i64, sign-extended to the widest discriminant type: its low bytes are the
     // value as the discriminant type (the JIT's targets are little-endian)
-    let wide = unsafe { im::discriminant_value(v) } as i128;
+    let wide = im::discriminant_value(v) as i128;
     Discriminant(unsafe { transmute_copy::<i128, <T as crate::marker::DiscriminantKind>::Discriminant>(&wide) })
 }
 
@@ -243,6 +265,59 @@ impl<T> MaybeUninit<T> {
     }
     pub const unsafe fn assume_init_drop(&mut self) {
         im::drop_in_place(self.as_mut_ptr())
+    }
+}
+
+impl<T> [MaybeUninit<T>] {
+    /// rustc 1.93.0 (maybe_uninit_slice): drops the initialized elements of the slice in place.
+    pub unsafe fn assume_init_drop(&mut self) {
+        if !self.is_empty() {
+            unsafe { crate::ptr::drop_in_place(self as *mut Self as *mut [T]) }
+        }
+    }
+    /// rustc 1.93.0 (maybe_uninit_slice): borrows the initialized elements of the slice.
+    pub const unsafe fn assume_init_ref(&self) -> &[T] {
+        unsafe { &*(self as *const Self as *const [T]) }
+    }
+    /// rustc 1.93.0 (maybe_uninit_slice): mutably borrows the initialized elements of the slice.
+    pub const unsafe fn assume_init_mut(&mut self) -> &mut [T] {
+        unsafe { &mut *(self as *mut Self as *mut [T]) }
+    }
+    /// rustc 1.93.0 (maybe_uninit_write_slice): copies a slice into storage of the same length.
+    pub const fn write_copy_of_slice(&mut self, src: &[T]) -> &mut [T]
+    where
+        T: Copy,
+    {
+        let src: &[MaybeUninit<T>] = unsafe { transmute(src) };
+        self.copy_from_slice(src);
+        unsafe { self.assume_init_mut() }
+    }
+    /// rustc 1.93.0 (maybe_uninit_write_slice): clones a slice into storage of the same length.
+    pub fn write_clone_of_slice(&mut self, src: &[T]) -> &mut [T]
+    where
+        T: Clone,
+    {
+        assert_eq!(self.len(), src.len(), "destination and source slices have different lengths");
+        let len = self.len();
+        let src = &src[..len];
+        let mut guard = CloneSliceGuard { slice: self, initialized: 0 };
+        for i in 0..len {
+            guard.slice[i].write(src[i].clone());
+            guard.initialized += 1;
+        }
+        forget(guard);
+        unsafe { self.assume_init_mut() }
+    }
+}
+
+struct CloneSliceGuard<'a, T> {
+    slice: &'a mut [MaybeUninit<T>],
+    initialized: usize,
+}
+
+impl<'a, T> Drop for CloneSliceGuard<'a, T> {
+    fn drop(&mut self) {
+        unsafe { self.slice[..self.initialized].assume_init_drop() }
     }
 }
 

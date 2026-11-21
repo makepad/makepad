@@ -23,7 +23,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/test_run.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT
 export CARGO_TARGET_DIR=$dir/target
-unset GATE_PROVEN GATE_RETRY GATE_FULL GATE_QUEUE DEVHUB_TOLD DEVHUB_LEASE
+unset GATE_PROVEN GATE_RETRY GATE_FULL GATE_QUEUE GATE_TEST_TIMES DEVHUB_TOLD DEVHUB_LEASE
 g() { git -C "$dir/repo" -c user.name=test-run -c user.email= -c commit.gpgsign=false "$@" > /dev/null; }
 put() { mkdir -p "$dir/repo/$(dirname "$1")"; printf '%s\n' "$2" > "$dir/repo/$1"; }
 lib() { # lib <dir> <package> <lib.rs> [Cargo.toml dependency lines]
@@ -70,7 +70,8 @@ put tools/run/src/main.rs '// `makepad test <package> [<target>] [-- --list]` fr
 // two, the second never ending, when it says HANGS (the first run again in a child of its own before it, as the
 // harness self-exec says it: its own `running 1 test` to `test result:` inside the target; its pid in
 // TEST_RUN_LOG.pids), working 6 s when it says BUSY, its build failing before any test when it says UNBUILT;
-// each run is said in TEST_RUN_LOG. `makepad inspect <pid> <question>`: a stub answer.
+// each run is said in TEST_RUN_LOG; with `-Z unstable-options --report-time` and RUSTC_BOOTSTRAP (the run of a part), its
+// result line ends in its time. `makepad inspect <pid> <question>`: a stub answer.
 use std::io::Write;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -104,6 +105,12 @@ fn main() {
         // (writeln! writes its pieces one by one, and two runs merged their lines)
         let line = format!("{}\n", std::iter::once(pkg.as_str()).chain(sel).collect::<Vec<_>>().join(" "));
         f.write_all(line.as_bytes()).unwrap();
+        // the queue values of a run stay in the shell of its gate: a unit that inherits one is said (land_gate.sh QUEUE_VARS)
+        let inherited: Vec<&str> = ["GATE_PROVEN", "GATE_TIMES", "GATE_PEAKS", "GATE_JOBS", "GATE_TEST_TIMES", "GATE_QUEUE_DIR"].into_iter().filter(|v| std::env::var_os(v).is_some()).collect();
+        if !inherited.is_empty() {
+            let line = format!("{}\n", inherited.join(" "));
+            std::fs::OpenOptions::new().create(true).append(true).open(format!("{log}.env")).unwrap().write_all(line.as_bytes()).unwrap();
+        }
     }
     if src.contains("UNBUILT") {
         // (a build takes its time: the watch of the unit looks at it, its peak said)
@@ -115,9 +122,11 @@ fn main() {
         // as the JIT fails two tests: the caught panic of a passing test first, a long assertion, a report alone
         let (q, long) = (char::from(39u8), "x".repeat(500));
         let report = |msg: &str, at: &str| format!("  report: {{\"kind\":\"panic\",\"message\":\"{msg}\",\"location\":\"{dir}/src/lib.rs:{at}\",\"backtrace\":[]}}");
-        println!("running 3 tests\n{}\ntest tests::caught ... ok", report("expected", "9:9"));
+        println!("running 4 tests\n{}\ntest tests::caught ... ok", report("expected", "9:9"));
         println!("thread {q}tests::it{q} (7) panicked at {dir}/src/lib.rs:1:1:\nbroken: {long}\nits second line\n{}\ntest tests::it ... FAILED", report(&format!("broken: {long}\\nits second line"), "1:1"));
-        println!("{}\ntest tests::other ... FAILED\n\nfailures:\n\n\nfailures:\n    tests::it\n    tests::other\n\ntest result: FAILED. 1 passed; 2 failed; 0 ignored", report("the \\\"quoted\\\" one", "2:2"));
+        println!("{}\ntest tests::other ... FAILED", report("the \\\"quoted\\\" one", "2:2"));
+        // a harness whose message announces the output of its child: what follows its colon is said too
+        println!("thread {q}tests::harness{q} (8) panicked at {dir}/src/lib.rs:3:3:\nrun.sh failed:\ncase a: ok\n\ncase b: wrong output\nnote: run with RUST_BACKTRACE=1 for a backtrace\ntest tests::harness ... FAILED\n\nfailures:\n\n\nfailures:\n    tests::it\n    tests::other\n    tests::harness\n\ntest result: FAILED. 1 passed; 3 failed; 0 ignored");
         std::process::exit(101);
     }
     if src.contains("HANGS") {
@@ -133,7 +142,8 @@ fn main() {
         let mut n = 0u64;
         while start.elapsed().as_secs() < 6 { n = std::hint::black_box(n.wrapping_mul(31).wrapping_add(1)); }
     }
-    println!("running 1 test\ntest tests::it ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored");
+    let timed = args.windows(2).any(|w| w[0] == "-Z" && w[1] == "unstable-options") && args.iter().any(|a| a == "--report-time") && std::env::var_os("RUSTC_BOOTSTRAP").is_some();
+    println!("running 1 test\ntest tests::it ... ok{}\n\ntest result: ok. 1 passed; 0 failed; 0 ignored", if timed { " <0.012s>" } else { "" });
 }'
 g init -q -b base && g add -A && g commit -q -m base
 base=$(git -C "$dir/repo" rev-parse HEAD)
@@ -174,7 +184,7 @@ while True:
 gate() { # gate <label> <rev> <expect ok|fail|lost> <ran: packages, sorted> <grep -F'd lines, | between>: land_gate.sh testrun
   local out code ran want pid st deals=""
   g checkout -q "$2"
-  rm -f "$dir/ran" "$dir/out"
+  rm -f "$dir/ran" "$dir/ran.env" "$dir/out"
   if [ "${GATE_QUEUE:-}" = 1 ] && [ -n "${DEVHUB_TOLD:-}" ]; then
     : > "$DEVHUB_TOLD"; python3 -I -c "$dealer" "$dir/out" "$DEVHUB_TOLD" "${DEAL_TAKEN:-}" "${DEAL_DIGEST:-}" "${DEAL_NONE:-}" & deals=$!
   fi
@@ -190,6 +200,7 @@ gate() { # gate <label> <rev> <expect ok|fail|lost> <ran: packages, sorted> <gre
   ran=$(sort "$dir/ran" 2>/dev/null | paste -sd' ' -)
   case "$3:$code" in ok:0|fail:1|lost:4) ;; *) fail="$fail $1(exit $code)"; echo "$out" | tail -20;; esac
   [ "$ran" = "$4" ] || { fail="$fail $1(ran: ${ran:-none}; want $4)"; }
+  [ ! -s "$dir/ran.env" ] || fail="$fail $1(its units inherited $(tr ' ' '\n' < "$dir/ran.env" | sort -u | paste -sd' ' -))"
   local IFS='|'
   for want in $5; do
     echo "$out" | grep -qF -- "$want" || { fail="$fail $1(no \`$want\`)"; echo "$out" | tail -20; }
@@ -217,7 +228,8 @@ GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 GATE
 ! echo "$gate_out" | grep -qE '^(NODEGATE-|GATESTEP fail)' || fail="$fail stale(a verdict said)"
 GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 DEAL_NONE=1 GATE_TIMES=$times gate other shape ok "" "is not the run's 000000000000 (made from other measures): it takes none of it|NODEGATE-OK testrun 0 packages"
 GATE_QUEUE=1 gate untold shape fail "" "NODEGATE-FAIL: queue (no \$DEVHUB_TOLD"
-gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one"
+gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one|FAILED tests::harness|  panicked at libs/plan/src/lib.rs:3:3 -- run.sh failed:|    case a: ok|    case b: wrong output"
+! echo "$gate_out" | grep -q 'RUST_BACKTRACE' || fail="$fail plan(the runner's own note said as the harness's output)"
 # every failing test named, each with its own panic whole (a passing test's caught one is no failure's)
 ! echo "$gate_out" | grep -qE 'lib.rs:9:9|its second line' || fail="$fail plan(a passing test's panic or a second line said)"
 # a failed unit's test artifacts stay in the lease's keep, its app home aside; a passing unit's are not kept
@@ -262,6 +274,18 @@ order=$(echo "$gate_out" | grep -oE '^GATESTART test [a-z-]+' | cut -d' ' -f3 | 
 # runs and its tests/more.rs was proven; tests/heavy.rs needs a feature its defaults lack, so `makepad test` of the
 # package skips it, and named alone it is an error: no unit
 GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=700" GATE_PROVEN="test test-run-other --test more" gate split shape ok "makepad-draw test-run-other --lib test-run-shape" "GATEUNIT ok test test-run-other --lib|GATEUNIT proven test test-run-other --test more|GATETIME test test-run-other --lib |GATESTART test test-run-other --lib |NODEGATE-OK testrun 3 packages"
+# a target measured past GATE_SPLIT_S runs in parts, k = one per GATE_SPLIT_S of its measure: the other's lib at
+# 1300 s in 3, each its share of the target's tests by sorted name (the stub lists two: the third part has none and
+# runs nothing), each measured alone, each test's time said (GATETESTS); the next run's k follows the
+# parts' measures (500 + 400 s: 2 parts), and its parts' shares its tests' (GATE_TEST_TIMES, deal_part): the slow
+# tests::stuck alone in part 1, where by sorted name it went to part 2
+GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=700;test test-run-other --lib=1300" GATE_PROVEN="test test-run-other --test more" gate parts shape ok "makepad-draw test-run-other --lib test-run-other --lib test-run-shape" "testrun: test test-run-other --lib: 1300 s of its last measure, in 3 parts of its tests|test test-run-other --lib part 1/3: 1 of its target's tests|GATEUNIT ok test test-run-other --lib part 1/3|GATEUNIT ok test test-run-other --lib part 2/3|test test-run-other --lib part 3/3: no test of its target in its share|GATEUNIT ok test test-run-other --lib part 3/3|GATETIME test test-run-other --lib part 2/3 |GATETESTS test test-run-other --lib part 1/3 :: tests::it=0.0/"
+# (its values as a devhub bucket hands them over: files of $GATE_QUEUE_DIR, one per variable, bucket.rs QueueInput)
+mkdir -p "$dir/queue2"
+printf '%s' "test test-run-other --lib part 1/3=500;test test-run-other --lib part 2/3=400;test test-run-other --lib part 3/3=0" > "$dir/queue2/GATE_TIMES"
+printf '%s' "test test-run-other --test more :: tests::it=900;test test-run-other --lib :: tests::stuck=300 tests::it=1" > "$dir/queue2/GATE_TEST_TIMES"
+printf '%s' "test test-run-other --test more" > "$dir/queue2/GATE_PROVEN"
+GATE_RETRY="test test-run-other" GATE_QUEUE_DIR=$dir/queue2 gate parts2 shape ok "makepad-draw test-run-other --lib test-run-other --lib test-run-shape" "testrun: test test-run-other --lib: 900 s of its last measure, in 2 parts of its tests|test test-run-other --lib part 1/2: 1 of its target's tests, 300 s of their last measures (the parts 1-300 s; 2 of the target's 2 measured)|test test-run-other --lib part 2/2: 1 of its target's tests, 1 s of their last measures|GATEUNIT ok test test-run-other --lib part 2/2"
 # the other's Cargo.toml runs its tests/more.rs under cargo (native-tests): the package runs a unit per target, its lib
 # under the JIT and more under `cargo test`, never the JIT, whose red says the cargo command that shows it; a
 # declared target the package lacks is said

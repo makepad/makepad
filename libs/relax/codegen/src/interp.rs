@@ -3501,6 +3501,9 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             l.emit(if l.cls(*d) == Cls::V128 { h_sel16 } else { h_sel }, &[w]);
         }
         Inst::SelCmp(..) => unreachable!("SelCmp is made by the native back ends only"),
+        // black_box's block (rir AsmBlock::is_empty): no instruction to run, the passes kept
+        // what it stands for (as wasm and sandboxed code take it)
+        Inst::Call(Callee::Asm(a), _, _) if a.is_empty() => {}
         Inst::Call(callee, args, rets) => {
             let target = match callee {
                 // an asm! block runs only as machine code: its function stays native

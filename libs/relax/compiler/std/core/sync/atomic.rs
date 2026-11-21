@@ -93,6 +93,22 @@ impl<T: AtomicPrimitive> Atomic<T> {
     pub const fn new(v: T) -> Atomic<T> {
         Atomic { v: UnsafeCell::new(v) }
     }
+    /// rustc 1.75.0 (atomic_from_ptr): borrows suitably aligned storage as an atomic.
+    pub const unsafe fn from_ptr<'a>(ptr: *mut T) -> &'a Self {
+        unsafe { &*ptr.cast::<Self>() }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed value as an atomic.
+    pub fn from_mut(v: &mut T) -> &mut Self {
+        unsafe { &mut *(v as *mut T as *mut Self) }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed slice as atomics.
+    pub fn from_mut_slice(v: &mut [T]) -> &mut [Self] {
+        unsafe { &mut *(v as *mut [T] as *mut [Self]) }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed atomic slice as plain values.
+    pub fn get_mut_slice(this: &mut [Self]) -> &mut [T] {
+        unsafe { &mut *(this as *mut [Self] as *mut [T]) }
+    }
     #[deprecated(since = "1.50.0", note = "Use `compare_exchange` or `compare_exchange_weak` instead")]
     #[rustc_should_not_be_called_on_const_items]
     pub fn compare_and_swap(&self, current: T, new: T, order: Ordering) -> T {
@@ -233,6 +249,22 @@ impl AtomicBool {
     pub const fn new(v: bool) -> AtomicBool {
         AtomicBool { v: UnsafeCell::new(v as u8) }
     }
+    /// rustc 1.75.0 (atomic_from_ptr): borrows suitably aligned storage as an atomic.
+    pub const unsafe fn from_ptr<'a>(ptr: *mut bool) -> &'a Self {
+        unsafe { &*ptr.cast::<Self>() }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed value as an atomic.
+    pub fn from_mut(v: &mut bool) -> &mut Self {
+        unsafe { &mut *(v as *mut bool as *mut Self) }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed slice as atomics.
+    pub fn from_mut_slice(v: &mut [bool]) -> &mut [Self] {
+        unsafe { &mut *(v as *mut [bool] as *mut [Self]) }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed atomic slice as plain values.
+    pub fn get_mut_slice(this: &mut [Self]) -> &mut [bool] {
+        unsafe { &mut *(this as *mut [Self] as *mut [bool]) }
+    }
     #[deprecated(since = "1.50.0", note = "Use `compare_exchange` or `compare_exchange_weak` instead")]
     #[rustc_should_not_be_called_on_const_items]
     pub fn compare_and_swap(&self, current: bool, new: bool, order: Ordering) -> bool {
@@ -365,6 +397,22 @@ unsafe impl<T> Send for AtomicPtr<T> {}
 impl<T> AtomicPtr<T> {
     pub const fn new(p: *mut T) -> AtomicPtr<T> {
         AtomicPtr { p: UnsafeCell::new(p) }
+    }
+    /// rustc 1.75.0 (atomic_from_ptr): borrows suitably aligned storage as an atomic.
+    pub const unsafe fn from_ptr<'a>(ptr: *mut *mut T) -> &'a Self {
+        unsafe { &*ptr.cast::<Self>() }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed value as an atomic.
+    pub fn from_mut(v: &mut *mut T) -> &mut Self {
+        unsafe { &mut *(v as *mut *mut T as *mut Self) }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed slice as atomics.
+    pub fn from_mut_slice(v: &mut [*mut T]) -> &mut [Self] {
+        unsafe { &mut *(v as *mut [*mut T] as *mut [Self]) }
+    }
+    /// rustc 1.98.0 (atomic_from_mut): views an exclusively borrowed atomic slice as plain values.
+    pub fn get_mut_slice(this: &mut [Self]) -> &mut [*mut T] {
+        unsafe { &mut *(this as *mut [Self] as *mut [*mut T]) }
     }
     #[deprecated(since = "1.50.0", note = "Use `compare_exchange` or `compare_exchange_weak` instead")]
     #[rustc_should_not_be_called_on_const_items]

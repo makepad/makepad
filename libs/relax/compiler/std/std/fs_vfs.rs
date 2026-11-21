@@ -41,6 +41,9 @@ pub(crate) enum Edit {
     Replace = 2,
     /// a folder
     Dir = 3,
+    /// a read-only open: the disk file it opens, if any (none for a file only the store holds, or
+    /// one a held landing answers for)
+    Read = 4,
 }
 
 /// The disk path a write into the virtual `path` goes to (Some(Err) when it cannot be
@@ -57,7 +60,7 @@ pub(crate) fn edit_target(path: &Path, how: Edit) -> Option<io::Result<PathBuf>>
     Some(match take(id, p, n) {
         Some(v) => Ok(PathBuf::from(String::from_utf8_lossy(&v).into_owned())),
         None => Err(match how {
-            Edit::Existing => io::Error::from(io::ErrorKind::NotFound),
+            Edit::Existing | Edit::Read => io::Error::from(io::ErrorKind::NotFound),
             _ => read_only(),
         }),
     })

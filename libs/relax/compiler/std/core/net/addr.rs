@@ -105,8 +105,16 @@ impl SocketAddrV6 {
     pub const fn flowinfo(&self) -> u32 {
         self.flowinfo
     }
+    /// rustc 1.9.0 (sockaddr_setters): sets the IPv6 flow information.
+    pub const fn set_flowinfo(&mut self, new_flowinfo: u32) {
+        self.flowinfo = new_flowinfo;
+    }
     pub const fn scope_id(&self) -> u32 {
         self.scope_id
+    }
+    /// rustc 1.9.0 (sockaddr_setters): sets the IPv6 scope identifier.
+    pub const fn set_scope_id(&mut self, new_scope_id: u32) {
+        self.scope_id = new_scope_id;
     }
 }
 

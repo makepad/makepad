@@ -22,12 +22,19 @@ pub struct Ipv6Addr {
 }
 
 impl Ipv4Addr {
+    /// rustc 1.80.0 (ip_bits): the number of bits in an IPv4 address.
+    pub const BITS: u32 = 32;
     pub const LOCALHOST: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
     pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
     pub const BROADCAST: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
 
     pub const fn new(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
         Ipv4Addr { octets: [a, b, c, d] }
+    }
+    /// rustc 1.91.0 (ip_from): constructs an IPv4 address from its four octets.
+    #[must_use]
+    pub const fn from_octets(octets: [u8; 4]) -> Ipv4Addr {
+        Ipv4Addr { octets }
     }
     pub const fn octets(&self) -> [u8; 4] {
         self.octets
@@ -80,6 +87,8 @@ impl Ipv4Addr {
 }
 
 impl Ipv6Addr {
+    /// rustc 1.80.0 (ip_bits): the number of bits in an IPv6 address.
+    pub const BITS: u32 = 128;
     pub const LOCALHOST: Ipv6Addr = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
     pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
 
@@ -94,6 +103,12 @@ impl Ipv6Addr {
         }
         Ipv6Addr { octets }
     }
+    /// rustc 1.91.0 (ip_from): constructs an IPv6 address from its eight segments.
+    #[must_use]
+    pub const fn from_segments(segments: [u16; 8]) -> Ipv6Addr {
+        let [a, b, c, d, e, f, g, h] = segments;
+        Ipv6Addr::new(a, b, c, d, e, f, g, h)
+    }
     pub const fn segments(&self) -> [u16; 8] {
         let o = self.octets;
         let mut s = [0u16; 8];
@@ -103,6 +118,11 @@ impl Ipv6Addr {
             i += 1;
         }
         s
+    }
+    /// rustc 1.91.0 (ip_from): constructs an IPv6 address from its sixteen octets.
+    #[must_use]
+    pub const fn from_octets(octets: [u8; 16]) -> Ipv6Addr {
+        Ipv6Addr { octets }
     }
     pub const fn octets(&self) -> [u8; 16] {
         self.octets

@@ -167,6 +167,8 @@ fn a03_str_patterns() {
         }
     }
     d.line("str string patterns");
+    println!("| circumfix {:?} {:?} {:?}", "«é»".strip_circumfix("«", '»'),
+        "aba".strip_circumfix("ab", "ba"), "ab".strip_circumfix('a', 'b'));
 }
 
 #[test]
@@ -206,6 +208,7 @@ fn a04_char_patterns() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn a05_whitespace_lines_trim() {
     let mut rng = Rng(13);
     let mut d = D::new();
@@ -219,9 +222,13 @@ fn a05_whitespace_lines_trim() {
         );
     }
     d.line("str whitespace");
+    let mut lines: core::str::LinesAny<'_> = "a\r\n\nb\r".lines_any();
+    println!("| lines_any {:?} {:?}", lines.next(), lines.next_back());
+    println!("| remaining {:?} {:?} {:?}", lines, lines.clone().count(), lines.size_hint());
 }
 
 #[test]
+#[allow(deprecated)]
 fn a06_slicing_and_panics() {
     let mut rng = Rng(14);
     let mut d = D::new();
@@ -244,6 +251,9 @@ fn a06_slicing_and_panics() {
         observe!(d; s.get(range.clone()), panicked(|| &s[range.clone()]));
     }
     d.line("str slicing");
+    let mut word = String::from("éabc!");
+    unsafe { word.as_mut_str().slice_mut_unchecked(2, 5) }.make_ascii_uppercase();
+    println!("| slice_mut_unchecked {}", word);
 }
 
 #[test]

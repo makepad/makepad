@@ -13,190 +13,202 @@ main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
 work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [job.live_allow-c-cached.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_allow-c-dylib.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_allow-c-script-native.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_allow-c.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_boot-panic.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_caught-report.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_check-rustc.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_check-server.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_edit-undone.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4f55d169c657c2e6a3c1f7c5a1c04aace1ebd6dcc5f6b64eaed7aba6555e36a6"
+main = "d23fed7609edc8df59e4a135b3fe501472e7b829"
+work = "4bf7164d8222afb14f717e5a597655370152e259"
 
 [job.live_gates.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_hold-back.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
+
+[job.live_hot-fail-windows.windows]
+date = "2026-11-21"
+digest = "91d397f287f7f2290df87eec69d0e7040ed52b73432ec1db00c02de5c341e6cf"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_hot-fail.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_kinds.linux]
-date = "2026-11-15"
-digest = "f0afca6ed0edc5eb79e00161f7b7a958f29e3ef1577fecefe71d2a4e195f7f6e"
-main = "3887f442322ed9565ea4e386841d301b4444ee3f"
-work = "169e0213dc826e66294c7e9a0119b48e3b4a02d2"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_landing-hold.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_landing-whole.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_rebuild.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_relax-app.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_replay.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_restart.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-20"
+digest = "59fa55088fdb0d07deac7bfd8b3be20a2dfd730779508e1e7b2ecc6ae8da1e47"
+main = "04df76375c13cb26181ca1f25d61b73a3344a1fb"
+work = "8f0c688cbdccf91e5fae8ed43c5c22b9ac4345ca"
 
 [job.live_run-env.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
+
+[job.live_runner-windows.windows]
+date = "2026-11-19"
+digest = "9d578b7ab8f4ed102bc00e4e718b0e605435e0173b18d1cf2cc4183797591a3d"
+main = "9e6cb64351d5c114136cccbabc61eaacf999830b"
+work = "6116e11c66d9da006e0dedc1b21a94d859681887"
 
 [job.live_shared-std.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_test-dep-gaps.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_test-dep-keys.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_test-results.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_test-warnings.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_test-workspace.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_two-module-file.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_warm-image-patch.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_warm-image-union.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_warm-manifest-layout.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.live_wm-rest.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-21"
+digest = "4169f20aa2900c8dbd2246cb4e3a2fcaa6de5fc9be6c8772c4ce403cb2f39335"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [job.nocodegen.macos]
 date = "2026-11-08"
@@ -205,7 +217,7 @@ main = "7a3bfa2fed356bd7323016f85ff43cae31292417"
 work = "914befad8de650b0a5abf2b720760b518aadf4f3"
 
 [tests.linux]
-date = "2026-11-18"
-digest = "2028f2aa338478af61d3db6a66cff113494fbb7c5efdc0b72a8f6d7b9483a1a9"
-main = "7fdc2c08f44b0bcfd151a16758624829e1ebee84"
-work = "fe9ba5d9b1ef12fbef5afae0c11d63c01a018637"
+date = "2026-11-19"
+digest = "0f98cb3783fecbc62971d44174a798404f0a8dbf5021bad6ceb57557bea3e9ab"
+main = "9e6cb64351d5c114136cccbabc61eaacf999830b"
+work = "6116e11c66d9da006e0dedc1b21a94d859681887"

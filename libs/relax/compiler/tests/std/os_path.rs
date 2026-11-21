@@ -71,4 +71,20 @@ fn a03_build() {
     println!("| {:?} {:?} {:?} {}", os, os2, os2.to_str(), os2.len());
     println!("| {:?} {:?}", PathBuf::from(os2).into_os_string(), Path::new("a\u{e9}\"b\n").to_string_lossy());
     println!("| {:?} {}", Path::new("q\u{e9}\t\"'"), Path::new("q\u{e9}").display());
+    // add_extension / with_added_extension, file_prefix, is_empty (1.91, 1.98) over every case
+    for c in CASES.iter() {
+        let p = Path::new(c);
+        let mut b = p.to_path_buf();
+        let added = b.add_extension("gz");
+        println!("| {:?} +gz {} {:?} with {:?} {:?} prefix {:?} empty {}", c, added, b, p.with_added_extension("tar.xz"), p.with_added_extension(""), p.file_prefix(), p.is_empty());
+    }
+    let mut x = PathBuf::from("/feel/the");
+    x.add_extension("formatted");
+    x.add_extension("dark.side");
+    x.set_extension("cookie");
+    println!("| {:?} {:?} {:?}", x, x.extension(), x.file_prefix());
+    println!("| {:?} {:?}", PathBuf::from("ok/\u{e9}").into_string(), PathBuf::from(OsString::from("p")).into_string());
+    let leaked: &mut Path = PathBuf::from("leaked/x.y").leak();
+    let os_leaked: &mut OsStr = OsString::from("os").leak();
+    println!("| {:?} {:?} {:?}", leaked, leaked.file_prefix(), os_leaked);
 }

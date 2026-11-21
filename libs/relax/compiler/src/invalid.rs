@@ -649,7 +649,9 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
 /// a version that holds a copy of such code (an inlining tier's), in a slot that can still call
 /// such code (reload::over_retired: an instance over a kept closure),
 /// or in an earlier version of any slot (code
-/// of a text no longer the program's, whose types are not asked), named for the restart's reason. Every thread's frames
+/// of a text no longer the program's, whose types are not asked, or an earlier build of the text
+/// now that holds a copy of what the patch rebuilds: [`earlier_body`]; an earlier build the records
+/// show to be of the text now and free of it is no reason), named for the restart's reason. Every thread's frames
 /// are read, those of a walk that ends short too: a frame found is the answer. Err: none was
 /// found, and a stack could not be read to its end (what it hides is not known).
 pub(crate) fn frame_in(u: &Unit, slots: &crate::fxhash::HashSet<u32>) -> Result<Option<String>, String> {
@@ -717,13 +719,55 @@ pub(crate) fn frame_in(u: &Unit, slots: &crate::fxhash::HashSet<u32>) -> Result<
                 return Ok(Some(format!("{} runs on thread {} {}", shown(slot), thread, r)));
             }
             if start != f.code {
-                return Ok(Some(format!("{} runs code from before an earlier edit on thread {}", shown(slot), thread)));
+                match earlier_body(u, slot, start, inlined.as_deref(), slots) {
+                    EarlierBody::SameText => {}
+                    EarlierBody::Holds(c) => return Ok(Some(format!("{} runs an earlier build of its code on thread {}, which holds a copy of {}", shown(slot), thread, shown(c)))),
+                    EarlierBody::Stale => return Ok(Some(format!("{} runs code from before an earlier edit on thread {}", shown(slot), thread))),
+                }
             }
         }
     }
     match unread {
         Some(e) => Err(e),
         None => Ok(None),
+    }
+}
+
+/// A frame's code body that is not its slot's code now, as the records show it ([`earlier_body`]).
+#[derive(Debug, PartialEq)]
+enum EarlierBody {
+    /// an earlier build of the text the slot runs now (a tier-up replaced it) that holds no copy
+    /// of a slot the patch rebuilds: nothing in it was built for the old layout
+    SameText,
+    /// an earlier build of the slot's text now that holds a copy of this rebuilt slot
+    Holds(u32),
+    /// code of an earlier text, or a body the records do not show to be of the text now
+    Stale,
+}
+
+/// What the frame in slot `slot`'s body at `start` (not its code now) runs, by the records alone,
+/// never by its tier: of the text the slot runs now when the slot's history has that body with the
+/// patch generation the slot has now (a tier-up installs with none, an edit with its own), and
+/// then free of the patch's `rebuilt` slots unless the body's own inlinee list (`inlined`) or a
+/// rebuilt slot's `inlined_into` (every build and link of a copy writes it) names one in it. A
+/// body the history does not have is stale, and so is one a layout patch invalidated (a rollback
+/// that restores it stubs the slot, and the build after has the generation the body had: the text
+/// is the same, the layout it was built for is not). (A thread parked in a fn since before its tier-up --
+/// a log thread in `futex_wait` -- was named as running code from before an edit, and the restart
+/// offer of a layout edit pointed at it instead of the thread that runs the changed code, 11-21.)
+fn earlier_body(u: &Unit, slot: u32, start: u64, inlined: Option<&[u32]>, rebuilt: &crate::fxhash::HashSet<u32>) -> EarlierBody {
+    let f = &u.fns[slot as usize];
+    let h = f.history();
+    let Some(gen) = h.prev.iter().chain(h.retired.iter()).find(|b| b.0 == start && b.1 > 0).map(|b| b.3) else { return EarlierBody::Stale };
+    if gen != f.patch_gen || crate::stale::lookup(start).is_some() {
+        return EarlierBody::Stale;
+    }
+    if let Some(&c) = inlined.and_then(|list| list.iter().find(|c| rebuilt.contains(c))) {
+        return EarlierBody::Holds(c);
+    }
+    match rebuilt.iter().copied().filter(|&c| (c as usize) < u.fns.len() && u.fns[c as usize].history().inlined_into.contains(&slot)).min() {
+        Some(c) => EarlierBody::Holds(c),
+        None => EarlierBody::SameText,
     }
 }
 

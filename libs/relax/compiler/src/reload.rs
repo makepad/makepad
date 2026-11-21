@@ -70,7 +70,7 @@ fn stream_timing() -> bool {
     *ON.get_or_init(|| std::env::var_os("RELAX_STREAM_TIMING").is_some())
 }
 
-fn live_trace() -> bool {
+pub(crate) fn live_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RELAX_LIVE_TRACE").is_some())
 }
@@ -2810,14 +2810,25 @@ pub(crate) fn crates_seeing_edit(prog: &crate::program::Program, files: impl Ite
 
 /// A scope-preserving edit moved the program from collect epoch `from` to `from + 1`: Gandalf
 /// keeps the verdicts (and queued checks) of owners in crates that cannot see the edited files
-/// instead of re-checking the whole program (borrowck::lazy::carry_epoch). Front-end write
-/// lock held (on the owner thread).
-fn carry_gandalf(u: &Unit, from: u64, visible: &[bool], files: Option<&[u32]>) {
+/// instead of re-checking the whole program (borrowck::lazy::carry_epoch). `files`: a body-only
+/// edit's versions (None: one of declarations, seen by the `visible` crates). Of the owners that
+/// can see it, those whose text it did not change (`changed`: its bodies, consts and statics; a
+/// removed item's def stays in a version no longer current) keep their queued checks: nothing
+/// queues an unchanged fn again (it does not compile again). Under the key they were queued with
+/// after a body-only edit (the same text reads the same declarations), under none after another.
+/// Front-end write lock held (on the owner thread).
+fn carry_gandalf(u: &Unit, from: u64, visible: &[bool], files: Option<&[u32]>, changed: &[DefId]) {
+    use crate::borrowck::lazy::Carry;
     let src = u.front.checker_id;
     let prog = &u.prog;
     crate::borrowck::lazy::carry_epoch(src, from, u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), &|d: DefId| {
-        if let Some(files) = files { !files.contains(&prog.def(d).file) }
-        else { gandalf_keeps(prog, visible, d) }
+        let kept = match files {
+            Some(files) => !files.contains(&prog.def(d).file),
+            None => gandalf_keeps(prog, visible, d),
+        };
+        if kept { Carry::Keep }
+        else if (d.0 as usize) >= prog.defs.len() || changed.contains(&d) || !prog.is_current_version(prog.def(d).file) { Carry::Drop }
+        else { Carry::Again { keyed: files.is_some() } }
     });
 }
 
@@ -6565,6 +6576,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
     }
     let carry = gandalf_carries(&changes, versions.iter().map(|(_, p)| p));
+    // (the owners whose text the edit changes: carry_gandalf drops their checks, the others' stay)
+    let changed_owners: Vec<DefId> = body_defs.iter().chain(&const_defs).chain(&static_defs).chain(&layout_defs).copied().collect();
     let mut use_undo: Vec<crate::program::UseUndo> = Vec::new();
     let mut removed_errs: Vec<String> = Vec::new();
     // fns declared again: a type their unchanged signature names moved (decls_naming_removed)
@@ -6763,7 +6776,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         trace_sub("publish_inputs");
         if carry && !ctfe_relevant {
             let files: Vec<u32> = news.iter().flat_map(|&(a, b)| [a, b]).collect();
-            carry_gandalf(u, from, &visible_crates, if full_inputs { None } else { Some(&files) });
+            carry_gandalf(u, from, &visible_crates, if full_inputs { None } else { Some(&files) }, &changed_owners);
         }
         trace_sub("publish_collected");
         // the added items' signatures, types and impl tables: before the layout edits, whose
@@ -7465,6 +7478,12 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let mut pre_n = 0usize;
     // (what an earlier patch built and did not install is not this one's)
     crate::zone_alloc::kept_with(|| u.built_digests.clear());
+    // The copy records (`inlined_into`) of the slots built again start over, as their builds note
+    // them again; a refused edit drops those builds, and the running code keeps the copies it
+    // holds: their records come back (below, `copies_before`). (A refused layout edit left a host
+    // whose dropped build took no copy off the record, and the next edit of the copied fn did not
+    // build it again: the host ran the old copy, 11-22.)
+    let mut copies_before: Vec<(u32, Vec<u32>)> = Vec::new();
     if errs.is_empty() {
         for &id in slots.iter().chain(fresh.iter()) {
             // SPEC-V: the edited bodies have no verdict for their new text yet: flagged before any
@@ -7474,7 +7493,10 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             let f = &mut u.fns[id as usize];
             f.unverified.store(unverified, Ordering::Relaxed);
             f.rir = None;
-            if let Some(h) = &mut f.history { h.inlined_into.clear(); }
+            if let Some(h) = &mut f.history {
+                if !h.inlined_into.is_empty() { copies_before.push((id, h.inlined_into.clone())); }
+                h.inlined_into.clear();
+            }
             f.build_err = None;
             f.spec = None;
             u.reload_errors.remove(&id);
@@ -7849,7 +7871,10 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             let f = &mut u.fns[id as usize];
             f.unverified.store(unverified, Ordering::Relaxed);
             f.rir = None;
-            if let Some(h) = &mut f.history { h.inlined_into.clear(); }
+            if let Some(h) = &mut f.history {
+                if !h.inlined_into.is_empty() { copies_before.push((id, h.inlined_into.clone())); }
+                h.inlined_into.clear();
+            }
             f.build_err = None;
             f.spec = None;
             u.reload_errors.remove(&id);
@@ -7957,6 +7982,15 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         if pre_paused {
             crate::inspect::instrument::resume_program();
         }
+        // the running code's copies are on the record again (with what the dropped builds noted:
+        // a host noted only there is built again for nothing, never left out)
+        for (id, hosts) in copies_before.drain(..) {
+            for h in hosts {
+                if !u.fns[id as usize].history().inlined_into.contains(&h) {
+                    crate::zone_alloc::slots_with(|| u.fns[id as usize].history.get_or_insert_with(Default::default).inlined_into.push(h));
+                }
+            }
+        }
         if !staged_keeps.is_empty() {
             u.kept_old.retain(|s, _| !staged_keeps.contains(s));
             let fns = &u.fns;
@@ -7981,7 +8015,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         publish_reload(u, &news, full_inputs, scope.as_deref());
         if carry && !ctfe_relevant {
             let files: Vec<u32> = news.iter().flat_map(|&(a, b)| [a, b]).collect();
-            carry_gandalf(u, from, &visible_crates, if full_inputs { None } else { Some(&files) });
+            carry_gandalf(u, from, &visible_crates, if full_inputs { None } else { Some(&files) }, &changed_owners);
         }
         unsafe { u.prog.reclaim_caches(); }
         // the running enum variants and struct layouts come back with the versions, under the
@@ -8515,6 +8549,17 @@ fn set_watch_loaded(files: &[WatchFile]) {
 
 fn loaded_of(files: &[WatchFile]) -> std::sync::Arc<Vec<String>> {
     crate::zone_alloc::kept_with(|| std::sync::Arc::new(files.iter().filter(|f| f.1 != u32::MAX).map(|f| f.0.clone()).collect()))
+}
+
+/// `inputs`' answer while the host waits for a fix ([`input_paths`]): its first word is what
+/// devhub reads ("held"), the rest what the person does.
+pub const HELD_NO_RUN: &str = "held: no run: the last one did not compile; the next save or `session relaunch` starts the next one";
+
+/// The host starts to wait for a fix (its build failed before the app started, or a run failed
+/// its app check): an `inputs` request waiting for a watcher answers now ([`HELD_NO_RUN`]).
+pub fn inputs_wake() {
+    let _g = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    WATCH_READY.notify_all();
 }
 
 fn watch_gone() {
@@ -9416,7 +9461,22 @@ pub(crate) fn next_run_env(state: Option<&[u8]>) -> Result<Vec<(&'static str, Op
     let saved = RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string();
     let mut next = vec![("RELAX_JIT_RECOVERY", recovery), ("RELAX_RESTORE", restore), ("RELAX_RESTART_T0", Some(saved.into()))];
     next.extend(NATIVE_RECEIPTS.map(|name| (name, None)));
+    next.push(crate::harness::test_package_env());
     Ok(next)
+}
+
+/// A test target of `makepad test` restarted in place stays one: its next process gets
+/// RELAX_TEST_PACKAGE (taken out of the environment at its start), so a filter that matches
+/// nothing still exits NO_TESTS_EXIT there; a run that is no such target hands none on.
+#[cfg(test)]
+#[test]
+fn a_restarted_test_target_stays_a_test_target() {
+    isolated_test!(a_restarted_test_target_stays_a_test_target);
+    let carried = |next: &[(&'static str, Option<std::ffi::OsString>)]| next.iter().find(|(k, _)| *k == makepad_remote::hot::TEST_PACKAGE_ENV).map(|(_, v)| v.clone());
+    crate::harness::set_test_package(true);
+    assert_eq!(carried(&next_run_env(None).unwrap()), Some(Some("1".into())), "a test target's restart carries the name");
+    crate::harness::set_test_package(false);
+    assert_eq!(carried(&next_run_env(None).unwrap()), Some(None), "any other run's restart takes it out");
 }
 
 /// A restart that waited out the run's boot (run_end::restart) and hands no state of its own: the
@@ -9592,6 +9652,14 @@ pub(crate) static RESTART_CONFIRMED: std::sync::atomic::AtomicBool = std::sync::
 /// wait (unix ms) and the edited files whose text it waits on (restart_for_edit; none: no revert
 /// ends it).
 static RESTART_PENDING: std::sync::Mutex<Vec<(String, u64, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// A run that failed its app check ended in place (run_end::check_failed): the sources wait for a
+/// run that passes it, as an edit waits for a restart (`session` lists it), until a run loads them.
+pub(crate) fn check_failed_pending(why: &str) {
+    // (a relaunch then says "restarting (the last run ended in place: ...)", not the check's
+    // errors as if they were its reason)
+    note_restart_pending(&format!("the last run ended in place: {why}"));
+}
 
 fn note_restart_pending(why: &str) {
     note_restart_pending_in(why, Vec::new());
@@ -10374,9 +10442,16 @@ pub(crate) fn input_paths(keep: &dyn Fn(&str) -> bool) -> Result<Vec<String>, St
     // the launch) waits for it: it was refused "not started" (11-03). The run's own flag: this
     // answers from before the program is laid out (the layout's flag), and a save that came then
     // read "watches no sources" and ended the session (12 min of native build lost, 11-04)
+    // A host that waits for a fix has no run, and no watcher starts before the next save or
+    // relaunch starts one: it says so at once, as it starts to wait (`inputs_wake`). It read
+    // "watches no sources" in the end of a run that failed its app check, devhub took the session
+    // for over, and a session started on a broken tree ended at the save that fixed it (11-21).
     let mut g = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner());
-    while g.is_none() && crate::run::live_session() && !WATCH_GONE.load(std::sync::atomic::Ordering::Acquire) {
+    while g.is_none() && crate::run::live_session() && !WATCH_GONE.load(std::sync::atomic::Ordering::Acquire) && !crate::run::host_held() {
         g = WATCH_READY.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
+    if g.is_none() && crate::run::host_held() {
+        return Err(HELD_NO_RUN.into());
     }
     let (inputs, loaded) = g.as_ref().map(|v| (v.inputs.clone(), v.loaded.clone())).ok_or("this run watches no sources (not a live session, or its watcher ended)")?;
     drop(g);
@@ -10737,9 +10812,11 @@ unsafe fn test_edit(up: *mut Unit, paths: Vec<String>, o: &mut Outcome, undos: &
     // rest on every body -- dead code, unused imports -- wait for the next test check)
     let mut bodies = o.bodies.clone();
     if let Some(u) = &o.undo { bodies.extend(u.added.iter().copied()); }
-    for l in crate::owner::call(crate::owner::Class::Program, || crate::check::live_lints(&(*up).prog, &(*up).tcx, &bodies)) {
+    let check = crate::owner::call(crate::owner::Class::Program, || crate::check::live_lints(&(*up).prog, &(*up).tcx, &bodies));
+    for l in check.lints.iter().chain(check.borrows.iter().map(|(_, e)| e)) {
         eprintln!("relax live:   {l}");
     }
+    live::note_borrows(&check.owners, check.borrows);
     patch_landed(edit.paths.iter().cloned(), changed_items(up, o));
     let mut pending = Vec::new();
     if let Some(undo) = o.undo.take() {
@@ -10810,6 +10887,17 @@ unsafe fn test_edit(up: *mut Unit, paths: Vec<String>, o: &mut Outcome, undos: &
 }
 
 unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
+    if live_trace() {
+        eprintln!("relax live: watcher up at t={:.0} ms (recovering {}, replacement {})", crate::clock::ms_since_start(), crate::hot_failure::recovering(), crate::hot_failure::replacement_running());
+    }
+    // (hot_fail.py's late-watcher case: a restart's replacement whose watcher comes up after the
+    // next save, as one on a loaded box did, 11-19; the save is this run's to patch, from the
+    // stamps its resolve took)
+    if crate::hot_failure::replacement() {
+        if let Some(ms) = std::env::var("RELAX_TEST_LATE_WATCHER").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
     // a body that includes a file for the first time: the watcher watches it from now on
     crate::sip::on_late_new(watch_events::kick);
     inputs.add_runner();
@@ -10865,6 +10953,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     // the readiness signal for tools and tests, whatever the log verbosity: RELAX_LIVE_READY=<file>
     // gets the watched file count once the watcher runs (edits saved from now on are seen)
     if let Some(ready) = std::env::var_os("RELAX_LIVE_READY") { let _ = std::fs::write(ready, format!("{}\n", files.len())); }
+    if live_trace() {
+        eprintln!("relax live: watching {} files at t={:.0} ms (recovering {})", files.len(), crate::clock::ms_since_start(), crate::hot_failure::recovering());
+    }
     let mut undos: Vec<Undo> = Vec::new();
     // SPEC-V: patches that ran before their verdict
     let mut pending: Vec<PendingPatch> = Vec::new();
@@ -11293,6 +11384,17 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let settled_stamps = last;
         // (what settled may be a held landing's: it waits, the rest applies)
         changed.retain(|&k| !held_back(&files[k].0, true));
+        // The lockfile as the run's own native build left it is no edit (cargo brought it up to
+        // date, or made it in a tree without one: native.rs OWN_LOCKS): taken as it is. While that
+        // cargo still runs, a later round looks at it again.
+        changed.retain(|&k| match inputs.is_manifest(&files[k].0).then(|| crate::native::own_lock(&files[k].0)).flatten() {
+            Some(crate::native::OwnLockState::Building) => false,
+            Some(crate::native::OwnLockState::Left(left)) if left == settled_stamps[k] => {
+                files[k].2 = left;
+                false
+            }
+            _ => true,
+        });
         if changed.is_empty() && !quiet_retry {
             continue;
         }
@@ -11670,7 +11772,15 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         log_edit(up, &what, &paths, &o, saved, seen);
         if crate::harness::live::enabled() {
             drop(_reloading);
-            let back = test_edit(up, which.iter().map(|&k| files[k].0.clone()).collect(), &mut o, &mut undos);
+            // the verdict names what was saved: an included file (a fixture's data an item reads
+            // with include_str!) as well as the code that includes it, whose items the patch
+            // changed; naming the includer alone, the round read as one that took none of the
+            // saved files (organ8.blocks.splash, W14539, 11-19)
+            let mut tested: Vec<String> = which.iter().map(|&k| files[k].0.clone()).collect();
+            for &k in &moved {
+                if !tested.contains(&files[k].0) { tested.push(files[k].0.clone()); }
+            }
+            let back = test_edit(up, tested, &mut o, &mut undos);
             for (old, new) in back { for f in &mut files { if f.1 == new { f.1 = old; } } }
             continue;
         }

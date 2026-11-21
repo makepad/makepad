@@ -4,6 +4,8 @@
 // strings over every radix for seven types
 // (core_parse_int.rs parses others). Tests are a01.. so rustc's order is the file's.
 
+use std::num::{NonZero, Saturating};
+
 struct D(u64, u32);
 impl D {
     fn new() -> D {
@@ -131,6 +133,16 @@ macro_rules! common {
     ($t:ident, $v:expr) => {{
         let v = $v;
         println!("| {} MIN {} MAX {} BITS {}", stringify!($t), $t::MIN, $t::MAX, $t::BITS);
+        println!("| {} Saturating MIN {} MAX {} BITS {}", stringify!($t),
+            Saturating::<$t>::MIN.0, Saturating::<$t>::MAX.0, Saturating::<$t>::BITS);
+        for a in [Saturating(0 as $t), Saturating(0x52 as $t), Saturating::<$t>::MAX, Saturating::<$t>::MIN] {
+            println!("| {} Saturating bits {} {} {} {} {}", stringify!($t), a.0,
+                a.count_ones(), a.count_zeros(), a.leading_zeros(), a.trailing_zeros());
+            println!("| {} Saturating shifts {} {} {} {}", stringify!($t),
+                a.rotate_left($t::BITS + 3).0, a.rotate_right(3).0, a.swap_bytes().0, a.reverse_bits().0);
+            println!("| {} Saturating endian {} {} {} {} pow {}", stringify!($t),
+                Saturating::<$t>::from_be(a).0, Saturating::<$t>::from_le(a).0, a.to_be().0, a.to_le().0, a.pow(3).0);
+        }
         m1!($t, v, count_ones, |a| a.count_ones());
         m1!($t, v, leading_zeros, |a| a.leading_zeros());
         m1!($t, v, trailing_zeros, |a| a.trailing_zeros());
@@ -215,6 +227,19 @@ macro_rules! unsigned {
         #[test]
         fn $fname() {
             let v = common!($t, values!($t, false));
+            let high = (1 as $t) << ($t::BITS - 1);
+            for b in [high - 1, high, high + 1] {
+                println!("| {} checked_signed_diff {} {:?} {:?}", stringify!($t), b,
+                    b.checked_signed_diff(0), (0 as $t).checked_signed_diff(b));
+            }
+            for a in [0 as $t, 1, 3, high] {
+                println!("| {} Saturating power of two {} {}", stringify!($t), a, Saturating(a).is_power_of_two());
+            }
+            let three = NonZero::<$t>::new(3).unwrap();
+            for a in [three, NonZero::<$t>::MAX] {
+                println!("| {} NonZero {} quotient {} {} width {} signed {}", stringify!($t), a,
+                    a.div_ceil(three), a.div_ceil(NonZero::<$t>::new(2).unwrap()), a.bit_width(), a.cast_signed());
+            }
             m1!($t, v, is_power_of_two, |a| a.is_power_of_two());
             // next_power_of_two wraps to 0 on overflow in release, panics in debug: the checked form
             m1!($t, v, checked_next_power_of_two, |a| a.checked_next_power_of_two());
@@ -239,6 +264,11 @@ macro_rules! signed {
         #[test]
         fn $fname() {
             let v = common!($t, values!($t, true));
+            for a in [Saturating::<$t>::MIN, Saturating(0 as $t), Saturating(1 as $t)] {
+                println!("| {} Saturating sign {} {} {} {} {}", stringify!($t), a.0,
+                    a.abs().0, a.signum().0, a.is_positive(), a.is_negative());
+            }
+            println!("| {} NonZero unsigned {}", stringify!($t), NonZero::<$t>::MIN.cast_unsigned());
             m1!($t, v, wrapping_abs, |a| a.wrapping_abs());
             m1!($t, v, unsigned_abs, |a| a.unsigned_abs());
             m1!($t, v, signum, |a| a.signum());
@@ -288,7 +318,12 @@ fn a13_parse_edges() {
         println!("| {:?} u8 {} i8 {} u64 {} i64 {} u128 {} i128 {} u32x {} i32r36 {}", c,
             kind(u8::from_str_radix(c, 10)), kind(i8::from_str_radix(c, 10)), kind(u64::from_str_radix(c, 10)), kind(i64::from_str_radix(c, 10)),
             kind(u128::from_str_radix(c, 10)), kind(i128::from_str_radix(c, 10)), kind(u32::from_str_radix(c, 16)), kind(i32::from_str_radix(c, 36)));
+        println!("| NonZero {:?} u8x {} i8x {} u128 {} i128 {}", c,
+            kind(NonZero::<u8>::from_str_radix(c, 16)), kind(NonZero::<i8>::from_str_radix(c, 16)),
+            kind(NonZero::<u128>::from_str_radix(c, 10)), kind(NonZero::<i128>::from_str_radix(c, 10)));
     }
+    const PARSED: Result<NonZero<i16>, std::num::ParseIntError> = NonZero::<i16>::from_str_radix("-100", 2);
+    println!("| NonZero const radix {}", kind(PARSED));
 }
 
 #[test]
@@ -299,6 +334,7 @@ fn a14_parse_bad_radix() {
         Err(e) => e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default(),
     };
     println!("| radix 37: {}", msg);
+    println!("| NonZero radix 1 panics {}", std::panic::catch_unwind(|| NonZero::<u8>::from_str_radix("0", 1)).is_err());
 }
 
 #[test]
@@ -328,4 +364,91 @@ fn a15_parse_random_all_radixes() {
         parse!(u8, i8, u16, i32, u64, i64, u128);
     }
     println!("| parse random {} {:016x}", d.1, d.0);
+}
+
+#[test]
+fn a16_algebraic_floats() {
+    for (a, b) in [(5.5f32, 2.0f32), (-3.5, 2.0)] {
+        println!("| f32 algebraic {} {} {} {} {}", a.algebraic_add(b), a.algebraic_sub(b),
+            a.algebraic_mul(b), a.algebraic_div(b), a.algebraic_rem(b));
+    }
+    for (a, b) in [(5.5f64, 2.0f64), (-3.5, 2.0)] {
+        println!("| f64 algebraic {} {} {} {} {}", a.algebraic_add(b), a.algebraic_sub(b),
+            a.algebraic_mul(b), a.algebraic_div(b), a.algebraic_rem(b));
+    }
+}
+
+#[test]
+fn a17_inherited_overflow_checks() {
+    use std::ops::*;
+    use std::panic::{catch_unwind, UnwindSafe};
+
+    fn show<T: std::fmt::Debug>(label: &str, f: impl FnOnce() -> T + UnwindSafe) {
+        match catch_unwind(f) {
+            Ok(value) => println!("| {} {:?}", label, value),
+            Err(payload) => {
+                let msg = match payload.downcast_ref::<&str>() {
+                    Some(s) => *s,
+                    None => payload.downcast_ref::<String>().unwrap().as_str(),
+                };
+                println!("| {} panicked: {}", label, msg);
+            }
+        }
+    }
+
+    macro_rules! op_cases {
+        ($op:ident, $tr:ident, $sym:tt, $assign:ident, $atr:ident, $asym:tt, $a:expr, $b:expr) => {{
+            fn $op<T: $tr<R>, R>(a: T, b: R) -> T::Output { a $sym b }
+            fn $assign<T: $atr<R>, R>(mut a: T, b: R) -> T {
+                a $asym b;
+                a
+            }
+            show(stringify!($op), || $op($a, $b));
+            show(concat!(stringify!($op), " ref/value"), || $op(&$a, $b));
+            show(concat!(stringify!($op), " value/ref"), || $op($a, &$b));
+            show(concat!(stringify!($op), " ref/ref"), || $op(&$a, &$b));
+            show(stringify!($assign), || $assign($a, $b));
+            show(concat!(stringify!($assign), " ref"), || $assign($a, &$b));
+        }};
+    }
+
+    op_cases!(add, Add, +, add_assign, AddAssign, +=, u8::MAX, 1u8);
+    op_cases!(sub, Sub, -, sub_assign, SubAssign, -=, 0u8, 1u8);
+    op_cases!(mul, Mul, *, mul_assign, MulAssign, *=, i8::MAX, 2i8);
+    op_cases!(shl, Shl, <<, shl_assign, ShlAssign, <<=, 1u8, 8u16);
+    op_cases!(shr, Shr, >>, shr_assign, ShrAssign, >>=, -2i8, 8i8);
+
+    fn neg<T: Neg>(a: T) -> T::Output { -a }
+    show("neg", || neg(i8::MIN));
+    show("neg ref", || neg(&i8::MIN));
+
+    show("sum u8 value", || [u8::MAX, 1].into_iter().sum::<u8>());
+    show("sum u8 ref", || [u8::MAX, 1].iter().sum::<u8>());
+    show("sum i32 value", || [i32::MAX, 1].into_iter().sum::<i32>());
+    show("sum i32 ref", || [i32::MAX, 1].iter().sum::<i32>());
+    show("product u8 value", || [128u8, 2].into_iter().product::<u8>());
+    show("product u8 ref", || [128u8, 2].iter().product::<u8>());
+    show("product i32 value", || [i32::MAX, 2].into_iter().product::<i32>());
+    show("product i32 ref", || [i32::MAX, 2].iter().product::<i32>());
+
+    show("pow unsigned", || 16u8.pow(2));
+    show("pow signed", || (-8i8).pow(3));
+    show("abs", || i8::MIN.abs());
+    show("next_power_of_two", || 200u8.next_power_of_two());
+    show("next_multiple_of", || 250u8.next_multiple_of(16));
+
+    show("range nth", || (250u8..).nth(10));
+    show("range next three", || {
+        let mut it = 254u8..;
+        (it.next(), it.next(), it.next())
+    });
+    show("RangeFromIter nth", || core::range::RangeFrom::from(250u8..).into_iter().nth(10));
+    show("RangeFromIter next to max", || {
+        let mut it = core::range::RangeFrom::from(254u8..).into_iter();
+        (it.next(), it.next())
+    });
+    show("RangeFromIter next three", || {
+        let mut it = core::range::RangeFrom::from(254u8..).into_iter();
+        (it.next(), it.next(), it.next())
+    });
 }

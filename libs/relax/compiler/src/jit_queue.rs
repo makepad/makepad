@@ -19,6 +19,12 @@ pub(super) enum Job {
     O2(usize, u32, O2Kind),
     O3(TierEntry),
     Spec(usize, u32),
+    /// the real-time reach's build of a slot it reached (jit.rs reach_build): installed at once,
+    /// its references walked at the install. Spec's tier. True: a ticket waits for the reach (a
+    /// device's start, a tier-up's install): Interactive, behind everything a program thread
+    /// waits for (REACH_WAITED_KEY); else a build nobody waits for, before the rest of its class
+    /// (REACH_KEY)
+    Reach(usize, u32, bool),
     Tick,
     /// a slice of a check beside the program (check.rs CheckBatch): below every build until
     /// something waits for it
@@ -29,15 +35,15 @@ impl Job {
         match self {
             Self::Ahead(f, AheadWork::Slot(id)) => Some((f.unit.load(Ordering::Acquire) as usize, *id)),
             Self::Ahead(_, AheadWork::Body(..) | AheadWork::Look(..)) | Self::Tick | Self::Check(..) => None,
-            Self::O2(u, id, _) | Self::Spec(u, id) => Some((*u, *id)),
+            Self::O2(u, id, _) | Self::Spec(u, id) | Self::Reach(u, id, _) => Some((*u, *id)),
             Self::O3(e) => Some((TIER_UNIT.load(Ordering::Acquire) as usize, e.0)),
         }
     }
     fn label(&self) -> &'static str {
-        match self { Self::Ahead(..) => "JIT ahead", Self::O2(..) => "JIT O2", Self::O3(..) => "JIT O3", Self::Spec(..) => "JIT spec", Self::Tick => "JIT tick", Self::Check(..) => "JIT check" }
+        match self { Self::Ahead(..) => "JIT ahead", Self::O2(..) => "JIT O2", Self::O3(..) => "JIT O3", Self::Spec(..) => "JIT spec", Self::Reach(..) => "JIT reach", Self::Tick => "JIT tick", Self::Check(..) => "JIT check" }
     }
     fn tier(&self) -> usize {
-        match self { Self::Ahead(..) => 0, Self::O2(..) => 1, Self::O3(..) => 2, Self::Spec(..) => 3, Self::Tick => 4, Self::Check(..) => 5 }
+        match self { Self::Ahead(..) => 0, Self::O2(..) => 1, Self::O3(..) => 2, Self::Spec(..) | Self::Reach(..) => 3, Self::Tick => 4, Self::Check(..) => 5 }
     }
 }
 /// `slot`: the job's slot when it was queued (a wait for that slot promotes it).
@@ -62,7 +68,10 @@ struct Policy {
     /// running builds below Interactive (the burst gate's count: a check beside the program is none)
     builds: usize,
     noninteractive: usize,
+    /// the running Background jobs but O3 builds (breadth: O2, speculation, checks)
     background: usize,
+    /// the running Background O3 builds: their own part while the JIT comes first (`wide`)
+    background_o3: usize,
     /// the running jobs per tier (the startup's tier widths)
     tiers: [usize; TIERS],
     /// through the startup the checks ahead of the main thread run on a few workers, as many as its
@@ -71,6 +80,11 @@ struct Policy {
     ahead_full: bool,
     limit: usize,
     background_limit: usize,
+    /// O3's Background ceiling, `budget::jit_background_limit`: the cores the app's Background work
+    /// leaves while the JIT comes first, else `background_limit`
+    wide: usize,
+    /// Visible work is queued or running here: every Background build keeps `background_limit`
+    visible: bool,
     /// before the first present: the startup's tier widths apply
     widths: bool,
     o3_stopped: bool,
@@ -129,7 +143,7 @@ impl Queue {
         let slot = job.slot();
         let wanted = slot.and_then(|slot| self.wanted(slot));
         // the run quits: a compile nobody waits for is speculative (`quit`)
-        if wanted.is_none() && self.quitting && quit_drops(job.tier()) { return false; }
+        if wanted.is_none() && self.quitting && quit_drops(&job) { return false; }
         let promoted = wanted.is_some();
         let class = if job.tier() == 0 { budget::BACKGROUND } else { job_class(&job, &now) };
         let class = wanted.map_or(class, |w| w.min(self.bucket_class(job.tier(), class)));
@@ -144,6 +158,7 @@ impl Queue {
         let class = self.class_of(&entry);
         if entry.job.tier() == 0 && !entry.promoted { self.ahead_len += 1; }
         COUNTS[entry.job.tier()].fetch_add(1, Ordering::Relaxed);
+        if matches!(entry.job, Job::Reach(..)) { REACH_QUEUED.fetch_add(1, Ordering::SeqCst); }
         self.entries.push(entry);
         budget::queued(class, budget::JIT, 1);
         let policy = self.policy();
@@ -251,10 +266,13 @@ impl Queue {
             builds: 0,
             noninteractive: 0,
             background: 0,
+            background_o3: 0,
             tiers: [0; TIERS],
             ahead_full: false,
             limit: budget::limit() as usize,
             background_limit: budget::background_limit() as usize,
+            wide: budget::jit_background_limit() as usize,
+            visible: self.plan.iter().any(|p| !p[budget::VISIBLE as usize].is_empty()),
             widths: !FIRST_PRESENT.load(Ordering::Acquire) && !HEADLESS.load(Ordering::Acquire),
             o3_stopped: TIER_STOP.load(Ordering::Acquire),
             o3_startup: startup_holds_tier1(),
@@ -265,7 +283,8 @@ impl Queue {
             let class = r.class.class();
             if r.tier != 4 && class != budget::INTERACTIVE { policy.noninteractive += 1; }
             if r.tier < 4 && class != budget::INTERACTIVE { policy.builds += 1; }
-            if class == budget::BACKGROUND { policy.background += 1; }
+            if class == budget::BACKGROUND { if r.tier == 2 { policy.background_o3 += 1 } else { policy.background += 1 } }
+            if class == budget::VISIBLE { policy.visible = true; }
             policy.tiers[r.tier] += 1;
             if r.tier == 0 && !r.promoted { ahead += 1; }
         }
@@ -276,7 +295,8 @@ impl Queue {
     fn class_blocked(&self, class: u8, tier: usize, policy: &Policy) -> Option<&'static str> {
         if tier < 4 && !eligible(class, policy.burst, policy.builds) { return Some("UI burst"); }
         if class != budget::INTERACTIVE {
-            if let Some(why) = drain_blocked(class, policy.noninteractive, policy.background, policy.limit, policy.background_limit) { return Some(why); }
+            let (background, ceiling) = background_drains(tier, policy.visible, policy.background, policy.background_o3, policy.background_limit, policy.wide);
+            if let Some(why) = drain_blocked(class, policy.noninteractive, background, policy.limit, ceiling) { return Some(why); }
             if policy.widths {
                 let width = match tier { 1 => 1, 2 | 3 => 2, _ => usize::MAX };
                 if policy.tiers[tier] >= width { return Some("startup tier width"); }
@@ -360,6 +380,7 @@ impl Queue {
     fn remove(&mut self, i: usize) -> Entry {
         let mut e = self.entries.swap_remove(i);
         COUNTS[e.job.tier()].fetch_sub(1, Ordering::Relaxed);
+        if matches!(e.job, Job::Reach(..)) { REACH_QUEUED.fetch_sub(1, Ordering::SeqCst); }
         budget::queued(self.class_of(&e), budget::JIT, -1);
         self.plan[e.job.tier()][e.class as usize].remove(&order(e.key, e.serial));
         if e.job.tier() == 0 && !e.promoted { self.ahead_len -= 1; }
@@ -395,6 +416,14 @@ fn drain_blocked(class: u8, noninteractive: usize, background: usize, limit: usi
     if class == budget::BACKGROUND && background >= background_limit { return Some("visible reserve"); }
     None
 }
+/// The running Background builds tier `tier` counts against and their ceiling. While the JIT comes
+/// first (`wide` above `background_limit`) its O3 builds take `wide` against their own count, and
+/// breadth (O2, speculation, checks) keeps `background_limit` against the rest: hot code reaches O3
+/// without waiting out the O2 backlog, and breadth takes no more than before. Visible work queued
+/// or running here: one part, as before, so its drains stay free.
+fn background_drains(tier: usize, visible: bool, rest: usize, o3: usize, background_limit: usize, wide: usize) -> (usize, usize) {
+    if visible { (rest + o3, background_limit) } else if tier == 2 { (o3, wide) } else { (rest, background_limit) }
+}
 fn eligible(class: u8, burst: bool, noninteractive: usize) -> bool {
     !(burst && class != budget::INTERACTIVE && noninteractive != 0)
 }
@@ -406,6 +435,7 @@ fn measured_hot(job: &Job, now: &HeatNow) -> bool {
     match job {
         Job::O3(e) => e.1 != super::Q_MARKED,
         Job::O2(u, id, O2Kind::Normal) => now.heat(*u, *id).0 > 0,
+        Job::Reach(_, _, waited) => *waited,
         _ => false,
     }
 }
@@ -419,6 +449,7 @@ fn job_class(job: &Job, _now: &HeatNow) -> u8 {
     match job {
         Job::Ahead(..) if startup_phase() || ui_burst() => budget::INTERACTIVE,
         Job::Check(..) if crate::check::check_waited() => budget::INTERACTIVE,
+        Job::Reach(_, _, true) => budget::INTERACTIVE,
         _ => budget::BACKGROUND,
     }
 }
@@ -429,10 +460,20 @@ pub(super) fn heat_key(heat: u64, ui: bool, waited_ns: u64) -> u64 {
 /// A check that something waits for goes before every build of its class: the first frame and the
 /// run's exit wait for nothing else.
 const CHECK_WAITED_KEY: i64 = i64::MAX - 1;
+/// A reach build no ticket waits for (a late crossing) goes before every build of its class
+/// (tier-ups, speculation): real-time code may call what it builds; the frontier grows only as
+/// they install, which bounds how many are queued. Behind a waited check.
+const REACH_KEY: i64 = i64::MAX - 2;
+/// One a ticket waits for (Interactive) goes behind everything there a program thread waits for
+/// or will (a slot made, a body's inline candidates: their age and heat keep them far above it) and before
+/// the startup's look-ahead (-LOOK_BEHIND). Through the startup's UI burst a background build ran
+/// one at a time: a cold launch's mark took 590-700 ms on workers against 280 ms on the owner.
+const REACH_WAITED_KEY: i64 = -(1 << 39);
 fn key(e: &Entry, now: &HeatNow) -> i64 {
     if matches!(e.job, Job::Tick) { return i64::MAX; }
     // (a check beside the program goes behind every build of its class, until it is waited for)
     if matches!(e.job, Job::Check(..)) { return if crate::check::check_waited() { CHECK_WAITED_KEY } else { i64::MIN }; }
+    if let Job::Reach(_, _, waited) = e.job { return if waited { REACH_WAITED_KEY } else { REACH_KEY }; }
     let (heat, ui) = match &e.job {
         Job::O2(u, id, _) => now.heat(*u, *id),
         Job::O3(t) => now.tier_heat(t),
@@ -518,6 +559,19 @@ fn idle_tiers() -> bool {
 }
 fn is_tier_up(tier: usize) -> bool {
     tier == 1 || tier == 2
+}
+/// The JIT comes first in the CPU budget (`budget::set_jit_first`, at each pick): the app is up
+/// (its first present, or a headless run) and O3 builds are queued or running. Then its O3 builds
+/// take the physical cores the app's Background work leaves (`background_drains`); once the O3
+/// queue has drained and its last build is done, Background is one part again. O2 of everything is
+/// breadth: it is never settled, so it does not hold the phase open (a game's first world load
+/// waited out 2.5-5x the O2 builds while it did). Before the first present the start-up's tier
+/// widths apply and Background keeps its ceiling: the UI thread's first frame compiles there.
+/// Measured states, not a timer: a start-up, a first reach and the settle after an edit each queue
+/// their tier-ups.
+fn jit_first() -> bool {
+    (FIRST_PRESENT.load(Ordering::Acquire) || HEADLESS.load(Ordering::Acquire))
+        && COUNTS[2].load(Ordering::Relaxed) + RUNNING[2].load(Ordering::Relaxed) > 0
 }
 /// The calling thread may wait for a helper's check or lowering of a body it needs: not while
 /// tier-ups run at the idle policy (idle_tiers), whose prefronts check and lower bodies too, unless
@@ -706,9 +760,10 @@ static FORKED: AtomicBool = AtomicBool::new(false);
 /// The run quits (`quit`): ahead work found from now on is not queued (Queue::quitting decides,
 /// under the lock; this spares the inbox and the workers' wake).
 static QUITTING: AtomicBool = AtomicBool::new(false);
-/// A queued job of `tier` the quit drops: checks and lowering ahead, O2 and speculative builds.
-fn quit_drops(tier: usize) -> bool {
-    matches!(tier, 0 | 1 | 3)
+/// A queued job the quit drops: checks and lowering ahead, O2 and speculative builds (not the
+/// real-time reach's: the reach waits for each).
+fn quit_drops(job: &Job) -> bool {
+    matches!(job.tier(), 0 | 1 | 3) && !matches!(job, Job::Reach(..))
 }
 /// The run quits (run.rs quit_mark): the compiles queued and not started -- checks and lowering
 /// ahead, O2 and speculative builds -- are dropped, unless a thread waits for one: they are
@@ -747,6 +802,25 @@ pub(super) fn o2(unit: usize, id: u32, kind: O2Kind, at: u64) {
 }
 /// Speculative compile of unit `unit`'s slot `id` (a slot id means something only in its own unit).
 pub(super) fn spec(unit: usize, id: u32) { push(Job::Spec(unit, id), wall_ns()); }
+/// The real-time reach's build of unit `unit`'s slot `id` (jit.rs reach_build).
+pub(super) fn reach(unit: usize, id: u32, waited: bool) { push(Job::Reach(unit, id, waited), wall_ns()); }
+/// Reach builds queued (Queue::push, Queue::remove): a thread waiting for the reach takes them.
+static REACH_QUEUED: AtomicUsize = AtomicUsize::new(0);
+pub(super) fn reach_queued() -> bool { REACH_QUEUED.load(Ordering::SeqCst) != 0 }
+/// Workers take what is queued here: not a plain fork's child (it has none, and nothing queues).
+pub(super) fn takes_jobs() -> bool { !FORKED.load(Ordering::Relaxed) }
+/// A queued reach build out of the queue, for a thread whose wait is the reach's to run it itself
+/// (jit.rs realtime_before_install: a tier-up build of real-time code waits for the reach on a
+/// worker; with every worker waiting so, the reach's builds would stay queued). The oldest one of
+/// the most urgent class (a reach build's key is REACH_KEY or REACH_WAITED_KEY).
+pub(super) fn take_reach() -> Option<(usize, u32)> {
+    if FORKED.load(Ordering::Relaxed) || !reach_queued() { return None; }
+    let mut q = lock();
+    let serial = q.plan[3].iter().find_map(|bucket| [REACH_KEY, REACH_WAITED_KEY].into_iter().find_map(|key| bucket.range(order(key, 0)..=order(key, u64::MAX))
+        .map(|&(_, serial)| serial).find(|serial| matches!(q.entries[q.indices[serial]].job, Job::Reach(..)))))?;
+    let i = q.indices[&serial];
+    match q.remove(i).job { Job::Reach(unit, id, _) => Some((unit, id)), _ => None }
+}
 /// Slot `id` to check and lower ahead. Every slot made goes: one whose body a check ahead already
 /// checked (an inline candidate, the look-ahead) is still lowered here, off the owner.
 pub(super) fn ahead(front: Arc<FrontShared>, id: u32) { push_ahead(&front, std::iter::once(AheadWork::Slot(id))); }
@@ -849,7 +923,7 @@ impl Queue {
     /// The run quits (`quit`): nothing it drops is queued from now on; the queued entries it drops.
     fn quit(&mut self) -> Vec<u64> {
         self.quitting = true;
-        self.entries.iter().filter(|e| quit_drops(e.job.tier()) && !e.promoted).map(|e| e.serial).collect()
+        self.entries.iter().filter(|e| quit_drops(&e.job) && !e.promoted).map(|e| e.serial).collect()
     }
     /// `serials`' entries out of the queue, but one a worker took since or a thread came to wait for.
     fn quit_drop(&mut self, serials: &[u64]) -> Vec<Entry> {
@@ -1024,6 +1098,7 @@ fn worker_loop(index: usize) {
                     q.tick_queued = true;
                     q.push(Job::Tick, wall_ns());
                 }
+                budget::set_jit_first(jit_first());
                 let now = HeatNow::take();
                 let takes = Takes::of(worker.idle.load(Ordering::Relaxed));
                 let head = q.head(&now, takes);
@@ -1171,7 +1246,7 @@ pub(super) fn view(n: usize) -> Vec<String> {
         let why = match &e.job {
             Job::O3(t) => Q_WHY[t.1 as usize],
             Job::O2(_, _, kind) => match kind { O2Kind::Normal => "optimize", O2Kind::Base => "baseline", O2Kind::Borrow => "borrow", O2Kind::Verified => "verified O1" },
-            Job::Ahead(_, AheadWork::Slot(_)) => "prepare", Job::Ahead(_, AheadWork::Body(..)) => "inline candidate", Job::Ahead(_, AheadWork::Look(..)) => "look ahead", Job::Spec(..) => "speculate", Job::Tick => "housekeeping", Job::Check(..) => "dependency check",
+            Job::Ahead(_, AheadWork::Slot(_)) => "prepare", Job::Ahead(_, AheadWork::Body(..)) => "inline candidate", Job::Ahead(_, AheadWork::Look(..)) => "look ahead", Job::Spec(..) => "speculate", Job::Reach(..) => "real-time reach", Job::Tick => "housekeeping", Job::Check(..) => "dependency check",
         };
         let name = slot_label(e.slot);
         rows.push(format!("queued {} class={} heat={}{} why={} waited={:.3}s {}{}", e.job.label(), class_name(q.class_of(e)), heat,
@@ -1226,6 +1301,13 @@ mod tests {
         assert_eq!(drain_blocked(budget::BACKGROUND, 1, 1, 2, 1), Some("visible reserve"), "parked Background builds cannot fill the Visible drain");
         assert_eq!(drain_blocked(budget::VISIBLE, 1, 1, 2, 1), None, "Visible work passes a parked Background build");
         assert_eq!(drain_blocked(budget::INTERACTIVE, 2, 1, 2, 1), None, "first compiles retain their drain above both lower classes");
+        let (o3, o3_ceiling) = background_drains(2, false, 1, 1, 1, 3);
+        assert_eq!(drain_blocked(budget::BACKGROUND, 2, o3, 3, o3_ceiling), None, "while the JIT comes first an O3 build passes a running O2 build and O3 build");
+        let (o2, o2_ceiling) = background_drains(1, false, 1, 1, 1, 3);
+        assert_eq!(drain_blocked(budget::BACKGROUND, 2, o2, 3, o2_ceiling), Some("visible reserve"), "breadth keeps background_limit beside the wide O3 part");
+        let (seen, seen_ceiling) = background_drains(2, true, 0, 1, 1, 3);
+        assert_eq!(drain_blocked(budget::BACKGROUND, 1, seen, 3, seen_ceiling), Some("visible reserve"), "Visible work here: O3 keeps the old reserve");
+        assert_eq!(background_drains(2, false, 0, 0, 1, 1), (0, 1), "flag down: O3 at background_limit, as before");
         let mut q = Queue::new();
         q.push(Job::Spec(1, 10), 1);
         q.push(Job::Spec(1, 11), 2);
@@ -1405,6 +1487,7 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&QUEUE, OnceLock::new());
     reset(&COUNTS, [const { AtomicUsize::new(0) }; TIERS]);
+    reset(&REACH_QUEUED, AtomicUsize::new(0));
     reset(&RUNNING, [const { AtomicUsize::new(0) }; TIERS]);
     reset(&JOB_CPU, [const { AtomicU64::new(0) }; TIERS]);
     reset(&JOB_RUNS, [const { AtomicU64::new(0) }; TIERS]);

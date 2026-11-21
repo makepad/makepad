@@ -48,9 +48,17 @@ pub fn patch_reaches(b: &Func) -> bool {
 }
 
 /// Per block, the guard test it ends in, as (fast target, slow side): a `Branch` one of whose
-/// targets is a block holding a slow call (`Func::guard_calls`), or a guard test with the same
-/// fast target (a copy version's compare leads to its flags' test). And per block, whether it
-/// holds a slow call.
+/// targets is a block holding a slow call (`Func::guard_calls`), or a copy version's compare
+/// (`copy_ver_compares`) whose other target is a guard test with the same fast target (it leads
+/// to its flags' test). And per block, whether it holds a slow call.
+///
+/// Only a copy version's compare chains: a block that ends in a guard test may hold code of its
+/// own before it, and a branch of the program's into it is no guard test. An emulator's bus read
+/// `if !plain(addr) { slow = ..; bus.tick = ..; notes.read(addr) }`, `notes.read` an empty
+/// patchable body: the callee's prepared body comes with the copy's jumps threaded, so the `if`'s
+/// body ends in the copy's guard (its shared copy version compare) whose fast side is the `if`'s
+/// join, and the `if` was read as a guard test leading to it: the fast half went straight to the
+/// join and lost both stores.
 fn guard_tests(f: &Func) -> (Vec<Option<(u32, u32)>>, Vec<bool>) {
     let nb = f.blocks.len();
     let slow: Vec<bool> = (0..nb).map(|b| (0..f.blocks[b].insts.len()).any(|ii| f.guard_call(b, ii))).collect();
@@ -58,14 +66,16 @@ fn guard_tests(f: &Func) -> (Vec<Option<(u32, u32)>>, Vec<bool>) {
     if !slow.contains(&true) {
         return (test, slow);
     }
+    let ver_cmp = copy_ver_compares(f);
     loop {
         let mut changed = false;
         for b in 0..nb {
-            let Term::Branch(_, x, y) = f.blocks[b].term else { continue };
+            let Term::Branch(c, x, y) = f.blocks[b].term else { continue };
             if test[b].is_some() || x == y {
                 continue;
             }
-            let leads = |side: u32, fast: u32| slow[side as usize] || test[side as usize].is_some_and(|(t, _)| t == fast);
+            let chains = ver_cmp[c.0 as usize];
+            let leads = |side: u32, fast: u32| slow[side as usize] || chains && test[side as usize].is_some_and(|(t, _)| t == fast);
             let found = if leads(y, x) {
                 Some((x, y))
             } else if leads(x, y) {
@@ -82,6 +92,41 @@ fn guard_tests(f: &Func) -> (Vec<Option<(u32, u32)>>, Vec<bool>) {
             return (test, slow);
         }
     }
+}
+
+/// Per vreg, whether it is a copy version's compare as `opt::inline_site` emits it, its read
+/// shared by several guards or not: `w == ver` (or `!=`, or the word itself) of a relaxed load of
+/// an `Addr` at a copy version word's offset (the root's word's: every slot's is at the same
+/// offset of its tier record). Each of the three has one definition.
+fn copy_ver_compares(f: &Func) -> Vec<bool> {
+    let nv = f.vregs.len();
+    let Some((word, _)) = f.copy_ver else { return vec![false; nv] };
+    let mut def: Vec<Option<(usize, usize)>> = vec![None; nv];
+    let mut n = vec![0u8; nv];
+    for p in &f.params {
+        n[p.0 as usize] = 2;
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (ii, i) in b.insts.iter().enumerate() {
+            for_defs(i, |d| {
+                let k = d.0 as usize;
+                n[k] = n[k].saturating_add(1);
+                def[k] = Some((bi, ii));
+            });
+        }
+    }
+    let one = |v: VReg| def[v.0 as usize].filter(|_| n[v.0 as usize] == 1).map(|(bi, ii)| &f.blocks[bi].insts[ii]);
+    let read = |w: VReg| match one(w) {
+        Some(Inst::AtomicLoad(Mem::Int(8, false), AtomOrd::Relaxed, _, a)) => matches!(one(*a), Some(Inst::Addr(_, s)) if s.off == word.off),
+        _ => false,
+    };
+    (0..nv)
+        .map(|k| match one(VReg(k as u32)) {
+            Some(Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, w, _)) => read(*w),
+            Some(Inst::AtomicLoad(..)) => read(VReg(k as u32)),
+            _ => false,
+        })
+        .collect()
 }
 
 /// The blocks `succ` reaches from `entries` in reverse postorder, and each block's rank in it
@@ -2037,6 +2082,53 @@ mod tests {
         f.verify().unwrap();
         verify_patched_path(&f).unwrap_or_else(|e| panic!("{}\n{}", e, f.dump()));
         assert!(keeps_check(&f, k), "the fast half keeps the bounds check before a plain call: {}", f.dump());
+    }
+
+    #[test]
+    fn a_branch_into_a_block_that_ends_in_a_guard_stays_a_branch() {
+        // `loop { if v >= 8 { *p = v; note(v) } wait(v) }`, `note` an empty patchable body taken
+        // in from a prepared callee: the copy's jumps threaded, the `if`'s body ends in the copy's
+        // guard (the copy version compare its read shares with the loop's head) whose fast side
+        // is the `if`'s join. The `if` is the program's branch: the fast half keeps it and the
+        // store, and the guard alone goes. Before, the `if` was read as a guard test leading to
+        // the body's and the fast half skipped the body (an emulator's bus read lost its stamp)
+        let note = leaf("note", Some(FLAG));
+        let get = |id: u32| (id == 1).then_some((&note as *const Func, ATTR_ALWAYS));
+        let (mut f, v) = new_root();
+        let p = f.vreg(Cls::I);
+        f.params.push(p);
+        let [k, a, w, h, fa, fw, fc] = std::array::from_fn(|_| f.vreg(Cls::I));
+        for _ in 0..7 {
+            f.block();
+        }
+        let c = f.params[0];
+        let slow_pos = 20 | relax_backend::rir::POS_GUARD;
+        let blocks: [(Vec<Inst>, Term); 7] = [
+            (vec![Inst::Iconst(v, 0)], Term::Jump(1)),
+            (vec![Inst::Addr(a, WORD), Inst::AtomicLoad(M8, AtomOrd::Relaxed, w, a), Inst::ICmpI(Cond::Eq, false, h, w, 3), Inst::ICmpI(Cond::Lt, false, k, v, 8)], Term::Branch(k, 3, 2)),
+            (vec![Inst::Store(M8, p, 0, v)], Term::Branch(h, 3, 5)),
+            (vec![Inst::Call(Callee::Fn(5), vec![v], vec![v]), Inst::IBinI(IOp::Add, I64, v, v, 1)], Term::Branch(c, 1, 4)),
+            (Vec::new(), Term::Ret(vec![v])),
+            (vec![Inst::Addr(fa, FLAG), Inst::AtomicLoad(M8, AtomOrd::Relaxed, fw, fa), Inst::ICmpI(Cond::Eq, false, fc, fw, 0)], Term::Branch(fc, 3, 6)),
+            (vec![Inst::Call(Callee::Fn(1), vec![v], vec![])], Term::Jump(3)),
+        ];
+        for (b, (insts, term)) in blocks.into_iter().enumerate() {
+            f.blocks[b].pos = vec![if b == 6 { slow_pos } else { 10 + b as u64 }; insts.len()];
+            f.blocks[b].insts = insts;
+            f.blocks[b].term = term;
+        }
+        f.guard_calls.push((slow_pos, 1));
+        f.copy_ver = Some((WORD, 3));
+        f.verify().unwrap();
+        split_patched_path(&mut f, &get).expect("a split");
+        f.verify().unwrap();
+        verify_patched_path(&f).unwrap_or_else(|e| panic!("{}\n{}", e, f.dump()));
+        let (_, fast, _, pat) = halves(&f);
+        let branches_on = |blocks: &[bool], x: VReg| (0..f.blocks.len()).any(|b| blocks[b] && matches!(f.blocks[b].term, Term::Branch(y, t, e) if y == x && t != e));
+        assert!(branches_on(&fast, k), "the fast half keeps the program's branch: {}", f.dump());
+        assert_eq!(count(&f, &fast, |i| matches!(i, Inst::Store(M8, x, 0, _) if *x == p)), 1, "the fast half keeps the store: {}", f.dump());
+        assert_eq!((guard_calls_in(&f, &fast), count(&f, &fast, |i| matches!(i, Inst::Addr(_, x) if *x == FLAG))), (0, 0), "and no guard: {}", f.dump());
+        assert_eq!(guard_calls_in(&f, &pat), 1, "the patched path keeps it: {}", f.dump());
     }
 
     #[test]

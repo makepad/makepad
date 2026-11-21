@@ -30,6 +30,11 @@ pub mod collections {
 /// alloc::ffi (CString lives in core/ffi/c_string.rs; std-os lane)
 pub mod ffi {
     pub use core::ffi::{CString, FromVecWithNulError, IntoStringError, NulError};
+
+    /// rustc 1.88.0 (c_str_module): owned C strings and their conversion errors.
+    pub mod c_str {
+        pub use core::ffi::{CString, FromVecWithNulError, IntoStringError, NulError};
+    }
 }
 
 pub mod fmt {
@@ -53,6 +58,31 @@ pub mod slice {
 }
 
 pub mod str {
+    use crate::boxed::Box;
+
+    /// Converts a boxed slice of bytes to a boxed string slice without checking
+    /// that the string contains valid UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// * The provided bytes must contain a valid UTF-8 sequence.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let smile_utf8 = Box::new([226, 152, 186]);
+    /// let smile = unsafe { std::str::from_boxed_utf8_unchecked(smile_utf8) };
+    ///
+    /// assert_eq!("☺", &*smile);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub unsafe fn from_boxed_utf8_unchecked(v: Box<[u8]>) -> Box<str> {
+        unsafe { Box::from_raw(Box::into_raw(v) as *mut str) }
+    }
+
+    #[allow(deprecated)]
+    pub use core::str::LinesAny;
     pub use core::str::{
         from_utf8, from_utf8_mut, from_utf8_unchecked, from_utf8_unchecked_mut, pattern, Bytes, CharIndices, Chars,
         EncodeUtf16, EscapeDebug, EscapeDefault, EscapeUnicode, FromStr, Lines, MatchIndices, Matches, ParseBoolError,

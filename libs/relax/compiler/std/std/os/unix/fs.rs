@@ -159,6 +159,17 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Resu
     fs::symlink_raw(original.as_ref(), link.as_ref())
 }
 
+/// rustc 1.56.0 (unix_chroot): Changes the process's root directory.
+#[cfg(not(target_os = "fuchsia"))]
+pub fn chroot<P: AsRef<Path>>(dir: P) -> io::Result<()> {
+    fs::run_path_with_cstr(dir.as_ref(), &|path| {
+        if unsafe { crate::sys::chroot(path.as_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })
+}
+
 /// Changes the owner and group of a file or directory, following symlinks; `None` leaves that
 /// id unchanged (real std's `os::unix::fs::chown`).
 pub fn chown<P: AsRef<Path>>(dir: P, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {

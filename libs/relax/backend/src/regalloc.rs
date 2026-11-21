@@ -931,7 +931,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     drop(live_in);
     let ranges = build_ranges(f, &reach, &tab, &block_start, &block_end, &live_out);
     drop(live_out);
-    let wts = block_weights(f, &reach, freq);
+    let wts = block_weights(options, f, &reach, freq);
     let aff = affinities(f, &reach, &block_start, &ranges, &wts);
     let (mut remat, base_only) = remat_values(options, f, &reach, cfg);
     // base + k is recomputed at its uses: the base must be live (hold its one value) at each of
@@ -3647,10 +3647,18 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
     (remat, base_only)
 }
 
-/// How often each block runs, relative: with measured frequencies (O3: samples of the code
-/// the block's instructions came from, 0..=1 of the hottest block) mostly those, a sliver of loop
-/// depth for blocks no sample hit; without, 8^loop depth (capped).
-fn block_weights(f: &Func, reach: &[bool], freq: Option<&[f32]>) -> Vec<f32> {
+/// How often each block runs, relative: a counted body's frequencies themselves
+/// (`profile::freqs`: the counts, and uncounted blocks estimated from counted predecessors; 0..=1
+/// of the hottest block, floored); other frequencies (structural estimates) raise the static
+/// weight up to 8x; without, 8^loop depth (capped).
+fn block_weights(options: &relax_session::Options, f: &Func, reach: &[bool], freq: Option<&[f32]>) -> Vec<f32> {
+    // counts rank a hot loop's blocks on their own: a never-run block of the loop is not 1/8 of
+    // its header, nor is a block of a deeper loop that ran less above one that ran more
+    if let Some(fr) = freq {
+        if fr.len() == f.blocks.len() && crate::profile::has_counts(f) && !crate::stats::opt_off(options, "-cntweights") {
+            return fr.to_vec();
+        }
+    }
     let depth = loop_depths(f, reach);
     let st = static_weights(f, reach, &depth);
     match freq {
@@ -4413,6 +4421,7 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
         if sites.is_empty() {
             continue;
         }
+        let (nv_blk, np_blk) = (g.vregs.len(), pieces.len());
         // sites are back to front: inserting at a later index keeps the earlier ones valid
         for (ii, across) in sites {
             let p = g.blocks[bi].pos[ii];
@@ -4444,9 +4453,14 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
         // a copy pair per value per cold call: a big loop with many cold calls made
         // thousands (an app's video editing store worker: 10.6k vregs -> 69k after both splits,
         // 7.4 s of allocation, 1.8 MB of code): past half again the function's values the
-        // split costs more than its spills, and the first allocation stands
+        // split costs more than its spills: this block stays as it was, and the blocks after it
         if g.vregs.len() - nv0 > SPLIT_GROWTH_MAX(nv0) / 2 {
-            return None;
+            g.blocks[bi] = f.blocks[bi].clone();
+            g.vregs.truncate(nv_blk);
+            pieces.truncate(np_blk);
+            changed = !pieces.is_empty();
+            eprintln!("relax ra: {}: cold-call pieces at the cap ({} over {} values): calls from b{} on left as they were", f.name, SPLIT_GROWTH_MAX(nv0) / 2, nv0, bi);
+            break;
         }
     }
     if changed {
@@ -4724,8 +4738,10 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
     let mut defd = vec![false; n_orig];
     let mut refall = vec![false; n_orig];
     let mut through_pieces: Vec<u32> = Vec::new();
+    let (mut capped, mut capped_at) = (0usize, None::<u32>);
     for li in 0..loops.len() {
         let header = loops[li].0;
+        let (nv_loop, nt_loop) = (f.vregs.len(), through_pieces.len());
         let inl = |b: u32, member: &Vec<Vec<u16>>| member[b as usize].contains(&(li as u16));
         // spilled originals referenced inside the loop (pieces made for inner loops are reached
         // through their originals' copies, which are split here too)
@@ -4829,9 +4845,15 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
                 k -= 1;
             }
         }
-        // (see split_cold_calls): too many pieces, no split
+        // (see split_cold_calls): past the cap this loop stays whole; the loops split before it
+        // (innermost first) keep their pieces
         if f.vregs.len() - n_orig > SPLIT_GROWTH_MAX(n_orig) {
-            return None;
+            f.vregs.truncate(nv_loop);
+            origin.truncate(nv_loop);
+            through_pieces.truncate(nt_loop);
+            split.clear();
+            capped += 1;
+            capped_at.get_or_insert(header);
         }
         for &bi in &blocks_of[li] {
             for i in &f.blocks[bi as usize].insts {
@@ -4985,6 +5007,9 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
             preds.push(vec![from]);
             placed.push((from, true, nbk));
         }
+    }
+    if capped > 0 {
+        eprintln!("relax ra: {}: live-range pieces at the cap ({} over {} values): {} loops left whole, the first headed b{}", f.name, SPLIT_GROWTH_MAX(n_orig), n_orig, capped, capped_at.unwrap_or(0));
     }
     if !changed {
         return None;
@@ -6106,6 +6131,150 @@ pub fn compares_into_readers(options: &relax_session::Options, f: &Func, sel_ok:
         }
     }
     Some(g)
+}
+
+/// Overflow checks branch on the op's own overflow flag (`Cmp::O`: x64 `add; jo`, arm64 `cmn;
+/// b.vs`). `lower` makes rustc's checked signed arithmetic with plain RIR ops, which reach here as
+/// branches on `(a ^ d) & (b ^ d) < 0` for `d = a + b`, `(a ^ d) & (a ^ b) < 0` for `d = a - b`,
+/// the 64-bit product's high word against its low word's sign (`mulhi(a, b) != (a * b) >> 63`)
+/// and the 32-bit product against the 64-bit one; 4 to 6 instructions and a test each, a quarter
+/// of the instructions in a large app's hottest loop where native has the op's `jo`. A branch on one of
+/// these, its pieces all in the branch's block and the op's operands written by nothing from the
+/// op on, reads `O(op, ty, a, b)`, the op made again on the flags (at 32 or 64 bits); the pieces
+/// left without readers go. `mul`: the back end makes a multiply's overflow flag (x64 `imul`).
+/// RELAX_OPT=-ovfbr.
+pub fn overflows_into_branches(options: &relax_session::Options, f: &Func, mul: bool) -> Option<Func> {
+    if crate::stats::opt_off(options, "-ovfbr") {
+        return None;
+    }
+    let found: Vec<(usize, Cmp)> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(bi, b)| match b.term {
+            Term::BranchCmp(c, ..) => overflow_check(&b.insts, c, mul).map(|o| (bi, o)),
+            _ => None,
+        })
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    let mut g = f.clone();
+    for &(bi, o) in &found {
+        if let Term::BranchCmp(c, ..) = &mut g.blocks[bi].term {
+            *c = o;
+        }
+    }
+    // the checks' pieces nothing reads any more (an xor, an and, a multiply's high word, a
+    // shift, a product), till none is left
+    loop {
+        let mut uses = vec![0u32; g.vregs.len()];
+        let mut tu = Vec::new();
+        for b in &g.blocks {
+            for i in &b.insts {
+                for_uses(i, |u| uses[u.0 as usize] += 1);
+            }
+            term_uses(&b.term, &mut tu);
+            for u in &tu {
+                uses[u.0 as usize] += 1;
+            }
+        }
+        let mut gone = false;
+        for &(bi, _) in &found {
+            let blk = &mut g.blocks[bi];
+            let keep_pos = blk.pos.len() == blk.insts.len();
+            let mut k = 0;
+            while k < blk.insts.len() {
+                let unread = match blk.insts[k] {
+                    Inst::IBin(IOp::Xor | IOp::And | IOp::Mul | IOp::MulHi, _, d, _, _) | Inst::IBinI(IOp::Shr, _, d, _, _) => uses[d.0 as usize] == 0,
+                    _ => false,
+                };
+                if unread {
+                    blk.insts.remove(k);
+                    if keep_pos {
+                        blk.pos.remove(k);
+                    }
+                    gone = true;
+                } else {
+                    k += 1;
+                }
+            }
+        }
+        if !gone {
+            break;
+        }
+    }
+    Some(g)
+}
+
+/// The overflow check a block's branch on `c` is (`overflows_into_branches`), as the `Cmp::O` it
+/// reads instead.
+fn overflow_check(insts: &[Inst], c: Cmp, mul: bool) -> Option<Cmp> {
+    // the last write of v before `at`: where, and what
+    let def = |v: VReg, at: usize| -> Option<(usize, Inst)> {
+        (0..at).rev().find(|&j| {
+            let mut w = false;
+            for_defs(&insts[j], |d| w |= d == v);
+            w
+        })
+        .map(|j| (j, insts[j].clone()))
+    };
+    // a and b hold at the branch what the op at k read: nothing from it on writes them
+    let held = |k: usize, a: VReg, b: VReg| {
+        !insts[k..].iter().any(|i| {
+            let mut w = false;
+            for_defs(i, |d| w |= d == a || d == b);
+            w
+        })
+    };
+    let same = |x: (VReg, VReg), y: (VReg, VReg)| x == y || x == (y.1, y.0);
+    let wide = |t: IntTy| t.signed && (t.bits == 32 || t.bits == 64);
+    match c {
+        // add / sub: (a ^ d) & (b ^ d) < 0, (a ^ d) & (a ^ b) < 0
+        Cmp::K(Cond::Lt, true, s, 0) => {
+            let n = insts.len();
+            let (ks, Inst::IBin(IOp::And, _, _, p, q)) = def(s, n)? else { return None };
+            let (kp, Inst::IBin(IOp::Xor, _, _, p1, p2)) = def(p, ks)? else { return None };
+            let (kq, Inst::IBin(IOp::Xor, _, _, q1, q2)) = def(q, ks)? else { return None };
+            for d in [p1, p2, q1, q2] {
+                let Some((kd, Inst::IBin(op @ (IOp::Add | IOp::Sub), t, _, a, b))) = def(d, kp.min(kq)) else { continue };
+                if !wide(t) || def(d, kp.max(kq)).map(|x| x.0) != Some(kd) || !held(kd, a, b) {
+                    continue;
+                }
+                let other = if op == IOp::Add { (b, d) } else { (a, b) };
+                let (x, y) = ((p1, p2), (q1, q2));
+                if (same(x, (a, d)) && same(y, other)) || (same(y, (a, d)) && same(x, other)) {
+                    return Some(Cmp::O(op, t, a, b));
+                }
+            }
+            None
+        }
+        // mul: mulhi(a, b) != (a * b) >> 63 (64 bits), a * b at 64 bits != a * b at 32
+        Cmp::R(Cond::Ne, _, x, y) if mul => {
+            let n = insts.len();
+            let (kx, ix) = def(x, n)?;
+            let (ky, iy) = def(y, n)?;
+            let pair = [(kx, ix.clone(), ky, iy.clone()), (ky, iy, kx, ix)];
+            for (k1, i1, k2, i2) in pair {
+                match (i1, i2) {
+                    (Inst::IBin(IOp::MulHi, t @ I64, _, a, b), Inst::IBinI(IOp::Shr, I64, _, m, 63)) => {
+                        let Some((km, Inst::IBin(IOp::Mul, I64, _, ma, mb))) = def(m, k2) else { continue };
+                        if same((ma, mb), (a, b)) && held(k1.min(km), a, b) {
+                            return Some(Cmp::O(IOp::Mul, t, a, b));
+                        }
+                    }
+                    (Inst::IBin(IOp::Mul, I64, _, a, b), Inst::IBin(IOp::Mul, t @ I32, _, a2, b2)) => {
+                        if same((a, b), (a2, b2)) && held(k1.min(k2), a, b) {
+                            return Some(Cmp::O(IOp::Mul, t, a, b));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// The blocks whose start reads the running thread's domain base for a function that names domain

@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 lazy-typeck-dep = { path = "../libs/dep" }
+lazy-typeck-store = { path = "../libs/store" }

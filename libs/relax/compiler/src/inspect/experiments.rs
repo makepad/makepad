@@ -113,7 +113,7 @@ fn install(up: *mut crate::jit::Unit, id: u32, v: &Variant, round: u32) -> Resul
             if ok {
                 Ok(())
             } else {
-                Err("the O3 build was not installed (O3 off, not verified, or failed: RELAX_TIER1_TRACE=1 says why)".into())
+                Err("the O3 build was not installed (O3 off, not verified, or failed: RELAX_O3_TRACE=1 says why)".into())
             }
         }
     }

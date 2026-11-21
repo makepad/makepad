@@ -52,6 +52,9 @@ function Case($name, $hooks, $killParent) {
     $env:RELAX_CACHE_DIR = Join-Path $home_ 'cache'
     $env:RELAX_TARGET_DIR = Join-Path $home_ 'target'
     $env:RELAX_LIVE_TRACE = '1'
+    # the failed call's park is the test's own: a devhub node's watch leaves it for the restart this
+    # script takes (hot_fail.py says why)
+    $env:RELAX_EXPECTED_CRASH = 'hot_fail.ps1 parks a failed live update and takes its restart'
     foreach ($h in $hooks) { Set-Item "env:$h" 'hot_fail_target' }
     $p = Start-Process -FilePath $Makepad -ArgumentList 'run', '--ahead=minimal', 'relax-hot-fail' -WorkingDirectory $pkg -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
     $null = $p.Handle # (ExitCode is only there with the handle taken at the start)

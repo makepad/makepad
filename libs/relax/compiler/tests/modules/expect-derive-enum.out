@@ -1,0 +1,5 @@
+out derived PartialEq: true
+out derived PartialOrd, Ord: true
+out derived Hash: true
+out derived Debug: true
+out its own unsafe refused: true

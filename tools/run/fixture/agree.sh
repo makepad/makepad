@@ -2,7 +2,8 @@
 # Regression test: `makepad check` and `makepad test` (package and single file) give rustc's verdict.
 # accept/: rustc --test builds it and every form accepts. reject/: rustc --test rejects it and every
 # form rejects, naming the text of its `// rejects: <text>` line. reject_bin/: the same as a binary
-# (src/main.rs), checked by `makepad check` and rustc without --test. Extra accepted files come as arguments.
+# (src/main.rs), checked by `makepad check` and rustc without --test. diff_pkg/: differential files run as a
+# package's tests (pkg_diff_of). Extra accepted files come as arguments.
 # A case with a `// needs-native: <why>` line runs only as machine code: in no-codegen mode
 # (RELAX_NO_CODEGEN=1) its runs (the test forms) are skipped and listed; rustc and check still answer.
 # (A const fn that overflows when a constant calls it is the one verdict that depends on the profile:
@@ -64,6 +65,30 @@ diff_of() { # diff_of <file>: a differential file (tests/std, core_diff.sh's rul
   out=$(rustc --edition 2021 -O --test -o "$W/$n.real" "$1" 2>&1) || { verdict "rustc:$n" 0 "" 1 "$out"; return; }
   "$W/$n.real" --test-threads=1 --nocapture > "$W/$n.real.out" 2>&1 || { verdict "real:$n" 0 "" 1 "$(tail -12 "$W/$n.real.out")"; return; }
   out=$($J test "$1" -- --test-threads=1 --nocapture 2>&1); verdict "test:$n" 0 "" $? "$out"
+  same_lines "$n" "$out"
+}
+pkg_diff_of() { # pkg_diff_of <file>: diff_of's rule in the package form (`makepad test <package>`, whose
+  # test program is a test binary of its own, as cargo's: one that runs itself again)
+  n=p_$(basename "$1" .rs)
+  package "$n" "$1" lib.rs
+  out=$(rustc --edition 2021 -O --test -o "$W/$n.real" "$1" 2>&1) || { verdict "rustc:$n" 0 "" 1 "$out"; return; }
+  "$W/$n.real" --test-threads=1 --nocapture > "$W/$n.real.out" 2>&1 || { verdict "real:$n" 0 "" 1 "$(tail -12 "$W/$n.real.out")"; return; }
+  out=$(cd "$W/$n" && $J test "$n" --release -- --test-threads=1 --nocapture 2>&1); verdict "test:$n" 0 "" $? "$out"
+  same_lines "$n" "$out"
+}
+diff_checks_of() { # diff_checks_of <file>: pkg_diff_of's rule with overflow checks on in both, as cargo test's
+  # profile has them: rustc's -C overflow-checks=on, and the package's release profile through cargo's
+  # CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS. Std's #[rustc_inherit_overflow_checks] items (the integer operators,
+  # sum, product, Step, ..) then check as the program's own arithmetic does
+  n=c_$(basename "$1" .rs)
+  package "$n" "$1" lib.rs
+  out=$(rustc --edition 2021 -O -C overflow-checks=on --test -o "$W/$n.real" "$1" 2>&1) || { verdict "rustc:$n" 0 "" 1 "$out"; return; }
+  "$W/$n.real" --test-threads=1 --nocapture > "$W/$n.real.out" 2>&1 || { verdict "real:$n" 0 "" 1 "$(tail -12 "$W/$n.real.out")"; return; }
+  out=$(cd "$W/$n" && CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true $J test "$n" --release -- --test-threads=1 --nocapture 2>&1); verdict "test:$n" 0 "" $? "$out"
+  same_lines "$n" "$out"
+}
+same_lines() { # same_lines <name> <makepad test's output>: its `| ` lines equal the real run's, and there are some
+  local n="$1" out="$2"
   grep -o '| .*' "$W/$n.real.out" > "$W/$n.real.lines"
   printf '%s\n' "$out" | grep -o '| .*' > "$W/$n.relax.lines"
   if [ ! -s "$W/$n.real.lines" ] || ! cmp -s "$W/$n.real.lines" "$W/$n.relax.lines"; then
@@ -170,7 +195,7 @@ diffed="$T/std/core_int_methods.rs $T/std/core_char_props.rs $T/std/core_str_ops
   $T/std/core_string_ops.rs $T/std/core_vec_dedup.rs $T/std/core_vec_ops.rs $T/std/os_align_to_file_ext.rs
   $T/std/os_command_path.rs $T/std/os_core_atomic.rs $T/std/os_core_ffi.rs $T/std/os_core_time.rs $T/std/os_env.rs
   $T/std/os_exec.rs $T/std/os_fork_busy.rs $T/std/os_hr_probe.rs
-  $T/std/os_io.rs $T/std/os_min_stack.rs $T/std/os_net.rs $T/std/os_path.rs $T/std/os_pipe.rs $T/std/os_pre_exec.rs
+  $T/std/os_io.rs $T/std/os_io_vectored.rs $T/std/os_min_stack.rs $T/std/os_net.rs $T/std/os_path.rs $T/std/os_pipe.rs $T/std/os_pre_exec.rs
   $T/std/os_process_group.rs $T/std/os_sync.rs $T/std/os_thread.rs $T/std/os_time.rs $T/std/os_udp.rs
   $T/std/core_panic_payload.rs $T/std/core_thread_panic.rs $T/std/core_rust_1100.rs $T/std/core_allocator_heap.rs $T/std/core_allocator_box.rs
   $T/std/core_allocator_vec.rs $T/std/core_fmt_num_buffer.rs
@@ -184,9 +209,16 @@ case "$(uname -m)" in
 esac
 [ "$(uname -sm)" = "Darwin arm64" ] && diffed="$diffed $T/std/os_sys_raw.rs"
 for f in $diffed; do diff_of "$f"; done
+# the package form's differential files (a test program that runs its own binary again)
+for f in "$fx"/diff_pkg/*.rs; do pkg_diff_of "$f"; done
+for f in $T/std/core_int_methods.rs $T/std/core_dep_gaps_async_crypto.rs; do diff_checks_of "$f"; done
 diff_env_of $T/std/os_min_stack.rs RUST_MIN_STACK=8388608
+python3 libs/relax/compiler/std/gen_stability.py --surface-check "$J" "$W/surface" || fail="$fail surface"
 # an async cycle first used from its other end, from the code the run above cached
 diff_env_of $T/async_box_cycle_order.rs CYCLE_ORDER=inner
+# a run whose current folder is virtual (the workspace shared, vfs.rs SHARE): os_fs's follow lines read a
+# file the run wrote there, which a read-only open reads on the disk
+diff_env_of $T/std/os_fs.rs RELAX_SHARE=agree-os-fs
 # macOS: std's sync and threads on the futex fallback (__ulock) too, not only os_sync_wait_on_address
 if [ "$(uname)" = Darwin ]; then
   for f in $T/std/os_sync.rs $T/std/os_thread.rs; do diff_env_of "$f" RELAX_FORCE_ULOCK=1; done

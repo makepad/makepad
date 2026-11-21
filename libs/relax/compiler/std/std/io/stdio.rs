@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
 
-use super::{BufRead, BufReader, Error, LineWriter, Lines, Read, Result, Write};
+use super::{BufRead, BufReader, Error, IoSlice, LineWriter, Lines, Read, Result, Write};
 use crate::sync::{Mutex, MutexGuard, OnceLock, ReentrantLock, ReentrantLockGuard};
 use crate::sys;
 
@@ -20,6 +20,19 @@ struct Raw {
 impl Write for Raw {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         sys::stdio_write(self.fd, buf).map_err(Error::from_raw_os_error)
+    }
+    /// Real std's unix stdio: one writev(2), a closed stream taking every byte (handle_ebadf).
+    /// Elsewhere the trait's default, as real std's Windows stdio.
+    #[cfg(unix)]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        match super::fd_write_vectored(self.fd, bufs) {
+            Err(e) if e.raw_os_error() == Some(sys::os::EBADF) => Ok(bufs.iter().map(|b| b.len()).sum()),
+            r => r,
+        }
+    }
+    #[cfg(unix)]
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -144,6 +157,12 @@ impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         (&*self).write(buf)
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        (&*self).write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        (&&*self).is_write_vectored()
+    }
     fn flush(&mut self) -> Result<()> {
         (&*self).flush()
     }
@@ -158,6 +177,12 @@ impl Write for Stdout {
 impl Write for &Stdout {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         self.lock().write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        self.lock().write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.lock().is_write_vectored()
     }
     fn flush(&mut self) -> Result<()> {
         self.lock().flush()
@@ -177,6 +202,12 @@ impl<'a> Write for StdoutLock<'a> {
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         self.inner.borrow_mut().write_all(buf)
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        self.inner.borrow_mut().write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.borrow_mut().is_write_vectored()
+    }
     fn flush(&mut self) -> Result<()> {
         self.inner.borrow_mut().flush()
     }
@@ -185,6 +216,12 @@ impl<'a> Write for StdoutLock<'a> {
 impl Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         (&*self).write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        (&*self).write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        (&&*self).is_write_vectored()
     }
     fn flush(&mut self) -> Result<()> {
         (&*self).flush()
@@ -200,6 +237,12 @@ impl Write for Stderr {
 impl Write for &Stderr {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         self.lock().write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        self.lock().write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.lock().is_write_vectored()
     }
     fn flush(&mut self) -> Result<()> {
         self.lock().flush()
@@ -218,6 +261,12 @@ impl<'a> Write for StderrLock<'a> {
     }
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         self.inner.borrow_mut().write_all(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        self.inner.borrow_mut().write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.borrow_mut().is_write_vectored()
     }
     fn flush(&mut self) -> Result<()> {
         self.inner.borrow_mut().flush()

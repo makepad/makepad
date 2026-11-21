@@ -530,9 +530,17 @@ pub fn low_bits_only(options: &relax_session::Options, f: &Func) -> Vec<bool> {
                     }
                 });
             }
+            // a terminator reads the whole register (a fused compare-and-branch included): a
+            // clear here can clear the operands of an and / or / xor before it, so it counts as
+            // a change too (else a bitwise chain ending in a branch kept its operands' upper
+            // bits unextended: `x.checked_add(y)?`'s sign test of (x ^ r) & (y ^ r) read the
+            // zero-extended sum, so two negative operands overflowed)
             crate::regalloc::term_uses(&b.term, &mut tu);
             for u in &tu {
-                ok[u.0 as usize] = false;
+                if ok[u.0 as usize] {
+                    ok[u.0 as usize] = false;
+                    changed = true;
+                }
             }
         }
         if !changed {

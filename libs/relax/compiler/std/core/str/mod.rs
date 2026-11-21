@@ -14,6 +14,8 @@ mod traits_impls;
 
 pub use iter::{Bytes, CharIndices, Chars, EncodeUtf16, EscapeDebug, EscapeDefault, EscapeUnicode};
 pub use lossy::{utf8_chunks, Utf8Chunk, Utf8Chunks};
+#[allow(deprecated)]
+pub use split::LinesAny;
 pub use split::{
     Lines, MatchIndices, Matches, RMatchIndices, RMatches, RSplit, RSplitN, RSplitTerminator, Split,
     SplitAsciiWhitespace, SplitInclusive, SplitN, SplitTerminator, SplitWhitespace,

@@ -53,7 +53,7 @@ fn build(w: bool) -> Code {
     f.blocks[0].insts = insts;
     f.blocks[0].term = Term::Ret(vec![]);
     f.verify().unwrap();
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let c = relax_backend::x64::compile(&options(), &f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }
@@ -173,7 +173,7 @@ fn build_loads(w: bool) -> Code {
     f.blocks[0].insts = insts;
     f.blocks[0].term = Term::Ret(vec![]);
     f.verify().unwrap();
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let c = relax_backend::x64::compile(&options(), &f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }

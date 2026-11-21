@@ -100,8 +100,8 @@ fn run_hook(payload: &(dyn Any + Send), message: &str, location: &Location<'_>) 
     }
 }
 
-/// Real std's default hook output: the backtrace note only with the process's first panic
-/// (std's FIRST_PANIC).
+/// Real std's default hook output: with RUST_BACKTRACE set the backtrace (crate::backtrace
+/// print_panic_backtrace), else the note, only with the process's first panic (std's FIRST_PANIC).
 fn default_hook(info: &PanicHookInfo<'_>) {
     static FIRST_PANIC: crate::sync::atomic::AtomicBool = crate::sync::atomic::AtomicBool::new(true);
     let thread = crate::thread::current();
@@ -109,7 +109,8 @@ fn default_hook(info: &PanicHookInfo<'_>) {
         Some(n) => n,
         None => "<unnamed>",
     };
-    let note = if FIRST_PANIC.swap(false, crate::sync::atomic::Ordering::Relaxed) {
+    let style = backtrace_style();
+    let note = if style == STYLE_OFF && FIRST_PANIC.swap(false, crate::sync::atomic::Ordering::Relaxed) {
         "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
     } else {
         ""
@@ -119,6 +120,37 @@ fn default_hook(info: &PanicHookInfo<'_>) {
         &mut err,
         format_args!("\nthread '{}' ({}) panicked at {}:\n{}\n{}", name, sys::os::thread_os_id(), info.location, info.message, note),
     );
+    // (rustc's lines above as they are; what else names an unnamed thread on a line after them)
+    if let Some(about) = crate::thread::unnamed_note(&thread) {
+        let _ = crate::io::Write::write_all(&mut err, about.as_bytes());
+    }
+    if style != STYLE_OFF {
+        crate::backtrace::print_panic_backtrace(&mut err, style == STYLE_FULL);
+    }
+}
+
+const STYLE_OFF: u8 = 1;
+const STYLE_SHORT: u8 = 2;
+const STYLE_FULL: u8 = 3;
+
+/// real std's get_backtrace_style: RUST_BACKTRACE, read once ("0" or unset: off, "full": full,
+/// anything else: short)
+fn backtrace_style() -> u8 {
+    static STYLE: crate::sync::atomic::AtomicU8 = crate::sync::atomic::AtomicU8::new(0);
+    let s = STYLE.load(crate::sync::atomic::Ordering::Relaxed);
+    if s != 0 {
+        return s;
+    }
+    let s = match crate::env::var_os("RUST_BACKTRACE") {
+        None => STYLE_OFF,
+        Some(x) => match x.to_str() {
+            Some("0") => STYLE_OFF,
+            Some("full") => STYLE_FULL,
+            _ => STYLE_SHORT,
+        },
+    };
+    STYLE.store(s, crate::sync::atomic::Ordering::Relaxed);
+    s
 }
 
 pub fn set_hook(hook: Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>) {

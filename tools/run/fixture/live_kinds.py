@@ -559,21 +559,57 @@ print("|---|---|---|---|---|")
 for r in results:
     print("| %s | %s | %s | %s | %s |" % (r["kind"], r["outcome"], r["effect"], r["ms"], r["note"].replace("|", "/")))
 landed = sum(1 for r in results if r["effect"] == "yes" and not r.get("fail"))
+failed_rows = []
 for r in results:
-    if r.get("fail"):
-        print("live_kinds FAIL %s: %s" % (r["kind"], r["fail"]))
+    if r.get("fail") or r["effect"] != "yes":
+        failed_rows.append(("live_kinds/" + r["kind"], r.get("fail") or "its effect never showed (%s)" % r["outcome"]))
+        print("live_kinds FAIL %s: %s" % (r["kind"], failed_rows[-1][1]))
 print("live_kinds: %d/%d landed" % (landed, len(results)))
+
+
+def tail(text, chars=3000):
+    """The last `chars` of `text` from a line's start, under a heading that says it is no verdict:
+    cut mid-line, a passing row in the tail of the const fixture read as its failure (11-18)."""
+    cut = text[-chars:]
+    if len(text) > chars and "\n" in cut:
+        cut = cut[cut.index("\n") + 1:]
+    return "context (not failures), its last %d lines:\n%s" % (len(cut.splitlines()), cut)
+
+
+def rows_failed(name, p, said):
+    """The failed rows a fixture's verdict line names (`<name>: <n> failed: <id> ...`), each with
+    its own block (its row line and the `    | ` lines under it); a fixture that ended without
+    one is failed as a whole."""
+    lines = p.stdout.splitlines()
+    ids = next((l.split(" failed: ", 1)[1].split() for l in reversed(lines) if l.startswith(name + ": ") and " failed: " in l), None)
+    if ids is None:
+        return [] if p.returncode == 0 else [(name, "exit %s: %s" % (p.returncode, said(p)))]
+    out = []
+    for id in ids:
+        at = max((i for i, l in enumerate(lines) if l.split()[:1] == [id]), default=None)
+        block = [] if at is None else [lines[at]] + [l for l in lines[at + 1:at + 40] if l.startswith("    | ")]
+        out.append(("%s/%s" % (name, id), " ".join(block[0].split()[1:])[:300] if block else "no row line"))
+        if block:
+            print("%s failed row %s:\n%s" % (name, id, "\n".join(block)), flush=True)
+    return out
+
+
 shutil.rmtree(root, ignore_errors=True)
 # the app fixtures that need the disk cache: code from a run before the patch
 subprocess.run(["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad"], check=True)
 binary = os.path.join(os.environ.get("CARGO_TARGET_DIR", "target"), "host", "makepad")
+last_err = lambda p: next((l for l in reversed(p.stderr.splitlines()) if l.strip()), "")[:300]
 warm = subprocess.run([sys.executable, "libs/relax/compiler/tests/live_closure_owner_app/run.py", "--makepad", binary, "--warm"], capture_output=True, text=True)
-print(warm.stdout[-3000:], flush=True)
+print("live_closure_owner_app --warm: exit %s; %s" % (warm.returncode, tail(warm.stdout)), flush=True)
+if warm.returncode != 0:
+    failed_rows.append(("live_closure_owner_app", "exit %s: %s" % (warm.returncode, last_err(warm))))
 consts = subprocess.run([sys.executable, "tools/run/tests/cache_warm_const_edit/run.py", "--makepad", binary], capture_output=True, text=True)
-# its failed rows wherever they are (the tail alone hid an early row's), then the tail
-failed = [l for l in consts.stdout.splitlines() if " ms value=" in l and l.split()[1] not in ("landed", "restart")]
-if failed:
-    print("cache_warm_const_edit failed rows:\n" + "\n".join(failed), flush=True)
-print(consts.stdout[-3000:], flush=True)
+# its failed rows by the ids its verdict line names, wherever they are (the tail alone hid an
+# early row's), then the tail as context
+failed_rows += rows_failed("cache_warm_const_edit", consts, last_err)
+print("cache_warm_const_edit: exit %s; %s" % (consts.returncode, tail(consts.stdout)), flush=True)
 shutil.rmtree(root, ignore_errors=True)
-sys.exit(0 if landed == len(results) and warm.returncode == 0 and consts.returncode == 0 else 1)
+# the verdict, one line per failed row, last: the CI's summary names these ids (ci.rs `judge`)
+for id, why in failed_rows:
+    print("CI-FAILED %s: %s" % (id, why), flush=True)
+sys.exit(1 if failed_rows else 0)

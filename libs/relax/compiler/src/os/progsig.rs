@@ -696,16 +696,32 @@ unsafe fn errno() -> *mut i32 {
     return sys::__error();
 }
 
+/// A signal handler keeps the interrupted code's `errno`: what the handler calls may set it, and an
+/// asynchronous signal (a watchdog kick, a program's signal) lands between a call and the read of
+/// its errno, so a nonblocking read's EAGAIN could come back as another error. Held for the
+/// handler's whole body, early returns included (os/fault.rs on_signal, deliver).
+pub(crate) struct KeepErrno(*mut i32, i32);
+
+impl KeepErrno {
+    pub(crate) unsafe fn new() -> KeepErrno {
+        let e = errno();
+        KeepErrno(e, *e)
+    }
+}
+
+impl Drop for KeepErrno {
+    fn drop(&mut self) {
+        unsafe { *self.0 = self.1 };
+    }
+}
+
 /// No lock, no allocation, no thread-local: only the table, the thread's key value and system calls.
 unsafe fn deliver(sig: i32, info: *mut u8, uc: *mut u8, chained: bool) -> bool {
     if sig <= 0 || sig as usize >= NSIG {
         return false;
     }
-    let errno = errno();
-    let saved = *errno;
-    let handled = route(sig, info, uc, chained);
-    *errno = saved;
-    handled
+    let _errno = KeepErrno::new();
+    route(sig, info, uc, chained)
 }
 
 /// A fault the kernel raised at the instruction (not one sent with kill): never deferred.
@@ -1013,7 +1029,8 @@ pub(crate) unsafe fn test_send(sig: i32, to: &str, block: bool, name: &str) {
                 sys::syscall(SYS_RT_TGSIGQUEUEINFO, sys::getpid() as i64, tid, sig as i64, p);
             }
         }
-        // a fault the kernel raises at an instruction, inside the compile (`sig` unused: SIGSEGV):
+        // a fault the kernel raises at an instruction, inside the compile (`sig` unused: SIGSEGV,
+        // SIGBUS on macOS, whose kernel raises that for a mapped page without access):
         // a write into an inaccessible page, made by the C library's code (under the JIT this
         // code is JIT code, whose own faults the host contains)
         "fault" => {

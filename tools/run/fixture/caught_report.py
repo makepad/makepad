@@ -10,16 +10,20 @@ usage: caught_report.py [--makepad <makepad binary>]
 
 A package is written to a fresh dir (its own RELAX_HOME):
   1. `makepad run`: main catches a panic with catch_unwind ("caught on purpose": its message, no
-     report), and a thread it joins panics ("a thread ends": reported);
+     report), and two threads it joins panic ("a thread ends", "a named thread ends": reported);
+     neither has a std name, so after rustc's lines a note says where each was spawned, and for the
+     one that named itself at the OS (macOS, Linux) that name too;
   2. `makepad test`: one test catches a panic ("caught in a test": no report), a #[should_panic]
      test panics as it expects ("expected by the test": no report), and one test fails ("fails the
      test": reported).
 Red when a caught panic is reported: a suite whose tests catch panics on purpose filled its log
 with reports rustc never prints (relax issue 231); before that, untagged, a summary took them for
-failures (11-07).
+failures (11-07). Red too when a report's JIT frames do not say which code ran: each names its
+code's tier and its version among its fn's bodies, and when that body went in (`v`, `of`,
+`tiered_ms`, on the clock of the report's `t_ms`), so a suspected miscompile points at one body.
 Prints `caught_report: ok` or `caught_report: FAIL <why>`; exit 1 on failure.
 """
-import os, re, shutil, subprocess, sys, tempfile
+import json, os, re, shutil, subprocess, sys, tempfile
 
 ROOT = os.getcwd()
 MAIN = """fn main() {
@@ -27,7 +31,31 @@ MAIN = """fn main() {
     assert!(r.is_err());
     let h = std::thread::spawn(|| panic!("a thread ends"));
     assert!(h.join().is_err());
+    let h = std::thread::spawn(|| {
+        os_name(b"named-by-os\\0");
+        panic!("a named thread ends")
+    });
+    assert!(h.join().is_err());
     println!("main done");
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_setname_np(name: *const std::ffi::c_char) -> i32;
+}
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn pthread_self() -> usize;
+    fn pthread_setname_np(t: usize, name: *const std::ffi::c_char) -> i32;
+}
+
+/// names the calling thread at the OS only (std keeps no name for it)
+fn os_name(name: &[u8]) {
+    #[cfg(target_os = "macos")]
+    unsafe { pthread_setname_np(name.as_ptr().cast()) };
+    #[cfg(target_os = "linux")]
+    unsafe { pthread_setname_np(pthread_self(), name.as_ptr().cast()) };
+    let _ = name;
 }
 
 #[cfg(test)]
@@ -70,6 +98,29 @@ def reports(text):
     return out
 
 
+def versioned(what, text):
+    """None when every report names its JIT frames' code: at least one frame has the code's tier
+    and version, and each frame that has a version is consistent (1 <= v <= of, tiered no later
+    than the report)."""
+    for line in text.splitlines():
+        m = re.match(r"^  report[^:]*: (\{.*)$", line)
+        if not m:
+            continue
+        try:
+            r = json.loads(m.group(1))
+        except ValueError as e:
+            return "%s: a report is not JSON (%s): %s" % (what, e, line[:300])
+        frames = [f for f in r.get("backtrace", []) if "fn" in f and "v" in f]
+        if not frames:
+            return "%s: no JIT frame of the report of %r names its code version: %s" % (what, r.get("message"), line[:600])
+        for f in frames:
+            # "<tier> <origin> <start>", neither unknown ("?"): e.g. "O1 fresh 0x..."
+            tier_ok = re.match(r"^[^?\s]+ [^?\s]+ 0x[0-9a-f]+$", f.get("code", ""))
+            if not tier_ok or not (1 <= f["v"] <= f.get("of", 0)) or not (0 <= f.get("tiered_ms", -1) <= r.get("t_ms", -1)):
+                return "%s: frame %s of the report of %r: tier or version wrong: %s (t_ms %s)" % (what, f.get("fn"), r.get("message"), json.dumps(f), r.get("t_ms"))
+    return None
+
+
 def compare(what, text, reported, quiet):
     """None when exactly the `reported` panics have a report and each `quiet` one printed std's
     message (`panicked at`) without one."""
@@ -98,9 +149,15 @@ def check(jit, work):
     p = subprocess.run(jit + ["run", "--quiet", "--unattended", "relax-caught-report"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
     if "main done" not in p.stdout:
         return "the run did not finish (exit %s): %s" % (p.returncode, p.stderr.strip()[-400:])
-    why = compare("the run", p.stderr, ["a thread ends"], ["caught on purpose"])
+    why = compare("the run", p.stderr, ["a thread ends", "a named thread ends"], ["caught on purpose"]) or versioned("the run", p.stderr)
     if why:
         return why
+    # each thread's note: the line after its message (a thread that inherited its OS name says none)
+    named = " is named 'named-by-os' by the OS and" if sys.platform.startswith(("darwin", "linux")) else ""
+    for msg, line, os_said in (("a thread ends", 4, ""), ("a named thread ends", 6, named)):
+        want = r"\n%s\nnote: thread '<unnamed>'%s was spawned at \S*src/main\.rs:%d:\d+\n" % (re.escape(msg), re.escape(os_said), line)
+        if not re.search(want, p.stderr):
+            return "the run: no note after %r saying the thread%s was spawned at src/main.rs:%d: %s" % (msg, os_said, line, p.stderr.strip()[-600:])
     # 2. a test run
     log = os.path.join(work, "test.log")
     with open(log, "w") as f:
@@ -108,7 +165,7 @@ def check(jit, work):
     text = open(log, errors="replace").read()
     if p.returncode == 0 or "test tests::fails ... FAILED" not in text or "2 passed; 1 failed" not in text:
         return "the test run is not 2 passed, 1 failed (exit %s): %s" % (p.returncode, text.strip()[-400:])
-    return compare("the test run", text, ["fails the test"], ["caught in a test", "expected by the test"])
+    return compare("the test run", text, ["fails the test"], ["caught in a test", "expected by the test"]) or versioned("the test run", text)
 
 
 args = sys.argv[1:]

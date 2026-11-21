@@ -20,7 +20,7 @@ fn build(from64: bool, it: IntTy, no_avx: bool, opt_regs: bool) -> Code {
     let mut options = relax_session::Options::default();
     options.no_avx = no_avx;
     options.cpu.avx = !no_avx && std::arch::is_x86_feature_detected!("avx");
-    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs, syms: 0, sym_class: 0, near: false };
+    let env = x64::Env::standalone(opt_regs);
     let c = x64::compile(&options, &f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }

@@ -52,11 +52,6 @@ path = "src/provided_enum.rs"
 name = "relax-provided-static"
 path = "src/provided_static.rs"
 
-# panic unwinding through frames with drop guards (driven by compiler/tests/unwind_modes.py)
-[[bin]]
-name = "relax-unwind-probe"
-path = "src/unwind_probe.rs"
-
 # a JIT panic through the lib's rustc frames: rustc's drop guard runs and rustc's catch_unwind
 # catches it; prints what its rustc build prints (unwind_through.sh)
 [[bin]]

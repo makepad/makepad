@@ -26,8 +26,14 @@ fn a01_parse_format() {
     let b = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 1, 0, 0, 1);
     println!("| {} [{:>30}] {:?} {:?} {}", b, b, b.segments(), a.to_ipv6_mapped(), a.to_ipv6_mapped().to_ipv4_mapped().unwrap());
     println!("| {:?} {:?}", Ipv6Addr::LOCALHOST.to_ipv4(), b.to_canonical());
-    let s6 = SocketAddrV6::new(b, 443, 7, 2);
+    println!("| address widths {} {}", Ipv4Addr::BITS, Ipv6Addr::BITS);
+    println!("| from octets {} {}", Ipv4Addr::from_octets([192, 0, 2, 17]), Ipv6Addr::from_octets(b.octets()));
+    println!("| from segments {:?}", Ipv6Addr::from_segments([0x2001, 0xdb8, 2, 3, 4, 5, 6, 0xabcd]).octets());
+    let mut s6 = SocketAddrV6::new(b, 443, 7, 2);
     println!("| {} {:?} {} {} [{:>40}]", s6, s6, s6.flowinfo(), s6.scope_id(), s6);
+    s6.set_flowinfo(19);
+    s6.set_scope_id(31);
+    println!("| socket fields {} {} {} {}", s6.ip(), s6.port(), s6.flowinfo(), s6.scope_id());
     let mut sa = SocketAddr::new(IpAddr::V4(a), 1);
     sa.set_port(99);
     println!("| {} {} {} {:?}", sa, sa.ip(), sa.is_ipv4(), SocketAddr::from((Ipv6Addr::LOCALHOST, 5)));
@@ -61,6 +67,14 @@ fn a02_tcp() {
     let mut c = TcpStream::connect(addr).unwrap();
     c.set_nodelay(true).unwrap();
     println!("| {:?} {:?}", c.nodelay(), c.peer_addr().map(|a| a == addr));
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::linux::net::TcpStreamExt;
+        for value in [true, false] {
+            c.set_quickack(value).unwrap();
+            println!("| set_quickack({value}) {}", c.quickack().unwrap());
+        }
+    }
     c.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
     println!("| {:?}", c.read_timeout().map(|d| d.map(|x| x.as_millis())));
     println!("| {:?}", c.set_read_timeout(Some(Duration::ZERO)).map_err(|e| e.to_string()));
@@ -81,6 +95,15 @@ fn a02_tcp() {
     let l2 = TcpListener::bind("127.0.0.1:0").unwrap();
     l2.set_nonblocking(true).unwrap();
     println!("| {:?}", l2.accept().map(|_| ()).map_err(|e| e.kind()));
+    #[allow(deprecated)]
+    for addr in ["[::1]:0", "127.0.0.1:0"] {
+        let listener = TcpListener::bind(addr).unwrap();
+        println!("| {addr} only_v6 {:?}", listener.only_v6().map_err(|e| e.kind()));
+        for value in [true, false] {
+            println!("| {addr} set_only_v6({value}) {:?}", listener.set_only_v6(value).map_err(|e| e.kind()));
+            println!("| {addr} only_v6 {:?}", listener.only_v6().map_err(|e| e.kind()));
+        }
+    }
 }
 
 #[test]

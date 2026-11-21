@@ -412,32 +412,12 @@ pub fn repeat<T: Copy>(s: &[T], n: usize) -> crate::vec::Vec<T> {
     v
 }
 
-/// Resolves a `usize` range against a length: (start, end), panicking like real core's
-/// slice indexing does on bad ranges.
+/// rustc's `slice::range`: a `usize` range resolved against a length as (start, end), panicking as
+/// slice indexing does on a bad one (its into_slice_range).
+#[track_caller]
 pub fn range<R: crate::ops::RangeBounds<usize>>(r: &R, len: usize) -> (usize, usize) {
-    let start = match r.start_bound() {
-        crate::ops::Bound::Included(s) => *s,
-        crate::ops::Bound::Excluded(s) => match s.checked_add(1) {
-            Some(v) => v,
-            None => crate::panicking::panic_str("attempted to index slice from after maximum usize"),
-        },
-        crate::ops::Bound::Unbounded => 0,
-    };
-    let end = match r.end_bound() {
-        crate::ops::Bound::Included(e) => match e.checked_add(1) {
-            Some(v) => v,
-            None => crate::panicking::panic_str("attempted to index slice up to maximum usize"),
-        },
-        crate::ops::Bound::Excluded(e) => *e,
-        crate::ops::Bound::Unbounded => len,
-    };
-    if start > end {
-        crate::panicking::slice_index_order_fail(start, end);
-    }
-    if end > len {
-        crate::panicking::slice_end_index_len_fail(end, len);
-    }
-    (start, end)
+    let r = index::into_slice_range(len, (r.start_bound().cloned(), r.end_bound().cloned()));
+    (r.start, r.end)
 }
 
 // ---------------------------------------------------------------- [u8] ascii helpers

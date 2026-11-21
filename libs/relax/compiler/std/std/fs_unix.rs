@@ -193,6 +193,14 @@ impl OpenOptions {
             vfs::note(&abs, b'f');
             return match k {
                 vfs::Kind::File(stat) => {
+                    // a file the run wrote (its edits folder's copy, a folder mount's file) opens on
+                    // the disk, so its reader sees later writes, as it would natively. A file only
+                    // the repository's store holds reads from a copy: the run's own first write to
+                    // it makes the edits folder's copy, which a reader opened before does not see
+                    // (an overlay's copy-up). A held landing's file reads as every read of it does.
+                    if let Some(Ok(disk)) = vfs::edit_target(&*abs, vfs::Edit::Read) {
+                        return run_path_with_cstr(&disk, &|c| self.open_c(c));
+                    }
                     let data = vfs::read(&*abs)?;
                     let mut file = File { fd: virtual_fd()?, virtual_stat: None };
                     cvt_r(|| unsafe { sys::fchmod(file.raw(), 0o644 as sys::mode_t) })?;
@@ -203,13 +211,12 @@ impl OpenOptions {
                 }
                 // open(2) of a folder for reading succeeds on the disk (its reads fail EISDIR; a
                 // folder's fd is fsync'd to make its entries durable): the run's edits copy of the
-                // folder when there is one, else a folder fd of its own
+                // folder when there is one (its open's error is the answer, as natively), else, for
+                // a folder only the store holds, a folder fd of its own
                 vfs::Kind::Dir => {
                     self.access_mode()?;
                     if let Some(Ok(disk)) = vfs::edit_target(&*abs, vfs::Edit::Existing) {
-                        if let Ok(file) = run_path_with_cstr(&disk, &|c| self.open_c(c)) {
-                            return Ok(file);
-                        }
+                        return run_path_with_cstr(&disk, &|c| self.open_c(c));
                     }
                     Ok(File { fd: virtual_dir_fd()?, virtual_stat: None })
                 }
@@ -410,6 +417,13 @@ impl File {
             Ok(r as usize)
         }
     }
+    /// One writev(2) of the buffers (real std's File::write_vectored)
+    fn write_vectored_raw(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        if self.virtual_stat.is_some() {
+            return Err(vfs::read_only());
+        }
+        io::fd_write_vectored(self.raw(), bufs)
+    }
     fn seek_raw(&self, pos: SeekFrom) -> io::Result<u64> {
         let (whence, off) = match pos {
             SeekFrom::Start(o) => (sys::SEEK_SET, o as i64),
@@ -474,6 +488,12 @@ impl Write for File {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_raw(buf)
     }
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.write_vectored_raw(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -482,6 +502,12 @@ impl Write for File {
 impl Write for &File {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_raw(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.write_vectored_raw(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -660,6 +686,7 @@ const UTIME_OMIT: i64 = (1 << 30) - 2;
 #[cfg(not(target_vendor = "apple"))]
 extern "C" {
     fn futimens(fd: c_int, times: *const FutimensSpec) -> c_int;
+    fn utimensat(dirfd: c_int, path: *const c_char, times: *const FutimensSpec, flags: c_int) -> c_int;
 }
 
 #[cfg(not(target_vendor = "apple"))]
@@ -699,6 +726,7 @@ const ATTR_CMN_ACCTIME: u32 = 0x0000_1000;
 #[cfg(target_vendor = "apple")]
 extern "C" {
     fn fsetattrlist(fd: c_int, attr_list: *mut c_void, attr_buf: *mut c_void, attr_buf_size: usize, options: u32) -> c_int;
+    fn setattrlist(path: *const c_char, attr_list: *mut c_void, attr_buf: *mut c_void, attr_buf_size: usize, options: u32) -> c_int;
 }
 
 /// real std sys/fs/unix.rs TimesAttrlist: the times that are set, in the attribute order
@@ -1262,6 +1290,37 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
         cvt_r(|| unsafe { sys::chmod(c.as_ptr(), perm.mode as sys::mode_t) })?;
         Ok(())
     })
+}
+
+fn set_path_times(path: &Path, times: FileTimes, follow_symlinks: bool) -> io::Result<()> {
+    run_path_with_cstr(path, &|p| {
+        #[cfg(target_vendor = "apple")]
+        let result = {
+            const FSOPT_NOFOLLOW: u32 = 1;
+            let ta = TimesAttrlist::from_times(&times);
+            let options = if follow_symlinks { 0 } else { FSOPT_NOFOLLOW };
+            unsafe { setattrlist(p.as_ptr(), ta.attrlist(), ta.times_buf(), ta.times_buf_size(), options) }
+        };
+        #[cfg(not(target_vendor = "apple"))]
+        let result = {
+            const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
+            let spec = [file_time_to_timespec(times.accessed), file_time_to_timespec(times.modified)];
+            let flags = if follow_symlinks { 0 } else { AT_SYMLINK_NOFOLLOW };
+            unsafe { utimensat(sys::os::AT_FDCWD, p.as_ptr(), spec.as_ptr(), flags) }
+        };
+        cvt(result)?;
+        Ok(())
+    })
+}
+
+/// rustc 1.99.0 (fs_set_times): Sets a file's timestamps, following symbolic links.
+pub fn set_times<P: AsRef<Path>>(path: P, times: FileTimes) -> io::Result<()> {
+    set_path_times(path.as_ref(), times, true)
+}
+
+/// rustc 1.99.0 (fs_set_times): Sets a file's timestamps without following the final symbolic link.
+pub fn set_times_nofollow<P: AsRef<Path>>(path: P, times: FileTimes) -> io::Result<()> {
+    set_path_times(path.as_ref(), times, false)
 }
 
 // chown(2), lchown(2) and fchown(2), as real std's sys fs: `u32::MAX` (-1) leaves that id as it is.

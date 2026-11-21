@@ -10,14 +10,14 @@ use relax_backend::{exec::Code, passes, rir::*};
 fn compile(f: &Func) -> Vec<u8> {
     let mut o = relax_session::Options::default();
     o.cpu = relax_backend::x64::detect_cpu(&o);
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let c = relax_backend::x64::compile(&o, f, &env).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }
 
 #[cfg(target_arch = "aarch64")]
 fn compile(f: &Func) -> Vec<u8> {
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::arm64::Env::standalone(true);
     let c = relax_backend::arm64::compile(&relax_session::Options::default(), f, &env).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }

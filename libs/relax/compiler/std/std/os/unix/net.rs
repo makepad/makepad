@@ -197,6 +197,12 @@ impl Write for UnixStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.sock.write(buf)
     }
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.sock.write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -204,6 +210,12 @@ impl Write for UnixStream {
 impl Write for &UnixStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.sock.write(buf)
+    }
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.sock.write_vectored(bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())

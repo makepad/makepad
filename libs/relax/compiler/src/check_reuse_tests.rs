@@ -398,7 +398,10 @@ fn a_blanket_impl_change_checks_the_crates_above() {
     changed("overlap", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), format!("{lib}impl<X> T for X {{}}\n")).unwrap(), &[], 0);
 }
 
-/// Never stale: a const value and a type's size used in the binary's const and array length.
+/// Never stale: a const value and a type's size used in the binary's const and array length; a
+/// const's value whose interface text stays as it was: the statics' initializers it reads, and the
+/// line it is written on (caller_location, directly or through a `#[track_caller]` const fn) below
+/// a body that gains a line.
 #[test]
 fn a_const_value_or_size_change_checks_the_crates_above() {
     let lib = "pub const N: usize = 4;\nfn unused_in_lib() {}\n";
@@ -407,6 +410,15 @@ fn a_const_value_or_size_change_checks_the_crates_above() {
     let lib = "pub struct S { pub a: u32 }\nfn unused_in_lib() {}\n";
     let bin = "const SZ: usize = std::mem::size_of::<pkg::S>();\nfn main() { let a: [u8; SZ] = [0; 4]; let _ = a; }\nfn unused_in_bin() {}\n";
     changed("typesize", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("pub a: u32 }", "pub a: u32, pub b: u32 }")).unwrap(), &[], 0);
+    // (two statics trading initializers: the set of initializers stays as it was)
+    let lib = "static S: usize = 4;\npub static T: usize = 5;\npub const N: usize = S;\nfn unused_in_lib() {}\n";
+    let bin = "fn main() { let a: [u8; pkg::N] = [0; 4]; let _ = a; }\nfn unused_in_bin() {}\n";
+    changed("staticval", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("S: usize = 4;\npub static T: usize = 5;", "S: usize = 5;\npub static T: usize = 4;")).unwrap(), &[], 0);
+    let bin = "fn main() { let a: [u8; pkg::N] = [0; 2]; let _ = a; }\nfn unused_in_bin() {}\n";
+    let lib = "fn unused_in_lib() {}\npub const N: usize = core::panic::Location::caller().line() as usize;\n";
+    changed("callerline", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("{}", "{\n}")).unwrap(), &[], 0);
+    let lib = "#[track_caller]\npub const fn line_here() -> usize { core::panic::Location::caller().line() as usize }\nfn unused_in_lib() {}\npub const N: usize = line_here() - 2;\n";
+    changed("trackcaller", &[("lib.rs", lib), ("bin.rs", bin)], &[], |d| std::fs::write(d.join("lib.rs"), lib.replace("lib() {}", "lib() {\n}")).unwrap(), &[], 0);
 }
 
 /// Never stale: a `macro_rules!` change reaching the binary through its expansion: the items it

@@ -702,6 +702,63 @@ fn a_front_made_after_a_patch_of_its_file_is_taken() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A closure's front lowers it from its parent's checked body, and its take refuses a lowering
+/// from a body the parent no longer has. The take of the parent's own lowering made ahead puts the
+/// body that lowering came from (a new one), and the closure's next front found the old lowering,
+/// said "already lowered" and counted as made: the tries went to a front no take could use, and
+/// the O3 build of a hot caller left the closure out ("made, and needed again": 109 of 114
+/// left-out lines of the runs of a scenario test of a large app, 11-20).
+#[test]
+fn a_closure_front_from_its_parents_old_body_is_made_again() {
+    isolated_test!(a_closure_front_from_its_parents_old_body_is_made_again);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-closure-old-body-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, HINTED_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "closure_old_body", false).unwrap();
+    let fit_d = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "fit").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    enable_pipelining(&u.prog.session.options);
+    // fit's build makes the closure's slot
+    let (fit, closure) = crate::owner::call(crate::owner::Class::Program, || {
+        let u = unsafe { &mut *up };
+        let fit = u.fn_id(FnKey::Inst(fit_d, Vec::new()));
+        unsafe { compile_fn(up, fit) }.unwrap();
+        (fit, (0..u.fns.len() as u32).find(|&id| matches!(u.fns[id as usize].key, FnKey::Closure(_, _, p) if p == fit)))
+    });
+    let closure = closure.expect("fit's closure has a slot");
+    let front = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).front.clone() });
+    assert!(prefront_slot(&front, closure), "the closure's first front was not made off the owner");
+    // fit's lowering made ahead is taken: the parent's body is the new one that lowering came from
+    crate::owner::call(crate::owner::Class::Program, || {
+        let u = unsafe { &mut *up };
+        let FnKey::Closure(cfile, _, _) = u.fns[closure as usize].key else { unreachable!() };
+        let checked = crate::typeck::try_codegen_body(&u.prog, &u.tcx, fit_d, &[]).expect("fit's body is checked");
+        assert_eq!(checked.file, cfile, "the fixture: the closure is in fit's body");
+        let again = std::sync::Arc::new((*checked).clone());
+        assert!(u.body_of(fit, cfile).is_none_or(|b| !std::sync::Arc::ptr_eq(b, &again)), "the fixture: fit's body is a new one");
+        u.put_body(fit, again);
+    });
+    assert!(prefront_slot(&front, closure), "the closure's front was not made off the owner after its parent's new body");
+    let taken = crate::owner::call(crate::owner::Class::Program, || unsafe { take_lowered_ahead(&mut *up, closure).is_some() });
+    assert!(taken, "the closure's front after its parent's new body was refused at its take: lowered from the old body");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A hot fn whose O3 take gives way for a cause that lasts (TAKE_GIVES_WAY stands in for one: a
 /// front never made off the owner, a wait that never ends) is tried again once per change, not
 /// once per call. A take that gave way counted the slot again from the cost it had, over the

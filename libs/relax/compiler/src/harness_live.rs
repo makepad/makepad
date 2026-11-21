@@ -41,6 +41,11 @@ struct State {
     /// what `fresh_statics` did before this run, for its verdict: how many of the program's
     /// statics held an earlier run's values, and whether they went back
     statics: Option<(usize, bool)>,
+    /// the borrow check's errors of the bodies live saves changed, by body owner, as the latest
+    /// save of each found them (check.rs live_lints): a verdict is red while one is left. The
+    /// session's first run had none: its crates' check (run.rs check_test_subjects) and its path
+    /// dependencies' (check.rs finish_test_deps) passed before a test ran.
+    borrows: std::collections::BTreeMap<u32, Vec<String>>,
 }
 
 static LIVE: OnceLock<(Mutex<State>, Condvar)> = OnceLock::new();
@@ -72,8 +77,17 @@ pub(crate) fn start(restart: Option<&str>) -> Result<(), String> {
             Edit { paths, group, compile_ms, restarted: true, changed: None, patch: None, reverted: Vec::new() }
         }
     };
-    let _ = LIVE.set((Mutex::new(State { edit, waiting: false, faults: Vec::new(), runs: 0, results: None, harness_thread: 0, statics: None }), Condvar::new()));
+    let _ = LIVE.set((Mutex::new(State { edit, waiting: false, faults: Vec::new(), runs: 0, results: None, harness_thread: 0, statics: None, borrows: Default::default() }), Condvar::new()));
     Ok(())
+}
+
+/// A live save's borrow check (reload.rs test_edit): `owners` are the body owners it checked, and
+/// `errors` what it found in them; an owner checked clean has none left.
+pub(crate) fn note_borrows(owners: &[u32], errors: Vec<(u32, String)>) {
+    let Some((state, _)) = LIVE.get() else { return };
+    let mut s = state.lock().unwrap();
+    for o in owners { s.borrows.remove(o); }
+    for (o, e) in errors { s.borrows.entry(o).or_default().push(e); }
 }
 
 pub(crate) fn group() -> u32 {
@@ -149,7 +163,11 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
     // (its boot's deferred records: written now, not at an exit a signal never lets it reach)
     if s.runs == 1 { crate::jit::first_test_pass_done(); }
     let Verdict { ran, passed, ignored, failures, stale, why, skipped, tests } = v;
-    let failed = failures.len();
+    // a green needs the borrow check of what the tests ran: an error a save left makes the run red
+    // with its first one (the tests ran its code, as a lazy build runs a body before its check)
+    let borrow_errors: usize = s.borrows.values().map(Vec::len).sum();
+    let borrow_first = s.borrows.values().flatten().next().map(|e| e.lines().take(2).map(str::trim).collect::<Vec<_>>().join(" "));
+    let failed = failures.len() + usize::from(borrow_errors > 0);
     // a run whose patched code faulted is no pass of the edit whatever its tests say (the fault
     // can be a thread no test waits for): the JIT undoes those groups and runs the tests again,
     // and that run's verdict names them as `reverted`
@@ -162,8 +180,12 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
         _ => (String::new(), String::new()),
     };
     let why_field = why.as_ref().map_or(String::new(), |s| format!(",\"why\":{}", json_str(s)));
+    let borrowck_field = match &borrow_first {
+        None => ",\"borrowck\":\"clean\"".to_string(),
+        Some(first) => format!(",\"borrowck\":\"failed\",\"borrowck_errors\":{borrow_errors},\"borrowck_first\":{}", json_str(first)),
+    };
     // the verdict stays small at any test count: each test's outcome is the `results` query's
-    let fields = format!("{},\"ran\":{ran},\"passed\":{passed},\"failed\":{failed},\"ignored\":{ignored},\"failures\":[{}],\"ms\":{ms},\"selected\":\"{selected}\",\"skipped\":{skipped},\"stale\":[{}]{why_field}{faulted}{statics},\"results\":\"test-results group={}\"",
+    let fields = format!("{},\"ran\":{ran},\"passed\":{passed},\"failed\":{failed},\"ignored\":{ignored},\"failures\":[{}],\"ms\":{ms},\"selected\":\"{selected}\",\"skipped\":{skipped},\"stale\":[{}]{why_field}{borrowck_field}{faulted}{statics},\"results\":\"test-results group={}\"",
         s.edit.fields(), failures.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","),
         stale.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","), s.edit.group);
     s.results = Some((s.edit.group, s.edit.reverted.clone(), tests.into()));
@@ -176,6 +198,10 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
         note += &format!(" reverted={:?} (these tests ran the code from before the edit, not the saved source)", s.edit.reverted);
     }
     note += &statics_note;
+    note += &match &borrow_first {
+        None => " borrowck=clean".to_string(),
+        Some(first) => format!(" borrowck=failed errors={borrow_errors} first={first:?} (the borrow check of a body a save changed: no pass of the edit)"),
+    };
     println!("testverdict group={} ran={ran} passed={passed} failed={failed} ms={ms:.1} selected={selected} skipped={skipped}{note}", s.edit.group);
     use std::io::Write;
     let _ = std::io::stdout().flush();

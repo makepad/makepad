@@ -600,6 +600,29 @@ impl<'a, K: Ord, V> Entry<'a, K, V> {
             Entry::Vacant(entry) => Entry::Vacant(entry),
         }
     }
+
+    /// Sets the value of the entry, and returns an `OccupiedEntry`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    ///
+    /// let mut map: BTreeMap<&str, String> = BTreeMap::new();
+    /// let entry = map.entry("poneyland").insert_entry("hoho".to_string());
+    ///
+    /// assert_eq!(entry.key(), &"poneyland");
+    /// ```
+    #[inline]
+    pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V> {
+        match self {
+            Entry::Occupied(mut entry) => {
+                entry.insert(value);
+                entry
+            }
+            Entry::Vacant(entry) => entry.insert_entry(value),
+        }
+    }
 }
 
 impl<'a, K: Ord, V: Default> Entry<'a, K, V> {
@@ -619,9 +642,29 @@ impl<'a, K: Ord, V> VacantEntry<'a, K, V> {
         self.key
     }
     pub fn insert(self, value: V) -> &'a mut V {
-        let map: &'a mut BTreeMap<K, V> = self.map;
-        let n = map.insert_at(self.at, self.key, value);
-        map.kv_at_mut(n).1
+        self.insert_entry(value).into_mut()
+    }
+
+    /// Sets the value of the entry with the `VacantEntry`'s key,
+    /// and returns an `OccupiedEntry`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use std::collections::btree_map::Entry;
+    ///
+    /// let mut map: BTreeMap<&str, u32> = BTreeMap::new();
+    ///
+    /// if let Entry::Vacant(o) = map.entry("poneyland") {
+    ///     let entry = o.insert_entry(37);
+    ///     assert_eq!(entry.get(), &37);
+    /// }
+    /// assert_eq!(map["poneyland"], 37);
+    /// ```
+    pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V> {
+        let node = self.map.insert_at(self.at, self.key, value);
+        OccupiedEntry { map: self.map, node }
     }
 }
 

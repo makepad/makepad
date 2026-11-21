@@ -104,6 +104,22 @@ impl<'a, T: ?Sized> Pin<&'a mut T> {
     }
 }
 
+impl<T: ?Sized> Pin<&'static T> {
+    /// rustc 1.61.0 (pin_static_ref): pins a shared reference for its static lifetime.
+    pub const fn static_ref(r: &'static T) -> Pin<&'static T> {
+        // SAFETY: the static borrow keeps the referent in place.
+        unsafe { Pin::new_unchecked(r) }
+    }
+}
+
+impl<T: ?Sized> Pin<&'static mut T> {
+    /// rustc 1.61.0 (pin_static_ref): pins a mutable reference for its static lifetime.
+    pub const fn static_mut(r: &'static mut T) -> Pin<&'static mut T> {
+        // SAFETY: the static borrow keeps the referent in place.
+        unsafe { Pin::new_unchecked(r) }
+    }
+}
+
 impl<P: crate::ops::LegacyReceiver> crate::ops::LegacyReceiver for Pin<P> {}
 impl<P: Deref> Deref for Pin<P> {
     type Target = P::Target;

@@ -20,7 +20,7 @@ fn build(op: FOp, w: bool, no_avx: bool) -> Code {
     f.verify().unwrap();
     let mut options = relax_session::Options::default();
     options.no_avx = no_avx;
-    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = x64::Env::standalone(true);
     let c = x64::compile(&options, &f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }
@@ -39,7 +39,7 @@ fn build_const(op: FOp, c: f64, first: bool, no_avx: bool) -> Code {
     f.verify().unwrap();
     let mut options = relax_session::Options::default();
     options.no_avx = no_avx;
-    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = x64::Env::standalone(true);
     let c = x64::compile(&options, &f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }

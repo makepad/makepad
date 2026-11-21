@@ -16,6 +16,9 @@ fn a01_construct() {
     for d in ds.iter() {
         println!("| {} {} {} {} {} {} {} {}", d.as_secs(), d.subsec_nanos(), d.subsec_millis(), d.subsec_micros(), d.as_millis(), d.as_micros(), d.as_nanos(), d.is_zero());
     }
+    let max = Duration::MAX.as_nanos();
+    let d = Duration::from_nanos_u128(max);
+    println!("| nanos_u128 {} {} {}", d.as_secs(), d.subsec_nanos(), std::panic::catch_unwind(|| Duration::from_nanos_u128(max + 1)).is_err());
 }
 
 #[test]

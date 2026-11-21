@@ -1423,6 +1423,9 @@ fn single_thread(name: &str) -> Option<HostBind> {
         // the one thread: id 1 (0 is a lock's "no owner": a reentrant lock would think it holds
         // itself), the main thread (gettid == getpid)
         "pthread_self" | "pthread_main_np" | "gettid" | "getpid" => HostBind::Builtin(Builtin::One),
+        // an OS thread name (std's unnamed spawn reads its spawner's, thread/mod.rs Thread::spawned):
+        // an error, so none
+        "pthread_getname_np" => HostBind::Builtin(Builtin::One),
         "__relax_key_create" => HostBind::Builtin(Builtin::KeyCreate),
         "__relax_key_get" => HostBind::Builtin(Builtin::KeyGet),
         "__relax_key_set" => HostBind::Builtin(Builtin::KeySet),

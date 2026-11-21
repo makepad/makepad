@@ -83,6 +83,7 @@ impl<I: Iterator, P: FnMut(&I::Item) -> bool> Iterator for Filter<I, P> {
         (0, upper)
     }
     // as core: the predicate's result added up, no branch per item
+    #[rustc_inherit_overflow_checks]
     fn count(self) -> usize {
         let Filter { mut iter, mut predicate } = self;
         let mut n = 0;
@@ -163,6 +164,7 @@ impl<I> Enumerate<I> {
 
 impl<I: Iterator> Iterator for Enumerate<I> {
     type Item = (usize, I::Item);
+    #[rustc_inherit_overflow_checks]
     fn next(&mut self) -> Option<(usize, I::Item)> {
         let a = self.iter.next()?;
         let i = self.count;
@@ -172,13 +174,57 @@ impl<I: Iterator> Iterator for Enumerate<I> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iter.size_hint()
     }
+    #[rustc_inherit_overflow_checks]
     fn nth(&mut self, n: usize) -> Option<(usize, I::Item)> {
         let a = self.iter.nth(n)?;
         let i = self.count + n;
         self.count = i + 1;
         Some((i, a))
     }
+    fn try_fold<Acc, Fold, R>(&mut self, init: Acc, fold: Fold) -> R
+    where
+        Self: Sized,
+        Fold: FnMut(Acc, Self::Item) -> R,
+        R: crate::ops::Try<Output = Acc>,
+    {
+        #[inline]
+        fn enumerate<'a, T, Acc, R>(
+            count: &'a mut usize,
+            mut fold: impl FnMut(Acc, (usize, T)) -> R + 'a,
+        ) -> impl FnMut(Acc, T) -> R + 'a {
+            #[rustc_inherit_overflow_checks]
+            move |acc, item| {
+                let acc = fold(acc, (*count, item));
+                *count += 1;
+                acc
+            }
+        }
+
+        self.iter.try_fold(init, enumerate(&mut self.count, fold))
+    }
+
+    #[inline]
+    fn fold<Acc, Fold>(self, init: Acc, fold: Fold) -> Acc
+    where
+        Fold: FnMut(Acc, Self::Item) -> Acc,
+    {
+        #[inline]
+        fn enumerate<T, Acc>(
+            mut count: usize,
+            mut fold: impl FnMut(Acc, (usize, T)) -> Acc,
+        ) -> impl FnMut(Acc, T) -> Acc {
+            #[rustc_inherit_overflow_checks]
+            move |acc, item| {
+                let acc = fold(acc, (count, item));
+                count += 1;
+                acc
+            }
+        }
+
+        self.iter.fold(init, enumerate(self.count, fold))
+    }
     // core enumerate.rs: the count goes on by the items the inner iterator advanced
+    #[rustc_inherit_overflow_checks]
     fn advance_by(&mut self, n: usize) -> Result<(), usize> {
         let remaining = self.iter.advance_by(n);
         self.count += match remaining {
@@ -188,6 +234,7 @@ impl<I: Iterator> Iterator for Enumerate<I> {
         remaining
     }
     #[doc(hidden)]
+    #[rustc_inherit_overflow_checks]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> (usize, I::Item) {
         // SAFETY: the caller keeps Iterator::__iterator_get_unchecked's contract
         let value = unsafe { try_get_unchecked(&mut self.iter, idx) };
@@ -597,6 +644,7 @@ impl<I: Iterator> Iterator for Take<I> {
         }
     }
     // core take.rs: at most the items left to take, in one advance_by of the inner iterator
+    #[rustc_inherit_overflow_checks]
     fn advance_by(&mut self, n: usize) -> Result<(), usize> {
         let min = if self.n < n { self.n } else { n };
         let rem = match self.iter.advance_by(min) {
@@ -618,6 +666,25 @@ impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Take<I>
         self.n -= 1;
         let skip = self.iter.len().saturating_sub(n);
         self.iter.nth_back(skip)
+    }
+    #[rustc_inherit_overflow_checks]
+    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
+        // The amount by which the inner iterator needs to be shortened for it to be
+        // at most as long as the take() amount.
+        let trim_inner = self.iter.len().saturating_sub(self.n);
+        // The amount we need to advance inner to fulfill the caller's request.
+        // take(), advance_by() and len() all can be at most usize, so we don't have to worry
+        // about having to advance more than usize::MAX here.
+        let advance_by = trim_inner.saturating_add(n);
+
+        let remainder = match self.iter.advance_back_by(advance_by) {
+            Ok(()) => 0,
+            Err(rem) => rem,
+        };
+        let advanced_by_inner = advance_by - remainder;
+        let advanced_by = advanced_by_inner - trim_inner;
+        self.n -= advanced_by;
+        if n == advanced_by { Ok(()) } else { Err(n - advanced_by) }
     }
 }
 
@@ -664,6 +731,7 @@ impl<I: Iterator> Iterator for Skip<I> {
     }
     // core skip.rs: the skip and `n` in one advance_by of the inner iterator (their sum saturates:
     // the rest of `n` then goes in a second); a skip the inner iterator did not reach stays
+    #[rustc_inherit_overflow_checks]
     fn advance_by(&mut self, n: usize) -> Result<(), usize> {
         let mut n = n;
         let skip_inner = self.n;
@@ -853,6 +921,18 @@ impl<A: Iterator, B: Iterator<Item = A::Item>> Iterator for Chain<A, B> {
             Some(b) => b.next(),
             None => None,
         }
+    }
+    #[rustc_inherit_overflow_checks]
+    fn count(self) -> usize {
+        let a_count = match self.a {
+            Some(a) => a.count(),
+            None => 0,
+        };
+        let b_count = match self.b {
+            Some(b) => b.count(),
+            None => 0,
+        };
+        a_count + b_count
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (al, au) = match &self.a {
@@ -1091,6 +1171,32 @@ impl<I: Iterator> Peekable<I> {
             }
         }
     }
+    /// rustc 1.94.0 (peekable_next_if_map): consumes the mapped value or puts the returned item back.
+    pub fn next_if_map<R>(&mut self, f: impl FnOnce(I::Item) -> Result<R, I::Item>) -> Option<R> {
+        let unpeek = if let Some(item) = self.next() {
+            match f(item) {
+                Ok(result) => return Some(result),
+                Err(item) => Some(item),
+            }
+        } else {
+            None
+        };
+        self.peeked = Some(unpeek);
+        None
+    }
+    /// rustc 1.94.0 (peekable_next_if_map): consumes the mapped value or retains the modified item.
+    pub fn next_if_map_mut<R>(&mut self, f: impl FnOnce(&mut I::Item) -> Option<R>) -> Option<R> {
+        let unpeek = if let Some(mut item) = self.next() {
+            match f(&mut item) {
+                Some(result) => return Some(result),
+                None => Some(item),
+            }
+        } else {
+            None
+        };
+        self.peeked = Some(unpeek);
+        None
+    }
     pub fn next_if_eq<T: ?Sized>(&mut self, expected: &T) -> Option<I::Item>
     where
         I::Item: PartialEq<T>,
@@ -1121,6 +1227,7 @@ impl<I: Iterator> Iterator for Peekable<I> {
         };
         (lo, hi)
     }
+    #[rustc_inherit_overflow_checks]
     fn count(self) -> usize {
         match self.peeked {
             Some(None) => 0,
@@ -1655,6 +1762,24 @@ impl<I: Clone + Iterator> Iterator for Cycle<I> {
             (0, _) => (0, None),
             _ => (usize::MAX, None),
         }
+    }
+    #[rustc_inherit_overflow_checks]
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        let mut n = match self.iter.advance_by(n) {
+            Ok(()) => return Ok(()),
+            Err(rem) => rem,
+        };
+
+        while n > 0 {
+            self.iter = self.orig.clone();
+            n = match self.iter.advance_by(n) {
+                Ok(()) => return Ok(()),
+                e @ Err(rem) if rem == n => return e,
+                Err(rem) => rem,
+            };
+        }
+
+        Ok(())
     }
 }
 

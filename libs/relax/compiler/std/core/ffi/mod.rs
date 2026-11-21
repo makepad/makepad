@@ -8,6 +8,11 @@ use crate::fmt::Write as _;
 mod c_string;
 pub use self::c_string::{CString, FromVecWithNulError, IntoStringError, NulError};
 
+/// rustc 1.88.0 (c_str_module): borrowed C strings and their conversion errors.
+pub mod c_str {
+    pub use super::{CStr, FromBytesUntilNulError, FromBytesWithNulError};
+}
+
 pub type c_schar = i8;
 pub type c_uchar = u8;
 pub type c_short = i16;

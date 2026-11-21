@@ -727,6 +727,10 @@ pub struct Program {
     pub std_from_shared: bool,
     /// the std crates include core::simd / std::simd (relax_portable_simd; `std_simd_wanted`)
     pub std_simd: bool,
+    /// the program's profile has overflow checks (its root crate's cfg(overflow_checks)): the std
+    /// crates are compiled with relax_overflow_checks, which their code that inherits the
+    /// program's checks follows (rustc's `#[rustc_inherit_overflow_checks]`)
+    pub std_overflow_checks: bool,
     /// item-level macro calls no macro resolved at their parse (file, item, module, dir, mod_rs): expanded
     /// again once the crate is loaded (expand_pending: rustc's resolve/expand fixpoint for
     /// macros an expansion in a later file defines or imports), else errors
@@ -927,6 +931,7 @@ impl Program {
             std_from_shared: false,
             ptr_bytes: sess.options.check_target.web().map_or(8, |w| w.bytes()),
             std_simd: false,
+            std_overflow_checks: false,
             part_interned: Default::default(),
             pending_macs: Vec::new(),
             global_asms: Vec::new(),

@@ -576,7 +576,7 @@ fn eval(f: &Func, mem: &mut [u64; WORDS], args: [u64; 3]) -> Option<u64> {
 
 #[cfg(target_arch = "x86_64")]
 fn native(o: &relax_session::Options, f: &Func, thorough: bool) -> Result<Vec<u8>, String> {
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(thorough);
     let c = relax_backend::x64::compile(o, f, &env)?;
     // (the float constant pool follows the text: the whole code runs; nothing to link here)
     if !c.relocs.is_empty() {
@@ -587,7 +587,7 @@ fn native(o: &relax_session::Options, f: &Func, thorough: bool) -> Result<Vec<u8
 
 #[cfg(target_arch = "aarch64")]
 fn native(o: &relax_session::Options, f: &Func, thorough: bool) -> Result<Vec<u8>, String> {
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::arm64::Env::standalone(thorough);
     let c = relax_backend::arm64::compile(o, f, &env)?;
     // (the float constant pool follows the text: the whole code runs; nothing to link here)
     if !c.relocs.is_empty() {

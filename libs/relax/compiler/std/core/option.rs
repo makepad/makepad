@@ -141,6 +141,13 @@ impl<T> Option<T> {
             None => default(),
         }
     }
+    /// rustc 1.98.0 (result_option_map_or_default): maps the value or returns the output type's default.
+    pub const fn map_or_default<U: Default, F: FnOnce(T) -> U>(self, f: F) -> U {
+        match self {
+            Some(t) => f(t),
+            None => U::default(),
+        }
+    }
     pub const fn ok_or<E>(self, err: E) -> Result<T, E> {
         match self {
             Some(v) => Ok(v),

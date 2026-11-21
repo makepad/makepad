@@ -28,8 +28,13 @@ pub enum Class {
     /// a bounded, guarded step (OWNERARCH.DESIGN.md rule I-PUB, `publish`): a back end's finish,
     /// background bookkeeping, the take of a background build. It runs
     /// no front, no initializer, no JIT code, no wait and no request, so it is never refused and is
-    /// served inside every pump. Served after the program's requests: a program thread waits for at
-    /// most the one publish running when it asks
+    /// served inside every pump. Served after the program's requests, except that a program request
+    /// the owner posted to itself (the next step of its own work, a real-time reach's) waits behind
+    /// the publishes queued when it was posted (`Req::own_ahead`). So a program thread waits for the
+    /// one publish running when it asks, plus those counted ahead of an owner step queued before
+    /// it; the main thread is exempt (main's requests go first). A publish in turn may wait for one
+    /// such step, and a step is not held to its budget: one compile can overrun it, and the step
+    /// that completes a reach also runs the reach's tail, up to about 3 s in all (11-18)
     Publish = 1,
     /// the program's threads (its main thread among them, in one FIFO: OWNERARCH.DESIGN.md step 6),
     /// patches, structural steps (loads, adopts), inspect
@@ -153,6 +158,13 @@ struct Req {
     t_main: u64,
     t_serve: AtomicU64,
     t_done: AtomicU64,
+    /// a program request the owner posted to itself (post_queued on the owner: the next step of
+    /// its own work, a real-time reach's): the publishes queued when it was posted, which pick
+    /// serves before it. Program requests go before publishes (SERVICE_ORDER), so a walk that
+    /// posts its next step after every step kept the publish lane waiting for the walk's whole
+    /// length: a cold test binary's compile workers and test threads waited 76 s for their
+    /// publishes behind a 190k-slot reach, and two tests ran out of their own deadlines (11-18)
+    own_ahead: Cell<u32>,
     /// the requester sleeps on these until Done (no thread handle: a thread's TLS destructors
     /// compile too, after std::thread::current() is gone)
     done: Mutex<bool>,
@@ -161,9 +173,11 @@ struct Req {
 
 struct Queue {
     lanes: [VecDeque<usize>; CLASSES],
+    /// posted tasks go unrun (`void_posts`): read as the owner picks each request
+    void: bool,
 }
 
-static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES] });
+static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES], void: false });
 
 static WAKE: Condvar = Condvar::new();
 static STARTED: std::sync::Once = std::sync::Once::new();
@@ -1027,6 +1041,19 @@ pub(crate) fn stop() {
     if let Some(thread) = OWNER_JOIN.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = thread.join();
     }
+    Q.lock().unwrap_or_else(|e| e.into_inner()).void = false;
+}
+
+/// The run ends (`run_end`), its unit about to retire: every task posted to the owner (`post`,
+/// `post_queued`) and not yet run goes unrun from here, and so does any posted later, until the
+/// owner stops. They are the run's own work, and some hold its unit's address: a real-time reach's
+/// next step, posted by the step before it behind the unit's retirement, ran on the freed unit
+/// ("a posted compiler task panicked: write_code: ... is not code memory", a run that ended in
+/// place before its first frame, 11-21). A task running now ends first: the retirement is the
+/// owner's next request after it. The flag is the owner queue's (`Queue::void`), which the run's
+/// end resets with the queue (`reset_statics`): no static of its own for a restart to remember.
+pub(crate) fn void_posts() {
+    Q.lock().unwrap_or_else(|e| e.into_inner()).void = true;
 }
 
 /// Runs `f` on the owner thread and returns its result (its panic resumes here). On the owner it
@@ -1114,6 +1141,7 @@ fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadl
         t_main: if main_after { crate::jit::wall_ns().max(1) } else { 0 },
         t_serve: AtomicU64::new(0),
         t_done: AtomicU64::new(0),
+        own_ahead: Cell::new(0),
         done: Mutex::new(false),
         wake: Condvar::new(),
     };
@@ -1121,6 +1149,9 @@ fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadl
     let behind_from = NOW_FROM.load(Ordering::Relaxed);
     // SAFETY: only &'static Locations are stored
     let behind_site = unsafe { NOW_SITE.load(Ordering::Relaxed).as_ref() };
+    // a main-thread request asked while a real-time reach step runs (its queue delay is the
+    // reach's cost to main: the trace's line per reach)
+    let behind_rt = req.t_push != 0 && crate::jit::RT_STEPS_ON.load(Ordering::Relaxed) > 0;
     let t_req = std::time::Instant::now();
     let t0 = if main_wait { crate::jit::wall_ns() } else { 0 };
     if req.t_push != 0 {
@@ -1148,6 +1179,9 @@ fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadl
         if served != 0 {
             let q = served.saturating_sub(req.t_push);
             crate::jit::main_rec_behind(q, behind, behind_from, behind_site);
+            if behind_rt {
+                crate::jit::rt_main_waited(q);
+            }
         }
         crate::postframe::main_owner_wait(req.t_push, w);
     }
@@ -1256,6 +1290,7 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
         t_main: 0,
         t_serve: AtomicU64::new(0),
         t_done: AtomicU64::new(0),
+        own_ahead: Cell::new(0),
         done: Mutex::new(false),
         wake: Condvar::new(),
     });
@@ -1264,6 +1299,10 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
 
 fn push(r: usize, class: Class) {
     let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
+    if class == Class::Program && is_owner() {
+        let ahead = q.lanes[Class::Publish as usize].len().min(u32::MAX as usize) as u32;
+        unsafe { (*(r as *const Req)).own_ahead.set(ahead) };
+    }
     // a lane grows in the kept heap, whichever phase the requester is in
     crate::zone_alloc::kept_with(|| q.lanes[class as usize].push_back(r));
     if class == Class::Program {
@@ -1410,6 +1449,19 @@ fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
             }
         }
     }
+    // the owner's own next step (Req::own_ahead) at the head of the program lane: the publishes
+    // that were queued when it was posted go first, one per pick (a job's request still first)
+    if only == 0 && mode == Mode::Top && q.lanes[Class::Job as usize].is_empty() && !q.lanes[Class::Publish as usize].is_empty() {
+        if let Some(&h) = q.lanes[Class::Program as usize].front() {
+            let ahead = unsafe { &(*(h as *const Req)).own_ahead };
+            if ahead.get() > 0 {
+                ahead.set(ahead.get() - 1);
+                let r = q.lanes[Class::Publish as usize].pop_front().unwrap();
+                dequeued(Class::Publish as usize, r);
+                return Some(r);
+            }
+        }
+    }
     for c in SERVICE_ORDER {
         // a pump serves only what the awaited thread may be waiting for: a job's request, a
         // publish. Never a program thread's request: it opens builds of its own on top of the
@@ -1454,7 +1506,8 @@ pub fn queued_in(class: Class) -> usize {
     Q.lock().unwrap_or_else(|e| e.into_inner()).lanes[class as usize].len()
 }
 
-fn serve(r: usize) {
+/// `void`: posted tasks go unrun (`Queue::void`, as the request was picked).
+fn serve(r: usize, void: bool) {
     let req = unsafe { &*(r as *const Req) };
     SERVED.fetch_add(1, Ordering::Relaxed);
     // served inside a pump, the owner runs: its row stops naming the pump's runner meanwhile (the
@@ -1491,9 +1544,12 @@ fn serve(r: usize) {
     if traced {
         crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanBegin, SERVE_NAMES[req.class as usize], req.from, crate::inspect::pstream::SITE | (req.site as *const std::panic::Location<'static> as u64));
     }
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        unsafe { (*req.run)() }
-    }));
+    // (a run's end voided the posted tasks: this one goes unrun, `void_posts`)
+    let res = if !req.waited && void {
+        Ok(())
+    } else {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*req.run)() }))
+    };
     let busy = crate::jit::frame_leave(frame);
     if req.waited {
         OPEN_FOR.with(|o| o.borrow_mut().pop());
@@ -1597,7 +1653,7 @@ fn owner_loop() {
             std::hint::spin_loop();
         }
         drop(spin);
-        let r = {
+        let (r, void) = {
             let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 // a fork: parked here, between two requests (no request's state half done)
@@ -1611,7 +1667,7 @@ fn owner_loop() {
                     continue;
                 }
                 if let Some(r) = pick(&mut q, Mode::Top) {
-                    break r;
+                    break (r, q.void);
                 }
                 if STOP.load(Ordering::SeqCst) {
                     return;
@@ -1628,7 +1684,7 @@ fn owner_loop() {
             }
         };
         main_last = from_main(r);
-        serve(r);
+        serve(r, void);
         crate::lifeline::beat();
         // between top-level requests: the vtables made for real-time trait-object types
         // (a panic in either is printed by the panic hook: the owner is not serving a request).
@@ -1724,7 +1780,7 @@ fn pump_wait_at(site: &'static std::panic::Location<'static>, row: (crate::waits
         let r = {
             let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
             match pick(&mut q, Mode::Pump) {
-                Some(r) => Some(r),
+                Some(r) => Some((r, q.void)),
                 None => {
                     // a latch completing or a request arriving wakes it; the timeout bounds a
                     // condition nothing announces (an in-flight flag cleared by a Finish)
@@ -1735,9 +1791,9 @@ fn pump_wait_at(site: &'static std::panic::Location<'static>, row: (crate::waits
                 }
             }
         };
-        if let Some(r) = r {
+        if let Some((r, void)) = r {
             let t = crate::jit::wall_ns();
-            serve(r);
+            serve(r, void);
             pumping.serving += crate::jit::wall_ns().saturating_sub(t);
         }
     }
@@ -2351,7 +2407,7 @@ mod tests {
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
-    reset(&Q, Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES] }));
+    reset(&Q, Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES], void: false }));
     reset(&STARTED, std::sync::Once::new());
     reset(&STOP, AtomicBool::new(false));
     reset(&FOREGROUND, AtomicU32::new(0));

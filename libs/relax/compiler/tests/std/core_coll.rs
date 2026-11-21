@@ -83,3 +83,32 @@ fn a04_rc_refcell() {
     let b = Box::new(41u64);
     println!("| box {}", *b + 1);
 }
+
+#[test]
+fn a05_linked_list() {
+    use std::collections::LinkedList;
+    let mut list = LinkedList::new();
+    *list.push_back_mut(2) += 1;
+    *list.push_front_mut(0) += 1;
+    list.extend([4, 5, 6]);
+    let mut it = list.extract_if(|x| {
+        *x += 1;
+        *x % 2 == 0
+    });
+    println!("| first {:?} {:?}", it.size_hint(), it.next());
+    println!("| next {:?} {:?}", it, it.size_hint());
+    drop(it);
+    println!("| retained {:?} {}", list, list.len());
+    let evens: Vec<_> = list.extract_if(|x| *x % 2 == 0).collect();
+    println!("| removed {:?}, remaining {:?}", evens, list.iter().rev().copied().collect::<Vec<_>>());
+    println!("| drain {:?} {}", list.extract_if(|_| true).collect::<Vec<_>>(), list.len());
+    *list.push_front_mut(7) += 1;
+    println!("| reused {:?}", list.pop_back());
+
+    let mut words = LinkedList::from([String::from("keep"), String::from("take")]);
+    let removed = words.extract_if(|word| {
+        word.push('!');
+        word == "take!"
+    }).next();
+    println!("| owned {:?} {:?}", removed, words);
+}

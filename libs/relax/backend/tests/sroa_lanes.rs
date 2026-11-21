@@ -64,7 +64,7 @@ fn promoted_lanes_compute_the_same_bits() {
     type Entry = extern "sysv64" fn(*const u8, *mut u8);
     let mut o = relax_session::Options::default();
     o.cpu = relax_backend::x64::detect_cpu(&o);
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let src: Vec<f32> = (0..4 * N).map(|k| (k as f32 - 7.5) * 1.25).collect();
     let mut outs = Vec::new();
     for promote in [false, true] {
@@ -125,7 +125,7 @@ fn vinsert_from_memory_builds_the_lanes() {
     f.blocks[0].insts = insts;
     f.blocks[0].term = Term::Ret(vec![]);
     f.verify().unwrap();
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let c = relax_backend::x64::compile(&o, &f, &env).unwrap();
     let code = Code::new(&c.code).unwrap();
     let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
@@ -197,7 +197,7 @@ fn combined_lane_loads_compute_the_same_bits() {
     type Entry = extern "sysv64" fn(*const u8, *mut u8);
     let mut o = relax_session::Options::default();
     o.cpu = relax_backend::x64::detect_cpu(&o);
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let src: Vec<f32> = (0..4 * N + 8).map(|k| (k as f32 - 7.5) * 1.25).collect();
     let mut outs = Vec::new();
     for fold in [false, true] {
@@ -271,7 +271,7 @@ fn paired_word_copies_move_the_same_bytes() {
     type Entry = extern "sysv64" fn(*const u8, *mut u8);
     let mut o = relax_session::Options::default();
     o.cpu = relax_backend::x64::detect_cpu(&o);
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     let src: Vec<u32> = (0..9).map(|k| 0x3f80_0000 + k * 0x1234_5).collect();
     for pair in [false, true] {
         let mut f = word_copy_func();

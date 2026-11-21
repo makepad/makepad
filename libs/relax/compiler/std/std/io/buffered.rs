@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::{BufRead, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write, DEFAULT_BUF_SIZE};
+use super::{BufRead, Error, ErrorKind, IoSlice, Read, Result, Seek, SeekFrom, Write, DEFAULT_BUF_SIZE};
 
 pub struct BufReader<R> {
     buf: Vec<u8>, // len == capacity of the buffer
@@ -155,6 +155,10 @@ impl<W> IntoInnerError<W> {
     pub fn into_error(self) -> Error {
         self.1
     }
+    /// rustc 1.55.0 (io_into_inner_error_parts): returns the flush error and the recoverable writer.
+    pub fn into_parts(self) -> (Error, W) {
+        (self.1, self.0)
+    }
 }
 
 impl<W> fmt::Display for IntoInnerError<W> {
@@ -238,6 +242,16 @@ impl<W: Write> BufWriter<W> {
         self.buf.drain(..written);
         ret
     }
+    /// The room left in the buffer (rustc's spare_capacity)
+    fn spare(&self) -> usize {
+        self.cap.saturating_sub(self.buf.len())
+    }
+    /// Buffers as much of `buf` as there is room for, and says how much (rustc's write_to_buf)
+    fn write_to_buf(&mut self, buf: &[u8]) -> usize {
+        let n = self.spare().min(buf.len());
+        self.buf.extend_from_slice(&buf[..n]);
+        n
+    }
     pub fn get_ref(&self) -> &W {
         match self.inner.as_ref() {
             Some(w) => w,
@@ -297,6 +311,59 @@ impl<W: Write> Write for BufWriter<W> {
             Ok(())
         }
     }
+    /// rustc's: over a vectored writer, the buffers are buffered together while they fit and go
+    /// to the writer in one vectored write when they do not; over any other, buffer after buffer
+    /// is buffered while it fits (a first one as large as the buffer is written alone).
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        if self.get_ref().is_write_vectored() {
+            let mut total: usize = 0;
+            for b in bufs {
+                total = total.saturating_add(b.len());
+                if total > self.spare() && !self.buf.is_empty() {
+                    self.flush_buf()?;
+                }
+                if total >= self.cap {
+                    self.panicked = true;
+                    let r = self.inner_mut().write_vectored(bufs);
+                    self.panicked = false;
+                    return r;
+                }
+            }
+            for b in bufs {
+                self.buf.extend_from_slice(&**b);
+            }
+            Ok(total)
+        } else {
+            let mut iter = bufs.iter();
+            let mut total = match iter.by_ref().find(|b| !b.is_empty()) {
+                Some(b) => {
+                    if b.len() > self.spare() {
+                        self.flush_buf()?;
+                    }
+                    if b.len() >= self.cap {
+                        self.panicked = true;
+                        let r = self.inner_mut().write(&**b);
+                        self.panicked = false;
+                        return r;
+                    }
+                    self.buf.extend_from_slice(&**b);
+                    b.len()
+                }
+                None => return Ok(0),
+            };
+            for b in iter {
+                if b.len() > self.spare() {
+                    break;
+                }
+                self.buf.extend_from_slice(&**b);
+                total += b.len();
+            }
+            Ok(total)
+        }
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn flush(&mut self) -> Result<()> {
         self.flush_buf()?;
         self.inner_mut().flush()
@@ -344,6 +411,13 @@ impl<W: Write> LineWriter<W> {
     }
     pub fn get_mut(&mut self) -> &mut W {
         self.inner.get_mut()
+    }
+    /// rustc 1.0.0 (rust1): writes the buffered bytes and returns the underlying writer.
+    pub fn into_inner(self) -> core::result::Result<W, IntoInnerError<LineWriter<W>>> {
+        self.inner.into_inner().map_err(|err| {
+            let (error, inner) = err.into_parts();
+            IntoInnerError(LineWriter { inner }, error)
+        })
     }
 }
 
@@ -406,6 +480,55 @@ impl<W: Write> Write for LineWriter<W> {
                 self.inner.write_all(tail)
             }
         }
+    }
+    /// rustc's LineWriterShim::write_vectored: over a vectored writer, the buffers up to the last
+    /// one holding a newline go out in one vectored write (after what was buffered), the rest is
+    /// buffered; over any other, the first non-empty buffer is written as `write` writes it.
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        if !self.inner.get_ref().is_write_vectored() {
+            return match bufs.iter().find(|b| !b.is_empty()) {
+                Some(b) => self.write(&**b),
+                None => Ok(0),
+            };
+        }
+        // rustc scans at most this many buffers (the most one writev takes on Linux and Apple
+        // targets); the rest is the caller's next write
+        let bufs = &bufs[..bufs.len().min(1024)];
+        let last = match bufs.iter().rposition(|b| b.contains(&b'\n')) {
+            None => {
+                // a previously buffered complete line is flushed first
+                if self.inner.buffer().last() == Some(&b'\n') {
+                    self.inner.flush_buf()?;
+                }
+                return self.inner.write_vectored(bufs);
+            }
+            Some(i) => i,
+        };
+        self.inner.flush_buf()?;
+        let (lines, tail) = bufs.split_at(last + 1);
+        let flushed = self.inner.inner_mut().write_vectored(lines)?;
+        if flushed == 0 {
+            return Ok(0);
+        }
+        let mut lines_len: usize = 0;
+        for b in lines {
+            lines_len = lines_len.saturating_add(b.len());
+            if flushed < lines_len {
+                return Ok(flushed);
+            }
+        }
+        let mut buffered = 0;
+        for b in tail.iter().filter(|b| !b.is_empty()) {
+            let n = self.inner.write_to_buf(&**b);
+            if n == 0 {
+                break;
+            }
+            buffered += n;
+        }
+        Ok(flushed + buffered)
+    }
+    fn is_write_vectored(&self) -> bool {
+        true
     }
     fn flush(&mut self) -> Result<()> {
         self.inner.flush()

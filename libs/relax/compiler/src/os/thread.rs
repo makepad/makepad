@@ -3,6 +3,7 @@
 //!
 //! - `current()`: the calling thread's id (nonzero; pthread_t on unix).
 //! - `name(t)`: a thread's name for diagnostics.
+//! - `set_own_name(name)`: names the calling thread at the OS (and for `name`).
 //! - `kick(t)`: interrupts thread `t` for the hang watchdog / RELAX_COMPILE_WATCH: the fault
 //!   layer's handler then runs on that thread (jit::on_watchdog decides what it does).
 //! - `realtime()`: the calling thread runs under a real-time policy (an audio callback thread:
@@ -18,6 +19,10 @@ mod unix {
         pub fn pthread_self() -> usize;
         fn pthread_kill(t: usize, sig: i32) -> i32;
         fn pthread_getname_np(t: usize, name: *mut u8, len: usize) -> i32;
+        #[cfg(target_vendor = "apple")]
+        fn pthread_setname_np(name: *const std::ffi::c_char) -> i32;
+        #[cfg(not(target_vendor = "apple"))]
+        fn pthread_setname_np(t: usize, name: *const std::ffi::c_char) -> i32;
         #[link_name = "fork"]
         fn libc_fork() -> i32;
         fn _exit(code: i32) -> !;
@@ -78,6 +83,24 @@ mod unix {
 
     thread_local! {
         static NOTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Names the calling thread at the OS, cut to what it keeps (Linux 15 bytes, macOS 63), and
+    /// for `name`.
+    pub fn set_own_name(name: &str) {
+        let keep = if cfg!(target_vendor = "apple") { 63 } else { 15 };
+        let mut k = name.len().min(keep);
+        while !name.is_char_boundary(k) {
+            k -= 1;
+        }
+        let mut b = [0u8; 64];
+        b[..k].copy_from_slice(&name.as_bytes()[..k]);
+        #[cfg(target_vendor = "apple")]
+        unsafe { pthread_setname_np(b.as_ptr().cast()) };
+        #[cfg(not(target_vendor = "apple"))]
+        unsafe { pthread_setname_np(pthread_self(), b.as_ptr().cast()) };
+        names::put(current(), &b[..k]);
+        let _ = NOTED.try_with(|n| n.set(true));
     }
 
     /// Records the calling thread's name for `name` (once per thread; one thread-local read after).
@@ -223,7 +246,7 @@ mod unix {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
-    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, take_kick};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, set_own_name, take_kick};
 
     pub fn realtime() -> bool {
         extern "C" {
@@ -236,7 +259,7 @@ mod imp {
 
 #[cfg(target_vendor = "apple")]
 mod imp {
-    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, take_kick};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, set_own_name, take_kick};
     use super::unix::pthread_self;
 
     /// A thread with a time-constraint policy (CoreAudio's IO threads, audio workgroups).
@@ -286,6 +309,12 @@ mod imp {
             CloseHandle(h);
             s
         }
+    }
+
+    /// Names the calling thread (its description, which `name` reads).
+    pub fn set_own_name(name: &str) {
+        let w: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        unsafe { SetThreadDescription(GetCurrentThread(), w.as_ptr()) };
     }
 
     /// The watchdog / RELAX_COMPILE_WATCH interrupt: the thread is suspended and its context read

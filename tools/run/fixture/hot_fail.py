@@ -15,8 +15,11 @@ that a worker thread calls a fn never built before. In a process an edit ran in,
     the call would park at a compile error;
   - panic: the compiler panics in the call (RELAX_TEST_HOT_COMPILE_PANIC): the call gets a stub
     that panics. Its builds fail too, so that nothing builds it ahead of the call.
+  - late-watcher: as error, and the restarted run's watcher comes up 3 s late
+    (RELAX_TEST_LATE_WATCHER), as one on a loaded box did: the next edit is saved before it runs,
+    and the restart's own record comes after that save.
 Then, in the restarted run (a terminal program: it never presents a frame):
-  - error, panic: the next edit;
+  - error, panic, late-watcher: the next edit;
   - program-panic: a thread of the program's panics ("panic-now");
   - jit-error: that build fails again with no edit in the run (RELAX_TEST_REPLACEMENT_BUILD_ERROR);
     the worker calls the fn again every tick, so calls meet the error after the run reported it too.
@@ -24,8 +27,9 @@ In every case the fixture waits for the offer and takes it (`session relaunch`).
   - the app's state came back ("out restored <tick>" at or past the tick before the edit) and, but
     for jit-error, the edit runs (value=2);
   - the ledger (the hot outbox under MAKEPAD_HOME) holds the failure and its restart, one load;
-  - error, panic: the next edit is a patch (value=3, no further restart): the restore ended the
-    recovery, though the program never presents a frame;
+  - error, panic, late-watcher: the next edit is a patch (value=3, no further restart): the restore
+    ended the recovery, though the program never presents a frame; a record that comes after the
+    save is the restart's own (of the failed load), never that edit's outcome;
   - program-panic: the panic is the program's: the run's output and the flight recorder say it as a
     panic, no JIT error is said (no record, no verdict), and the program runs on;
   - jit-error: the error is the JIT's: a restart_failed record of the same load, the run's JIT error
@@ -39,7 +43,8 @@ Every wait ends on what the run does (an output line, a ledger record, its end),
 program stops by itself after 300 s); a failure says what came instead.
 hot_fail.ps1 is the error and panic cases on Windows, where the boxes have no Python and a restart is
 another process.
-Prints "hot_fail: OK ..." or "hot_fail: FAIL ..."; exit 1 on any FAIL.
+Prints "hot_fail: OK ..." or "hot_fail: FAIL ..."; exit 1 on any FAIL. HOT_FAIL_TRACE=1 prints a passing
+case's `relax live:` lines too (RELAX_LIVE_TRACE: the watcher's state across the recovery's close).
 """
 import glob, json, os, shutil, subprocess, sys, tempfile, threading, time
 
@@ -57,15 +62,20 @@ OFFERED = "a restart applies it; offered"
 os.environ.setdefault("RELAX_STD", os.path.abspath("libs/relax/compiler/std"))
 
 
-def case(name, hooks, after):
+def case(name, hooks, after, extra={}):
     tmp = tempfile.mkdtemp(prefix="hot-fail-")
     pkg = os.path.join(tmp, "pkg")
     shutil.copytree(os.path.join(HERE, "hot_fail"), pkg)
     home = os.path.join(tmp, "home")
     ready = os.path.join(tmp, "ready")
+    # the failed load's call parks on purpose, and the fixture takes its offered restart: the park
+    # is the test's own (RELAX_EXPECTED_CRASH), which a devhub node's watch leaves for it, as it does
+    # not one in the run of a lease nobody attends (released at once with `stop`: the run ended
+    # before the fixture's relaunch, "no-restored-state" in every case, 11-19)
     env = dict(os.environ, RELAX_LIVE_READY=ready, RELAX_HOME=home, MAKEPAD_HOME=os.path.join(tmp, "makepad"),
                RELAX_CACHE_DIR=os.path.join(home, "cache"), RELAX_TARGET_DIR=os.path.join(home, "target"),
-               RELAX_LIVE_TRACE="1", **{hook: "hot_fail_target" for hook in hooks})
+               RELAX_LIVE_TRACE="1", RELAX_EXPECTED_CRASH="hot_fail.py parks a failed live update and takes its restart",
+               **{hook: "hot_fail_target" for hook in hooks}, **extra)
     p = subprocess.Popen(JIT + ["run", "--ahead=minimal", "relax-hot-fail"], cwd=pkg, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     out, err = [], []
     def pump(f, acc):
@@ -130,6 +140,7 @@ def case(name, hooks, after):
     before = -1
     exit_code = 7
     allowed = [PARKED_CALL]
+    later = None
     try:
         if not wait(lambda: os.path.exists(ready) and len(ticks()) >= 20 and any("watcher gate open" in l for l in err)):
             fails.append("no-start")
@@ -163,11 +174,15 @@ def case(name, hooks, after):
                 # the restarted run's watcher takes the next edit (a recovery its restore never
                 # ended parks the watcher, and every later edit is dropped): until its value shows,
                 # a record or refusal of it comes, or the run ends
+                # (the restart's own record, of the failed load, may come after this: it is no
+                # record of the later edit)
                 ids = {r.get("id") for r in ledger()}
+                failed = {r.get("load") for r in ledger() if r.get("outcome") == "panic"}
                 n_later, e_later = len(out), len(err)
+                t_later = time.time()
                 edit("pub fn value() -> u64 {\n    hot_fail_target()\n}", "pub fn value() -> u64 {\n    hot_fail_target() + 1\n}")
                 patched = lambda: any("value=3" in l for l in ticks(n_later))
-                came = lambda: [r for r in ledger() if r.get("id") not in ids]
+                came = lambda: [r for r in ledger() if r.get("id") not in ids and r.get("load") not in failed]
                 refused = lambda: [l for l in err[e_later:] if "NOT applied" in l]
                 verified_at = []
                 def settled():
@@ -180,8 +195,9 @@ def case(name, hooks, after):
                         return len(ticks()) >= verified_at[0] + 10
                     return False
                 wait(settled)
+                later = time.time() - t_later
                 if not patched():
-                    fails.append("later-edit-not-patched(records %s; %s; %s)" % (sorted(r.get("outcome") for r in came()), (refused() or ["no refusal"])[0][:160], ended()))
+                    fails.append("later-edit-not-patched(records %s; %s; %s; after %.1f s)" % (sorted(r.get("outcome") for r in came()), (refused() or ["no refusal"])[0][:160], ended(), later))
                 elif len(pids()) != 2:
                     fails.append("later-edit-restarted-%s" % pids())
             if not fails and after == "program-panic":
@@ -253,16 +269,19 @@ def case(name, hooks, after):
         p.wait()
     if fails:
         print("hot_fail: %s: FAIL %s" % (name, " ".join(fails)))
-        print("\n".join(err[-40:]))
+        print("\n".join(err[-80:]))
         print("\n".join(out[-5:]))
         return False
-    print("hot_fail: %s: OK restored at tick %d (edit at %d), ledger %s" % (name, restored()[-1], before, outcomes()))
+    if os.environ.get("HOT_FAIL_TRACE"):
+        print("\n".join(l for l in err if l.startswith("relax live: ")))
+    print("hot_fail: %s: OK restored at tick %d (edit at %d), ledger %s%s" % (name, restored()[-1], before, outcomes(), "" if later is None else ", the later edit patched %.1f s after its save" % later))
     shutil.rmtree(tmp, ignore_errors=True)
     return True
 
 ERROR, PANIC, AGAIN = "RELAX_TEST_HOT_BUILD_ERROR", "RELAX_TEST_HOT_COMPILE_PANIC", "RELAX_TEST_REPLACEMENT_BUILD_ERROR"
 CASES = [("error", [ERROR], "edit"), ("panic", [ERROR, PANIC], "edit"),
-         ("program-panic", [ERROR], "program-panic"), ("jit-error", [ERROR, AGAIN], "jit-error")]
+         ("program-panic", [ERROR], "program-panic"), ("jit-error", [ERROR, AGAIN], "jit-error"),
+         ("late-watcher", [ERROR], "edit", {"RELAX_TEST_LATE_WATCHER": "3000"})]
 asked = sys.argv[1:]
 unknown = [a for a in asked if a not in [c[0] for c in CASES]]
 if unknown:

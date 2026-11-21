@@ -11,6 +11,14 @@ fn a01_ref_result_into_iter() {
     for v in &r {
         println!("| for ref {}", v);
     }
+    let err: Result<u32, &str> = Err("outer");
+    println!("| map_or_default {} {}", r.map_or_default(|v| v + 1), err.map_or_default(|v| v + 1));
+    let nested: [Result<Result<u32, &str>, &str>; 3] = [Ok(Ok(3)), Ok(Err("inner")), Err("outer")];
+    for value in nested {
+        println!("| flatten {:?}", value.flatten());
+    }
+    // SAFETY: err was constructed as Err above.
+    println!("| unchecked error {}", unsafe { err.unwrap_err_unchecked() });
 }
 
 #[test]

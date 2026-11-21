@@ -46,6 +46,16 @@ impl f64 {
     pub const fn round_ties_even(self) -> f64 { unsafe { intrinsics::rint_f64(self) } }
     pub const fn round(self) -> f64 { unsafe { intrinsics::round_f64(self) } }
     pub const fn fract(self) -> f64 { self - self.trunc() }
+    /// rustc 1.98.0 (float_algebraic): Floating-point addition allowing algebraic optimizations.
+    pub const fn algebraic_add(self, rhs: f64) -> f64 { self + rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point subtraction allowing algebraic optimizations.
+    pub const fn algebraic_sub(self, rhs: f64) -> f64 { self - rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point multiplication allowing algebraic optimizations.
+    pub const fn algebraic_mul(self, rhs: f64) -> f64 { self * rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point division allowing algebraic optimizations.
+    pub const fn algebraic_div(self, rhs: f64) -> f64 { self / rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point remainder allowing algebraic optimizations.
+    pub const fn algebraic_rem(self, rhs: f64) -> f64 { self % rhs }
     pub const fn min(self, other: f64) -> f64 { unsafe { intrinsics::fmin_f64(self, other) } }
     pub const fn max(self, other: f64) -> f64 { unsafe { intrinsics::fmax_f64(self, other) } }
     pub const fn minimum(self, other: f64) -> f64 { if self < other { self } else if other < self { other } else if self == other { if self.is_sign_negative() && other.is_sign_positive() { self } else { other } } else { self + other } }
@@ -134,6 +144,16 @@ impl f32 {
     pub const fn round_ties_even(self) -> f32 { unsafe { intrinsics::rint_f32(self) } }
     pub const fn round(self) -> f32 { unsafe { intrinsics::round_f32(self) } }
     pub const fn fract(self) -> f32 { self - self.trunc() }
+    /// rustc 1.98.0 (float_algebraic): Floating-point addition allowing algebraic optimizations.
+    pub const fn algebraic_add(self, rhs: f32) -> f32 { self + rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point subtraction allowing algebraic optimizations.
+    pub const fn algebraic_sub(self, rhs: f32) -> f32 { self - rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point multiplication allowing algebraic optimizations.
+    pub const fn algebraic_mul(self, rhs: f32) -> f32 { self * rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point division allowing algebraic optimizations.
+    pub const fn algebraic_div(self, rhs: f32) -> f32 { self / rhs }
+    /// rustc 1.98.0 (float_algebraic): Floating-point remainder allowing algebraic optimizations.
+    pub const fn algebraic_rem(self, rhs: f32) -> f32 { self % rhs }
     pub const fn min(self, other: f32) -> f32 { unsafe { intrinsics::fmin_f32(self, other) } }
     pub const fn max(self, other: f32) -> f32 { unsafe { intrinsics::fmax_f32(self, other) } }
     pub const fn minimum(self, other: f32) -> f32 { if self < other { self } else if other < self { other } else if self == other { if self.is_sign_negative() && other.is_sign_positive() { self } else { other } } else { self + other } }

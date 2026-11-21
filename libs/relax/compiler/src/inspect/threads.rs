@@ -151,6 +151,81 @@ pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use imp::{stack_hi_of_self, walk_regs_with, Slot as HoldSlot};
 
+/// The calling thread's own stack, every frame of it (host and JIT code, innermost first):
+/// return addresses, the first one into this fn's caller. std::backtrace's capture
+/// (inspect/backtrace.rs), on the running thread itself: frame records on arm64 and macOS (JIT
+/// code keeps them on every target, host code by the platform ABI), and on x86_64 Linux and
+/// Windows JIT frames by their records, host frames by their unwind tables (x64_walk). Reads stay
+/// inside the thread's stack (the program stack while it runs on one: the walk ends at its
+/// switch). Nothing where no walk exists.
+#[inline(never)]
+pub fn capture_self(out: &mut Vec<u64>) {
+    let (lo, hi) = crate::os::fault::stack_bounds_of_self();
+    #[cfg(any(target_arch = "aarch64", target_vendor = "apple"))]
+    {
+        let mut fp: u64;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            std::arch::asm!("mov {}, x29", out(reg) fp)
+        };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            std::arch::asm!("mov {}, rbp", out(reg) fp)
+        };
+        // [fp] = the caller's fp, [fp + 8] = the return address (arm64e system code signs it: the
+        // pointer authentication bits go)
+        while hi != 0 && fp & 7 == 0 && fp >= lo && fp.saturating_add(16) <= hi {
+            let ret = unsafe { *((fp + 8) as *const u64) };
+            #[cfg(target_arch = "aarch64")]
+            let ret = ret & 0x0000_ffff_ffff_ffff;
+            if ret == 0 {
+                break;
+            }
+            out.push(ret);
+            let next = unsafe { *(fp as *const u64) };
+            if next <= fp {
+                break;
+            }
+            fp = next;
+        }
+    }
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", windows)))]
+    {
+        let (rip, rsp, rbp, rbx): (u64, u64, u64, u64);
+        let (r12, r13, r14, r15): (u64, u64, u64, u64);
+        unsafe {
+            std::arch::asm!("lea {0}, [rip]", "mov {1}, rsp", "mov {2}, rbp", "mov {3}, rbx", out(reg) rip, out(reg) rsp, out(reg) rbp, out(reg) rbx);
+            std::arch::asm!("mov {0}, r12", "mov {1}, r13", "mov {2}, r14", "mov {3}, r15", out(reg) r12, out(reg) r13, out(reg) r14, out(reg) r15);
+        }
+        // the module index, built once (a refresh leaks the index it replaces: walks may still read it)
+        if !super::cfi::covers(rip) {
+            super::cfi::refresh();
+        }
+        #[allow(unused_mut)]
+        let mut regs = super::cfi::Regs { rip, rsp, rbp: rbp.max(1), rbx, r12, r13, r14, r15, ..Default::default() };
+        #[cfg(windows)]
+        unsafe {
+            std::arch::asm!("mov {0}, rsi", "mov {1}, rdi", out(reg) regs.rsi, out(reg) regs.rdi);
+        }
+        let _ = lo;
+        // this thread's own stack: plain reads within [sp, top of stack)
+        let read = |a: u64| -> Option<u64> { (a >= rsp && a % 8 == 0 && a.saturating_add(8) <= hi).then(|| unsafe { *(a as *const u64) }) };
+        // (the first pc is this fn's own)
+        let mut first = true;
+        x64_walk::walk_each(&mut regs, &read, &mut |pc| {
+            if !first {
+                out.push(pc);
+            }
+            first = false;
+            true
+        });
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_vendor = "apple", all(target_arch = "x86_64", any(target_os = "linux", windows)))))]
+    {
+        let _ = (out, lo, hi);
+    }
+}
+
 /// Pause: holds thread `tid` in its handler until `release_hold` (Linux).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn hold_paused(tid: u64) -> Result<&'static HoldSlot, &'static str> {
@@ -1064,27 +1139,38 @@ mod x64_walk {
     /// CI hang's main thread, blocked in poll, read as called from the feature resolver that had
     /// run there before).
     pub fn walk_with(raw: &mut Raw, r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>) {
+        if raw.n >= MAX_FRAMES {
+            return;
+        }
+        let (pcs, n) = (&mut raw.pcs, &mut raw.n);
+        raw.stop = walk_each(r, read, &mut |pc| {
+            pcs[*n] = pc;
+            *n += 1;
+            *n < MAX_FRAMES
+        });
+    }
+
+    /// `walk_with`'s walk, each pc handed to `push` (innermost first; false: the walk ends after
+    /// that frame's step); why it ended at its last frame, when that is not the stack's outermost.
+    pub fn walk_each(r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>, push: &mut dyn FnMut(u64) -> bool) -> Option<&'static str> {
         use super::super::cfi;
         let mut top = true;
-        while raw.n < MAX_FRAMES && r.rip != 0 {
+        while r.rip != 0 {
             // the lookup pc: a return address points past its call
             let look = if top { r.rip } else { r.rip.wrapping_sub(1) };
             let own = crate::jit::in_jit_code(look);
             let jit = own || host::jit_code(look);
             if !top && !jit && !cfi::covers(look) {
-                raw.stop = Some(NOT_CODE);
-                break;
+                return Some(NOT_CODE);
             }
-            raw.pcs[raw.n] = r.rip;
-            raw.n += 1;
+            let more = push(r.rip);
             // the stack switch's frame: it runs on the thread's own stack (its sp is in the
             // switch record on the segment), its callee on the segment
             if !top && (r.rip == crate::stack::switch_return_pc() || r.rip == host::switch_return_pc()) {
                 match read(r.rsp.wrapping_add(crate::stack::SWITCH_RECORD)) {
                     Some(own) => r.rsp = own,
                     None => {
-                        raw.stop = Some("it switched to the program stack and its switch record is unreadable");
-                        break;
+                        return Some("it switched to the program stack and its switch record is unreadable");
                     }
                 }
             }
@@ -1096,28 +1182,23 @@ mod x64_walk {
                 // staged arguments (its unwind info), which need sp only
                 if r.rbp == 0 {
                     if top {
-                        raw.stop = Some("it is JIT code at no call (it makes the syscall itself) and its frame pointer is not known");
-                        break;
+                        return Some("it is JIT code at no call (it makes the syscall itself) and its frame pointer is not known");
                     }
                     if !own {
-                        raw.stop = Some(HOST_NO_FP);
-                        break;
+                        return Some(HOST_NO_FP);
                     }
                     match crate::jit::frame_pointer_at(r.rip, sp0) {
                         Ok(fp) => r.rbp = fp,
                         Err(why) => {
-                            raw.stop = Some(why);
-                            break;
+                            return Some(why);
                         }
                     }
                 }
                 if r.rbp < sp0 || r.rbp - sp0 > 1 << 20 {
-                    raw.stop = Some(FP_NOT_IN_STACK);
-                    break;
+                    return Some(FP_NOT_IN_STACK);
                 }
                 let (Some(ra), Some(next)) = (read(r.rbp.wrapping_add(8)), read(r.rbp)) else {
-                    raw.stop = Some("it is JIT code and its frame record is unreadable");
-                    break;
+                    return Some("it is JIT code and its frame record is unreadable");
                 };
                 r.rsp = r.rbp + 16;
                 r.rip = ra;
@@ -1125,24 +1206,25 @@ mod x64_walk {
             } else {
                 match cfi::step(r, top, read) {
                     cfi::Step::Done => {}
-                    cfi::Step::End => break,
+                    cfi::Step::End => return None,
                     #[cfg(target_os = "linux")]
                     cfi::Step::NeedRbp => {
-                        raw.stop = Some(super::imp::BLOCKED_NO_FP);
-                        break;
+                        return Some(super::imp::BLOCKED_NO_FP);
                     }
                     cfi::Step::Fail(why) => {
-                        raw.stop = Some(why);
-                        break;
+                        return Some(why);
                     }
                 }
             }
             if r.rsp <= sp0 {
-                raw.stop = Some("its caller's frame is not above it");
-                break;
+                return Some("its caller's frame is not above it");
+            }
+            if !more {
+                return None;
             }
             top = false;
         }
+        None
     }
 }
 

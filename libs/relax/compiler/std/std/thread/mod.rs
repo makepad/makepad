@@ -10,6 +10,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
+use core::panic::Location;
 use core::sync::atomic::Ordering::{Relaxed, SeqCst};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use core::time::Duration;
@@ -67,6 +68,13 @@ struct Inner {
     name: Option<CString>,
     id: ThreadId,
     parker: Parker,
+    /// where `spawn` was called (none for the main thread and threads std did not start): an
+    /// unnamed thread's panic says it (`unnamed_note`)
+    spawned_at: Option<&'static Location<'static>>,
+    /// (Linux) the OS name an unnamed thread starts with, its spawner's: the note names the
+    /// thread's OS name only when it set another
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    inherited: [u8; 16],
 }
 
 #[derive(Clone)]
@@ -76,7 +84,29 @@ pub struct Thread {
 
 impl Thread {
     fn new(name: Option<CString>) -> Thread {
-        Thread { inner: Arc::new(Inner { name, id: ThreadId::new(), parker: Parker::new() }) }
+        Thread::spawned(name, None)
+    }
+    /// (called on the spawning thread)
+    fn spawned(name: Option<CString>, spawned_at: Option<&'static Location<'static>>) -> Thread {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let mut inherited = [0u8; 16];
+        // (a Linux thread starts with the name of the thread that created it: this one)
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if name.is_none() && spawned_at.is_some() {
+            let mut b = [0u8; 64];
+            let n = sys::os::thread_os_name(&mut b).min(inherited.len());
+            inherited[..n].copy_from_slice(&b[..n]);
+        }
+        Thread {
+            inner: Arc::new(Inner {
+                name,
+                id: ThreadId::new(),
+                parker: Parker::new(),
+                spawned_at,
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                inherited,
+            }),
+        }
     }
     pub fn id(&self) -> ThreadId {
         self.inner.id
@@ -89,6 +119,29 @@ impl Thread {
     }
     pub fn unpark(&self) {
         self.inner.parker.unpark();
+    }
+}
+
+/// For a panic on the calling thread `t` (its handle) when std has no name for it: a note line
+/// with what else names it, the name it set at the OS and where it was spawned (None: nothing
+/// does). The panic's own lines stay rustc's; the note follows them.
+pub(crate) fn unnamed_note(t: &Thread) -> Option<String> {
+    if t.inner.name.is_some() {
+        return None;
+    }
+    let mut b = [0u8; 64];
+    let n = sys::os::thread_os_name(&mut b);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let n = {
+        let had = &t.inner.inherited;
+        if b[..n] == had[..had.iter().position(|&c| c == 0).unwrap_or(had.len())] { 0 } else { n }
+    };
+    let os = if n == 0 { None } else { Some(String::from_utf8_lossy(&b[..n])) };
+    match (os, t.inner.spawned_at) {
+        (None, None) => None,
+        (Some(os), None) => Some(alloc::format!("note: thread '<unnamed>' is named '{}' by the OS\n", os)),
+        (None, Some(at)) => Some(alloc::format!("note: thread '<unnamed>' was spawned at {}\n", at)),
+        (Some(os), Some(at)) => Some(alloc::format!("note: thread '<unnamed>' is named '{}' by the OS and was spawned at {}\n", os, at)),
     }
 }
 
@@ -187,27 +240,45 @@ impl Builder {
         self.stack_size = Some(size);
         self
     }
+    // (#[track_caller] only to know where a thread was spawned, as real std under Miri: the
+    // panics these make stay inside std, in fns of their own)
+    #[track_caller]
     pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        unsafe { Ok(JoinHandle(self.spawn_unchecked_(f, None)?)) }
+        unsafe { self.spawn_unchecked(f) }
     }
 
+    /// rustc 1.82.0 (thread_spawn_unchecked): spawns a thread whose closure and result may borrow local data.
+    ///
+    /// # Safety
+    /// All borrows in the closure and its result must remain valid for their uses, including their drops.
+    /// Joining the thread before the borrowed data goes out of scope satisfies this requirement.
+    #[track_caller]
+    pub unsafe fn spawn_unchecked<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
+    where
+        F: FnOnce() -> T + Send,
+        T: Send,
+    {
+        unsafe { Ok(JoinHandle(self.spawn_unchecked_(f, None, Location::caller())?)) }
+    }
+
+    #[track_caller]
     pub fn spawn_scoped<'scope, 'env, F, T>(self, scope: &'scope Scope<'scope, 'env>, f: F) -> io::Result<ScopedJoinHandle<'scope, T>>
     where
         F: FnOnce() -> T + Send + 'scope,
         T: Send + 'scope,
     {
-        unsafe { Ok(ScopedJoinHandle(self.spawn_unchecked_(f, Some(scope.data.clone()))?)) }
+        unsafe { Ok(ScopedJoinHandle(self.spawn_unchecked_(f, Some(scope.data.clone()), Location::caller())?)) }
     }
 
-    /// # Safety: `f` and `T` must outlive the thread (callers: 'static, or a scope that joins).
-    unsafe fn spawn_unchecked_<'a, F, T>(self, f: F, scope_data: Option<Arc<ScopeData>>) -> io::Result<JoinInner<'a, T>>
+    /// # Safety: the caller must keep the data borrowed by `f` and `T` alive through their uses.
+    unsafe fn spawn_unchecked_<'a, F, T>(self, f: F, scope_data: Option<Arc<ScopeData>>, at: &'static Location<'static>) -> io::Result<JoinInner<'a, T>>
     where
-        F: FnOnce() -> T + Send + 'a,
-        T: Send + 'a,
+        F: FnOnce() -> T + Send,
+        T: Send,
     {
         let stack_size = match self.stack_size {
             Some(s) => s,
@@ -220,12 +291,12 @@ impl Builder {
             },
             None => None,
         };
-        let my_thread = Thread::new(cname);
+        let my_thread = Thread::spawned(cname, Some(at));
         let my_packet: Arc<Packet<'a, T>> = Arc::new(Packet { scope: scope_data, result: UnsafeCell::new(None), _marker: PhantomData });
         if let Some(scope) = &my_packet.scope {
             scope.increment_num_running_threads();
         }
-        // lifetime erased: the thread is joined before 'a ends (scope) or 'a is 'static
+        // The packet's erased scope lifetime is covered by the caller's safety contract.
         let their_packet: Arc<Packet<'static, T>> = core::mem::transmute(my_packet.clone());
         #[cfg(not(relax_web))]
         let test = unsafe { __relax_test_inherit() };
@@ -404,6 +475,7 @@ impl<T> fmt::Debug for JoinHandle<T> {
     }
 }
 
+#[track_caller]
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -411,8 +483,14 @@ where
 {
     match Builder::new().spawn(f) {
         Ok(h) => h,
-        Err(e) => panic!("failed to spawn thread: {:?}", e),
+        Err(e) => spawn_failed(e),
     }
+}
+
+/// (the panic of a spawn that failed: at std's line, not the caller's)
+#[inline(never)]
+fn spawn_failed(e: io::Error) -> ! {
+    panic!("failed to spawn thread: {:?}", e)
 }
 
 // ---- scoped threads
@@ -471,6 +549,7 @@ where
 }
 
 impl<'scope, 'env> Scope<'scope, 'env> {
+    #[track_caller]
     pub fn spawn<F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
     where
         F: FnOnce() -> T + Send + 'scope,
@@ -478,7 +557,7 @@ impl<'scope, 'env> Scope<'scope, 'env> {
     {
         match Builder::new().spawn_scoped(self, f) {
             Ok(h) => h,
-            Err(e) => panic!("failed to spawn thread: {:?}", e),
+            Err(e) => spawn_failed(e),
         }
     }
 }

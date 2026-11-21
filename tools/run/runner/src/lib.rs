@@ -229,9 +229,10 @@ pub fn main(host: &'static Host) {
     // environment (relax-base progenv.rs); a provided crate's read of the program's environment
     // (relax-api env) answers with them. A test's package binary that a launcher clearing the
     // environment started builds with its test's run's build environment (selfexe.rs prepared_build).
+    // A run Relax std's spawn started takes its parent's by the descriptor it names (spawned_build).
     let handed = match &relaunch {
         Some(_) => relax_compiler::selfexe::relaunch_build(),
-        None if bin.is_none() => relax_compiler::selfexe::prepared_build(&relax_compiler::os::proc::args_bytes()),
+        None if bin.is_none() => relax_compiler::selfexe::spawned_build().or_else(|| relax_compiler::selfexe::prepared_build(&relax_compiler::os::proc::args_bytes())),
         None => None,
     };
     relax_compiler::progenv::init_handed(handed);

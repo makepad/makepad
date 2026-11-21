@@ -82,6 +82,11 @@ pub fn is_main_thread() -> bool {
 /// rustc's sys/thread/unsupported.rs `set_name`: "nope".
 pub fn set_thread_name(_name: *const c_char) {}
 
+/// (no OS names on wasm)
+pub fn thread_os_name(_buf: &mut [u8; 64]) -> usize {
+    0
+}
+
 pub mod portable {
     use super::*;
 

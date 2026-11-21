@@ -73,6 +73,17 @@ impl Duration {
     pub const fn from_nanos(nanos: u64) -> Duration {
         Duration { secs: nanos / (NANOS_PER_SEC as u64), nanos: unsafe { Nanoseconds::new((nanos % (NANOS_PER_SEC as u64)) as u32) } }
     }
+    /// rustc 1.93.0 (duration_from_nanos_u128): constructs a duration from a 128-bit nanosecond count.
+    #[must_use]
+    #[track_caller]
+    pub const fn from_nanos_u128(nanos: u128) -> Duration {
+        let secs = nanos / NANOS_PER_SEC as u128;
+        if secs > u64::MAX as u128 {
+            panic!("overflow in `Duration::from_nanos_u128`");
+        }
+        let subsec_nanos = (nanos % NANOS_PER_SEC as u128) as u32;
+        Duration { secs: secs as u64, nanos: unsafe { Nanoseconds::new(subsec_nanos) } }
+    }
     pub const fn from_mins(mins: u64) -> Duration {
         if mins > u64::MAX / 60 {
             panic!("overflow in Duration::from_mins");

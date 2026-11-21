@@ -212,6 +212,9 @@ pub struct Parser<'a> {
     /// the expression a macro call expands to is a list element by itself or a method call's
     /// receiver: its outer attributes are not gated (taken by the expansion's first `expr_bp`)
     expn_attrs_ungated: bool,
+    /// the closure about to be parsed is marked #[rustc_inherit_overflow_checks] (closure_attrs; taken
+    /// by `closure` when it starts, before any closure in its body)
+    closure_inherit: bool,
     /// attributes whose shape is checked once their item is known to be configured in (check only)
     pending_shape: Vec<(TokRange, Option<PErr>)>,
 }
@@ -296,6 +299,7 @@ impl<'a> Parser<'a> {
             expansion_semi: false,
             list_elem_at: (u32::MAX, ELEM_LIST),
             expn_attrs_ungated: false,
+            closure_inherit: false,
             pending_shape: Vec::new(),
         }
     }
@@ -2385,7 +2389,7 @@ impl<'a> Parser<'a> {
         let before = self.trace();
         let (pos, undo, mark) = (self.pos, self.tok_undo.len(), self.ast.mark());
         let lens = (self.item_start.len(), self.lazy_mods.len(), self.mod_stack.len(), self.scope_stack.len(), self.rule_scopes.len(), self.extra_items.len(), self.extra_assoc_items.len(), self.pending_shape.len());
-        let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated);
+        let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated, self.closure_inherit);
         let (pending_inner, cfg_select_rest, cfg_select_ends) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone(), self.cfg_select_ends.borrow().clone());
         let macro_scope_miss = self.macro_scope_miss.get();
         let lit_errs = (!self.lit_errs.is_empty()).then(|| self.lit_errs.clone());
@@ -2406,7 +2410,7 @@ impl<'a> Parser<'a> {
         self.extra_items.truncate(lens.5);
         self.extra_assoc_items.truncate(lens.6);
         self.pending_shape.truncate(lens.7);
-        (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated) = flags;
+        (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated, self.closure_inherit) = flags;
         self.pending_inner = pending_inner;
         *self.cfg_select_rest.borrow_mut() = cfg_select_rest;
         *self.cfg_select_ends.borrow_mut() = cfg_select_ends;
@@ -2432,7 +2436,7 @@ impl<'a> Parser<'a> {
             pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, stmt_frags, synth_parens, fwd_starts,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, foreign_rules, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
-            include_as_expr, foreign_abi, cfg_out, lit_errs, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape, macro_scope_miss,
+            include_as_expr, foreign_abi, cfg_out, lit_errs, expansion_semi, list_elem_at, expn_attrs_ungated, closure_inherit, pending_shape, macro_scope_miss,
             cfg_select_ends, builtin_exp,
         } = self;
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
@@ -2446,7 +2450,7 @@ impl<'a> Parser<'a> {
             tables {tables:?} token_input {token_input} exp_depth {exp_depth} builtin_exp {builtin_exp} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
             mods {mod_stack:?} scopes {scope_stack:?} {next_scope} {rule_scopes:?} no_prelude {no_prelude} range_dots {range_dots}\n\
             items {item_start:?} {extra_items:?} {extra_assoc_items:?} {pending_inner:?} {in_assoc} {in_trait} {foreign_abi:?}\n\
-            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} {:?} {lit_errs:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
+            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} {closure_inherit} cfg {cfg_out} {:?} {:?} {lit_errs:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
             macros.is_some(), cfg_select_rest.borrow(), cfg_select_ends.borrow(), macro_scope_miss.get())
     }
 
@@ -5604,6 +5608,7 @@ impl<'a> Parser<'a> {
                 match (single, self.tok_text(self.toks.at(alo))) {
                     (true, b"target_feature") => return Err(PErr { pos: self.toks.at(alo).lo, msg: "`#[target_feature]` attribute cannot be used on closures".into() }),
                     (true, b"track_caller") => self.ast.gated_syntax.push(("closure_track_caller", self.toks.at(alo).lo)),
+                    (true, b"rustc_inherit_overflow_checks") => self.closure_inherit = true,
                     _ => {}
                 }
             }
@@ -6045,6 +6050,7 @@ impl<'a> Parser<'a> {
     }
 
     fn closure(&mut self, is_async: bool, is_static: bool, r: u8, lo: u32) -> PResult<ExprId> {
+        let inherit_overflow_checks = std::mem::take(&mut self.closure_inherit);
         let is_move = self.eat(T::KwMove);
         let mut params = Vec::new();
         if !self.eat(T::OrOr) {
@@ -6097,11 +6103,11 @@ impl<'a> Parser<'a> {
             let b = BlockId(self.ast.base[3] + self.ast.blocks.len() as u32 - 1);
             let fut = self.mk_expr(ExprKind::Async(crate::ast::ASYNC_CLOSURE_BODY, b), blo);
             let params = self.ast.push_list(params);
-            let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: OptTyId::NONE, body: fut });
+            let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: OptTyId::NONE, body: fut, inherit_overflow_checks });
             return Ok(self.mk_expr(ExprKind::Closure(row), lo));
         }
         let params = self.ast.push_list(params);
-        let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: OptTyId::from(ret), body });
+        let row = self.ast.push_row(ClosureRow { is_move, is_async, is_static, params, ret: OptTyId::from(ret), body, inherit_overflow_checks });
         Ok(self.mk_expr(ExprKind::Closure(row), lo))
     }
 

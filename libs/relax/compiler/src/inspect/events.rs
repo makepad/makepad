@@ -8,7 +8,9 @@
 //! Panic parking: a panic in JIT code on a program thread parks with its stack intact for up to
 //! 600 s when someone can decide it: an inspect watcher, `--agent`, devhub, the visible Run panel
 //! in a live session, or an interactive terminal. Otherwise it parks briefly
-//! (RELAX_PANIC_PARK seconds, default 2), once per site. Someone attaching extends a short
+//! (RELAX_PANIC_PARK seconds, default 2), once per site. Only a panic that leaves the program
+//! parks: one the program's catch_unwind catches goes back to it (jit.rs panic_caught_here, and
+//! a rethrow decides anew: rethrow_of_caught). Someone attaching extends a short
 //! park to 600 s from its start; a long park never shortens. Resuming or timing out unwinds as
 //! usual. `--unattended` never parks. Every park always prints one line, even under --quiet or
 //! --silent, naming who can decide, the limit, how to inspect it and how --unattended avoids it;
@@ -166,9 +168,21 @@ pub fn observer_closed() {
     retry_update();
 }
 
-/// Retry boundaries are worth setting while someone may resume a panic with `retry`.
+/// Retry boundaries are worth setting while someone may resume a panic with `retry`: a watcher,
+/// an agent, devhub, the Run panel, or a person at the terminal of an attended run.
 fn retry_update() {
-    RELAX_RETRY_ON.store(watched() || OBSERVERS.load(Relaxed) > 0 || RUN_STATE_AVAILABLE.load(Relaxed), Relaxed);
+    let terminal = std::io::stdin().is_terminal() && crate::tui::stderr_is_terminal();
+    let on = retry_wanted(watched() || OBSERVERS.load(Relaxed) > 0 || RUN_STATE_AVAILABLE.load(Relaxed),
+        terminal, UNATTENDED.load(Relaxed), super::TEST_RUN.load(Relaxed));
+    RELAX_RETRY_ON.store(on, Relaxed);
+}
+
+/// Whether retry boundaries are set: someone who can resume a panic with `retry` follows the run
+/// (`followed`), or a person attends it at an interactive terminal (stdin and stderr both TTYs:
+/// a contained panic parks at its site for them to decide). Never for a terminal of a non-TTY
+/// run (scripts, CI, a background lease) or of a test's run, and `--unattended` always wins.
+fn retry_wanted(followed: bool, terminal: bool, unattended: bool, test_run: bool) -> bool {
+    !unattended && (followed || terminal && !test_run)
 }
 
 fn wanted(on: &Option<Vec<String>>, kind: &str) -> bool {
@@ -339,10 +353,33 @@ pub extern "C" fn relax_retry_enter(name: *const u8, len: usize) {
     let _kept = crate::zone_alloc::kept();
     let n = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) }.to_string();
     let _ = BOUNDARIES.try_with(|b| b.borrow_mut().push(n));
+    // the catch_unwind that follows is the boundary's own (jit.rs Catch::Retry)
+    let _ = RETRY_NEXT.try_with(|r| r.set(true));
 }
 
 pub extern "C" fn relax_retry_leave() {
     let _ = BOUNDARIES.try_with(|b| b.borrow_mut().pop());
+    let _ = RETRY_NEXT.try_with(|r| r.set(false));
+}
+
+/// The recovery point entered now is a retry boundary's catch (clears the mark).
+pub(crate) fn take_retry_next() -> bool {
+    RETRY_NEXT.try_with(|r| r.replace(false)).unwrap_or(false)
+}
+
+thread_local! {
+    /// relax_retry_enter ran and its catch_unwind is next
+    static RETRY_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The panic this thread raised last went back to the program and did not park: its message
+    /// and where it began (a rethrow of it decides anew, [`rethrow_of_caught`]).
+    static CAUGHT_UNPARKED: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A resume_unwind of this message: where the panic began, when it is the one this thread's
+/// program caught last without parking (it may park now). A rethrow of a panic that parked, or
+/// of an older one, parks no more.
+pub(crate) fn rethrow_of_caught(message: &str) -> Option<String> {
+    CAUGHT_UNPARKED.try_with(|c| c.borrow_mut().take()).ok().flatten().filter(|(m, _)| m == message).map(|(_, at)| at)
 }
 
 /// makepad, after catching a panic at its boundary: run the unit again? (clears the request)
@@ -366,6 +403,7 @@ static UNATTENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// Marks this run as one no one attends ([`UNATTENDED`]).
 pub fn unattended() {
     UNATTENDED.store(true, Relaxed);
+    retry_update();
 }
 
 fn park_secs_unwatched() -> u64 {
@@ -430,6 +468,8 @@ pub fn release_domain(domain: crate::domain::DomainId) {
 pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let unwinds = !regs.is_null();
     let _k = crate::zone_alloc::kept();
+    // (a new panic: no rethrow continues the one before)
+    let _ = CAUGHT_UNPARKED.try_with(|c| c.borrow_mut().take());
     if !super::STARTED.load(Relaxed) || super::TEST_RUN.load(Relaxed) || UNATTENDED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
         return;
     }
@@ -457,6 +497,20 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let mut watched = deciding.is_some();
     let key = format!("{}|{}|{}", info.site, info.location, info.message);
     super::flightrec::panic(&super::short(&info.message, 120), if info.location.is_empty() { "?" } else { &info.location });
+    // A panic of the program's that unwinds to its catch_unwind goes back to the program, which
+    // handles it (rustc's std prints the hook's message and the program goes on): nothing is left
+    // to decide and nothing parks (a backtrace sample's caught panic held a devhub lease until
+    // devhub ended it idle, 11-18). One that leaves the program parks: no recovery point takes it,
+    // std's own boundary does (a thread's start, the test harness) or a retry boundary does
+    // (jit.rs panic_caught_here); a rethrow of a caught one decides anew (rethrow_of_caught). A
+    // restartable frame on its stack (`restartable <fn>`) is the one deciding's ask: it parks.
+    // Faults, hangs and compile errors the JIT contained are no panics of the program's: they
+    // park caught or not (rt_catch_panic reports them so too).
+    let program_panic = info.kind == "panic" && !info.message.starts_with("compile error in ") && !crate::jit::is_ice_stub_message(&info.message);
+    if program_panic && crate::jit::panic_caught_here() && !(unwinds && super::instrument::restartable_in(&info.frames).is_some()) {
+        let _ = CAUGHT_UNPARKED.try_with(|c| *c.borrow_mut() = Some((info.message.clone(), info.location.clone())));
+        return;
+    }
     if !watched {
         let mut seen = SITES_SEEN.lock().unwrap_or_else(|e| e.into_inner());
         if park_secs_unwatched() == 0 || seen.iter().any(|s| s.1 == key) {
@@ -936,6 +990,17 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_boundaries_follow_an_attended_terminal_and_never_an_unattended_run() {
+        // (followed, terminal, unattended, test run)
+        assert!(retry_wanted(false, true, false, false), "a run attended at an interactive terminal sets them");
+        assert!(!retry_wanted(false, false, false, false), "a run without a terminal (a script, CI, a background lease) does not");
+        assert!(!retry_wanted(false, true, false, true), "a test's run at a terminal does not: its panics are the test's");
+        assert!(!retry_wanted(false, true, true, false), "--unattended wins over a terminal");
+        assert!(!retry_wanted(true, true, true, false), "--unattended wins over a watcher too");
+        assert!(retry_wanted(true, false, false, false), "a watcher without a terminal sets them, as before");
+    }
 
     #[test]
     fn the_recent_events_end_at_the_newest_and_arrive_whole() {

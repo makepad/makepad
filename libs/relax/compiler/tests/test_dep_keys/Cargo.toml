@@ -7,3 +7,8 @@ edition = "2021"
 
 [dependencies]
 tdk-mid = { path = "mid" }
+
+[[bin]]
+name = "tdk-run"
+path = "src/main.rs"
+test = false

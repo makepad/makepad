@@ -175,6 +175,9 @@ pub(crate) fn replacement_running() -> bool { REPLACEMENT.load(Ordering::Acquire
 /// from here on a panic of the program's own code is the program's, and a JIT-internal error is
 /// still the JIT's (`replacement_jit_failed`).
 pub(crate) fn restored() {
+    if crate::reload::live_trace() {
+        eprintln!("relax live: restore completed at t={:.0} ms (replacement {}, recovering {})", crate::clock::ms_since_start(), replacement_running(), recovering());
+    }
     if !replacement_running() { return; }
     let _kept = crate::zone_alloc::kept();
     let error = RESTART_ERROR.lock().unwrap_or_else(|e| e.into_inner());
@@ -223,6 +226,35 @@ pub(crate) fn replacement_jit_failed(why: &str) -> bool {
     true
 }
 
+/// The run's app check found `errors` (run_end::check_failed): the edit's outcome, a refusal with
+/// its diagnostics, as a refused patch's (never the restart's failure nor the JIT's error: a type
+/// error is the person's, and devhub reads `jiterror` as the JIT's). A restart this run replaces
+/// ends with it: the run that follows is no replacement, and no record says it restarted. From the
+/// check's thread, before the run's end: one write, which on a failure stays pending.
+pub(crate) fn check_refused(why: &str, errors: &[String]) {
+    let _kept = crate::zone_alloc::kept();
+    let lines = errors.to_vec();
+    let recovery = {
+        let mut s = state();
+        let r = s.recovery.take().or_else(|| s.restarted.take()).or_else(|| s.replaced.take());
+        s.restarted = None;
+        s.replaced = None;
+        r
+    };
+    ACTIVE.store(false, Ordering::Release);
+    REPLACEMENT.store(false, Ordering::Release);
+    if REPORTING.load(Ordering::Acquire) {
+        let (attempt, failure) = match recovery {
+            Some(r) => (r.attempt, r.failure),
+            None => (current(), String::new()),
+        };
+        let r = record(&attempt, Outcome::Refused, why.to_string(), failure, lines.clone());
+        state().pending.push_back(r);
+        flush();
+    }
+    crate::reload::patch_refused_event(why, true, &lines);
+}
+
 /// Whether this run is a restart's replacement (its restore read a recovery), restored or not.
 pub(crate) fn replacement() -> bool { replacement_running() || state().replaced.is_some() }
 
@@ -252,6 +284,9 @@ pub fn pump() {
         let load_id = r.load.clone();
         state().pending.push_back(r);
         durable();
+        if crate::reload::live_trace() {
+            eprintln!("relax live: the restart's record written at t={:.0} ms", crate::clock::ms_since_start());
+        }
         crate::inspect::events::emit("patchrestarted", &record_id,
             &format!("\"record\":{},\"load\":{}", crate::inspect::json_str(&record_id), crate::inspect::json_str(&load_id)));
     }
@@ -357,6 +392,9 @@ pub(crate) fn restore() {
             ACTIVE.store(true, Ordering::Release);
             REPLACEMENT.store(true, Ordering::Release);
             let _ = std::fs::remove_file(path);
+            if crate::reload::live_trace() {
+                eprintln!("relax live: recovery taken at t={:.0} ms", crate::clock::ms_since_start());
+            }
         }
         None => eprintln!("relax hot: cannot restore the pending recovery record"),
     }

@@ -5,7 +5,7 @@
 use relax_backend::{exec::Code, rir::*, x64};
 
 fn env() -> x64::Env {
-    x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false }
+    x64::Env::standalone(true)
 }
 
 fn block(f: &mut Func, insts: Vec<Inst>, term: Term) -> u32 {

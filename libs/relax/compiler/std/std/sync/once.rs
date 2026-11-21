@@ -427,18 +427,34 @@ impl<T, F: FnOnce() -> T> LazyLock<T, F> {
         if !this.once.is_completed() {
             let init = &this.init;
             let value = &this.value;
-            this.once.call(false, &mut |_p: &OnceState| {
-                let f = unsafe { (*init.get()).take() };
-                match f {
-                    Some(f) => unsafe { *value.get() = Some(f()) },
-                    None => panic!("LazyLock instance has previously been poisoned"),
+            this.once.call(true, &mut |state: &OnceState| {
+                if state.is_poisoned() {
+                    panic!("LazyLock instance has previously been poisoned");
                 }
+                let f = unsafe { (*init.get()).take().unwrap() };
+                unsafe { *value.get() = Some(f()) };
             });
         }
         match unsafe { (*this.value.get()).as_ref() } {
             Some(v) => v,
             None => panic!("LazyLock instance has previously been poisoned"),
         }
+    }
+
+    /// rustc 1.94.0 (lazy_get): initializes the lock if necessary and mutably borrows its value.
+    pub fn force_mut(this: &mut LazyLock<T, F>) -> &mut T {
+        let state = this.once.state_and_queued.get_mut();
+        let value = this.value.get_mut();
+        if *state != COMPLETE {
+            let Some(f) = this.init.get_mut().take() else {
+                panic!("LazyLock instance has previously been poisoned");
+            };
+            // An exclusive borrow rules out waiters. Leave the lock poisoned if f unwinds.
+            *state = POISONED;
+            *value = Some(f());
+            *state = COMPLETE;
+        }
+        value.as_mut().unwrap()
     }
 
     pub fn into_inner(this: LazyLock<T, F>) -> Result<T, F> {
@@ -463,6 +479,13 @@ impl<T, F: FnOnce() -> T> LazyLock<T, F> {
         } else {
             None
         }
+    }
+}
+
+impl<T, F> LazyLock<T, F> {
+    /// rustc 1.94.0 (lazy_get): mutably borrows the value if initialization succeeded.
+    pub fn get_mut(this: &mut LazyLock<T, F>) -> Option<&mut T> {
+        this.value.get_mut().as_mut()
     }
 }
 

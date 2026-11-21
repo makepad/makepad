@@ -66,7 +66,8 @@ std's run_main over that closure, which the edit leaves alone: it must not resta
 --cold: the same sessions with the disk cache off, for comparison.
 --window: the same program with a window (hidden), so a restart keeps the process and the window: the
 new value must show in the same pid.
-Prints a row per probe and exits 1 on any stale one.
+Prints a row per probe and exits 1 on any that failed, its last line
+`cache_warm_const_edit: ok` or `cache_warm_const_edit: <n> failed: <row id> ...`.
 """
 import json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time
 
@@ -563,7 +564,8 @@ def session(probe, rel, old, new, want):
             save(other, text)
 
 
-fails = 0
+# the ids of the rows that failed: the verdict line names them, and live_kinds.py reports them
+failed = []
 if not cold:
     p = once("fill", "fill")
     if p.returncode != 0:
@@ -649,15 +651,15 @@ def fewer_definitions():
 if not cold and (not only or "fewer_definitions" in only):
     why = fewer_definitions()
     print("%-23s %s" % ("fewer_definitions", why or "ok"))
-    fails += 1 if why else 0
+    failed += ["fewer_definitions"] if why else []
 if not cold and (not only or "skipped_offline" in only):
     why = skipped_offline()
     print("%-23s %s" % ("skipped_offline", why or "ok"))
-    fails += 1 if why else 0
+    failed += ["skipped_offline"] if why else []
 if not cold and (not only or "older_than_manifest" in only):
     why = older_than_manifest()
     print("%-23s %s" % ("older_than_manifest", why or "ok"))
-    fails += 1 if why else 0
+    failed += ["older_than_manifest"] if why else []
 for probe, rel, old, new, want in PROBES:
     if only and probe not in only:
         continue
@@ -678,11 +680,11 @@ for probe, rel, old, new, want in PROBES:
         if missing or misread:
             row["outcome"], ok = "GATE MISREAD", False
             row["patch"] = (misread[0] if misread else "no line like " + missing[0])[:160]
-    fails += 0 if ok else 1
+    failed += [] if ok else [probe]
     print("%-23s %-15s %6s ms value=%-4s want=%-2s relaunch=%-4s fresh=%-4s %s | %s" % (probe, row["outcome"], row.get("ms", "-"), row["value"], want, row.get("relaunch", "-"), row.get("fresh", "-"), row["trace"] + (" settle_ms=%d" % row["settle_ms"] if "settle_ms" in row else ""), row["patch"]), flush=True)
     if not ok and "-v" in args:
         for l in [l for l in err[:-12] if "restart the app" in l or "new layout" in l] + err[-12:]:
             print("    | " + l[:400])
 shutil.rmtree(tmp, ignore_errors=True)
-print("cache_warm_const_edit: %s" % ("ok" if not fails else "%d stale" % fails))
-sys.exit(1 if fails else 0)
+print("cache_warm_const_edit: %s" % ("ok" if not failed else "%d failed: %s" % (len(failed), " ".join(failed))))
+sys.exit(1 if failed else 0)

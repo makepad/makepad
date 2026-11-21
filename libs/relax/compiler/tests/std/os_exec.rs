@@ -23,6 +23,17 @@ fn a01_exec() {
     println!("| exec exit {}", (st >> 8) & 0xff);
     let e = Command::new("/nonexistent/prog").exec();
     println!("| missing {:?}", e.kind());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        // 0x137f is continued on macOS and stopped on Linux. Linux uses 0xffff for continued.
+        for raw in [0, 7 << 8, 15, 0x8b, 0x117f, 0x137f, 0xffff, 0x01_117f] {
+            let status = ExitStatus::from_raw(raw);
+            println!("| status {raw:#x} continued {} stopped {:?} signal {:?} code {:?}",
+                     status.continued(), status.stopped_signal(), status.signal(), status.code());
+        }
+    }
 }
 
 /// The exit code of `exec` run in a forked child; 100 + errno when the exec failed.

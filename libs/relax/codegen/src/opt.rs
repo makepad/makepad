@@ -1207,6 +1207,11 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
             f.sret_callees.push(*c);
         }
     }
+    for &note in &callee.notes {
+        if !f.notes.contains(&note) {
+            f.notes.push(note);
+        }
+    }
     for c in &callee.nocapture {
         if !f.nocapture.contains(c) {
             f.nocapture.push(c.clone());

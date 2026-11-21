@@ -39,6 +39,11 @@ impl str {
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// rustc 1.98.0 (substr_range): returns the byte range of a substring by address.
+    #[must_use]
+    pub fn substr_range(&self, substr: &str) -> Option<crate::range::Range<usize>> {
+        self.as_bytes().subslice_range(substr.as_bytes())
+    }
     pub const fn as_bytes(&self) -> &[u8] {
         unsafe { crate::intrinsics_mem::str_as_bytes(self) }
     }
@@ -84,6 +89,14 @@ impl str {
     pub unsafe fn slice_unchecked(&self, begin: usize, end: usize) -> &str {
         sub(self, begin, end)
     }
+    /// rustc 1.5.0 (str_slice_mut): takes a mutable subslice between byte offsets.
+    ///
+    /// # Safety
+    /// Both offsets must be character boundaries and satisfy `begin <= end <= self.len()`.
+    #[deprecated(since = "1.29.0", note = "use `get_unchecked_mut(begin..end)` instead")]
+    pub unsafe fn slice_mut_unchecked(&mut self, begin: usize, end: usize) -> &mut str {
+        unsafe { self.get_unchecked_mut(begin..end) }
+    }
     #[track_caller]
     pub const fn split_at(&self, mid: usize) -> (&str, &str) {
         split_at(self, mid)
@@ -116,6 +129,12 @@ impl str {
     }
     pub fn lines(&self) -> Lines<'_> {
         lines(self)
+    }
+    /// rustc 1.0.0 (rust1): iterates over lines ending in LF or CRLF.
+    #[deprecated(since = "1.4.0", note = "use lines() instead now", suggestion = "lines")]
+    #[allow(deprecated)]
+    pub fn lines_any(&self) -> LinesAny<'_> {
+        LinesAny(self.lines())
     }
     pub fn encode_utf16(&self) -> EncodeUtf16<'_> {
         encode_utf16(self)
@@ -245,6 +264,14 @@ impl str {
     }
     pub fn strip_prefix<'a, P: Pattern<'a>>(&'a self, prefix: P) -> Option<&'a str> {
         strip_prefix(self, prefix)
+    }
+    /// rustc 1.98.0 (strip_circumfix): removes a matching prefix followed by a matching suffix.
+    #[must_use = "this returns the remaining substring as a new slice, without modifying the original"]
+    pub fn strip_circumfix<'a, P: Pattern<'a>, S: Pattern<'a>>(&'a self, prefix: P, suffix: S) -> Option<&'a str>
+    where
+        S::Searcher: ReverseSearcher<'a>,
+    {
+        self.strip_prefix(prefix)?.strip_suffix(suffix)
     }
     pub fn strip_suffix<'a, P: Pattern<'a>>(&'a self, suffix: P) -> Option<&'a str>
     where

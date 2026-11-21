@@ -33,14 +33,16 @@
 //! child in this process's folder or in the mount. A shared workspace's run (vfs.rs SHARE) has a
 //! real folder, its checkout: a child in this process's folder runs there with no mount, as it does
 //! under cargo, and only a child started in a folder of the mount gets it, with the share's name.
+//! A child that gets no mount gets no path into it either (`outside_mount`): a folder mount's path
+//! is spelled as the disk file it is, and a std chosen in a store mount stays behind.
 //!
 //! A run of a package binary the run prepared (its test's CARGO_BIN_EXE_<name>, std's spawn asks
 //! `prepared_bin`) or of this program again is built by the run that prepared it, as cargo builds
 //! the binary once in the test's build: that child's host builds with this run's build environment
-//! (`BUILD`, handed over in `BUILD_ENV` whatever environment the program gave the child), and its
-//! program gets the environment it was given, in the process environment from its start on
-//! (`program_start`), so a C library's own `getenv` and a shell it starts read that one too (relax
-//! issue 168).
+//! (`BUILD`, handed over by the descriptor `BUILD_FD` names, else in `BUILD_ENV`, whatever
+//! environment the program gave the child), and its program gets the environment it was given, in
+//! the process environment from its start on (`program_start`), so a C library's own `getenv` and
+//! a shell it starts read that one too (relax issue 168).
 //!
 //! JIT-run code reaches the overlay through the loader's symbols (relax-compiler jit.rs
 //! `loader_symbol`): its `getenv` / `setenv` / `unsetenv` / `putenv` are `program_getenv` and the
@@ -84,6 +86,13 @@ pub const RUN_FACTS: [&[u8]; 8] = [b"RELAX_SELF_EXEC", b"RELAX_SELF_EXEC_SILENT_
 /// The build environment a run hands the runs of the programs it prepared (`BUILD`, `encode`d):
 /// their hosts build as it does. Never the program's: the child host takes it out at its start.
 pub const BUILD_ENV: &[u8] = b"RELAX_BUILD_ENV";
+/// Where a run hands that build environment by a descriptor instead (`spawn_env`, while
+/// relax-compiler selfexe.rs `hand_build` holds one): `<pid> <fd> <dev> <ino>`, the run's pid and
+/// the words its entry names the descriptor by. One variable holding the whole environment is a
+/// string Linux refuses an exec over at 128 KiB (MAX_ARG_STRLEN: E2BIG), which a gate's or a
+/// person's environment reaches; a descriptor has no size. The child's runner reads and closes it,
+/// and takes the name out, before anything reads its environment (selfexe.rs `spawned_build`).
+pub const BUILD_FD: &[u8] = b"RELAX_BUILD_FD";
 /// A confined build script's run (relax-front unitgraph.rs `run_one`, Policy::Sandboxed): the names
 /// its program is given, in the wire form (`encode`, names without values). The run's host takes
 /// it out at its start (`init`), and from then on the program reads those names and the reserved
@@ -98,7 +107,7 @@ pub const SCRIPT_ENV: &[u8] = b"RELAX_SCRIPT_ENV";
 /// program) wrote it into its build environment, and a relaunch of its program by a shell that
 /// cleared it hid the loader its start found from the program (the build's reserved names it was
 /// not started with), which then had none.
-const HANDOVER: [&[u8]; 7] = [PROGRAM_ENV, BUILD_ENV, SCRIPT_ENV, b"RELAX_ARG0", b"RELAX_BIN_NATIVE_RECEIPT", b"RELAX_NATIVE_RECEIPT", b"RELAX_LOADER"];
+const HANDOVER: [&[u8]; 8] = [PROGRAM_ENV, BUILD_ENV, BUILD_FD, SCRIPT_ENV, b"RELAX_ARG0", b"RELAX_BIN_NATIVE_RECEIPT", b"RELAX_NATIVE_RECEIPT", b"RELAX_LOADER"];
 
 /// The restart parent's (relax-compiler restart_parent.rs): its file, its pid and its run's
 /// lifeline, which a parent gives the run it starts, and that run alone. They are never part of a
@@ -109,8 +118,16 @@ const HANDOVER: [&[u8]; 7] = [PROGRAM_ENV, BUILD_ENV, SCRIPT_ENV, b"RELAX_ARG0",
 /// process that started a parent of its own took itself for the outer one's run).
 pub const RESTART: [&[u8]; 3] = [b"RELAX_RESTART_FILE", b"RELAX_RESTART_PARENT", b"RELAX_RESTART_LIFELINE"];
 
-fn restart_var(name: &[u8]) -> bool {
-    RESTART.iter().any(|n| same_name(n, name))
+/// `makepad test`'s word to the run of each of its targets that it sums their verdicts
+/// (makepad-remote hot.rs TEST_PACKAGE_ENV; relax-compiler harness.rs takes it out at the run's
+/// start): that run's alone, as the restart parent's names are. Carried into a build
+/// environment, a test that ran its own binary again started another target of the package,
+/// whose filter that ran no test exited NO_TESTS_EXIT instead of libtest's 0.
+pub const TEST_PACKAGE: &[u8] = b"RELAX_TEST_PACKAGE";
+
+/// A name one process gives the run it starts, and that run alone (`RESTART`, `TEST_PACKAGE`).
+fn one_run_var(name: &[u8]) -> bool {
+    RESTART.iter().any(|n| same_name(n, name)) || same_name(TEST_PACKAGE, name)
 }
 
 pub fn run_fact(name: &[u8]) -> bool {
@@ -223,10 +240,51 @@ fn set(env: &mut Env, name: &[u8], value: Option<&[u8]>) {
     }
 }
 
+/// One of the names a run's build environment is handed to a child's host by (`BUILD_ENV`,
+/// `BUILD_FD`): std's plumbing's alone, never the program's.
+fn handed_build(k: &[u8]) -> bool {
+    same_name(k, BUILD_ENV) || same_name(k, BUILD_FD)
+}
+
+/// Where a value of a child's environment lies, for a child that gets none of this process's mount
+/// (`outside_mount`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    /// no path in a mount (a disk path, or no path at all)
+    Disk,
+    /// a path in a folder mount (a shared workspace's, vfs.rs SHARE): the disk path it is
+    Folder(Vec<u8>),
+    /// a path in a store mount (a git run's, devhub's overlay): on no disk
+    Store,
+}
+
+/// The std a run took (relax-compiler std_source.rs), and the mark of an automatic choice.
+const STD: [&[u8]; 2] = [b"RELAX_STD", b"RELAX_STD_AUTO"];
+
+/// A child that starts without this process's mount (a real folder's, or any child of a shared
+/// workspace's run: `child_env`) cannot read a path in it, so its environment names none. A value
+/// in a folder mount is spelled as the disk path it is, as a host hands its own paths to other
+/// programs (vfs.rs `on_disk`). The std a run took in a store mount (RELAX_STD, a repository's own
+/// std, and its automatic mark) does not cross: the child takes its own, as a run given none does
+/// (std_source.rs `select`); before, a relax run that a shell in a real folder started refused
+/// that RELAX_STD as no folder. Any other value in a store mount has no spelling on disk and stays
+/// as the program gave it, as a path in its arguments does: a program that hands one on starts its
+/// child in the mount.
+pub fn outside_mount(env: &mut Env, place: impl Fn(&[u8]) -> Place) {
+    env.retain_mut(|(k, v)| match place(v) {
+        Place::Disk => true,
+        Place::Folder(disk) => {
+            *v = disk;
+            true
+        }
+        Place::Store => !STD.iter().any(|n| same_name(k, n)),
+    });
+}
+
 /// What the program reads: `real` (this process's environment) with its own values applied.
 pub fn program_view(real: &[(Vec<u8>, Vec<u8>)], own: &[(Vec<u8>, Option<Vec<u8>>)]) -> Env {
     let mut env: Env = real.iter().filter(|(k, _)| !same_name(k, PROGRAM_ENV)).cloned().collect();
-    for (k, v) in own.iter().filter(|(k, _)| !same_name(k, BUILD_ENV)) {
+    for (k, v) in own.iter().filter(|(k, _)| !handed_build(k)) {
         set(&mut env, k, v.as_deref());
     }
     env
@@ -243,15 +301,15 @@ pub fn program_view(real: &[(Vec<u8>, Vec<u8>)], own: &[(Vec<u8>, Option<Vec<u8>
 pub fn child_env(real: &[(Vec<u8>, Vec<u8>)], own: &[(Vec<u8>, Option<Vec<u8>>)], spawn: &Spawn) -> Env {
     let mut view = if spawn.clear { Env::new() } else { program_view(real, own) };
     // the build environment a child's host takes is std's plumbing's alone (`spawn_env`)
-    for (k, v) in spawn.edits.iter().filter(|(k, _)| !same_name(k, BUILD_ENV)) {
+    for (k, v) in spawn.edits.iter().filter(|(k, _)| !handed_build(k)) {
         set(&mut view, k, v.as_deref());
     }
     let wrote = |k: &[u8]| own.iter().any(|(o, _)| same_name(o, k)) || spawn.edits.iter().any(|(e, _)| same_name(e, k));
     let host_value = |k: &[u8]| real.iter().find(|(r, _)| same_name(r, k)).map(|(_, v)| v.clone());
-    // the restart parent's names: only what the program or the spawn set (`RESTART`)
-    view.retain(|(k, _)| !restart_var(k) || wrote(k));
+    // the restart parent's names and makepad test's: only what the program or the spawn set
+    view.retain(|(k, _)| !one_run_var(k) || wrote(k));
     let mut env = if spawn.self_exec {
-        let host: Env = real.iter().filter(|(k, _)| reserved(k) && !same_name(k, PROGRAM_ENV) && !restart_var(k)).cloned().collect();
+        let host: Env = real.iter().filter(|(k, _)| reserved(k) && !same_name(k, PROGRAM_ENV) && !one_run_var(k)).cloned().collect();
         let mut differ: Own = Vec::new();
         for (k, v) in &view {
             if reserved(k) && !host.iter().any(|(h, hv)| same_name(h, k) && hv == v) {
@@ -810,6 +868,7 @@ pub fn init_handed(beside: Option<Vec<u8>>) {
     // (what it hands on: without what `take_build` did not take)
     let _ = BUILD.set(build_part(&build));
     let _ = PROGRAM_START.set(program);
+    let _ = HIDDEN.set(hidden);
 }
 
 /// This run's build environment (`init`): the one it was handed, else its own as it started.
@@ -850,8 +909,43 @@ pub fn build_wire() -> Vec<u8> {
     let build: Own = BUILD.get().cloned().unwrap_or_else(|| build_part(&real())).into_iter().map(|(k, v)| (k, Some(v))).collect();
     encode(&build)
 }
+/// The words a spawn of this run's program hands its build environment by (`BUILD_FD`), while
+/// relax-compiler selfexe.rs holds that descriptor (`hand_build`); None: none is held, and a spawn
+/// hands the environment itself (`BUILD_ENV`).
+static BUILD_HANDLE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+pub fn set_build_handle(words: Option<String>) {
+    *BUILD_HANDLE.lock().unwrap_or_else(|e| e.into_inner()) = words.map(String::into_bytes);
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`): the ended run's
+/// descriptor is closed (selfexe.rs reset_statics), so no spawn names it.
+pub(crate) unsafe fn reset_statics() {
+    *BUILD_HANDLE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// The program's environment as this process was started, when its host builds with a handed one.
 static PROGRAM_START: std::sync::OnceLock<Env> = std::sync::OnceLock::new();
+/// The reserved names only the handed build environment set (`take_build`'s hidden ones): in the
+/// host's environment, never the program's.
+static HIDDEN: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+
+/// The environment a run that was handed a build environment gives the same run of itself started
+/// again as a new process (restart_parent.rs: behind a parent on macOS and Windows): the
+/// program's environment as this process started, its host's own settings, and the build
+/// environment it was handed (`BUILD_ENV`), so the new process takes them as this one did. None:
+/// none was handed, and this process's environment is the run's. (Its host's environment alone
+/// would make the build environment the program's, and the program would read what the build
+/// set: cargo's `[env]`, a build script's `rustc-env`.)
+pub fn restart_env() -> Option<Vec<(std::ffi::OsString, std::ffi::OsString)>> {
+    let program = PROGRAM_START.get()?;
+    let hidden = HIDDEN.get().map_or(&[][..], Vec::as_slice);
+    let os = |b: &[u8]| unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(b) }.to_os_string();
+    let mut env: Vec<_> = program.iter().map(|(k, v)| (os(k), os(v))).collect();
+    env.extend(real().iter().filter(|(k, _)| reserved(k) && !handed_build(k) && !hidden.iter().any(|h| same_name(h, k))).map(|(k, v)| (os(k), os(v))));
+    env.push((os(BUILD_ENV), os(&build_wire())));
+    Some(env)
+}
 
 /// `env` without what one process hands the next (`HANDOVER`), without the run facts and without
 /// the grants' names (options.rs GRANTS): a `makepad run` host takes a grant from its words alone,
@@ -859,7 +953,7 @@ static PROGRAM_START: std::sync::OnceLock<Env> = std::sync::OnceLock::new();
 /// hands it to.
 fn build_part(env: &[(Vec<u8>, Vec<u8>)]) -> Env {
     let grant = |k: &[u8]| crate::options::GRANTS.iter().any(|(_, name)| same_name(name.as_bytes(), k));
-    env.iter().filter(|(k, _)| !run_fact(k) && !grant(k) && !restart_var(k) && !HANDOVER.iter().any(|h| same_name(h, k))).cloned().collect()
+    env.iter().filter(|(k, _)| !run_fact(k) && !grant(k) && !one_run_var(k) && !HANDOVER.iter().any(|h| same_name(h, k))).cloned().collect()
 }
 
 /// A child run handed a build environment (`BUILD_ENV`): `start` is its environment as started,
@@ -875,7 +969,7 @@ pub fn take_build(start: &[(Vec<u8>, Vec<u8>)], build: &[(Vec<u8>, Vec<u8>)]) ->
     let build = build_part(build);
     let started = |k: &[u8]| start.iter().any(|(s, _)| same_name(s, k));
     let mut host: Env = build.iter().filter(|(k, _)| !reserved(k) || !started(k)).cloned().collect();
-    host.extend(start.iter().filter(|(k, _)| reserved(k) && !same_name(k, BUILD_ENV)).cloned());
+    host.extend(start.iter().filter(|(k, _)| reserved(k) && !handed_build(k)).cloned());
     let hidden = build.iter().filter(|(k, _)| reserved(k) && !started(k)).map(|(k, _)| k.clone()).collect();
     let program = start.iter().filter(|(k, _)| !reserved(k)).cloned().collect();
     (host, hidden, program)
@@ -933,10 +1027,26 @@ pub extern "C" fn spawn_env(edits: *const u8, edits_len: usize, host: *const u8,
     // a run of this program again (2) or of a package binary this run prepared (16): its host
     // builds as this run does
     if flags & (2 | 16) != 0 {
-        host.push((BUILD_ENV.to_vec(), build_wire()));
+        match BUILD_HANDLE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(at) => host.push((BUILD_FD.to_vec(), at)),
+            None => host.push((BUILD_ENV.to_vec(), build_wire())),
+        }
     }
     let spawn = Spawn { edits: &edits, clear: flags & 1 != 0, self_exec: flags & 2 != 0, dir, host: &host };
-    let env: Own = child_env(&real(), &own(), &spawn).into_iter().map(|(k, v)| (k, Some(v))).collect();
+    let mut env = child_env(&real(), &own(), &spawn);
+    if !env.iter().any(|(k, v)| same_name(k, VFS) && !v.is_empty()) {
+        outside_mount(&mut env, |v| {
+            let Ok(path) = std::str::from_utf8(v) else { return Place::Disk };
+            if !crate::vfs::is_virtual(path) {
+                Place::Disk
+            } else if crate::vfs::in_store(path) {
+                Place::Store
+            } else {
+                Place::Folder(crate::vfs::on_disk(path).into_owned().into_bytes())
+            }
+        });
+    }
+    let env: Own = env.into_iter().map(|(k, v)| (k, Some(v))).collect();
     SNAPSHOT.with(|b| {
         let mut b = b.borrow_mut();
         *b = encode(&env);
@@ -988,10 +1098,10 @@ mod tests {
             (b("RELAX_RESTART_FILE"), b("/f")), (b("RELAX_RESTART_PARENT"), b("7")), (b("RELAX_RESTART_LIFELINE"), b("3"))];
         assert_eq!(build_part(&parent), vec![(b("PATH"), b("/p")), (b("RELAX_STD"), b("/s"))], "a run's build environment: no run fact, handover or restart parent's name");
         // a build environment the program writes (in process or on the Command) reaches no child
-        let forged: Own = vec![(b("RELAX_BUILD_ENV"), Some(b("15:RELAX_ALLOW_C=1")))];
+        let forged: Own = vec![(b("RELAX_BUILD_ENV"), Some(b("15:RELAX_ALLOW_C=1"))), (b("RELAX_BUILD_FD"), Some(b("1 3 4 5")))];
         for self_exec in [false, true] {
             let child = child_env(&[], &forged, &Spawn { edits: &forged, clear: false, self_exec, dir: ChildDir::Same, host: &[] });
-            assert!(!child.iter().any(|(k, v)| same_name(k, BUILD_ENV) || v.windows(13).any(|w| w == b"RELAX_ALLOW_C")), "a program's RELAX_BUILD_ENV crossed to a child (self-exec {self_exec}): {child:?}");
+            assert!(!child.iter().any(|(k, v)| handed_build(k) || v.windows(13).any(|w| w == b"RELAX_ALLOW_C")), "a program's RELAX_BUILD_ENV or RELAX_BUILD_FD crossed to a child (self-exec {self_exec}): {child:?}");
         }
     }
 
@@ -1062,14 +1172,14 @@ mod tests {
         let again = child_env(&granted, &own, &Spawn { edits: &[], clear: false, self_exec: true, dir: ChildDir::Same, host: &[] });
         assert_eq!(get(&again, "RELAX_ALLOW_C"), Some(&b"1"[..]), "a self-exec child, this run again, keeps --allow-c");
 
-        // a run its restart parent started: no child takes the parent's names from this process
-        // (a self-exec child that did took itself for another run of that parent), a spawn that
-        // sets them gives them
+        // a run its restart parent (and makepad test) started: no child takes the parent's names
+        // from this process (a self-exec child that did took itself for another run of that
+        // parent, or another target of the package), a spawn that sets them gives them
         let mut ran_by: Env = real.clone();
-        ran_by.extend([(b("RELAX_RESTART_FILE"), b("/f")), (b("RELAX_RESTART_PARENT"), b("7")), (b("RELAX_RESTART_LIFELINE"), b("3"))]);
+        ran_by.extend([(b("RELAX_RESTART_FILE"), b("/f")), (b("RELAX_RESTART_PARENT"), b("7")), (b("RELAX_RESTART_LIFELINE"), b("3")), (b("RELAX_TEST_PACKAGE"), b("1"))]);
         let restart_names = |env: &Env| -> Own {
-            let mut all: Own = env.iter().filter(|(k, _)| restart_var(k)).map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
-            all.extend(program_env(env).into_iter().filter(|(k, _)| restart_var(k)));
+            let mut all: Own = env.iter().filter(|(k, _)| one_run_var(k)).map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
+            all.extend(program_env(env).into_iter().filter(|(k, _)| one_run_var(k)));
             all
         };
         let started = vec![(b("RELAX_RESTART_FILE"), Some(b("/mine")))];
@@ -1165,6 +1275,24 @@ mod tests {
             buf.truncate(got);
             Some(buf)
         }
+    }
+
+    /// A child that gets no mount (`outside_mount`): every path its environment names is one it can
+    /// read, each assert naming its property.
+    #[test]
+    fn a_child_without_the_mount_gets_no_path_into_it() {
+        let mut env: Env = vec![(b("RELAX_STD"), b("/m/repo/std")), (b("RELAX_STD_AUTO"), b("/m/repo/std")), (b("CARGO_MANIFEST_DIR"), b("/m/share/pkg")),
+            (b("SRC"), b("/m/repo/pkg")), (b("HOME"), b("/h")), (b("LANG"), b("C"))];
+        outside_mount(&mut env, |v| match v {
+            _ if v.starts_with(b"/m/repo") => Place::Store,
+            _ if v.starts_with(b"/m/share") => Place::Folder([&b"/disk/checkout"[..], &v[b"/m/share".len()..]].concat()),
+            _ => Place::Disk,
+        });
+        assert_eq!((get(&env, "RELAX_STD"), get(&env, "RELAX_STD_AUTO")), (None, None), "a std a run took in a store mount stays behind: the child takes its own");
+        assert_eq!(get(&env, "CARGO_MANIFEST_DIR"), Some(&b"/disk/checkout/pkg"[..]), "a folder mount's path is spelled as the disk path it is");
+        assert_eq!(get(&env, "SRC"), Some(&b"/m/repo/pkg"[..]), "a program's value in a store mount has no disk spelling: it stays as given");
+        assert_eq!((get(&env, "HOME"), get(&env, "LANG")), (Some(&b"/h"[..]), Some(&b"C"[..])), "what names no mount is untouched");
+        assert_eq!(env.len(), 4, "only the std's names left: {env:?}");
     }
 
     /// A program's writes of reserved names, read back the three ways a program reads: std's

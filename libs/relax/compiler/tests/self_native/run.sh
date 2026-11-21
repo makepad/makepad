@@ -2,8 +2,9 @@
 # usage: run.sh <makepad binary>: `makepad run --allow-c sn-app` and `makepad test --allow-c
 # sn-app`, whose program (and unit-test harness) makes the C compiler unusable once it runs and
 # starts its own executable with a cleared environment: the child takes the native build its
-# parent made, as cargo's child is the built binary, and needs no compiler (relax issue 177). One
-# line per case; the last is "self_native: ok" or "self_native: FAILED" (exit 1).
+# parent made, as cargo's child is the built binary, and needs no compiler (relax issue 177). And
+# the lockfile a run's own native build makes is no edit to the live watcher. One line per case;
+# the last is "self_native: ok" or "self_native: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 [ -n "$T" ] && [ -d "$T" ] || exit 2
@@ -20,6 +21,16 @@ FAILS=0
 case_is() { # name ok?
     if [ "$2" = 1 ]; then echo "self_native: $1: ok"; else echo "self_native: $1: FAILED"; FAILS=$((FAILS + 1)); fi
 }
+# A tree without its lockfile (it is not tracked): the run's own cargo makes it as it builds the
+# native package, which is no edit: the live watcher says nothing of it. The program stays until
+# the watcher has looked (SN_LIVE_READY). First, while $T holds no native build yet.
+rm -f "$H/Cargo.lock"
+OUT=$(cd "$H" && RELAX_LIVE_READY=$T/ready SN_LIVE_READY=$T/ready "$1" run --quiet --allow-c sn-app 2>&1)
+rc=$?
+ok=0
+[ $rc = 0 ] && [ -f "$H/Cargo.lock" ] && echo "$OUT" | grep -qx "ok" && ! echo "$OUT" | grep -qF "manifest(s) changed" && ok=1
+[ $ok = 1 ] || echo "$OUT" | tail -6
+case_is "a run's own lockfile is no edit" $ok
 rm -f "$T/gone" "$T/refused"
 OUT=$(cd "$H" && "$1" run --quiet --allow-c sn-app 2>&1)
 rc=$?

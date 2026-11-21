@@ -45,6 +45,9 @@ enum Update {
     /// a build that failed before the app started compiles again (retry)
     Begin,
     Failure(String),
+    /// a run ended in place on its app check's errors (`next_run`): the next waits for a save or
+    /// the Restart, whatever the window (a live session never ends for a compile error)
+    CheckFailed(String),
     Message(String),
     /// The program turned out to draw nothing: its load screen closes, the run goes on.
     Batch,
@@ -487,17 +490,19 @@ static COMPILE_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(N
 
 /// A run's compile thread: it boots and, for an app without the HAL, runs its main.
 fn start_compile_thread() {
+    // the run it compiles, read before a restart can take that run
+    let run = relax_compiler::run_end::run_gen();
     // the handle (thread record, result packet) is joined at the end of the run, after the settle swap
     // may have destroyed the compiler generation this frame runs in: it lives in the kept heap
     let thread = relax_compiler::zone_alloc::kept_with(|| std::thread::Builder::new()
         .name("run-compile".into())
         .stack_size(8 << 20)
-        .spawn(|| {
+        .spawn(move || {
             // this thread boots and, for an app without the HAL, runs its main (what the loader's
             // main thread did): a compiler phase, not a swap-quiesced compiler worker
             let _compiler = relax_compiler::zone_alloc::compiler();
             let mut compile = COMPILE.lock().unwrap_or_else(|e| e.into_inner()).take().expect("the run's compile");
-            compile_runs(&mut compile);
+            compile_runs(&mut compile, run);
             *COMPILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(compile);
         })
         .expect("the compiler thread"));
@@ -527,12 +532,19 @@ pub fn next_run() -> bool {
         let _ = thread.join();
     }
     NEXT_RUN.store(false, Ordering::Release);
-    {
+    // the run before failed its app check: this one waits for the next save or the Restart (taken
+    // under the run's lock: `held` sees the failure or the wait, never neither)
+    let check_failed = {
         let mut guard = state();
+        let check_failed = relax_compiler::run_end::take_check_failure();
         let Some(run) = guard.as_mut() else { return false };
         run.spec = None;
-        run.initial_failed = false;
+        run.initial_failed = check_failed.is_some();
         run.retry = false;
+        check_failed
+    };
+    if check_failed.is_some() {
+        relax_compiler::reload::inputs_wake();
     }
     EXIT.store(0, Ordering::Release);
     PANICS_CHANGED.store(false, Ordering::Release);
@@ -540,9 +552,25 @@ pub fn next_run() -> bool {
     QUIT.store(false, Ordering::Release);
     UPDATES.lock().unwrap_or_else(|e| e.into_inner()).clear();
     post(Update::NextRun { start_screen });
-    post(Update::Begin);
+    HELD.store(check_failed.is_some(), Ordering::Release);
+    match check_failed {
+        Some(why) => post(Update::CheckFailed(format!("The app did not compile: {why}. A save or Restart starts it again"))),
+        None => post(Update::Begin),
+    }
     start_compile_thread();
     true
+}
+
+/// The run before failed its app check (`next_run`): the compile thread waits for the next save or
+/// the window's Restart before it compiles, as a failed build's does (`wait_for_retry`).
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// The host has no run and waits for a fix (`MainHost::held`): its build failed before the app
+/// started, or the run before failed its app check (from that run's end on). The next save,
+/// the window's Restart or `session relaunch` starts the next run.
+pub fn held() -> bool {
+    let guard = state();
+    guard.as_ref().is_some_and(|r| r.initial_failed) || relax_compiler::run_end::check_failing()
 }
 
 /// A run ended in place, and its compile thread is to return rather than wait for a retry
@@ -559,7 +587,14 @@ fn end_retry_wait() {
     RETRY.notify_all();
 }
 
-fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
+/// `run`: the run this thread compiles (`run_end::run_gen`).
+fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>, run: u64) {
+    if HELD.swap(false, Ordering::AcqRel) {
+        if !wait_for_retry(state()) {
+            return;
+        }
+        post(Update::Begin);
+    }
     loop {
         relax_compiler::lifeline::clear_panic_at();
         // a panic in the compiler (exit 101): its message and position go on the load
@@ -568,8 +603,8 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             Ok(code) => (code, None),
             Err(p) => (101, Some(relax_compiler::lifeline::panic_line(&*p))),
         };
-        // (a restart ended the run under it: `next_run` starts the next one)
-        if relax_compiler::run_end::restarting() {
+        // (a restart took the run under it, or takes it now: `next_run` starts the next one)
+        if relax_compiler::run_end::ended_in_place(run) || relax_compiler::run_end::restarting() {
             return;
         }
         // (a compiler panic's line: the hook keeps a build's panics quiet, they become its compile
@@ -591,13 +626,17 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
         EXIT.store(code, Ordering::Release);
         // an app's start that could not get its source shows why and waits for the Restart
         let source = relax_compiler::run::source_failure();
-        if run.window.is_none() || !(relax_compiler::run::live_session() || source.is_some()) || unseen() {
+        if run.window.is_none() || !(relax_compiler::run::live_session() || source.is_some()) || (unseen() && !relax_compiler::run::edits_pushed()) {
             // No native window backend: there is no run UI to retry from. A run that is
             // no live session takes no edit that could fix the build: it ends with the
             // code (a test's child under CARGO_BIN_EXE_* is waited for by its parent).
             // A hidden window (MAKEPAD_HIDE_WINDOWS) shows the failure to nobody and nobody
             // retries from it: the run ends with the code instead of waiting for a retry
             // forever (a hidden Sandbox boot whose provided crates differed sat idle 4.6 h).
+            // A hidden live session whose edits a client pushes (`edits_pushed`) waits as a
+            // window's does: that client sends the fix and asks for the next run, as for a run
+            // that failed its app check (a hidden session started on a tree that did not load
+            // ended at its start, 11-21).
             end_run(&format!("the program's run ended with {code}{cause} and no window can retry it"));
             Hal::global().wake_session(HOST);
             if PUMP.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
@@ -611,6 +650,7 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             // a compiler failure nor a retry of compilation against the stale loader.
             let update_ready = code == 0 && panicked.is_none() && relax_compiler::reload::host::update_message().is_some();
             run.initial_failed = !update_ready && run.spec.is_none();
+            let held = run.initial_failed;
             if !update_ready {
                 post(Update::Failure(match (&panicked, source) {
                     (Some(line), _) => format!("Compilation failed: the compiler panicked: {line}"),
@@ -620,6 +660,12 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
             }
             if run.spec.is_some() {
                 return;
+            }
+            if held {
+                // (outside the run's lock: an `inputs` request asks `held` under the watcher's)
+                drop(guard);
+                relax_compiler::reload::inputs_wake();
+                guard = state();
             }
             if !wait_for_retry(guard) {
                 return;
@@ -1028,8 +1074,9 @@ const RESTART_SCREEN: &str = "RELAX_RESTART_SCREEN";
 /// content fades to the start screen in the same window; this returns when it covers the app. A
 /// window that cannot show it (none yet, a panel over it, its loop gone) never holds up the restart.
 pub fn restart_begins() {
-    // (an edit's restart keeps the app's last frame on the window until the new one replaces it)
-    if !relax_compiler::reload::relaunch_asked() || state().is_none() {
+    // (an edit's restart keeps the app's last frame on the window until the new one replaces it;
+    // a run that failed its app check leaves none up looking alive)
+    if !(relax_compiler::reload::relaunch_asked() || relax_compiler::run_end::check_failing()) || state().is_none() {
         return;
     }
     *LEFT.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
@@ -1530,7 +1577,7 @@ fn pump(
                     overlay_dismissed = false;
                     active = true;
                 }
-                Update::Failure(message) if !has_window || unseen => {
+                Update::Failure(message) if !has_window || (unseen && !relax_compiler::run::edits_pushed()) => {
                     if relax_compiler::hot_failure::recovering() {
                         relax_compiler::hot_failure::restart_failed(&message);
                         continue;
@@ -1545,10 +1592,24 @@ fn pump(
                     end_run("its failure (above) has no window to show it");
                 }
                 Update::Failure(message) => {
+                    // a hidden live session whose edits a client pushes holds here as a window does,
+                    // for that client's fix and its `session relaunch`; the client reads the log
+                    if unseen {
+                        eprintln!("makepad: {message}");
+                    }
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
                     diagnostics_dirty = true;
                     failed = true;
                     active = false;
+                    data.domain = "Boot failed".into();
+                }
+                // the errors themselves came as the check's diagnostics; no previous code runs
+                Update::CheckFailed(message) => {
+                    diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
+                    diagnostics_dirty = true;
+                    failed = true;
+                    active = false;
+                    patch_notice = None;
                     data.domain = "Boot failed".into();
                 }
                 Update::Relaunched => ring_clicked = false,

@@ -5,6 +5,10 @@
 /// Float operations that become single instructions.
 pub mod intrinsics {
     pub use super::intrinsics_mem::{copy, copy_nonoverlapping};
+    /// rustc 1.0.0 (rust1): reinterprets a value as another type of the same size.
+    pub use crate::mem::transmute;
+    /// rustc 1.0.0 (rust1): fills `count` elements of memory with a repeated byte.
+    pub use crate::ptr::write_bytes;
     extern "relax-intrinsic" {
         pub fn sqrt_f64(x: f64) -> f64;
         pub fn sqrt_f32(x: f32) -> f32;
@@ -34,6 +38,13 @@ pub mod intrinsics {
         pub fn fma_f32(a: f32, b: f32, c: f32) -> f32;
         /// true when this target (arm64; x86-64 with FMA3) fuses in hardware: a constant per run
         pub fn fma_native() -> bool;
+    }
+    unsafe extern "relax-intrinsic" {
+        /// rustc's `intrinsics::overflow_checks`: whether the program's profile has overflow checks,
+        /// so code inheriting them (rustc's `#[rustc_inherit_overflow_checks]`) panics on overflow
+        /// as the program's own arithmetic does. One value for the whole program: std is compiled
+        /// for it (a constant in its code); true in constant evaluation, as rustc's.
+        pub safe fn overflow_checks() -> bool;
     }
     pub use super::intrinsics_simd as simd;
     /// rustc's `intrinsics::assume` (UB when false): hint::assert_unchecked
@@ -224,9 +235,6 @@ pub mod intrinsics_mem {
         /// reinterpret the bits; Relax checks size equality and R14 (repr(C)/scalars only)
         #[rustc_const_stable(feature = "const_transmute", since = "1.56.0")]
         pub fn transmute<T, U>(v: T) -> U;
-        /// enum discriminant as i64 (0 for non-enums)
-        #[rustc_intrinsic_const_stable_indirect]
-        pub fn discriminant_value<T>(v: &T) -> i64;
         /// stable 128-bit hash of the type (after monomorphisation): low and high halves
         // (rustc's type_id intrinsic is a const fn, const-unstable)
         #[rustc_const_unstable(feature = "core_intrinsics", issue = "none")]
@@ -243,6 +251,14 @@ pub mod intrinsics_mem {
         pub fn slice_len<T>(s: &[T]) -> usize;
         #[rustc_intrinsic_const_stable_indirect]
         pub fn str_as_bytes(s: &str) -> &[u8];
+    }
+    // safe, as rustc's (core::intrinsics::discriminant_value): it reads the discriminant through
+    // a reference, so the built-in derives' reads of it (PartialEq, PartialOrd, Ord, Hash on an
+    // enum) need no `unsafe` and load in a sandboxed module like any of its safe code
+    unsafe extern "relax-intrinsic" {
+        /// enum discriminant as i64 (0 for non-enums)
+        #[rustc_intrinsic_const_stable_indirect]
+        pub safe fn discriminant_value<T>(v: &T) -> i64;
     }
 }
 

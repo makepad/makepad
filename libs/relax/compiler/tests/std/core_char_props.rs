@@ -159,14 +159,15 @@ fn a01_all_code_points() {
         escapes.chars(c.escape_unicode());
         escapes.add(&c.escape_unicode().len());
         escapes.formatted(format_args!("{:?}", c));
-        let mut utf8 = [0u8; 4];
+        let mut utf8 = [0u8; char::MAX_LEN_UTF8];
         encoding.add(c.encode_utf8(&mut utf8).as_bytes());
-        let mut utf16 = [0u16; 2];
+        let mut utf16 = [0u16; char::MAX_LEN_UTF16];
         encoding.add(c.encode_utf16(&mut utf16));
         n += 1;
     }
     assert_eq!(n, 0x110000 - 0x800);
     println!("| char scalar count {n}");
+    println!("| char max encoding lengths {} {}", char::MAX_LEN_UTF8, char::MAX_LEN_UTF16);
     properties.line("char properties");
     case.line("char case");
     escapes.line("char escapes");

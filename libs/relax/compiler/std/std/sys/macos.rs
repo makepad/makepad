@@ -170,6 +170,8 @@ extern "C" {
     pub fn fstat(fd: c_int, buf: *mut stat_t) -> c_int;
     pub fn readdir(dir: *mut c_void) -> *mut dirent_t;
     fn pthread_setname_np(name: *const c_char) -> c_int;
+    fn pthread_getname_np(thread: usize, name: *mut c_char, len: usize) -> c_int;
+    fn pthread_self() -> usize;
     fn _NSGetEnviron() -> *mut *const *const c_char;
     fn _NSGetExecutablePath(buf: *mut c_char, size: *mut u32) -> c_int;
     fn pthread_threadid_np(thread: usize, id: *mut u64) -> c_int;
@@ -220,6 +222,12 @@ pub fn set_thread_name(name: *const c_char) {
     unsafe {
         pthread_setname_np(name);
     }
+}
+
+/// The calling thread's name at the OS into `buf`: its length (0: none).
+pub fn thread_os_name(buf: &mut [u8; 64]) -> usize {
+    unsafe { pthread_getname_np(pthread_self(), buf.as_mut_ptr() as *mut c_char, buf.len()) };
+    buf.iter().position(|&c| c == 0).unwrap_or(0)
 }
 
 pub fn fill_random(buf: &mut [u8]) {

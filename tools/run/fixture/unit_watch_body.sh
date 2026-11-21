@@ -1,6 +1,8 @@
 # unit_watch_body.sh, sourced by unit_watch.sh <session> <out>: land_gate.sh's watch beside one unit's run (its
 # `watched`), until it is stopped
-# (TERM). The unit hangs, and the watch keeps its JIT stacks in <out>.hung and stops its processes, when:
+# (TERM), or until its session has no process left: the unit ended, said in <out>.ended, and the watch ends with it,
+# so its gate takes that end however its wait saw it (a gate whose wait never returned for a unit that had ended
+# waited on its watch, which read the empty session as a build going on, and its shard sat 10 min, L1483898, 11-21). The unit hangs, and the watch keeps its JIT stacks in <out>.hung and stops its processes, when:
 # - a process of its session parks (a panic, a compile error, a stale access or a failed update waiting at its
 #   call: their `makepad: ... parked` line in the unit's output <out> or in a JIT's session log under $TMPDIR).
 #   A unit runs unattended, so nobody resumes it; it fails HUNG at the next look with the park's text. An app a
@@ -31,6 +33,12 @@
 #   one thread at 94% in libnvidia-eglcore, until it was cancelled by hand (11-12). Asked once a minute past the
 #   quiet; a process the JIT does not answer for, main at work, or a busy thread with a frame of its own code is
 #   work.
+# - or its JIT holds it: no new test result, no I/O and no process gone for its quiet while its tests run, and a
+#   process of it answers the JIT's why-hung with main blocked on its JIT's own wait (the owner's request, or a
+#   build in flight) for its quiet too (jit_blocked): a deadlock the JIT itself reports, whatever its threads'
+#   CPU. Its line names the build waited on and its recorded holder. A full run's `ui_semantics` (measured
+#   30 s) sat 48 min, main waiting on the owner and the owner on a build it held itself, the owner spinning
+#   at a core, so read as work (11-19). Asked with driver_spin, once a minute past the quiet.
 # A unit that spins in its own code runs on here: by its stacks a spin there is no different from work (six
 # threads in `while !go` and a test thread spinning in a budget callback would have held one for ever, 11-09).
 # Such a unit is said, never stopped: once its tests run BUSY_S s with no new test result (its busy measure,
@@ -50,7 +58,8 @@
 # channel (a driver's own threads too, where a JIT's walk stops), the box's WMs' uptimes (a display reset under
 # the unit) and the GPU's (nvidia-smi: said if it has not answered, never waited on past the capture).
 # The most it held at once, in MB in <out>.peak (the tests run's GATEPEAK), and its five largest processes then in
-# <out>.peak.by (peak_look).
+# <out>.peak.by (peak_look). At each look, `<s into the unit> <KB its processes hold> <test results so far>` into
+# <out>.rss: the timeline its tests' times are read against (land_gate.sh test_times).
 # B: the JIT command for the captures (`makepad`); HUNG_QUIET, HUNG_LOOK (s between looks), IDLE_PCT; BUSY_S,
 # BUSY_UNIT (its GATEBUSY name); MEASURE_S. What sources this gives it its clock and /proc: `now`, `proc`, `nap`,
 # wait_s <s>, read_gpu <file> and wall (the epoch s).
@@ -245,6 +254,38 @@ driver_spin() {
   done
   echo "$said"
 }
+# jit_blocked: the first process of the unit whose JIT's why-hung says main is blocked on its JIT's own wait (main
+# waits on the owner's request or on a build in flight) for $quiet s or more, as `pid 7: main blocked on its JIT for
+# 608.8 s, on build #292211 core::mem::drop, whose recorded holder is run-owner (T37)` (the build and its holder when
+# the JIT's chain names one); else empty (no answer, main at work, or blocked on its own program's waits)
+jit_blocked() {
+  local p a d
+  for p in "${ua_pids[@]}"; do
+    a=$($B inspect "$p" why-hung as=json 2>/dev/null | head -c 200000)
+    d=$(awk -v min="$quiet" '
+      /^\{"verdict":/ {
+        if (!match($0, /"verdict":"[^"]*"/) || substr($0, RSTART + 11, RLENGTH - 12) != "blocked") exit
+        if (!match($0, /"why":"([^"\\]|\\.)*"/)) exit
+        w = substr($0, RSTART + 7, RLENGTH - 8)
+        if (substr(w, 1, 17) != "main is blocked: ") exit
+        first = substr(w, 18); i = index(first, " -> "); if (i) first = substr(first, 1, i - 1)
+        if (!index(first, "waits: owner (") && !index(first, "waits: build #")) exit
+        if (!match(first, / for [0-9.]+ s/)) exit
+        s = substr(first, RSTART + 5, RLENGTH - 7)
+        if (s + 0 < min) exit
+        b = ""; i = index(w, "waits: build #")
+        if (i) {
+          r = substr(w, i + 7); j = index(r, " held by ")
+          if (j) { name = substr(r, 1, j - 1); r = substr(r, j + 9); k = index(r, " for "); if (k) b = ", on " name ", whose recorded holder is " substr(r, 1, k - 1) }
+        }
+        print "main blocked on its JIT for " s " s" b
+        exit
+      }' <<< "$a")
+    [ -z "$d" ] || { echo "pid $p: $d"; return 0; }
+  done
+}
+# look_line: this look into <out>.rss (no fork)
+look_line() { printf '%s %s %s\n' "$now" "$ua_rss" "$out_results" >> "$out.rss"; }
 # say <line>: live, on fd 4 (land_gate.sh's at_once: the shard's log); none there, nowhere
 say() { { printf '%s\n' "$1" >&4; } 2> /dev/null || :; }
 # busy_said: its stall was said (GATEBUSY); moved: when its tests last moved (a build, a new result); r1: its results then
@@ -254,15 +295,19 @@ peak=0
 trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; stop; exit 0' TERM
 since=$now rsince=$now spin_at=0
 unit_activity; c0=$ua_cpu; i0=$ua_io; peak_look
-out_state; r0=$out_results
+out_state; r0=$out_results; look_line
 why=""
 while :; do
   wait_s "$HUNG_LOOK"
   unit_activity; over=$(( (now - since) * 1000000 ))
   peak_look
+  # (its session's leader is the unit's own process, setsid in place: it leads it while it lives)
+  if [ "${#ua_pids[@]}" = 0 ] && [ ! -e "$proc/$session" ]; then
+    echo "its session has no process left, $now s into the unit: the unit ended" > "$out.ended"; stop; exit 0
+  fi
   parked=$(parked_line)
   if [ -n "$parked" ]; then why="a process of it parked, which nobody resumes in a gate: $parked"; break; fi
-  out_state
+  out_state; look_line
   # its tests moved (a build, a new result), or they ran BUSY_S s since with no new result: a stall, said once
   if [ "$out_in" != 1 ] || [ "$out_results" -gt "$r1" ]; then
     [ -z "$busy_said" ] || say "GATEBUSY $BUSY_UNIT :: 0"
@@ -286,6 +331,8 @@ while :; do
     if [ $((now - rsince)) -ge "$quiet" ] && [ "$now" -ge "$spin_at" ]; then
       spin_at=$((now + 60)); spin=$(driver_spin)
       if [ -n "$spin" ]; then why="its processes did no work of their own (no test result, no I/O; their CPU a spin outside their code: $spin) for $((now - rsince)) s while its tests ran, $now s into the unit$past"; break; fi
+      held=$(jit_blocked)
+      if [ -n "$held" ]; then why="its JIT held it (no test result, no I/O; $held) for $((now - rsince)) s while its tests ran, $now s into the unit$past"; break; fi
     fi
     continue
   fi

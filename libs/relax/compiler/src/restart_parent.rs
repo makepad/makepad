@@ -17,7 +17,7 @@
 //! only the parent holds open (the lifeline). Linux keeps its exec in place ([`replace`]): its window
 //! manager's connection crosses the exec (hal_run.rs prepare_exec), which a new process could not
 //! inherit. The parent's code builds on Linux too, where its tests run it.
-#[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
+#[cfg(any(windows, unix))]
 use std::ffi::{OsStr, OsString};
 
 /// The exit code with which a run asks its parent to start the next one.
@@ -84,20 +84,15 @@ impl Next {
         // SAFETY: args_bytes gives the encoded bytes of OsStrings
         let words = args[1..].iter().map(|a| unsafe { OsStr::from_encoded_bytes_unchecked(a) }.to_os_string()).collect();
         let dir = std::env::current_dir().map(std::path::PathBuf::into_os_string).unwrap_or_default();
-        Ok(Next { program: exe.into_os_string(), args: words, dir, envs: std::env::vars_os().collect() })
+        // a run that was handed a build environment hands it on, with the program's own
+        let envs = crate::progenv::restart_env().unwrap_or_else(|| std::env::vars_os().collect());
+        Ok(Next { program: exe.into_os_string(), args: words, dir, envs })
     }
 
     /// This process's directory and environment with `cmd`'s changes (its folder, when it names one).
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     fn of(cmd: &std::process::Command) -> std::io::Result<Next> {
-        let same = |a: &OsStr, b: &OsStr| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b };
-        let mut envs: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-        for (k, v) in cmd.get_envs() {
-            envs.retain(|(e, _)| !same(e, k));
-            if let Some(v) = v {
-                envs.push((k.to_os_string(), v.to_os_string()));
-            }
-        }
+        let envs = next_env(cmd);
         Ok(Next {
             program: cmd.get_program().to_os_string(),
             args: cmd.get_args().map(OsStr::to_os_string).collect(),
@@ -166,6 +161,21 @@ impl Next {
     }
 }
 
+/// The next run's environment: this run's (as it was handed, `progenv::restart_env`, when it was
+/// handed a build environment) with `cmd`'s changes.
+#[cfg(any(windows, unix))]
+fn next_env(cmd: &std::process::Command) -> Vec<(OsString, OsString)> {
+    let same = |a: &OsStr, b: &OsStr| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b };
+    let mut envs: Vec<(OsString, OsString)> = crate::progenv::restart_env().unwrap_or_else(|| std::env::vars_os().collect());
+    for (k, v) in cmd.get_envs() {
+        envs.retain(|(e, _)| !same(e, k));
+        if let Some(v) = v {
+            envs.push((k.to_os_string(), v.to_os_string()));
+        }
+    }
+    envs
+}
+
 /// This process ends and `cmd` runs as the next run: through this run's parent where it has one
 /// (Windows, macOS: [`request`]), else by an exec in place (Linux, whose window manager's connection
 /// crosses the exec and whose runs get no parent; a macOS run that cannot restart, which has none).
@@ -179,7 +189,14 @@ pub(crate) fn replace(cmd: &mut std::process::Command) -> String {
         return request(cmd);
     }
     #[cfg(unix)]
-    return std::os::unix::process::CommandExt::exec(cmd).to_string();
+    {
+        // (a run that was handed a build environment hands it on in place too)
+        if crate::progenv::restart_env().is_some() {
+            let envs = next_env(cmd);
+            cmd.env_clear().envs(envs);
+        }
+        return std::os::unix::process::CommandExt::exec(cmd).to_string();
+    }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = cmd;

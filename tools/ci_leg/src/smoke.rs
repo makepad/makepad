@@ -566,14 +566,12 @@ impl Runtime {
         let gpu_reply = startup_gpu(socket, remote_up + STARTUP);
         let mut gpu_seen = false;
         let mut slow_said = false;
-        let first_frame_line = format!("relax: {} first frame at ", target.package);
         loop {
             if !self.alive(index)? {
                 return Err(format!("app died before its first frame\n{}", tail(&self.apps[index].child.text, 30)));
             }
             let report = std::fs::read_to_string(&self.apps[index].report).unwrap_or_default();
-            let presented = report.lines().any(|line| line.trim() == "present")
-                || self.apps[index].child.text.lines().any(|line| line.starts_with(&first_frame_line));
+            let presented = first_presented(&report, &self.apps[index].child.text, &target.package);
             if !presented && Instant::now() >= first_frame_deadline {
                 self.apps[index].remote.as_ref().unwrap().client.set_timeout(Some(Duration::from_secs(10)));
                 let said = self.request(index, &argv(&["jit", "ms=5000"]), false).unwrap_or_else(|e| e);
@@ -585,6 +583,13 @@ impl Runtime {
                     }
                     first_frame_deadline = Instant::now();
                     gpu_deadline = first_frame_deadline + FIRST_FRAME;
+                    continue;
+                }
+                // the sample takes its window (`ms=5000`): a first frame within it is no hang (a
+                // cold Fab presented a second after its verdict, 11-18)
+                let _ = self.drain_app(index);
+                let report = std::fs::read_to_string(&self.apps[index].report).unwrap_or_default();
+                if first_presented(&report, &self.apps[index].child.text, &target.package) {
                     continue;
                 }
                 let why = format!("hang: no first frame {} s after its remote came up", remote_up.elapsed().as_secs());
@@ -1033,6 +1038,13 @@ impl Runtime {
 /// cannot extend the first-frame deadline. No process is stopped here.
 /// Whether a `jit` line says the UI thread gets on with its boot: first compiles finished in its
 /// window, and the UI thread waited for them. Background tiers build on while a UI thread hangs.
+/// Whether an app presented its first frame: its JIT report's `present` line, or the platform's
+/// own `makepad: <app> first frame at` line in its output (a native app writes no report).
+fn first_presented(report: &str, out: &str, package: &str) -> bool {
+    let line = format!("makepad: {package} first frame at ");
+    report.lines().any(|l| l.trim() == "present") || out.lines().any(|l| l.starts_with(&line))
+}
+
 fn ui_thread_compiling(jit_line: &str) -> bool {
     let after = |word: &str| jit_line.split(word).nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse::<u64>().ok());
     after("lazy ").is_some_and(|n| n > 0) && after("UI JIT duty ").is_some_and(|n| n > 0)
@@ -1896,6 +1908,17 @@ mod tests {
         assert!(!ui_thread_compiling("busy · running: UI thread compiling · queued: ahead 0, O2 0, O3 0 · finished 24.7k (+0 in 5000 ms = 0 fns/s: lazy 0, ahead 0, O2 0, O3 0, linked 0) · UI JIT duty 100%"));
         // no JIT to ask
         assert!(!ui_thread_compiling("jit: connection refused"));
+    }
+
+    #[test]
+    fn a_first_frame_shows_in_the_report_or_in_the_apps_own_line() {
+        // the platform's line as a cold Fab printed it (11-18): the leg read `relax: ` there, a
+        // prefix the line lost on 10-31, so only the report could answer
+        let out = "lan: local network off\nmakepad: makepad-fab first frame at 71.41 s (main at 20.18 s, cache cold, ahead balanced), first frame held 430 ms for 48 pipelines, 0 glyphs\n";
+        assert!(first_presented("", out, "makepad-fab"), "the app's own first-frame line");
+        assert!(first_presented("fns\t45490\t71211\npresent\nfns\t45756\t71586\n", "", "makepad-fab"), "the JIT report's present line");
+        assert!(!first_presented("fns\t45490\t71211\n", "makepad: makepad-app-wm first frame at 3.10 s\n", "makepad-fab"), "another app's first frame");
+        assert!(!first_presented("fns\t45490\t71211\n", "relax: first-frame timeout 180 s\n", "makepad-fab"), "no first frame yet");
     }
 
     #[test]

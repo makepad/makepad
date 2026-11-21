@@ -16,24 +16,24 @@ impl PartialEq for u8 { fn eq(&self, other: &u8) -> bool { *self == *other } fn 
 impl Eq for u8 {}
 impl PartialOrd for u8 { fn partial_cmp(&self, other: &u8) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &u8) -> bool { *self < *other } fn le(&self, other: &u8) -> bool { *self <= *other } fn gt(&self, other: &u8) -> bool { *self > *other } fn ge(&self, other: &u8) -> bool { *self >= *other } }
 impl Ord for u8 { fn cmp(&self, other: &u8) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for u8 { type Output = u8; fn add(self, rhs: u8) -> u8 { self + rhs } }
-impl<'a> Add<&'a u8> for u8 { type Output = u8; fn add(self, rhs: &'a u8) -> u8 { self + *rhs } }
-impl<'a> Add<u8> for &'a u8 { type Output = u8; fn add(self, rhs: u8) -> u8 { *self + rhs } }
-impl<'a, 'b> Add<&'a u8> for &'b u8 { type Output = u8; fn add(self, rhs: &'a u8) -> u8 { *self + *rhs } }
-impl AddAssign for u8 { fn add_assign(&mut self, rhs: u8) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a u8> for u8 { fn add_assign(&mut self, rhs: &'a u8) { *self = *self + *rhs; } }
-impl Sub for u8 { type Output = u8; fn sub(self, rhs: u8) -> u8 { self - rhs } }
-impl<'a> Sub<&'a u8> for u8 { type Output = u8; fn sub(self, rhs: &'a u8) -> u8 { self - *rhs } }
-impl<'a> Sub<u8> for &'a u8 { type Output = u8; fn sub(self, rhs: u8) -> u8 { *self - rhs } }
-impl<'a, 'b> Sub<&'a u8> for &'b u8 { type Output = u8; fn sub(self, rhs: &'a u8) -> u8 { *self - *rhs } }
-impl SubAssign for u8 { fn sub_assign(&mut self, rhs: u8) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a u8> for u8 { fn sub_assign(&mut self, rhs: &'a u8) { *self = *self - *rhs; } }
-impl Mul for u8 { type Output = u8; fn mul(self, rhs: u8) -> u8 { self * rhs } }
-impl<'a> Mul<&'a u8> for u8 { type Output = u8; fn mul(self, rhs: &'a u8) -> u8 { self * *rhs } }
-impl<'a> Mul<u8> for &'a u8 { type Output = u8; fn mul(self, rhs: u8) -> u8 { *self * rhs } }
-impl<'a, 'b> Mul<&'a u8> for &'b u8 { type Output = u8; fn mul(self, rhs: &'a u8) -> u8 { *self * *rhs } }
-impl MulAssign for u8 { fn mul_assign(&mut self, rhs: u8) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a u8> for u8 { fn mul_assign(&mut self, rhs: &'a u8) { *self = *self * *rhs; } }
+impl Add for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn add(self, rhs: u8) -> u8 { self + rhs } }
+impl<'a> Add<&'a u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u8) -> u8 { self + *rhs } }
+impl<'a> Add<u8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn add(self, rhs: u8) -> u8 { *self + rhs } }
+impl<'a, 'b> Add<&'a u8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u8) -> u8 { *self + *rhs } }
+impl AddAssign for u8 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: u8) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a u8> for u8 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a u8) { *self = *self + *rhs; } }
+impl Sub for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u8) -> u8 { self - rhs } }
+impl<'a> Sub<&'a u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u8) -> u8 { self - *rhs } }
+impl<'a> Sub<u8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u8) -> u8 { *self - rhs } }
+impl<'a, 'b> Sub<&'a u8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u8) -> u8 { *self - *rhs } }
+impl SubAssign for u8 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: u8) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a u8> for u8 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a u8) { *self = *self - *rhs; } }
+impl Mul for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u8) -> u8 { self * rhs } }
+impl<'a> Mul<&'a u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u8) -> u8 { self * *rhs } }
+impl<'a> Mul<u8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u8) -> u8 { *self * rhs } }
+impl<'a, 'b> Mul<&'a u8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u8) -> u8 { *self * *rhs } }
+impl MulAssign for u8 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: u8) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a u8> for u8 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a u8) { *self = *self * *rhs; } }
 impl Div for u8 { type Output = u8; fn div(self, rhs: u8) -> u8 { self / rhs } }
 impl<'a> Div<&'a u8> for u8 { type Output = u8; fn div(self, rhs: &'a u8) -> u8 { self / *rhs } }
 impl<'a> Div<u8> for &'a u8 { type Output = u8; fn div(self, rhs: u8) -> u8 { *self / rhs } }
@@ -64,65 +64,103 @@ impl<'a> BitXor<u8> for &'a u8 { type Output = u8; fn bitxor(self, rhs: u8) -> u
 impl<'a, 'b> BitXor<&'a u8> for &'b u8 { type Output = u8; fn bitxor(self, rhs: &'a u8) -> u8 { *self ^ *rhs } }
 impl BitXorAssign for u8 { fn bitxor_assign(&mut self, rhs: u8) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a u8> for u8 { fn bitxor_assign(&mut self, rhs: &'a u8) { *self = *self ^ *rhs; } }
-impl Shl<u8> for u8 { type Output = u8; fn shl(self, rhs: u8) -> u8 { self << rhs } }
-impl<'a> Shl<&'a u8> for u8 { type Output = u8; fn shl(self, rhs: &'a u8) -> u8 { self << *rhs } }
-impl<'a> Shl<u8> for &'a u8 { type Output = u8; fn shl(self, rhs: u8) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a u8) -> u8 { *self << *rhs } }
-impl ShlAssign<u8> for u8 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for u8 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for u8 { type Output = u8; fn shr(self, rhs: u8) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a u8> for u8 { type Output = u8; fn shr(self, rhs: &'a u8) -> u8 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a u8 { type Output = u8; fn shr(self, rhs: u8) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a u8) -> u8 { *self >> *rhs } }
-impl ShrAssign<u8> for u8 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for u8 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u32> for u8 { type Output = u8; fn shl(self, rhs: u32) -> u8 { self << rhs } }
-impl<'a> Shl<&'a u32> for u8 { type Output = u8; fn shl(self, rhs: &'a u32) -> u8 { self << *rhs } }
-impl<'a> Shl<u32> for &'a u8 { type Output = u8; fn shl(self, rhs: u32) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a u32) -> u8 { *self << *rhs } }
-impl ShlAssign<u32> for u8 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for u8 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for u8 { type Output = u8; fn shr(self, rhs: u32) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a u32> for u8 { type Output = u8; fn shr(self, rhs: &'a u32) -> u8 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a u8 { type Output = u8; fn shr(self, rhs: u32) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a u32) -> u8 { *self >> *rhs } }
-impl ShrAssign<u32> for u8 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for u8 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for u8 { type Output = u8; fn shl(self, rhs: i32) -> u8 { self << rhs } }
-impl<'a> Shl<&'a i32> for u8 { type Output = u8; fn shl(self, rhs: &'a i32) -> u8 { self << *rhs } }
-impl<'a> Shl<i32> for &'a u8 { type Output = u8; fn shl(self, rhs: i32) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a i32) -> u8 { *self << *rhs } }
-impl ShlAssign<i32> for u8 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for u8 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for u8 { type Output = u8; fn shr(self, rhs: i32) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a i32> for u8 { type Output = u8; fn shr(self, rhs: &'a i32) -> u8 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a u8 { type Output = u8; fn shr(self, rhs: i32) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a i32) -> u8 { *self >> *rhs } }
-impl ShrAssign<i32> for u8 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for u8 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for u8 { type Output = u8; fn shl(self, rhs: usize) -> u8 { self << rhs } }
-impl<'a> Shl<&'a usize> for u8 { type Output = u8; fn shl(self, rhs: &'a usize) -> u8 { self << *rhs } }
-impl<'a> Shl<usize> for &'a u8 { type Output = u8; fn shl(self, rhs: usize) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a usize) -> u8 { *self << *rhs } }
-impl ShlAssign<usize> for u8 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for u8 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for u8 { type Output = u8; fn shr(self, rhs: usize) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a usize> for u8 { type Output = u8; fn shr(self, rhs: &'a usize) -> u8 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a u8 { type Output = u8; fn shr(self, rhs: usize) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a usize) -> u8 { *self >> *rhs } }
-impl ShrAssign<usize> for u8 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for u8 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u8 { self << rhs } }
+impl<'a> Shl<&'a u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u8 { self << *rhs } }
+impl<'a> Shl<u8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u8 { *self << *rhs } }
+impl ShlAssign<u8> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a u8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u8 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u8 { *self >> *rhs } }
+impl ShrAssign<u8> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u8 { self << rhs } }
+impl<'a> Shl<&'a u32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u8 { self << *rhs } }
+impl<'a> Shl<u32> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u8 { *self << *rhs } }
+impl ShlAssign<u32> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a u32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u8 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u8 { *self >> *rhs } }
+impl ShrAssign<u32> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u8 { self << rhs } }
+impl<'a> Shl<&'a i32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u8 { self << *rhs } }
+impl<'a> Shl<i32> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u8 { *self << *rhs } }
+impl ShlAssign<i32> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a i32> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u8 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u8 { *self >> *rhs } }
+impl ShrAssign<i32> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u8 { self << rhs } }
+impl<'a> Shl<&'a usize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u8 { self << *rhs } }
+impl<'a> Shl<usize> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u8 { *self << *rhs } }
+impl ShlAssign<usize> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a usize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u8 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u8 { *self >> *rhs } }
+impl ShrAssign<usize> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for u8 { type Output = u8; fn not(self) -> u8 { !self } }
 impl<'a> Not for &'a u8 { type Output = u8; fn not(self) -> u8 { !*self } }
-impl Sum for u8 { fn sum<I: Iterator<Item = u8>>(iter: I) -> u8 { crate::iter::sum_from(0 as u8, iter) } }
-impl<'a> Sum<&'a u8> for u8 { fn sum<I: Iterator<Item = &'a u8>>(iter: I) -> u8 { crate::iter::sum_from(0 as u8, iter.copied()) } }
-impl Product for u8 { fn product<I: Iterator<Item = u8>>(iter: I) -> u8 { crate::iter::product_from(1 as u8, iter) } }
-impl<'a> Product<&'a u8> for u8 { fn product<I: Iterator<Item = &'a u8>>(iter: I) -> u8 { crate::iter::product_from(1 as u8, iter.copied()) } }
+impl Sum for u8 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a u8> for u8 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for u8 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a u8> for u8 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for u8 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u8, ParseIntError> { u8::from_str_radix(src, 10) } }
 impl Step for u8 {
     fn steps_between(start: &u8, end: &u8) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u8).wrapping_sub(*start as u8) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: u8, n: usize) -> Option<u8> { if n > u8::MAX as usize { return None; } start.checked_add(n as u8) }
     fn backward_checked(start: u8, n: usize) -> Option<u8> { if n > u8::MAX as usize { return None; } start.checked_sub(n as u8) }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_add(n),
+            // if n is out of range, `start + n` must overflow
+            Err(_) => (start.wrapping_add(n as Self), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_sub(n),
+            // if n is out of range, `start - n` must overflow
+            Err(_) => (start.wrapping_sub(n as Self), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: u8, n: usize) -> u8 { start.wrapping_add(n as u8) }
     unsafe fn backward_unchecked(start: u8, n: usize) -> u8 { start.wrapping_sub(n as u8) }
 }
@@ -135,24 +173,24 @@ impl PartialEq for u16 { fn eq(&self, other: &u16) -> bool { *self == *other } f
 impl Eq for u16 {}
 impl PartialOrd for u16 { fn partial_cmp(&self, other: &u16) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &u16) -> bool { *self < *other } fn le(&self, other: &u16) -> bool { *self <= *other } fn gt(&self, other: &u16) -> bool { *self > *other } fn ge(&self, other: &u16) -> bool { *self >= *other } }
 impl Ord for u16 { fn cmp(&self, other: &u16) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for u16 { type Output = u16; fn add(self, rhs: u16) -> u16 { self + rhs } }
-impl<'a> Add<&'a u16> for u16 { type Output = u16; fn add(self, rhs: &'a u16) -> u16 { self + *rhs } }
-impl<'a> Add<u16> for &'a u16 { type Output = u16; fn add(self, rhs: u16) -> u16 { *self + rhs } }
-impl<'a, 'b> Add<&'a u16> for &'b u16 { type Output = u16; fn add(self, rhs: &'a u16) -> u16 { *self + *rhs } }
-impl AddAssign for u16 { fn add_assign(&mut self, rhs: u16) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a u16> for u16 { fn add_assign(&mut self, rhs: &'a u16) { *self = *self + *rhs; } }
-impl Sub for u16 { type Output = u16; fn sub(self, rhs: u16) -> u16 { self - rhs } }
-impl<'a> Sub<&'a u16> for u16 { type Output = u16; fn sub(self, rhs: &'a u16) -> u16 { self - *rhs } }
-impl<'a> Sub<u16> for &'a u16 { type Output = u16; fn sub(self, rhs: u16) -> u16 { *self - rhs } }
-impl<'a, 'b> Sub<&'a u16> for &'b u16 { type Output = u16; fn sub(self, rhs: &'a u16) -> u16 { *self - *rhs } }
-impl SubAssign for u16 { fn sub_assign(&mut self, rhs: u16) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a u16> for u16 { fn sub_assign(&mut self, rhs: &'a u16) { *self = *self - *rhs; } }
-impl Mul for u16 { type Output = u16; fn mul(self, rhs: u16) -> u16 { self * rhs } }
-impl<'a> Mul<&'a u16> for u16 { type Output = u16; fn mul(self, rhs: &'a u16) -> u16 { self * *rhs } }
-impl<'a> Mul<u16> for &'a u16 { type Output = u16; fn mul(self, rhs: u16) -> u16 { *self * rhs } }
-impl<'a, 'b> Mul<&'a u16> for &'b u16 { type Output = u16; fn mul(self, rhs: &'a u16) -> u16 { *self * *rhs } }
-impl MulAssign for u16 { fn mul_assign(&mut self, rhs: u16) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a u16> for u16 { fn mul_assign(&mut self, rhs: &'a u16) { *self = *self * *rhs; } }
+impl Add for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn add(self, rhs: u16) -> u16 { self + rhs } }
+impl<'a> Add<&'a u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u16) -> u16 { self + *rhs } }
+impl<'a> Add<u16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn add(self, rhs: u16) -> u16 { *self + rhs } }
+impl<'a, 'b> Add<&'a u16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u16) -> u16 { *self + *rhs } }
+impl AddAssign for u16 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: u16) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a u16> for u16 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a u16) { *self = *self + *rhs; } }
+impl Sub for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u16) -> u16 { self - rhs } }
+impl<'a> Sub<&'a u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u16) -> u16 { self - *rhs } }
+impl<'a> Sub<u16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u16) -> u16 { *self - rhs } }
+impl<'a, 'b> Sub<&'a u16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u16) -> u16 { *self - *rhs } }
+impl SubAssign for u16 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: u16) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a u16> for u16 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a u16) { *self = *self - *rhs; } }
+impl Mul for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u16) -> u16 { self * rhs } }
+impl<'a> Mul<&'a u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u16) -> u16 { self * *rhs } }
+impl<'a> Mul<u16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u16) -> u16 { *self * rhs } }
+impl<'a, 'b> Mul<&'a u16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u16) -> u16 { *self * *rhs } }
+impl MulAssign for u16 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: u16) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a u16> for u16 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a u16) { *self = *self * *rhs; } }
 impl Div for u16 { type Output = u16; fn div(self, rhs: u16) -> u16 { self / rhs } }
 impl<'a> Div<&'a u16> for u16 { type Output = u16; fn div(self, rhs: &'a u16) -> u16 { self / *rhs } }
 impl<'a> Div<u16> for &'a u16 { type Output = u16; fn div(self, rhs: u16) -> u16 { *self / rhs } }
@@ -183,65 +221,103 @@ impl<'a> BitXor<u16> for &'a u16 { type Output = u16; fn bitxor(self, rhs: u16) 
 impl<'a, 'b> BitXor<&'a u16> for &'b u16 { type Output = u16; fn bitxor(self, rhs: &'a u16) -> u16 { *self ^ *rhs } }
 impl BitXorAssign for u16 { fn bitxor_assign(&mut self, rhs: u16) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a u16> for u16 { fn bitxor_assign(&mut self, rhs: &'a u16) { *self = *self ^ *rhs; } }
-impl Shl<u16> for u16 { type Output = u16; fn shl(self, rhs: u16) -> u16 { self << rhs } }
-impl<'a> Shl<&'a u16> for u16 { type Output = u16; fn shl(self, rhs: &'a u16) -> u16 { self << *rhs } }
-impl<'a> Shl<u16> for &'a u16 { type Output = u16; fn shl(self, rhs: u16) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a u16) -> u16 { *self << *rhs } }
-impl ShlAssign<u16> for u16 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for u16 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for u16 { type Output = u16; fn shr(self, rhs: u16) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a u16> for u16 { type Output = u16; fn shr(self, rhs: &'a u16) -> u16 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a u16 { type Output = u16; fn shr(self, rhs: u16) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a u16) -> u16 { *self >> *rhs } }
-impl ShrAssign<u16> for u16 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for u16 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u32> for u16 { type Output = u16; fn shl(self, rhs: u32) -> u16 { self << rhs } }
-impl<'a> Shl<&'a u32> for u16 { type Output = u16; fn shl(self, rhs: &'a u32) -> u16 { self << *rhs } }
-impl<'a> Shl<u32> for &'a u16 { type Output = u16; fn shl(self, rhs: u32) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a u32) -> u16 { *self << *rhs } }
-impl ShlAssign<u32> for u16 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for u16 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for u16 { type Output = u16; fn shr(self, rhs: u32) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a u32> for u16 { type Output = u16; fn shr(self, rhs: &'a u32) -> u16 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a u16 { type Output = u16; fn shr(self, rhs: u32) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a u32) -> u16 { *self >> *rhs } }
-impl ShrAssign<u32> for u16 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for u16 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for u16 { type Output = u16; fn shl(self, rhs: i32) -> u16 { self << rhs } }
-impl<'a> Shl<&'a i32> for u16 { type Output = u16; fn shl(self, rhs: &'a i32) -> u16 { self << *rhs } }
-impl<'a> Shl<i32> for &'a u16 { type Output = u16; fn shl(self, rhs: i32) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a i32) -> u16 { *self << *rhs } }
-impl ShlAssign<i32> for u16 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for u16 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for u16 { type Output = u16; fn shr(self, rhs: i32) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a i32> for u16 { type Output = u16; fn shr(self, rhs: &'a i32) -> u16 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a u16 { type Output = u16; fn shr(self, rhs: i32) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a i32) -> u16 { *self >> *rhs } }
-impl ShrAssign<i32> for u16 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for u16 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for u16 { type Output = u16; fn shl(self, rhs: usize) -> u16 { self << rhs } }
-impl<'a> Shl<&'a usize> for u16 { type Output = u16; fn shl(self, rhs: &'a usize) -> u16 { self << *rhs } }
-impl<'a> Shl<usize> for &'a u16 { type Output = u16; fn shl(self, rhs: usize) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a usize) -> u16 { *self << *rhs } }
-impl ShlAssign<usize> for u16 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for u16 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for u16 { type Output = u16; fn shr(self, rhs: usize) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a usize> for u16 { type Output = u16; fn shr(self, rhs: &'a usize) -> u16 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a u16 { type Output = u16; fn shr(self, rhs: usize) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a usize) -> u16 { *self >> *rhs } }
-impl ShrAssign<usize> for u16 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for u16 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u16 { self << rhs } }
+impl<'a> Shl<&'a u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u16 { self << *rhs } }
+impl<'a> Shl<u16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u16 { *self << *rhs } }
+impl ShlAssign<u16> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a u16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u16 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u16 { *self >> *rhs } }
+impl ShrAssign<u16> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u16 { self << rhs } }
+impl<'a> Shl<&'a u32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u16 { self << *rhs } }
+impl<'a> Shl<u32> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u16 { *self << *rhs } }
+impl ShlAssign<u32> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a u32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u16 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u16 { *self >> *rhs } }
+impl ShrAssign<u32> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u16 { self << rhs } }
+impl<'a> Shl<&'a i32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u16 { self << *rhs } }
+impl<'a> Shl<i32> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u16 { *self << *rhs } }
+impl ShlAssign<i32> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a i32> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u16 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u16 { *self >> *rhs } }
+impl ShrAssign<i32> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u16 { self << rhs } }
+impl<'a> Shl<&'a usize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u16 { self << *rhs } }
+impl<'a> Shl<usize> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u16 { *self << *rhs } }
+impl ShlAssign<usize> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a usize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u16 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u16 { *self >> *rhs } }
+impl ShrAssign<usize> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for u16 { type Output = u16; fn not(self) -> u16 { !self } }
 impl<'a> Not for &'a u16 { type Output = u16; fn not(self) -> u16 { !*self } }
-impl Sum for u16 { fn sum<I: Iterator<Item = u16>>(iter: I) -> u16 { crate::iter::sum_from(0 as u16, iter) } }
-impl<'a> Sum<&'a u16> for u16 { fn sum<I: Iterator<Item = &'a u16>>(iter: I) -> u16 { crate::iter::sum_from(0 as u16, iter.copied()) } }
-impl Product for u16 { fn product<I: Iterator<Item = u16>>(iter: I) -> u16 { crate::iter::product_from(1 as u16, iter) } }
-impl<'a> Product<&'a u16> for u16 { fn product<I: Iterator<Item = &'a u16>>(iter: I) -> u16 { crate::iter::product_from(1 as u16, iter.copied()) } }
+impl Sum for u16 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a u16> for u16 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for u16 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a u16> for u16 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for u16 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u16, ParseIntError> { u16::from_str_radix(src, 10) } }
 impl Step for u16 {
     fn steps_between(start: &u16, end: &u16) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u16).wrapping_sub(*start as u16) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: u16, n: usize) -> Option<u16> { if n > u16::MAX as usize { return None; } start.checked_add(n as u16) }
     fn backward_checked(start: u16, n: usize) -> Option<u16> { if n > u16::MAX as usize { return None; } start.checked_sub(n as u16) }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_add(n),
+            // if n is out of range, `start + n` must overflow
+            Err(_) => (start.wrapping_add(n as Self), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_sub(n),
+            // if n is out of range, `start - n` must overflow
+            Err(_) => (start.wrapping_sub(n as Self), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: u16, n: usize) -> u16 { start.wrapping_add(n as u16) }
     unsafe fn backward_unchecked(start: u16, n: usize) -> u16 { start.wrapping_sub(n as u16) }
 }
@@ -254,24 +330,24 @@ impl PartialEq for u32 { fn eq(&self, other: &u32) -> bool { *self == *other } f
 impl Eq for u32 {}
 impl PartialOrd for u32 { fn partial_cmp(&self, other: &u32) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &u32) -> bool { *self < *other } fn le(&self, other: &u32) -> bool { *self <= *other } fn gt(&self, other: &u32) -> bool { *self > *other } fn ge(&self, other: &u32) -> bool { *self >= *other } }
 impl Ord for u32 { fn cmp(&self, other: &u32) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for u32 { type Output = u32; fn add(self, rhs: u32) -> u32 { self + rhs } }
-impl<'a> Add<&'a u32> for u32 { type Output = u32; fn add(self, rhs: &'a u32) -> u32 { self + *rhs } }
-impl<'a> Add<u32> for &'a u32 { type Output = u32; fn add(self, rhs: u32) -> u32 { *self + rhs } }
-impl<'a, 'b> Add<&'a u32> for &'b u32 { type Output = u32; fn add(self, rhs: &'a u32) -> u32 { *self + *rhs } }
-impl AddAssign for u32 { fn add_assign(&mut self, rhs: u32) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a u32> for u32 { fn add_assign(&mut self, rhs: &'a u32) { *self = *self + *rhs; } }
-impl Sub for u32 { type Output = u32; fn sub(self, rhs: u32) -> u32 { self - rhs } }
-impl<'a> Sub<&'a u32> for u32 { type Output = u32; fn sub(self, rhs: &'a u32) -> u32 { self - *rhs } }
-impl<'a> Sub<u32> for &'a u32 { type Output = u32; fn sub(self, rhs: u32) -> u32 { *self - rhs } }
-impl<'a, 'b> Sub<&'a u32> for &'b u32 { type Output = u32; fn sub(self, rhs: &'a u32) -> u32 { *self - *rhs } }
-impl SubAssign for u32 { fn sub_assign(&mut self, rhs: u32) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a u32> for u32 { fn sub_assign(&mut self, rhs: &'a u32) { *self = *self - *rhs; } }
-impl Mul for u32 { type Output = u32; fn mul(self, rhs: u32) -> u32 { self * rhs } }
-impl<'a> Mul<&'a u32> for u32 { type Output = u32; fn mul(self, rhs: &'a u32) -> u32 { self * *rhs } }
-impl<'a> Mul<u32> for &'a u32 { type Output = u32; fn mul(self, rhs: u32) -> u32 { *self * rhs } }
-impl<'a, 'b> Mul<&'a u32> for &'b u32 { type Output = u32; fn mul(self, rhs: &'a u32) -> u32 { *self * *rhs } }
-impl MulAssign for u32 { fn mul_assign(&mut self, rhs: u32) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a u32> for u32 { fn mul_assign(&mut self, rhs: &'a u32) { *self = *self * *rhs; } }
+impl Add for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn add(self, rhs: u32) -> u32 { self + rhs } }
+impl<'a> Add<&'a u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u32) -> u32 { self + *rhs } }
+impl<'a> Add<u32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn add(self, rhs: u32) -> u32 { *self + rhs } }
+impl<'a, 'b> Add<&'a u32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u32) -> u32 { *self + *rhs } }
+impl AddAssign for u32 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: u32) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a u32> for u32 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a u32) { *self = *self + *rhs; } }
+impl Sub for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u32) -> u32 { self - rhs } }
+impl<'a> Sub<&'a u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u32) -> u32 { self - *rhs } }
+impl<'a> Sub<u32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u32) -> u32 { *self - rhs } }
+impl<'a, 'b> Sub<&'a u32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u32) -> u32 { *self - *rhs } }
+impl SubAssign for u32 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: u32) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a u32> for u32 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a u32) { *self = *self - *rhs; } }
+impl Mul for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u32) -> u32 { self * rhs } }
+impl<'a> Mul<&'a u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u32) -> u32 { self * *rhs } }
+impl<'a> Mul<u32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u32) -> u32 { *self * rhs } }
+impl<'a, 'b> Mul<&'a u32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u32) -> u32 { *self * *rhs } }
+impl MulAssign for u32 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: u32) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a u32> for u32 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a u32) { *self = *self * *rhs; } }
 impl Div for u32 { type Output = u32; fn div(self, rhs: u32) -> u32 { self / rhs } }
 impl<'a> Div<&'a u32> for u32 { type Output = u32; fn div(self, rhs: &'a u32) -> u32 { self / *rhs } }
 impl<'a> Div<u32> for &'a u32 { type Output = u32; fn div(self, rhs: u32) -> u32 { *self / rhs } }
@@ -302,53 +378,91 @@ impl<'a> BitXor<u32> for &'a u32 { type Output = u32; fn bitxor(self, rhs: u32) 
 impl<'a, 'b> BitXor<&'a u32> for &'b u32 { type Output = u32; fn bitxor(self, rhs: &'a u32) -> u32 { *self ^ *rhs } }
 impl BitXorAssign for u32 { fn bitxor_assign(&mut self, rhs: u32) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a u32> for u32 { fn bitxor_assign(&mut self, rhs: &'a u32) { *self = *self ^ *rhs; } }
-impl Shl<u32> for u32 { type Output = u32; fn shl(self, rhs: u32) -> u32 { self << rhs } }
-impl<'a> Shl<&'a u32> for u32 { type Output = u32; fn shl(self, rhs: &'a u32) -> u32 { self << *rhs } }
-impl<'a> Shl<u32> for &'a u32 { type Output = u32; fn shl(self, rhs: u32) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a u32) -> u32 { *self << *rhs } }
-impl ShlAssign<u32> for u32 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for u32 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for u32 { type Output = u32; fn shr(self, rhs: u32) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a u32> for u32 { type Output = u32; fn shr(self, rhs: &'a u32) -> u32 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a u32 { type Output = u32; fn shr(self, rhs: u32) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a u32) -> u32 { *self >> *rhs } }
-impl ShrAssign<u32> for u32 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for u32 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for u32 { type Output = u32; fn shl(self, rhs: i32) -> u32 { self << rhs } }
-impl<'a> Shl<&'a i32> for u32 { type Output = u32; fn shl(self, rhs: &'a i32) -> u32 { self << *rhs } }
-impl<'a> Shl<i32> for &'a u32 { type Output = u32; fn shl(self, rhs: i32) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a i32) -> u32 { *self << *rhs } }
-impl ShlAssign<i32> for u32 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for u32 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for u32 { type Output = u32; fn shr(self, rhs: i32) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a i32> for u32 { type Output = u32; fn shr(self, rhs: &'a i32) -> u32 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a u32 { type Output = u32; fn shr(self, rhs: i32) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a i32) -> u32 { *self >> *rhs } }
-impl ShrAssign<i32> for u32 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for u32 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for u32 { type Output = u32; fn shl(self, rhs: usize) -> u32 { self << rhs } }
-impl<'a> Shl<&'a usize> for u32 { type Output = u32; fn shl(self, rhs: &'a usize) -> u32 { self << *rhs } }
-impl<'a> Shl<usize> for &'a u32 { type Output = u32; fn shl(self, rhs: usize) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a usize) -> u32 { *self << *rhs } }
-impl ShlAssign<usize> for u32 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for u32 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for u32 { type Output = u32; fn shr(self, rhs: usize) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a usize> for u32 { type Output = u32; fn shr(self, rhs: &'a usize) -> u32 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a u32 { type Output = u32; fn shr(self, rhs: usize) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a usize) -> u32 { *self >> *rhs } }
-impl ShrAssign<usize> for u32 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for u32 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u32 { self << rhs } }
+impl<'a> Shl<&'a u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u32 { self << *rhs } }
+impl<'a> Shl<u32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u32 { *self << *rhs } }
+impl ShlAssign<u32> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a u32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u32 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u32 { *self >> *rhs } }
+impl ShrAssign<u32> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u32 { self << rhs } }
+impl<'a> Shl<&'a i32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u32 { self << *rhs } }
+impl<'a> Shl<i32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u32 { *self << *rhs } }
+impl ShlAssign<i32> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a i32> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u32 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u32 { *self >> *rhs } }
+impl ShrAssign<i32> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u32 { self << rhs } }
+impl<'a> Shl<&'a usize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u32 { self << *rhs } }
+impl<'a> Shl<usize> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u32 { *self << *rhs } }
+impl ShlAssign<usize> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a usize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u32 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u32 { *self >> *rhs } }
+impl ShrAssign<usize> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for u32 { type Output = u32; fn not(self) -> u32 { !self } }
 impl<'a> Not for &'a u32 { type Output = u32; fn not(self) -> u32 { !*self } }
-impl Sum for u32 { fn sum<I: Iterator<Item = u32>>(iter: I) -> u32 { crate::iter::sum_from(0 as u32, iter) } }
-impl<'a> Sum<&'a u32> for u32 { fn sum<I: Iterator<Item = &'a u32>>(iter: I) -> u32 { crate::iter::sum_from(0 as u32, iter.copied()) } }
-impl Product for u32 { fn product<I: Iterator<Item = u32>>(iter: I) -> u32 { crate::iter::product_from(1 as u32, iter) } }
-impl<'a> Product<&'a u32> for u32 { fn product<I: Iterator<Item = &'a u32>>(iter: I) -> u32 { crate::iter::product_from(1 as u32, iter.copied()) } }
+impl Sum for u32 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a u32> for u32 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for u32 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a u32> for u32 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for u32 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u32, ParseIntError> { u32::from_str_radix(src, 10) } }
 impl Step for u32 {
     fn steps_between(start: &u32, end: &u32) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u32).wrapping_sub(*start as u32) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: u32, n: usize) -> Option<u32> { if n > u32::MAX as usize { return None; } start.checked_add(n as u32) }
     fn backward_checked(start: u32, n: usize) -> Option<u32> { if n > u32::MAX as usize { return None; } start.checked_sub(n as u32) }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_add(n),
+            // if n is out of range, `start + n` must overflow
+            Err(_) => (start.wrapping_add(n as Self), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_sub(n),
+            // if n is out of range, `start - n` must overflow
+            Err(_) => (start.wrapping_sub(n as Self), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: u32, n: usize) -> u32 { start.wrapping_add(n as u32) }
     unsafe fn backward_unchecked(start: u32, n: usize) -> u32 { start.wrapping_sub(n as u32) }
 }
@@ -361,24 +475,24 @@ impl PartialEq for u64 { fn eq(&self, other: &u64) -> bool { *self == *other } f
 impl Eq for u64 {}
 impl PartialOrd for u64 { fn partial_cmp(&self, other: &u64) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &u64) -> bool { *self < *other } fn le(&self, other: &u64) -> bool { *self <= *other } fn gt(&self, other: &u64) -> bool { *self > *other } fn ge(&self, other: &u64) -> bool { *self >= *other } }
 impl Ord for u64 { fn cmp(&self, other: &u64) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for u64 { type Output = u64; fn add(self, rhs: u64) -> u64 { self + rhs } }
-impl<'a> Add<&'a u64> for u64 { type Output = u64; fn add(self, rhs: &'a u64) -> u64 { self + *rhs } }
-impl<'a> Add<u64> for &'a u64 { type Output = u64; fn add(self, rhs: u64) -> u64 { *self + rhs } }
-impl<'a, 'b> Add<&'a u64> for &'b u64 { type Output = u64; fn add(self, rhs: &'a u64) -> u64 { *self + *rhs } }
-impl AddAssign for u64 { fn add_assign(&mut self, rhs: u64) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a u64> for u64 { fn add_assign(&mut self, rhs: &'a u64) { *self = *self + *rhs; } }
-impl Sub for u64 { type Output = u64; fn sub(self, rhs: u64) -> u64 { self - rhs } }
-impl<'a> Sub<&'a u64> for u64 { type Output = u64; fn sub(self, rhs: &'a u64) -> u64 { self - *rhs } }
-impl<'a> Sub<u64> for &'a u64 { type Output = u64; fn sub(self, rhs: u64) -> u64 { *self - rhs } }
-impl<'a, 'b> Sub<&'a u64> for &'b u64 { type Output = u64; fn sub(self, rhs: &'a u64) -> u64 { *self - *rhs } }
-impl SubAssign for u64 { fn sub_assign(&mut self, rhs: u64) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a u64> for u64 { fn sub_assign(&mut self, rhs: &'a u64) { *self = *self - *rhs; } }
-impl Mul for u64 { type Output = u64; fn mul(self, rhs: u64) -> u64 { self * rhs } }
-impl<'a> Mul<&'a u64> for u64 { type Output = u64; fn mul(self, rhs: &'a u64) -> u64 { self * *rhs } }
-impl<'a> Mul<u64> for &'a u64 { type Output = u64; fn mul(self, rhs: u64) -> u64 { *self * rhs } }
-impl<'a, 'b> Mul<&'a u64> for &'b u64 { type Output = u64; fn mul(self, rhs: &'a u64) -> u64 { *self * *rhs } }
-impl MulAssign for u64 { fn mul_assign(&mut self, rhs: u64) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a u64> for u64 { fn mul_assign(&mut self, rhs: &'a u64) { *self = *self * *rhs; } }
+impl Add for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn add(self, rhs: u64) -> u64 { self + rhs } }
+impl<'a> Add<&'a u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u64) -> u64 { self + *rhs } }
+impl<'a> Add<u64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn add(self, rhs: u64) -> u64 { *self + rhs } }
+impl<'a, 'b> Add<&'a u64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u64) -> u64 { *self + *rhs } }
+impl AddAssign for u64 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: u64) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a u64> for u64 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a u64) { *self = *self + *rhs; } }
+impl Sub for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u64) -> u64 { self - rhs } }
+impl<'a> Sub<&'a u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u64) -> u64 { self - *rhs } }
+impl<'a> Sub<u64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u64) -> u64 { *self - rhs } }
+impl<'a, 'b> Sub<&'a u64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u64) -> u64 { *self - *rhs } }
+impl SubAssign for u64 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: u64) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a u64> for u64 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a u64) { *self = *self - *rhs; } }
+impl Mul for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u64) -> u64 { self * rhs } }
+impl<'a> Mul<&'a u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u64) -> u64 { self * *rhs } }
+impl<'a> Mul<u64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u64) -> u64 { *self * rhs } }
+impl<'a, 'b> Mul<&'a u64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u64) -> u64 { *self * *rhs } }
+impl MulAssign for u64 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: u64) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a u64> for u64 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a u64) { *self = *self * *rhs; } }
 impl Div for u64 { type Output = u64; fn div(self, rhs: u64) -> u64 { self / rhs } }
 impl<'a> Div<&'a u64> for u64 { type Output = u64; fn div(self, rhs: &'a u64) -> u64 { self / *rhs } }
 impl<'a> Div<u64> for &'a u64 { type Output = u64; fn div(self, rhs: u64) -> u64 { *self / rhs } }
@@ -409,65 +523,115 @@ impl<'a> BitXor<u64> for &'a u64 { type Output = u64; fn bitxor(self, rhs: u64) 
 impl<'a, 'b> BitXor<&'a u64> for &'b u64 { type Output = u64; fn bitxor(self, rhs: &'a u64) -> u64 { *self ^ *rhs } }
 impl BitXorAssign for u64 { fn bitxor_assign(&mut self, rhs: u64) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a u64> for u64 { fn bitxor_assign(&mut self, rhs: &'a u64) { *self = *self ^ *rhs; } }
-impl Shl<u64> for u64 { type Output = u64; fn shl(self, rhs: u64) -> u64 { self << rhs } }
-impl<'a> Shl<&'a u64> for u64 { type Output = u64; fn shl(self, rhs: &'a u64) -> u64 { self << *rhs } }
-impl<'a> Shl<u64> for &'a u64 { type Output = u64; fn shl(self, rhs: u64) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a u64) -> u64 { *self << *rhs } }
-impl ShlAssign<u64> for u64 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for u64 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for u64 { type Output = u64; fn shr(self, rhs: u64) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a u64> for u64 { type Output = u64; fn shr(self, rhs: &'a u64) -> u64 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a u64 { type Output = u64; fn shr(self, rhs: u64) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a u64) -> u64 { *self >> *rhs } }
-impl ShrAssign<u64> for u64 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for u64 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u32> for u64 { type Output = u64; fn shl(self, rhs: u32) -> u64 { self << rhs } }
-impl<'a> Shl<&'a u32> for u64 { type Output = u64; fn shl(self, rhs: &'a u32) -> u64 { self << *rhs } }
-impl<'a> Shl<u32> for &'a u64 { type Output = u64; fn shl(self, rhs: u32) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a u32) -> u64 { *self << *rhs } }
-impl ShlAssign<u32> for u64 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for u64 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for u64 { type Output = u64; fn shr(self, rhs: u32) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a u32> for u64 { type Output = u64; fn shr(self, rhs: &'a u32) -> u64 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a u64 { type Output = u64; fn shr(self, rhs: u32) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a u32) -> u64 { *self >> *rhs } }
-impl ShrAssign<u32> for u64 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for u64 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for u64 { type Output = u64; fn shl(self, rhs: i32) -> u64 { self << rhs } }
-impl<'a> Shl<&'a i32> for u64 { type Output = u64; fn shl(self, rhs: &'a i32) -> u64 { self << *rhs } }
-impl<'a> Shl<i32> for &'a u64 { type Output = u64; fn shl(self, rhs: i32) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a i32) -> u64 { *self << *rhs } }
-impl ShlAssign<i32> for u64 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for u64 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for u64 { type Output = u64; fn shr(self, rhs: i32) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a i32> for u64 { type Output = u64; fn shr(self, rhs: &'a i32) -> u64 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a u64 { type Output = u64; fn shr(self, rhs: i32) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a i32) -> u64 { *self >> *rhs } }
-impl ShrAssign<i32> for u64 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for u64 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for u64 { type Output = u64; fn shl(self, rhs: usize) -> u64 { self << rhs } }
-impl<'a> Shl<&'a usize> for u64 { type Output = u64; fn shl(self, rhs: &'a usize) -> u64 { self << *rhs } }
-impl<'a> Shl<usize> for &'a u64 { type Output = u64; fn shl(self, rhs: usize) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a usize) -> u64 { *self << *rhs } }
-impl ShlAssign<usize> for u64 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for u64 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for u64 { type Output = u64; fn shr(self, rhs: usize) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a usize> for u64 { type Output = u64; fn shr(self, rhs: &'a usize) -> u64 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a u64 { type Output = u64; fn shr(self, rhs: usize) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a usize) -> u64 { *self >> *rhs } }
-impl ShrAssign<usize> for u64 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for u64 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u64 { self << rhs } }
+impl<'a> Shl<&'a u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u64 { self << *rhs } }
+impl<'a> Shl<u64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u64 { *self << *rhs } }
+impl ShlAssign<u64> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a u64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u64 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u64 { *self >> *rhs } }
+impl ShrAssign<u64> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u64 { self << rhs } }
+impl<'a> Shl<&'a u32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u64 { self << *rhs } }
+impl<'a> Shl<u32> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u64 { *self << *rhs } }
+impl ShlAssign<u32> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a u32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u64 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u64 { *self >> *rhs } }
+impl ShrAssign<u32> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u64 { self << rhs } }
+impl<'a> Shl<&'a i32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u64 { self << *rhs } }
+impl<'a> Shl<i32> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u64 { *self << *rhs } }
+impl ShlAssign<i32> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a i32> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u64 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u64 { *self >> *rhs } }
+impl ShrAssign<i32> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u64 { self << rhs } }
+impl<'a> Shl<&'a usize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u64 { self << *rhs } }
+impl<'a> Shl<usize> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u64 { *self << *rhs } }
+impl ShlAssign<usize> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a usize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u64 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u64 { *self >> *rhs } }
+impl ShrAssign<usize> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for u64 { type Output = u64; fn not(self) -> u64 { !self } }
 impl<'a> Not for &'a u64 { type Output = u64; fn not(self) -> u64 { !*self } }
-impl Sum for u64 { fn sum<I: Iterator<Item = u64>>(iter: I) -> u64 { crate::iter::sum_from(0 as u64, iter) } }
-impl<'a> Sum<&'a u64> for u64 { fn sum<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::sum_from(0 as u64, iter.copied()) } }
-impl Product for u64 { fn product<I: Iterator<Item = u64>>(iter: I) -> u64 { crate::iter::product_from(1 as u64, iter) } }
-impl<'a> Product<&'a u64> for u64 { fn product<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::product_from(1 as u64, iter.copied()) } }
+impl Sum for u64 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a u64> for u64 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for u64 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a u64> for u64 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for u64 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u64, ParseIntError> { u64::from_str_radix(src, 10) } }
 impl Step for u64 {
     fn steps_between(start: &u64, end: &u64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64); if s <= usize::MAX as u64 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
     fn forward_checked(start: u64, n: usize) -> Option<u64> { if false { return None; } start.checked_add(n as u64) }
     fn backward_checked(start: u64, n: usize) -> Option<u64> { if false { return None; } start.checked_sub(n as u64) }
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_add(n),
+            // if n is out of range, `start + n` must overflow
+            Err(_) => (start.wrapping_add(n as Self), true),
+        }
+    }
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_sub(n),
+            // if n is out of range, `start - n` must overflow
+            Err(_) => (start.wrapping_sub(n as Self), true),
+        }
+    }
+    #[cfg(target_pointer_width = "32")]
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_add(n as Self)
+    }
+    #[cfg(target_pointer_width = "32")]
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_sub(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: u64, n: usize) -> u64 { start.wrapping_add(n as u64) }
     unsafe fn backward_unchecked(start: u64, n: usize) -> u64 { start.wrapping_sub(n as u64) }
 }
@@ -480,24 +644,24 @@ impl PartialEq for u128 { fn eq(&self, other: &u128) -> bool { *self == *other }
 impl Eq for u128 {}
 impl PartialOrd for u128 { fn partial_cmp(&self, other: &u128) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &u128) -> bool { *self < *other } fn le(&self, other: &u128) -> bool { *self <= *other } fn gt(&self, other: &u128) -> bool { *self > *other } fn ge(&self, other: &u128) -> bool { *self >= *other } }
 impl Ord for u128 { fn cmp(&self, other: &u128) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for u128 { type Output = u128; fn add(self, rhs: u128) -> u128 { self + rhs } }
-impl<'a> Add<&'a u128> for u128 { type Output = u128; fn add(self, rhs: &'a u128) -> u128 { self + *rhs } }
-impl<'a> Add<u128> for &'a u128 { type Output = u128; fn add(self, rhs: u128) -> u128 { *self + rhs } }
-impl<'a, 'b> Add<&'a u128> for &'b u128 { type Output = u128; fn add(self, rhs: &'a u128) -> u128 { *self + *rhs } }
-impl AddAssign for u128 { fn add_assign(&mut self, rhs: u128) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a u128> for u128 { fn add_assign(&mut self, rhs: &'a u128) { *self = *self + *rhs; } }
-impl Sub for u128 { type Output = u128; fn sub(self, rhs: u128) -> u128 { self - rhs } }
-impl<'a> Sub<&'a u128> for u128 { type Output = u128; fn sub(self, rhs: &'a u128) -> u128 { self - *rhs } }
-impl<'a> Sub<u128> for &'a u128 { type Output = u128; fn sub(self, rhs: u128) -> u128 { *self - rhs } }
-impl<'a, 'b> Sub<&'a u128> for &'b u128 { type Output = u128; fn sub(self, rhs: &'a u128) -> u128 { *self - *rhs } }
-impl SubAssign for u128 { fn sub_assign(&mut self, rhs: u128) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a u128> for u128 { fn sub_assign(&mut self, rhs: &'a u128) { *self = *self - *rhs; } }
-impl Mul for u128 { type Output = u128; fn mul(self, rhs: u128) -> u128 { self * rhs } }
-impl<'a> Mul<&'a u128> for u128 { type Output = u128; fn mul(self, rhs: &'a u128) -> u128 { self * *rhs } }
-impl<'a> Mul<u128> for &'a u128 { type Output = u128; fn mul(self, rhs: u128) -> u128 { *self * rhs } }
-impl<'a, 'b> Mul<&'a u128> for &'b u128 { type Output = u128; fn mul(self, rhs: &'a u128) -> u128 { *self * *rhs } }
-impl MulAssign for u128 { fn mul_assign(&mut self, rhs: u128) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a u128> for u128 { fn mul_assign(&mut self, rhs: &'a u128) { *self = *self * *rhs; } }
+impl Add for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn add(self, rhs: u128) -> u128 { self + rhs } }
+impl<'a> Add<&'a u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u128) -> u128 { self + *rhs } }
+impl<'a> Add<u128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn add(self, rhs: u128) -> u128 { *self + rhs } }
+impl<'a, 'b> Add<&'a u128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a u128) -> u128 { *self + *rhs } }
+impl AddAssign for u128 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: u128) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a u128> for u128 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a u128) { *self = *self + *rhs; } }
+impl Sub for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u128) -> u128 { self - rhs } }
+impl<'a> Sub<&'a u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u128) -> u128 { self - *rhs } }
+impl<'a> Sub<u128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: u128) -> u128 { *self - rhs } }
+impl<'a, 'b> Sub<&'a u128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a u128) -> u128 { *self - *rhs } }
+impl SubAssign for u128 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: u128) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a u128> for u128 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a u128) { *self = *self - *rhs; } }
+impl Mul for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u128) -> u128 { self * rhs } }
+impl<'a> Mul<&'a u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u128) -> u128 { self * *rhs } }
+impl<'a> Mul<u128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: u128) -> u128 { *self * rhs } }
+impl<'a, 'b> Mul<&'a u128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a u128) -> u128 { *self * *rhs } }
+impl MulAssign for u128 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: u128) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a u128> for u128 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a u128) { *self = *self * *rhs; } }
 impl Div for u128 { type Output = u128; fn div(self, rhs: u128) -> u128 { self / rhs } }
 impl<'a> Div<&'a u128> for u128 { type Output = u128; fn div(self, rhs: &'a u128) -> u128 { self / *rhs } }
 impl<'a> Div<u128> for &'a u128 { type Output = u128; fn div(self, rhs: u128) -> u128 { *self / rhs } }
@@ -528,65 +692,95 @@ impl<'a> BitXor<u128> for &'a u128 { type Output = u128; fn bitxor(self, rhs: u1
 impl<'a, 'b> BitXor<&'a u128> for &'b u128 { type Output = u128; fn bitxor(self, rhs: &'a u128) -> u128 { *self ^ *rhs } }
 impl BitXorAssign for u128 { fn bitxor_assign(&mut self, rhs: u128) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a u128> for u128 { fn bitxor_assign(&mut self, rhs: &'a u128) { *self = *self ^ *rhs; } }
-impl Shl<u128> for u128 { type Output = u128; fn shl(self, rhs: u128) -> u128 { self << rhs } }
-impl<'a> Shl<&'a u128> for u128 { type Output = u128; fn shl(self, rhs: &'a u128) -> u128 { self << *rhs } }
-impl<'a> Shl<u128> for &'a u128 { type Output = u128; fn shl(self, rhs: u128) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a u128) -> u128 { *self << *rhs } }
-impl ShlAssign<u128> for u128 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for u128 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for u128 { type Output = u128; fn shr(self, rhs: u128) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a u128> for u128 { type Output = u128; fn shr(self, rhs: &'a u128) -> u128 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a u128 { type Output = u128; fn shr(self, rhs: u128) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a u128) -> u128 { *self >> *rhs } }
-impl ShrAssign<u128> for u128 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for u128 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<u32> for u128 { type Output = u128; fn shl(self, rhs: u32) -> u128 { self << rhs } }
-impl<'a> Shl<&'a u32> for u128 { type Output = u128; fn shl(self, rhs: &'a u32) -> u128 { self << *rhs } }
-impl<'a> Shl<u32> for &'a u128 { type Output = u128; fn shl(self, rhs: u32) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a u32) -> u128 { *self << *rhs } }
-impl ShlAssign<u32> for u128 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for u128 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for u128 { type Output = u128; fn shr(self, rhs: u32) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a u32> for u128 { type Output = u128; fn shr(self, rhs: &'a u32) -> u128 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a u128 { type Output = u128; fn shr(self, rhs: u32) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a u32) -> u128 { *self >> *rhs } }
-impl ShrAssign<u32> for u128 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for u128 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for u128 { type Output = u128; fn shl(self, rhs: i32) -> u128 { self << rhs } }
-impl<'a> Shl<&'a i32> for u128 { type Output = u128; fn shl(self, rhs: &'a i32) -> u128 { self << *rhs } }
-impl<'a> Shl<i32> for &'a u128 { type Output = u128; fn shl(self, rhs: i32) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a i32) -> u128 { *self << *rhs } }
-impl ShlAssign<i32> for u128 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for u128 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for u128 { type Output = u128; fn shr(self, rhs: i32) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a i32> for u128 { type Output = u128; fn shr(self, rhs: &'a i32) -> u128 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a u128 { type Output = u128; fn shr(self, rhs: i32) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a i32) -> u128 { *self >> *rhs } }
-impl ShrAssign<i32> for u128 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for u128 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for u128 { type Output = u128; fn shl(self, rhs: usize) -> u128 { self << rhs } }
-impl<'a> Shl<&'a usize> for u128 { type Output = u128; fn shl(self, rhs: &'a usize) -> u128 { self << *rhs } }
-impl<'a> Shl<usize> for &'a u128 { type Output = u128; fn shl(self, rhs: usize) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a usize) -> u128 { *self << *rhs } }
-impl ShlAssign<usize> for u128 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for u128 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for u128 { type Output = u128; fn shr(self, rhs: usize) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a usize> for u128 { type Output = u128; fn shr(self, rhs: &'a usize) -> u128 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a u128 { type Output = u128; fn shr(self, rhs: usize) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a usize) -> u128 { *self >> *rhs } }
-impl ShrAssign<usize> for u128 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for u128 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u128 { self << rhs } }
+impl<'a> Shl<&'a u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u128 { self << *rhs } }
+impl<'a> Shl<u128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u128 { *self << *rhs } }
+impl ShlAssign<u128> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a u128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u128 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u128 { *self >> *rhs } }
+impl ShrAssign<u128> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<u32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u128 { self << rhs } }
+impl<'a> Shl<&'a u32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u128 { self << *rhs } }
+impl<'a> Shl<u32> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> u128 { *self << *rhs } }
+impl ShlAssign<u32> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a u32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u128 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> u128 { *self >> *rhs } }
+impl ShrAssign<u32> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u128 { self << rhs } }
+impl<'a> Shl<&'a i32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u128 { self << *rhs } }
+impl<'a> Shl<i32> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> u128 { *self << *rhs } }
+impl ShlAssign<i32> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a i32> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u128 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> u128 { *self >> *rhs } }
+impl ShrAssign<i32> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u128 { self << rhs } }
+impl<'a> Shl<&'a usize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u128 { self << *rhs } }
+impl<'a> Shl<usize> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> u128 { *self << *rhs } }
+impl ShlAssign<usize> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a usize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u128 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> u128 { *self >> *rhs } }
+impl ShrAssign<usize> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for u128 { type Output = u128; fn not(self) -> u128 { !self } }
 impl<'a> Not for &'a u128 { type Output = u128; fn not(self) -> u128 { !*self } }
-impl Sum for u128 { fn sum<I: Iterator<Item = u128>>(iter: I) -> u128 { crate::iter::sum_from(0 as u128, iter) } }
-impl<'a> Sum<&'a u128> for u128 { fn sum<I: Iterator<Item = &'a u128>>(iter: I) -> u128 { crate::iter::sum_from(0 as u128, iter.copied()) } }
-impl Product for u128 { fn product<I: Iterator<Item = u128>>(iter: I) -> u128 { crate::iter::product_from(1 as u128, iter) } }
-impl<'a> Product<&'a u128> for u128 { fn product<I: Iterator<Item = &'a u128>>(iter: I) -> u128 { crate::iter::product_from(1 as u128, iter.copied()) } }
+impl Sum for u128 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a u128> for u128 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for u128 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a u128> for u128 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for u128 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u128, ParseIntError> { u128::from_str_radix(src, 10) } }
 impl Step for u128 {
     fn steps_between(start: &u128, end: &u128) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u128).wrapping_sub(*start as u128); if s <= usize::MAX as u128 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
     fn forward_checked(start: u128, n: usize) -> Option<u128> { if false { return None; } start.checked_add(n as u128) }
     fn backward_checked(start: u128, n: usize) -> Option<u128> { if false { return None; } start.checked_sub(n as u128) }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_add(n as Self)
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_sub(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: u128, n: usize) -> u128 { start.wrapping_add(n as u128) }
     unsafe fn backward_unchecked(start: u128, n: usize) -> u128 { start.wrapping_sub(n as u128) }
 }
@@ -599,24 +793,24 @@ impl PartialEq for usize { fn eq(&self, other: &usize) -> bool { *self == *other
 impl Eq for usize {}
 impl PartialOrd for usize { fn partial_cmp(&self, other: &usize) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &usize) -> bool { *self < *other } fn le(&self, other: &usize) -> bool { *self <= *other } fn gt(&self, other: &usize) -> bool { *self > *other } fn ge(&self, other: &usize) -> bool { *self >= *other } }
 impl Ord for usize { fn cmp(&self, other: &usize) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for usize { type Output = usize; fn add(self, rhs: usize) -> usize { self + rhs } }
-impl<'a> Add<&'a usize> for usize { type Output = usize; fn add(self, rhs: &'a usize) -> usize { self + *rhs } }
-impl<'a> Add<usize> for &'a usize { type Output = usize; fn add(self, rhs: usize) -> usize { *self + rhs } }
-impl<'a, 'b> Add<&'a usize> for &'b usize { type Output = usize; fn add(self, rhs: &'a usize) -> usize { *self + *rhs } }
-impl AddAssign for usize { fn add_assign(&mut self, rhs: usize) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a usize> for usize { fn add_assign(&mut self, rhs: &'a usize) { *self = *self + *rhs; } }
-impl Sub for usize { type Output = usize; fn sub(self, rhs: usize) -> usize { self - rhs } }
-impl<'a> Sub<&'a usize> for usize { type Output = usize; fn sub(self, rhs: &'a usize) -> usize { self - *rhs } }
-impl<'a> Sub<usize> for &'a usize { type Output = usize; fn sub(self, rhs: usize) -> usize { *self - rhs } }
-impl<'a, 'b> Sub<&'a usize> for &'b usize { type Output = usize; fn sub(self, rhs: &'a usize) -> usize { *self - *rhs } }
-impl SubAssign for usize { fn sub_assign(&mut self, rhs: usize) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a usize> for usize { fn sub_assign(&mut self, rhs: &'a usize) { *self = *self - *rhs; } }
-impl Mul for usize { type Output = usize; fn mul(self, rhs: usize) -> usize { self * rhs } }
-impl<'a> Mul<&'a usize> for usize { type Output = usize; fn mul(self, rhs: &'a usize) -> usize { self * *rhs } }
-impl<'a> Mul<usize> for &'a usize { type Output = usize; fn mul(self, rhs: usize) -> usize { *self * rhs } }
-impl<'a, 'b> Mul<&'a usize> for &'b usize { type Output = usize; fn mul(self, rhs: &'a usize) -> usize { *self * *rhs } }
-impl MulAssign for usize { fn mul_assign(&mut self, rhs: usize) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a usize> for usize { fn mul_assign(&mut self, rhs: &'a usize) { *self = *self * *rhs; } }
+impl Add for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn add(self, rhs: usize) -> usize { self + rhs } }
+impl<'a> Add<&'a usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a usize) -> usize { self + *rhs } }
+impl<'a> Add<usize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn add(self, rhs: usize) -> usize { *self + rhs } }
+impl<'a, 'b> Add<&'a usize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a usize) -> usize { *self + *rhs } }
+impl AddAssign for usize { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: usize) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a usize> for usize { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a usize) { *self = *self + *rhs; } }
+impl Sub for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: usize) -> usize { self - rhs } }
+impl<'a> Sub<&'a usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a usize) -> usize { self - *rhs } }
+impl<'a> Sub<usize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: usize) -> usize { *self - rhs } }
+impl<'a, 'b> Sub<&'a usize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a usize) -> usize { *self - *rhs } }
+impl SubAssign for usize { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: usize) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a usize> for usize { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a usize) { *self = *self - *rhs; } }
+impl Mul for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: usize) -> usize { self * rhs } }
+impl<'a> Mul<&'a usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a usize) -> usize { self * *rhs } }
+impl<'a> Mul<usize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: usize) -> usize { *self * rhs } }
+impl<'a, 'b> Mul<&'a usize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a usize) -> usize { *self * *rhs } }
+impl MulAssign for usize { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: usize) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a usize> for usize { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a usize) { *self = *self * *rhs; } }
 impl Div for usize { type Output = usize; fn div(self, rhs: usize) -> usize { self / rhs } }
 impl<'a> Div<&'a usize> for usize { type Output = usize; fn div(self, rhs: &'a usize) -> usize { self / *rhs } }
 impl<'a> Div<usize> for &'a usize { type Output = usize; fn div(self, rhs: usize) -> usize { *self / rhs } }
@@ -647,53 +841,91 @@ impl<'a> BitXor<usize> for &'a usize { type Output = usize; fn bitxor(self, rhs:
 impl<'a, 'b> BitXor<&'a usize> for &'b usize { type Output = usize; fn bitxor(self, rhs: &'a usize) -> usize { *self ^ *rhs } }
 impl BitXorAssign for usize { fn bitxor_assign(&mut self, rhs: usize) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a usize> for usize { fn bitxor_assign(&mut self, rhs: &'a usize) { *self = *self ^ *rhs; } }
-impl Shl<usize> for usize { type Output = usize; fn shl(self, rhs: usize) -> usize { self << rhs } }
-impl<'a> Shl<&'a usize> for usize { type Output = usize; fn shl(self, rhs: &'a usize) -> usize { self << *rhs } }
-impl<'a> Shl<usize> for &'a usize { type Output = usize; fn shl(self, rhs: usize) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b usize { type Output = usize; fn shl(self, rhs: &'a usize) -> usize { *self << *rhs } }
-impl ShlAssign<usize> for usize { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for usize { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for usize { type Output = usize; fn shr(self, rhs: usize) -> usize { self >> rhs } }
-impl<'a> Shr<&'a usize> for usize { type Output = usize; fn shr(self, rhs: &'a usize) -> usize { self >> *rhs } }
-impl<'a> Shr<usize> for &'a usize { type Output = usize; fn shr(self, rhs: usize) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b usize { type Output = usize; fn shr(self, rhs: &'a usize) -> usize { *self >> *rhs } }
-impl ShrAssign<usize> for usize { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for usize { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
-impl Shl<u32> for usize { type Output = usize; fn shl(self, rhs: u32) -> usize { self << rhs } }
-impl<'a> Shl<&'a u32> for usize { type Output = usize; fn shl(self, rhs: &'a u32) -> usize { self << *rhs } }
-impl<'a> Shl<u32> for &'a usize { type Output = usize; fn shl(self, rhs: u32) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b usize { type Output = usize; fn shl(self, rhs: &'a u32) -> usize { *self << *rhs } }
-impl ShlAssign<u32> for usize { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for usize { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for usize { type Output = usize; fn shr(self, rhs: u32) -> usize { self >> rhs } }
-impl<'a> Shr<&'a u32> for usize { type Output = usize; fn shr(self, rhs: &'a u32) -> usize { self >> *rhs } }
-impl<'a> Shr<u32> for &'a usize { type Output = usize; fn shr(self, rhs: u32) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b usize { type Output = usize; fn shr(self, rhs: &'a u32) -> usize { *self >> *rhs } }
-impl ShrAssign<u32> for usize { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for usize { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for usize { type Output = usize; fn shl(self, rhs: i32) -> usize { self << rhs } }
-impl<'a> Shl<&'a i32> for usize { type Output = usize; fn shl(self, rhs: &'a i32) -> usize { self << *rhs } }
-impl<'a> Shl<i32> for &'a usize { type Output = usize; fn shl(self, rhs: i32) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b usize { type Output = usize; fn shl(self, rhs: &'a i32) -> usize { *self << *rhs } }
-impl ShlAssign<i32> for usize { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for usize { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for usize { type Output = usize; fn shr(self, rhs: i32) -> usize { self >> rhs } }
-impl<'a> Shr<&'a i32> for usize { type Output = usize; fn shr(self, rhs: &'a i32) -> usize { self >> *rhs } }
-impl<'a> Shr<i32> for &'a usize { type Output = usize; fn shr(self, rhs: i32) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b usize { type Output = usize; fn shr(self, rhs: &'a i32) -> usize { *self >> *rhs } }
-impl ShrAssign<i32> for usize { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for usize { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> usize { self << rhs } }
+impl<'a> Shl<&'a usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> usize { self << *rhs } }
+impl<'a> Shl<usize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> usize { *self << *rhs } }
+impl ShlAssign<usize> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> usize { self >> rhs } }
+impl<'a> Shr<&'a usize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> usize { self >> *rhs } }
+impl<'a> Shr<usize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> usize { *self >> *rhs } }
+impl ShrAssign<usize> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<u32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> usize { self << rhs } }
+impl<'a> Shl<&'a u32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> usize { self << *rhs } }
+impl<'a> Shl<u32> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> usize { *self << *rhs } }
+impl ShlAssign<u32> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> usize { self >> rhs } }
+impl<'a> Shr<&'a u32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> usize { self >> *rhs } }
+impl<'a> Shr<u32> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> usize { *self >> *rhs } }
+impl ShrAssign<u32> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> usize { self << rhs } }
+impl<'a> Shl<&'a i32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> usize { self << *rhs } }
+impl<'a> Shl<i32> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> usize { *self << *rhs } }
+impl ShlAssign<i32> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> usize { self >> rhs } }
+impl<'a> Shr<&'a i32> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> usize { self >> *rhs } }
+impl<'a> Shr<i32> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> usize { *self >> *rhs } }
+impl ShrAssign<i32> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
 impl Not for usize { type Output = usize; fn not(self) -> usize { !self } }
 impl<'a> Not for &'a usize { type Output = usize; fn not(self) -> usize { !*self } }
-impl Sum for usize { fn sum<I: Iterator<Item = usize>>(iter: I) -> usize { crate::iter::sum_from(0 as usize, iter) } }
-impl<'a> Sum<&'a usize> for usize { fn sum<I: Iterator<Item = &'a usize>>(iter: I) -> usize { crate::iter::sum_from(0 as usize, iter.copied()) } }
-impl Product for usize { fn product<I: Iterator<Item = usize>>(iter: I) -> usize { crate::iter::product_from(1 as usize, iter) } }
-impl<'a> Product<&'a usize> for usize { fn product<I: Iterator<Item = &'a usize>>(iter: I) -> usize { crate::iter::product_from(1 as usize, iter.copied()) } }
+impl Sum for usize { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a usize> for usize { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for usize { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a usize> for usize { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for usize { type Err = ParseIntError; fn from_str(src: &str) -> Result<usize, ParseIntError> { usize::from_str_radix(src, 10) } }
 impl Step for usize {
     fn steps_between(start: &usize, end: &usize) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as usize).wrapping_sub(*start as usize) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: usize, n: usize) -> Option<usize> { if false { return None; } start.checked_add(n as usize) }
     fn backward_checked(start: usize, n: usize) -> Option<usize> { if false { return None; } start.checked_sub(n as usize) }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_add(n),
+            // if n is out of range, `start + n` must overflow
+            Err(_) => (start.wrapping_add(n as Self), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match Self::try_from(n) {
+            Ok(n) => start.overflowing_sub(n),
+            // if n is out of range, `start - n` must overflow
+            Err(_) => (start.wrapping_sub(n as Self), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: usize, n: usize) -> usize { start.wrapping_add(n as usize) }
     unsafe fn backward_unchecked(start: usize, n: usize) -> usize { start.wrapping_sub(n as usize) }
 }
@@ -706,24 +938,24 @@ impl PartialEq for i8 { fn eq(&self, other: &i8) -> bool { *self == *other } fn 
 impl Eq for i8 {}
 impl PartialOrd for i8 { fn partial_cmp(&self, other: &i8) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &i8) -> bool { *self < *other } fn le(&self, other: &i8) -> bool { *self <= *other } fn gt(&self, other: &i8) -> bool { *self > *other } fn ge(&self, other: &i8) -> bool { *self >= *other } }
 impl Ord for i8 { fn cmp(&self, other: &i8) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for i8 { type Output = i8; fn add(self, rhs: i8) -> i8 { self + rhs } }
-impl<'a> Add<&'a i8> for i8 { type Output = i8; fn add(self, rhs: &'a i8) -> i8 { self + *rhs } }
-impl<'a> Add<i8> for &'a i8 { type Output = i8; fn add(self, rhs: i8) -> i8 { *self + rhs } }
-impl<'a, 'b> Add<&'a i8> for &'b i8 { type Output = i8; fn add(self, rhs: &'a i8) -> i8 { *self + *rhs } }
-impl AddAssign for i8 { fn add_assign(&mut self, rhs: i8) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a i8> for i8 { fn add_assign(&mut self, rhs: &'a i8) { *self = *self + *rhs; } }
-impl Sub for i8 { type Output = i8; fn sub(self, rhs: i8) -> i8 { self - rhs } }
-impl<'a> Sub<&'a i8> for i8 { type Output = i8; fn sub(self, rhs: &'a i8) -> i8 { self - *rhs } }
-impl<'a> Sub<i8> for &'a i8 { type Output = i8; fn sub(self, rhs: i8) -> i8 { *self - rhs } }
-impl<'a, 'b> Sub<&'a i8> for &'b i8 { type Output = i8; fn sub(self, rhs: &'a i8) -> i8 { *self - *rhs } }
-impl SubAssign for i8 { fn sub_assign(&mut self, rhs: i8) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a i8> for i8 { fn sub_assign(&mut self, rhs: &'a i8) { *self = *self - *rhs; } }
-impl Mul for i8 { type Output = i8; fn mul(self, rhs: i8) -> i8 { self * rhs } }
-impl<'a> Mul<&'a i8> for i8 { type Output = i8; fn mul(self, rhs: &'a i8) -> i8 { self * *rhs } }
-impl<'a> Mul<i8> for &'a i8 { type Output = i8; fn mul(self, rhs: i8) -> i8 { *self * rhs } }
-impl<'a, 'b> Mul<&'a i8> for &'b i8 { type Output = i8; fn mul(self, rhs: &'a i8) -> i8 { *self * *rhs } }
-impl MulAssign for i8 { fn mul_assign(&mut self, rhs: i8) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a i8> for i8 { fn mul_assign(&mut self, rhs: &'a i8) { *self = *self * *rhs; } }
+impl Add for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn add(self, rhs: i8) -> i8 { self + rhs } }
+impl<'a> Add<&'a i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i8) -> i8 { self + *rhs } }
+impl<'a> Add<i8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn add(self, rhs: i8) -> i8 { *self + rhs } }
+impl<'a, 'b> Add<&'a i8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i8) -> i8 { *self + *rhs } }
+impl AddAssign for i8 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: i8) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a i8> for i8 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a i8) { *self = *self + *rhs; } }
+impl Sub for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i8) -> i8 { self - rhs } }
+impl<'a> Sub<&'a i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i8) -> i8 { self - *rhs } }
+impl<'a> Sub<i8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i8) -> i8 { *self - rhs } }
+impl<'a, 'b> Sub<&'a i8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i8) -> i8 { *self - *rhs } }
+impl SubAssign for i8 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: i8) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a i8> for i8 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a i8) { *self = *self - *rhs; } }
+impl Mul for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i8) -> i8 { self * rhs } }
+impl<'a> Mul<&'a i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i8) -> i8 { self * *rhs } }
+impl<'a> Mul<i8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i8) -> i8 { *self * rhs } }
+impl<'a, 'b> Mul<&'a i8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i8) -> i8 { *self * *rhs } }
+impl MulAssign for i8 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: i8) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a i8> for i8 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a i8) { *self = *self * *rhs; } }
 impl Div for i8 { type Output = i8; fn div(self, rhs: i8) -> i8 { self / rhs } }
 impl<'a> Div<&'a i8> for i8 { type Output = i8; fn div(self, rhs: &'a i8) -> i8 { self / *rhs } }
 impl<'a> Div<i8> for &'a i8 { type Output = i8; fn div(self, rhs: i8) -> i8 { *self / rhs } }
@@ -754,67 +986,109 @@ impl<'a> BitXor<i8> for &'a i8 { type Output = i8; fn bitxor(self, rhs: i8) -> i
 impl<'a, 'b> BitXor<&'a i8> for &'b i8 { type Output = i8; fn bitxor(self, rhs: &'a i8) -> i8 { *self ^ *rhs } }
 impl BitXorAssign for i8 { fn bitxor_assign(&mut self, rhs: i8) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a i8> for i8 { fn bitxor_assign(&mut self, rhs: &'a i8) { *self = *self ^ *rhs; } }
-impl Shl<i8> for i8 { type Output = i8; fn shl(self, rhs: i8) -> i8 { self << rhs } }
-impl<'a> Shl<&'a i8> for i8 { type Output = i8; fn shl(self, rhs: &'a i8) -> i8 { self << *rhs } }
-impl<'a> Shl<i8> for &'a i8 { type Output = i8; fn shl(self, rhs: i8) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a i8) -> i8 { *self << *rhs } }
-impl ShlAssign<i8> for i8 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for i8 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for i8 { type Output = i8; fn shr(self, rhs: i8) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a i8> for i8 { type Output = i8; fn shr(self, rhs: &'a i8) -> i8 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a i8 { type Output = i8; fn shr(self, rhs: i8) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a i8) -> i8 { *self >> *rhs } }
-impl ShrAssign<i8> for i8 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for i8 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<u32> for i8 { type Output = i8; fn shl(self, rhs: u32) -> i8 { self << rhs } }
-impl<'a> Shl<&'a u32> for i8 { type Output = i8; fn shl(self, rhs: &'a u32) -> i8 { self << *rhs } }
-impl<'a> Shl<u32> for &'a i8 { type Output = i8; fn shl(self, rhs: u32) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a u32) -> i8 { *self << *rhs } }
-impl ShlAssign<u32> for i8 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for i8 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for i8 { type Output = i8; fn shr(self, rhs: u32) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a u32> for i8 { type Output = i8; fn shr(self, rhs: &'a u32) -> i8 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a i8 { type Output = i8; fn shr(self, rhs: u32) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a u32) -> i8 { *self >> *rhs } }
-impl ShrAssign<u32> for i8 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for i8 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for i8 { type Output = i8; fn shl(self, rhs: i32) -> i8 { self << rhs } }
-impl<'a> Shl<&'a i32> for i8 { type Output = i8; fn shl(self, rhs: &'a i32) -> i8 { self << *rhs } }
-impl<'a> Shl<i32> for &'a i8 { type Output = i8; fn shl(self, rhs: i32) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a i32) -> i8 { *self << *rhs } }
-impl ShlAssign<i32> for i8 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for i8 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for i8 { type Output = i8; fn shr(self, rhs: i32) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a i32> for i8 { type Output = i8; fn shr(self, rhs: &'a i32) -> i8 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a i8 { type Output = i8; fn shr(self, rhs: i32) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a i32) -> i8 { *self >> *rhs } }
-impl ShrAssign<i32> for i8 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for i8 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for i8 { type Output = i8; fn shl(self, rhs: usize) -> i8 { self << rhs } }
-impl<'a> Shl<&'a usize> for i8 { type Output = i8; fn shl(self, rhs: &'a usize) -> i8 { self << *rhs } }
-impl<'a> Shl<usize> for &'a i8 { type Output = i8; fn shl(self, rhs: usize) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a usize) -> i8 { *self << *rhs } }
-impl ShlAssign<usize> for i8 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for i8 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for i8 { type Output = i8; fn shr(self, rhs: usize) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a usize> for i8 { type Output = i8; fn shr(self, rhs: &'a usize) -> i8 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a i8 { type Output = i8; fn shr(self, rhs: usize) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a usize) -> i8 { *self >> *rhs } }
-impl ShrAssign<usize> for i8 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for i8 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i8 { self << rhs } }
+impl<'a> Shl<&'a i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i8 { self << *rhs } }
+impl<'a> Shl<i8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i8 { *self << *rhs } }
+impl ShlAssign<i8> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a i8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i8 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i8 { *self >> *rhs } }
+impl ShrAssign<i8> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<u32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i8 { self << rhs } }
+impl<'a> Shl<&'a u32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i8 { self << *rhs } }
+impl<'a> Shl<u32> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i8 { *self << *rhs } }
+impl ShlAssign<u32> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a u32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i8 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i8 { *self >> *rhs } }
+impl ShrAssign<u32> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i8 { self << rhs } }
+impl<'a> Shl<&'a i32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i8 { self << *rhs } }
+impl<'a> Shl<i32> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i8 { *self << *rhs } }
+impl ShlAssign<i32> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a i32> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i8 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i8 { *self >> *rhs } }
+impl ShrAssign<i32> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i8 { self << rhs } }
+impl<'a> Shl<&'a usize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i8 { self << *rhs } }
+impl<'a> Shl<usize> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i8 { *self << *rhs } }
+impl ShlAssign<usize> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a usize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i8 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i8 { *self >> *rhs } }
+impl ShrAssign<usize> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for i8 { type Output = i8; fn not(self) -> i8 { !self } }
 impl<'a> Not for &'a i8 { type Output = i8; fn not(self) -> i8 { !*self } }
-impl Neg for i8 { type Output = i8; fn neg(self) -> i8 { -self } }
-impl<'a> Neg for &'a i8 { type Output = i8; fn neg(self) -> i8 { -*self } }
-impl Sum for i8 { fn sum<I: Iterator<Item = i8>>(iter: I) -> i8 { crate::iter::sum_from(0 as i8, iter) } }
-impl<'a> Sum<&'a i8> for i8 { fn sum<I: Iterator<Item = &'a i8>>(iter: I) -> i8 { crate::iter::sum_from(0 as i8, iter.copied()) } }
-impl Product for i8 { fn product<I: Iterator<Item = i8>>(iter: I) -> i8 { crate::iter::product_from(1 as i8, iter) } }
-impl<'a> Product<&'a i8> for i8 { fn product<I: Iterator<Item = &'a i8>>(iter: I) -> i8 { crate::iter::product_from(1 as i8, iter.copied()) } }
+impl Neg for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn neg(self) -> i8 { -self } }
+impl<'a> Neg for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn neg(self) -> i8 { -*self } }
+impl Sum for i8 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a i8> for i8 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for i8 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a i8> for i8 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for i8 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i8, ParseIntError> { i8::from_str_radix(src, 10) } }
 impl Step for i8 {
     fn steps_between(start: &i8, end: &i8) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u8).wrapping_sub(*start as u8) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: i8, n: usize) -> Option<i8> { if n > u8::MAX as usize { return None; } let w = start.wrapping_add(n as u8 as i8); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: i8, n: usize) -> Option<i8> { if n > u8::MAX as usize { return None; } let w = start.wrapping_sub(n as u8 as i8); if w <= start { Some(w) } else { None } }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u8::try_from(n) {
+            Ok(n) => start.overflowing_add_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 + n` necessarily overflows i8.
+            Err(_) => (start.wrapping_add_unsigned(n as u8), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u8::try_from(n) {
+            Ok(n) => start.overflowing_sub_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 - n` necessarily overflows i8.
+            Err(_) => (start.wrapping_sub_unsigned(n as u8), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: i8, n: usize) -> i8 { start.wrapping_add(n as i8) }
     unsafe fn backward_unchecked(start: i8, n: usize) -> i8 { start.wrapping_sub(n as i8) }
 }
@@ -827,24 +1101,24 @@ impl PartialEq for i16 { fn eq(&self, other: &i16) -> bool { *self == *other } f
 impl Eq for i16 {}
 impl PartialOrd for i16 { fn partial_cmp(&self, other: &i16) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &i16) -> bool { *self < *other } fn le(&self, other: &i16) -> bool { *self <= *other } fn gt(&self, other: &i16) -> bool { *self > *other } fn ge(&self, other: &i16) -> bool { *self >= *other } }
 impl Ord for i16 { fn cmp(&self, other: &i16) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for i16 { type Output = i16; fn add(self, rhs: i16) -> i16 { self + rhs } }
-impl<'a> Add<&'a i16> for i16 { type Output = i16; fn add(self, rhs: &'a i16) -> i16 { self + *rhs } }
-impl<'a> Add<i16> for &'a i16 { type Output = i16; fn add(self, rhs: i16) -> i16 { *self + rhs } }
-impl<'a, 'b> Add<&'a i16> for &'b i16 { type Output = i16; fn add(self, rhs: &'a i16) -> i16 { *self + *rhs } }
-impl AddAssign for i16 { fn add_assign(&mut self, rhs: i16) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a i16> for i16 { fn add_assign(&mut self, rhs: &'a i16) { *self = *self + *rhs; } }
-impl Sub for i16 { type Output = i16; fn sub(self, rhs: i16) -> i16 { self - rhs } }
-impl<'a> Sub<&'a i16> for i16 { type Output = i16; fn sub(self, rhs: &'a i16) -> i16 { self - *rhs } }
-impl<'a> Sub<i16> for &'a i16 { type Output = i16; fn sub(self, rhs: i16) -> i16 { *self - rhs } }
-impl<'a, 'b> Sub<&'a i16> for &'b i16 { type Output = i16; fn sub(self, rhs: &'a i16) -> i16 { *self - *rhs } }
-impl SubAssign for i16 { fn sub_assign(&mut self, rhs: i16) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a i16> for i16 { fn sub_assign(&mut self, rhs: &'a i16) { *self = *self - *rhs; } }
-impl Mul for i16 { type Output = i16; fn mul(self, rhs: i16) -> i16 { self * rhs } }
-impl<'a> Mul<&'a i16> for i16 { type Output = i16; fn mul(self, rhs: &'a i16) -> i16 { self * *rhs } }
-impl<'a> Mul<i16> for &'a i16 { type Output = i16; fn mul(self, rhs: i16) -> i16 { *self * rhs } }
-impl<'a, 'b> Mul<&'a i16> for &'b i16 { type Output = i16; fn mul(self, rhs: &'a i16) -> i16 { *self * *rhs } }
-impl MulAssign for i16 { fn mul_assign(&mut self, rhs: i16) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a i16> for i16 { fn mul_assign(&mut self, rhs: &'a i16) { *self = *self * *rhs; } }
+impl Add for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn add(self, rhs: i16) -> i16 { self + rhs } }
+impl<'a> Add<&'a i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i16) -> i16 { self + *rhs } }
+impl<'a> Add<i16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn add(self, rhs: i16) -> i16 { *self + rhs } }
+impl<'a, 'b> Add<&'a i16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i16) -> i16 { *self + *rhs } }
+impl AddAssign for i16 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: i16) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a i16> for i16 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a i16) { *self = *self + *rhs; } }
+impl Sub for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i16) -> i16 { self - rhs } }
+impl<'a> Sub<&'a i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i16) -> i16 { self - *rhs } }
+impl<'a> Sub<i16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i16) -> i16 { *self - rhs } }
+impl<'a, 'b> Sub<&'a i16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i16) -> i16 { *self - *rhs } }
+impl SubAssign for i16 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: i16) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a i16> for i16 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a i16) { *self = *self - *rhs; } }
+impl Mul for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i16) -> i16 { self * rhs } }
+impl<'a> Mul<&'a i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i16) -> i16 { self * *rhs } }
+impl<'a> Mul<i16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i16) -> i16 { *self * rhs } }
+impl<'a, 'b> Mul<&'a i16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i16) -> i16 { *self * *rhs } }
+impl MulAssign for i16 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: i16) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a i16> for i16 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a i16) { *self = *self * *rhs; } }
 impl Div for i16 { type Output = i16; fn div(self, rhs: i16) -> i16 { self / rhs } }
 impl<'a> Div<&'a i16> for i16 { type Output = i16; fn div(self, rhs: &'a i16) -> i16 { self / *rhs } }
 impl<'a> Div<i16> for &'a i16 { type Output = i16; fn div(self, rhs: i16) -> i16 { *self / rhs } }
@@ -875,67 +1149,109 @@ impl<'a> BitXor<i16> for &'a i16 { type Output = i16; fn bitxor(self, rhs: i16) 
 impl<'a, 'b> BitXor<&'a i16> for &'b i16 { type Output = i16; fn bitxor(self, rhs: &'a i16) -> i16 { *self ^ *rhs } }
 impl BitXorAssign for i16 { fn bitxor_assign(&mut self, rhs: i16) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a i16> for i16 { fn bitxor_assign(&mut self, rhs: &'a i16) { *self = *self ^ *rhs; } }
-impl Shl<i16> for i16 { type Output = i16; fn shl(self, rhs: i16) -> i16 { self << rhs } }
-impl<'a> Shl<&'a i16> for i16 { type Output = i16; fn shl(self, rhs: &'a i16) -> i16 { self << *rhs } }
-impl<'a> Shl<i16> for &'a i16 { type Output = i16; fn shl(self, rhs: i16) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a i16) -> i16 { *self << *rhs } }
-impl ShlAssign<i16> for i16 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for i16 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for i16 { type Output = i16; fn shr(self, rhs: i16) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a i16> for i16 { type Output = i16; fn shr(self, rhs: &'a i16) -> i16 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a i16 { type Output = i16; fn shr(self, rhs: i16) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a i16) -> i16 { *self >> *rhs } }
-impl ShrAssign<i16> for i16 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for i16 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<u32> for i16 { type Output = i16; fn shl(self, rhs: u32) -> i16 { self << rhs } }
-impl<'a> Shl<&'a u32> for i16 { type Output = i16; fn shl(self, rhs: &'a u32) -> i16 { self << *rhs } }
-impl<'a> Shl<u32> for &'a i16 { type Output = i16; fn shl(self, rhs: u32) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a u32) -> i16 { *self << *rhs } }
-impl ShlAssign<u32> for i16 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for i16 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for i16 { type Output = i16; fn shr(self, rhs: u32) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a u32> for i16 { type Output = i16; fn shr(self, rhs: &'a u32) -> i16 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a i16 { type Output = i16; fn shr(self, rhs: u32) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a u32) -> i16 { *self >> *rhs } }
-impl ShrAssign<u32> for i16 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for i16 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for i16 { type Output = i16; fn shl(self, rhs: i32) -> i16 { self << rhs } }
-impl<'a> Shl<&'a i32> for i16 { type Output = i16; fn shl(self, rhs: &'a i32) -> i16 { self << *rhs } }
-impl<'a> Shl<i32> for &'a i16 { type Output = i16; fn shl(self, rhs: i32) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a i32) -> i16 { *self << *rhs } }
-impl ShlAssign<i32> for i16 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for i16 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for i16 { type Output = i16; fn shr(self, rhs: i32) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a i32> for i16 { type Output = i16; fn shr(self, rhs: &'a i32) -> i16 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a i16 { type Output = i16; fn shr(self, rhs: i32) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a i32) -> i16 { *self >> *rhs } }
-impl ShrAssign<i32> for i16 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for i16 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for i16 { type Output = i16; fn shl(self, rhs: usize) -> i16 { self << rhs } }
-impl<'a> Shl<&'a usize> for i16 { type Output = i16; fn shl(self, rhs: &'a usize) -> i16 { self << *rhs } }
-impl<'a> Shl<usize> for &'a i16 { type Output = i16; fn shl(self, rhs: usize) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a usize) -> i16 { *self << *rhs } }
-impl ShlAssign<usize> for i16 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for i16 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for i16 { type Output = i16; fn shr(self, rhs: usize) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a usize> for i16 { type Output = i16; fn shr(self, rhs: &'a usize) -> i16 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a i16 { type Output = i16; fn shr(self, rhs: usize) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a usize) -> i16 { *self >> *rhs } }
-impl ShrAssign<usize> for i16 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for i16 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i16 { self << rhs } }
+impl<'a> Shl<&'a i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i16 { self << *rhs } }
+impl<'a> Shl<i16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i16 { *self << *rhs } }
+impl ShlAssign<i16> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a i16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i16 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i16 { *self >> *rhs } }
+impl ShrAssign<i16> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<u32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i16 { self << rhs } }
+impl<'a> Shl<&'a u32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i16 { self << *rhs } }
+impl<'a> Shl<u32> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i16 { *self << *rhs } }
+impl ShlAssign<u32> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a u32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i16 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i16 { *self >> *rhs } }
+impl ShrAssign<u32> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i16 { self << rhs } }
+impl<'a> Shl<&'a i32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i16 { self << *rhs } }
+impl<'a> Shl<i32> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i16 { *self << *rhs } }
+impl ShlAssign<i32> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a i32> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i16 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i16 { *self >> *rhs } }
+impl ShrAssign<i32> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i16 { self << rhs } }
+impl<'a> Shl<&'a usize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i16 { self << *rhs } }
+impl<'a> Shl<usize> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i16 { *self << *rhs } }
+impl ShlAssign<usize> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a usize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i16 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i16 { *self >> *rhs } }
+impl ShrAssign<usize> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for i16 { type Output = i16; fn not(self) -> i16 { !self } }
 impl<'a> Not for &'a i16 { type Output = i16; fn not(self) -> i16 { !*self } }
-impl Neg for i16 { type Output = i16; fn neg(self) -> i16 { -self } }
-impl<'a> Neg for &'a i16 { type Output = i16; fn neg(self) -> i16 { -*self } }
-impl Sum for i16 { fn sum<I: Iterator<Item = i16>>(iter: I) -> i16 { crate::iter::sum_from(0 as i16, iter) } }
-impl<'a> Sum<&'a i16> for i16 { fn sum<I: Iterator<Item = &'a i16>>(iter: I) -> i16 { crate::iter::sum_from(0 as i16, iter.copied()) } }
-impl Product for i16 { fn product<I: Iterator<Item = i16>>(iter: I) -> i16 { crate::iter::product_from(1 as i16, iter) } }
-impl<'a> Product<&'a i16> for i16 { fn product<I: Iterator<Item = &'a i16>>(iter: I) -> i16 { crate::iter::product_from(1 as i16, iter.copied()) } }
+impl Neg for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn neg(self) -> i16 { -self } }
+impl<'a> Neg for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn neg(self) -> i16 { -*self } }
+impl Sum for i16 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a i16> for i16 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for i16 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a i16> for i16 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for i16 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i16, ParseIntError> { i16::from_str_radix(src, 10) } }
 impl Step for i16 {
     fn steps_between(start: &i16, end: &i16) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u16).wrapping_sub(*start as u16) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: i16, n: usize) -> Option<i16> { if n > u16::MAX as usize { return None; } let w = start.wrapping_add(n as u16 as i16); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: i16, n: usize) -> Option<i16> { if n > u16::MAX as usize { return None; } let w = start.wrapping_sub(n as u16 as i16); if w <= start { Some(w) } else { None } }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u16::try_from(n) {
+            Ok(n) => start.overflowing_add_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 + n` necessarily overflows i8.
+            Err(_) => (start.wrapping_add_unsigned(n as u16), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u16::try_from(n) {
+            Ok(n) => start.overflowing_sub_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 - n` necessarily overflows i8.
+            Err(_) => (start.wrapping_sub_unsigned(n as u16), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: i16, n: usize) -> i16 { start.wrapping_add(n as i16) }
     unsafe fn backward_unchecked(start: i16, n: usize) -> i16 { start.wrapping_sub(n as i16) }
 }
@@ -948,24 +1264,24 @@ impl PartialEq for i32 { fn eq(&self, other: &i32) -> bool { *self == *other } f
 impl Eq for i32 {}
 impl PartialOrd for i32 { fn partial_cmp(&self, other: &i32) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &i32) -> bool { *self < *other } fn le(&self, other: &i32) -> bool { *self <= *other } fn gt(&self, other: &i32) -> bool { *self > *other } fn ge(&self, other: &i32) -> bool { *self >= *other } }
 impl Ord for i32 { fn cmp(&self, other: &i32) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for i32 { type Output = i32; fn add(self, rhs: i32) -> i32 { self + rhs } }
-impl<'a> Add<&'a i32> for i32 { type Output = i32; fn add(self, rhs: &'a i32) -> i32 { self + *rhs } }
-impl<'a> Add<i32> for &'a i32 { type Output = i32; fn add(self, rhs: i32) -> i32 { *self + rhs } }
-impl<'a, 'b> Add<&'a i32> for &'b i32 { type Output = i32; fn add(self, rhs: &'a i32) -> i32 { *self + *rhs } }
-impl AddAssign for i32 { fn add_assign(&mut self, rhs: i32) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a i32> for i32 { fn add_assign(&mut self, rhs: &'a i32) { *self = *self + *rhs; } }
-impl Sub for i32 { type Output = i32; fn sub(self, rhs: i32) -> i32 { self - rhs } }
-impl<'a> Sub<&'a i32> for i32 { type Output = i32; fn sub(self, rhs: &'a i32) -> i32 { self - *rhs } }
-impl<'a> Sub<i32> for &'a i32 { type Output = i32; fn sub(self, rhs: i32) -> i32 { *self - rhs } }
-impl<'a, 'b> Sub<&'a i32> for &'b i32 { type Output = i32; fn sub(self, rhs: &'a i32) -> i32 { *self - *rhs } }
-impl SubAssign for i32 { fn sub_assign(&mut self, rhs: i32) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a i32> for i32 { fn sub_assign(&mut self, rhs: &'a i32) { *self = *self - *rhs; } }
-impl Mul for i32 { type Output = i32; fn mul(self, rhs: i32) -> i32 { self * rhs } }
-impl<'a> Mul<&'a i32> for i32 { type Output = i32; fn mul(self, rhs: &'a i32) -> i32 { self * *rhs } }
-impl<'a> Mul<i32> for &'a i32 { type Output = i32; fn mul(self, rhs: i32) -> i32 { *self * rhs } }
-impl<'a, 'b> Mul<&'a i32> for &'b i32 { type Output = i32; fn mul(self, rhs: &'a i32) -> i32 { *self * *rhs } }
-impl MulAssign for i32 { fn mul_assign(&mut self, rhs: i32) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a i32> for i32 { fn mul_assign(&mut self, rhs: &'a i32) { *self = *self * *rhs; } }
+impl Add for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn add(self, rhs: i32) -> i32 { self + rhs } }
+impl<'a> Add<&'a i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i32) -> i32 { self + *rhs } }
+impl<'a> Add<i32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn add(self, rhs: i32) -> i32 { *self + rhs } }
+impl<'a, 'b> Add<&'a i32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i32) -> i32 { *self + *rhs } }
+impl AddAssign for i32 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: i32) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a i32> for i32 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a i32) { *self = *self + *rhs; } }
+impl Sub for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i32) -> i32 { self - rhs } }
+impl<'a> Sub<&'a i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i32) -> i32 { self - *rhs } }
+impl<'a> Sub<i32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i32) -> i32 { *self - rhs } }
+impl<'a, 'b> Sub<&'a i32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i32) -> i32 { *self - *rhs } }
+impl SubAssign for i32 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: i32) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a i32> for i32 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a i32) { *self = *self - *rhs; } }
+impl Mul for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i32) -> i32 { self * rhs } }
+impl<'a> Mul<&'a i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i32) -> i32 { self * *rhs } }
+impl<'a> Mul<i32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i32) -> i32 { *self * rhs } }
+impl<'a, 'b> Mul<&'a i32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i32) -> i32 { *self * *rhs } }
+impl MulAssign for i32 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: i32) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a i32> for i32 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a i32) { *self = *self * *rhs; } }
 impl Div for i32 { type Output = i32; fn div(self, rhs: i32) -> i32 { self / rhs } }
 impl<'a> Div<&'a i32> for i32 { type Output = i32; fn div(self, rhs: &'a i32) -> i32 { self / *rhs } }
 impl<'a> Div<i32> for &'a i32 { type Output = i32; fn div(self, rhs: i32) -> i32 { *self / rhs } }
@@ -996,55 +1312,97 @@ impl<'a> BitXor<i32> for &'a i32 { type Output = i32; fn bitxor(self, rhs: i32) 
 impl<'a, 'b> BitXor<&'a i32> for &'b i32 { type Output = i32; fn bitxor(self, rhs: &'a i32) -> i32 { *self ^ *rhs } }
 impl BitXorAssign for i32 { fn bitxor_assign(&mut self, rhs: i32) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a i32> for i32 { fn bitxor_assign(&mut self, rhs: &'a i32) { *self = *self ^ *rhs; } }
-impl Shl<i32> for i32 { type Output = i32; fn shl(self, rhs: i32) -> i32 { self << rhs } }
-impl<'a> Shl<&'a i32> for i32 { type Output = i32; fn shl(self, rhs: &'a i32) -> i32 { self << *rhs } }
-impl<'a> Shl<i32> for &'a i32 { type Output = i32; fn shl(self, rhs: i32) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a i32) -> i32 { *self << *rhs } }
-impl ShlAssign<i32> for i32 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for i32 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for i32 { type Output = i32; fn shr(self, rhs: i32) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a i32> for i32 { type Output = i32; fn shr(self, rhs: &'a i32) -> i32 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a i32 { type Output = i32; fn shr(self, rhs: i32) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a i32) -> i32 { *self >> *rhs } }
-impl ShrAssign<i32> for i32 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for i32 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<u32> for i32 { type Output = i32; fn shl(self, rhs: u32) -> i32 { self << rhs } }
-impl<'a> Shl<&'a u32> for i32 { type Output = i32; fn shl(self, rhs: &'a u32) -> i32 { self << *rhs } }
-impl<'a> Shl<u32> for &'a i32 { type Output = i32; fn shl(self, rhs: u32) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a u32) -> i32 { *self << *rhs } }
-impl ShlAssign<u32> for i32 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for i32 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for i32 { type Output = i32; fn shr(self, rhs: u32) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a u32> for i32 { type Output = i32; fn shr(self, rhs: &'a u32) -> i32 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a i32 { type Output = i32; fn shr(self, rhs: u32) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a u32) -> i32 { *self >> *rhs } }
-impl ShrAssign<u32> for i32 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for i32 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<usize> for i32 { type Output = i32; fn shl(self, rhs: usize) -> i32 { self << rhs } }
-impl<'a> Shl<&'a usize> for i32 { type Output = i32; fn shl(self, rhs: &'a usize) -> i32 { self << *rhs } }
-impl<'a> Shl<usize> for &'a i32 { type Output = i32; fn shl(self, rhs: usize) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a usize) -> i32 { *self << *rhs } }
-impl ShlAssign<usize> for i32 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for i32 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for i32 { type Output = i32; fn shr(self, rhs: usize) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a usize> for i32 { type Output = i32; fn shr(self, rhs: &'a usize) -> i32 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a i32 { type Output = i32; fn shr(self, rhs: usize) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a usize) -> i32 { *self >> *rhs } }
-impl ShrAssign<usize> for i32 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for i32 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i32 { self << rhs } }
+impl<'a> Shl<&'a i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i32 { self << *rhs } }
+impl<'a> Shl<i32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i32 { *self << *rhs } }
+impl ShlAssign<i32> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a i32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i32 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i32 { *self >> *rhs } }
+impl ShrAssign<i32> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<u32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i32 { self << rhs } }
+impl<'a> Shl<&'a u32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i32 { self << *rhs } }
+impl<'a> Shl<u32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i32 { *self << *rhs } }
+impl ShlAssign<u32> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a u32> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i32 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i32 { *self >> *rhs } }
+impl ShrAssign<u32> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<usize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i32 { self << rhs } }
+impl<'a> Shl<&'a usize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i32 { self << *rhs } }
+impl<'a> Shl<usize> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i32 { *self << *rhs } }
+impl ShlAssign<usize> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a usize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i32 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i32 { *self >> *rhs } }
+impl ShrAssign<usize> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for i32 { type Output = i32; fn not(self) -> i32 { !self } }
 impl<'a> Not for &'a i32 { type Output = i32; fn not(self) -> i32 { !*self } }
-impl Neg for i32 { type Output = i32; fn neg(self) -> i32 { -self } }
-impl<'a> Neg for &'a i32 { type Output = i32; fn neg(self) -> i32 { -*self } }
-impl Sum for i32 { fn sum<I: Iterator<Item = i32>>(iter: I) -> i32 { crate::iter::sum_from(0 as i32, iter) } }
-impl<'a> Sum<&'a i32> for i32 { fn sum<I: Iterator<Item = &'a i32>>(iter: I) -> i32 { crate::iter::sum_from(0 as i32, iter.copied()) } }
-impl Product for i32 { fn product<I: Iterator<Item = i32>>(iter: I) -> i32 { crate::iter::product_from(1 as i32, iter) } }
-impl<'a> Product<&'a i32> for i32 { fn product<I: Iterator<Item = &'a i32>>(iter: I) -> i32 { crate::iter::product_from(1 as i32, iter.copied()) } }
+impl Neg for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn neg(self) -> i32 { -self } }
+impl<'a> Neg for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn neg(self) -> i32 { -*self } }
+impl Sum for i32 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a i32> for i32 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for i32 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a i32> for i32 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for i32 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i32, ParseIntError> { i32::from_str_radix(src, 10) } }
 impl Step for i32 {
     fn steps_between(start: &i32, end: &i32) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u32).wrapping_sub(*start as u32) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: i32, n: usize) -> Option<i32> { if n > u32::MAX as usize { return None; } let w = start.wrapping_add(n as u32 as i32); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: i32, n: usize) -> Option<i32> { if n > u32::MAX as usize { return None; } let w = start.wrapping_sub(n as u32 as i32); if w <= start { Some(w) } else { None } }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u32::try_from(n) {
+            Ok(n) => start.overflowing_add_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 + n` necessarily overflows i8.
+            Err(_) => (start.wrapping_add_unsigned(n as u32), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u32::try_from(n) {
+            Ok(n) => start.overflowing_sub_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 - n` necessarily overflows i8.
+            Err(_) => (start.wrapping_sub_unsigned(n as u32), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: i32, n: usize) -> i32 { start.wrapping_add(n as i32) }
     unsafe fn backward_unchecked(start: i32, n: usize) -> i32 { start.wrapping_sub(n as i32) }
 }
@@ -1057,24 +1415,24 @@ impl PartialEq for i64 { fn eq(&self, other: &i64) -> bool { *self == *other } f
 impl Eq for i64 {}
 impl PartialOrd for i64 { fn partial_cmp(&self, other: &i64) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &i64) -> bool { *self < *other } fn le(&self, other: &i64) -> bool { *self <= *other } fn gt(&self, other: &i64) -> bool { *self > *other } fn ge(&self, other: &i64) -> bool { *self >= *other } }
 impl Ord for i64 { fn cmp(&self, other: &i64) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for i64 { type Output = i64; fn add(self, rhs: i64) -> i64 { self + rhs } }
-impl<'a> Add<&'a i64> for i64 { type Output = i64; fn add(self, rhs: &'a i64) -> i64 { self + *rhs } }
-impl<'a> Add<i64> for &'a i64 { type Output = i64; fn add(self, rhs: i64) -> i64 { *self + rhs } }
-impl<'a, 'b> Add<&'a i64> for &'b i64 { type Output = i64; fn add(self, rhs: &'a i64) -> i64 { *self + *rhs } }
-impl AddAssign for i64 { fn add_assign(&mut self, rhs: i64) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a i64> for i64 { fn add_assign(&mut self, rhs: &'a i64) { *self = *self + *rhs; } }
-impl Sub for i64 { type Output = i64; fn sub(self, rhs: i64) -> i64 { self - rhs } }
-impl<'a> Sub<&'a i64> for i64 { type Output = i64; fn sub(self, rhs: &'a i64) -> i64 { self - *rhs } }
-impl<'a> Sub<i64> for &'a i64 { type Output = i64; fn sub(self, rhs: i64) -> i64 { *self - rhs } }
-impl<'a, 'b> Sub<&'a i64> for &'b i64 { type Output = i64; fn sub(self, rhs: &'a i64) -> i64 { *self - *rhs } }
-impl SubAssign for i64 { fn sub_assign(&mut self, rhs: i64) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a i64> for i64 { fn sub_assign(&mut self, rhs: &'a i64) { *self = *self - *rhs; } }
-impl Mul for i64 { type Output = i64; fn mul(self, rhs: i64) -> i64 { self * rhs } }
-impl<'a> Mul<&'a i64> for i64 { type Output = i64; fn mul(self, rhs: &'a i64) -> i64 { self * *rhs } }
-impl<'a> Mul<i64> for &'a i64 { type Output = i64; fn mul(self, rhs: i64) -> i64 { *self * rhs } }
-impl<'a, 'b> Mul<&'a i64> for &'b i64 { type Output = i64; fn mul(self, rhs: &'a i64) -> i64 { *self * *rhs } }
-impl MulAssign for i64 { fn mul_assign(&mut self, rhs: i64) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a i64> for i64 { fn mul_assign(&mut self, rhs: &'a i64) { *self = *self * *rhs; } }
+impl Add for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn add(self, rhs: i64) -> i64 { self + rhs } }
+impl<'a> Add<&'a i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i64) -> i64 { self + *rhs } }
+impl<'a> Add<i64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn add(self, rhs: i64) -> i64 { *self + rhs } }
+impl<'a, 'b> Add<&'a i64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i64) -> i64 { *self + *rhs } }
+impl AddAssign for i64 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: i64) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a i64> for i64 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a i64) { *self = *self + *rhs; } }
+impl Sub for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i64) -> i64 { self - rhs } }
+impl<'a> Sub<&'a i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i64) -> i64 { self - *rhs } }
+impl<'a> Sub<i64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i64) -> i64 { *self - rhs } }
+impl<'a, 'b> Sub<&'a i64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i64) -> i64 { *self - *rhs } }
+impl SubAssign for i64 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: i64) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a i64> for i64 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a i64) { *self = *self - *rhs; } }
+impl Mul for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i64) -> i64 { self * rhs } }
+impl<'a> Mul<&'a i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i64) -> i64 { self * *rhs } }
+impl<'a> Mul<i64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i64) -> i64 { *self * rhs } }
+impl<'a, 'b> Mul<&'a i64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i64) -> i64 { *self * *rhs } }
+impl MulAssign for i64 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: i64) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a i64> for i64 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a i64) { *self = *self * *rhs; } }
 impl Div for i64 { type Output = i64; fn div(self, rhs: i64) -> i64 { self / rhs } }
 impl<'a> Div<&'a i64> for i64 { type Output = i64; fn div(self, rhs: &'a i64) -> i64 { self / *rhs } }
 impl<'a> Div<i64> for &'a i64 { type Output = i64; fn div(self, rhs: i64) -> i64 { *self / rhs } }
@@ -1105,67 +1463,121 @@ impl<'a> BitXor<i64> for &'a i64 { type Output = i64; fn bitxor(self, rhs: i64) 
 impl<'a, 'b> BitXor<&'a i64> for &'b i64 { type Output = i64; fn bitxor(self, rhs: &'a i64) -> i64 { *self ^ *rhs } }
 impl BitXorAssign for i64 { fn bitxor_assign(&mut self, rhs: i64) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a i64> for i64 { fn bitxor_assign(&mut self, rhs: &'a i64) { *self = *self ^ *rhs; } }
-impl Shl<i64> for i64 { type Output = i64; fn shl(self, rhs: i64) -> i64 { self << rhs } }
-impl<'a> Shl<&'a i64> for i64 { type Output = i64; fn shl(self, rhs: &'a i64) -> i64 { self << *rhs } }
-impl<'a> Shl<i64> for &'a i64 { type Output = i64; fn shl(self, rhs: i64) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a i64) -> i64 { *self << *rhs } }
-impl ShlAssign<i64> for i64 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for i64 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for i64 { type Output = i64; fn shr(self, rhs: i64) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a i64> for i64 { type Output = i64; fn shr(self, rhs: &'a i64) -> i64 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a i64 { type Output = i64; fn shr(self, rhs: i64) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a i64) -> i64 { *self >> *rhs } }
-impl ShrAssign<i64> for i64 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for i64 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<u32> for i64 { type Output = i64; fn shl(self, rhs: u32) -> i64 { self << rhs } }
-impl<'a> Shl<&'a u32> for i64 { type Output = i64; fn shl(self, rhs: &'a u32) -> i64 { self << *rhs } }
-impl<'a> Shl<u32> for &'a i64 { type Output = i64; fn shl(self, rhs: u32) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a u32) -> i64 { *self << *rhs } }
-impl ShlAssign<u32> for i64 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for i64 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for i64 { type Output = i64; fn shr(self, rhs: u32) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a u32> for i64 { type Output = i64; fn shr(self, rhs: &'a u32) -> i64 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a i64 { type Output = i64; fn shr(self, rhs: u32) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a u32) -> i64 { *self >> *rhs } }
-impl ShrAssign<u32> for i64 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for i64 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for i64 { type Output = i64; fn shl(self, rhs: i32) -> i64 { self << rhs } }
-impl<'a> Shl<&'a i32> for i64 { type Output = i64; fn shl(self, rhs: &'a i32) -> i64 { self << *rhs } }
-impl<'a> Shl<i32> for &'a i64 { type Output = i64; fn shl(self, rhs: i32) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a i32) -> i64 { *self << *rhs } }
-impl ShlAssign<i32> for i64 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for i64 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for i64 { type Output = i64; fn shr(self, rhs: i32) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a i32> for i64 { type Output = i64; fn shr(self, rhs: &'a i32) -> i64 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a i64 { type Output = i64; fn shr(self, rhs: i32) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a i32) -> i64 { *self >> *rhs } }
-impl ShrAssign<i32> for i64 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for i64 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for i64 { type Output = i64; fn shl(self, rhs: usize) -> i64 { self << rhs } }
-impl<'a> Shl<&'a usize> for i64 { type Output = i64; fn shl(self, rhs: &'a usize) -> i64 { self << *rhs } }
-impl<'a> Shl<usize> for &'a i64 { type Output = i64; fn shl(self, rhs: usize) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a usize) -> i64 { *self << *rhs } }
-impl ShlAssign<usize> for i64 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for i64 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for i64 { type Output = i64; fn shr(self, rhs: usize) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a usize> for i64 { type Output = i64; fn shr(self, rhs: &'a usize) -> i64 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a i64 { type Output = i64; fn shr(self, rhs: usize) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a usize) -> i64 { *self >> *rhs } }
-impl ShrAssign<usize> for i64 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for i64 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i64 { self << rhs } }
+impl<'a> Shl<&'a i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i64 { self << *rhs } }
+impl<'a> Shl<i64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i64 { *self << *rhs } }
+impl ShlAssign<i64> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a i64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i64 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i64 { *self >> *rhs } }
+impl ShrAssign<i64> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<u32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i64 { self << rhs } }
+impl<'a> Shl<&'a u32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i64 { self << *rhs } }
+impl<'a> Shl<u32> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i64 { *self << *rhs } }
+impl ShlAssign<u32> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a u32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i64 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i64 { *self >> *rhs } }
+impl ShrAssign<u32> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i64 { self << rhs } }
+impl<'a> Shl<&'a i32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i64 { self << *rhs } }
+impl<'a> Shl<i32> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i64 { *self << *rhs } }
+impl ShlAssign<i32> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a i32> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i64 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i64 { *self >> *rhs } }
+impl ShrAssign<i32> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i64 { self << rhs } }
+impl<'a> Shl<&'a usize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i64 { self << *rhs } }
+impl<'a> Shl<usize> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i64 { *self << *rhs } }
+impl ShlAssign<usize> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a usize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i64 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i64 { *self >> *rhs } }
+impl ShrAssign<usize> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for i64 { type Output = i64; fn not(self) -> i64 { !self } }
 impl<'a> Not for &'a i64 { type Output = i64; fn not(self) -> i64 { !*self } }
-impl Neg for i64 { type Output = i64; fn neg(self) -> i64 { -self } }
-impl<'a> Neg for &'a i64 { type Output = i64; fn neg(self) -> i64 { -*self } }
-impl Sum for i64 { fn sum<I: Iterator<Item = i64>>(iter: I) -> i64 { crate::iter::sum_from(0 as i64, iter) } }
-impl<'a> Sum<&'a i64> for i64 { fn sum<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::sum_from(0 as i64, iter.copied()) } }
-impl Product for i64 { fn product<I: Iterator<Item = i64>>(iter: I) -> i64 { crate::iter::product_from(1 as i64, iter) } }
-impl<'a> Product<&'a i64> for i64 { fn product<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::product_from(1 as i64, iter.copied()) } }
+impl Neg for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn neg(self) -> i64 { -self } }
+impl<'a> Neg for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn neg(self) -> i64 { -*self } }
+impl Sum for i64 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a i64> for i64 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for i64 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a i64> for i64 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for i64 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i64, ParseIntError> { i64::from_str_radix(src, 10) } }
 impl Step for i64 {
     fn steps_between(start: &i64, end: &i64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64); if s <= usize::MAX as u64 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
     fn forward_checked(start: i64, n: usize) -> Option<i64> { if false { return None; } let w = start.wrapping_add(n as u64 as i64); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: i64, n: usize) -> Option<i64> { if false { return None; } let w = start.wrapping_sub(n as u64 as i64); if w <= start { Some(w) } else { None } }
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u64::try_from(n) {
+            Ok(n) => start.overflowing_add_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 + n` necessarily overflows i8.
+            Err(_) => (start.wrapping_add_unsigned(n as u64), true),
+        }
+    }
+    #[cfg(target_pointer_width = "64")]
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match u64::try_from(n) {
+            Ok(n) => start.overflowing_sub_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 - n` necessarily overflows i8.
+            Err(_) => (start.wrapping_sub_unsigned(n as u64), true),
+        }
+    }
+    #[cfg(target_pointer_width = "32")]
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_add_unsigned(n as u64)
+    }
+    #[cfg(target_pointer_width = "32")]
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_sub_unsigned(n as u64)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: i64, n: usize) -> i64 { start.wrapping_add(n as i64) }
     unsafe fn backward_unchecked(start: i64, n: usize) -> i64 { start.wrapping_sub(n as i64) }
 }
@@ -1178,24 +1590,24 @@ impl PartialEq for i128 { fn eq(&self, other: &i128) -> bool { *self == *other }
 impl Eq for i128 {}
 impl PartialOrd for i128 { fn partial_cmp(&self, other: &i128) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &i128) -> bool { *self < *other } fn le(&self, other: &i128) -> bool { *self <= *other } fn gt(&self, other: &i128) -> bool { *self > *other } fn ge(&self, other: &i128) -> bool { *self >= *other } }
 impl Ord for i128 { fn cmp(&self, other: &i128) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for i128 { type Output = i128; fn add(self, rhs: i128) -> i128 { self + rhs } }
-impl<'a> Add<&'a i128> for i128 { type Output = i128; fn add(self, rhs: &'a i128) -> i128 { self + *rhs } }
-impl<'a> Add<i128> for &'a i128 { type Output = i128; fn add(self, rhs: i128) -> i128 { *self + rhs } }
-impl<'a, 'b> Add<&'a i128> for &'b i128 { type Output = i128; fn add(self, rhs: &'a i128) -> i128 { *self + *rhs } }
-impl AddAssign for i128 { fn add_assign(&mut self, rhs: i128) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a i128> for i128 { fn add_assign(&mut self, rhs: &'a i128) { *self = *self + *rhs; } }
-impl Sub for i128 { type Output = i128; fn sub(self, rhs: i128) -> i128 { self - rhs } }
-impl<'a> Sub<&'a i128> for i128 { type Output = i128; fn sub(self, rhs: &'a i128) -> i128 { self - *rhs } }
-impl<'a> Sub<i128> for &'a i128 { type Output = i128; fn sub(self, rhs: i128) -> i128 { *self - rhs } }
-impl<'a, 'b> Sub<&'a i128> for &'b i128 { type Output = i128; fn sub(self, rhs: &'a i128) -> i128 { *self - *rhs } }
-impl SubAssign for i128 { fn sub_assign(&mut self, rhs: i128) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a i128> for i128 { fn sub_assign(&mut self, rhs: &'a i128) { *self = *self - *rhs; } }
-impl Mul for i128 { type Output = i128; fn mul(self, rhs: i128) -> i128 { self * rhs } }
-impl<'a> Mul<&'a i128> for i128 { type Output = i128; fn mul(self, rhs: &'a i128) -> i128 { self * *rhs } }
-impl<'a> Mul<i128> for &'a i128 { type Output = i128; fn mul(self, rhs: i128) -> i128 { *self * rhs } }
-impl<'a, 'b> Mul<&'a i128> for &'b i128 { type Output = i128; fn mul(self, rhs: &'a i128) -> i128 { *self * *rhs } }
-impl MulAssign for i128 { fn mul_assign(&mut self, rhs: i128) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a i128> for i128 { fn mul_assign(&mut self, rhs: &'a i128) { *self = *self * *rhs; } }
+impl Add for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn add(self, rhs: i128) -> i128 { self + rhs } }
+impl<'a> Add<&'a i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i128) -> i128 { self + *rhs } }
+impl<'a> Add<i128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn add(self, rhs: i128) -> i128 { *self + rhs } }
+impl<'a, 'b> Add<&'a i128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a i128) -> i128 { *self + *rhs } }
+impl AddAssign for i128 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: i128) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a i128> for i128 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a i128) { *self = *self + *rhs; } }
+impl Sub for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i128) -> i128 { self - rhs } }
+impl<'a> Sub<&'a i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i128) -> i128 { self - *rhs } }
+impl<'a> Sub<i128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: i128) -> i128 { *self - rhs } }
+impl<'a, 'b> Sub<&'a i128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a i128) -> i128 { *self - *rhs } }
+impl SubAssign for i128 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: i128) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a i128> for i128 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a i128) { *self = *self - *rhs; } }
+impl Mul for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i128) -> i128 { self * rhs } }
+impl<'a> Mul<&'a i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i128) -> i128 { self * *rhs } }
+impl<'a> Mul<i128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: i128) -> i128 { *self * rhs } }
+impl<'a, 'b> Mul<&'a i128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a i128) -> i128 { *self * *rhs } }
+impl MulAssign for i128 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: i128) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a i128> for i128 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a i128) { *self = *self * *rhs; } }
 impl Div for i128 { type Output = i128; fn div(self, rhs: i128) -> i128 { self / rhs } }
 impl<'a> Div<&'a i128> for i128 { type Output = i128; fn div(self, rhs: &'a i128) -> i128 { self / *rhs } }
 impl<'a> Div<i128> for &'a i128 { type Output = i128; fn div(self, rhs: i128) -> i128 { *self / rhs } }
@@ -1226,67 +1638,97 @@ impl<'a> BitXor<i128> for &'a i128 { type Output = i128; fn bitxor(self, rhs: i1
 impl<'a, 'b> BitXor<&'a i128> for &'b i128 { type Output = i128; fn bitxor(self, rhs: &'a i128) -> i128 { *self ^ *rhs } }
 impl BitXorAssign for i128 { fn bitxor_assign(&mut self, rhs: i128) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a i128> for i128 { fn bitxor_assign(&mut self, rhs: &'a i128) { *self = *self ^ *rhs; } }
-impl Shl<i128> for i128 { type Output = i128; fn shl(self, rhs: i128) -> i128 { self << rhs } }
-impl<'a> Shl<&'a i128> for i128 { type Output = i128; fn shl(self, rhs: &'a i128) -> i128 { self << *rhs } }
-impl<'a> Shl<i128> for &'a i128 { type Output = i128; fn shl(self, rhs: i128) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a i128) -> i128 { *self << *rhs } }
-impl ShlAssign<i128> for i128 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for i128 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for i128 { type Output = i128; fn shr(self, rhs: i128) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a i128> for i128 { type Output = i128; fn shr(self, rhs: &'a i128) -> i128 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a i128 { type Output = i128; fn shr(self, rhs: i128) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a i128) -> i128 { *self >> *rhs } }
-impl ShrAssign<i128> for i128 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for i128 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<u32> for i128 { type Output = i128; fn shl(self, rhs: u32) -> i128 { self << rhs } }
-impl<'a> Shl<&'a u32> for i128 { type Output = i128; fn shl(self, rhs: &'a u32) -> i128 { self << *rhs } }
-impl<'a> Shl<u32> for &'a i128 { type Output = i128; fn shl(self, rhs: u32) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a u32) -> i128 { *self << *rhs } }
-impl ShlAssign<u32> for i128 { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for i128 { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for i128 { type Output = i128; fn shr(self, rhs: u32) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a u32> for i128 { type Output = i128; fn shr(self, rhs: &'a u32) -> i128 { self >> *rhs } }
-impl<'a> Shr<u32> for &'a i128 { type Output = i128; fn shr(self, rhs: u32) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a u32) -> i128 { *self >> *rhs } }
-impl ShrAssign<u32> for i128 { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for i128 { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for i128 { type Output = i128; fn shl(self, rhs: i32) -> i128 { self << rhs } }
-impl<'a> Shl<&'a i32> for i128 { type Output = i128; fn shl(self, rhs: &'a i32) -> i128 { self << *rhs } }
-impl<'a> Shl<i32> for &'a i128 { type Output = i128; fn shl(self, rhs: i32) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a i32) -> i128 { *self << *rhs } }
-impl ShlAssign<i32> for i128 { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for i128 { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for i128 { type Output = i128; fn shr(self, rhs: i32) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a i32> for i128 { type Output = i128; fn shr(self, rhs: &'a i32) -> i128 { self >> *rhs } }
-impl<'a> Shr<i32> for &'a i128 { type Output = i128; fn shr(self, rhs: i32) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a i32) -> i128 { *self >> *rhs } }
-impl ShrAssign<i32> for i128 { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for i128 { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for i128 { type Output = i128; fn shl(self, rhs: usize) -> i128 { self << rhs } }
-impl<'a> Shl<&'a usize> for i128 { type Output = i128; fn shl(self, rhs: &'a usize) -> i128 { self << *rhs } }
-impl<'a> Shl<usize> for &'a i128 { type Output = i128; fn shl(self, rhs: usize) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a usize) -> i128 { *self << *rhs } }
-impl ShlAssign<usize> for i128 { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for i128 { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for i128 { type Output = i128; fn shr(self, rhs: usize) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a usize> for i128 { type Output = i128; fn shr(self, rhs: &'a usize) -> i128 { self >> *rhs } }
-impl<'a> Shr<usize> for &'a i128 { type Output = i128; fn shr(self, rhs: usize) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a usize) -> i128 { *self >> *rhs } }
-impl ShrAssign<usize> for i128 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for i128 { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i128 { self << rhs } }
+impl<'a> Shl<&'a i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i128 { self << *rhs } }
+impl<'a> Shl<i128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i128 { *self << *rhs } }
+impl ShlAssign<i128> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a i128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i128 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i128 { *self >> *rhs } }
+impl ShrAssign<i128> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<u32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i128 { self << rhs } }
+impl<'a> Shl<&'a u32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i128 { self << *rhs } }
+impl<'a> Shl<u32> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> i128 { *self << *rhs } }
+impl ShlAssign<u32> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a u32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i128 { self >> *rhs } }
+impl<'a> Shr<u32> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> i128 { *self >> *rhs } }
+impl ShrAssign<u32> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i128 { self << rhs } }
+impl<'a> Shl<&'a i32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i128 { self << *rhs } }
+impl<'a> Shl<i32> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> i128 { *self << *rhs } }
+impl ShlAssign<i32> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a i32> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i128 { self >> *rhs } }
+impl<'a> Shr<i32> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> i128 { *self >> *rhs } }
+impl ShrAssign<i32> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i128 { self << rhs } }
+impl<'a> Shl<&'a usize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i128 { self << *rhs } }
+impl<'a> Shl<usize> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> i128 { *self << *rhs } }
+impl ShlAssign<usize> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a usize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i128 { self >> *rhs } }
+impl<'a> Shr<usize> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> i128 { *self >> *rhs } }
+impl ShrAssign<usize> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for i128 { type Output = i128; fn not(self) -> i128 { !self } }
 impl<'a> Not for &'a i128 { type Output = i128; fn not(self) -> i128 { !*self } }
-impl Neg for i128 { type Output = i128; fn neg(self) -> i128 { -self } }
-impl<'a> Neg for &'a i128 { type Output = i128; fn neg(self) -> i128 { -*self } }
-impl Sum for i128 { fn sum<I: Iterator<Item = i128>>(iter: I) -> i128 { crate::iter::sum_from(0 as i128, iter) } }
-impl<'a> Sum<&'a i128> for i128 { fn sum<I: Iterator<Item = &'a i128>>(iter: I) -> i128 { crate::iter::sum_from(0 as i128, iter.copied()) } }
-impl Product for i128 { fn product<I: Iterator<Item = i128>>(iter: I) -> i128 { crate::iter::product_from(1 as i128, iter) } }
-impl<'a> Product<&'a i128> for i128 { fn product<I: Iterator<Item = &'a i128>>(iter: I) -> i128 { crate::iter::product_from(1 as i128, iter.copied()) } }
+impl Neg for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn neg(self) -> i128 { -self } }
+impl<'a> Neg for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn neg(self) -> i128 { -*self } }
+impl Sum for i128 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a i128> for i128 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for i128 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a i128> for i128 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for i128 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i128, ParseIntError> { i128::from_str_radix(src, 10) } }
 impl Step for i128 {
     fn steps_between(start: &i128, end: &i128) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u128).wrapping_sub(*start as u128); if s <= usize::MAX as u128 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
     fn forward_checked(start: i128, n: usize) -> Option<i128> { if false { return None; } let w = start.wrapping_add(n as u128 as i128); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: i128, n: usize) -> Option<i128> { if false { return None; } let w = start.wrapping_sub(n as u128 as i128); if w <= start { Some(w) } else { None } }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_add_unsigned(n as u128)
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        start.overflowing_sub_unsigned(n as u128)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: i128, n: usize) -> i128 { start.wrapping_add(n as i128) }
     unsafe fn backward_unchecked(start: i128, n: usize) -> i128 { start.wrapping_sub(n as i128) }
 }
@@ -1299,24 +1741,24 @@ impl PartialEq for isize { fn eq(&self, other: &isize) -> bool { *self == *other
 impl Eq for isize {}
 impl PartialOrd for isize { fn partial_cmp(&self, other: &isize) -> Option<Ordering> { Some(self.cmp(other)) } fn lt(&self, other: &isize) -> bool { *self < *other } fn le(&self, other: &isize) -> bool { *self <= *other } fn gt(&self, other: &isize) -> bool { *self > *other } fn ge(&self, other: &isize) -> bool { *self >= *other } }
 impl Ord for isize { fn cmp(&self, other: &isize) -> Ordering { if *self < *other { Ordering::Less } else if *self == *other { Ordering::Equal } else { Ordering::Greater } } }
-impl Add for isize { type Output = isize; fn add(self, rhs: isize) -> isize { self + rhs } }
-impl<'a> Add<&'a isize> for isize { type Output = isize; fn add(self, rhs: &'a isize) -> isize { self + *rhs } }
-impl<'a> Add<isize> for &'a isize { type Output = isize; fn add(self, rhs: isize) -> isize { *self + rhs } }
-impl<'a, 'b> Add<&'a isize> for &'b isize { type Output = isize; fn add(self, rhs: &'a isize) -> isize { *self + *rhs } }
-impl AddAssign for isize { fn add_assign(&mut self, rhs: isize) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a isize> for isize { fn add_assign(&mut self, rhs: &'a isize) { *self = *self + *rhs; } }
-impl Sub for isize { type Output = isize; fn sub(self, rhs: isize) -> isize { self - rhs } }
-impl<'a> Sub<&'a isize> for isize { type Output = isize; fn sub(self, rhs: &'a isize) -> isize { self - *rhs } }
-impl<'a> Sub<isize> for &'a isize { type Output = isize; fn sub(self, rhs: isize) -> isize { *self - rhs } }
-impl<'a, 'b> Sub<&'a isize> for &'b isize { type Output = isize; fn sub(self, rhs: &'a isize) -> isize { *self - *rhs } }
-impl SubAssign for isize { fn sub_assign(&mut self, rhs: isize) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a isize> for isize { fn sub_assign(&mut self, rhs: &'a isize) { *self = *self - *rhs; } }
-impl Mul for isize { type Output = isize; fn mul(self, rhs: isize) -> isize { self * rhs } }
-impl<'a> Mul<&'a isize> for isize { type Output = isize; fn mul(self, rhs: &'a isize) -> isize { self * *rhs } }
-impl<'a> Mul<isize> for &'a isize { type Output = isize; fn mul(self, rhs: isize) -> isize { *self * rhs } }
-impl<'a, 'b> Mul<&'a isize> for &'b isize { type Output = isize; fn mul(self, rhs: &'a isize) -> isize { *self * *rhs } }
-impl MulAssign for isize { fn mul_assign(&mut self, rhs: isize) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a isize> for isize { fn mul_assign(&mut self, rhs: &'a isize) { *self = *self * *rhs; } }
+impl Add for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn add(self, rhs: isize) -> isize { self + rhs } }
+impl<'a> Add<&'a isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a isize) -> isize { self + *rhs } }
+impl<'a> Add<isize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn add(self, rhs: isize) -> isize { *self + rhs } }
+impl<'a, 'b> Add<&'a isize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a isize) -> isize { *self + *rhs } }
+impl AddAssign for isize { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: isize) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a isize> for isize { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a isize) { *self = *self + *rhs; } }
+impl Sub for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: isize) -> isize { self - rhs } }
+impl<'a> Sub<&'a isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a isize) -> isize { self - *rhs } }
+impl<'a> Sub<isize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: isize) -> isize { *self - rhs } }
+impl<'a, 'b> Sub<&'a isize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a isize) -> isize { *self - *rhs } }
+impl SubAssign for isize { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: isize) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a isize> for isize { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a isize) { *self = *self - *rhs; } }
+impl Mul for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: isize) -> isize { self * rhs } }
+impl<'a> Mul<&'a isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a isize) -> isize { self * *rhs } }
+impl<'a> Mul<isize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: isize) -> isize { *self * rhs } }
+impl<'a, 'b> Mul<&'a isize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a isize) -> isize { *self * *rhs } }
+impl MulAssign for isize { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: isize) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a isize> for isize { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a isize) { *self = *self * *rhs; } }
 impl Div for isize { type Output = isize; fn div(self, rhs: isize) -> isize { self / rhs } }
 impl<'a> Div<&'a isize> for isize { type Output = isize; fn div(self, rhs: &'a isize) -> isize { self / *rhs } }
 impl<'a> Div<isize> for &'a isize { type Output = isize; fn div(self, rhs: isize) -> isize { *self / rhs } }
@@ -1347,67 +1789,109 @@ impl<'a> BitXor<isize> for &'a isize { type Output = isize; fn bitxor(self, rhs:
 impl<'a, 'b> BitXor<&'a isize> for &'b isize { type Output = isize; fn bitxor(self, rhs: &'a isize) -> isize { *self ^ *rhs } }
 impl BitXorAssign for isize { fn bitxor_assign(&mut self, rhs: isize) { *self = *self ^ rhs; } }
 impl<'a> BitXorAssign<&'a isize> for isize { fn bitxor_assign(&mut self, rhs: &'a isize) { *self = *self ^ *rhs; } }
-impl Shl<isize> for isize { type Output = isize; fn shl(self, rhs: isize) -> isize { self << rhs } }
-impl<'a> Shl<&'a isize> for isize { type Output = isize; fn shl(self, rhs: &'a isize) -> isize { self << *rhs } }
-impl<'a> Shl<isize> for &'a isize { type Output = isize; fn shl(self, rhs: isize) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b isize { type Output = isize; fn shl(self, rhs: &'a isize) -> isize { *self << *rhs } }
-impl ShlAssign<isize> for isize { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for isize { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for isize { type Output = isize; fn shr(self, rhs: isize) -> isize { self >> rhs } }
-impl<'a> Shr<&'a isize> for isize { type Output = isize; fn shr(self, rhs: &'a isize) -> isize { self >> *rhs } }
-impl<'a> Shr<isize> for &'a isize { type Output = isize; fn shr(self, rhs: isize) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b isize { type Output = isize; fn shr(self, rhs: &'a isize) -> isize { *self >> *rhs } }
-impl ShrAssign<isize> for isize { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for isize { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u32> for isize { type Output = isize; fn shl(self, rhs: u32) -> isize { self << rhs } }
-impl<'a> Shl<&'a u32> for isize { type Output = isize; fn shl(self, rhs: &'a u32) -> isize { self << *rhs } }
-impl<'a> Shl<u32> for &'a isize { type Output = isize; fn shl(self, rhs: u32) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u32> for &'b isize { type Output = isize; fn shl(self, rhs: &'a u32) -> isize { *self << *rhs } }
-impl ShlAssign<u32> for isize { fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u32> for isize { fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
-impl Shr<u32> for isize { type Output = isize; fn shr(self, rhs: u32) -> isize { self >> rhs } }
-impl<'a> Shr<&'a u32> for isize { type Output = isize; fn shr(self, rhs: &'a u32) -> isize { self >> *rhs } }
-impl<'a> Shr<u32> for &'a isize { type Output = isize; fn shr(self, rhs: u32) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u32> for &'b isize { type Output = isize; fn shr(self, rhs: &'a u32) -> isize { *self >> *rhs } }
-impl ShrAssign<u32> for isize { fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u32> for isize { fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
-impl Shl<i32> for isize { type Output = isize; fn shl(self, rhs: i32) -> isize { self << rhs } }
-impl<'a> Shl<&'a i32> for isize { type Output = isize; fn shl(self, rhs: &'a i32) -> isize { self << *rhs } }
-impl<'a> Shl<i32> for &'a isize { type Output = isize; fn shl(self, rhs: i32) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i32> for &'b isize { type Output = isize; fn shl(self, rhs: &'a i32) -> isize { *self << *rhs } }
-impl ShlAssign<i32> for isize { fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i32> for isize { fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
-impl Shr<i32> for isize { type Output = isize; fn shr(self, rhs: i32) -> isize { self >> rhs } }
-impl<'a> Shr<&'a i32> for isize { type Output = isize; fn shr(self, rhs: &'a i32) -> isize { self >> *rhs } }
-impl<'a> Shr<i32> for &'a isize { type Output = isize; fn shr(self, rhs: i32) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i32> for &'b isize { type Output = isize; fn shr(self, rhs: &'a i32) -> isize { *self >> *rhs } }
-impl ShrAssign<i32> for isize { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i32> for isize { fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
-impl Shl<usize> for isize { type Output = isize; fn shl(self, rhs: usize) -> isize { self << rhs } }
-impl<'a> Shl<&'a usize> for isize { type Output = isize; fn shl(self, rhs: &'a usize) -> isize { self << *rhs } }
-impl<'a> Shl<usize> for &'a isize { type Output = isize; fn shl(self, rhs: usize) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a usize> for &'b isize { type Output = isize; fn shl(self, rhs: &'a usize) -> isize { *self << *rhs } }
-impl ShlAssign<usize> for isize { fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a usize> for isize { fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
-impl Shr<usize> for isize { type Output = isize; fn shr(self, rhs: usize) -> isize { self >> rhs } }
-impl<'a> Shr<&'a usize> for isize { type Output = isize; fn shr(self, rhs: &'a usize) -> isize { self >> *rhs } }
-impl<'a> Shr<usize> for &'a isize { type Output = isize; fn shr(self, rhs: usize) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a usize> for &'b isize { type Output = isize; fn shr(self, rhs: &'a usize) -> isize { *self >> *rhs } }
-impl ShrAssign<usize> for isize { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a usize> for isize { fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
+impl Shl<isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> isize { self << rhs } }
+impl<'a> Shl<&'a isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> isize { self << *rhs } }
+impl<'a> Shl<isize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> isize { *self << *rhs } }
+impl ShlAssign<isize> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> isize { self >> rhs } }
+impl<'a> Shr<&'a isize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> isize { self >> *rhs } }
+impl<'a> Shr<isize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> isize { *self >> *rhs } }
+impl ShrAssign<isize> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> isize { self << rhs } }
+impl<'a> Shl<&'a u32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> isize { self << *rhs } }
+impl<'a> Shl<u32> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u32) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u32> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u32) -> isize { *self << *rhs } }
+impl ShlAssign<u32> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u32> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u32) { *self = *self << *rhs; } }
+impl Shr<u32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> isize { self >> rhs } }
+impl<'a> Shr<&'a u32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> isize { self >> *rhs } }
+impl<'a> Shr<u32> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u32) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u32> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u32) -> isize { *self >> *rhs } }
+impl ShrAssign<u32> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u32> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u32) { *self = *self >> *rhs; } }
+impl Shl<i32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> isize { self << rhs } }
+impl<'a> Shl<&'a i32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> isize { self << *rhs } }
+impl<'a> Shl<i32> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i32) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i32> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i32) -> isize { *self << *rhs } }
+impl ShlAssign<i32> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i32) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i32> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i32) { *self = *self << *rhs; } }
+impl Shr<i32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> isize { self >> rhs } }
+impl<'a> Shr<&'a i32> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> isize { self >> *rhs } }
+impl<'a> Shr<i32> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i32) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i32> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i32) -> isize { *self >> *rhs } }
+impl ShrAssign<i32> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i32> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i32) { *self = *self >> *rhs; } }
+impl Shl<usize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> isize { self << rhs } }
+impl<'a> Shl<&'a usize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> isize { self << *rhs } }
+impl<'a> Shl<usize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: usize) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a usize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a usize) -> isize { *self << *rhs } }
+impl ShlAssign<usize> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: usize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a usize> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a usize) { *self = *self << *rhs; } }
+impl Shr<usize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> isize { self >> rhs } }
+impl<'a> Shr<&'a usize> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> isize { self >> *rhs } }
+impl<'a> Shr<usize> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: usize) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a usize> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a usize) -> isize { *self >> *rhs } }
+impl ShrAssign<usize> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a usize> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a usize) { *self = *self >> *rhs; } }
 impl Not for isize { type Output = isize; fn not(self) -> isize { !self } }
 impl<'a> Not for &'a isize { type Output = isize; fn not(self) -> isize { !*self } }
-impl Neg for isize { type Output = isize; fn neg(self) -> isize { -self } }
-impl<'a> Neg for &'a isize { type Output = isize; fn neg(self) -> isize { -*self } }
-impl Sum for isize { fn sum<I: Iterator<Item = isize>>(iter: I) -> isize { crate::iter::sum_from(0 as isize, iter) } }
-impl<'a> Sum<&'a isize> for isize { fn sum<I: Iterator<Item = &'a isize>>(iter: I) -> isize { crate::iter::sum_from(0 as isize, iter.copied()) } }
-impl Product for isize { fn product<I: Iterator<Item = isize>>(iter: I) -> isize { crate::iter::product_from(1 as isize, iter) } }
-impl<'a> Product<&'a isize> for isize { fn product<I: Iterator<Item = &'a isize>>(iter: I) -> isize { crate::iter::product_from(1 as isize, iter.copied()) } }
+impl Neg for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn neg(self) -> isize { -self } }
+impl<'a> Neg for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn neg(self) -> isize { -*self } }
+impl Sum for isize { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a isize> for isize { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for isize { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a isize> for isize { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for isize { type Err = ParseIntError; fn from_str(src: &str) -> Result<isize, ParseIntError> { isize::from_str_radix(src, 10) } }
 impl Step for isize {
     fn steps_between(start: &isize, end: &isize) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as usize).wrapping_sub(*start as usize) as usize; (s, Some(s)) } else { (0, None) } }
     fn forward_checked(start: isize, n: usize) -> Option<isize> { if false { return None; } let w = start.wrapping_add(n as usize as isize); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: isize, n: usize) -> Option<isize> { if false { return None; } let w = start.wrapping_sub(n as usize as isize); if w <= start { Some(w) } else { None } }
+    #[inline]
+    fn forward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match usize::try_from(n) {
+            Ok(n) => start.overflowing_add_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 + n` necessarily overflows i8.
+            Err(_) => (start.wrapping_add_unsigned(n as usize), true),
+        }
+    }
+    #[inline]
+    fn backward_overflowing(start: Self, n: usize) -> (Self, bool) {
+        match usize::try_from(n) {
+            Ok(n) => start.overflowing_sub_unsigned(n),
+            // If n is out of range of e.g. u8,
+            // then it is bigger than the entire range for i8 is wide
+            // so `any_i8 - n` necessarily overflows i8.
+            Err(_) => (start.wrapping_sub_unsigned(n as usize), true),
+        }
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
     unsafe fn forward_unchecked(start: isize, n: usize) -> isize { start.wrapping_add(n as isize) }
     unsafe fn backward_unchecked(start: isize, n: usize) -> isize { start.wrapping_sub(n as isize) }
 }
@@ -1418,24 +1902,24 @@ impl Copy for f32 {}
 impl Default for f32 { fn default() -> f32 { 0.0 } }
 impl PartialEq for f32 { fn eq(&self, other: &f32) -> bool { *self == *other } fn ne(&self, other: &f32) -> bool { *self != *other } }
 impl PartialOrd for f32 { fn partial_cmp(&self, other: &f32) -> Option<Ordering> { if *self < *other { Some(Ordering::Less) } else if *self > *other { Some(Ordering::Greater) } else if *self == *other { Some(Ordering::Equal) } else { None } } fn lt(&self, other: &f32) -> bool { *self < *other } fn le(&self, other: &f32) -> bool { *self <= *other } fn gt(&self, other: &f32) -> bool { *self > *other } fn ge(&self, other: &f32) -> bool { *self >= *other } }
-impl Add for f32 { type Output = f32; fn add(self, rhs: f32) -> f32 { self + rhs } }
-impl<'a> Add<&'a f32> for f32 { type Output = f32; fn add(self, rhs: &'a f32) -> f32 { self + *rhs } }
-impl<'a> Add<f32> for &'a f32 { type Output = f32; fn add(self, rhs: f32) -> f32 { *self + rhs } }
-impl<'a, 'b> Add<&'a f32> for &'b f32 { type Output = f32; fn add(self, rhs: &'a f32) -> f32 { *self + *rhs } }
-impl AddAssign for f32 { fn add_assign(&mut self, rhs: f32) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a f32> for f32 { fn add_assign(&mut self, rhs: &'a f32) { *self = *self + *rhs; } }
-impl Sub for f32 { type Output = f32; fn sub(self, rhs: f32) -> f32 { self - rhs } }
-impl<'a> Sub<&'a f32> for f32 { type Output = f32; fn sub(self, rhs: &'a f32) -> f32 { self - *rhs } }
-impl<'a> Sub<f32> for &'a f32 { type Output = f32; fn sub(self, rhs: f32) -> f32 { *self - rhs } }
-impl<'a, 'b> Sub<&'a f32> for &'b f32 { type Output = f32; fn sub(self, rhs: &'a f32) -> f32 { *self - *rhs } }
-impl SubAssign for f32 { fn sub_assign(&mut self, rhs: f32) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a f32> for f32 { fn sub_assign(&mut self, rhs: &'a f32) { *self = *self - *rhs; } }
-impl Mul for f32 { type Output = f32; fn mul(self, rhs: f32) -> f32 { self * rhs } }
-impl<'a> Mul<&'a f32> for f32 { type Output = f32; fn mul(self, rhs: &'a f32) -> f32 { self * *rhs } }
-impl<'a> Mul<f32> for &'a f32 { type Output = f32; fn mul(self, rhs: f32) -> f32 { *self * rhs } }
-impl<'a, 'b> Mul<&'a f32> for &'b f32 { type Output = f32; fn mul(self, rhs: &'a f32) -> f32 { *self * *rhs } }
-impl MulAssign for f32 { fn mul_assign(&mut self, rhs: f32) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a f32> for f32 { fn mul_assign(&mut self, rhs: &'a f32) { *self = *self * *rhs; } }
+impl Add for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn add(self, rhs: f32) -> f32 { self + rhs } }
+impl<'a> Add<&'a f32> for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a f32) -> f32 { self + *rhs } }
+impl<'a> Add<f32> for &'a f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn add(self, rhs: f32) -> f32 { *self + rhs } }
+impl<'a, 'b> Add<&'a f32> for &'b f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a f32) -> f32 { *self + *rhs } }
+impl AddAssign for f32 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: f32) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a f32> for f32 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a f32) { *self = *self + *rhs; } }
+impl Sub for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: f32) -> f32 { self - rhs } }
+impl<'a> Sub<&'a f32> for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a f32) -> f32 { self - *rhs } }
+impl<'a> Sub<f32> for &'a f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: f32) -> f32 { *self - rhs } }
+impl<'a, 'b> Sub<&'a f32> for &'b f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a f32) -> f32 { *self - *rhs } }
+impl SubAssign for f32 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: f32) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a f32> for f32 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a f32) { *self = *self - *rhs; } }
+impl Mul for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: f32) -> f32 { self * rhs } }
+impl<'a> Mul<&'a f32> for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a f32) -> f32 { self * *rhs } }
+impl<'a> Mul<f32> for &'a f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: f32) -> f32 { *self * rhs } }
+impl<'a, 'b> Mul<&'a f32> for &'b f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a f32) -> f32 { *self * *rhs } }
+impl MulAssign for f32 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: f32) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a f32> for f32 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a f32) { *self = *self * *rhs; } }
 impl Div for f32 { type Output = f32; fn div(self, rhs: f32) -> f32 { self / rhs } }
 impl<'a> Div<&'a f32> for f32 { type Output = f32; fn div(self, rhs: &'a f32) -> f32 { self / *rhs } }
 impl<'a> Div<f32> for &'a f32 { type Output = f32; fn div(self, rhs: f32) -> f32 { *self / rhs } }
@@ -1448,12 +1932,12 @@ impl<'a> Rem<f32> for &'a f32 { type Output = f32; fn rem(self, rhs: f32) -> f32
 impl<'a, 'b> Rem<&'a f32> for &'b f32 { type Output = f32; fn rem(self, rhs: &'a f32) -> f32 { *self % *rhs } }
 impl RemAssign for f32 { fn rem_assign(&mut self, rhs: f32) { *self = *self % rhs; } }
 impl<'a> RemAssign<&'a f32> for f32 { fn rem_assign(&mut self, rhs: &'a f32) { *self = *self % *rhs; } }
-impl Neg for f32 { type Output = f32; fn neg(self) -> f32 { -self } }
-impl<'a> Neg for &'a f32 { type Output = f32; fn neg(self) -> f32 { -*self } }
-impl Sum for f32 { fn sum<I: Iterator<Item = f32>>(iter: I) -> f32 { crate::iter::sum_from(-0.0 as f32, iter) } }
-impl<'a> Sum<&'a f32> for f32 { fn sum<I: Iterator<Item = &'a f32>>(iter: I) -> f32 { crate::iter::sum_from(-0.0 as f32, iter.copied()) } }
-impl Product for f32 { fn product<I: Iterator<Item = f32>>(iter: I) -> f32 { crate::iter::product_from(1.0 as f32, iter) } }
-impl<'a> Product<&'a f32> for f32 { fn product<I: Iterator<Item = &'a f32>>(iter: I) -> f32 { crate::iter::product_from(1.0 as f32, iter.copied()) } }
+impl Neg for f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn neg(self) -> f32 { -self } }
+impl<'a> Neg for &'a f32 { type Output = f32; #[rustc_inherit_overflow_checks] fn neg(self) -> f32 { -*self } }
+impl Sum for f32 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(-0.0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a f32> for f32 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(-0.0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for f32 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1.0, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a f32> for f32 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1.0, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for f32 { type Err = crate::num::ParseFloatError; fn from_str(src: &str) -> Result<f32, crate::num::ParseFloatError> { crate::num::dec2flt::parse_f32(src) } }
 
 // ---- f64
@@ -1462,24 +1946,24 @@ impl Copy for f64 {}
 impl Default for f64 { fn default() -> f64 { 0.0 } }
 impl PartialEq for f64 { fn eq(&self, other: &f64) -> bool { *self == *other } fn ne(&self, other: &f64) -> bool { *self != *other } }
 impl PartialOrd for f64 { fn partial_cmp(&self, other: &f64) -> Option<Ordering> { if *self < *other { Some(Ordering::Less) } else if *self > *other { Some(Ordering::Greater) } else if *self == *other { Some(Ordering::Equal) } else { None } } fn lt(&self, other: &f64) -> bool { *self < *other } fn le(&self, other: &f64) -> bool { *self <= *other } fn gt(&self, other: &f64) -> bool { *self > *other } fn ge(&self, other: &f64) -> bool { *self >= *other } }
-impl Add for f64 { type Output = f64; fn add(self, rhs: f64) -> f64 { self + rhs } }
-impl<'a> Add<&'a f64> for f64 { type Output = f64; fn add(self, rhs: &'a f64) -> f64 { self + *rhs } }
-impl<'a> Add<f64> for &'a f64 { type Output = f64; fn add(self, rhs: f64) -> f64 { *self + rhs } }
-impl<'a, 'b> Add<&'a f64> for &'b f64 { type Output = f64; fn add(self, rhs: &'a f64) -> f64 { *self + *rhs } }
-impl AddAssign for f64 { fn add_assign(&mut self, rhs: f64) { *self = *self + rhs; } }
-impl<'a> AddAssign<&'a f64> for f64 { fn add_assign(&mut self, rhs: &'a f64) { *self = *self + *rhs; } }
-impl Sub for f64 { type Output = f64; fn sub(self, rhs: f64) -> f64 { self - rhs } }
-impl<'a> Sub<&'a f64> for f64 { type Output = f64; fn sub(self, rhs: &'a f64) -> f64 { self - *rhs } }
-impl<'a> Sub<f64> for &'a f64 { type Output = f64; fn sub(self, rhs: f64) -> f64 { *self - rhs } }
-impl<'a, 'b> Sub<&'a f64> for &'b f64 { type Output = f64; fn sub(self, rhs: &'a f64) -> f64 { *self - *rhs } }
-impl SubAssign for f64 { fn sub_assign(&mut self, rhs: f64) { *self = *self - rhs; } }
-impl<'a> SubAssign<&'a f64> for f64 { fn sub_assign(&mut self, rhs: &'a f64) { *self = *self - *rhs; } }
-impl Mul for f64 { type Output = f64; fn mul(self, rhs: f64) -> f64 { self * rhs } }
-impl<'a> Mul<&'a f64> for f64 { type Output = f64; fn mul(self, rhs: &'a f64) -> f64 { self * *rhs } }
-impl<'a> Mul<f64> for &'a f64 { type Output = f64; fn mul(self, rhs: f64) -> f64 { *self * rhs } }
-impl<'a, 'b> Mul<&'a f64> for &'b f64 { type Output = f64; fn mul(self, rhs: &'a f64) -> f64 { *self * *rhs } }
-impl MulAssign for f64 { fn mul_assign(&mut self, rhs: f64) { *self = *self * rhs; } }
-impl<'a> MulAssign<&'a f64> for f64 { fn mul_assign(&mut self, rhs: &'a f64) { *self = *self * *rhs; } }
+impl Add for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn add(self, rhs: f64) -> f64 { self + rhs } }
+impl<'a> Add<&'a f64> for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a f64) -> f64 { self + *rhs } }
+impl<'a> Add<f64> for &'a f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn add(self, rhs: f64) -> f64 { *self + rhs } }
+impl<'a, 'b> Add<&'a f64> for &'b f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn add(self, rhs: &'a f64) -> f64 { *self + *rhs } }
+impl AddAssign for f64 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: f64) { *self = *self + rhs; } }
+impl<'a> AddAssign<&'a f64> for f64 { #[rustc_inherit_overflow_checks] fn add_assign(&mut self, rhs: &'a f64) { *self = *self + *rhs; } }
+impl Sub for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: f64) -> f64 { self - rhs } }
+impl<'a> Sub<&'a f64> for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a f64) -> f64 { self - *rhs } }
+impl<'a> Sub<f64> for &'a f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: f64) -> f64 { *self - rhs } }
+impl<'a, 'b> Sub<&'a f64> for &'b f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn sub(self, rhs: &'a f64) -> f64 { *self - *rhs } }
+impl SubAssign for f64 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: f64) { *self = *self - rhs; } }
+impl<'a> SubAssign<&'a f64> for f64 { #[rustc_inherit_overflow_checks] fn sub_assign(&mut self, rhs: &'a f64) { *self = *self - *rhs; } }
+impl Mul for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: f64) -> f64 { self * rhs } }
+impl<'a> Mul<&'a f64> for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a f64) -> f64 { self * *rhs } }
+impl<'a> Mul<f64> for &'a f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: f64) -> f64 { *self * rhs } }
+impl<'a, 'b> Mul<&'a f64> for &'b f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn mul(self, rhs: &'a f64) -> f64 { *self * *rhs } }
+impl MulAssign for f64 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: f64) { *self = *self * rhs; } }
+impl<'a> MulAssign<&'a f64> for f64 { #[rustc_inherit_overflow_checks] fn mul_assign(&mut self, rhs: &'a f64) { *self = *self * *rhs; } }
 impl Div for f64 { type Output = f64; fn div(self, rhs: f64) -> f64 { self / rhs } }
 impl<'a> Div<&'a f64> for f64 { type Output = f64; fn div(self, rhs: &'a f64) -> f64 { self / *rhs } }
 impl<'a> Div<f64> for &'a f64 { type Output = f64; fn div(self, rhs: f64) -> f64 { *self / rhs } }
@@ -1492,12 +1976,12 @@ impl<'a> Rem<f64> for &'a f64 { type Output = f64; fn rem(self, rhs: f64) -> f64
 impl<'a, 'b> Rem<&'a f64> for &'b f64 { type Output = f64; fn rem(self, rhs: &'a f64) -> f64 { *self % *rhs } }
 impl RemAssign for f64 { fn rem_assign(&mut self, rhs: f64) { *self = *self % rhs; } }
 impl<'a> RemAssign<&'a f64> for f64 { fn rem_assign(&mut self, rhs: &'a f64) { *self = *self % *rhs; } }
-impl Neg for f64 { type Output = f64; fn neg(self) -> f64 { -self } }
-impl<'a> Neg for &'a f64 { type Output = f64; fn neg(self) -> f64 { -*self } }
-impl Sum for f64 { fn sum<I: Iterator<Item = f64>>(iter: I) -> f64 { crate::iter::sum_from(-0.0 as f64, iter) } }
-impl<'a> Sum<&'a f64> for f64 { fn sum<I: Iterator<Item = &'a f64>>(iter: I) -> f64 { crate::iter::sum_from(-0.0 as f64, iter.copied()) } }
-impl Product for f64 { fn product<I: Iterator<Item = f64>>(iter: I) -> f64 { crate::iter::product_from(1.0 as f64, iter) } }
-impl<'a> Product<&'a f64> for f64 { fn product<I: Iterator<Item = &'a f64>>(iter: I) -> f64 { crate::iter::product_from(1.0 as f64, iter.copied()) } }
+impl Neg for f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn neg(self) -> f64 { -self } }
+impl<'a> Neg for &'a f64 { type Output = f64; #[rustc_inherit_overflow_checks] fn neg(self) -> f64 { -*self } }
+impl Sum for f64 { fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(-0.0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl<'a> Sum<&'a f64> for f64 { fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(-0.0, #[rustc_inherit_overflow_checks] |a, b| a + b) } }
+impl Product for f64 { fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold(1.0, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
+impl<'a> Product<&'a f64> for f64 { fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold(1.0, #[rustc_inherit_overflow_checks] |a, b| a * b) } }
 impl FromStr for f64 { type Err = crate::num::ParseFloatError; fn from_str(src: &str) -> Result<f64, crate::num::ParseFloatError> { crate::num::dec2flt::parse_f64(src) } }
 
 // ---- bool
@@ -1551,6 +2035,67 @@ impl Ord for char { fn cmp(&self, other: &char) -> Ordering { (*self as u32).cmp
 impl bool {
     pub const fn then_some<T>(self, t: T) -> Option<T> { if self { Some(t) } else { None } }
     pub const fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T> { if self { Some(f()) } else { None } }
+
+    /// Returns `Ok(())` if the `bool` is [`true`](../std/keyword.true.html),
+    /// or `Err(err)` otherwise.
+    ///
+    /// Arguments passed to `ok_or` are eagerly evaluated; if you are
+    /// passing the result of a function call, it is recommended to use
+    /// [`ok_or_else`], which is lazily evaluated.
+    ///
+    /// [`ok_or_else`]: bool::ok_or_else
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert_eq!(false.ok_or(0), Err(0));
+    /// assert_eq!(true.ok_or(0), Ok(()));
+    /// ```
+    ///
+    /// ```
+    /// let mut a = 0;
+    /// let mut function_with_side_effects = || { a += 1; };
+    ///
+    /// assert!(true.ok_or(function_with_side_effects()).is_ok());
+    /// assert!(false.ok_or(function_with_side_effects()).is_err());
+    ///
+    /// // `a` is incremented twice because the value passed to `ok_or` is
+    /// // evaluated eagerly.
+    /// assert_eq!(a, 2);
+    /// ```
+    #[inline]
+    pub const fn ok_or<E: crate::marker::Destruct>(self, err: E) -> Result<(), E> {
+        if self { Ok(()) } else { Err(err) }
+    }
+
+    /// Returns `Ok(())` if the `bool` is [`true`](../std/keyword.true.html),
+    /// or `Err(f())` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert_eq!(false.ok_or_else(|| 0), Err(0));
+    /// assert_eq!(true.ok_or_else(|| 0), Ok(()));
+    /// ```
+    ///
+    /// ```
+    /// let mut a = 0;
+    ///
+    /// assert!(true.ok_or_else(|| { a += 1; }).is_ok());
+    /// assert!(false.ok_or_else(|| { a += 1; }).is_err());
+    ///
+    /// // `a` is incremented once because the closure is evaluated lazily by
+    /// // `ok_or_else`.
+    /// assert_eq!(a, 1);
+    /// ```
+    #[inline]
+    pub const fn ok_or_else<E, F: FnOnce() -> E + crate::marker::Destruct>(
+        self,
+        f: F,
+    ) -> Result<(), E> {
+        if self { Ok(()) } else { Err(f()) }
+    }
+
     /// rustc 1.100.0 (bool_toggle)
     pub const fn toggle(&mut self) { *self = !*self; }
 }
@@ -1841,1191 +2386,1191 @@ impl From<bool> for f32 { fn from(v: bool) -> f32 { v as u8 as f32 } }
 impl From<bool> for f64 { fn from(v: bool) -> f64 { v as u8 as f64 } }
 
 // ---- additional integer shift impls
-impl Shl<u16> for u8 { type Output = u8; fn shl(self, rhs: u16) -> u8 { self << rhs } }
-impl<'a> Shl<&'a u16> for u8 { type Output = u8; fn shl(self, rhs: &'a u16) -> u8 { self << *rhs } }
-impl<'a> Shl<u16> for &'a u8 { type Output = u8; fn shl(self, rhs: u16) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a u16) -> u8 { *self << *rhs } }
-impl ShlAssign<u16> for u8 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for u8 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for u8 { type Output = u8; fn shr(self, rhs: u16) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a u16> for u8 { type Output = u8; fn shr(self, rhs: &'a u16) -> u8 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a u8 { type Output = u8; fn shr(self, rhs: u16) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a u16) -> u8 { *self >> *rhs } }
-impl ShrAssign<u16> for u8 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for u8 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for u8 { type Output = u8; fn shl(self, rhs: u64) -> u8 { self << rhs } }
-impl<'a> Shl<&'a u64> for u8 { type Output = u8; fn shl(self, rhs: &'a u64) -> u8 { self << *rhs } }
-impl<'a> Shl<u64> for &'a u8 { type Output = u8; fn shl(self, rhs: u64) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a u64) -> u8 { *self << *rhs } }
-impl ShlAssign<u64> for u8 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for u8 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for u8 { type Output = u8; fn shr(self, rhs: u64) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a u64> for u8 { type Output = u8; fn shr(self, rhs: &'a u64) -> u8 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a u8 { type Output = u8; fn shr(self, rhs: u64) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a u64) -> u8 { *self >> *rhs } }
-impl ShrAssign<u64> for u8 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for u8 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for u8 { type Output = u8; fn shl(self, rhs: u128) -> u8 { self << rhs } }
-impl<'a> Shl<&'a u128> for u8 { type Output = u8; fn shl(self, rhs: &'a u128) -> u8 { self << *rhs } }
-impl<'a> Shl<u128> for &'a u8 { type Output = u8; fn shl(self, rhs: u128) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a u128) -> u8 { *self << *rhs } }
-impl ShlAssign<u128> for u8 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for u8 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for u8 { type Output = u8; fn shr(self, rhs: u128) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a u128> for u8 { type Output = u8; fn shr(self, rhs: &'a u128) -> u8 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a u8 { type Output = u8; fn shr(self, rhs: u128) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a u128) -> u8 { *self >> *rhs } }
-impl ShrAssign<u128> for u8 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for u8 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for u8 { type Output = u8; fn shl(self, rhs: i8) -> u8 { self << rhs } }
-impl<'a> Shl<&'a i8> for u8 { type Output = u8; fn shl(self, rhs: &'a i8) -> u8 { self << *rhs } }
-impl<'a> Shl<i8> for &'a u8 { type Output = u8; fn shl(self, rhs: i8) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a i8) -> u8 { *self << *rhs } }
-impl ShlAssign<i8> for u8 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for u8 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for u8 { type Output = u8; fn shr(self, rhs: i8) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a i8> for u8 { type Output = u8; fn shr(self, rhs: &'a i8) -> u8 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a u8 { type Output = u8; fn shr(self, rhs: i8) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a i8) -> u8 { *self >> *rhs } }
-impl ShrAssign<i8> for u8 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for u8 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for u8 { type Output = u8; fn shl(self, rhs: i16) -> u8 { self << rhs } }
-impl<'a> Shl<&'a i16> for u8 { type Output = u8; fn shl(self, rhs: &'a i16) -> u8 { self << *rhs } }
-impl<'a> Shl<i16> for &'a u8 { type Output = u8; fn shl(self, rhs: i16) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a i16) -> u8 { *self << *rhs } }
-impl ShlAssign<i16> for u8 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for u8 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for u8 { type Output = u8; fn shr(self, rhs: i16) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a i16> for u8 { type Output = u8; fn shr(self, rhs: &'a i16) -> u8 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a u8 { type Output = u8; fn shr(self, rhs: i16) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a i16) -> u8 { *self >> *rhs } }
-impl ShrAssign<i16> for u8 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for u8 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for u8 { type Output = u8; fn shl(self, rhs: i64) -> u8 { self << rhs } }
-impl<'a> Shl<&'a i64> for u8 { type Output = u8; fn shl(self, rhs: &'a i64) -> u8 { self << *rhs } }
-impl<'a> Shl<i64> for &'a u8 { type Output = u8; fn shl(self, rhs: i64) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a i64) -> u8 { *self << *rhs } }
-impl ShlAssign<i64> for u8 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for u8 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for u8 { type Output = u8; fn shr(self, rhs: i64) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a i64> for u8 { type Output = u8; fn shr(self, rhs: &'a i64) -> u8 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a u8 { type Output = u8; fn shr(self, rhs: i64) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a i64) -> u8 { *self >> *rhs } }
-impl ShrAssign<i64> for u8 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for u8 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for u8 { type Output = u8; fn shl(self, rhs: i128) -> u8 { self << rhs } }
-impl<'a> Shl<&'a i128> for u8 { type Output = u8; fn shl(self, rhs: &'a i128) -> u8 { self << *rhs } }
-impl<'a> Shl<i128> for &'a u8 { type Output = u8; fn shl(self, rhs: i128) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a i128) -> u8 { *self << *rhs } }
-impl ShlAssign<i128> for u8 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for u8 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for u8 { type Output = u8; fn shr(self, rhs: i128) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a i128> for u8 { type Output = u8; fn shr(self, rhs: &'a i128) -> u8 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a u8 { type Output = u8; fn shr(self, rhs: i128) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a i128) -> u8 { *self >> *rhs } }
-impl ShrAssign<i128> for u8 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for u8 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for u8 { type Output = u8; fn shl(self, rhs: isize) -> u8 { self << rhs } }
-impl<'a> Shl<&'a isize> for u8 { type Output = u8; fn shl(self, rhs: &'a isize) -> u8 { self << *rhs } }
-impl<'a> Shl<isize> for &'a u8 { type Output = u8; fn shl(self, rhs: isize) -> u8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b u8 { type Output = u8; fn shl(self, rhs: &'a isize) -> u8 { *self << *rhs } }
-impl ShlAssign<isize> for u8 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for u8 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for u8 { type Output = u8; fn shr(self, rhs: isize) -> u8 { self >> rhs } }
-impl<'a> Shr<&'a isize> for u8 { type Output = u8; fn shr(self, rhs: &'a isize) -> u8 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a u8 { type Output = u8; fn shr(self, rhs: isize) -> u8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b u8 { type Output = u8; fn shr(self, rhs: &'a isize) -> u8 { *self >> *rhs } }
-impl ShrAssign<isize> for u8 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for u8 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for u16 { type Output = u16; fn shl(self, rhs: u8) -> u16 { self << rhs } }
-impl<'a> Shl<&'a u8> for u16 { type Output = u16; fn shl(self, rhs: &'a u8) -> u16 { self << *rhs } }
-impl<'a> Shl<u8> for &'a u16 { type Output = u16; fn shl(self, rhs: u8) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a u8) -> u16 { *self << *rhs } }
-impl ShlAssign<u8> for u16 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for u16 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for u16 { type Output = u16; fn shr(self, rhs: u8) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a u8> for u16 { type Output = u16; fn shr(self, rhs: &'a u8) -> u16 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a u16 { type Output = u16; fn shr(self, rhs: u8) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a u8) -> u16 { *self >> *rhs } }
-impl ShrAssign<u8> for u16 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for u16 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u64> for u16 { type Output = u16; fn shl(self, rhs: u64) -> u16 { self << rhs } }
-impl<'a> Shl<&'a u64> for u16 { type Output = u16; fn shl(self, rhs: &'a u64) -> u16 { self << *rhs } }
-impl<'a> Shl<u64> for &'a u16 { type Output = u16; fn shl(self, rhs: u64) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a u64) -> u16 { *self << *rhs } }
-impl ShlAssign<u64> for u16 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for u16 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for u16 { type Output = u16; fn shr(self, rhs: u64) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a u64> for u16 { type Output = u16; fn shr(self, rhs: &'a u64) -> u16 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a u16 { type Output = u16; fn shr(self, rhs: u64) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a u64) -> u16 { *self >> *rhs } }
-impl ShrAssign<u64> for u16 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for u16 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for u16 { type Output = u16; fn shl(self, rhs: u128) -> u16 { self << rhs } }
-impl<'a> Shl<&'a u128> for u16 { type Output = u16; fn shl(self, rhs: &'a u128) -> u16 { self << *rhs } }
-impl<'a> Shl<u128> for &'a u16 { type Output = u16; fn shl(self, rhs: u128) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a u128) -> u16 { *self << *rhs } }
-impl ShlAssign<u128> for u16 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for u16 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for u16 { type Output = u16; fn shr(self, rhs: u128) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a u128> for u16 { type Output = u16; fn shr(self, rhs: &'a u128) -> u16 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a u16 { type Output = u16; fn shr(self, rhs: u128) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a u128) -> u16 { *self >> *rhs } }
-impl ShrAssign<u128> for u16 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for u16 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for u16 { type Output = u16; fn shl(self, rhs: i8) -> u16 { self << rhs } }
-impl<'a> Shl<&'a i8> for u16 { type Output = u16; fn shl(self, rhs: &'a i8) -> u16 { self << *rhs } }
-impl<'a> Shl<i8> for &'a u16 { type Output = u16; fn shl(self, rhs: i8) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a i8) -> u16 { *self << *rhs } }
-impl ShlAssign<i8> for u16 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for u16 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for u16 { type Output = u16; fn shr(self, rhs: i8) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a i8> for u16 { type Output = u16; fn shr(self, rhs: &'a i8) -> u16 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a u16 { type Output = u16; fn shr(self, rhs: i8) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a i8) -> u16 { *self >> *rhs } }
-impl ShrAssign<i8> for u16 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for u16 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for u16 { type Output = u16; fn shl(self, rhs: i16) -> u16 { self << rhs } }
-impl<'a> Shl<&'a i16> for u16 { type Output = u16; fn shl(self, rhs: &'a i16) -> u16 { self << *rhs } }
-impl<'a> Shl<i16> for &'a u16 { type Output = u16; fn shl(self, rhs: i16) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a i16) -> u16 { *self << *rhs } }
-impl ShlAssign<i16> for u16 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for u16 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for u16 { type Output = u16; fn shr(self, rhs: i16) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a i16> for u16 { type Output = u16; fn shr(self, rhs: &'a i16) -> u16 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a u16 { type Output = u16; fn shr(self, rhs: i16) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a i16) -> u16 { *self >> *rhs } }
-impl ShrAssign<i16> for u16 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for u16 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for u16 { type Output = u16; fn shl(self, rhs: i64) -> u16 { self << rhs } }
-impl<'a> Shl<&'a i64> for u16 { type Output = u16; fn shl(self, rhs: &'a i64) -> u16 { self << *rhs } }
-impl<'a> Shl<i64> for &'a u16 { type Output = u16; fn shl(self, rhs: i64) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a i64) -> u16 { *self << *rhs } }
-impl ShlAssign<i64> for u16 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for u16 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for u16 { type Output = u16; fn shr(self, rhs: i64) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a i64> for u16 { type Output = u16; fn shr(self, rhs: &'a i64) -> u16 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a u16 { type Output = u16; fn shr(self, rhs: i64) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a i64) -> u16 { *self >> *rhs } }
-impl ShrAssign<i64> for u16 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for u16 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for u16 { type Output = u16; fn shl(self, rhs: i128) -> u16 { self << rhs } }
-impl<'a> Shl<&'a i128> for u16 { type Output = u16; fn shl(self, rhs: &'a i128) -> u16 { self << *rhs } }
-impl<'a> Shl<i128> for &'a u16 { type Output = u16; fn shl(self, rhs: i128) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a i128) -> u16 { *self << *rhs } }
-impl ShlAssign<i128> for u16 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for u16 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for u16 { type Output = u16; fn shr(self, rhs: i128) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a i128> for u16 { type Output = u16; fn shr(self, rhs: &'a i128) -> u16 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a u16 { type Output = u16; fn shr(self, rhs: i128) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a i128) -> u16 { *self >> *rhs } }
-impl ShrAssign<i128> for u16 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for u16 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for u16 { type Output = u16; fn shl(self, rhs: isize) -> u16 { self << rhs } }
-impl<'a> Shl<&'a isize> for u16 { type Output = u16; fn shl(self, rhs: &'a isize) -> u16 { self << *rhs } }
-impl<'a> Shl<isize> for &'a u16 { type Output = u16; fn shl(self, rhs: isize) -> u16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b u16 { type Output = u16; fn shl(self, rhs: &'a isize) -> u16 { *self << *rhs } }
-impl ShlAssign<isize> for u16 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for u16 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for u16 { type Output = u16; fn shr(self, rhs: isize) -> u16 { self >> rhs } }
-impl<'a> Shr<&'a isize> for u16 { type Output = u16; fn shr(self, rhs: &'a isize) -> u16 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a u16 { type Output = u16; fn shr(self, rhs: isize) -> u16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b u16 { type Output = u16; fn shr(self, rhs: &'a isize) -> u16 { *self >> *rhs } }
-impl ShrAssign<isize> for u16 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for u16 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for u32 { type Output = u32; fn shl(self, rhs: u8) -> u32 { self << rhs } }
-impl<'a> Shl<&'a u8> for u32 { type Output = u32; fn shl(self, rhs: &'a u8) -> u32 { self << *rhs } }
-impl<'a> Shl<u8> for &'a u32 { type Output = u32; fn shl(self, rhs: u8) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a u8) -> u32 { *self << *rhs } }
-impl ShlAssign<u8> for u32 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for u32 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for u32 { type Output = u32; fn shr(self, rhs: u8) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a u8> for u32 { type Output = u32; fn shr(self, rhs: &'a u8) -> u32 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a u32 { type Output = u32; fn shr(self, rhs: u8) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a u8) -> u32 { *self >> *rhs } }
-impl ShrAssign<u8> for u32 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for u32 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for u32 { type Output = u32; fn shl(self, rhs: u16) -> u32 { self << rhs } }
-impl<'a> Shl<&'a u16> for u32 { type Output = u32; fn shl(self, rhs: &'a u16) -> u32 { self << *rhs } }
-impl<'a> Shl<u16> for &'a u32 { type Output = u32; fn shl(self, rhs: u16) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a u16) -> u32 { *self << *rhs } }
-impl ShlAssign<u16> for u32 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for u32 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for u32 { type Output = u32; fn shr(self, rhs: u16) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a u16> for u32 { type Output = u32; fn shr(self, rhs: &'a u16) -> u32 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a u32 { type Output = u32; fn shr(self, rhs: u16) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a u16) -> u32 { *self >> *rhs } }
-impl ShrAssign<u16> for u32 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for u32 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for u32 { type Output = u32; fn shl(self, rhs: u64) -> u32 { self << rhs } }
-impl<'a> Shl<&'a u64> for u32 { type Output = u32; fn shl(self, rhs: &'a u64) -> u32 { self << *rhs } }
-impl<'a> Shl<u64> for &'a u32 { type Output = u32; fn shl(self, rhs: u64) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a u64) -> u32 { *self << *rhs } }
-impl ShlAssign<u64> for u32 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for u32 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for u32 { type Output = u32; fn shr(self, rhs: u64) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a u64> for u32 { type Output = u32; fn shr(self, rhs: &'a u64) -> u32 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a u32 { type Output = u32; fn shr(self, rhs: u64) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a u64) -> u32 { *self >> *rhs } }
-impl ShrAssign<u64> for u32 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for u32 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for u32 { type Output = u32; fn shl(self, rhs: u128) -> u32 { self << rhs } }
-impl<'a> Shl<&'a u128> for u32 { type Output = u32; fn shl(self, rhs: &'a u128) -> u32 { self << *rhs } }
-impl<'a> Shl<u128> for &'a u32 { type Output = u32; fn shl(self, rhs: u128) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a u128) -> u32 { *self << *rhs } }
-impl ShlAssign<u128> for u32 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for u32 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for u32 { type Output = u32; fn shr(self, rhs: u128) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a u128> for u32 { type Output = u32; fn shr(self, rhs: &'a u128) -> u32 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a u32 { type Output = u32; fn shr(self, rhs: u128) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a u128) -> u32 { *self >> *rhs } }
-impl ShrAssign<u128> for u32 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for u32 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for u32 { type Output = u32; fn shl(self, rhs: i8) -> u32 { self << rhs } }
-impl<'a> Shl<&'a i8> for u32 { type Output = u32; fn shl(self, rhs: &'a i8) -> u32 { self << *rhs } }
-impl<'a> Shl<i8> for &'a u32 { type Output = u32; fn shl(self, rhs: i8) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a i8) -> u32 { *self << *rhs } }
-impl ShlAssign<i8> for u32 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for u32 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for u32 { type Output = u32; fn shr(self, rhs: i8) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a i8> for u32 { type Output = u32; fn shr(self, rhs: &'a i8) -> u32 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a u32 { type Output = u32; fn shr(self, rhs: i8) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a i8) -> u32 { *self >> *rhs } }
-impl ShrAssign<i8> for u32 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for u32 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for u32 { type Output = u32; fn shl(self, rhs: i16) -> u32 { self << rhs } }
-impl<'a> Shl<&'a i16> for u32 { type Output = u32; fn shl(self, rhs: &'a i16) -> u32 { self << *rhs } }
-impl<'a> Shl<i16> for &'a u32 { type Output = u32; fn shl(self, rhs: i16) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a i16) -> u32 { *self << *rhs } }
-impl ShlAssign<i16> for u32 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for u32 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for u32 { type Output = u32; fn shr(self, rhs: i16) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a i16> for u32 { type Output = u32; fn shr(self, rhs: &'a i16) -> u32 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a u32 { type Output = u32; fn shr(self, rhs: i16) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a i16) -> u32 { *self >> *rhs } }
-impl ShrAssign<i16> for u32 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for u32 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for u32 { type Output = u32; fn shl(self, rhs: i64) -> u32 { self << rhs } }
-impl<'a> Shl<&'a i64> for u32 { type Output = u32; fn shl(self, rhs: &'a i64) -> u32 { self << *rhs } }
-impl<'a> Shl<i64> for &'a u32 { type Output = u32; fn shl(self, rhs: i64) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a i64) -> u32 { *self << *rhs } }
-impl ShlAssign<i64> for u32 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for u32 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for u32 { type Output = u32; fn shr(self, rhs: i64) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a i64> for u32 { type Output = u32; fn shr(self, rhs: &'a i64) -> u32 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a u32 { type Output = u32; fn shr(self, rhs: i64) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a i64) -> u32 { *self >> *rhs } }
-impl ShrAssign<i64> for u32 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for u32 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for u32 { type Output = u32; fn shl(self, rhs: i128) -> u32 { self << rhs } }
-impl<'a> Shl<&'a i128> for u32 { type Output = u32; fn shl(self, rhs: &'a i128) -> u32 { self << *rhs } }
-impl<'a> Shl<i128> for &'a u32 { type Output = u32; fn shl(self, rhs: i128) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a i128) -> u32 { *self << *rhs } }
-impl ShlAssign<i128> for u32 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for u32 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for u32 { type Output = u32; fn shr(self, rhs: i128) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a i128> for u32 { type Output = u32; fn shr(self, rhs: &'a i128) -> u32 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a u32 { type Output = u32; fn shr(self, rhs: i128) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a i128) -> u32 { *self >> *rhs } }
-impl ShrAssign<i128> for u32 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for u32 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for u32 { type Output = u32; fn shl(self, rhs: isize) -> u32 { self << rhs } }
-impl<'a> Shl<&'a isize> for u32 { type Output = u32; fn shl(self, rhs: &'a isize) -> u32 { self << *rhs } }
-impl<'a> Shl<isize> for &'a u32 { type Output = u32; fn shl(self, rhs: isize) -> u32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b u32 { type Output = u32; fn shl(self, rhs: &'a isize) -> u32 { *self << *rhs } }
-impl ShlAssign<isize> for u32 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for u32 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for u32 { type Output = u32; fn shr(self, rhs: isize) -> u32 { self >> rhs } }
-impl<'a> Shr<&'a isize> for u32 { type Output = u32; fn shr(self, rhs: &'a isize) -> u32 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a u32 { type Output = u32; fn shr(self, rhs: isize) -> u32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b u32 { type Output = u32; fn shr(self, rhs: &'a isize) -> u32 { *self >> *rhs } }
-impl ShrAssign<isize> for u32 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for u32 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for u64 { type Output = u64; fn shl(self, rhs: u8) -> u64 { self << rhs } }
-impl<'a> Shl<&'a u8> for u64 { type Output = u64; fn shl(self, rhs: &'a u8) -> u64 { self << *rhs } }
-impl<'a> Shl<u8> for &'a u64 { type Output = u64; fn shl(self, rhs: u8) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a u8) -> u64 { *self << *rhs } }
-impl ShlAssign<u8> for u64 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for u64 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for u64 { type Output = u64; fn shr(self, rhs: u8) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a u8> for u64 { type Output = u64; fn shr(self, rhs: &'a u8) -> u64 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a u64 { type Output = u64; fn shr(self, rhs: u8) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a u8) -> u64 { *self >> *rhs } }
-impl ShrAssign<u8> for u64 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for u64 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for u64 { type Output = u64; fn shl(self, rhs: u16) -> u64 { self << rhs } }
-impl<'a> Shl<&'a u16> for u64 { type Output = u64; fn shl(self, rhs: &'a u16) -> u64 { self << *rhs } }
-impl<'a> Shl<u16> for &'a u64 { type Output = u64; fn shl(self, rhs: u16) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a u16) -> u64 { *self << *rhs } }
-impl ShlAssign<u16> for u64 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for u64 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for u64 { type Output = u64; fn shr(self, rhs: u16) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a u16> for u64 { type Output = u64; fn shr(self, rhs: &'a u16) -> u64 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a u64 { type Output = u64; fn shr(self, rhs: u16) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a u16) -> u64 { *self >> *rhs } }
-impl ShrAssign<u16> for u64 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for u64 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u128> for u64 { type Output = u64; fn shl(self, rhs: u128) -> u64 { self << rhs } }
-impl<'a> Shl<&'a u128> for u64 { type Output = u64; fn shl(self, rhs: &'a u128) -> u64 { self << *rhs } }
-impl<'a> Shl<u128> for &'a u64 { type Output = u64; fn shl(self, rhs: u128) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a u128) -> u64 { *self << *rhs } }
-impl ShlAssign<u128> for u64 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for u64 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for u64 { type Output = u64; fn shr(self, rhs: u128) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a u128> for u64 { type Output = u64; fn shr(self, rhs: &'a u128) -> u64 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a u64 { type Output = u64; fn shr(self, rhs: u128) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a u128) -> u64 { *self >> *rhs } }
-impl ShrAssign<u128> for u64 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for u64 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for u64 { type Output = u64; fn shl(self, rhs: i8) -> u64 { self << rhs } }
-impl<'a> Shl<&'a i8> for u64 { type Output = u64; fn shl(self, rhs: &'a i8) -> u64 { self << *rhs } }
-impl<'a> Shl<i8> for &'a u64 { type Output = u64; fn shl(self, rhs: i8) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a i8) -> u64 { *self << *rhs } }
-impl ShlAssign<i8> for u64 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for u64 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for u64 { type Output = u64; fn shr(self, rhs: i8) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a i8> for u64 { type Output = u64; fn shr(self, rhs: &'a i8) -> u64 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a u64 { type Output = u64; fn shr(self, rhs: i8) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a i8) -> u64 { *self >> *rhs } }
-impl ShrAssign<i8> for u64 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for u64 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for u64 { type Output = u64; fn shl(self, rhs: i16) -> u64 { self << rhs } }
-impl<'a> Shl<&'a i16> for u64 { type Output = u64; fn shl(self, rhs: &'a i16) -> u64 { self << *rhs } }
-impl<'a> Shl<i16> for &'a u64 { type Output = u64; fn shl(self, rhs: i16) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a i16) -> u64 { *self << *rhs } }
-impl ShlAssign<i16> for u64 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for u64 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for u64 { type Output = u64; fn shr(self, rhs: i16) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a i16> for u64 { type Output = u64; fn shr(self, rhs: &'a i16) -> u64 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a u64 { type Output = u64; fn shr(self, rhs: i16) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a i16) -> u64 { *self >> *rhs } }
-impl ShrAssign<i16> for u64 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for u64 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for u64 { type Output = u64; fn shl(self, rhs: i64) -> u64 { self << rhs } }
-impl<'a> Shl<&'a i64> for u64 { type Output = u64; fn shl(self, rhs: &'a i64) -> u64 { self << *rhs } }
-impl<'a> Shl<i64> for &'a u64 { type Output = u64; fn shl(self, rhs: i64) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a i64) -> u64 { *self << *rhs } }
-impl ShlAssign<i64> for u64 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for u64 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for u64 { type Output = u64; fn shr(self, rhs: i64) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a i64> for u64 { type Output = u64; fn shr(self, rhs: &'a i64) -> u64 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a u64 { type Output = u64; fn shr(self, rhs: i64) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a i64) -> u64 { *self >> *rhs } }
-impl ShrAssign<i64> for u64 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for u64 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for u64 { type Output = u64; fn shl(self, rhs: i128) -> u64 { self << rhs } }
-impl<'a> Shl<&'a i128> for u64 { type Output = u64; fn shl(self, rhs: &'a i128) -> u64 { self << *rhs } }
-impl<'a> Shl<i128> for &'a u64 { type Output = u64; fn shl(self, rhs: i128) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a i128) -> u64 { *self << *rhs } }
-impl ShlAssign<i128> for u64 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for u64 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for u64 { type Output = u64; fn shr(self, rhs: i128) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a i128> for u64 { type Output = u64; fn shr(self, rhs: &'a i128) -> u64 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a u64 { type Output = u64; fn shr(self, rhs: i128) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a i128) -> u64 { *self >> *rhs } }
-impl ShrAssign<i128> for u64 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for u64 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for u64 { type Output = u64; fn shl(self, rhs: isize) -> u64 { self << rhs } }
-impl<'a> Shl<&'a isize> for u64 { type Output = u64; fn shl(self, rhs: &'a isize) -> u64 { self << *rhs } }
-impl<'a> Shl<isize> for &'a u64 { type Output = u64; fn shl(self, rhs: isize) -> u64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b u64 { type Output = u64; fn shl(self, rhs: &'a isize) -> u64 { *self << *rhs } }
-impl ShlAssign<isize> for u64 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for u64 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for u64 { type Output = u64; fn shr(self, rhs: isize) -> u64 { self >> rhs } }
-impl<'a> Shr<&'a isize> for u64 { type Output = u64; fn shr(self, rhs: &'a isize) -> u64 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a u64 { type Output = u64; fn shr(self, rhs: isize) -> u64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b u64 { type Output = u64; fn shr(self, rhs: &'a isize) -> u64 { *self >> *rhs } }
-impl ShrAssign<isize> for u64 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for u64 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for u128 { type Output = u128; fn shl(self, rhs: u8) -> u128 { self << rhs } }
-impl<'a> Shl<&'a u8> for u128 { type Output = u128; fn shl(self, rhs: &'a u8) -> u128 { self << *rhs } }
-impl<'a> Shl<u8> for &'a u128 { type Output = u128; fn shl(self, rhs: u8) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a u8) -> u128 { *self << *rhs } }
-impl ShlAssign<u8> for u128 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for u128 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for u128 { type Output = u128; fn shr(self, rhs: u8) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a u8> for u128 { type Output = u128; fn shr(self, rhs: &'a u8) -> u128 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a u128 { type Output = u128; fn shr(self, rhs: u8) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a u8) -> u128 { *self >> *rhs } }
-impl ShrAssign<u8> for u128 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for u128 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for u128 { type Output = u128; fn shl(self, rhs: u16) -> u128 { self << rhs } }
-impl<'a> Shl<&'a u16> for u128 { type Output = u128; fn shl(self, rhs: &'a u16) -> u128 { self << *rhs } }
-impl<'a> Shl<u16> for &'a u128 { type Output = u128; fn shl(self, rhs: u16) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a u16) -> u128 { *self << *rhs } }
-impl ShlAssign<u16> for u128 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for u128 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for u128 { type Output = u128; fn shr(self, rhs: u16) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a u16> for u128 { type Output = u128; fn shr(self, rhs: &'a u16) -> u128 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a u128 { type Output = u128; fn shr(self, rhs: u16) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a u16) -> u128 { *self >> *rhs } }
-impl ShrAssign<u16> for u128 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for u128 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for u128 { type Output = u128; fn shl(self, rhs: u64) -> u128 { self << rhs } }
-impl<'a> Shl<&'a u64> for u128 { type Output = u128; fn shl(self, rhs: &'a u64) -> u128 { self << *rhs } }
-impl<'a> Shl<u64> for &'a u128 { type Output = u128; fn shl(self, rhs: u64) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a u64) -> u128 { *self << *rhs } }
-impl ShlAssign<u64> for u128 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for u128 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for u128 { type Output = u128; fn shr(self, rhs: u64) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a u64> for u128 { type Output = u128; fn shr(self, rhs: &'a u64) -> u128 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a u128 { type Output = u128; fn shr(self, rhs: u64) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a u64) -> u128 { *self >> *rhs } }
-impl ShrAssign<u64> for u128 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for u128 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<i8> for u128 { type Output = u128; fn shl(self, rhs: i8) -> u128 { self << rhs } }
-impl<'a> Shl<&'a i8> for u128 { type Output = u128; fn shl(self, rhs: &'a i8) -> u128 { self << *rhs } }
-impl<'a> Shl<i8> for &'a u128 { type Output = u128; fn shl(self, rhs: i8) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a i8) -> u128 { *self << *rhs } }
-impl ShlAssign<i8> for u128 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for u128 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for u128 { type Output = u128; fn shr(self, rhs: i8) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a i8> for u128 { type Output = u128; fn shr(self, rhs: &'a i8) -> u128 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a u128 { type Output = u128; fn shr(self, rhs: i8) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a i8) -> u128 { *self >> *rhs } }
-impl ShrAssign<i8> for u128 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for u128 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for u128 { type Output = u128; fn shl(self, rhs: i16) -> u128 { self << rhs } }
-impl<'a> Shl<&'a i16> for u128 { type Output = u128; fn shl(self, rhs: &'a i16) -> u128 { self << *rhs } }
-impl<'a> Shl<i16> for &'a u128 { type Output = u128; fn shl(self, rhs: i16) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a i16) -> u128 { *self << *rhs } }
-impl ShlAssign<i16> for u128 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for u128 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for u128 { type Output = u128; fn shr(self, rhs: i16) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a i16> for u128 { type Output = u128; fn shr(self, rhs: &'a i16) -> u128 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a u128 { type Output = u128; fn shr(self, rhs: i16) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a i16) -> u128 { *self >> *rhs } }
-impl ShrAssign<i16> for u128 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for u128 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for u128 { type Output = u128; fn shl(self, rhs: i64) -> u128 { self << rhs } }
-impl<'a> Shl<&'a i64> for u128 { type Output = u128; fn shl(self, rhs: &'a i64) -> u128 { self << *rhs } }
-impl<'a> Shl<i64> for &'a u128 { type Output = u128; fn shl(self, rhs: i64) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a i64) -> u128 { *self << *rhs } }
-impl ShlAssign<i64> for u128 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for u128 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for u128 { type Output = u128; fn shr(self, rhs: i64) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a i64> for u128 { type Output = u128; fn shr(self, rhs: &'a i64) -> u128 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a u128 { type Output = u128; fn shr(self, rhs: i64) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a i64) -> u128 { *self >> *rhs } }
-impl ShrAssign<i64> for u128 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for u128 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for u128 { type Output = u128; fn shl(self, rhs: i128) -> u128 { self << rhs } }
-impl<'a> Shl<&'a i128> for u128 { type Output = u128; fn shl(self, rhs: &'a i128) -> u128 { self << *rhs } }
-impl<'a> Shl<i128> for &'a u128 { type Output = u128; fn shl(self, rhs: i128) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a i128) -> u128 { *self << *rhs } }
-impl ShlAssign<i128> for u128 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for u128 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for u128 { type Output = u128; fn shr(self, rhs: i128) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a i128> for u128 { type Output = u128; fn shr(self, rhs: &'a i128) -> u128 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a u128 { type Output = u128; fn shr(self, rhs: i128) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a i128) -> u128 { *self >> *rhs } }
-impl ShrAssign<i128> for u128 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for u128 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for u128 { type Output = u128; fn shl(self, rhs: isize) -> u128 { self << rhs } }
-impl<'a> Shl<&'a isize> for u128 { type Output = u128; fn shl(self, rhs: &'a isize) -> u128 { self << *rhs } }
-impl<'a> Shl<isize> for &'a u128 { type Output = u128; fn shl(self, rhs: isize) -> u128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b u128 { type Output = u128; fn shl(self, rhs: &'a isize) -> u128 { *self << *rhs } }
-impl ShlAssign<isize> for u128 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for u128 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for u128 { type Output = u128; fn shr(self, rhs: isize) -> u128 { self >> rhs } }
-impl<'a> Shr<&'a isize> for u128 { type Output = u128; fn shr(self, rhs: &'a isize) -> u128 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a u128 { type Output = u128; fn shr(self, rhs: isize) -> u128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b u128 { type Output = u128; fn shr(self, rhs: &'a isize) -> u128 { *self >> *rhs } }
-impl ShrAssign<isize> for u128 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for u128 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for usize { type Output = usize; fn shl(self, rhs: u8) -> usize { self << rhs } }
-impl<'a> Shl<&'a u8> for usize { type Output = usize; fn shl(self, rhs: &'a u8) -> usize { self << *rhs } }
-impl<'a> Shl<u8> for &'a usize { type Output = usize; fn shl(self, rhs: u8) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b usize { type Output = usize; fn shl(self, rhs: &'a u8) -> usize { *self << *rhs } }
-impl ShlAssign<u8> for usize { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for usize { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for usize { type Output = usize; fn shr(self, rhs: u8) -> usize { self >> rhs } }
-impl<'a> Shr<&'a u8> for usize { type Output = usize; fn shr(self, rhs: &'a u8) -> usize { self >> *rhs } }
-impl<'a> Shr<u8> for &'a usize { type Output = usize; fn shr(self, rhs: u8) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b usize { type Output = usize; fn shr(self, rhs: &'a u8) -> usize { *self >> *rhs } }
-impl ShrAssign<u8> for usize { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for usize { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for usize { type Output = usize; fn shl(self, rhs: u16) -> usize { self << rhs } }
-impl<'a> Shl<&'a u16> for usize { type Output = usize; fn shl(self, rhs: &'a u16) -> usize { self << *rhs } }
-impl<'a> Shl<u16> for &'a usize { type Output = usize; fn shl(self, rhs: u16) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b usize { type Output = usize; fn shl(self, rhs: &'a u16) -> usize { *self << *rhs } }
-impl ShlAssign<u16> for usize { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for usize { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for usize { type Output = usize; fn shr(self, rhs: u16) -> usize { self >> rhs } }
-impl<'a> Shr<&'a u16> for usize { type Output = usize; fn shr(self, rhs: &'a u16) -> usize { self >> *rhs } }
-impl<'a> Shr<u16> for &'a usize { type Output = usize; fn shr(self, rhs: u16) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b usize { type Output = usize; fn shr(self, rhs: &'a u16) -> usize { *self >> *rhs } }
-impl ShrAssign<u16> for usize { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for usize { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for usize { type Output = usize; fn shl(self, rhs: u64) -> usize { self << rhs } }
-impl<'a> Shl<&'a u64> for usize { type Output = usize; fn shl(self, rhs: &'a u64) -> usize { self << *rhs } }
-impl<'a> Shl<u64> for &'a usize { type Output = usize; fn shl(self, rhs: u64) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b usize { type Output = usize; fn shl(self, rhs: &'a u64) -> usize { *self << *rhs } }
-impl ShlAssign<u64> for usize { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for usize { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for usize { type Output = usize; fn shr(self, rhs: u64) -> usize { self >> rhs } }
-impl<'a> Shr<&'a u64> for usize { type Output = usize; fn shr(self, rhs: &'a u64) -> usize { self >> *rhs } }
-impl<'a> Shr<u64> for &'a usize { type Output = usize; fn shr(self, rhs: u64) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b usize { type Output = usize; fn shr(self, rhs: &'a u64) -> usize { *self >> *rhs } }
-impl ShrAssign<u64> for usize { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for usize { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for usize { type Output = usize; fn shl(self, rhs: u128) -> usize { self << rhs } }
-impl<'a> Shl<&'a u128> for usize { type Output = usize; fn shl(self, rhs: &'a u128) -> usize { self << *rhs } }
-impl<'a> Shl<u128> for &'a usize { type Output = usize; fn shl(self, rhs: u128) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b usize { type Output = usize; fn shl(self, rhs: &'a u128) -> usize { *self << *rhs } }
-impl ShlAssign<u128> for usize { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for usize { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for usize { type Output = usize; fn shr(self, rhs: u128) -> usize { self >> rhs } }
-impl<'a> Shr<&'a u128> for usize { type Output = usize; fn shr(self, rhs: &'a u128) -> usize { self >> *rhs } }
-impl<'a> Shr<u128> for &'a usize { type Output = usize; fn shr(self, rhs: u128) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b usize { type Output = usize; fn shr(self, rhs: &'a u128) -> usize { *self >> *rhs } }
-impl ShrAssign<u128> for usize { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for usize { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for usize { type Output = usize; fn shl(self, rhs: i8) -> usize { self << rhs } }
-impl<'a> Shl<&'a i8> for usize { type Output = usize; fn shl(self, rhs: &'a i8) -> usize { self << *rhs } }
-impl<'a> Shl<i8> for &'a usize { type Output = usize; fn shl(self, rhs: i8) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b usize { type Output = usize; fn shl(self, rhs: &'a i8) -> usize { *self << *rhs } }
-impl ShlAssign<i8> for usize { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for usize { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for usize { type Output = usize; fn shr(self, rhs: i8) -> usize { self >> rhs } }
-impl<'a> Shr<&'a i8> for usize { type Output = usize; fn shr(self, rhs: &'a i8) -> usize { self >> *rhs } }
-impl<'a> Shr<i8> for &'a usize { type Output = usize; fn shr(self, rhs: i8) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b usize { type Output = usize; fn shr(self, rhs: &'a i8) -> usize { *self >> *rhs } }
-impl ShrAssign<i8> for usize { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for usize { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for usize { type Output = usize; fn shl(self, rhs: i16) -> usize { self << rhs } }
-impl<'a> Shl<&'a i16> for usize { type Output = usize; fn shl(self, rhs: &'a i16) -> usize { self << *rhs } }
-impl<'a> Shl<i16> for &'a usize { type Output = usize; fn shl(self, rhs: i16) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b usize { type Output = usize; fn shl(self, rhs: &'a i16) -> usize { *self << *rhs } }
-impl ShlAssign<i16> for usize { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for usize { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for usize { type Output = usize; fn shr(self, rhs: i16) -> usize { self >> rhs } }
-impl<'a> Shr<&'a i16> for usize { type Output = usize; fn shr(self, rhs: &'a i16) -> usize { self >> *rhs } }
-impl<'a> Shr<i16> for &'a usize { type Output = usize; fn shr(self, rhs: i16) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b usize { type Output = usize; fn shr(self, rhs: &'a i16) -> usize { *self >> *rhs } }
-impl ShrAssign<i16> for usize { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for usize { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for usize { type Output = usize; fn shl(self, rhs: i64) -> usize { self << rhs } }
-impl<'a> Shl<&'a i64> for usize { type Output = usize; fn shl(self, rhs: &'a i64) -> usize { self << *rhs } }
-impl<'a> Shl<i64> for &'a usize { type Output = usize; fn shl(self, rhs: i64) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b usize { type Output = usize; fn shl(self, rhs: &'a i64) -> usize { *self << *rhs } }
-impl ShlAssign<i64> for usize { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for usize { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for usize { type Output = usize; fn shr(self, rhs: i64) -> usize { self >> rhs } }
-impl<'a> Shr<&'a i64> for usize { type Output = usize; fn shr(self, rhs: &'a i64) -> usize { self >> *rhs } }
-impl<'a> Shr<i64> for &'a usize { type Output = usize; fn shr(self, rhs: i64) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b usize { type Output = usize; fn shr(self, rhs: &'a i64) -> usize { *self >> *rhs } }
-impl ShrAssign<i64> for usize { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for usize { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for usize { type Output = usize; fn shl(self, rhs: i128) -> usize { self << rhs } }
-impl<'a> Shl<&'a i128> for usize { type Output = usize; fn shl(self, rhs: &'a i128) -> usize { self << *rhs } }
-impl<'a> Shl<i128> for &'a usize { type Output = usize; fn shl(self, rhs: i128) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b usize { type Output = usize; fn shl(self, rhs: &'a i128) -> usize { *self << *rhs } }
-impl ShlAssign<i128> for usize { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for usize { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for usize { type Output = usize; fn shr(self, rhs: i128) -> usize { self >> rhs } }
-impl<'a> Shr<&'a i128> for usize { type Output = usize; fn shr(self, rhs: &'a i128) -> usize { self >> *rhs } }
-impl<'a> Shr<i128> for &'a usize { type Output = usize; fn shr(self, rhs: i128) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b usize { type Output = usize; fn shr(self, rhs: &'a i128) -> usize { *self >> *rhs } }
-impl ShrAssign<i128> for usize { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for usize { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for usize { type Output = usize; fn shl(self, rhs: isize) -> usize { self << rhs } }
-impl<'a> Shl<&'a isize> for usize { type Output = usize; fn shl(self, rhs: &'a isize) -> usize { self << *rhs } }
-impl<'a> Shl<isize> for &'a usize { type Output = usize; fn shl(self, rhs: isize) -> usize { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b usize { type Output = usize; fn shl(self, rhs: &'a isize) -> usize { *self << *rhs } }
-impl ShlAssign<isize> for usize { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for usize { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for usize { type Output = usize; fn shr(self, rhs: isize) -> usize { self >> rhs } }
-impl<'a> Shr<&'a isize> for usize { type Output = usize; fn shr(self, rhs: &'a isize) -> usize { self >> *rhs } }
-impl<'a> Shr<isize> for &'a usize { type Output = usize; fn shr(self, rhs: isize) -> usize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b usize { type Output = usize; fn shr(self, rhs: &'a isize) -> usize { *self >> *rhs } }
-impl ShrAssign<isize> for usize { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for usize { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for i8 { type Output = i8; fn shl(self, rhs: u8) -> i8 { self << rhs } }
-impl<'a> Shl<&'a u8> for i8 { type Output = i8; fn shl(self, rhs: &'a u8) -> i8 { self << *rhs } }
-impl<'a> Shl<u8> for &'a i8 { type Output = i8; fn shl(self, rhs: u8) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a u8) -> i8 { *self << *rhs } }
-impl ShlAssign<u8> for i8 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for i8 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for i8 { type Output = i8; fn shr(self, rhs: u8) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a u8> for i8 { type Output = i8; fn shr(self, rhs: &'a u8) -> i8 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a i8 { type Output = i8; fn shr(self, rhs: u8) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a u8) -> i8 { *self >> *rhs } }
-impl ShrAssign<u8> for i8 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for i8 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for i8 { type Output = i8; fn shl(self, rhs: u16) -> i8 { self << rhs } }
-impl<'a> Shl<&'a u16> for i8 { type Output = i8; fn shl(self, rhs: &'a u16) -> i8 { self << *rhs } }
-impl<'a> Shl<u16> for &'a i8 { type Output = i8; fn shl(self, rhs: u16) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a u16) -> i8 { *self << *rhs } }
-impl ShlAssign<u16> for i8 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for i8 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for i8 { type Output = i8; fn shr(self, rhs: u16) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a u16> for i8 { type Output = i8; fn shr(self, rhs: &'a u16) -> i8 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a i8 { type Output = i8; fn shr(self, rhs: u16) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a u16) -> i8 { *self >> *rhs } }
-impl ShrAssign<u16> for i8 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for i8 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for i8 { type Output = i8; fn shl(self, rhs: u64) -> i8 { self << rhs } }
-impl<'a> Shl<&'a u64> for i8 { type Output = i8; fn shl(self, rhs: &'a u64) -> i8 { self << *rhs } }
-impl<'a> Shl<u64> for &'a i8 { type Output = i8; fn shl(self, rhs: u64) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a u64) -> i8 { *self << *rhs } }
-impl ShlAssign<u64> for i8 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for i8 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for i8 { type Output = i8; fn shr(self, rhs: u64) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a u64> for i8 { type Output = i8; fn shr(self, rhs: &'a u64) -> i8 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a i8 { type Output = i8; fn shr(self, rhs: u64) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a u64) -> i8 { *self >> *rhs } }
-impl ShrAssign<u64> for i8 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for i8 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for i8 { type Output = i8; fn shl(self, rhs: u128) -> i8 { self << rhs } }
-impl<'a> Shl<&'a u128> for i8 { type Output = i8; fn shl(self, rhs: &'a u128) -> i8 { self << *rhs } }
-impl<'a> Shl<u128> for &'a i8 { type Output = i8; fn shl(self, rhs: u128) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a u128) -> i8 { *self << *rhs } }
-impl ShlAssign<u128> for i8 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for i8 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for i8 { type Output = i8; fn shr(self, rhs: u128) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a u128> for i8 { type Output = i8; fn shr(self, rhs: &'a u128) -> i8 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a i8 { type Output = i8; fn shr(self, rhs: u128) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a u128) -> i8 { *self >> *rhs } }
-impl ShrAssign<u128> for i8 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for i8 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i16> for i8 { type Output = i8; fn shl(self, rhs: i16) -> i8 { self << rhs } }
-impl<'a> Shl<&'a i16> for i8 { type Output = i8; fn shl(self, rhs: &'a i16) -> i8 { self << *rhs } }
-impl<'a> Shl<i16> for &'a i8 { type Output = i8; fn shl(self, rhs: i16) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a i16) -> i8 { *self << *rhs } }
-impl ShlAssign<i16> for i8 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for i8 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for i8 { type Output = i8; fn shr(self, rhs: i16) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a i16> for i8 { type Output = i8; fn shr(self, rhs: &'a i16) -> i8 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a i8 { type Output = i8; fn shr(self, rhs: i16) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a i16) -> i8 { *self >> *rhs } }
-impl ShrAssign<i16> for i8 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for i8 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for i8 { type Output = i8; fn shl(self, rhs: i64) -> i8 { self << rhs } }
-impl<'a> Shl<&'a i64> for i8 { type Output = i8; fn shl(self, rhs: &'a i64) -> i8 { self << *rhs } }
-impl<'a> Shl<i64> for &'a i8 { type Output = i8; fn shl(self, rhs: i64) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a i64) -> i8 { *self << *rhs } }
-impl ShlAssign<i64> for i8 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for i8 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for i8 { type Output = i8; fn shr(self, rhs: i64) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a i64> for i8 { type Output = i8; fn shr(self, rhs: &'a i64) -> i8 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a i8 { type Output = i8; fn shr(self, rhs: i64) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a i64) -> i8 { *self >> *rhs } }
-impl ShrAssign<i64> for i8 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for i8 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for i8 { type Output = i8; fn shl(self, rhs: i128) -> i8 { self << rhs } }
-impl<'a> Shl<&'a i128> for i8 { type Output = i8; fn shl(self, rhs: &'a i128) -> i8 { self << *rhs } }
-impl<'a> Shl<i128> for &'a i8 { type Output = i8; fn shl(self, rhs: i128) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a i128) -> i8 { *self << *rhs } }
-impl ShlAssign<i128> for i8 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for i8 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for i8 { type Output = i8; fn shr(self, rhs: i128) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a i128> for i8 { type Output = i8; fn shr(self, rhs: &'a i128) -> i8 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a i8 { type Output = i8; fn shr(self, rhs: i128) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a i128) -> i8 { *self >> *rhs } }
-impl ShrAssign<i128> for i8 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for i8 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for i8 { type Output = i8; fn shl(self, rhs: isize) -> i8 { self << rhs } }
-impl<'a> Shl<&'a isize> for i8 { type Output = i8; fn shl(self, rhs: &'a isize) -> i8 { self << *rhs } }
-impl<'a> Shl<isize> for &'a i8 { type Output = i8; fn shl(self, rhs: isize) -> i8 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b i8 { type Output = i8; fn shl(self, rhs: &'a isize) -> i8 { *self << *rhs } }
-impl ShlAssign<isize> for i8 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for i8 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for i8 { type Output = i8; fn shr(self, rhs: isize) -> i8 { self >> rhs } }
-impl<'a> Shr<&'a isize> for i8 { type Output = i8; fn shr(self, rhs: &'a isize) -> i8 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a i8 { type Output = i8; fn shr(self, rhs: isize) -> i8 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b i8 { type Output = i8; fn shr(self, rhs: &'a isize) -> i8 { *self >> *rhs } }
-impl ShrAssign<isize> for i8 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for i8 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for i16 { type Output = i16; fn shl(self, rhs: u8) -> i16 { self << rhs } }
-impl<'a> Shl<&'a u8> for i16 { type Output = i16; fn shl(self, rhs: &'a u8) -> i16 { self << *rhs } }
-impl<'a> Shl<u8> for &'a i16 { type Output = i16; fn shl(self, rhs: u8) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a u8) -> i16 { *self << *rhs } }
-impl ShlAssign<u8> for i16 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for i16 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for i16 { type Output = i16; fn shr(self, rhs: u8) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a u8> for i16 { type Output = i16; fn shr(self, rhs: &'a u8) -> i16 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a i16 { type Output = i16; fn shr(self, rhs: u8) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a u8) -> i16 { *self >> *rhs } }
-impl ShrAssign<u8> for i16 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for i16 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for i16 { type Output = i16; fn shl(self, rhs: u16) -> i16 { self << rhs } }
-impl<'a> Shl<&'a u16> for i16 { type Output = i16; fn shl(self, rhs: &'a u16) -> i16 { self << *rhs } }
-impl<'a> Shl<u16> for &'a i16 { type Output = i16; fn shl(self, rhs: u16) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a u16) -> i16 { *self << *rhs } }
-impl ShlAssign<u16> for i16 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for i16 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for i16 { type Output = i16; fn shr(self, rhs: u16) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a u16> for i16 { type Output = i16; fn shr(self, rhs: &'a u16) -> i16 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a i16 { type Output = i16; fn shr(self, rhs: u16) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a u16) -> i16 { *self >> *rhs } }
-impl ShrAssign<u16> for i16 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for i16 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for i16 { type Output = i16; fn shl(self, rhs: u64) -> i16 { self << rhs } }
-impl<'a> Shl<&'a u64> for i16 { type Output = i16; fn shl(self, rhs: &'a u64) -> i16 { self << *rhs } }
-impl<'a> Shl<u64> for &'a i16 { type Output = i16; fn shl(self, rhs: u64) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a u64) -> i16 { *self << *rhs } }
-impl ShlAssign<u64> for i16 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for i16 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for i16 { type Output = i16; fn shr(self, rhs: u64) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a u64> for i16 { type Output = i16; fn shr(self, rhs: &'a u64) -> i16 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a i16 { type Output = i16; fn shr(self, rhs: u64) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a u64) -> i16 { *self >> *rhs } }
-impl ShrAssign<u64> for i16 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for i16 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for i16 { type Output = i16; fn shl(self, rhs: u128) -> i16 { self << rhs } }
-impl<'a> Shl<&'a u128> for i16 { type Output = i16; fn shl(self, rhs: &'a u128) -> i16 { self << *rhs } }
-impl<'a> Shl<u128> for &'a i16 { type Output = i16; fn shl(self, rhs: u128) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a u128) -> i16 { *self << *rhs } }
-impl ShlAssign<u128> for i16 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for i16 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for i16 { type Output = i16; fn shr(self, rhs: u128) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a u128> for i16 { type Output = i16; fn shr(self, rhs: &'a u128) -> i16 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a i16 { type Output = i16; fn shr(self, rhs: u128) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a u128) -> i16 { *self >> *rhs } }
-impl ShrAssign<u128> for i16 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for i16 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for i16 { type Output = i16; fn shl(self, rhs: i8) -> i16 { self << rhs } }
-impl<'a> Shl<&'a i8> for i16 { type Output = i16; fn shl(self, rhs: &'a i8) -> i16 { self << *rhs } }
-impl<'a> Shl<i8> for &'a i16 { type Output = i16; fn shl(self, rhs: i8) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a i8) -> i16 { *self << *rhs } }
-impl ShlAssign<i8> for i16 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for i16 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for i16 { type Output = i16; fn shr(self, rhs: i8) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a i8> for i16 { type Output = i16; fn shr(self, rhs: &'a i8) -> i16 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a i16 { type Output = i16; fn shr(self, rhs: i8) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a i8) -> i16 { *self >> *rhs } }
-impl ShrAssign<i8> for i16 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for i16 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i64> for i16 { type Output = i16; fn shl(self, rhs: i64) -> i16 { self << rhs } }
-impl<'a> Shl<&'a i64> for i16 { type Output = i16; fn shl(self, rhs: &'a i64) -> i16 { self << *rhs } }
-impl<'a> Shl<i64> for &'a i16 { type Output = i16; fn shl(self, rhs: i64) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a i64) -> i16 { *self << *rhs } }
-impl ShlAssign<i64> for i16 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for i16 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for i16 { type Output = i16; fn shr(self, rhs: i64) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a i64> for i16 { type Output = i16; fn shr(self, rhs: &'a i64) -> i16 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a i16 { type Output = i16; fn shr(self, rhs: i64) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a i64) -> i16 { *self >> *rhs } }
-impl ShrAssign<i64> for i16 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for i16 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for i16 { type Output = i16; fn shl(self, rhs: i128) -> i16 { self << rhs } }
-impl<'a> Shl<&'a i128> for i16 { type Output = i16; fn shl(self, rhs: &'a i128) -> i16 { self << *rhs } }
-impl<'a> Shl<i128> for &'a i16 { type Output = i16; fn shl(self, rhs: i128) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a i128) -> i16 { *self << *rhs } }
-impl ShlAssign<i128> for i16 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for i16 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for i16 { type Output = i16; fn shr(self, rhs: i128) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a i128> for i16 { type Output = i16; fn shr(self, rhs: &'a i128) -> i16 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a i16 { type Output = i16; fn shr(self, rhs: i128) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a i128) -> i16 { *self >> *rhs } }
-impl ShrAssign<i128> for i16 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for i16 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for i16 { type Output = i16; fn shl(self, rhs: isize) -> i16 { self << rhs } }
-impl<'a> Shl<&'a isize> for i16 { type Output = i16; fn shl(self, rhs: &'a isize) -> i16 { self << *rhs } }
-impl<'a> Shl<isize> for &'a i16 { type Output = i16; fn shl(self, rhs: isize) -> i16 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b i16 { type Output = i16; fn shl(self, rhs: &'a isize) -> i16 { *self << *rhs } }
-impl ShlAssign<isize> for i16 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for i16 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for i16 { type Output = i16; fn shr(self, rhs: isize) -> i16 { self >> rhs } }
-impl<'a> Shr<&'a isize> for i16 { type Output = i16; fn shr(self, rhs: &'a isize) -> i16 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a i16 { type Output = i16; fn shr(self, rhs: isize) -> i16 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b i16 { type Output = i16; fn shr(self, rhs: &'a isize) -> i16 { *self >> *rhs } }
-impl ShrAssign<isize> for i16 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for i16 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for i32 { type Output = i32; fn shl(self, rhs: u8) -> i32 { self << rhs } }
-impl<'a> Shl<&'a u8> for i32 { type Output = i32; fn shl(self, rhs: &'a u8) -> i32 { self << *rhs } }
-impl<'a> Shl<u8> for &'a i32 { type Output = i32; fn shl(self, rhs: u8) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a u8) -> i32 { *self << *rhs } }
-impl ShlAssign<u8> for i32 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for i32 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for i32 { type Output = i32; fn shr(self, rhs: u8) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a u8> for i32 { type Output = i32; fn shr(self, rhs: &'a u8) -> i32 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a i32 { type Output = i32; fn shr(self, rhs: u8) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a u8) -> i32 { *self >> *rhs } }
-impl ShrAssign<u8> for i32 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for i32 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for i32 { type Output = i32; fn shl(self, rhs: u16) -> i32 { self << rhs } }
-impl<'a> Shl<&'a u16> for i32 { type Output = i32; fn shl(self, rhs: &'a u16) -> i32 { self << *rhs } }
-impl<'a> Shl<u16> for &'a i32 { type Output = i32; fn shl(self, rhs: u16) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a u16) -> i32 { *self << *rhs } }
-impl ShlAssign<u16> for i32 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for i32 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for i32 { type Output = i32; fn shr(self, rhs: u16) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a u16> for i32 { type Output = i32; fn shr(self, rhs: &'a u16) -> i32 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a i32 { type Output = i32; fn shr(self, rhs: u16) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a u16) -> i32 { *self >> *rhs } }
-impl ShrAssign<u16> for i32 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for i32 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for i32 { type Output = i32; fn shl(self, rhs: u64) -> i32 { self << rhs } }
-impl<'a> Shl<&'a u64> for i32 { type Output = i32; fn shl(self, rhs: &'a u64) -> i32 { self << *rhs } }
-impl<'a> Shl<u64> for &'a i32 { type Output = i32; fn shl(self, rhs: u64) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a u64) -> i32 { *self << *rhs } }
-impl ShlAssign<u64> for i32 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for i32 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for i32 { type Output = i32; fn shr(self, rhs: u64) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a u64> for i32 { type Output = i32; fn shr(self, rhs: &'a u64) -> i32 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a i32 { type Output = i32; fn shr(self, rhs: u64) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a u64) -> i32 { *self >> *rhs } }
-impl ShrAssign<u64> for i32 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for i32 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for i32 { type Output = i32; fn shl(self, rhs: u128) -> i32 { self << rhs } }
-impl<'a> Shl<&'a u128> for i32 { type Output = i32; fn shl(self, rhs: &'a u128) -> i32 { self << *rhs } }
-impl<'a> Shl<u128> for &'a i32 { type Output = i32; fn shl(self, rhs: u128) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a u128) -> i32 { *self << *rhs } }
-impl ShlAssign<u128> for i32 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for i32 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for i32 { type Output = i32; fn shr(self, rhs: u128) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a u128> for i32 { type Output = i32; fn shr(self, rhs: &'a u128) -> i32 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a i32 { type Output = i32; fn shr(self, rhs: u128) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a u128) -> i32 { *self >> *rhs } }
-impl ShrAssign<u128> for i32 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for i32 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for i32 { type Output = i32; fn shl(self, rhs: i8) -> i32 { self << rhs } }
-impl<'a> Shl<&'a i8> for i32 { type Output = i32; fn shl(self, rhs: &'a i8) -> i32 { self << *rhs } }
-impl<'a> Shl<i8> for &'a i32 { type Output = i32; fn shl(self, rhs: i8) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a i8) -> i32 { *self << *rhs } }
-impl ShlAssign<i8> for i32 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for i32 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for i32 { type Output = i32; fn shr(self, rhs: i8) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a i8> for i32 { type Output = i32; fn shr(self, rhs: &'a i8) -> i32 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a i32 { type Output = i32; fn shr(self, rhs: i8) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a i8) -> i32 { *self >> *rhs } }
-impl ShrAssign<i8> for i32 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for i32 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for i32 { type Output = i32; fn shl(self, rhs: i16) -> i32 { self << rhs } }
-impl<'a> Shl<&'a i16> for i32 { type Output = i32; fn shl(self, rhs: &'a i16) -> i32 { self << *rhs } }
-impl<'a> Shl<i16> for &'a i32 { type Output = i32; fn shl(self, rhs: i16) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a i16) -> i32 { *self << *rhs } }
-impl ShlAssign<i16> for i32 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for i32 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for i32 { type Output = i32; fn shr(self, rhs: i16) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a i16> for i32 { type Output = i32; fn shr(self, rhs: &'a i16) -> i32 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a i32 { type Output = i32; fn shr(self, rhs: i16) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a i16) -> i32 { *self >> *rhs } }
-impl ShrAssign<i16> for i32 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for i32 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for i32 { type Output = i32; fn shl(self, rhs: i64) -> i32 { self << rhs } }
-impl<'a> Shl<&'a i64> for i32 { type Output = i32; fn shl(self, rhs: &'a i64) -> i32 { self << *rhs } }
-impl<'a> Shl<i64> for &'a i32 { type Output = i32; fn shl(self, rhs: i64) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a i64) -> i32 { *self << *rhs } }
-impl ShlAssign<i64> for i32 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for i32 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for i32 { type Output = i32; fn shr(self, rhs: i64) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a i64> for i32 { type Output = i32; fn shr(self, rhs: &'a i64) -> i32 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a i32 { type Output = i32; fn shr(self, rhs: i64) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a i64) -> i32 { *self >> *rhs } }
-impl ShrAssign<i64> for i32 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for i32 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for i32 { type Output = i32; fn shl(self, rhs: i128) -> i32 { self << rhs } }
-impl<'a> Shl<&'a i128> for i32 { type Output = i32; fn shl(self, rhs: &'a i128) -> i32 { self << *rhs } }
-impl<'a> Shl<i128> for &'a i32 { type Output = i32; fn shl(self, rhs: i128) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a i128) -> i32 { *self << *rhs } }
-impl ShlAssign<i128> for i32 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for i32 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for i32 { type Output = i32; fn shr(self, rhs: i128) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a i128> for i32 { type Output = i32; fn shr(self, rhs: &'a i128) -> i32 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a i32 { type Output = i32; fn shr(self, rhs: i128) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a i128) -> i32 { *self >> *rhs } }
-impl ShrAssign<i128> for i32 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for i32 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for i32 { type Output = i32; fn shl(self, rhs: isize) -> i32 { self << rhs } }
-impl<'a> Shl<&'a isize> for i32 { type Output = i32; fn shl(self, rhs: &'a isize) -> i32 { self << *rhs } }
-impl<'a> Shl<isize> for &'a i32 { type Output = i32; fn shl(self, rhs: isize) -> i32 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b i32 { type Output = i32; fn shl(self, rhs: &'a isize) -> i32 { *self << *rhs } }
-impl ShlAssign<isize> for i32 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for i32 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for i32 { type Output = i32; fn shr(self, rhs: isize) -> i32 { self >> rhs } }
-impl<'a> Shr<&'a isize> for i32 { type Output = i32; fn shr(self, rhs: &'a isize) -> i32 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a i32 { type Output = i32; fn shr(self, rhs: isize) -> i32 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b i32 { type Output = i32; fn shr(self, rhs: &'a isize) -> i32 { *self >> *rhs } }
-impl ShrAssign<isize> for i32 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for i32 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for i64 { type Output = i64; fn shl(self, rhs: u8) -> i64 { self << rhs } }
-impl<'a> Shl<&'a u8> for i64 { type Output = i64; fn shl(self, rhs: &'a u8) -> i64 { self << *rhs } }
-impl<'a> Shl<u8> for &'a i64 { type Output = i64; fn shl(self, rhs: u8) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a u8) -> i64 { *self << *rhs } }
-impl ShlAssign<u8> for i64 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for i64 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for i64 { type Output = i64; fn shr(self, rhs: u8) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a u8> for i64 { type Output = i64; fn shr(self, rhs: &'a u8) -> i64 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a i64 { type Output = i64; fn shr(self, rhs: u8) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a u8) -> i64 { *self >> *rhs } }
-impl ShrAssign<u8> for i64 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for i64 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for i64 { type Output = i64; fn shl(self, rhs: u16) -> i64 { self << rhs } }
-impl<'a> Shl<&'a u16> for i64 { type Output = i64; fn shl(self, rhs: &'a u16) -> i64 { self << *rhs } }
-impl<'a> Shl<u16> for &'a i64 { type Output = i64; fn shl(self, rhs: u16) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a u16) -> i64 { *self << *rhs } }
-impl ShlAssign<u16> for i64 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for i64 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for i64 { type Output = i64; fn shr(self, rhs: u16) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a u16> for i64 { type Output = i64; fn shr(self, rhs: &'a u16) -> i64 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a i64 { type Output = i64; fn shr(self, rhs: u16) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a u16) -> i64 { *self >> *rhs } }
-impl ShrAssign<u16> for i64 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for i64 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for i64 { type Output = i64; fn shl(self, rhs: u64) -> i64 { self << rhs } }
-impl<'a> Shl<&'a u64> for i64 { type Output = i64; fn shl(self, rhs: &'a u64) -> i64 { self << *rhs } }
-impl<'a> Shl<u64> for &'a i64 { type Output = i64; fn shl(self, rhs: u64) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a u64) -> i64 { *self << *rhs } }
-impl ShlAssign<u64> for i64 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for i64 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for i64 { type Output = i64; fn shr(self, rhs: u64) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a u64> for i64 { type Output = i64; fn shr(self, rhs: &'a u64) -> i64 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a i64 { type Output = i64; fn shr(self, rhs: u64) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a u64) -> i64 { *self >> *rhs } }
-impl ShrAssign<u64> for i64 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for i64 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for i64 { type Output = i64; fn shl(self, rhs: u128) -> i64 { self << rhs } }
-impl<'a> Shl<&'a u128> for i64 { type Output = i64; fn shl(self, rhs: &'a u128) -> i64 { self << *rhs } }
-impl<'a> Shl<u128> for &'a i64 { type Output = i64; fn shl(self, rhs: u128) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a u128) -> i64 { *self << *rhs } }
-impl ShlAssign<u128> for i64 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for i64 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for i64 { type Output = i64; fn shr(self, rhs: u128) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a u128> for i64 { type Output = i64; fn shr(self, rhs: &'a u128) -> i64 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a i64 { type Output = i64; fn shr(self, rhs: u128) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a u128) -> i64 { *self >> *rhs } }
-impl ShrAssign<u128> for i64 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for i64 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for i64 { type Output = i64; fn shl(self, rhs: i8) -> i64 { self << rhs } }
-impl<'a> Shl<&'a i8> for i64 { type Output = i64; fn shl(self, rhs: &'a i8) -> i64 { self << *rhs } }
-impl<'a> Shl<i8> for &'a i64 { type Output = i64; fn shl(self, rhs: i8) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a i8) -> i64 { *self << *rhs } }
-impl ShlAssign<i8> for i64 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for i64 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for i64 { type Output = i64; fn shr(self, rhs: i8) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a i8> for i64 { type Output = i64; fn shr(self, rhs: &'a i8) -> i64 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a i64 { type Output = i64; fn shr(self, rhs: i8) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a i8) -> i64 { *self >> *rhs } }
-impl ShrAssign<i8> for i64 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for i64 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for i64 { type Output = i64; fn shl(self, rhs: i16) -> i64 { self << rhs } }
-impl<'a> Shl<&'a i16> for i64 { type Output = i64; fn shl(self, rhs: &'a i16) -> i64 { self << *rhs } }
-impl<'a> Shl<i16> for &'a i64 { type Output = i64; fn shl(self, rhs: i16) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a i16) -> i64 { *self << *rhs } }
-impl ShlAssign<i16> for i64 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for i64 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for i64 { type Output = i64; fn shr(self, rhs: i16) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a i16> for i64 { type Output = i64; fn shr(self, rhs: &'a i16) -> i64 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a i64 { type Output = i64; fn shr(self, rhs: i16) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a i16) -> i64 { *self >> *rhs } }
-impl ShrAssign<i16> for i64 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for i64 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i128> for i64 { type Output = i64; fn shl(self, rhs: i128) -> i64 { self << rhs } }
-impl<'a> Shl<&'a i128> for i64 { type Output = i64; fn shl(self, rhs: &'a i128) -> i64 { self << *rhs } }
-impl<'a> Shl<i128> for &'a i64 { type Output = i64; fn shl(self, rhs: i128) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a i128) -> i64 { *self << *rhs } }
-impl ShlAssign<i128> for i64 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for i64 { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for i64 { type Output = i64; fn shr(self, rhs: i128) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a i128> for i64 { type Output = i64; fn shr(self, rhs: &'a i128) -> i64 { self >> *rhs } }
-impl<'a> Shr<i128> for &'a i64 { type Output = i64; fn shr(self, rhs: i128) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a i128) -> i64 { *self >> *rhs } }
-impl ShrAssign<i128> for i64 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for i64 { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
-impl Shl<isize> for i64 { type Output = i64; fn shl(self, rhs: isize) -> i64 { self << rhs } }
-impl<'a> Shl<&'a isize> for i64 { type Output = i64; fn shl(self, rhs: &'a isize) -> i64 { self << *rhs } }
-impl<'a> Shl<isize> for &'a i64 { type Output = i64; fn shl(self, rhs: isize) -> i64 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b i64 { type Output = i64; fn shl(self, rhs: &'a isize) -> i64 { *self << *rhs } }
-impl ShlAssign<isize> for i64 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for i64 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for i64 { type Output = i64; fn shr(self, rhs: isize) -> i64 { self >> rhs } }
-impl<'a> Shr<&'a isize> for i64 { type Output = i64; fn shr(self, rhs: &'a isize) -> i64 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a i64 { type Output = i64; fn shr(self, rhs: isize) -> i64 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b i64 { type Output = i64; fn shr(self, rhs: &'a isize) -> i64 { *self >> *rhs } }
-impl ShrAssign<isize> for i64 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for i64 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for i128 { type Output = i128; fn shl(self, rhs: u8) -> i128 { self << rhs } }
-impl<'a> Shl<&'a u8> for i128 { type Output = i128; fn shl(self, rhs: &'a u8) -> i128 { self << *rhs } }
-impl<'a> Shl<u8> for &'a i128 { type Output = i128; fn shl(self, rhs: u8) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a u8) -> i128 { *self << *rhs } }
-impl ShlAssign<u8> for i128 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for i128 { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for i128 { type Output = i128; fn shr(self, rhs: u8) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a u8> for i128 { type Output = i128; fn shr(self, rhs: &'a u8) -> i128 { self >> *rhs } }
-impl<'a> Shr<u8> for &'a i128 { type Output = i128; fn shr(self, rhs: u8) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a u8) -> i128 { *self >> *rhs } }
-impl ShrAssign<u8> for i128 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for i128 { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for i128 { type Output = i128; fn shl(self, rhs: u16) -> i128 { self << rhs } }
-impl<'a> Shl<&'a u16> for i128 { type Output = i128; fn shl(self, rhs: &'a u16) -> i128 { self << *rhs } }
-impl<'a> Shl<u16> for &'a i128 { type Output = i128; fn shl(self, rhs: u16) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a u16) -> i128 { *self << *rhs } }
-impl ShlAssign<u16> for i128 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for i128 { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for i128 { type Output = i128; fn shr(self, rhs: u16) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a u16> for i128 { type Output = i128; fn shr(self, rhs: &'a u16) -> i128 { self >> *rhs } }
-impl<'a> Shr<u16> for &'a i128 { type Output = i128; fn shr(self, rhs: u16) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a u16) -> i128 { *self >> *rhs } }
-impl ShrAssign<u16> for i128 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for i128 { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for i128 { type Output = i128; fn shl(self, rhs: u64) -> i128 { self << rhs } }
-impl<'a> Shl<&'a u64> for i128 { type Output = i128; fn shl(self, rhs: &'a u64) -> i128 { self << *rhs } }
-impl<'a> Shl<u64> for &'a i128 { type Output = i128; fn shl(self, rhs: u64) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a u64) -> i128 { *self << *rhs } }
-impl ShlAssign<u64> for i128 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for i128 { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for i128 { type Output = i128; fn shr(self, rhs: u64) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a u64> for i128 { type Output = i128; fn shr(self, rhs: &'a u64) -> i128 { self >> *rhs } }
-impl<'a> Shr<u64> for &'a i128 { type Output = i128; fn shr(self, rhs: u64) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a u64) -> i128 { *self >> *rhs } }
-impl ShrAssign<u64> for i128 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for i128 { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for i128 { type Output = i128; fn shl(self, rhs: u128) -> i128 { self << rhs } }
-impl<'a> Shl<&'a u128> for i128 { type Output = i128; fn shl(self, rhs: &'a u128) -> i128 { self << *rhs } }
-impl<'a> Shl<u128> for &'a i128 { type Output = i128; fn shl(self, rhs: u128) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a u128) -> i128 { *self << *rhs } }
-impl ShlAssign<u128> for i128 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for i128 { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for i128 { type Output = i128; fn shr(self, rhs: u128) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a u128> for i128 { type Output = i128; fn shr(self, rhs: &'a u128) -> i128 { self >> *rhs } }
-impl<'a> Shr<u128> for &'a i128 { type Output = i128; fn shr(self, rhs: u128) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a u128) -> i128 { *self >> *rhs } }
-impl ShrAssign<u128> for i128 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for i128 { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for i128 { type Output = i128; fn shl(self, rhs: i8) -> i128 { self << rhs } }
-impl<'a> Shl<&'a i8> for i128 { type Output = i128; fn shl(self, rhs: &'a i8) -> i128 { self << *rhs } }
-impl<'a> Shl<i8> for &'a i128 { type Output = i128; fn shl(self, rhs: i8) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a i8) -> i128 { *self << *rhs } }
-impl ShlAssign<i8> for i128 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for i128 { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for i128 { type Output = i128; fn shr(self, rhs: i8) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a i8> for i128 { type Output = i128; fn shr(self, rhs: &'a i8) -> i128 { self >> *rhs } }
-impl<'a> Shr<i8> for &'a i128 { type Output = i128; fn shr(self, rhs: i8) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a i8) -> i128 { *self >> *rhs } }
-impl ShrAssign<i8> for i128 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for i128 { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for i128 { type Output = i128; fn shl(self, rhs: i16) -> i128 { self << rhs } }
-impl<'a> Shl<&'a i16> for i128 { type Output = i128; fn shl(self, rhs: &'a i16) -> i128 { self << *rhs } }
-impl<'a> Shl<i16> for &'a i128 { type Output = i128; fn shl(self, rhs: i16) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a i16) -> i128 { *self << *rhs } }
-impl ShlAssign<i16> for i128 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for i128 { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for i128 { type Output = i128; fn shr(self, rhs: i16) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a i16> for i128 { type Output = i128; fn shr(self, rhs: &'a i16) -> i128 { self >> *rhs } }
-impl<'a> Shr<i16> for &'a i128 { type Output = i128; fn shr(self, rhs: i16) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a i16) -> i128 { *self >> *rhs } }
-impl ShrAssign<i16> for i128 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for i128 { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for i128 { type Output = i128; fn shl(self, rhs: i64) -> i128 { self << rhs } }
-impl<'a> Shl<&'a i64> for i128 { type Output = i128; fn shl(self, rhs: &'a i64) -> i128 { self << *rhs } }
-impl<'a> Shl<i64> for &'a i128 { type Output = i128; fn shl(self, rhs: i64) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a i64) -> i128 { *self << *rhs } }
-impl ShlAssign<i64> for i128 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for i128 { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for i128 { type Output = i128; fn shr(self, rhs: i64) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a i64> for i128 { type Output = i128; fn shr(self, rhs: &'a i64) -> i128 { self >> *rhs } }
-impl<'a> Shr<i64> for &'a i128 { type Output = i128; fn shr(self, rhs: i64) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a i64) -> i128 { *self >> *rhs } }
-impl ShrAssign<i64> for i128 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for i128 { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<isize> for i128 { type Output = i128; fn shl(self, rhs: isize) -> i128 { self << rhs } }
-impl<'a> Shl<&'a isize> for i128 { type Output = i128; fn shl(self, rhs: &'a isize) -> i128 { self << *rhs } }
-impl<'a> Shl<isize> for &'a i128 { type Output = i128; fn shl(self, rhs: isize) -> i128 { *self << rhs } }
-impl<'a, 'b> Shl<&'a isize> for &'b i128 { type Output = i128; fn shl(self, rhs: &'a isize) -> i128 { *self << *rhs } }
-impl ShlAssign<isize> for i128 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a isize> for i128 { fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
-impl Shr<isize> for i128 { type Output = i128; fn shr(self, rhs: isize) -> i128 { self >> rhs } }
-impl<'a> Shr<&'a isize> for i128 { type Output = i128; fn shr(self, rhs: &'a isize) -> i128 { self >> *rhs } }
-impl<'a> Shr<isize> for &'a i128 { type Output = i128; fn shr(self, rhs: isize) -> i128 { *self >> rhs } }
-impl<'a, 'b> Shr<&'a isize> for &'b i128 { type Output = i128; fn shr(self, rhs: &'a isize) -> i128 { *self >> *rhs } }
-impl ShrAssign<isize> for i128 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a isize> for i128 { fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
-impl Shl<u8> for isize { type Output = isize; fn shl(self, rhs: u8) -> isize { self << rhs } }
-impl<'a> Shl<&'a u8> for isize { type Output = isize; fn shl(self, rhs: &'a u8) -> isize { self << *rhs } }
-impl<'a> Shl<u8> for &'a isize { type Output = isize; fn shl(self, rhs: u8) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u8> for &'b isize { type Output = isize; fn shl(self, rhs: &'a u8) -> isize { *self << *rhs } }
-impl ShlAssign<u8> for isize { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u8> for isize { fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
-impl Shr<u8> for isize { type Output = isize; fn shr(self, rhs: u8) -> isize { self >> rhs } }
-impl<'a> Shr<&'a u8> for isize { type Output = isize; fn shr(self, rhs: &'a u8) -> isize { self >> *rhs } }
-impl<'a> Shr<u8> for &'a isize { type Output = isize; fn shr(self, rhs: u8) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u8> for &'b isize { type Output = isize; fn shr(self, rhs: &'a u8) -> isize { *self >> *rhs } }
-impl ShrAssign<u8> for isize { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u8> for isize { fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
-impl Shl<u16> for isize { type Output = isize; fn shl(self, rhs: u16) -> isize { self << rhs } }
-impl<'a> Shl<&'a u16> for isize { type Output = isize; fn shl(self, rhs: &'a u16) -> isize { self << *rhs } }
-impl<'a> Shl<u16> for &'a isize { type Output = isize; fn shl(self, rhs: u16) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u16> for &'b isize { type Output = isize; fn shl(self, rhs: &'a u16) -> isize { *self << *rhs } }
-impl ShlAssign<u16> for isize { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u16> for isize { fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
-impl Shr<u16> for isize { type Output = isize; fn shr(self, rhs: u16) -> isize { self >> rhs } }
-impl<'a> Shr<&'a u16> for isize { type Output = isize; fn shr(self, rhs: &'a u16) -> isize { self >> *rhs } }
-impl<'a> Shr<u16> for &'a isize { type Output = isize; fn shr(self, rhs: u16) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u16> for &'b isize { type Output = isize; fn shr(self, rhs: &'a u16) -> isize { *self >> *rhs } }
-impl ShrAssign<u16> for isize { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u16> for isize { fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
-impl Shl<u64> for isize { type Output = isize; fn shl(self, rhs: u64) -> isize { self << rhs } }
-impl<'a> Shl<&'a u64> for isize { type Output = isize; fn shl(self, rhs: &'a u64) -> isize { self << *rhs } }
-impl<'a> Shl<u64> for &'a isize { type Output = isize; fn shl(self, rhs: u64) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u64> for &'b isize { type Output = isize; fn shl(self, rhs: &'a u64) -> isize { *self << *rhs } }
-impl ShlAssign<u64> for isize { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u64> for isize { fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
-impl Shr<u64> for isize { type Output = isize; fn shr(self, rhs: u64) -> isize { self >> rhs } }
-impl<'a> Shr<&'a u64> for isize { type Output = isize; fn shr(self, rhs: &'a u64) -> isize { self >> *rhs } }
-impl<'a> Shr<u64> for &'a isize { type Output = isize; fn shr(self, rhs: u64) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u64> for &'b isize { type Output = isize; fn shr(self, rhs: &'a u64) -> isize { *self >> *rhs } }
-impl ShrAssign<u64> for isize { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u64> for isize { fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
-impl Shl<u128> for isize { type Output = isize; fn shl(self, rhs: u128) -> isize { self << rhs } }
-impl<'a> Shl<&'a u128> for isize { type Output = isize; fn shl(self, rhs: &'a u128) -> isize { self << *rhs } }
-impl<'a> Shl<u128> for &'a isize { type Output = isize; fn shl(self, rhs: u128) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a u128> for &'b isize { type Output = isize; fn shl(self, rhs: &'a u128) -> isize { *self << *rhs } }
-impl ShlAssign<u128> for isize { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a u128> for isize { fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
-impl Shr<u128> for isize { type Output = isize; fn shr(self, rhs: u128) -> isize { self >> rhs } }
-impl<'a> Shr<&'a u128> for isize { type Output = isize; fn shr(self, rhs: &'a u128) -> isize { self >> *rhs } }
-impl<'a> Shr<u128> for &'a isize { type Output = isize; fn shr(self, rhs: u128) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a u128> for &'b isize { type Output = isize; fn shr(self, rhs: &'a u128) -> isize { *self >> *rhs } }
-impl ShrAssign<u128> for isize { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a u128> for isize { fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
-impl Shl<i8> for isize { type Output = isize; fn shl(self, rhs: i8) -> isize { self << rhs } }
-impl<'a> Shl<&'a i8> for isize { type Output = isize; fn shl(self, rhs: &'a i8) -> isize { self << *rhs } }
-impl<'a> Shl<i8> for &'a isize { type Output = isize; fn shl(self, rhs: i8) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i8> for &'b isize { type Output = isize; fn shl(self, rhs: &'a i8) -> isize { *self << *rhs } }
-impl ShlAssign<i8> for isize { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i8> for isize { fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
-impl Shr<i8> for isize { type Output = isize; fn shr(self, rhs: i8) -> isize { self >> rhs } }
-impl<'a> Shr<&'a i8> for isize { type Output = isize; fn shr(self, rhs: &'a i8) -> isize { self >> *rhs } }
-impl<'a> Shr<i8> for &'a isize { type Output = isize; fn shr(self, rhs: i8) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i8> for &'b isize { type Output = isize; fn shr(self, rhs: &'a i8) -> isize { *self >> *rhs } }
-impl ShrAssign<i8> for isize { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i8> for isize { fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
-impl Shl<i16> for isize { type Output = isize; fn shl(self, rhs: i16) -> isize { self << rhs } }
-impl<'a> Shl<&'a i16> for isize { type Output = isize; fn shl(self, rhs: &'a i16) -> isize { self << *rhs } }
-impl<'a> Shl<i16> for &'a isize { type Output = isize; fn shl(self, rhs: i16) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i16> for &'b isize { type Output = isize; fn shl(self, rhs: &'a i16) -> isize { *self << *rhs } }
-impl ShlAssign<i16> for isize { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i16> for isize { fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
-impl Shr<i16> for isize { type Output = isize; fn shr(self, rhs: i16) -> isize { self >> rhs } }
-impl<'a> Shr<&'a i16> for isize { type Output = isize; fn shr(self, rhs: &'a i16) -> isize { self >> *rhs } }
-impl<'a> Shr<i16> for &'a isize { type Output = isize; fn shr(self, rhs: i16) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i16> for &'b isize { type Output = isize; fn shr(self, rhs: &'a i16) -> isize { *self >> *rhs } }
-impl ShrAssign<i16> for isize { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i16> for isize { fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
-impl Shl<i64> for isize { type Output = isize; fn shl(self, rhs: i64) -> isize { self << rhs } }
-impl<'a> Shl<&'a i64> for isize { type Output = isize; fn shl(self, rhs: &'a i64) -> isize { self << *rhs } }
-impl<'a> Shl<i64> for &'a isize { type Output = isize; fn shl(self, rhs: i64) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i64> for &'b isize { type Output = isize; fn shl(self, rhs: &'a i64) -> isize { *self << *rhs } }
-impl ShlAssign<i64> for isize { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i64> for isize { fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
-impl Shr<i64> for isize { type Output = isize; fn shr(self, rhs: i64) -> isize { self >> rhs } }
-impl<'a> Shr<&'a i64> for isize { type Output = isize; fn shr(self, rhs: &'a i64) -> isize { self >> *rhs } }
-impl<'a> Shr<i64> for &'a isize { type Output = isize; fn shr(self, rhs: i64) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i64> for &'b isize { type Output = isize; fn shr(self, rhs: &'a i64) -> isize { *self >> *rhs } }
-impl ShrAssign<i64> for isize { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i64> for isize { fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
-impl Shl<i128> for isize { type Output = isize; fn shl(self, rhs: i128) -> isize { self << rhs } }
-impl<'a> Shl<&'a i128> for isize { type Output = isize; fn shl(self, rhs: &'a i128) -> isize { self << *rhs } }
-impl<'a> Shl<i128> for &'a isize { type Output = isize; fn shl(self, rhs: i128) -> isize { *self << rhs } }
-impl<'a, 'b> Shl<&'a i128> for &'b isize { type Output = isize; fn shl(self, rhs: &'a i128) -> isize { *self << *rhs } }
-impl ShlAssign<i128> for isize { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
-impl<'a> ShlAssign<&'a i128> for isize { fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
-impl Shr<i128> for isize { type Output = isize; fn shr(self, rhs: i128) -> isize { self >> rhs } }
-impl<'a> Shr<&'a i128> for isize { type Output = isize; fn shr(self, rhs: &'a i128) -> isize { self >> *rhs } }
-impl<'a> Shr<i128> for &'a isize { type Output = isize; fn shr(self, rhs: i128) -> isize { *self >> rhs } }
-impl<'a, 'b> Shr<&'a i128> for &'b isize { type Output = isize; fn shr(self, rhs: &'a i128) -> isize { *self >> *rhs } }
-impl ShrAssign<i128> for isize { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
-impl<'a> ShrAssign<&'a i128> for isize { fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<u16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u8 { self << rhs } }
+impl<'a> Shl<&'a u16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u8 { self << *rhs } }
+impl<'a> Shl<u16> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u8 { *self << *rhs } }
+impl ShlAssign<u16> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a u16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u8 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u8 { *self >> *rhs } }
+impl ShrAssign<u16> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u8 { self << rhs } }
+impl<'a> Shl<&'a u64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u8 { self << *rhs } }
+impl<'a> Shl<u64> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u8 { *self << *rhs } }
+impl ShlAssign<u64> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a u64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u8 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u8 { *self >> *rhs } }
+impl ShrAssign<u64> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u8 { self << rhs } }
+impl<'a> Shl<&'a u128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u8 { self << *rhs } }
+impl<'a> Shl<u128> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u8 { *self << *rhs } }
+impl ShlAssign<u128> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a u128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u8 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u8 { *self >> *rhs } }
+impl ShrAssign<u128> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u8 { self << rhs } }
+impl<'a> Shl<&'a i8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u8 { self << *rhs } }
+impl<'a> Shl<i8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u8 { *self << *rhs } }
+impl ShlAssign<i8> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a i8> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u8 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u8 { *self >> *rhs } }
+impl ShrAssign<i8> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u8 { self << rhs } }
+impl<'a> Shl<&'a i16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u8 { self << *rhs } }
+impl<'a> Shl<i16> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u8 { *self << *rhs } }
+impl ShlAssign<i16> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a i16> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u8 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u8 { *self >> *rhs } }
+impl ShrAssign<i16> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u8 { self << rhs } }
+impl<'a> Shl<&'a i64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u8 { self << *rhs } }
+impl<'a> Shl<i64> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u8 { *self << *rhs } }
+impl ShlAssign<i64> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a i64> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u8 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u8 { *self >> *rhs } }
+impl ShrAssign<i64> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u8 { self << rhs } }
+impl<'a> Shl<&'a i128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u8 { self << *rhs } }
+impl<'a> Shl<i128> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u8 { *self << *rhs } }
+impl ShlAssign<i128> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a i128> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u8 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u8 { *self >> *rhs } }
+impl ShrAssign<i128> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u8 { self << rhs } }
+impl<'a> Shl<&'a isize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u8 { self << *rhs } }
+impl<'a> Shl<isize> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u8 { *self << *rhs } }
+impl ShlAssign<isize> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for u8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u8 { self >> rhs } }
+impl<'a> Shr<&'a isize> for u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u8 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b u8 { type Output = u8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u8 { *self >> *rhs } }
+impl ShrAssign<isize> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for u8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u16 { self << rhs } }
+impl<'a> Shl<&'a u8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u16 { self << *rhs } }
+impl<'a> Shl<u8> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u16 { *self << *rhs } }
+impl ShlAssign<u8> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a u8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u16 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u16 { *self >> *rhs } }
+impl ShrAssign<u8> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u16 { self << rhs } }
+impl<'a> Shl<&'a u64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u16 { self << *rhs } }
+impl<'a> Shl<u64> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u16 { *self << *rhs } }
+impl ShlAssign<u64> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a u64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u16 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u16 { *self >> *rhs } }
+impl ShrAssign<u64> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u16 { self << rhs } }
+impl<'a> Shl<&'a u128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u16 { self << *rhs } }
+impl<'a> Shl<u128> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u16 { *self << *rhs } }
+impl ShlAssign<u128> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a u128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u16 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u16 { *self >> *rhs } }
+impl ShrAssign<u128> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u16 { self << rhs } }
+impl<'a> Shl<&'a i8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u16 { self << *rhs } }
+impl<'a> Shl<i8> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u16 { *self << *rhs } }
+impl ShlAssign<i8> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a i8> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u16 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u16 { *self >> *rhs } }
+impl ShrAssign<i8> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u16 { self << rhs } }
+impl<'a> Shl<&'a i16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u16 { self << *rhs } }
+impl<'a> Shl<i16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u16 { *self << *rhs } }
+impl ShlAssign<i16> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a i16> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u16 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u16 { *self >> *rhs } }
+impl ShrAssign<i16> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u16 { self << rhs } }
+impl<'a> Shl<&'a i64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u16 { self << *rhs } }
+impl<'a> Shl<i64> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u16 { *self << *rhs } }
+impl ShlAssign<i64> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a i64> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u16 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u16 { *self >> *rhs } }
+impl ShrAssign<i64> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u16 { self << rhs } }
+impl<'a> Shl<&'a i128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u16 { self << *rhs } }
+impl<'a> Shl<i128> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u16 { *self << *rhs } }
+impl ShlAssign<i128> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a i128> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u16 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u16 { *self >> *rhs } }
+impl ShrAssign<i128> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u16 { self << rhs } }
+impl<'a> Shl<&'a isize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u16 { self << *rhs } }
+impl<'a> Shl<isize> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u16 { *self << *rhs } }
+impl ShlAssign<isize> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for u16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u16 { self >> rhs } }
+impl<'a> Shr<&'a isize> for u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u16 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b u16 { type Output = u16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u16 { *self >> *rhs } }
+impl ShrAssign<isize> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for u16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u32 { self << rhs } }
+impl<'a> Shl<&'a u8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u32 { self << *rhs } }
+impl<'a> Shl<u8> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u32 { *self << *rhs } }
+impl ShlAssign<u8> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a u8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u32 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u32 { *self >> *rhs } }
+impl ShrAssign<u8> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u32 { self << rhs } }
+impl<'a> Shl<&'a u16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u32 { self << *rhs } }
+impl<'a> Shl<u16> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u32 { *self << *rhs } }
+impl ShlAssign<u16> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a u16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u32 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u32 { *self >> *rhs } }
+impl ShrAssign<u16> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u32 { self << rhs } }
+impl<'a> Shl<&'a u64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u32 { self << *rhs } }
+impl<'a> Shl<u64> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u32 { *self << *rhs } }
+impl ShlAssign<u64> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a u64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u32 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u32 { *self >> *rhs } }
+impl ShrAssign<u64> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u32 { self << rhs } }
+impl<'a> Shl<&'a u128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u32 { self << *rhs } }
+impl<'a> Shl<u128> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u32 { *self << *rhs } }
+impl ShlAssign<u128> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a u128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u32 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u32 { *self >> *rhs } }
+impl ShrAssign<u128> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u32 { self << rhs } }
+impl<'a> Shl<&'a i8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u32 { self << *rhs } }
+impl<'a> Shl<i8> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u32 { *self << *rhs } }
+impl ShlAssign<i8> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a i8> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u32 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u32 { *self >> *rhs } }
+impl ShrAssign<i8> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u32 { self << rhs } }
+impl<'a> Shl<&'a i16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u32 { self << *rhs } }
+impl<'a> Shl<i16> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u32 { *self << *rhs } }
+impl ShlAssign<i16> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a i16> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u32 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u32 { *self >> *rhs } }
+impl ShrAssign<i16> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u32 { self << rhs } }
+impl<'a> Shl<&'a i64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u32 { self << *rhs } }
+impl<'a> Shl<i64> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u32 { *self << *rhs } }
+impl ShlAssign<i64> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a i64> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u32 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u32 { *self >> *rhs } }
+impl ShrAssign<i64> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u32 { self << rhs } }
+impl<'a> Shl<&'a i128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u32 { self << *rhs } }
+impl<'a> Shl<i128> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u32 { *self << *rhs } }
+impl ShlAssign<i128> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a i128> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u32 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u32 { *self >> *rhs } }
+impl ShrAssign<i128> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u32 { self << rhs } }
+impl<'a> Shl<&'a isize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u32 { self << *rhs } }
+impl<'a> Shl<isize> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u32 { *self << *rhs } }
+impl ShlAssign<isize> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for u32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u32 { self >> rhs } }
+impl<'a> Shr<&'a isize> for u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u32 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b u32 { type Output = u32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u32 { *self >> *rhs } }
+impl ShrAssign<isize> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for u32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u64 { self << rhs } }
+impl<'a> Shl<&'a u8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u64 { self << *rhs } }
+impl<'a> Shl<u8> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u64 { *self << *rhs } }
+impl ShlAssign<u8> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a u8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u64 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u64 { *self >> *rhs } }
+impl ShrAssign<u8> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u64 { self << rhs } }
+impl<'a> Shl<&'a u16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u64 { self << *rhs } }
+impl<'a> Shl<u16> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u64 { *self << *rhs } }
+impl ShlAssign<u16> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a u16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u64 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u64 { *self >> *rhs } }
+impl ShrAssign<u16> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u64 { self << rhs } }
+impl<'a> Shl<&'a u128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u64 { self << *rhs } }
+impl<'a> Shl<u128> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> u64 { *self << *rhs } }
+impl ShlAssign<u128> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a u128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u64 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> u64 { *self >> *rhs } }
+impl ShrAssign<u128> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u64 { self << rhs } }
+impl<'a> Shl<&'a i8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u64 { self << *rhs } }
+impl<'a> Shl<i8> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u64 { *self << *rhs } }
+impl ShlAssign<i8> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a i8> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u64 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u64 { *self >> *rhs } }
+impl ShrAssign<i8> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u64 { self << rhs } }
+impl<'a> Shl<&'a i16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u64 { self << *rhs } }
+impl<'a> Shl<i16> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u64 { *self << *rhs } }
+impl ShlAssign<i16> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a i16> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u64 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u64 { *self >> *rhs } }
+impl ShrAssign<i16> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u64 { self << rhs } }
+impl<'a> Shl<&'a i64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u64 { self << *rhs } }
+impl<'a> Shl<i64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u64 { *self << *rhs } }
+impl ShlAssign<i64> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a i64> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u64 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u64 { *self >> *rhs } }
+impl ShrAssign<i64> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u64 { self << rhs } }
+impl<'a> Shl<&'a i128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u64 { self << *rhs } }
+impl<'a> Shl<i128> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u64 { *self << *rhs } }
+impl ShlAssign<i128> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a i128> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u64 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u64 { *self >> *rhs } }
+impl ShrAssign<i128> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u64 { self << rhs } }
+impl<'a> Shl<&'a isize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u64 { self << *rhs } }
+impl<'a> Shl<isize> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u64 { *self << *rhs } }
+impl ShlAssign<isize> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for u64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u64 { self >> rhs } }
+impl<'a> Shr<&'a isize> for u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u64 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b u64 { type Output = u64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u64 { *self >> *rhs } }
+impl ShrAssign<isize> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for u64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u128 { self << rhs } }
+impl<'a> Shl<&'a u8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u128 { self << *rhs } }
+impl<'a> Shl<u8> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> u128 { *self << *rhs } }
+impl ShlAssign<u8> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a u8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u128 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> u128 { *self >> *rhs } }
+impl ShrAssign<u8> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u128 { self << rhs } }
+impl<'a> Shl<&'a u16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u128 { self << *rhs } }
+impl<'a> Shl<u16> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> u128 { *self << *rhs } }
+impl ShlAssign<u16> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a u16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u128 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> u128 { *self >> *rhs } }
+impl ShrAssign<u16> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u128 { self << rhs } }
+impl<'a> Shl<&'a u64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u128 { self << *rhs } }
+impl<'a> Shl<u64> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> u128 { *self << *rhs } }
+impl ShlAssign<u64> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a u64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u128 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> u128 { *self >> *rhs } }
+impl ShrAssign<u64> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<i8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u128 { self << rhs } }
+impl<'a> Shl<&'a i8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u128 { self << *rhs } }
+impl<'a> Shl<i8> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> u128 { *self << *rhs } }
+impl ShlAssign<i8> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a i8> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u128 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> u128 { *self >> *rhs } }
+impl ShrAssign<i8> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u128 { self << rhs } }
+impl<'a> Shl<&'a i16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u128 { self << *rhs } }
+impl<'a> Shl<i16> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> u128 { *self << *rhs } }
+impl ShlAssign<i16> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a i16> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u128 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> u128 { *self >> *rhs } }
+impl ShrAssign<i16> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u128 { self << rhs } }
+impl<'a> Shl<&'a i64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u128 { self << *rhs } }
+impl<'a> Shl<i64> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> u128 { *self << *rhs } }
+impl ShlAssign<i64> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a i64> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u128 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> u128 { *self >> *rhs } }
+impl ShrAssign<i64> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u128 { self << rhs } }
+impl<'a> Shl<&'a i128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u128 { self << *rhs } }
+impl<'a> Shl<i128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> u128 { *self << *rhs } }
+impl ShlAssign<i128> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a i128> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u128 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> u128 { *self >> *rhs } }
+impl ShrAssign<i128> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u128 { self << rhs } }
+impl<'a> Shl<&'a isize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u128 { self << *rhs } }
+impl<'a> Shl<isize> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> u128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> u128 { *self << *rhs } }
+impl ShlAssign<isize> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for u128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u128 { self >> rhs } }
+impl<'a> Shr<&'a isize> for u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u128 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> u128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b u128 { type Output = u128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> u128 { *self >> *rhs } }
+impl ShrAssign<isize> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for u128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> usize { self << rhs } }
+impl<'a> Shl<&'a u8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> usize { self << *rhs } }
+impl<'a> Shl<u8> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> usize { *self << *rhs } }
+impl ShlAssign<u8> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> usize { self >> rhs } }
+impl<'a> Shr<&'a u8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> usize { self >> *rhs } }
+impl<'a> Shr<u8> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> usize { *self >> *rhs } }
+impl ShrAssign<u8> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> usize { self << rhs } }
+impl<'a> Shl<&'a u16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> usize { self << *rhs } }
+impl<'a> Shl<u16> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> usize { *self << *rhs } }
+impl ShlAssign<u16> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> usize { self >> rhs } }
+impl<'a> Shr<&'a u16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> usize { self >> *rhs } }
+impl<'a> Shr<u16> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> usize { *self >> *rhs } }
+impl ShrAssign<u16> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> usize { self << rhs } }
+impl<'a> Shl<&'a u64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> usize { self << *rhs } }
+impl<'a> Shl<u64> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> usize { *self << *rhs } }
+impl ShlAssign<u64> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> usize { self >> rhs } }
+impl<'a> Shr<&'a u64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> usize { self >> *rhs } }
+impl<'a> Shr<u64> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> usize { *self >> *rhs } }
+impl ShrAssign<u64> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> usize { self << rhs } }
+impl<'a> Shl<&'a u128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> usize { self << *rhs } }
+impl<'a> Shl<u128> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> usize { *self << *rhs } }
+impl ShlAssign<u128> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> usize { self >> rhs } }
+impl<'a> Shr<&'a u128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> usize { self >> *rhs } }
+impl<'a> Shr<u128> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> usize { *self >> *rhs } }
+impl ShrAssign<u128> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> usize { self << rhs } }
+impl<'a> Shl<&'a i8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> usize { self << *rhs } }
+impl<'a> Shl<i8> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> usize { *self << *rhs } }
+impl ShlAssign<i8> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> usize { self >> rhs } }
+impl<'a> Shr<&'a i8> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> usize { self >> *rhs } }
+impl<'a> Shr<i8> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> usize { *self >> *rhs } }
+impl ShrAssign<i8> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> usize { self << rhs } }
+impl<'a> Shl<&'a i16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> usize { self << *rhs } }
+impl<'a> Shl<i16> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> usize { *self << *rhs } }
+impl ShlAssign<i16> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> usize { self >> rhs } }
+impl<'a> Shr<&'a i16> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> usize { self >> *rhs } }
+impl<'a> Shr<i16> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> usize { *self >> *rhs } }
+impl ShrAssign<i16> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> usize { self << rhs } }
+impl<'a> Shl<&'a i64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> usize { self << *rhs } }
+impl<'a> Shl<i64> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> usize { *self << *rhs } }
+impl ShlAssign<i64> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> usize { self >> rhs } }
+impl<'a> Shr<&'a i64> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> usize { self >> *rhs } }
+impl<'a> Shr<i64> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> usize { *self >> *rhs } }
+impl ShrAssign<i64> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> usize { self << rhs } }
+impl<'a> Shl<&'a i128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> usize { self << *rhs } }
+impl<'a> Shl<i128> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> usize { *self << *rhs } }
+impl ShlAssign<i128> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> usize { self >> rhs } }
+impl<'a> Shr<&'a i128> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> usize { self >> *rhs } }
+impl<'a> Shr<i128> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> usize { *self >> *rhs } }
+impl ShrAssign<i128> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> usize { self << rhs } }
+impl<'a> Shl<&'a isize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> usize { self << *rhs } }
+impl<'a> Shl<isize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> usize { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> usize { *self << *rhs } }
+impl ShlAssign<isize> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for usize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> usize { self >> rhs } }
+impl<'a> Shr<&'a isize> for usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> usize { self >> *rhs } }
+impl<'a> Shr<isize> for &'a usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> usize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b usize { type Output = usize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> usize { *self >> *rhs } }
+impl ShrAssign<isize> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for usize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i8 { self << rhs } }
+impl<'a> Shl<&'a u8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i8 { self << *rhs } }
+impl<'a> Shl<u8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i8 { *self << *rhs } }
+impl ShlAssign<u8> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a u8> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i8 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i8 { *self >> *rhs } }
+impl ShrAssign<u8> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i8 { self << rhs } }
+impl<'a> Shl<&'a u16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i8 { self << *rhs } }
+impl<'a> Shl<u16> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i8 { *self << *rhs } }
+impl ShlAssign<u16> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a u16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i8 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i8 { *self >> *rhs } }
+impl ShrAssign<u16> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i8 { self << rhs } }
+impl<'a> Shl<&'a u64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i8 { self << *rhs } }
+impl<'a> Shl<u64> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i8 { *self << *rhs } }
+impl ShlAssign<u64> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a u64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i8 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i8 { *self >> *rhs } }
+impl ShrAssign<u64> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i8 { self << rhs } }
+impl<'a> Shl<&'a u128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i8 { self << *rhs } }
+impl<'a> Shl<u128> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i8 { *self << *rhs } }
+impl ShlAssign<u128> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a u128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i8 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i8 { *self >> *rhs } }
+impl ShrAssign<u128> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i8 { self << rhs } }
+impl<'a> Shl<&'a i16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i8 { self << *rhs } }
+impl<'a> Shl<i16> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i8 { *self << *rhs } }
+impl ShlAssign<i16> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a i16> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i8 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i8 { *self >> *rhs } }
+impl ShrAssign<i16> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i8 { self << rhs } }
+impl<'a> Shl<&'a i64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i8 { self << *rhs } }
+impl<'a> Shl<i64> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i8 { *self << *rhs } }
+impl ShlAssign<i64> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a i64> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i8 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i8 { *self >> *rhs } }
+impl ShrAssign<i64> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i8 { self << rhs } }
+impl<'a> Shl<&'a i128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i8 { self << *rhs } }
+impl<'a> Shl<i128> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i8 { *self << *rhs } }
+impl ShlAssign<i128> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a i128> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i8 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i8 { *self >> *rhs } }
+impl ShrAssign<i128> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i8 { self << rhs } }
+impl<'a> Shl<&'a isize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i8 { self << *rhs } }
+impl<'a> Shl<isize> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i8 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i8 { *self << *rhs } }
+impl ShlAssign<isize> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for i8 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i8 { self >> rhs } }
+impl<'a> Shr<&'a isize> for i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i8 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i8 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b i8 { type Output = i8; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i8 { *self >> *rhs } }
+impl ShrAssign<isize> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for i8 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i16 { self << rhs } }
+impl<'a> Shl<&'a u8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i16 { self << *rhs } }
+impl<'a> Shl<u8> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i16 { *self << *rhs } }
+impl ShlAssign<u8> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a u8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i16 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i16 { *self >> *rhs } }
+impl ShrAssign<u8> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i16 { self << rhs } }
+impl<'a> Shl<&'a u16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i16 { self << *rhs } }
+impl<'a> Shl<u16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i16 { *self << *rhs } }
+impl ShlAssign<u16> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a u16> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i16 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i16 { *self >> *rhs } }
+impl ShrAssign<u16> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i16 { self << rhs } }
+impl<'a> Shl<&'a u64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i16 { self << *rhs } }
+impl<'a> Shl<u64> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i16 { *self << *rhs } }
+impl ShlAssign<u64> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a u64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i16 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i16 { *self >> *rhs } }
+impl ShrAssign<u64> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i16 { self << rhs } }
+impl<'a> Shl<&'a u128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i16 { self << *rhs } }
+impl<'a> Shl<u128> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i16 { *self << *rhs } }
+impl ShlAssign<u128> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a u128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i16 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i16 { *self >> *rhs } }
+impl ShrAssign<u128> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i16 { self << rhs } }
+impl<'a> Shl<&'a i8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i16 { self << *rhs } }
+impl<'a> Shl<i8> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i16 { *self << *rhs } }
+impl ShlAssign<i8> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a i8> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i16 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i16 { *self >> *rhs } }
+impl ShrAssign<i8> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i16 { self << rhs } }
+impl<'a> Shl<&'a i64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i16 { self << *rhs } }
+impl<'a> Shl<i64> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i16 { *self << *rhs } }
+impl ShlAssign<i64> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a i64> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i16 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i16 { *self >> *rhs } }
+impl ShrAssign<i64> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i16 { self << rhs } }
+impl<'a> Shl<&'a i128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i16 { self << *rhs } }
+impl<'a> Shl<i128> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i16 { *self << *rhs } }
+impl ShlAssign<i128> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a i128> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i16 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i16 { *self >> *rhs } }
+impl ShrAssign<i128> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i16 { self << rhs } }
+impl<'a> Shl<&'a isize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i16 { self << *rhs } }
+impl<'a> Shl<isize> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i16 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i16 { *self << *rhs } }
+impl ShlAssign<isize> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for i16 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i16 { self >> rhs } }
+impl<'a> Shr<&'a isize> for i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i16 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i16 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b i16 { type Output = i16; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i16 { *self >> *rhs } }
+impl ShrAssign<isize> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for i16 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i32 { self << rhs } }
+impl<'a> Shl<&'a u8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i32 { self << *rhs } }
+impl<'a> Shl<u8> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i32 { *self << *rhs } }
+impl ShlAssign<u8> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a u8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i32 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i32 { *self >> *rhs } }
+impl ShrAssign<u8> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i32 { self << rhs } }
+impl<'a> Shl<&'a u16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i32 { self << *rhs } }
+impl<'a> Shl<u16> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i32 { *self << *rhs } }
+impl ShlAssign<u16> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a u16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i32 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i32 { *self >> *rhs } }
+impl ShrAssign<u16> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i32 { self << rhs } }
+impl<'a> Shl<&'a u64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i32 { self << *rhs } }
+impl<'a> Shl<u64> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i32 { *self << *rhs } }
+impl ShlAssign<u64> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a u64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i32 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i32 { *self >> *rhs } }
+impl ShrAssign<u64> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i32 { self << rhs } }
+impl<'a> Shl<&'a u128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i32 { self << *rhs } }
+impl<'a> Shl<u128> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i32 { *self << *rhs } }
+impl ShlAssign<u128> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a u128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i32 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i32 { *self >> *rhs } }
+impl ShrAssign<u128> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i32 { self << rhs } }
+impl<'a> Shl<&'a i8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i32 { self << *rhs } }
+impl<'a> Shl<i8> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i32 { *self << *rhs } }
+impl ShlAssign<i8> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a i8> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i32 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i32 { *self >> *rhs } }
+impl ShrAssign<i8> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i32 { self << rhs } }
+impl<'a> Shl<&'a i16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i32 { self << *rhs } }
+impl<'a> Shl<i16> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i32 { *self << *rhs } }
+impl ShlAssign<i16> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a i16> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i32 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i32 { *self >> *rhs } }
+impl ShrAssign<i16> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i32 { self << rhs } }
+impl<'a> Shl<&'a i64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i32 { self << *rhs } }
+impl<'a> Shl<i64> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i32 { *self << *rhs } }
+impl ShlAssign<i64> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a i64> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i32 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i32 { *self >> *rhs } }
+impl ShrAssign<i64> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i32 { self << rhs } }
+impl<'a> Shl<&'a i128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i32 { self << *rhs } }
+impl<'a> Shl<i128> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i32 { *self << *rhs } }
+impl ShlAssign<i128> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a i128> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i32 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i32 { *self >> *rhs } }
+impl ShrAssign<i128> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i32 { self << rhs } }
+impl<'a> Shl<&'a isize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i32 { self << *rhs } }
+impl<'a> Shl<isize> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i32 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i32 { *self << *rhs } }
+impl ShlAssign<isize> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for i32 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i32 { self >> rhs } }
+impl<'a> Shr<&'a isize> for i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i32 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i32 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b i32 { type Output = i32; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i32 { *self >> *rhs } }
+impl ShrAssign<isize> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for i32 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i64 { self << rhs } }
+impl<'a> Shl<&'a u8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i64 { self << *rhs } }
+impl<'a> Shl<u8> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i64 { *self << *rhs } }
+impl ShlAssign<u8> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a u8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i64 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i64 { *self >> *rhs } }
+impl ShrAssign<u8> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i64 { self << rhs } }
+impl<'a> Shl<&'a u16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i64 { self << *rhs } }
+impl<'a> Shl<u16> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i64 { *self << *rhs } }
+impl ShlAssign<u16> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a u16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i64 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i64 { *self >> *rhs } }
+impl ShrAssign<u16> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i64 { self << rhs } }
+impl<'a> Shl<&'a u64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i64 { self << *rhs } }
+impl<'a> Shl<u64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i64 { *self << *rhs } }
+impl ShlAssign<u64> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a u64> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i64 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i64 { *self >> *rhs } }
+impl ShrAssign<u64> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i64 { self << rhs } }
+impl<'a> Shl<&'a u128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i64 { self << *rhs } }
+impl<'a> Shl<u128> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i64 { *self << *rhs } }
+impl ShlAssign<u128> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a u128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i64 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i64 { *self >> *rhs } }
+impl ShrAssign<u128> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i64 { self << rhs } }
+impl<'a> Shl<&'a i8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i64 { self << *rhs } }
+impl<'a> Shl<i8> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i64 { *self << *rhs } }
+impl ShlAssign<i8> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a i8> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i64 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i64 { *self >> *rhs } }
+impl ShrAssign<i8> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i64 { self << rhs } }
+impl<'a> Shl<&'a i16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i64 { self << *rhs } }
+impl<'a> Shl<i16> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i64 { *self << *rhs } }
+impl ShlAssign<i16> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a i16> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i64 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i64 { *self >> *rhs } }
+impl ShrAssign<i16> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i64 { self << rhs } }
+impl<'a> Shl<&'a i128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i64 { self << *rhs } }
+impl<'a> Shl<i128> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> i64 { *self << *rhs } }
+impl ShlAssign<i128> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a i128> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i64 { self >> *rhs } }
+impl<'a> Shr<i128> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> i64 { *self >> *rhs } }
+impl ShrAssign<i128> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }
+impl Shl<isize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i64 { self << rhs } }
+impl<'a> Shl<&'a isize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i64 { self << *rhs } }
+impl<'a> Shl<isize> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i64 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i64 { *self << *rhs } }
+impl ShlAssign<isize> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for i64 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i64 { self >> rhs } }
+impl<'a> Shr<&'a isize> for i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i64 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i64 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b i64 { type Output = i64; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i64 { *self >> *rhs } }
+impl ShrAssign<isize> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for i64 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i128 { self << rhs } }
+impl<'a> Shl<&'a u8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i128 { self << *rhs } }
+impl<'a> Shl<u8> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> i128 { *self << *rhs } }
+impl ShlAssign<u8> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a u8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i128 { self >> *rhs } }
+impl<'a> Shr<u8> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> i128 { *self >> *rhs } }
+impl ShrAssign<u8> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i128 { self << rhs } }
+impl<'a> Shl<&'a u16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i128 { self << *rhs } }
+impl<'a> Shl<u16> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> i128 { *self << *rhs } }
+impl ShlAssign<u16> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a u16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i128 { self >> *rhs } }
+impl<'a> Shr<u16> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> i128 { *self >> *rhs } }
+impl ShrAssign<u16> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i128 { self << rhs } }
+impl<'a> Shl<&'a u64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i128 { self << *rhs } }
+impl<'a> Shl<u64> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> i128 { *self << *rhs } }
+impl ShlAssign<u64> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a u64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i128 { self >> *rhs } }
+impl<'a> Shr<u64> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> i128 { *self >> *rhs } }
+impl ShrAssign<u64> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i128 { self << rhs } }
+impl<'a> Shl<&'a u128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i128 { self << *rhs } }
+impl<'a> Shl<u128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> i128 { *self << *rhs } }
+impl ShlAssign<u128> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a u128> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i128 { self >> *rhs } }
+impl<'a> Shr<u128> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> i128 { *self >> *rhs } }
+impl ShrAssign<u128> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i128 { self << rhs } }
+impl<'a> Shl<&'a i8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i128 { self << *rhs } }
+impl<'a> Shl<i8> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> i128 { *self << *rhs } }
+impl ShlAssign<i8> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a i8> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i128 { self >> *rhs } }
+impl<'a> Shr<i8> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> i128 { *self >> *rhs } }
+impl ShrAssign<i8> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i128 { self << rhs } }
+impl<'a> Shl<&'a i16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i128 { self << *rhs } }
+impl<'a> Shl<i16> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> i128 { *self << *rhs } }
+impl ShlAssign<i16> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a i16> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i128 { self >> *rhs } }
+impl<'a> Shr<i16> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> i128 { *self >> *rhs } }
+impl ShrAssign<i16> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i128 { self << rhs } }
+impl<'a> Shl<&'a i64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i128 { self << *rhs } }
+impl<'a> Shl<i64> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> i128 { *self << *rhs } }
+impl ShlAssign<i64> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a i64> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i128 { self >> *rhs } }
+impl<'a> Shr<i64> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> i128 { *self >> *rhs } }
+impl ShrAssign<i64> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<isize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i128 { self << rhs } }
+impl<'a> Shl<&'a isize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i128 { self << *rhs } }
+impl<'a> Shl<isize> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: isize) -> i128 { *self << rhs } }
+impl<'a, 'b> Shl<&'a isize> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a isize) -> i128 { *self << *rhs } }
+impl ShlAssign<isize> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a isize> for i128 { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a isize) { *self = *self << *rhs; } }
+impl Shr<isize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i128 { self >> rhs } }
+impl<'a> Shr<&'a isize> for i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i128 { self >> *rhs } }
+impl<'a> Shr<isize> for &'a i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: isize) -> i128 { *self >> rhs } }
+impl<'a, 'b> Shr<&'a isize> for &'b i128 { type Output = i128; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a isize) -> i128 { *self >> *rhs } }
+impl ShrAssign<isize> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a isize> for i128 { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a isize) { *self = *self >> *rhs; } }
+impl Shl<u8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> isize { self << rhs } }
+impl<'a> Shl<&'a u8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> isize { self << *rhs } }
+impl<'a> Shl<u8> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u8) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u8> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u8) -> isize { *self << *rhs } }
+impl ShlAssign<u8> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u8> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u8) { *self = *self << *rhs; } }
+impl Shr<u8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> isize { self >> rhs } }
+impl<'a> Shr<&'a u8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> isize { self >> *rhs } }
+impl<'a> Shr<u8> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u8) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u8> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u8) -> isize { *self >> *rhs } }
+impl ShrAssign<u8> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u8> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u8) { *self = *self >> *rhs; } }
+impl Shl<u16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> isize { self << rhs } }
+impl<'a> Shl<&'a u16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> isize { self << *rhs } }
+impl<'a> Shl<u16> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u16) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u16> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u16) -> isize { *self << *rhs } }
+impl ShlAssign<u16> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u16> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u16) { *self = *self << *rhs; } }
+impl Shr<u16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> isize { self >> rhs } }
+impl<'a> Shr<&'a u16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> isize { self >> *rhs } }
+impl<'a> Shr<u16> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u16) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u16> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u16) -> isize { *self >> *rhs } }
+impl ShrAssign<u16> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u16> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u16) { *self = *self >> *rhs; } }
+impl Shl<u64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> isize { self << rhs } }
+impl<'a> Shl<&'a u64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> isize { self << *rhs } }
+impl<'a> Shl<u64> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u64) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u64> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u64) -> isize { *self << *rhs } }
+impl ShlAssign<u64> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u64> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u64) { *self = *self << *rhs; } }
+impl Shr<u64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> isize { self >> rhs } }
+impl<'a> Shr<&'a u64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> isize { self >> *rhs } }
+impl<'a> Shr<u64> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u64) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u64> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u64) -> isize { *self >> *rhs } }
+impl ShrAssign<u64> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u64> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u64) { *self = *self >> *rhs; } }
+impl Shl<u128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> isize { self << rhs } }
+impl<'a> Shl<&'a u128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> isize { self << *rhs } }
+impl<'a> Shl<u128> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: u128) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a u128> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a u128) -> isize { *self << *rhs } }
+impl ShlAssign<u128> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a u128> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a u128) { *self = *self << *rhs; } }
+impl Shr<u128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> isize { self >> rhs } }
+impl<'a> Shr<&'a u128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> isize { self >> *rhs } }
+impl<'a> Shr<u128> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: u128) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a u128> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a u128) -> isize { *self >> *rhs } }
+impl ShrAssign<u128> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a u128> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a u128) { *self = *self >> *rhs; } }
+impl Shl<i8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> isize { self << rhs } }
+impl<'a> Shl<&'a i8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> isize { self << *rhs } }
+impl<'a> Shl<i8> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i8) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i8> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i8) -> isize { *self << *rhs } }
+impl ShlAssign<i8> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i8> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i8) { *self = *self << *rhs; } }
+impl Shr<i8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> isize { self >> rhs } }
+impl<'a> Shr<&'a i8> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> isize { self >> *rhs } }
+impl<'a> Shr<i8> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i8) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i8> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i8) -> isize { *self >> *rhs } }
+impl ShrAssign<i8> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i8> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i8) { *self = *self >> *rhs; } }
+impl Shl<i16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> isize { self << rhs } }
+impl<'a> Shl<&'a i16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> isize { self << *rhs } }
+impl<'a> Shl<i16> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i16) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i16> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i16) -> isize { *self << *rhs } }
+impl ShlAssign<i16> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i16> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i16) { *self = *self << *rhs; } }
+impl Shr<i16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> isize { self >> rhs } }
+impl<'a> Shr<&'a i16> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> isize { self >> *rhs } }
+impl<'a> Shr<i16> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i16) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i16> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i16) -> isize { *self >> *rhs } }
+impl ShrAssign<i16> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i16> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i16) { *self = *self >> *rhs; } }
+impl Shl<i64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> isize { self << rhs } }
+impl<'a> Shl<&'a i64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> isize { self << *rhs } }
+impl<'a> Shl<i64> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i64) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i64> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i64) -> isize { *self << *rhs } }
+impl ShlAssign<i64> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i64> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i64) { *self = *self << *rhs; } }
+impl Shr<i64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> isize { self >> rhs } }
+impl<'a> Shr<&'a i64> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> isize { self >> *rhs } }
+impl<'a> Shr<i64> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i64) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i64> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i64) -> isize { *self >> *rhs } }
+impl ShrAssign<i64> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i64> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i64) { *self = *self >> *rhs; } }
+impl Shl<i128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> isize { self << rhs } }
+impl<'a> Shl<&'a i128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> isize { self << *rhs } }
+impl<'a> Shl<i128> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: i128) -> isize { *self << rhs } }
+impl<'a, 'b> Shl<&'a i128> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shl(self, rhs: &'a i128) -> isize { *self << *rhs } }
+impl ShlAssign<i128> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl<'a> ShlAssign<&'a i128> for isize { #[rustc_inherit_overflow_checks] fn shl_assign(&mut self, rhs: &'a i128) { *self = *self << *rhs; } }
+impl Shr<i128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> isize { self >> rhs } }
+impl<'a> Shr<&'a i128> for isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> isize { self >> *rhs } }
+impl<'a> Shr<i128> for &'a isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: i128) -> isize { *self >> rhs } }
+impl<'a, 'b> Shr<&'a i128> for &'b isize { type Output = isize; #[rustc_inherit_overflow_checks] fn shr(self, rhs: &'a i128) -> isize { *self >> *rhs } }
+impl ShrAssign<i128> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl<'a> ShrAssign<&'a i128> for isize { #[rustc_inherit_overflow_checks] fn shr_assign(&mut self, rhs: &'a i128) { *self = *self >> *rhs; } }

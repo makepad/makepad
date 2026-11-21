@@ -94,6 +94,13 @@ impl<T, E> Result<T, E> {
             Err(e) => default(e),
         }
     }
+    /// rustc 1.98.0 (result_option_map_or_default): maps the success value or returns the output type's default.
+    pub const fn map_or_default<U: Default, F: FnOnce(T) -> U>(self, f: F) -> U {
+        match self {
+            Ok(t) => f(t),
+            Err(_) => U::default(),
+        }
+    }
     pub const fn map_err<F2, O: FnOnce(E) -> F2>(self, op: O) -> Result<T, F2> {
         match self {
             Ok(t) => Ok(t),
@@ -208,6 +215,27 @@ impl<T, E> Result<T, E> {
         match self {
             Ok(t) => t,
             Err(_) => crate::hint::unreachable_unchecked(),
+        }
+    }
+    /// rustc 1.58.0 (option_result_unwrap_unchecked): returns the error without checking the variant.
+    ///
+    /// # Safety
+    /// The result must be `Err`.
+    #[track_caller]
+    pub const unsafe fn unwrap_err_unchecked(self) -> E {
+        match self {
+            Ok(_) => unsafe { crate::hint::unreachable_unchecked() },
+            Err(e) => e,
+        }
+    }
+}
+
+impl<T, E> Result<Result<T, E>, E> {
+    /// rustc 1.89.0 (result_flattening): removes one level of nested result.
+    pub const fn flatten(self) -> Result<T, E> {
+        match self {
+            Ok(inner) => inner,
+            Err(e) => Err(e),
         }
     }
 }

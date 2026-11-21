@@ -341,6 +341,10 @@ impl<'a, I: Ids + ?Sized> Resolver<'a, I> {
                 h.u8(17);
                 h.str(&n);
             }
+            SymKind::Note(n) => {
+                h.u8(18);
+                h.str(&n);
+            }
         }
         Some(h.finish128())
     }
@@ -406,8 +410,14 @@ pub(crate) fn encode(resolve: &mut dyn FnMut(&Dg) -> Option<u128>, id: u32, d: O
     };
     put(out, resolve(&d.own), false);
     out.extend_from_slice(&(d.ctx.len() as u32).to_le_bytes());
+    // (each slot's first position: a large body has thousands of contexts and of inlined keys,
+    // and a scan per context made this quadratic: 2-4 ms of a record)
+    let mut at: HashMap<u32, u32> = HashMap::with_capacity(inlined.len());
+    for (i, &x) in inlined.iter().enumerate() {
+        at.entry(x).or_insert(i as u32);
+    }
     for (s, g, waits) in d.ctx.iter() {
-        let ix = if *s == id { CTX_SELF } else { inlined.iter().position(|x| x == s).map_or(NO_SLOT, |i| i as u32) };
+        let ix = if *s == id { CTX_SELF } else { at.get(s).copied().unwrap_or(NO_SLOT) };
         out.extend_from_slice(&ix.to_le_bytes());
         put(out, resolve(g), *waits);
     }
@@ -732,6 +742,7 @@ fn sym_name(u: &Unit, y: u32) -> String {
         Some(SymKind::SbTls(s)) => format!("SbTls symbol #{s}"),
         Some(SymKind::SbTable) => "SbTable".to_string(),
         Some(SymKind::SbHost(n)) => format!("SbHost {n}"),
+        Some(SymKind::Note(n)) => format!("Note {n}"),
         None => "no kind recorded".to_string(),
     };
     format!("symbol #{y} {name}")

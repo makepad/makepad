@@ -19,7 +19,9 @@ fail=""
 run_case() { # run_case <main|thread>
     local case=$1 log="$dir/$1.log" pid ask view
     mkdir -p "$dir/$case-home" "$dir/$case-t"
-    env PARK_VIEW=$case MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/$case-home" TMPDIR="$dir/$case-t" \
+    # the panic parks on purpose and this script decides it: the test's own (RELAX_EXPECTED_CRASH),
+    # which a devhub node's watch leaves alone in the run of a lease nobody attends
+    env PARK_VIEW=$case RELAX_EXPECTED_CRASH="park_view.sh parks a panic and decides it" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/$case-home" TMPDIR="$dir/$case-t" \
         RELAX_HOME="$dir/$case-runhome" ${PARK_VIEW_DUMP:+RELAX_BOOT_DUMP=$PARK_VIEW_DUMP/$case@400} \
         "$T/makepad" run relax-park-view > "$log" 2>&1 &
     pid=$!

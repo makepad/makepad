@@ -9,8 +9,10 @@
 #
 # With a fresh home: passes the first-start card, selects Task, runs it live, checks that it drew
 # and that its card says it runs, presses Stop and checks the whole tree ends without a failure.
-# Then Enter (a double click's path) does the same, then a run frozen before Stop. Then adds Task to a Start Menu under the temp
-# folder, reads the shortcut as the shell does, starts it and removes it.
+# Then Enter (a double click's path) starts the compiled build, compiled first, and its Cancel ends
+# the build's whole tree; then a run frozen before Stop. Then adds Task to a Start Menu under the
+# temp folder, reads the shortcut as the shell does, starts it and removes it.
+# Each wait says what it waits for as it starts (a run that hangs names its wait in the log).
 # Prints "runner_windows: OK ..." or "runner_windows: FAIL ..."; exit 1 on FAIL.
 $ErrorActionPreference = 'Continue'
 $Root = (Get-Location).Path
@@ -56,6 +58,8 @@ function Act {
     return $answer
 }
 function Until($what, $pred) {
+    # (on the process's stdout, not the pipeline: a step's return value stays its own)
+    [Console]::Out.WriteLine("runner_windows: waiting for $what")
     while (-not (& $pred)) {
         if ($p.HasExited) { throw "the runner ended while waiting for $what" }
         Start-Sleep -Milliseconds 100
@@ -82,6 +86,33 @@ function Run-And-Stop($how, $start) {
     $ui = Ui
     if ($ui -match "Didn't open|taskkill|exit code") { throw "$how ended with a failure on its tile: $ui" }
     return "$how pid $pid_ tree of $($tree.Count)"
+}
+
+# Enter on the tile runs what a double click runs: the compiled build, compiled first (nothing
+# starts under the JIT unless the person picks Run Live). The build starts, and its card's Cancel
+# ends all of it: no process of its tree outlives the press, and the tile shows no failure. The
+# wait is bounded, as Stop's of a frozen run is.
+function Enter-Compiles {
+    $before = @(Tree $p.Id)
+    $added = { @(Tree $p.Id | Where-Object { $before -notcontains $_ }) }
+    Act ui act press role=button q=name=Task w=0 | Out-Null
+    Act key c=ReturnKey | Out-Null
+    Until 'Enter to start the build' { (Ui) -match 'static_text "Compiling"' }
+    Until "the build's processes" { (& $added).Count -gt 0 }
+    Act ui act press role=button q=name=Cancel w=0 | Out-Null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (($left = & $added).Count -gt 0) {
+        if ($sw.Elapsed.TotalSeconds -gt 60) {
+            $named = @($left | ForEach-Object { $q = Get-Process -Id $_ -ErrorAction SilentlyContinue; if ($q) { "$_ $($q.ProcessName)" } })
+            throw "Cancel left the build's processes alive after 60 s: $($named -join ', ')"
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $took = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
+    Until 'the build to show as cancelled' { (Ui) -notmatch 'static_text "Compiling"' }
+    $ui = Ui
+    if ($ui -match "Didn't open|taskkill|exit code") { throw "the cancelled build left a failure on its tile: $ui" }
+    return "Enter's build cancelled in $took s"
 }
 
 # A frozen run: one press of Stop ends it, with no failure on its tile. The wait is bounded so a
@@ -142,7 +173,7 @@ try {
     $said += Run-And-Stop 'Run Live' { Act ui act press 'q=name~=live' w=0 }
     # the tile takes the keys when pressed, and a card's press took them from it: Enter runs what a
     # double click runs
-    $said += Run-And-Stop 'Enter' { Act ui act press role=button q=name=Task w=0; Act key c=ReturnKey }
+    $said += Enter-Compiles
     $said += Frozen-Stop
     $said += Pin-And-Start
 } catch {

@@ -13,6 +13,9 @@
 # build input) is that run's build too (relax issue 172, PR 175's shell case), and no file in
 # that run's folder holds its environment (PREPARED_MARKER's value). The test also starts its binary
 # through `env -i`, a launcher that clears the environment, and that is still its build (relax issue 205).
+# The test runs with an environment over 128 KiB in all, each value under it: Linux refuses an exec
+# with one string over 128 KiB (E2BIG), and a spawn that handed the build environment in one
+# variable could not start the binary; a descriptor hands it now (relax-base progenv.rs BUILD_FD).
 H=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 [ -n "$T" ] && [ -d "$T" ] || exit 2
@@ -24,12 +27,13 @@ FAILS=0
 case_is() { # name ok?
     if [ "$2" = 1 ]; then echo "prepared_child: $1: ok"; else echo "prepared_child: $1: FAILED"; FAILS=$((FAILS + 1)); fi
 }
-OUT=$(cd "$H" && "$1" test --allow-c pc-app 2>&1)
+BULK=$(printf '%070000d' 0)
+OUT=$(cd "$H" && PREPARED_BULK_A=$BULK PREPARED_BULK_B=$BULK "$1" test --allow-c pc-app 2>&1)
 rc=$?
 echo "$OUT"
 ok=0
 [ $rc = 0 ] && echo "$OUT" | grep -q "^test the_binary_is_the_tests_build_in_any_environment \.\.\. ok$" && ok=1
-case_is "the test's binary" $ok
+case_is "the test's binary (an environment over 128 KiB)" $ok
 RECEIPT=$(cat "$T/target/relax/relax-bin/pc-app.native" 2>/dev/null)
 ok=0
 [ -n "$RECEIPT" ] && [ -f "$RECEIPT" ] && ok=1

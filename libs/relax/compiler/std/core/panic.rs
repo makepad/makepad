@@ -58,15 +58,48 @@ pub struct PanicInfo<'a> {
     location: &'a Location<'a>,
 }
 
+/// rustc 1.81.0 (panic_info_message): the formatted message supplied to a panic.
+pub struct PanicMessage<'a> {
+    message: &'a fmt::Arguments<'a>,
+}
+
+impl PanicMessage<'_> {
+    /// rustc 1.81.0 (panic_info_message): returns the static text when no runtime formatting is needed.
+    #[must_use]
+    pub const fn as_str(&self) -> Option<&'static str> {
+        self.message.as_str()
+    }
+}
+
+impl fmt::Display for PanicMessage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(*self.message)
+    }
+}
+
+impl fmt::Debug for PanicMessage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(*self.message)
+    }
+}
+
 impl<'a> PanicInfo<'a> {
     pub(crate) fn new(message: fmt::Arguments<'a>, location: &'a Location<'a>) -> PanicInfo<'a> {
         PanicInfo { message, location }
     }
-    pub fn message(&self) -> fmt::Arguments<'a> {
-        self.message
+    /// rustc 1.81.0 (panic_info_message): the message that was given to the panic macro.
+    #[must_use]
+    pub fn message(&self) -> PanicMessage<'_> {
+        PanicMessage { message: &self.message }
     }
     pub fn location(&self) -> Option<&Location<'_>> {
         Some(self.location)
+    }
+    /// rustc 1.10.0 (panic_hooks): returns an opaque placeholder payload.
+    #[deprecated(since = "1.81.0", note = "this never returns anything useful")]
+    pub fn payload(&self) -> &(dyn crate::any::Any + Send) {
+        struct NoPayload;
+        &NoPayload
     }
 }
 

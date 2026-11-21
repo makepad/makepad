@@ -32,6 +32,11 @@ fn a01_spawn_join() {
     }).unwrap();
     println!("| {}", h.join().unwrap());
     println!("| {:?}", thread::spawn(|| thread::current().name().map(|s| s.to_string())).join().unwrap());
+    let mut local = 8;
+    // SAFETY: the thread is joined before local is read again or dropped.
+    let borrowed = unsafe { thread::Builder::new().spawn_unchecked(|| &mut local) }.unwrap();
+    *borrowed.join().unwrap() += 3;
+    println!("| unchecked spawn {}", local);
 }
 
 #[test]
@@ -56,6 +61,8 @@ fn a03_thread_local() {
     });
     println!("| {:?} {} {}", h.join().unwrap(), DEPTH.get(), NAMES.with_borrow(|v| v.len()));
     println!("| {} {}", DEPTH.replace(1), DEPTH.take());
+    DEPTH.update(|v| v + 13);
+    println!("| updated depth {}", DEPTH.get());
 }
 
 #[test]
@@ -106,4 +113,23 @@ fn a05_scope() {
     let h = thread::spawn(|| thread::sleep(Duration::from_millis(1)));
     let _ = h.thread().id();
     h.join().unwrap();
+}
+
+#[test]
+fn a06_lazy_lock() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::LazyLock;
+    let mut lock = LazyLock::new(|| 5);
+    println!("| lazy before {:?}", LazyLock::get_mut(&mut lock));
+    *LazyLock::force_mut(&mut lock) += 4;
+    *LazyLock::get_mut(&mut lock).unwrap() *= 2;
+    println!("| lazy after {}", LazyLock::force_mut(&mut lock));
+    println!("| lazy shared {}", *lock);
+
+    let mut poisoned = LazyLock::new(|| -> u8 { panic!("initialization failed") });
+    let first = catch_unwind(AssertUnwindSafe(|| {
+        LazyLock::force_mut(&mut poisoned);
+    }));
+    let again = catch_unwind(AssertUnwindSafe(|| LazyLock::force(&poisoned)));
+    println!("| lazy poisoned {} {} {:?}", first.is_err(), again.is_err(), LazyLock::get_mut(&mut poisoned));
 }

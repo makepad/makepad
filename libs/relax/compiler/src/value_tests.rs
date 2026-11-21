@@ -39,13 +39,17 @@ const RELEASE: crate::resolve::ProfileChecks = crate::resolve::ProfileChecks { d
 
 /// The checks' values: `cfg!(debug_assertions)` at run time and in a const, a failing
 /// `debug_assert!`'s panic, the overflow panics of an add, a shift and a negation, and a sum that
-/// does not overflow.
+/// does not overflow. Then std's code that inherits the program's checks (rustc's
+/// `#[rustc_inherit_overflow_checks]`, `intrinsics::overflow_checks`): a `RangeFrom` stepping
+/// past its type's maximum, which panics with the add's message under checks and wraps without,
+/// and `core::range::RangeFrom`'s iterator, which yields the maximum first.
 const CHECKS: &str = r#"
 pub const ON: usize = if cfg!(debug_assertions) { 1 } else { 0 };
 fn add(a: u8, b: u8) -> u8 { a + b }
 fn shl(a: u32, b: u32) -> u32 { a << b }
 fn neg(a: i32) -> i32 { -a }
-pub fn values(out: &mut [usize; 7]) {
+fn message(e: Box<dyn std::any::Any + Send>) -> usize { (e.downcast_ref::<&str>() == Some(&"attempt to add with overflow")) as usize }
+pub fn values(out: &mut [usize; 11]) {
     out[0] = cfg!(debug_assertions) as usize;
     out[1] = ON;
     out[2] = std::panic::catch_unwind(|| debug_assert!(std::hint::black_box(1) == 2)).is_err() as usize;
@@ -53,6 +57,12 @@ pub fn values(out: &mut [usize; 7]) {
     out[4] = std::panic::catch_unwind(|| shl(1, std::hint::black_box(32))).is_err() as usize;
     out[5] = std::panic::catch_unwind(|| neg(std::hint::black_box(i32::MIN))).is_err() as usize;
     out[6] = add(std::hint::black_box(250), 5) as usize;
+    let past = std::panic::catch_unwind(|| { let mut r = std::hint::black_box(255u8)..; r.next(); r.start as usize });
+    out[7] = past.as_ref().map_or(999, |s| *s);
+    out[8] = past.err().map_or(0, message);
+    let mut it = core::range::RangeFrom::from(std::hint::black_box(254u8)..).into_iter();
+    out[9] = it.next().unwrap() as usize * 1000 + it.next().unwrap() as usize;
+    out[10] = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| it.next().unwrap() as usize)).unwrap_or(999);
 }
 "#;
 
@@ -117,11 +127,155 @@ fn cfg_macro_is_the_crates_cfg_at_run_time_and_in_consts() {
     let width = if cfg!(target_pointer_width = "64") { 64 } else { 32 };
     let arch = if cfg!(target_arch = "x86_64") { 1 } else if cfg!(target_arch = "aarch64") { 2 } else { 0 };
     assert_eq!(out, [cfg!(target_endian = "little") as usize, cfg!(target_pointer_width = "64") as usize, arch, width, width, 4, 7, width, 1]);
-    let (first, o3, refused): ([usize; 7], [usize; 7], _) = values_at_o3(CHECKS, "cfg_checked", CHECKED);
-    assert_eq!(first, [1, 1, 1, 1, 1, 1, 255], "the test profile's checks at the first tier");
+    let (first, o3, refused): ([usize; 11], [usize; 11], _) = values_at_o3(CHECKS, "cfg_checked", CHECKED);
+    assert_eq!(first, [1, 1, 1, 1, 1, 1, 255, 999, 1, 254_255, 999], "the test profile's checks at the first tier");
     assert_eq!(o3, first, "the test profile's checks at O3 (not built: {refused:?})");
-    let (first, o3, _): ([usize; 7], [usize; 7], _) = values_at_o3(CHECKS, "cfg_released", RELEASE);
-    assert_eq!((first, o3), ([0, 0, 0, 0, 0, 0, 255], [0, 0, 0, 0, 0, 0, 255]), "the release profile's: no check, at the first tier and at O3");
+    let (first, o3, _): ([usize; 11], [usize; 11], _) = values_at_o3(CHECKS, "cfg_released", RELEASE);
+    let released = [0, 0, 0, 0, 0, 0, 255, 0, 0, 254_255, 0];
+    assert_eq!((first, o3), (released, released), "the release profile's: no check, at the first tier and at O3");
+}
+
+/// Products of integers widened to 128 bits, under the test profile's overflow checks: signed
+/// values widened by their sign into i128 and unsigned ones by zero into u128 (one widening
+/// multiply, never an overflow), narrower ones, and the products that stay general: a signed by
+/// an unsigned value, and unsigned values widened into i128, whose product can overflow.
+const WIDENED: &str = r#"
+use std::hint::black_box;
+fn halves(v: i128, out: &mut [usize; 13], k: usize) { out[k] = v as u64 as usize; out[k + 1] = (v >> 64) as u64 as usize; }
+fn signed(a: i64, b: i64) -> i128 { a as i128 * b as i128 }
+fn narrow(a: i32, b: i8) -> i128 { (a as i128) * (b as i128) }
+fn unsigned(a: u64, b: u64) -> u128 { a as u128 * b as u128 }
+fn mixed(a: i64, b: u64) -> i128 { a as i128 * b as i128 }
+fn unsigned_into_signed(a: u64, b: u64) -> i128 { a as i128 * b as i128 }
+pub fn values(out: &mut [usize; 13]) {
+    halves(signed(black_box(i64::MIN), black_box(i64::MIN)), out, 0);
+    halves(signed(black_box(i64::MIN), black_box(i64::MAX)), out, 2);
+    halves(narrow(black_box(-3), black_box(-128)), out, 4);
+    halves(unsigned(black_box(u64::MAX), black_box(u64::MAX)) as i128, out, 6);
+    halves(mixed(black_box(i64::MIN), black_box(u64::MAX)), out, 8);
+    halves(unsigned_into_signed(black_box(1 << 63), black_box(3)), out, 10);
+    out[12] = std::panic::catch_unwind(|| unsigned_into_signed(black_box(u64::MAX), black_box(u64::MAX))).is_err() as usize;
+}
+"#;
+
+#[test]
+fn widened_128_bit_products_are_exact_and_overflow_only_where_they_can() {
+    isolated_test!(widened_128_bit_products_are_exact_and_overflow_only_where_they_can);
+    use std::hint::black_box;
+    let halves = |v: i128| [v as u64 as usize, (v >> 64) as u64 as usize];
+    let mut want = [0usize; 13];
+    for (k, v) in [
+        black_box(i64::MIN) as i128 * black_box(i64::MIN) as i128,
+        black_box(i64::MIN) as i128 * black_box(i64::MAX) as i128,
+        black_box(-3i32) as i128 * black_box(-128i8) as i128,
+        (black_box(u64::MAX) as u128 * black_box(u64::MAX) as u128) as i128,
+        black_box(i64::MIN) as i128 * black_box(u64::MAX) as i128,
+        black_box(1u64 << 63) as i128 * black_box(3u64) as i128,
+    ].into_iter().enumerate() {
+        want[2 * k..2 * k + 2].copy_from_slice(&halves(v));
+    }
+    want[12] = 1;
+    let (first, o3, refused): ([usize; 13], [usize; 13], _) = values_at_o3(WIDENED, "widened_products", CHECKED);
+    assert_eq!(first, want, "the products and the one overflow at the first tier");
+    assert_eq!(o3, want, "the products and the one overflow at O3 (not built: {refused:?})");
+}
+
+/// 128-bit products of a full value and a factor of one word (a widened i64 or u64 either side, a
+/// literal), and 128-bit quotients and remainders, signed and unsigned, under the test profile's
+/// checks: each value, or (third word 1) the overflow or zero-divisor panic. The values are paired
+/// with the cases' constants in the test (rustc's checked_mul / checked_div / checked_rem).
+const BY_WORD: &str = r#"
+use std::hint::black_box;
+const XS: [i128; 10] = [0, 1, -1, 0xffff_ffff_ffff_ffff, 1 << 64, -(1 << 64), 1 << 126, -(1 << 126), i128::MAX, i128::MIN];
+const FS: [i64; 7] = [0, 1, -1, 2, -2, i64::MAX, i64::MIN];
+const XU: [u128; 6] = [0, 1, 0xffff_ffff_ffff_ffff, 1 << 64, u128::MAX / 3, u128::MAX];
+const FU: [u64; 5] = [0, 1, 2, 3, u64::MAX];
+const DS: [i128; 6] = [3, -7, -1, 0, 1 << 70, -(1 << 65) + 1];
+const DU: [u128; 3] = [3, 0, 1 << 70];
+fn by(x: i128, f: i64) -> i128 { x * f as i128 }
+fn by_rev(x: i128, f: i64) -> i128 { (f as i128) * x }
+fn two(x: i128) -> i128 { 2 * x }
+fn minus_two(x: i128) -> i128 { x * -2 }
+fn uby(x: u128, f: u64) -> u128 { x * f as u128 }
+fn three(x: u128) -> u128 { 3 * x }
+fn put(out: &mut [usize; 1056], k: &mut usize, r: Result<u128, Box<dyn std::any::Any + Send>>) {
+    match r {
+        Ok(v) => { out[*k] = v as u64 as usize; out[*k + 1] = (v >> 64) as u64 as usize; }
+        Err(_) => out[*k + 2] = 1,
+    }
+    *k += 3;
+}
+pub fn values(out: &mut [usize; 1056]) {
+    use std::panic::catch_unwind as c;
+    let k = &mut 0;
+    for x in XS {
+        for f in FS {
+            put(out, k, c(|| by(black_box(x), black_box(f)) as u128));
+            put(out, k, c(|| by_rev(black_box(x), black_box(f)) as u128));
+        }
+        put(out, k, c(|| two(black_box(x)) as u128));
+        put(out, k, c(|| minus_two(black_box(x)) as u128));
+    }
+    for x in XU {
+        for f in FU { put(out, k, c(|| uby(black_box(x), black_box(f)))); }
+        put(out, k, c(|| three(black_box(x))));
+    }
+    for x in XS {
+        for d in DS {
+            put(out, k, c(|| (black_box(x) / black_box(d)) as u128));
+            put(out, k, c(|| (black_box(x) % black_box(d)) as u128));
+        }
+    }
+    for x in XU {
+        for d in DU {
+            put(out, k, c(|| black_box(x) / black_box(d)));
+            put(out, k, c(|| black_box(x) % black_box(d)));
+        }
+    }
+}
+"#;
+
+#[test]
+fn a_128_bit_value_by_one_word_and_its_quotients_are_rustcs() {
+    isolated_test!(a_128_bit_value_by_one_word_and_its_quotients_are_rustcs);
+    const XS: [i128; 10] = [0, 1, -1, 0xffff_ffff_ffff_ffff, 1 << 64, -(1 << 64), 1 << 126, -(1 << 126), i128::MAX, i128::MIN];
+    const FS: [i64; 7] = [0, 1, -1, 2, -2, i64::MAX, i64::MIN];
+    const XU: [u128; 6] = [0, 1, 0xffff_ffff_ffff_ffff, 1 << 64, u128::MAX / 3, u128::MAX];
+    const FU: [u64; 5] = [0, 1, 2, 3, u64::MAX];
+    const DS: [i128; 6] = [3, -7, -1, 0, 1 << 70, -(1 << 65) + 1];
+    const DU: [u128; 3] = [3, 0, 1 << 70];
+    let mut want = Vec::new();
+    let mut put = |r: Option<u128>| want.extend(match r { Some(v) => [v as u64 as usize, (v >> 64) as u64 as usize, 0], None => [0, 0, 1] });
+    for x in XS {
+        for f in FS {
+            put(x.checked_mul(f as i128).map(|v| v as u128));
+            put((f as i128).checked_mul(x).map(|v| v as u128));
+        }
+        put(2i128.checked_mul(x).map(|v| v as u128));
+        put(x.checked_mul(-2).map(|v| v as u128));
+    }
+    for x in XU {
+        for f in FU { put(x.checked_mul(f as u128)); }
+        put(3u128.checked_mul(x));
+    }
+    for x in XS {
+        for d in DS {
+            put(x.checked_div(d).map(|v| v as u128));
+            put(x.checked_rem(d).map(|v| v as u128));
+        }
+    }
+    for x in XU {
+        for d in DU {
+            put(x.checked_div(d));
+            put(x.checked_rem(d));
+        }
+    }
+    assert_eq!(want.len(), 1056);
+    let (first, o3, refused): ([usize; 1056], [usize; 1056], _) = values_at_o3(BY_WORD, "by_word", CHECKED);
+    // the first case that differs: (case, the JIT's value lo / hi / panicked, rustc's)
+    let differs = |out: &[usize; 1056]| (0..352).find(|&i| out[3 * i..3 * i + 3] != want[3 * i..3 * i + 3]).map(|i| (i, out[3 * i..3 * i + 3].to_vec(), want[3 * i..3 * i + 3].to_vec()));
+    assert_eq!(differs(&first), None, "at the first tier");
+    assert_eq!(differs(&o3), None, "at O3 (not built: {refused:?})");
 }
 
 /// `IoSlice` / `IoSliceMut` (now real std's `iovec`-shaped wrappers, WARNZERO class 8): the
@@ -424,6 +578,216 @@ pub fn values(out: &mut [usize; 5]) {{
 }}
 "#);
     assert_eq!(values::<5>(&src, "vfs_dir"), [1, 1, 1, 1, 1]);
+}
+
+/// std::backtrace (it was a stub that printed "unsupported backtrace", so a lane learned who held a
+/// stale id only from a native run): a capture prints real std's frames from its caller on, each
+/// fn with the file and line it was at, innermost first. `mid` is `#[inline]`: where a tier
+/// inlines it into `outer`, it is still a frame of its own (the line table's inline stack).
+/// Debug is real std's list; a disabled backtrace prints as std's does.
+const BACKTRACE: &str = r#"
+use std::backtrace::{Backtrace, BacktraceStatus};
+#[inline(never)]
+fn inner() -> Backtrace { let b = Backtrace::force_capture(); std::hint::black_box(&b); b }
+#[inline]
+fn mid() -> Backtrace { let b = inner(); std::hint::black_box(&b); b }
+#[inline(never)]
+fn outer() -> Backtrace { let b = mid(); std::hint::black_box(&b); b }
+/// frame `k`'s fn (its name's last segment) and line
+fn frame(lines: &[&str], k: usize) -> (String, usize) {
+    let head = format!("{:4}: ", k);
+    let Some(i) = lines.iter().position(|l| l.starts_with(&head)) else { return (String::new(), 0) };
+    let name = lines[i][head.len()..].rsplit("::").next().unwrap_or("").to_string();
+    let line = lines.get(i + 1).and_then(|l| l.trim_start().strip_prefix("at ")).and_then(|a| a.rsplitn(3, ':').nth(1)).and_then(|l| l.parse().ok()).unwrap_or(0);
+    (name, line)
+}
+pub fn values(out: &mut [usize; 8]) {
+    let b = outer();
+    out[0] = (b.status() == BacktraceStatus::Captured) as usize;
+    let text = b.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    let fs: Vec<(String, usize)> = (0..4).map(|k| frame(&lines, k)).collect();
+    out[1] = (fs.iter().map(|f| f.0.as_str()).collect::<Vec<_>>() == ["inner", "mid", "outer", "values"]) as usize;
+    out[2] = fs[0].1;
+    out[3] = fs[1].1;
+    out[4] = fs[2].1;
+    out[5] = lines.get(1).is_some_and(|l| l.contains("lib.rs:4:")) as usize;
+    let dbg = format!("{:?}", b);
+    out[6] = (dbg.starts_with("Backtrace [{ fn: \"") && dbg.contains("::inner\", file: \"")) as usize;
+    out[7] = (Backtrace::disabled().to_string() == "disabled backtrace" && format!("{:?}", Backtrace::disabled()) == "<disabled>") as usize;
+}
+"#;
+
+#[test]
+fn a_backtrace_names_its_callers_with_their_lines() {
+    isolated_test!(a_backtrace_names_its_callers_with_their_lines);
+    let (first, o3, refused): ([usize; 8], [usize; 8], _) = values_at_o3(BACKTRACE, "backtrace", RELEASE);
+    assert_eq!(first, [1, 1, 4, 6, 8, 1, 1, 1], "captured; frames inner, mid, outer, values; their lines; the file; Debug; disabled (first tier)");
+    assert_eq!(o3, first, "the same at O3 (not built: {refused:?})");
+}
+
+/// A panic parks (inspect events.rs on_panic) only where it leaves the program: one the program's
+/// catch_unwind catches goes back to it, which handles it, and parks nothing (a backtrace sample's
+/// caught panic parked, and devhub ended the idle lease, 11-18); one that ends a thread parks, as
+/// does a caught one rethrown out of a thread (resume_unwind searches anew) and one at a retry
+/// boundary (makepad's event dispatch: it catches only to retry). The run's endpoint is up with
+/// nobody attached, so each parks once and is released as a quit releases it (it unwinds).
+const PANIC_PARK: &str = r#"
+extern "C" {
+    fn relax_retry_enter(name: *const u8, len: usize);
+    fn relax_retry_leave();
+}
+fn rethrown(f: impl FnOnce() + std::panic::UnwindSafe) {
+    if let Err(p) = std::panic::catch_unwind(f) {
+        std::panic::resume_unwind(p);
+    }
+}
+pub fn values(out: &mut [usize; 5]) {
+    out[0] = std::panic::catch_unwind(|| { let v: Vec<u32> = Vec::new(); std::hint::black_box(&v)[3] }).is_err() as usize;
+    out[1] = std::panic::catch_unwind(|| rethrown(|| panic!("caught after a rethrow"))).is_err() as usize;
+    out[2] = std::thread::spawn(|| { let x: Option<u32> = std::hint::black_box(None); x.unwrap() }).join().is_err() as usize;
+    out[3] = std::thread::spawn(|| rethrown(|| panic!("rethrown out of a thread"))).join().is_err() as usize;
+    let name = "Signal";
+    unsafe { relax_retry_enter(name.as_ptr(), name.len()) };
+    out[4] = std::panic::catch_unwind(|| panic!("at a retry boundary")).is_err() as usize;
+    unsafe { relax_retry_leave() };
+}
+"#;
+
+#[test]
+fn a_panic_parks_only_where_it_leaves_the_program() {
+    isolated_test!(a_panic_parks_only_where_it_leaves_the_program);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    std::env::remove_var("RELAX_INSPECT");
+    std::env::set_var("RELAX_PANIC_PARK", "600");
+    // the parks are this test's own, and it releases them itself: a devhub node's observer releases
+    // a park in a run of a lease nobody attends unless its process says so, and released before the
+    // watcher looked, a park went uncounted (11-20: 183 of 240 runs under load failed)
+    std::env::set_var("RELAX_EXPECTED_CRASH", "a_panic_parks_only_where_it_leaves_the_program parks its panics and releases them");
+    crate::inspect::start("panic_park");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            // each park counted once, by its id, and released only once counted: a park released
+            // stays listed until its thread wakes, and the program's next panic parks only after
+            // that release. Counted again, the released one parked twice; released by a later look
+            // that still listed it, the next park went with it unseen
+            let mut seen: Vec<(String, String)> = Vec::new();
+            let mut ids = std::collections::HashSet::new();
+            while !stop.load(Ordering::Relaxed) {
+                let new: Vec<_> = crate::inspect::events::parked_now().into_iter().filter(|p| ids.insert(p.0)).collect();
+                if !new.is_empty() {
+                    seen.extend(new.into_iter().map(|p| (p.3, p.4)));
+                    crate::inspect::events::quit_releases();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            seen
+        })
+    };
+    let got: [usize; 5] = values(PANIC_PARK, "panic_park");
+    stop.store(true, Ordering::Relaxed);
+    let seen = watcher.join().unwrap();
+    let parked = |m: &str| seen.iter().filter(|p| p.0.contains(m)).count();
+    assert_eq!(got, [1; 5], "catch_unwind and join return each panic");
+    assert_eq!(parked("index out of bounds"), 0, "a panic catch_unwind catches parks nothing: {seen:?}");
+    assert_eq!(parked("caught after a rethrow"), 0, "nor one caught again after a rethrow: {seen:?}");
+    assert_eq!(parked("on a `None` value"), 1, "a panic that ends a thread parks: {seen:?}");
+    assert_eq!(parked("rethrown out of a thread"), 1, "a caught panic rethrown out of a thread parks once: {seen:?}");
+    assert!(seen.iter().any(|p| p.0.contains("rethrown out of a thread") && p.1.ends_with(":15:48")), "the rethrow's park says where the panic began: {seen:?}");
+    assert_eq!(parked("at a retry boundary"), 1, "a panic at a retry boundary parks: {seen:?}");
+}
+
+/// A panic through a restartable fn (`restartable <fn>`) parks even where the program catches it
+/// (the one deciding asked), and each decision does what it says: `restart` runs the fn again
+/// from its entry, `return <v>` makes the call return v, `panic` unwinds on to the catch. Every
+/// frame's drops run on the way, innermost first, as rustc's unwinder runs them (digits of the
+/// log: leaf 1, mid's box 2, mid 3, the fn's inner block 4, the fn 5).
+const RESTARTABLE: &str = r#"
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+static LOG: AtomicUsize = AtomicUsize::new(0);
+static ATTEMPT: AtomicUsize = AtomicUsize::new(0);
+struct G(usize);
+impl Drop for G {
+    fn drop(&mut self) { LOG.store(LOG.load(SeqCst) * 10 + self.0, SeqCst); }
+}
+#[inline(never)]
+fn leaf(n: usize) -> u64 { let _g = G(1); if std::hint::black_box(n) > 0 { panic!("attempt {n}") } 0 }
+#[inline(never)]
+fn mid(n: usize) -> u64 { let _a = G(3); let _b = Box::new(G(2)); let r = leaf(n); let _c = G(9); r }
+#[inline(never)]
+pub fn restartable_work(x: u64) -> u64 {
+    if x == 0 { return 0; }
+    let _w = G(5);
+    let n = ATTEMPT.fetch_add(1, SeqCst) + 1;
+    if n != 2 { let _i = G(4); mid(n); }
+    x + 1000
+}
+pub fn values(out: &mut [usize; 7]) {
+    restartable_work(0);
+    let (ready, go) = (std::env::var("RESTART_READY").unwrap(), std::env::var("RESTART_GO").unwrap());
+    std::fs::write(&ready, "").unwrap();
+    while !std::path::Path::new(&go).exists() { std::thread::sleep(std::time::Duration::from_millis(2)); }
+    out[0] = std::panic::catch_unwind(|| restartable_work(7)).unwrap_or(0) as usize;
+    out[1] = LOG.swap(0, SeqCst);
+    out[2] = std::panic::catch_unwind(|| restartable_work(7)).unwrap_or(0) as usize;
+    out[3] = LOG.swap(0, SeqCst);
+    out[4] = std::panic::catch_unwind(|| restartable_work(7)).is_err() as usize;
+    out[5] = LOG.swap(0, SeqCst);
+    out[6] = ATTEMPT.load(SeqCst);
+}
+"#;
+
+#[test]
+fn a_panic_through_a_restartable_fn_restarts_returns_or_unwinds_as_decided() {
+    isolated_test!(a_panic_through_a_restartable_fn_restarts_returns_or_unwinds_as_decided);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    std::env::remove_var("RELAX_INSPECT");
+    std::env::set_var("RELAX_PANIC_PARK", "600");
+    // the parks are this test's own, and its decider resumes them: a devhub node's observer releases a park
+    // in a run of a lease nobody attends unless its process says so, and released (`panic`) before the
+    // decider looked, an attempt unwound undecided (11-20 own-tests run: 3 attempts, decided [])
+    std::env::set_var("RELAX_EXPECTED_CRASH", "a_panic_through_a_restartable_fn_restarts_returns_or_unwinds_as_decided parks its panics and decides them");
+    crate::inspect::start("restartable");
+    let dir = std::env::temp_dir().join(format!("relax-restartable-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ready, go) = (dir.join("ready"), dir.join("go"));
+    std::env::set_var("RESTART_READY", &ready);
+    std::env::set_var("RESTART_GO", &go);
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let decider = {
+        let (stop, go) = (stop.clone(), go.clone());
+        std::thread::spawn(move || {
+            let say = |f: fn(&crate::inspect::Req, &mut crate::inspect::Out), line: &str| String::from_utf8_lossy(&makepad_remote::cmd::answer(f, line)).into_owned();
+            let wait = |until: &mut dyn FnMut() -> bool| {
+                while !until() && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            };
+            // armed once the program's first call compiled the fn
+            wait(&mut || ready.exists());
+            let armed = say(crate::inspect::instrument::cmd, "restartable restartable_work");
+            std::fs::write(&go, "").unwrap();
+            let mut decided = Vec::new();
+            for how in ["restart", "return 4242", "panic"] {
+                let mut id = None;
+                wait(&mut || { id = crate::inspect::events::parked_now().first().map(|p| p.0); id.is_some() });
+                let Some(id) = id else { break };
+                decided.push((how, say(crate::inspect::events::cmd_resume, &format!("resume P{id} {how}"))));
+                wait(&mut || !crate::inspect::events::parked_now().iter().any(|p| p.0 == id));
+            }
+            (armed, decided)
+        })
+    };
+    let got: [usize; 7] = values(RESTARTABLE, "restartable");
+    stop.store(true, Ordering::Relaxed);
+    let (armed, decided) = decider.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(got[6], 4, "four attempts: one restarted, then a return, then an unwind (armed: {armed}; decided: {decided:?})");
+    assert_eq!((got[0], got[1]), (1007, 123455), "restart: the fn ran again and returned, its frames' drops ran first ({decided:?})");
+    assert_eq!((got[2], got[3]), (4242, 12345), "return 4242: the call returned it ({decided:?})");
+    assert_eq!((got[4], got[5]), (1, 12345), "panic: it unwound on to the catch ({decided:?})");
 }
 
 /// A constant's initializer that runs as code (ctfe.rs off) runs constant-evaluation twins (ctfe_twin.rs), which count rustc's const-eval steps;

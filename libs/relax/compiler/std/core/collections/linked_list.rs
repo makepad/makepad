@@ -43,6 +43,17 @@ pub struct IntoIter<T> {
     list: LinkedList<T>,
 }
 
+/// rustc 1.87.0 (extract_if): a lazy iterator over the elements removed by a predicate.
+#[must_use = "iterators are lazy and do nothing unless consumed; \
+    use `extract_if().for_each(drop)` to remove and discard elements"]
+pub struct ExtractIf<'a, T: 'a, F: 'a> {
+    list: &'a mut LinkedList<T>,
+    it: *mut Node<T>,
+    pred: F,
+    idx: usize,
+    old_len: usize,
+}
+
 impl<T> LinkedList<T> {
     pub const fn new() -> LinkedList<T> {
         LinkedList { head: ptr::null_mut(), tail: ptr::null_mut(), len: 0, marker: PhantomData }
@@ -125,6 +136,12 @@ impl<T> LinkedList<T> {
     }
 
     pub fn push_front(&mut self, elt: T) {
+        let _ = self.push_front_mut(elt);
+    }
+
+    /// rustc 1.95.0 (push_mut): pushes an element at the front and returns a mutable reference to it.
+    #[must_use = "if you don't need a reference to the value, use `LinkedList::push_front` instead"]
+    pub fn push_front_mut(&mut self, elt: T) -> &mut T {
         let node = Box::into_raw(Box::new(Node { next: self.head, prev: ptr::null_mut(), element: elt }));
         if self.head.is_null() {
             self.tail = node;
@@ -133,6 +150,7 @@ impl<T> LinkedList<T> {
         }
         self.head = node;
         self.len += 1;
+        unsafe { &mut (*node).element }
     }
 
     pub fn pop_front(&mut self) -> Option<T> {
@@ -143,6 +161,12 @@ impl<T> LinkedList<T> {
     }
 
     pub fn push_back(&mut self, elt: T) {
+        let _ = self.push_back_mut(elt);
+    }
+
+    /// rustc 1.95.0 (push_mut): pushes an element at the back and returns a mutable reference to it.
+    #[must_use = "if you don't need a reference to the value, use `LinkedList::push_back` instead"]
+    pub fn push_back_mut(&mut self, elt: T) -> &mut T {
         let node = Box::into_raw(Box::new(Node { next: ptr::null_mut(), prev: self.tail, element: elt }));
         if self.tail.is_null() {
             self.head = node;
@@ -151,6 +175,7 @@ impl<T> LinkedList<T> {
         }
         self.tail = node;
         self.len += 1;
+        unsafe { &mut (*node).element }
     }
 
     pub fn pop_back(&mut self) -> Option<T> {
@@ -204,6 +229,32 @@ impl<T> LinkedList<T> {
         Some(node)
     }
 
+    /// rustc 1.87.0 (extract_if): visits elements in order and removes each one the predicate selects.
+    pub fn extract_if<F>(&mut self, filter: F) -> ExtractIf<'_, T, F>
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        let it = self.head;
+        let old_len = self.len;
+        ExtractIf { list: self, it, pred: filter, idx: 0, old_len }
+    }
+
+    unsafe fn unlink_node(&mut self, node: *mut Node<T>) {
+        let prev = (*node).prev;
+        let next = (*node).next;
+        if prev.is_null() {
+            self.head = next;
+        } else {
+            (*prev).next = next;
+        }
+        if next.is_null() {
+            self.tail = prev;
+        } else {
+            (*next).prev = prev;
+        }
+        self.len -= 1;
+    }
+
     fn pop_back_node(&mut self) -> Option<Box<Node<T>>> {
         if self.tail.is_null() {
             return None;
@@ -230,6 +281,36 @@ unsafe impl<#[may_dangle] T> Drop for LinkedList<T> {
 impl<T> Default for LinkedList<T> {
     fn default() -> LinkedList<T> {
         LinkedList::new()
+    }
+}
+
+impl<'a, T, F: FnMut(&mut T) -> bool> Iterator for ExtractIf<'a, T, F> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        while !self.it.is_null() {
+            let node = self.it;
+            unsafe {
+                self.it = (*node).next;
+                self.idx += 1;
+                if (self.pred)(&mut (*node).element) {
+                    self.list.unlink_node(node);
+                    return Some(Box::from_raw(node).element);
+                }
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.old_len - self.idx))
+    }
+}
+
+impl<'a, T: fmt::Debug, F> fmt::Debug for ExtractIf<'a, T, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let peek = if self.it.is_null() { None } else { Some(unsafe { &(*self.it).element }) };
+        f.debug_struct("ExtractIf").field("peek", &peek).finish_non_exhaustive()
     }
 }
 

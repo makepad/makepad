@@ -146,6 +146,11 @@ impl<T> NonNull<T> {
     pub fn align_offset(self, align: usize) -> usize {
         self.as_ptr().align_offset(align)
     }
+    /// rustc 1.79.0 (pointer_is_aligned): checks the pointer's alignment for `T`.
+    #[must_use]
+    pub fn is_aligned(self) -> bool {
+        self.as_ptr().is_aligned()
+    }
     pub const fn dangling() -> NonNull<T> {
         NonNull { pointer: dangling::<T>() }
     }
@@ -164,17 +169,33 @@ impl<T> NonNull<T> {
     pub const unsafe fn offset(self, count: isize) -> NonNull<T> {
         NonNull { pointer: im::ptr_add(self.pointer, count as usize) }
     }
+    /// rustc 1.80.0 (non_null_convenience): returns the signed distance from the origin in elements.
+    pub const unsafe fn offset_from(self, origin: NonNull<T>) -> isize {
+        unsafe { self.as_ptr().offset_from(origin.as_ptr()) }
+    }
+    /// rustc 1.87.0 (ptr_sub_ptr): returns the unsigned distance from the origin in elements.
+    pub const unsafe fn offset_from_unsigned(self, origin: NonNull<T>) -> usize {
+        unsafe { self.as_ptr().offset_from_unsigned(origin.as_ptr()) }
+    }
     pub const unsafe fn read(self) -> T {
         im::ptr_read(self.pointer)
     }
     pub const unsafe fn read_unaligned(self) -> T {
         read_unaligned(self.pointer)
     }
+    /// rustc 1.80.0 (non_null_convenience): performs a volatile read of the pointed-to value.
+    pub unsafe fn read_volatile(self) -> T {
+        unsafe { read_volatile(self.as_ptr()) }
+    }
     pub const unsafe fn write(self, val: T) {
         im::ptr_write(self.pointer as *mut T, val)
     }
     pub const unsafe fn write_unaligned(self, val: T) {
         write_unaligned(self.pointer as *mut T, val)
+    }
+    /// rustc 1.80.0 (non_null_convenience): performs a volatile write to the pointed-to value.
+    pub unsafe fn write_volatile(self, val: T) {
+        unsafe { write_volatile(self.as_ptr(), val) }
     }
     pub const unsafe fn write_bytes(self, val: u8, count: usize) {
         im::write_bytes(self.pointer as *mut T, val, count)
@@ -229,6 +250,14 @@ impl<T: crate::marker::PointeeSized> NonNull<T> {
     }
     pub const unsafe fn byte_offset(self, count: isize) -> Self {
         NonNull { pointer: self.pointer.wrapping_byte_add(count as usize) }
+    }
+    /// rustc 1.80.0 (non_null_convenience): returns the signed distance between data pointers in bytes.
+    pub const unsafe fn byte_offset_from<U: ?Sized>(self, origin: NonNull<U>) -> isize {
+        unsafe { self.as_ptr().byte_offset_from(origin.as_ptr()) }
+    }
+    /// rustc 1.87.0 (ptr_sub_ptr): returns the unsigned distance between data pointers in bytes.
+    pub const unsafe fn byte_offset_from_unsigned<U: ?Sized>(self, origin: NonNull<U>) -> usize {
+        unsafe { self.as_ptr().byte_offset_from_unsigned(origin.as_ptr()) }
     }
     pub const unsafe fn drop_in_place(self) {
         im::drop_in_place(self.pointer as *mut T)

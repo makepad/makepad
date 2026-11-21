@@ -50,6 +50,14 @@ pub fn from_fn<T, const N: usize, F: FnMut(usize) -> T>(f: F) -> [T; N] {
     unsafe { out.assume_init() }
 }
 
+/// rustc 1.91.0 (array_repeat): fills an array with clones and moves the original into the last slot.
+#[must_use = "cloning is often expensive and is not expected to have side effects"]
+pub fn repeat<T: Clone, const N: usize>(val: T) -> [T; N] {
+    let mut iter = crate::iter::repeat_n(val, N);
+    // SAFETY: from_fn calls the closure N times, exactly the length of the iterator.
+    from_fn(move |_| unsafe { iter.next().unwrap_unchecked() })
+}
+
 pub const fn from_ref<T>(s: &T) -> &[T; 1] {
     unsafe { &*(s as *const T as *const [T; 1]) }
 }
@@ -271,6 +279,11 @@ pub struct IntoIter<T, const N: usize> {
 }
 
 impl<T, const N: usize> IntoIter<T, N> {
+    /// rustc 1.51.0 (array_value_iter): creates an iterator that owns the array's elements.
+    #[deprecated(since = "1.59.0", note = "use `IntoIterator::into_iter` instead")]
+    pub fn new(array: [T; N]) -> Self {
+        IntoIterator::into_iter(array)
+    }
     fn base(&self) -> *const T {
         &*self.data as *const [T; N] as *const T
     }

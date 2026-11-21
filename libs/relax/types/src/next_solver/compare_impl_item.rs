@@ -207,6 +207,14 @@ impl Tcx {
 }
 
 impl Tcx {
+    /// Whether impl `imp`'s trait passed its overlap check in the impl's crate (the
+    /// specialization_graph query; true for an inherent impl). The query's E0119 went to the
+    /// diagnostics of the thread that asked it first.
+    pub fn impl_trait_coherent(&self, prog: &Program, imp: DefId) -> bool {
+        let Some(&td) = self.impl_trait.get(&imp) else { return true };
+        (crate::type_queries::Providers { tcx: self, prog }).specialization_graph((prog.def(imp).krate, td)).expect("coherent trait query")
+    }
+
     /// rustc_hir_analysis/src/check/check.rs:1302-1483. Specialization and
     /// unstable default-body attributes are cut; each impl is its own leaf.
     pub fn check_impl_items_against_trait(&self, prog: &Program, imp: DefId) -> Vec<String> {
@@ -235,7 +243,19 @@ impl Tcx {
             return errors;
         }
         for &item in &data.items {
-            if !prog.trait_item_def_id.contains_key(&item) || prog.impl_trait_in_trait_data.contains_key(&item) { continue; }
+            let Some(&trait_item) = prog.trait_item_def_id.get(&item) else { continue };
+            if prog.impl_trait_in_trait_data.contains_key(&item) { continue; }
+            if prog.def(item).kind == DefKind::AssocFn {
+                if let (Some(imp_sig), Some(trait_sig)) = (self.fn_item_sig(prog, item), self.fn_item_sig(prog, trait_item)) {
+                    let (actual, expected) = (imp_sig.params.len(), trait_sig.params.len());
+                    if actual != expected {
+                        let unit = if actual == 1 { "parameter" } else { "parameters" };
+                        errors.push(error(item, format!("E0050: method `{}` has {actual} {unit} but the declaration in trait `{}` has {expected}",
+                            prog.name(item), prog.def_path(trait_item))));
+                        continue;
+                    }
+                }
+            }
             if matches!(prog.def(item).kind, DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy) && self.compare_impl_item(prog, item).is_err() {
                 let code = match prog.def(item).kind { DefKind::AssocConst => "E0326", DefKind::AssocTy => "E0277", _ => "E0053" };
                 errors.push(error(item, format!("{code}: item `{}` has an incompatible type for trait", prog.name(item))));
@@ -259,7 +279,11 @@ impl Tcx {
             };
             if !has_value && !(unsized_self && self.generics_require_sized_self(prog, item)) { missing.push(format!("`{}`", prog.name(item))); }
         }
-        if !missing.is_empty() { errors.push(error(imp, format!("E0046: not all trait items implemented, missing: {}", missing.join(", ")))); }
+        if !missing.is_empty() {
+            let self_ty = crate::typeck::ty_to_string(false, prog, self, self.impl_self[&imp]);
+            errors.push(error(imp, format!("E0046: not all trait items implemented, missing: {} -- in `impl {} for {}`",
+                missing.join(", "), prog.def_path(td), self_ty)));
+        }
         errors
     }
 

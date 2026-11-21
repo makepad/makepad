@@ -643,6 +643,17 @@ pub struct LazyCell<T, F = fn() -> T> {
     init: Cell<Option<F>>,
 }
 
+impl<T, F> LazyCell<T, F> {
+    /// rustc 1.94.0 (lazy_get): borrows the value if initialization succeeded.
+    pub fn get(this: &LazyCell<T, F>) -> Option<&T> {
+        this.cell.get()
+    }
+    /// rustc 1.94.0 (lazy_get): mutably borrows the value if initialization succeeded.
+    pub fn get_mut(this: &mut LazyCell<T, F>) -> Option<&mut T> {
+        this.cell.get_mut()
+    }
+}
+
 impl<T, F: FnOnce() -> T> LazyCell<T, F> {
     pub const fn new(f: F) -> LazyCell<T, F> {
         LazyCell { cell: OnceCell::new(), init: Cell::new(Some(f)) }
@@ -650,6 +661,14 @@ impl<T, F: FnOnce() -> T> LazyCell<T, F> {
     #[rustc_should_not_be_called_on_const_items]
     pub fn force(this: &LazyCell<T, F>) -> &T {
         this.cell.get_or_init(|| match this.init.take() {
+            Some(f) => f(),
+            None => crate::panicking::panic_str("LazyCell instance has previously been poisoned"),
+        })
+    }
+    /// rustc 1.94.0 (lazy_get): initializes the cell if necessary and mutably borrows its value.
+    pub fn force_mut(this: &mut LazyCell<T, F>) -> &mut T {
+        let init = this.init.get_mut();
+        this.cell.inner.get_mut().get_or_insert_with(|| match init.take() {
             Some(f) => f(),
             None => crate::panicking::panic_str("LazyCell instance has previously been poisoned"),
         })

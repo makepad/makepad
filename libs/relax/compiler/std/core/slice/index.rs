@@ -3,7 +3,7 @@
 
 use crate::intrinsics_mem as im;
 use crate::ops::{Bound, Index, IndexMut, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
-use crate::panicking::{panic_bounds, panic_str, slice_end_index_len_fail, slice_index_order_fail, slice_start_index_len_fail};
+use crate::panicking::{panic_bounds, slice_end_index_len_fail, slice_index_order_fail, slice_start_index_len_fail};
 
 pub trait SliceIndex<T: ?Sized> {
     type Output: ?Sized;
@@ -225,20 +225,23 @@ impl<T> SliceIndex<[T]> for RangeFull {
     }
 }
 
-/// (start, exclusive end) of a RangeInclusive whose end is not usize::MAX; an exhausted
-/// range is empty at its end (as core's into_slice_range).
+/// rustc's `RangeInclusive::into_slice_range` as (start, exclusive end); the caller checks the end
+/// is below the length.
 fn incl_parts(r: &RangeInclusive<usize>) -> (usize, usize) {
-    let s = *r.start();
-    let e = *r.end();
-    let exclusive_end = e + 1;
-    let exhausted = r.is_empty() && s <= e;
-    (if exhausted { exclusive_end } else { s }, exclusive_end)
+    // If we're not exhausted, we want to simply slice `start..end + 1`.
+    // If we are exhausted, then slicing with `end + 1..end + 1` gives us an
+    // empty range that is still subject to bounds-checks for that endpoint.
+    let exclusive_end = r.end + 1;
+    let start = if r.exhausted { exclusive_end } else { r.start };
+    (start, exclusive_end)
 }
 
+/// rustc 1.26.0 (inclusive_range): indexes the slice by the inclusive range, as rustc 1.100's
+/// impl (an end at or past the length is reported as it was given).
 impl<T> SliceIndex<[T]> for RangeInclusive<usize> {
     type Output = [T];
     fn get(self, slice: &[T]) -> Option<&[T]> {
-        if *self.end() == usize::MAX {
+        if *self.end() >= slice.len() {
             None
         } else {
             let (s, e) = incl_parts(&self);
@@ -246,7 +249,7 @@ impl<T> SliceIndex<[T]> for RangeInclusive<usize> {
         }
     }
     fn get_mut(self, slice: &mut [T]) -> Option<&mut [T]> {
-        if *self.end() == usize::MAX {
+        if *self.end() >= slice.len() {
             None
         } else {
             let (s, e) = incl_parts(&self);
@@ -263,19 +266,31 @@ impl<T> SliceIndex<[T]> for RangeInclusive<usize> {
     }
     #[track_caller]
     fn index(self, slice: &[T]) -> &[T] {
-        if *self.end() == usize::MAX {
-            panic_str("attempted to index slice up to maximum usize");
+        let RangeInclusive { mut start, mut end, exhausted } = self;
+        let len = slice.len();
+        if end < len {
+            end = end + 1;
+            start = if exhausted { end } else { start };
+            if usize::checked_sub(end, start).is_some() {
+                // `self` is checked to be valid and in bounds above.
+                return unsafe { &*(start..end).get_unchecked(slice) };
+            }
         }
-        let (s, e) = incl_parts(&self);
-        (s..e).index(slice)
+        slice_index_fail(start, end, slice.len())
     }
     #[track_caller]
     fn index_mut(self, slice: &mut [T]) -> &mut [T] {
-        if *self.end() == usize::MAX {
-            panic_str("attempted to index slice up to maximum usize");
+        let RangeInclusive { mut start, mut end, exhausted } = self;
+        let len = slice.len();
+        if end < len {
+            end = end + 1;
+            start = if exhausted { end } else { start };
+            if usize::checked_sub(end, start).is_some() {
+                // `self` is checked to be valid and in bounds above.
+                return unsafe { &mut *(start..end).get_unchecked_mut(slice) };
+            }
         }
-        let (s, e) = incl_parts(&self);
-        (s..e).index_mut(slice)
+        slice_index_fail(start, end, slice.len())
     }
 }
 
@@ -300,6 +315,114 @@ impl<T> SliceIndex<[T]> for RangeToInclusive<usize> {
     #[track_caller]
     fn index_mut(self, slice: &mut [T]) -> &mut [T] {
         (0..=self.end).index_mut(slice)
+    }
+}
+
+/// rustc 1.96.0 (new_range_api): indexes a slice with a `Range`.
+impl<T> SliceIndex<[T]> for crate::range::Range<usize> {
+    type Output = [T];
+    fn get(self, slice: &[T]) -> Option<&[T]> {
+        Range::from(self).get(slice)
+    }
+    fn get_mut(self, slice: &mut [T]) -> Option<&mut [T]> {
+        Range::from(self).get_mut(slice)
+    }
+    unsafe fn get_unchecked(self, slice: *const [T]) -> *const [T] {
+        unsafe { Range::from(self).get_unchecked(slice) }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut [T]) -> *mut [T] {
+        unsafe { Range::from(self).get_unchecked_mut(slice) }
+    }
+    #[track_caller]
+    fn index(self, slice: &[T]) -> &[T] {
+        let len = slice.len();
+        match Range::from(self).get(slice) {
+            Some(part) => part,
+            None => slice_index_fail(self.start, self.end, len),
+        }
+    }
+    #[track_caller]
+    fn index_mut(self, slice: &mut [T]) -> &mut [T] {
+        let len = slice.len();
+        match Range::from(self).get_mut(slice) {
+            Some(part) => part,
+            None => slice_index_fail(self.start, self.end, len),
+        }
+    }
+}
+
+/// rustc 1.95.0 (new_range_inclusive_api): indexes a slice with a `RangeInclusive`.
+impl<T> SliceIndex<[T]> for crate::range::RangeInclusive<usize> {
+    type Output = [T];
+    fn get(self, slice: &[T]) -> Option<&[T]> {
+        RangeInclusive::from(self).get(slice)
+    }
+    fn get_mut(self, slice: &mut [T]) -> Option<&mut [T]> {
+        RangeInclusive::from(self).get_mut(slice)
+    }
+    unsafe fn get_unchecked(self, slice: *const [T]) -> *const [T] {
+        unsafe { RangeInclusive::from(self).get_unchecked(slice) }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut [T]) -> *mut [T] {
+        unsafe { RangeInclusive::from(self).get_unchecked_mut(slice) }
+    }
+    #[track_caller]
+    fn index(self, slice: &[T]) -> &[T] {
+        RangeInclusive::from(self).index(slice)
+    }
+    #[track_caller]
+    fn index_mut(self, slice: &mut [T]) -> &mut [T] {
+        RangeInclusive::from(self).index_mut(slice)
+    }
+}
+
+/// rustc 1.96.0 (new_range_from_api): indexes a slice with a `RangeFrom`.
+impl<T> SliceIndex<[T]> for crate::range::RangeFrom<usize> {
+    type Output = [T];
+    fn get(self, slice: &[T]) -> Option<&[T]> {
+        RangeFrom::from(self).get(slice)
+    }
+    fn get_mut(self, slice: &mut [T]) -> Option<&mut [T]> {
+        RangeFrom::from(self).get_mut(slice)
+    }
+    unsafe fn get_unchecked(self, slice: *const [T]) -> *const [T] {
+        unsafe { RangeFrom::from(self).get_unchecked(slice) }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut [T]) -> *mut [T] {
+        unsafe { RangeFrom::from(self).get_unchecked_mut(slice) }
+    }
+    #[track_caller]
+    fn index(self, slice: &[T]) -> &[T] {
+        RangeFrom::from(self).index(slice)
+    }
+    #[track_caller]
+    fn index_mut(self, slice: &mut [T]) -> &mut [T] {
+        RangeFrom::from(self).index_mut(slice)
+    }
+}
+
+/// rustc 1.96.0 (new_range_to_inclusive_api): indexes a slice with a `RangeToInclusive`.
+impl<T> SliceIndex<[T]> for crate::range::RangeToInclusive<usize> {
+    type Output = [T];
+    fn get(self, slice: &[T]) -> Option<&[T]> {
+        (0..=self.last).get(slice)
+    }
+    fn get_mut(self, slice: &mut [T]) -> Option<&mut [T]> {
+        (0..=self.last).get_mut(slice)
+    }
+    unsafe fn get_unchecked(self, slice: *const [T]) -> *const [T] {
+        unsafe { (0..=self.last).get_unchecked(slice) }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut [T]) -> *mut [T] {
+        unsafe { (0..=self.last).get_unchecked_mut(slice) }
+    }
+    #[track_caller]
+    fn index(self, slice: &[T]) -> &[T] {
+        crate::range::RangeInclusive { start: 0, last: self.last }.index(slice)
+    }
+    #[track_caller]
+    fn index_mut(self, slice: &mut [T]) -> &mut [T] {
+        crate::range::RangeInclusive { start: 0, last: self.last }.index_mut(slice)
     }
 }
 

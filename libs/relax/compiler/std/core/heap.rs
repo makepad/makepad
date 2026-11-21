@@ -158,7 +158,12 @@ impl Layout {
         Layout::from_size_align(size, self.align())
     }
     pub fn dangling(&self) -> crate::ptr::NonNull<u8> {
-        unsafe { crate::ptr::NonNull::new_unchecked(self.align() as *mut u8) }
+        self.dangling_ptr()
+    }
+    /// rustc 1.95.0 (alloc_layout_extra): returns a dangling pointer aligned for this layout.
+    #[must_use]
+    pub const fn dangling_ptr(&self) -> NonNull<u8> {
+        NonNull::without_provenance(unsafe { crate::num::NonZeroUsize::new_unchecked(self.align()) })
     }
 }
 

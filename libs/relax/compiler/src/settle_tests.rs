@@ -1618,7 +1618,7 @@ fn copy_versions_move_with_the_flags_their_code_reads() {
             relocs.push(relax_backend::rir::RelocAt { at: word, kind: relax_backend::rir::RelocKind::Pool64, target: relax_backend::rir::Reloc::Sym(at(&u, id, COPY_VER_OFF)) });
             let mut cache = u.cache.take().unwrap();
             let before = cache.stats.recorded;
-            let pending = cache.defer_record(&u, id, &code, &relocs, &built.1).expect("a fresh install is deferrable");
+            let pending = cache.defer_record(&u, id, &code, &relocs, &built.1, None).expect("a fresh install is deferrable");
             cache.record_pending(&u, &pending);
             assert_eq!(cache.stats.recorded > before, stored, "{}: a record naming a copy version at {} is {}", u.fns[id as usize].name, ver(&u, id), if stored { "encoded" } else { "never encoded" });
             u.cache = Some(cache);
@@ -1713,7 +1713,7 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
         u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
         let built = unsafe { compile_fn(up, id) }.unwrap();
         let mut cache = u.cache.take().unwrap();
-        let pending = cache.defer_record(&u, id, &built.0, &built.2, &built.1).expect("a fresh install is deferrable");
+        let pending = cache.defer_record(&u, id, &built.0, &built.2, &built.1, None).expect("a fresh install is deferrable");
         if phase == "stale" {
             bump_patch_epoch();
         }

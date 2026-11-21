@@ -10,6 +10,7 @@
 
 pub mod answer;
 pub mod asm;
+pub mod backtrace;
 pub(crate) use asm::plain_name as asm_plain;
 pub mod calltree;
 pub mod client;
@@ -237,7 +238,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("contention", "[s=3] [n=15]", "lock / condvar / park / owner waits grouped by what was waited on: total and longest wait, per frame, waiting threads, who ended them (records s seconds of timeline first; alias of timeline waits)"),
     ("counters", "[s=1] [n=12]", "hardware counters over a window: Linux per thread (cycles, instructions, IPC, branch and cache misses); macOS the process's instructions and cycles (all a non-root process gets)"),
     ("remarks", "<fn|@slot> [n=20]", "the O3 tier's optimisation remarks for the fn: every call its last O3 build kept (hot sites first) and why (no rule, budget, growth ceiling, cold, recursive, no body) with the numbers, and the tiers of its code"),
-    ("cache", "", "where this session's code came from: the warm cache's lookups (hits; misses by reason: no entry for the key, invalidated, did not link, not storable), the startup image (placed / stale / failed), stores opened, entries recorded, and the installed code by tier and origin (fresh / warm-cache / warm-image / live-patch / inspect)"),
+    ("cache", "[verify [fn|all] [n=40]]", "verify: every inlined copy in the installed code (its line table's inline levels) that no edit of the inlined fn would build again (no slot of it reaches the code through the reload's host walk) -- an edit leaves the copy running old text -- marked guarded (a patch flag exits it) and recorded (the code's entry names it among its inputs: a later session's edit refuses the entry); without verify: where this session's code came from: the warm cache's lookups (hits; misses by reason: no entry for the key, invalidated, did not link, not storable), the startup image (placed / stale / failed), stores opened, entries recorded, and the installed code by tier and origin (fresh / warm-cache / warm-image / live-patch / inspect)"),
     ("code", "[n=<top>]", "JIT code growth (code is append-only, never freed): bytes and installs by source (first, tier-up, re-optimize, patch, module) and the fns with the most versions"),
     ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
     ("why-tier", "<fn|file:line|@slot> | stuck [n=20] | uncounted [n=20]", "`stuck`: how many hot fns ended below O3 with nothing pending, by reason. Else why a fn is (not) at O3, answer first: per slot its count stub (armed, call weight, re-arms), its decayed cost against the threshold, the loop counter, cost checks by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
@@ -1195,7 +1196,7 @@ fn cmd_threads(out: &mut Out) {
     let mut list = threads::list();
     name_handles(&mut list);
     let waits = crate::waits::snapshot();
-    let jit_rows = crate::lifeline::snapshot();
+    let (jit_rows, ended) = crate::lifeline::snapshot_with_ended();
     out.measured("threads", "os+registry", &[]);
     for t in &list {
         let w = waits.iter().find(|w| w.thread == t.handle && t.handle != 0);
@@ -1228,9 +1229,17 @@ fn cmd_threads(out: &mut Out) {
             wait
         ));
     }
-    // registered JIT threads the OS no longer lists: gone (dead after panics, or ended)
+    // A live registry row can be absent from the OS sample.
     for r in jit_rows.iter().filter(|r| !list.iter().any(|t| t.os_id == r.os_id)) {
         out.line(&format!("{{\"id\":\"{}\",\"name\":{},\"role\":\"jit\",\"state\":\"gone\"{}}}", tid_label(r.os_id), json_str(&r.name), lifeline_fields(r)));
+    }
+    let now = crate::clock::wall_ns();
+    for (name, r) in ended {
+        let panic = if r.panics != 0 { format!(",\"last_panic\":{}", json_str(&r.last_panic)) } else { String::new() };
+        out.line(&format!(
+            "{{\"name\":{},\"role\":\"jit\",\"state\":\"ended\",\"started\":{},\"ended\":{},\"dead\":{},\"panics\":{},\"last_end\":\"{}\",\"last_end_ms_ago\":{}{}}}",
+            json_str(&name), r.started, r.ended, r.dead, r.panics, crate::lifeline::STATE_NAMES[r.last_end as usize], now.saturating_sub(r.last_end_ns) / 1_000_000, panic
+        ));
     }
 }
 
@@ -1443,9 +1452,13 @@ fn cmd_jit(req: &Req, out: &mut Out) {
 /// graphs): the monotonic counters a rate is diffed from and the UI frames since the last look.
 /// `editing` and `unverified` say whether the JIT is still on an edit: its watcher round (the save
 /// to its verdict) and the patch groups that run while their check has not reported. devhub's
-/// watch on an edit's verdict waits while either is on, however long: a two-file Fab edit took
+/// watch on an edit's verdict waits while either is on, however long: a two-file edit of a large app took
 /// 70 s to compile, and a fixed 60 s watch said the edit was not applied (11-16).
 /// `unverified_why` says what the oldest of those groups waits on (reload::unverified_why).
+/// `restart_unfinished`: a restart in place is not over (run_end::unfinished): devhub's relaunch
+/// is done only once it is, and no edit waits for a restart.
+/// `held`: the host has no run and waits for a fix (run::host_held: its build or app check
+/// failed): a save is the next run's, which the next save or `session relaunch` starts.
 fn cmd_live(req: &Req, out: &mut Out) {
     use std::fmt::Write;
     let a = crate::postframe::activity();
@@ -1465,11 +1478,13 @@ fn cmd_live(req: &Req, out: &mut Out) {
         None => flightrec::frames_head(),
     };
     out.line(&format!(
-        "{{\"now_ms\":{:.1},\"frames\":{frames},\"patches\":{},\"frame_patch\":{},\"restart_pending\":{},\"editing\":{},\"unverified\":{},\"unverified_why\":{},{},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
+        "{{\"now_ms\":{:.1},\"frames\":{frames},\"patches\":{},\"frame_patch\":{},\"restart_pending\":{},\"restart_unfinished\":{},\"held\":{},\"editing\":{},\"unverified\":{},\"unverified_why\":{},{},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
         now as f64 / 1e6,
         crate::reload::patches_installed(),
         crate::postframe::FRAME_PATCH.load(Relaxed),
         crate::reload::restart_pending().len(),
+        crate::run_end::unfinished() as u8,
+        crate::run::host_held() as u8,
         crate::reload::save_seen() as u8,
         crate::reload::UNVERIFIED_PATCHES.load(Relaxed),
         json_str(&crate::reload::unverified_why()),

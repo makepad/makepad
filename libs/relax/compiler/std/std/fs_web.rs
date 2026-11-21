@@ -462,6 +462,16 @@ pub fn set_permissions<P: AsRef<Path>>(_path: P, perm: Permissions) -> io::Resul
     perm.0
 }
 
+/// rustc 1.99.0 (fs_set_times): Sets a file's timestamps, following symbolic links.
+pub fn set_times<P: AsRef<Path>>(_path: P, _times: FileTimes) -> io::Result<()> {
+    unsupported()
+}
+
+/// rustc 1.99.0 (fs_set_times): Sets a file's timestamps without following the final symbolic link.
+pub fn set_times_nofollow<P: AsRef<Path>>(_path: P, _times: FileTimes) -> io::Result<()> {
+    unsupported()
+}
+
 pub fn soft_link<P: AsRef<Path>, Q: AsRef<Path>>(_original: P, _link: Q) -> io::Result<()> {
     unsupported()
 }

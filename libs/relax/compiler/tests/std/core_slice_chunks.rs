@@ -857,6 +857,14 @@ fn a36_array_views() {
     assert_eq!(z.as_chunks::<3>().0.len(), 5);
     assert_eq!(z.as_rchunks_mut::<3>().0.len(), 2);
     d.line("array_views");
+    const CHUNKS: &[[u8; 2]] = unsafe { b"abcd".as_chunks_unchecked::<2>() };
+    println!("| const chunks {:?}", CHUNKS);
+    let mut values = [1, 2, 3, 4];
+    let chunks = unsafe { values.as_chunks_unchecked_mut::<2>() };
+    chunks[1][0] = 9;
+    println!("| unchecked {:?}", unsafe { values.as_chunks_unchecked::<2>() });
+    println!("| circumfix {:?} {:?} {:?}", values.strip_circumfix(&[1], &values[3..]),
+        values.strip_circumfix(&values[..3], &[9, 4]), values.strip_circumfix(&values[..], &[]));
 }
 
 #[test]

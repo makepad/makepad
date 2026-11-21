@@ -86,11 +86,14 @@ fn header(out: &mut String, what: &str) {
 pub fn run(core: &str) {
     let mut a = String::new();
     header(&mut a, "Inherent methods of the integer types (Relax only: impls on primitive types).");
-    a.push_str("use crate::intrinsics_int as ii;\nuse crate::num::parse;\nuse crate::num::ParseIntError;\n\n");
+    a.push_str("use crate::intrinsics_int as ii;\nuse crate::num::parse;\nuse crate::num::{ParseIntError, Saturating};\n\n");
     for t in INTS.iter() {
         gen_int(&mut a, t);
     }
     gen_u8_ascii(&mut a);
+    for t in INTS.iter().filter(|t| t.pw != 32) {
+        gen_saturating(&mut a, t);
+    }
     std::fs::write(format!("{}/num/int_impls.rs", core), &a).expect("write int_impls.rs");
 
     let mut f = String::new();
@@ -123,7 +126,7 @@ pub fn run(core: &str) {
 
     let mut z = String::new();
     header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr, Neg), as real core's nonzero.rs macros generate it.");
-    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};\n\n");
+    z.push_str("use super::nonzero::NonZero;\nuse crate::num::{IntErrorKind, ParseIntError, TryFromIntError};\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};\n\n");
     for t in INTS.iter().filter(|t| t.pw != 32) {
         gen_nonzero(&mut z, t);
     }
@@ -170,7 +173,28 @@ fn gen_nonzero(o: &mut String, t: &Int) {
     let _ = writeln!(o, "    pub const fn saturating_mul(self, other: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_mul(other.get())) }} }}");
     let _ = writeln!(o, "    pub const fn checked_pow(self, other: u32) -> Option<NonZero<{n}>> {{ match self.get().checked_pow(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
     let _ = writeln!(o, "    pub const fn saturating_pow(self, other: u32) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_pow(other)) }} }}");
+    let _ = writeln!(o, "    /// rustc 1.98.0 (nonzero_from_str_radix): Parses a nonzero integer in the given radix.
+    pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {{
+        let n = match {n}::from_str_radix(src, radix) {{
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        }};
+        match Self::new(n) {{
+            Some(n) => Ok(n),
+            None => Err(ParseIntError {{ kind: IntErrorKind::Zero }}),
+        }}
+    }}");
     if !t.signed {
+        let s = signed_of(n);
+        let _ = writeln!(o, "    /// rustc 1.92.0 (unsigned_nonzero_div_ceil): Divides and rounds the quotient up.
+    pub const fn div_ceil(self, rhs: Self) -> Self {{
+        let v = (self.get() - 1) / rhs.get() + 1;
+        unsafe {{ Self::new_unchecked(v) }}
+    }}
+    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as a signed nonzero integer.
+    pub const fn cast_signed(self) -> NonZero<{s}> {{ unsafe {{ NonZero::new_unchecked(self.get().cast_signed()) }} }}
+    /// rustc 1.97.0 (uint_bit_width): Returns the minimum number of bits needed to represent the value.
+    pub const fn bit_width(self) -> NonZero<u32> {{ unsafe {{ NonZero::new_unchecked(Self::BITS - self.leading_zeros()) }} }}");
         let _ = writeln!(o, "    pub const fn checked_add(self, other: {n}) -> Option<NonZero<{n}>> {{ match self.get().checked_add(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
         let _ = writeln!(o, "    pub const fn saturating_add(self, other: {n}) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_add(other)) }} }}");
         let _ = writeln!(o, "    pub const fn checked_next_power_of_two(self) -> Option<NonZero<{n}>> {{ match self.get().checked_next_power_of_two() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
@@ -180,6 +204,8 @@ fn gen_nonzero(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    pub const fn midpoint(self, rhs: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().midpoint(rhs.get())) }} }}");
         let _ = writeln!(o, "    pub const fn isqrt(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().isqrt()) }} }}");
     } else {
+        let _ = writeln!(o, "    /// rustc 1.87.0 (integer_sign_cast): Reinterprets the bits as an unsigned nonzero integer.
+    pub const fn cast_unsigned(self) -> NonZero<{u}> {{ unsafe {{ NonZero::new_unchecked(self.get().cast_unsigned()) }} }}");
         let _ = writeln!(o, "    pub const fn abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().abs()) }} }}");
         let _ = writeln!(o, "    pub const fn checked_abs(self) -> Option<NonZero<{n}>> {{ match self.get().checked_abs() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
         let _ = writeln!(o, "    pub const fn overflowing_abs(self) -> (NonZero<{n}>, bool) {{ let (v, f) = self.get().overflowing_abs(); (unsafe {{ NonZero::new_unchecked(v) }}, f) }}");
@@ -206,6 +232,59 @@ fn gen_nonzero(o: &mut String, t: &Int) {
         let _ = writeln!(o, "impl<'a> Neg for &'a NonZero<{n}> {{ type Output = NonZero<{n}>; fn neg(self) -> NonZero<{n}> {{ -*self }} }}");
     }
     o.push('\n');
+}
+
+fn gen_saturating(o: &mut String, t: &Int) {
+    let n = t.name;
+    let _ = writeln!(o, "impl Saturating<{n}> {{
+    /// rustc 1.74.0 (saturating_int_impl): The smallest representable value.
+    pub const MIN: Self = Saturating({n}::MIN);
+    /// rustc 1.74.0 (saturating_int_impl): The largest representable value.
+    pub const MAX: Self = Saturating({n}::MAX);
+    /// rustc 1.74.0 (saturating_int_impl): The number of bits in the integer.
+    pub const BITS: u32 = {n}::BITS;
+    /// rustc 1.74.0 (saturating_int_impl): Counts the one bits.
+    pub const fn count_ones(self) -> u32 {{ self.0.count_ones() }}
+    /// rustc 1.74.0 (saturating_int_impl): Counts the zero bits.
+    pub const fn count_zeros(self) -> u32 {{ self.0.count_zeros() }}
+    /// rustc 1.74.0 (saturating_int_impl): Counts the leading zero bits.
+    pub const fn leading_zeros(self) -> u32 {{ self.0.leading_zeros() }}
+    /// rustc 1.74.0 (saturating_int_impl): Counts the trailing zero bits.
+    pub const fn trailing_zeros(self) -> u32 {{ self.0.trailing_zeros() }}
+    /// rustc 1.74.0 (saturating_int_impl): Rotates the bits to the left.
+    pub const fn rotate_left(self, n: u32) -> Self {{ Saturating(self.0.rotate_left(n)) }}
+    /// rustc 1.74.0 (saturating_int_impl): Rotates the bits to the right.
+    pub const fn rotate_right(self, n: u32) -> Self {{ Saturating(self.0.rotate_right(n)) }}
+    /// rustc 1.74.0 (saturating_int_impl): Reverses the byte order.
+    pub const fn swap_bytes(self) -> Self {{ Saturating(self.0.swap_bytes()) }}
+    /// rustc 1.74.0 (saturating_int_impl): Reverses the bit order.
+    pub const fn reverse_bits(self) -> Self {{ Saturating(self.0.reverse_bits()) }}
+    /// rustc 1.74.0 (saturating_int_impl): Converts a big-endian value to native byte order.
+    pub const fn from_be(x: Self) -> Self {{ Saturating({n}::from_be(x.0)) }}
+    /// rustc 1.74.0 (saturating_int_impl): Converts a little-endian value to native byte order.
+    pub const fn from_le(x: Self) -> Self {{ Saturating({n}::from_le(x.0)) }}
+    /// rustc 1.74.0 (saturating_int_impl): Converts to big-endian byte order.
+    pub const fn to_be(self) -> Self {{ Saturating(self.0.to_be()) }}
+    /// rustc 1.74.0 (saturating_int_impl): Converts to little-endian byte order.
+    pub const fn to_le(self) -> Self {{ Saturating(self.0.to_le()) }}
+    /// rustc 1.74.0 (saturating_int_impl): Raises the integer to a power, saturating on overflow.
+    pub const fn pow(self, exp: u32) -> Self {{ Saturating(self.0.saturating_pow(exp)) }}");
+    if t.signed {
+        o.push_str("    /// rustc 1.74.0 (saturating_int_impl): Returns the absolute value, saturating on overflow.
+    pub const fn abs(self) -> Self { Saturating(self.0.saturating_abs()) }
+    /// rustc 1.74.0 (saturating_int_impl): Returns the sign as -1, 0, or 1.
+    pub const fn signum(self) -> Self { Saturating(self.0.signum()) }
+    /// rustc 1.74.0 (saturating_int_impl): Returns whether the value is greater than zero.
+    pub const fn is_positive(self) -> bool { self.0.is_positive() }
+    /// rustc 1.74.0 (saturating_int_impl): Returns whether the value is less than zero.
+    pub const fn is_negative(self) -> bool { self.0.is_negative() }
+");
+    } else {
+        o.push_str("    /// rustc 1.74.0 (saturating_int_impl): Returns whether the value is a power of two.
+    pub const fn is_power_of_two(self) -> bool { self.0.is_power_of_two() }
+");
+    }
+    o.push_str("}\n\n");
 }
 
 fn gen_int(o: &mut String, t: &Int) {
@@ -403,8 +482,21 @@ fn gen_int(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    pub const fn saturating_pow(self, exp: u32) -> {n} {{ match self.checked_pow(exp) {{ Some(v) => v, None => {n}::MAX }} }}");
         let _ = writeln!(o, "    pub const fn saturating_div(self, rhs: {n}) -> {n} {{ self / rhs }}");
     }
-    // pow etc (release semantics: wrapping)
-    let _ = writeln!(o, "    pub const fn pow(self, exp: u32) -> {n} {{ self.wrapping_pow(exp) }}");
+    o.push_str("    pub const fn strict_pow(self, exp: u32) -> Self {
+        match self.checked_pow(exp) {
+            Some(x) => x,
+            None => crate::panicking::panic_str(\"attempt to exponentiate with overflow\"),
+        }
+    }
+    #[rustc_inherit_overflow_checks]
+    pub const fn pow(self, exp: u32) -> Self {
+        if crate::intrinsics::overflow_checks() {
+            self.strict_pow(exp)
+        } else {
+            self.wrapping_pow(exp)
+        }
+    }
+");
     let _ = writeln!(o, "    pub const fn abs_diff(self, other: {n}) -> {u} {{ if self < other {{ (other as {u}).wrapping_sub(self as {u}) }} else {{ (self as {u}).wrapping_sub(other as {u}) }} }}");
     // library/core/src/num/mod.rs:129-186 midpoint_impl!: a type with a wider integer widens, the
     // 128-bit types use the branchless algorithm (the signed one rounds toward zero)
@@ -417,7 +509,15 @@ fn gen_int(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    pub const fn midpoint(self, rhs: {n}) -> {n} {{ ((self ^ rhs) >> 1) + (self & rhs) }}");
     }
     if t.signed {
-        let _ = writeln!(o, "    pub const fn abs(self) -> {n} {{ if self < 0 {{ self.wrapping_neg() }} else {{ self }} }}");
+        o.push_str("    #[rustc_inherit_overflow_checks]
+    pub const fn abs(self) -> Self {
+        if self.is_negative() {
+            -self
+        } else {
+            self
+        }
+    }
+");
         let _ = writeln!(o, "    pub const fn unsigned_abs(self) -> {u} {{ self.wrapping_abs() as {u} }}");
         let _ = writeln!(o, "    pub const fn signum(self) -> {n} {{ if self < 0 {{ -1 }} else if self == 0 {{ 0 }} else {{ 1 }} }}");
         let _ = writeln!(o, "    pub const fn is_positive(self) -> bool {{ self > 0 }}");
@@ -442,14 +542,32 @@ fn gen_int(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    pub const fn rem_euclid(self, rhs: {n}) -> {n} {{ self % rhs }}");
         let _ = writeln!(o, "    pub const fn div_euclid(self, rhs: {n}) -> {n} {{ self / rhs }}");
         let _ = writeln!(o, "    pub const fn div_ceil(self, rhs: {n}) -> {n} {{ let d = self / rhs; let r = self % rhs; if r > 0 {{ d + 1 }} else {{ d }} }}");
-        let _ = writeln!(o, "    pub const fn next_multiple_of(self, rhs: {n}) -> {n} {{ match self % rhs {{ 0 => self, r => self + (rhs - r) }} }}");
+        let _ = writeln!(o, "    #[rustc_inherit_overflow_checks]\n    pub const fn next_multiple_of(self, rhs: {n}) -> {n} {{ match self % rhs {{ 0 => self, r => self + (rhs - r) }} }}");
         let _ = writeln!(o, "    pub const fn checked_next_multiple_of(self, rhs: {n}) -> Option<{n}> {{ if rhs == 0 {{ return None; }} match self % rhs {{ 0 => Some(self), r => self.checked_add(rhs - r) }} }}");
         let _ = writeln!(o, "    pub const fn is_power_of_two(self) -> bool {{ self.count_ones() == 1 }}");
         let _ = writeln!(o, "    const fn one_less_than_next_power_of_two(self) -> {n} {{ if self <= 1 {{ return 0; }} let p = self - 1; let z = p.leading_zeros(); {n}::MAX >> z }}");
-        let _ = writeln!(o, "    pub const fn next_power_of_two(self) -> {n} {{ self.one_less_than_next_power_of_two().wrapping_add(1) }}");
+        o.push_str("    #[rustc_inherit_overflow_checks]
+    pub const fn next_power_of_two(self) -> Self {
+        if let Some(npot) = self.checked_next_power_of_two() {
+            npot
+        } else {
+            #[expect(arithmetic_overflow)]
+            {
+                // Zero but in a way that panics in debug
+                Self::MAX + 1
+            }
+        }
+    }
+");
         let _ = writeln!(o, "    pub const fn checked_next_power_of_two(self) -> Option<{n}> {{ self.one_less_than_next_power_of_two().checked_add(1) }}");
         let _ = writeln!(o, "    pub const fn is_multiple_of(self, rhs: {n}) -> bool {{ match rhs {{ 0 => self == 0, _ => self % rhs == 0 }} }}");
         let _ = writeln!(o, "    pub const fn cast_signed(self) -> {s} {{ self as {s} }}");
+        let _ = writeln!(o, "    /// rustc 1.91.0 (unsigned_signed_diff): Returns the signed difference when it fits.
+    pub const fn checked_signed_diff(self, rhs: Self) -> Option<{s}> {{
+        let res = self.wrapping_sub(rhs) as {s};
+        let overflow = (self >= rhs) == (res < 0);
+        if !overflow {{ Some(res) }} else {{ None }}
+    }}");
         let _ = writeln!(o, "    pub const fn checked_add_signed(self, rhs: {s}) -> Option<{n}> {{ let (a, b) = self.overflowing_add(rhs as {n}); if b ^ (rhs < 0) {{ None }} else {{ Some(a) }} }}");
         let _ = writeln!(o, "    pub const fn wrapping_add_signed(self, rhs: {s}) -> {n} {{ self.wrapping_add(rhs as {n}) }}");
         let _ = writeln!(o, "    pub const fn saturating_add_signed(self, rhs: {s}) -> {n} {{ let (res, over) = self.overflowing_add(rhs as {n}); if over == (rhs < 0) {{ res }} else if over {{ {n}::MAX }} else {{ 0 }} }}");
@@ -616,6 +734,17 @@ fn gen_float(o: &mut String, f: &str) {
         let _ = writeln!(o, "    pub {constness}fn {m}(self) -> {f} {{ unsafe {{ intrinsics::{i}_{f}(self) }} }}");
     }
     let _ = writeln!(o, "    pub const fn fract(self) -> {f} {{ self - self.trunc() }}");
+    // Algebraic optimizations are optional. Each ordinary operation is a permitted evaluation.
+    for (method, op, operation) in [
+        ("algebraic_add", "+", "addition"),
+        ("algebraic_sub", "-", "subtraction"),
+        ("algebraic_mul", "*", "multiplication"),
+        ("algebraic_div", "/", "division"),
+        ("algebraic_rem", "%", "remainder"),
+    ] {
+        let _ = writeln!(o, "    /// rustc 1.98.0 (float_algebraic): Floating-point {operation} allowing algebraic optimizations.");
+        let _ = writeln!(o, "    pub const fn {method}(self, rhs: {f}) -> {f} {{ self {op} rhs }}");
+    }
     let _ = writeln!(o, "    pub const fn min(self, other: {f}) -> {f} {{ unsafe {{ intrinsics::fmin_{f}(self, other) }} }}");
     let _ = writeln!(o, "    pub const fn max(self, other: {f}) -> {f} {{ unsafe {{ intrinsics::fmax_{f}(self, other) }} }}");
     let _ = writeln!(o, "    pub const fn minimum(self, other: {f}) -> {f} {{ if self < other {{ self }} else if other < self {{ other }} else if self == other {{ if self.is_sign_negative() && other.is_sign_positive() {{ self }} else {{ other }} }} else {{ self + other }} }}");
@@ -684,24 +813,36 @@ fn gen_float(o: &mut String, f: &str) {
 
 fn op_impls(o: &mut String, n: &str, ops: &[(&str, &str, &str)]) {
     for (tr, m, sym) in ops {
-        let _ = writeln!(o, "impl {tr} for {n} {{ type Output = {n}; fn {m}(self, rhs: {n}) -> {n} {{ self {sym} rhs }} }}");
-        let _ = writeln!(o, "impl<'a> {tr}<&'a {n}> for {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {n}) -> {n} {{ self {sym} *rhs }} }}");
-        let _ = writeln!(o, "impl<'a> {tr}<{n}> for &'a {n} {{ type Output = {n}; fn {m}(self, rhs: {n}) -> {n} {{ *self {sym} rhs }} }}");
-        let _ = writeln!(o, "impl<'a, 'b> {tr}<&'a {n}> for &'b {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {n}) -> {n} {{ *self {sym} *rhs }} }}");
-        let _ = writeln!(o, "impl {tr}Assign for {n} {{ fn {m}_assign(&mut self, rhs: {n}) {{ *self = *self {sym} rhs; }} }}");
-        let _ = writeln!(o, "impl<'a> {tr}Assign<&'a {n}> for {n} {{ fn {m}_assign(&mut self, rhs: &'a {n}) {{ *self = *self {sym} *rhs; }} }}");
+        let attr = if matches!(*tr, "Add" | "Sub" | "Mul") {
+            "#[rustc_inherit_overflow_checks] "
+        } else {
+            ""
+        };
+        let _ = writeln!(o, "impl {tr} for {n} {{ type Output = {n}; {attr}fn {m}(self, rhs: {n}) -> {n} {{ self {sym} rhs }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<&'a {n}> for {n} {{ type Output = {n}; {attr}fn {m}(self, rhs: &'a {n}) -> {n} {{ self {sym} *rhs }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<{n}> for &'a {n} {{ type Output = {n}; {attr}fn {m}(self, rhs: {n}) -> {n} {{ *self {sym} rhs }} }}");
+        let _ = writeln!(o, "impl<'a, 'b> {tr}<&'a {n}> for &'b {n} {{ type Output = {n}; {attr}fn {m}(self, rhs: &'a {n}) -> {n} {{ *self {sym} *rhs }} }}");
+        let _ = writeln!(o, "impl {tr}Assign for {n} {{ {attr}fn {m}_assign(&mut self, rhs: {n}) {{ *self = *self {sym} rhs; }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}Assign<&'a {n}> for {n} {{ {attr}fn {m}_assign(&mut self, rhs: &'a {n}) {{ *self = *self {sym} *rhs; }} }}");
     }
 }
 
 fn shift_impls(o: &mut String, n: &str, r: &str) {
     for (tr, m, sym) in [("Shl", "shl", "<<"), ("Shr", "shr", ">>")] {
-        let _ = writeln!(o, "impl {tr}<{r}> for {n} {{ type Output = {n}; fn {m}(self, rhs: {r}) -> {n} {{ self {sym} rhs }} }}");
+        let _ = writeln!(o, "impl {tr}<{r}> for {n} {{ type Output = {n}; #[rustc_inherit_overflow_checks] fn {m}(self, rhs: {r}) -> {n} {{ self {sym} rhs }} }}");
         // core's forward_ref_binop! / forward_ref_op_assign!: either side by reference
-        let _ = writeln!(o, "impl<'a> {tr}<&'a {r}> for {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {r}) -> {n} {{ self {sym} *rhs }} }}");
-        let _ = writeln!(o, "impl<'a> {tr}<{r}> for &'a {n} {{ type Output = {n}; fn {m}(self, rhs: {r}) -> {n} {{ *self {sym} rhs }} }}");
-        let _ = writeln!(o, "impl<'a, 'b> {tr}<&'a {r}> for &'b {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {r}) -> {n} {{ *self {sym} *rhs }} }}");
-        let _ = writeln!(o, "impl {tr}Assign<{r}> for {n} {{ fn {m}_assign(&mut self, rhs: {r}) {{ *self = *self {sym} rhs; }} }}");
-        let _ = writeln!(o, "impl<'a> {tr}Assign<&'a {r}> for {n} {{ fn {m}_assign(&mut self, rhs: &'a {r}) {{ *self = *self {sym} *rhs; }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<&'a {r}> for {n} {{ type Output = {n}; #[rustc_inherit_overflow_checks] fn {m}(self, rhs: &'a {r}) -> {n} {{ self {sym} *rhs }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<{r}> for &'a {n} {{ type Output = {n}; #[rustc_inherit_overflow_checks] fn {m}(self, rhs: {r}) -> {n} {{ *self {sym} rhs }} }}");
+        let _ = writeln!(o, "impl<'a, 'b> {tr}<&'a {r}> for &'b {n} {{ type Output = {n}; #[rustc_inherit_overflow_checks] fn {m}(self, rhs: &'a {r}) -> {n} {{ *self {sym} *rhs }} }}");
+        let _ = writeln!(o, "impl {tr}Assign<{r}> for {n} {{ #[rustc_inherit_overflow_checks] fn {m}_assign(&mut self, rhs: {r}) {{ *self = *self {sym} rhs; }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}Assign<&'a {r}> for {n} {{ #[rustc_inherit_overflow_checks] fn {m}_assign(&mut self, rhs: &'a {r}) {{ *self = *self {sym} *rhs; }} }}");
+    }
+}
+
+fn gen_sum_product(o: &mut String, n: &str, zero: &str, one: &str) {
+    for (tr, method, init, op) in [("Sum", "sum", zero, "+"), ("Product", "product", one, "*")] {
+        let _ = writeln!(o, "impl {tr} for {n} {{ fn {method}<I: Iterator<Item = Self>>(iter: I) -> Self {{ iter.fold({init}, #[rustc_inherit_overflow_checks] |a, b| a {op} b) }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<&'a {n}> for {n} {{ fn {method}<I: Iterator<Item = &'a Self>>(iter: I) -> Self {{ iter.fold({init}, #[rustc_inherit_overflow_checks] |a, b| a {op} b) }} }}");
     }
 }
 
@@ -732,13 +873,10 @@ fn gen_int_traits(o: &mut String, t: &Int) {
     let _ = writeln!(o, "impl Not for {n} {{ type Output = {n}; fn not(self) -> {n} {{ !self }} }}");
     let _ = writeln!(o, "impl<'a> Not for &'a {n} {{ type Output = {n}; fn not(self) -> {n} {{ !*self }} }}");
     if t.signed {
-        let _ = writeln!(o, "impl Neg for {n} {{ type Output = {n}; fn neg(self) -> {n} {{ -self }} }}");
-        let _ = writeln!(o, "impl<'a> Neg for &'a {n} {{ type Output = {n}; fn neg(self) -> {n} {{ -*self }} }}");
+        let _ = writeln!(o, "impl Neg for {n} {{ type Output = {n}; #[rustc_inherit_overflow_checks] fn neg(self) -> {n} {{ -self }} }}");
+        let _ = writeln!(o, "impl<'a> Neg for &'a {n} {{ type Output = {n}; #[rustc_inherit_overflow_checks] fn neg(self) -> {n} {{ -*self }} }}");
     }
-    let _ = writeln!(o, "impl Sum for {n} {{ fn sum<I: Iterator<Item = {n}>>(iter: I) -> {n} {{ crate::iter::sum_from(0 as {n}, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Sum<&'a {n}> for {n} {{ fn sum<I: Iterator<Item = &'a {n}>>(iter: I) -> {n} {{ crate::iter::sum_from(0 as {n}, iter.copied()) }} }}");
-    let _ = writeln!(o, "impl Product for {n} {{ fn product<I: Iterator<Item = {n}>>(iter: I) -> {n} {{ crate::iter::product_from(1 as {n}, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Product<&'a {n}> for {n} {{ fn product<I: Iterator<Item = &'a {n}>>(iter: I) -> {n} {{ crate::iter::product_from(1 as {n}, iter.copied()) }} }}");
+    gen_sum_product(o, n, "0", "1");
     let _ = writeln!(o, "impl FromStr for {n} {{ type Err = ParseIntError; fn from_str(src: &str) -> Result<{n}, ParseIntError> {{ {n}::from_str_radix(src, 10) }} }}");
     gen_step(o, t);
     o.push('\n');
@@ -764,10 +902,66 @@ fn gen_step(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    fn forward_checked(start: {n}, n: usize) -> Option<{n}> {{ if {fits} {{ return None; }} start.checked_add(n as {n}) }}");
         let _ = writeln!(o, "    fn backward_checked(start: {n}, n: usize) -> Option<{n}> {{ if {fits} {{ return None; }} start.checked_sub(n as {n}) }}");
     }
+    // rustc's step_integer_impls!: u64 and i64 switch forms with the pointer width.
+    if t.bits == 64 && t.pw == 0 {
+        gen_step_overflowing(o, t, true, "    #[cfg(target_pointer_width = \"64\")]\n");
+        gen_step_overflowing(o, t, false, "    #[cfg(target_pointer_width = \"32\")]\n");
+    } else {
+        gen_step_overflowing(o, t, t.pw != 0 || t.bits <= 32, "");
+    }
+    o.push_str("    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn forward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::forward_checked(start, n).is_none() {
+            let _ = Self::MAX + 1;
+        }
+        // Do wrapping math to allow e.g. `Step::forward(-128i8, 255)`.
+        start.wrapping_add(n as Self)
+    }
+    #[allow(arithmetic_overflow)]
+    #[rustc_inherit_overflow_checks]
+    fn backward(start: Self, n: usize) -> Self {
+        // In debug builds, trigger a panic on overflow.
+        // This should optimize completely out in release builds.
+        if Self::backward_checked(start, n).is_none() {
+            let _ = Self::MIN - 1;
+        }
+        // Do wrapping math to allow e.g. `Step::backward(127i8, 255)`.
+        start.wrapping_sub(n as Self)
+    }
+");
     // the caller knows the step stays in range (rustc's Step::forward_unchecked): no test
     let _ = writeln!(o, "    unsafe fn forward_unchecked(start: {n}, n: usize) -> {n} {{ start.wrapping_add(n as {n}) }}");
     let _ = writeln!(o, "    unsafe fn backward_unchecked(start: {n}, n: usize) -> {n} {{ start.wrapping_sub(n as {n}) }}");
     o.push_str("}\n");
+}
+
+fn gen_step_overflowing(o: &mut String, t: &Int, narrower: bool, cfg: &str) {
+    let operand = if t.signed { t.unsigned } else { "Self" };
+    let suffix = if t.signed { "_unsigned" } else { "" };
+    for (direction, op, sign) in [("forward", "add", "+"), ("backward", "sub", "-")] {
+        o.push_str(cfg);
+        o.push_str("    #[inline]\n");
+        let _ = writeln!(o, "    fn {direction}_overflowing(start: Self, n: usize) -> (Self, bool) {{");
+        if narrower {
+            let _ = writeln!(o, "        match {operand}::try_from(n) {{");
+            let _ = writeln!(o, "            Ok(n) => start.overflowing_{op}{suffix}(n),");
+            if t.signed {
+                o.push_str("            // If n is out of range of e.g. u8,\n");
+                o.push_str("            // then it is bigger than the entire range for i8 is wide\n");
+                let _ = writeln!(o, "            // so `any_i8 {sign} n` necessarily overflows i8.");
+            } else {
+                let _ = writeln!(o, "            // if n is out of range, `start {sign} n` must overflow");
+            }
+            let _ = writeln!(o, "            Err(_) => (start.wrapping_{op}{suffix}(n as {operand}), true),");
+            o.push_str("        }\n");
+        } else {
+            let _ = writeln!(o, "        start.overflowing_{op}{suffix}(n as {operand})");
+        }
+        o.push_str("    }\n");
+    }
 }
 
 fn gen_float_traits(o: &mut String, f: &str) {
@@ -778,12 +972,9 @@ fn gen_float_traits(o: &mut String, f: &str) {
     let _ = writeln!(o, "impl PartialEq for {f} {{ fn eq(&self, other: &{f}) -> bool {{ *self == *other }} fn ne(&self, other: &{f}) -> bool {{ *self != *other }} }}");
     let _ = writeln!(o, "impl PartialOrd for {f} {{ fn partial_cmp(&self, other: &{f}) -> Option<Ordering> {{ if *self < *other {{ Some(Ordering::Less) }} else if *self > *other {{ Some(Ordering::Greater) }} else if *self == *other {{ Some(Ordering::Equal) }} else {{ None }} }} fn lt(&self, other: &{f}) -> bool {{ *self < *other }} fn le(&self, other: &{f}) -> bool {{ *self <= *other }} fn gt(&self, other: &{f}) -> bool {{ *self > *other }} fn ge(&self, other: &{f}) -> bool {{ *self >= *other }} }}");
     op_impls(o, f, &[("Add", "add", "+"), ("Sub", "sub", "-"), ("Mul", "mul", "*"), ("Div", "div", "/"), ("Rem", "rem", "%")]);
-    let _ = writeln!(o, "impl Neg for {f} {{ type Output = {f}; fn neg(self) -> {f} {{ -self }} }}");
-    let _ = writeln!(o, "impl<'a> Neg for &'a {f} {{ type Output = {f}; fn neg(self) -> {f} {{ -*self }} }}");
-    let _ = writeln!(o, "impl Sum for {f} {{ fn sum<I: Iterator<Item = {f}>>(iter: I) -> {f} {{ crate::iter::sum_from(-0.0 as {f}, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Sum<&'a {f}> for {f} {{ fn sum<I: Iterator<Item = &'a {f}>>(iter: I) -> {f} {{ crate::iter::sum_from(-0.0 as {f}, iter.copied()) }} }}");
-    let _ = writeln!(o, "impl Product for {f} {{ fn product<I: Iterator<Item = {f}>>(iter: I) -> {f} {{ crate::iter::product_from(1.0 as {f}, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Product<&'a {f}> for {f} {{ fn product<I: Iterator<Item = &'a {f}>>(iter: I) -> {f} {{ crate::iter::product_from(1.0 as {f}, iter.copied()) }} }}");
+    let _ = writeln!(o, "impl Neg for {f} {{ type Output = {f}; #[rustc_inherit_overflow_checks] fn neg(self) -> {f} {{ -self }} }}");
+    let _ = writeln!(o, "impl<'a> Neg for &'a {f} {{ type Output = {f}; #[rustc_inherit_overflow_checks] fn neg(self) -> {f} {{ -*self }} }}");
+    gen_sum_product(o, f, "-0.0", "1.0");
     let _ = writeln!(o, "impl FromStr for {f} {{ type Err = crate::num::ParseFloatError; fn from_str(src: &str) -> Result<{f}, crate::num::ParseFloatError> {{ crate::num::dec2flt::parse_{f}(src) }} }}");
     o.push('\n');
 }
@@ -812,6 +1003,20 @@ impl BitXor for bool { type Output = bool; fn bitxor(self, rhs: bool) -> bool { 
 impl BitAndAssign for bool { fn bitand_assign(&mut self, rhs: bool) { *self = *self & rhs; } }
 impl BitOrAssign for bool { fn bitor_assign(&mut self, rhs: bool) { *self = *self | rhs; } }
 impl BitXorAssign for bool { fn bitxor_assign(&mut self, rhs: bool) { *self = *self ^ rhs; } }
+// library/core/src/ops/bit.rs: bool's bit operators take references as the integers' do
+// (forward_ref_binop / forward_ref_op_assign: `bool: BitAnd<&bool>` and the rest)
+impl<'a> BitAnd<&'a bool> for bool { type Output = bool; fn bitand(self, rhs: &'a bool) -> bool { self & *rhs } }
+impl<'a> BitAnd<bool> for &'a bool { type Output = bool; fn bitand(self, rhs: bool) -> bool { *self & rhs } }
+impl<'a, 'b> BitAnd<&'a bool> for &'b bool { type Output = bool; fn bitand(self, rhs: &'a bool) -> bool { *self & *rhs } }
+impl<'a> BitOr<&'a bool> for bool { type Output = bool; fn bitor(self, rhs: &'a bool) -> bool { self | *rhs } }
+impl<'a> BitOr<bool> for &'a bool { type Output = bool; fn bitor(self, rhs: bool) -> bool { *self | rhs } }
+impl<'a, 'b> BitOr<&'a bool> for &'b bool { type Output = bool; fn bitor(self, rhs: &'a bool) -> bool { *self | *rhs } }
+impl<'a> BitXor<&'a bool> for bool { type Output = bool; fn bitxor(self, rhs: &'a bool) -> bool { self ^ *rhs } }
+impl<'a> BitXor<bool> for &'a bool { type Output = bool; fn bitxor(self, rhs: bool) -> bool { *self ^ rhs } }
+impl<'a, 'b> BitXor<&'a bool> for &'b bool { type Output = bool; fn bitxor(self, rhs: &'a bool) -> bool { *self ^ *rhs } }
+impl<'a> BitAndAssign<&'a bool> for bool { fn bitand_assign(&mut self, rhs: &'a bool) { *self = *self & *rhs; } }
+impl<'a> BitOrAssign<&'a bool> for bool { fn bitor_assign(&mut self, rhs: &'a bool) { *self = *self | *rhs; } }
+impl<'a> BitXorAssign<&'a bool> for bool { fn bitxor_assign(&mut self, rhs: &'a bool) { *self = *self ^ *rhs; } }
 
 // ---- char
 impl Clone for char { fn clone(&self) -> char { *self } }
@@ -827,6 +1032,67 @@ impl Ord for char { fn cmp(&self, other: &char) -> Ordering { (*self as u32).cmp
 impl bool {
     pub const fn then_some<T>(self, t: T) -> Option<T> { if self { Some(t) } else { None } }
     pub const fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T> { if self { Some(f()) } else { None } }
+
+    /// Returns `Ok(())` if the `bool` is [`true`](../std/keyword.true.html),
+    /// or `Err(err)` otherwise.
+    ///
+    /// Arguments passed to `ok_or` are eagerly evaluated; if you are
+    /// passing the result of a function call, it is recommended to use
+    /// [`ok_or_else`], which is lazily evaluated.
+    ///
+    /// [`ok_or_else`]: bool::ok_or_else
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert_eq!(false.ok_or(0), Err(0));
+    /// assert_eq!(true.ok_or(0), Ok(()));
+    /// ```
+    ///
+    /// ```
+    /// let mut a = 0;
+    /// let mut function_with_side_effects = || { a += 1; };
+    ///
+    /// assert!(true.ok_or(function_with_side_effects()).is_ok());
+    /// assert!(false.ok_or(function_with_side_effects()).is_err());
+    ///
+    /// // `a` is incremented twice because the value passed to `ok_or` is
+    /// // evaluated eagerly.
+    /// assert_eq!(a, 2);
+    /// ```
+    #[inline]
+    pub const fn ok_or<E: crate::marker::Destruct>(self, err: E) -> Result<(), E> {
+        if self { Ok(()) } else { Err(err) }
+    }
+
+    /// Returns `Ok(())` if the `bool` is [`true`](../std/keyword.true.html),
+    /// or `Err(f())` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert_eq!(false.ok_or_else(|| 0), Err(0));
+    /// assert_eq!(true.ok_or_else(|| 0), Ok(()));
+    /// ```
+    ///
+    /// ```
+    /// let mut a = 0;
+    ///
+    /// assert!(true.ok_or_else(|| { a += 1; }).is_ok());
+    /// assert!(false.ok_or_else(|| { a += 1; }).is_err());
+    ///
+    /// // `a` is incremented once because the closure is evaluated lazily by
+    /// // `ok_or_else`.
+    /// assert_eq!(a, 1);
+    /// ```
+    #[inline]
+    pub const fn ok_or_else<E, F: FnOnce() -> E + crate::marker::Destruct>(
+        self,
+        f: F,
+    ) -> Result<(), E> {
+        if self { Ok(()) } else { Err(f()) }
+    }
+
     /// rustc 1.100.0 (bool_toggle)
     pub const fn toggle(&mut self) { *self = !*self; }
 }

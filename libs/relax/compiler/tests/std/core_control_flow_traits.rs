@@ -41,6 +41,8 @@ fn control_flow_derives() {
 fn control_flow_values() {
     let hit = first_negative(&[1, -5]);
     let clean = first_negative(&[1, 2, 3]);
+    println!("| break_ok {:?} {:?}", hit.break_ok(), clean.break_ok());
+    println!("| continue_ok {:?} {:?}", hit.continue_ok(), clean.continue_ok());
     assert_eq!((hit.is_break(), hit.is_continue()), (true, false));
     assert_eq!((hit.break_value(), hit.continue_value()), (Some(-5), None));
     assert_eq!((clean.break_value(), clean.continue_value()), (None, Some(3)));

@@ -5,7 +5,7 @@
 //! What stays is the process: its main loop, the window, the GPU device, the host's threads.
 
 use crate::jit::Unit;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long the run's own threads get to see the end. A compile between two of its points is what
@@ -33,11 +33,41 @@ pub fn restarting() -> bool {
     RESTARTING.load(Ordering::Acquire)
 }
 
+/// Runs ended in place, counted as each restart takes its run (before that run's end); nothing
+/// lowers it.
+static ENDS: AtomicU64 = AtomicU64::new(0);
+/// The count of runs ended in place when the run going now began: the restart that started it
+/// sets it, before the next run's boot.
+static THIS_RUN: AtomicU64 = AtomicU64::new(0);
+
+/// The run going now, as `ended_in_place` takes it: read where the run's host threads start (the
+/// host's compile thread), before any restart can take that run.
+pub fn run_gen() -> u64 {
+    THIS_RUN.load(Ordering::Acquire)
+}
+
+/// A restart took the run `gen` names (`run_gen`): that run ends in place, or ended, and the
+/// restart starts the run after it. Unlike `restarting`, which clears before the next run's boot,
+/// nothing clears it: the host's compile thread, slow on a loaded box, read `restarting` after a
+/// relaunch in the next run's boot had cleared it, took the end for its run's own failure and ended
+/// the run with no next one (the restart fixture's "boot-no-next-run" in CI, 11-21).
+pub fn ended_in_place(gen: u64) -> bool {
+    ENDS.load(Ordering::Acquire) != gen
+}
+
 /// What the run before this one left for it (reload.rs next_run_env: the recovery record, the
 /// state, the edit's save time), for a run started in place: the restart hands it over here. The
 /// process's environment is never written for it: the host's threads and the C code they run read
 /// the environment meanwhile, and a write under a read is undefined.
 static HANDED: std::sync::Mutex<Option<Vec<(&'static str, Option<std::ffi::OsString>)>>> = std::sync::Mutex::new(None);
+
+/// A restart in place is not over: its end runs, the next run boots, or that run (started in
+/// place) still waits for its app check, which may end it in place (`check_failed`). The pending
+/// edits are back to none at the end already (`live` reads both: devhub's relaunch said a
+/// restart was done whose run then failed its check).
+pub fn unfinished() -> bool {
+    restarting() || crate::run::booting() || (started_in_place() && crate::check::app_check_running())
+}
 
 /// The input `name` of next_run_env as this run has it: from the run before it in this process
 /// (`restart`), or for the process's first run from the environment its starter gave it.
@@ -91,6 +121,8 @@ pub unsafe fn end(up: *mut Unit, grace: Duration) -> Ended {
     // from here the process's own threads are not at the run's state
     let gate = crate::run_threads::reset_gate();
     crate::pmhost::free_world();
+    // (the owner's posted tasks are the run's: none runs on its unit once it retires)
+    crate::owner::void_posts();
     let up = crate::run::take_run_unit();
     if !up.is_null() {
         let no_thread_in_it = stayed.is_empty();
@@ -144,10 +176,45 @@ unsafe fn reset_all() {
 /// thread: this returns when the restart is on its way, and a thread of the run goes on until its
 /// run's end meets it (`leave`, or the code it returns to). An error: nothing was started.
 pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
+    end_in_place(why, state, None)
+}
+
+/// The run's app check found `errors` (check.rs start_app_check; a live session's hosted run): the
+/// run ends as a restart's does, and the host waits with no run (its window on the start screen,
+/// with the errors) until the next save or relaunch starts the next one. That run gets the state
+/// this one was started with: a run that failed its check is not asked for its own. The edit's
+/// outcome is a refusal, never the restart's or the JIT's failure (hot_failure::check_refused).
+pub(crate) fn check_failed(errors: &[String]) -> Result<(), String> {
+    let first = errors.first().map_or("", |e| e.lines().next().unwrap_or(""));
+    let why = format!("its app check found {} error{}: {first}", errors.len(), if errors.len() == 1 { "" } else { "s" });
+    end_in_place(why, None, Some(errors))
+}
+
+/// Why the run whose app check failed ends (`check_failed`), from its end until the host takes it
+/// (`take_check_failure`): the host's window goes to the start screen for that end, and its next
+/// run waits for the next save or relaunch.
+static CHECK_FAILED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The run that ends failed its app check (`check_failed`).
+pub fn check_failing() -> bool {
+    CHECK_FAILED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// The host's next run (`MainHost::next_run`): why the run before it ended, when that run failed
+/// its app check; the next run then waits for the next save or relaunch.
+pub fn take_check_failure() -> Option<String> {
+    CHECK_FAILED.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+fn end_in_place(why: String, state: Option<&[u8]>, failed: Option<&[String]>) -> Result<(), String> {
     if RESTARTING.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
     let _k = crate::zone_alloc::kept();
+    // (before the hand-over: a recovery this run was for ends refused, the next run is none's)
+    if let Some(errors) = failed {
+        crate::hot_failure::check_refused(&why, errors);
+    }
     let next = match crate::reload::next_run_env(state) {
         Ok(next) => next,
         Err(e) => {
@@ -155,14 +222,28 @@ pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
             return Err(e);
         }
     };
+    let failed_check = failed.is_some();
+    if failed_check {
+        *CHECK_FAILED.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+    }
+    // (from here the run is this restart's: `ended_in_place` says so to its threads)
+    ENDS.fetch_add(1, Ordering::AcqRel);
     let spawned = std::thread::Builder::new().name("run-restart".into()).spawn(move || {
-        eprintln!("relax live: restarting ({why})");
+        if failed_check {
+            eprintln!("relax live: the run ends in place: {why}; the next save or `session relaunch` starts the next one");
+        } else {
+            eprintln!("relax live: restarting ({why})");
+        }
         let t = Instant::now();
         let mut next = next;
-        if wait_boot() {
+        let waited = wait_boot();
+        if waited {
             eprintln!("relax live: the run's boot is over after {:.0} ms: the restart ends the run now", t.elapsed().as_secs_f64() * 1e3);
-            // its program barely began: the state it was started with is the next run's, when
-            // this restart has none of its own
+        }
+        // its program barely began, failed its check, or there is no run (its build or check
+        // failed, and the host waits): the state it was started with is the next run's, when
+        // this end has none of its own
+        if waited || failed_check || crate::run::running_unit().is_null() {
             crate::reload::carry_restore(&mut next);
         }
         crate::reload::restart_begins();
@@ -171,10 +252,20 @@ pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
         eprintln!("relax: {} ; run's threads stayed: {:?}; {:.0} ms in all: end {:.0}, cache {:.0}, threads {:.0}, unit {:.0}, statics {:.0}", ended.program.line(), ended.stayed, t.elapsed().as_secs_f64() * 1e3, ended.ms[0], ended.ms[1], ended.ms[2], ended.ms[3], ended.ms[4]);
         // what the next run reads (run_input)
         *HANDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(next);
-        // the next run's boot is due before another restart can be asked for
-        crate::run::boot_begins();
+        if failed_check {
+            // the sources wait for a run that passes its check (`session` lists it; devhub's
+            // relaunch reads the line above)
+            crate::reload::check_failed_pending(&why);
+        } else {
+            // the next run's boot is due before another restart can be asked for
+            crate::run::boot_begins();
+        }
+        THIS_RUN.store(ENDS.load(Ordering::Acquire), Ordering::Release);
         RESTARTING.store(false, Ordering::Release);
-        crate::run::host_next_run();
+        if !crate::run::host_next_run() && failed_check {
+            // no host window to wait in after all: the run's code, as outside a live session
+            crate::os::proc::exit(101);
+        }
     });
     if let Err(e) = spawned {
         eprintln!("relax: the restart's thread did not start: {e}");
@@ -399,5 +490,16 @@ mod tests {
             panic!("the boot's own panic");
         });
         assert!(panicked.is_err() && !crate::run::booting(), "a boot that panicked is over");
+        // a hosted app's boot goes on in its app domain's load after the compile closure returned
+        // (a restart that ended the run then lost the app's state to that load, 11-21)
+        let boot = crate::run::Boot::on();
+        crate::run::boot_to_domain(true);
+        let restart = std::thread::spawn(super::wait_boot);
+        drop(boot);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(crate::run::booting() && !restart.is_finished(), "the end waits for the app domain's load, not for the closure");
+        crate::run::domain_boot_over();
+        assert!(restart.join().unwrap() && !crate::run::booting(), "the load is over: so is the boot");
+        crate::run::boot_to_domain(false);
     }
 }

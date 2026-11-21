@@ -1182,6 +1182,8 @@ pub struct ClosureRow {
     pub params: List<ClosureParam>,
     pub ret: OptTyId,
     pub body: ExprId,
+    /// `#[rustc_inherit_overflow_checks]` on the closure: its body checks overflow as the program does
+    pub inherit_overflow_checks: bool,
 }
 
 /// `S { fields, ..base }`; `rest`: a bare `..` (rustc default_field_values: the omitted fields

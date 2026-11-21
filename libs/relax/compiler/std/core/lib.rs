@@ -56,6 +56,8 @@ pub mod hint;
 pub mod marker;
 pub mod mem;
 pub mod ops;
+/// rustc 1.95.0 (new_range_inclusive_api): range values and their iterators.
+pub mod range;
 pub mod option;
 pub mod panic;
 pub mod panicking;

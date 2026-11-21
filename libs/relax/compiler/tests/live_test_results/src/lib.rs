@@ -11,8 +11,11 @@ fn value_is_one() { assert_eq!(value(), 1); }
 #[test]
 fn fresh_statics() { assert_eq!(ADDED.fetch_add(value(), Ordering::SeqCst), 0); }
 
+/// A data file an item reads (a fixture's text): its edit reaches the tests through this item.
+const NOTE: &str = include_str!("note.txt");
+
 #[test]
-fn independent() { assert_eq!(2 + 2, 4); }
+fn independent() { assert_eq!(2 + 2, 4); assert!(!NOTE.is_empty()); }
 
 #[test]
 #[ignore]

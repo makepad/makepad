@@ -17,6 +17,9 @@ Relax issue 131 (ported from makepad/relax PR 134).
    `faulted` with its group, the JIT undoes it, and the run after that says `reverted` with the
    group, in its verdict and its results' header: it tested the code from before the edit, which
    is no verdict on the saved source (a session read 77/77 after a revert as one, 11-14).
+5. An edit of an included data file (src/note.txt, read by `include_str!`): its verdict's `edit`
+   names the saved file, not only lib.rs that includes it (named alone, devhub read the round as
+   one that took none of the saved files: a fixture's .splash edit, 11-19).
 Prints "live_test_results: ok" or "live_test_results: FAILED (...)"."""
 import json
 import os
@@ -123,6 +126,12 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
         head = [r for r in inspect(pid, *undone["results"].split()) if "test_count" in r]
         if head != [{"group": g, "test_count": 5, "reverted": [g]}]:
             fail("the results after the revert: %s" % head, log)
+        time.sleep(1.1)
+        note = pkg / "src" / "note.txt"
+        note.write_text("another note\n")
+        noted = verdict(undone["seq"])
+        if not any(str(p).endswith("src/note.txt") for p in noted.get("edit", [])):
+            fail("the included file's edit: its verdict names %s" % noted.get("edit"), log)
     finally:
         try:
             os.killpg(p.pid, signal.SIGTERM)

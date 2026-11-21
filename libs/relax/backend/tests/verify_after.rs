@@ -8,13 +8,13 @@ use relax_backend::rir::*;
 fn compile(f: &Func) -> Result<(), String> {
     let mut o = relax_session::Options::default();
     o.cpu = relax_backend::x64::detect_cpu(&o);
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(true);
     relax_backend::x64::compile(&o, f, &env).map(|_| ())
 }
 
 #[cfg(target_arch = "aarch64")]
 fn compile(f: &Func) -> Result<(), String> {
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::arm64::Env::standalone(true);
     relax_backend::arm64::compile(&relax_session::Options::default(), f, &env).map(|_| ())
 }
 

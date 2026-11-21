@@ -19,6 +19,27 @@ fn a01_set_times() {
     let md = std::fs::metadata(&p).unwrap();
     println!("| accessed {:?} modified kept {}", md.accessed().unwrap().duration_since(UNIX_EPOCH).unwrap(), md.modified().unwrap() == m);
     drop(f);
+    let timestamps = |md: std::fs::Metadata| {
+        (
+            md.accessed().unwrap().duration_since(UNIX_EPOCH).unwrap(),
+            md.modified().unwrap().duration_since(UNIX_EPOCH).unwrap(),
+        )
+    };
+    std::fs::set_times(&p, FileTimes::new().set_accessed(t).set_modified(a)).unwrap();
+    println!("| path times {:?}", timestamps(std::fs::metadata(&p).unwrap()));
+    std::fs::set_times_nofollow(&p, FileTimes::new().set_accessed(a)).unwrap();
+    println!("| nofollow file {:?}", timestamps(std::fs::metadata(&p).unwrap()));
+    #[cfg(unix)]
+    {
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&p, &link).unwrap();
+        std::fs::set_times(&link, FileTimes::new().set_modified(t)).unwrap();
+        println!("| follow target {:?}", timestamps(std::fs::metadata(&p).unwrap()));
+        std::fs::set_times_nofollow(&link, FileTimes::new().set_accessed(a).set_modified(a)).unwrap();
+        println!("| nofollow link {:?}", timestamps(std::fs::symlink_metadata(&link).unwrap()));
+        println!("| nofollow target {:?}", timestamps(std::fs::metadata(&p).unwrap()));
+        std::fs::remove_file(&link).unwrap();
+    }
     std::fs::remove_file(&p).unwrap();
     std::fs::remove_dir(&dir).unwrap();
 }

@@ -14,3 +14,14 @@ pub fn broken(x: u32) -> u32 {
 fn fine_adds_one() {
     assert_eq!(fine(2), 3);
 }
+
+// a trait that gained a required method, `at`, before its impl in libs/store did (a save of one
+// crate before the other): rustc rejects the impl (E0046)
+pub trait Engine {
+    fn len(&self) -> usize;
+    fn at(&self, i: usize) -> usize;
+}
+
+pub fn first<E: Engine>(e: &E) -> usize {
+    if e.len() > 0 { e.at(0) } else { 0 }
+}

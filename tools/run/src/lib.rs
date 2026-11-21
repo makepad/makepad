@@ -353,6 +353,7 @@ fn run_host() {
             status: hal_run::status,
             end_app: hal_run::end_app,
             next_run: hal_run::next_run,
+            held: hal_run::held,
         });
         relax_compiler::run_end::set_native_end(
             || {

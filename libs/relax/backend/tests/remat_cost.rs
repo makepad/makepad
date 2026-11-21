@@ -80,7 +80,7 @@ fn reference(n: u64, seed: u64) -> u64 {
 #[test]
 fn dear_constants_are_not_rebuilt_per_read() {
     let f = build();
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::arm64::Env::standalone(true);
     let c = relax_backend::arm64::compile_freq(&relax_session::Options::default(), &f, &env, None).unwrap();
     let bytes = c.code[..c.text_len as usize].to_vec();
     let code = Code::new(&bytes).unwrap();

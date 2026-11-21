@@ -15,7 +15,7 @@ fn options(off: &[&str]) -> relax_session::Options {
 }
 
 fn compile(o: &relax_session::Options, f: &Func, thorough: bool) -> Vec<u8> {
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0, near: false };
+    let env = relax_backend::x64::Env::standalone(thorough);
     let c = relax_backend::x64::compile_freq(o, f, &env, None).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }

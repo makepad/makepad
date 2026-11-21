@@ -222,6 +222,7 @@ fn run_page(st: &Style) -> String {
     p.row("--units <json>", "Use a saved unit graph instead of cargo");
     p.row("--agent", "Park panics for an agent; print events on stderr");
     p.row("--unattended", "Never park: a panic unwinds at once and a compile\nerror ends the run (scripts, CI); no live session,\nso a saved edit is not patched in");
+    p.row("--quit-after-present", "Quit once the startup went quiet after the first\nframe, as a SIGTERM would end it (the cache is\ncommitted): a warm-up run. Not on Windows");
     p.row("--heap[=<bytes>]", "Track the heap by stack from the start (inspect heap)");
     p.row("--cfg <spec>", "Set a cfg for the program (name or name=\"value\"), as RUSTFLAGS=--cfg");
     p.row("--no-asm", "Refuse the program's inline assembly (asm!,\nglobal_asm!, naked_asm!: an error naming the crate),\nfor sandboxed uses; also RELAX_NO_ASM=1");

@@ -133,7 +133,7 @@ fn folded_ordering_compares_compute_the_same() {
                 for k in [-2i64, -1, 0, 1, 2, 254, 255] {
                     let mut f = build(cc, signed, k, narrow);
                     passes::simplify(&options, &mut f, None, true, true);
-                    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+                    let env = x64::Env::standalone(true);
                     let c = x64::compile(&options, &f, &env).unwrap();
                     let code = Code::new(&c.code).unwrap();
                     let run: Entry = unsafe { std::mem::transmute(code.ptr()) };

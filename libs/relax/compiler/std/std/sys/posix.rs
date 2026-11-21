@@ -94,6 +94,8 @@ extern "C" {
     pub fn closedir(dir: *mut c_void) -> c_int;
     pub fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char;
     pub fn chdir(path: *const c_char) -> c_int;
+    #[cfg(not(target_os = "fuchsia"))]
+    pub fn chroot(path: *const c_char) -> c_int;
     // env / process
     pub fn getenv(name: *const c_char) -> *mut c_char;
     pub fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;

@@ -175,3 +175,32 @@ fn a08_once_from_fn_cow() {
     let m: &mut [u8] = &mut arr;
     println!("| cow {} {} {} {} {}", v == borrowed, &v[..] == borrowed, m == borrowed, vec![3u8] == owned, v == owned);
 }
+
+#[test]
+fn a09_insert_entry_boxed_utf8_bool() {
+    extern crate alloc;
+    use std::collections::{btree_map::Entry, BTreeMap};
+
+    let mut map = BTreeMap::new();
+    let entry = map.entry(2).insert_entry(20);
+    println!("| vacant {} {}", entry.key(), entry.get());
+    let entry = map.entry(2).insert_entry(21);
+    println!("| occupied {} {}", entry.key(), entry.get());
+    if let Entry::Vacant(vacant) = map.entry(1) {
+        let entry = vacant.insert_entry(10);
+        println!("| vacant entry {} {}", entry.key(), entry.get());
+    }
+    println!("| map {:?}", map);
+
+    let bytes = [226, 152, 186];
+    let s = unsafe { std::str::from_boxed_utf8_unchecked(Box::new(bytes)) };
+    let a = unsafe { alloc::str::from_boxed_utf8_unchecked(Box::new(bytes)) };
+    println!("| boxed utf8 {} {}", s, a);
+
+    let mut calls = 0;
+    for b in [true, false] {
+        let eager = b.ok_or(7);
+        let lazy = b.ok_or_else(|| { calls += 1; 8 });
+        println!("| bool {} {:?} {:?} calls {}", b, eager, lazy, calls);
+    }
+}
