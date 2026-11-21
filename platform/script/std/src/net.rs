@@ -1,6 +1,6 @@
 use relax_api::relax_api;
 use crate::makepad_network::{
-    http_server::{HttpServer, HttpServerRequest, HttpServerResponse as NetHttpServerResponse},
+    http_server::{WebSocketOut, HttpServer, HttpServerRequest, HttpServerResponse as NetHttpServerResponse},
     FromUIReceiver, FromUISender, NetworkResponse, SocketStream, ToUIReceiver, ToUISender,
 };
 use crate::net_types::{HttpMethod, HttpRequest, HttpServerHeaders, HttpServerResponse};
@@ -25,7 +25,7 @@ pub struct ScriptWebSocket {
 pub struct ScriptServerWebSocket {
     pub web_socket_id: u64,
     #[allow(unused)]
-    pub response_sender: std::sync::mpsc::Sender<Vec<u8>>,
+    pub response_sender: std::sync::mpsc::Sender<WebSocketOut>,
     pub events: WebSocketEvents,
 }
 

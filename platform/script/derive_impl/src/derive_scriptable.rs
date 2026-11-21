@@ -1,4 +1,4 @@
-use makepad_micro_proc_macro::proc_macro::TokenStream;
+use makepad_micro_proc_macro::proc_macro::{TokenStream, TokenTree};
 
 use makepad_micro_proc_macro::{error_result, Attribute, LiveId, StructField, TokenBuilder, TokenParser};
 
@@ -20,6 +20,55 @@ fn emit_resolve(tb: &mut TokenBuilder, names: &[&str]) {
 /// field name) is the keyword itself.
 fn script_name(name: &str) -> &str {
     name.strip_prefix("r#").unwrap_or(name)
+}
+
+/// Where a draw struct's instance fields end, and the check that a struct built on it starts
+/// its own fields there. A draw call uploads the `#[live]` fields that follow the base's as one
+/// slice (`platform/src/draw_vars.rs`) and the shader packs them with no gap, so a base whose
+/// size rounds up past its last field (an odd number of f32 lanes in an 8-aligned struct)
+/// puts the next struct's fields one lane later than the shader reads them. Every non-generic
+/// `#[repr(C)]` struct gets `SCRIPT_INSTANCE_END` (a root such as `DrawVars` ends at its last
+/// field); one that adds fields to a `#[deref]` base asserts at compile time that they start
+/// where the base's end.
+fn emit_instance_layout(tb: &mut TokenBuilder, name: &str, attrs: &[Attribute], fields: &[StructField], deref_index: Option<usize>) {
+    let repr_c = attrs
+        .iter()
+        .filter(|attr| attr.name == "repr")
+        .filter_map(|attr| attr.args.clone())
+        .flatten()
+        .any(|token| matches!(token, TokenTree::Ident(ident) if ident.to_string() == "C"));
+    if !repr_c {
+        return;
+    }
+    let base = deref_index.map(|i| &fields[i]);
+    let own = &fields[deref_index.map_or(0, |i| i + 1)..];
+    tb.add("impl").ident(name).add("{ #[doc(hidden)] pub const SCRIPT_INSTANCE_END: usize =");
+    match (own.last(), base) {
+        (Some(last), _) => {
+            tb.add("core::mem::offset_of!(").ident(name).add(",").ident(&last.name);
+            tb.add(") + core::mem::size_of::<").stream(Some(last.ty.clone())).add(">();");
+        }
+        (None, Some(base)) => {
+            tb.add("core::mem::offset_of!(").ident(name).add(",").ident(&base.name);
+            tb.add(") + <").stream(Some(base.ty.clone())).add(">::SCRIPT_INSTANCE_END;");
+        }
+        (None, None) => {
+            tb.add("0;");
+        }
+    }
+    tb.add("}");
+    if let (Some(first), Some(base)) = (own.first(), base) {
+        tb.add("const _: () = assert!(core::mem::offset_of!(").ident(name).add(",").ident(&first.name);
+        tb.add(") == core::mem::offset_of!(").ident(name).add(",").ident(&base.name);
+        tb.add(") + <").stream(Some(base.ty.clone())).add(">::SCRIPT_INSTANCE_END,");
+        tb.string(&format!(
+            "{name}'s fields start after padding at the end of its `{}` base, so the shader reads \
+             them one lane early: give the base an even number of f32 lanes (a #[live] pad lane, \
+             as DrawQuad's pad1 and pad2)",
+            base.name
+        ));
+        tb.add(");");
+    }
 }
 
 pub fn derive_script_impl(input: TokenStream) -> TokenStream {
@@ -92,9 +141,14 @@ fn derive_script_impl_inner(
 
         // Deref
 
-        let deref_field = fields
+        let deref_index = fields
             .iter()
-            .find(|field| field.attrs.iter().any(|a| a.name == "deref"));
+            .position(|field| field.attrs.iter().any(|a| a.name == "deref"));
+        let deref_field = deref_index.map(|i| &fields[i]);
+
+        if generic.is_none() {
+            emit_instance_layout(tb, &struct_name, &main_attribs, &fields, deref_index);
+        }
 
         if let Some(deref_field) = deref_field {
             tb.add("impl").stream(generic.clone());

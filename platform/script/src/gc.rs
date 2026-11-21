@@ -804,6 +804,7 @@ impl ScriptHeap {
                     transient: false,
                     real_file: String::new(),
                     shown: None,
+                    first_col: 0,
                 };
                 free.push(b as u16);
             }

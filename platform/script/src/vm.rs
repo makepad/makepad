@@ -306,6 +306,10 @@ pub struct ScriptBody {
     /// its columns exact (`ScriptMod::column` only tells bodies apart).
     /// Parse errors and runtime locations then name the same line.
     pub shown: Option<String>,
+    /// A shown body whose text continues a line of its file (a chunk appended after a
+    /// line with no newline): the column its first row starts at there. Columns on that
+    /// row count from it, on later rows from 0 ([`Self::site_col`]).
+    pub first_col: u32,
 }
 
 impl ScriptBody {
@@ -323,6 +327,12 @@ impl ScriptBody {
     /// The file a location in this body names (see [`Self::shown`]).
     fn site_file(&self, script_mod: &ScriptMod) -> String {
         self.shown.clone().unwrap_or_else(|| script_mod.file.clone())
+    }
+
+    /// The file's column of the column `col` on zero-based `row` of the body's text
+    /// (see [`Self::first_col`]).
+    fn site_col(&self, row: u32, col: u32) -> u32 {
+        if row == 0 { col + self.first_col } else { col }
     }
 
     /// The zero-based line a text at ScriptMod line `line` starts at. Its first line is
@@ -375,6 +385,7 @@ impl ScriptBody {
             transient: true,
             real_file: self.real_file.clone(),
             shown: self.shown.clone(),
+            first_col: self.first_col,
         }
     }
 }
@@ -1134,7 +1145,7 @@ impl ScriptCode {
             // Where the `fn` keyword is written (its first character).
             let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
             let loc = match body.source.written() {
-                Some(script_mod) => ScriptLoc { file: body.site_file(script_mod), line: row + script_mod.line as u32, col },
+                Some(script_mod) => ScriptLoc { file: body.site_file(script_mod), line: row + script_mod.line as u32, col: body.site_col(row, col) },
                 None => ScriptLoc { file: "generated".into(), line: row, col },
             };
             file.push(&loc.file); at.line = loc.line; at.col = loc.col;
@@ -1222,7 +1233,7 @@ impl ScriptCode {
             let text: String = chars[start..end].iter().collect();
             let (row, col) = body.tokenizer.token_start_row_col(open as u32)?;
             let loc = match body.source.written() {
-                Some(script_mod) => ScriptLoc { file: body.site_file(script_mod), line: row + script_mod.line as u32, col },
+                Some(script_mod) => ScriptLoc { file: body.site_file(script_mod), line: row + script_mod.line as u32, col: body.site_col(row, col) },
                 None => ScriptLoc { file: "generated".into(), line: row, col },
             };
             Some((loc, text))
@@ -1253,7 +1264,7 @@ impl ScriptCode {
         for i in first..=last {
             let (row, col) = body.tokenizer.token_start_row_col(i as u32)?;
             let t = &tokens[i];
-            out.push(ScriptFnToken { token: t.token, newline: t.preceded_by_newline, start: t.start(), end: t.end(), line: row + line0 + 1, col: col + 1 });
+            out.push(ScriptFnToken { token: t.token, newline: t.preceded_by_newline, start: t.start(), end: t.end(), line: row + line0 + 1, col: body.site_col(row, col) + 1 });
         }
         Some(ScriptFnTokens { file, closure, tokens: out })
     }
@@ -1351,7 +1362,7 @@ impl ScriptCode {
             t.rebase(start);
             out.push(t);
         }
-        Some(ScriptFnImage::new(file, first_line + row, col, text, out, strings))
+        Some(ScriptFnImage::new(file, first_line + row, body.site_col(row, col), text, out, strings))
     }
 
     /// Where `field` is written (`field: …`, `field := …`, `field +: …`) in
@@ -1412,7 +1423,7 @@ impl ScriptCode {
                             // position may sit a character into it.)
                             let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
                             return Some(match body.source.written() {
-                                Some(script_mod) => ScriptLoc { file: body.site_file(script_mod), line: row + script_mod.line as u32, col },
+                                Some(script_mod) => ScriptLoc { file: body.site_file(script_mod), line: row + script_mod.line as u32, col: body.site_col(row, col) },
                                 None => ScriptLoc { file: "generated".into(), line: row, col },
                             });
                         }
@@ -1618,7 +1629,7 @@ impl ScriptCode {
                                     (None, false) => body.real_file.clone(),
                                 },
                                 line: rc.0 + script_mod.line as u32,
-                                col: rc.1,
+                                col: body.site_col(rc.0, rc.1),
                             });
                         }
                         return Some(ScriptLoc {
@@ -3170,6 +3181,7 @@ impl<'a> ScriptVm<'a> {
             transient,
             real_file: String::new(),
             shown: None,
+            first_col: 0,
         };
         let mut bodies = self.bx.code.bodies.borrow_mut();
         let ScriptSource::Mod(new_mod) = &new_body.source else { unreachable!() };
@@ -3193,6 +3205,7 @@ impl<'a> ScriptVm<'a> {
             body.transient = transient;
             body.real_file = String::new();
             body.shown = None;
+            body.first_col = 0;
             if code_changed || values_changed {
                 body.effective_code = new_body.effective_code;
                 body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
@@ -3284,7 +3297,7 @@ impl<'a> ScriptVm<'a> {
         // Transient: a text that is edited again and again must not pile up bodies; the
         // GC reclaims a body once nothing made from it (the exported fns) lives.
         let body_id = self.add_script_mod_with(script_mod, true);
-        self.bx.set_body_shown(body_id, &shown);
+        self.bx.set_body_shown(body_id, &shown, 0);
         for from in uses {
             self.bx.body_use_all(body_id, *from);
         }
@@ -3292,11 +3305,13 @@ impl<'a> ScriptVm<'a> {
     }
 
     /// Name `body`'s file in its messages and count its first line from
-    /// `ScriptMod::line` (see [`ScriptBody::shown`]).
+    /// `ScriptMod::line` (see [`ScriptBody::shown`]), that line's text starting at column
+    /// `first_col` of the file ([`ScriptBody::first_col`]; 0: a line of its own).
     #[inline(always)]
-    pub fn set_body_shown(&mut self, body: u16, file: &str) {
+    pub fn set_body_shown(&mut self, body: u16, file: &str, first_col: u32) {
         let mut req = ScriptBodyReq::new(BODY_SET_SHOWN, body);
         req.text = file;
+        req.value = ScriptValue::from_f64(first_col as f64);
         self.bx.vm_body(&mut req);
     }
 
@@ -3498,6 +3513,7 @@ impl<'a> ScriptVm<'a> {
                     .tokenize(&body.effective_code, &mut self.bx.heap);
                 body.tokenizer.finish(&mut self.bx.heap);
                 let (file, offsets) = body.parse_site(script_mod);
+                body.parser.first_col = body.first_col;
                 body.parser.parse(&body.tokenizer, &file, offsets, &script_mod.values);
                 body.source_len = body.effective_code.len();
                 body.content_hash = ScriptBody::content_hash_of(&body.effective_code, &script_mod.values);
@@ -3636,6 +3652,7 @@ impl<'a> ScriptVm<'a> {
             let errors_before = body.parser.parse_errors.len();
             let warnings_before = body.parser.parse_warnings.len();
             let (site_file, site_offsets) = body.parse_site(existing_mod);
+            body.parser.first_col = body.first_col;
             let cp = body.parser.parse_streaming(
                 &body.tokenizer,
                 &site_file,
@@ -3983,9 +4000,12 @@ impl ScriptVmBase {
     }
 
     /// Name `body`'s file in its messages and count its first line from
-    /// `ScriptMod::line` (see [`ScriptBody::shown`]).
-    pub(crate) fn set_body_shown(&mut self, body: u16, file: &str) {
-        self.code.bodies.borrow_mut()[body as usize].shown = Some(file.to_string());
+    /// `ScriptMod::line`, starting at column `first_col` (see [`ScriptBody::shown`]).
+    pub(crate) fn set_body_shown(&mut self, body: u16, file: &str, first_col: u32) {
+        let mut bodies = self.code.bodies.borrow_mut();
+        let body = &mut bodies[body as usize];
+        body.shown = Some(file.to_string());
+        body.first_col = first_col;
     }
 
     /// Bring every name of `from` into the scope of `body` (a module made

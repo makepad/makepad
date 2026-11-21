@@ -114,6 +114,8 @@ pub struct ParamInfo {
 #[derive(Clone, Debug)]
 pub struct StateVar {
     pub name: String,
+    /// The declaration's byte span in the source the lowering read.
+    pub span: Span,
     /// Type signature: equal signatures have equal layouts.
     pub sig: String,
     pub offset: u32,
@@ -2041,7 +2043,7 @@ impl Lowerer {
                         return err(*span, format!("state exceeds {} words (4 MiB) per instance", MAX_STATE_WORDS));
                     }
                     let words = self.words(&t);
-                    self.state_vars.push(StateVar { name: name.clone(), sig: self.sig(&t), offset, words });
+                    self.state_vars.push(StateVar { name: name.clone(), span: *span, sig: self.sig(&t), offset, words });
                     let bind = match t {
                         T::F | T::I | T::B => {
                             let v = self.b.var(ty_of(&t));

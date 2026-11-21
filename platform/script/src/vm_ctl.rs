@@ -218,7 +218,8 @@ impl<'a> ScriptErrorsReq<'a> {
 
 // ---- vm_body
 
-/// `body`, `text`: the file the body's messages name.
+/// `body`, `text`: the file the body's messages name; `value` (a number): the column of
+/// that file its first line starts at (0: a line of its own).
 pub const BODY_SET_SHOWN: u32 = 0;
 /// `body`, `scope`: brings every name of the object into the body's scope.
 pub const BODY_USE_ALL: u32 = 1;
@@ -240,7 +241,7 @@ pub struct ScriptBodyReq<'a> {
     pub text: &'a str,
     pub module: ScriptModView<'a>,
     pub rooted: bool,
-    /// out
+    /// out; in for BODY_SET_SHOWN (its first line's column)
     pub value: ScriptValue,
 }
 
@@ -657,7 +658,7 @@ impl ScriptVmBase {
     pub fn vm_body(&mut self, req: &mut ScriptBodyReq) -> bool {
         match req.op {
             BODY_SET_SHOWN => {
-                self.set_body_shown(req.body, req.text);
+                self.set_body_shown(req.body, req.text, req.value.as_number().unwrap_or(0.0) as u32);
                 true
             }
             BODY_USE_ALL => {

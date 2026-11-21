@@ -410,28 +410,20 @@ pub fn invoke_counted(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32
 /// `[f, nargs, nslices, nrets, args..., (buf, off, len) per slice, rets...]`.
 pub const REC_HEADER: usize = 4;
 
-/// Native code's entry into the registry: `rec` is the call record (see
-/// [`REC_HEADER`]), `table` the kernel's buffer table ((ptr, len) pairs,
-/// `nbufs` of them, writability in `writable`), `ctx` the kernel ctx
-/// (`K_HOST_ERR` is set when the call fails). Never unwinds. On x86-64 it takes the System V
-/// ABI the code generator emits for host calls on every OS (Windows' C ABI passes in rcx/rdx).
-///
-/// # Safety
-/// `rec` points at a record of the size its header states, `table` at
-/// `nbufs` live (ptr, len) pairs of Word buffers, `ctx` at a kernel ctx.
-/// Native compilation refuses narrow-buffer programs before making this table ABI usable.
-#[cfg(target_arch = "x86_64")]
-pub unsafe extern "sysv64" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
-    trampoline_body(rec, table, ctx, writable)
-}
-
-/// [`trampoline`] with the platform C ABI (arm64: AAPCS64, what compute's arm64 back end calls).
-///
-/// # Safety
-/// As [`trampoline`].
-#[cfg(not(target_arch = "x86_64"))]
-pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
-    trampoline_body(rec, table, ctx, writable)
+relax_backend::host_fn! {
+    /// Native code's entry into the registry: `rec` is the call record (see
+    /// [`REC_HEADER`]), `table` the kernel's buffer table ((ptr, len) pairs,
+    /// `nbufs` of them, writability in `writable`), `ctx` the kernel ctx
+    /// (`K_HOST_ERR` is set when the call fails). Never unwinds. It takes the ABI the shared
+    /// emitter uses for host calls: System V on x86-64 on every OS, the platform C ABI on arm64.
+    ///
+    /// # Safety
+    /// `rec` points at a record of the size its header states, `table` at
+    /// `nbufs` live (ptr, len) pairs of Word buffers, `ctx` at a kernel ctx.
+    /// Native compilation refuses narrow-buffer programs before making this table ABI usable.
+    pub unsafe fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
+        trampoline_body(rec, table, ctx, writable)
+    }
 }
 
 unsafe fn trampoline_body(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {

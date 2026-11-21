@@ -190,10 +190,18 @@ impl ThreadExecutor {
         ThreadExecutor { inner }
     }
 
-    /// The process-wide pool for [`crate::kernel::Call::run_parallel`]:
-    /// the machine's parallelism less one (the caller works too).
+    /// The process-wide pool for [`crate::kernel::Call::run_parallel`]: a long-lived pool's cores
+    /// less one (the caller works too), the machine's unless its run was given fewer
+    /// ([`makepad_cpu_budget::pool_cores`]), as the platform's app pool sizes.
     pub fn shared() -> &'static ThreadExecutor {
-        SHARED.get_or_init(|| ThreadExecutor::new(std::thread::available_parallelism().map_or(3, |n| n.get()).saturating_sub(1).max(1)))
+        SHARED.get_or_init(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            let cores = makepad_cpu_budget::pool_cores() as usize;
+            // (a page's workers: its parallelism unknown to std, as before)
+            #[cfg(target_arch = "wasm32")]
+            let cores = std::thread::available_parallelism().map_or(3, |n| n.get());
+            ThreadExecutor::new(cores.saturating_sub(1).max(1))
+        })
     }
 
     /// The app that used the process-wide pool ends while its process goes on (an app domain

@@ -6,4 +6,5 @@ license = "MIT OR Apache-2.0"
 description = "Caller-owned kernel scheduling, admission and zero-copy reusable jobs"
 
 [dependencies]
+makepad-cpu-budget = { workspace = true }
 makepad-script-compute = { path = "../compute" }

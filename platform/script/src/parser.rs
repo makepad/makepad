@@ -894,6 +894,9 @@ pub struct ScriptParser {
     pub file: String,
     pub line_offset: usize,
     pub col_offset: usize,
+    /// The column of its file the text's first row starts at (a chunk that continues a
+    /// line), added to that row's columns only; `col_offset` adds to every row's.
+    pub first_col: u32,
 
     // Temporary storage for destructuring defaults (binding_id, value_code, value_map)
     pub(crate) destruct_defaults: Vec<(LiveId, Vec<ScriptValue>, Vec<Option<u32>>)>,
@@ -953,6 +956,7 @@ impl Default for ScriptParser {
             file: String::new(),
             line_offset: 0,
             col_offset: 0,
+            first_col: 0,
             destruct_defaults: Default::default(),
             nested_patterns: Default::default(),
             slot_ctxs: Default::default(),
@@ -1012,13 +1016,19 @@ impl ScriptParser {
         self.diagnostics_truncated
     }
 
+    /// A token's zero-based (row, col) in the text as its (line, column) in the file: the
+    /// offsets, and on the first row the column the text starts at ([`Self::first_col`]).
+    fn site(&self, row: u32, col: u32) -> (u32, u32) {
+        let first = if row == 0 { self.first_col } else { 0 };
+        (row + self.line_offset as u32, col + self.col_offset as u32 + first)
+    }
+
     pub fn report_error(&mut self, tokenizer: &ScriptTokenizer, msg: String) {
         self.had_error = true;
-        let (line, col) = tokenizer
+        let (row, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
-        let line = line as u32 + self.line_offset as u32;
-        let column = col as u32 + self.col_offset as u32;
+        let (line, column) = self.site(row, col);
         if self.parse_errors.len() < 16 {
             self.parse_errors.push(format!(
                 "{}:{}:{}: {}",
@@ -1048,9 +1058,8 @@ impl ScriptParser {
     /// A warning at the current token (see [`Self::warnings`]): logged as a warning with the
     /// errors (when they are), once per place.
     pub fn report_warning(&mut self, tokenizer: &ScriptTokenizer, msg: String) {
-        let (line, col) = tokenizer.token_index_to_row_col(self.index).unwrap_or((0, 0));
-        let line = line as u32 + self.line_offset as u32;
-        let column = col as u32 + self.col_offset as u32;
+        let (row, col) = tokenizer.token_index_to_row_col(self.index).unwrap_or((0, 0));
+        let (line, column) = self.site(row, col);
         // A streaming parse goes over a token again after a checkpoint.
         if self.warnings.len() >= MAX_PARSER_DIAGNOSTICS || self.warnings.iter().any(|w| w.line == line && w.column == column) {
             return;

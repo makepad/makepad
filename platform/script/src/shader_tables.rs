@@ -5,6 +5,43 @@ use crate::trap::ScriptTrap;
 use crate::value::*;
 use crate::*;
 
+/// A shader type as an error message names it.
+fn type_word(ty: &ShaderType, b: &ScriptPodBuiltins) -> String {
+    match ty {
+        ShaderType::Pod(x) => crate::suggest::format_pod_type_from_builtins(*x, b),
+        ShaderType::AbstractFloat => "a float literal".into(),
+        ShaderType::AbstractInt => "an integer literal".into(),
+        _ => "a non-number value".into(),
+    }
+}
+
+/// Whether a shader type holds integers (the kind a float never mixes with).
+fn is_int_kind(ty: &ShaderType, b: &ScriptPodBuiltins) -> bool {
+    match ty {
+        ShaderType::Pod(x) => [b.pod_i32, b.pod_u32, b.pod_vec2i, b.pod_vec3i, b.pod_vec4i, b.pod_vec2u, b.pod_vec3u, b.pod_vec4u].contains(x),
+        _ => false,
+    }
+}
+
+/// Two operand types with no rule between them, said in the author's
+/// words (the message used to be "no wgsl conversion", which names neither).
+/// An operand that is already an error was reported where it went wrong
+/// (every lowering step that yields one reports first), so a line per
+/// operator it then reaches would only bury the cause.
+fn no_conversion(trap: ScriptTrap, lhs: &ShaderType, rhs: &ShaderType, b: &ScriptPodBuiltins) {
+    if matches!(lhs, ShaderType::Error(_)) || matches!(rhs, ShaderType::Error(_)) {
+        return;
+    }
+    let (l, r) = (type_word(lhs, b), type_word(rhs, b));
+    let mixed = is_int_kind(lhs, b) != is_int_kind(rhs, b);
+    let hint = if mixed {
+        "; integers and floats never mix in a shader: `let i = 3` is an i32, so write 3.0 for a float or convert with float(i)"
+    } else {
+        ""
+    };
+    script_err_shader!(trap, "{l} and {r} do not combine with this operator{hint}");
+}
+
 pub fn type_table_neg(
     val: &ShaderType,
     trap: ScriptTrap,
@@ -28,7 +65,9 @@ pub fn type_table_neg(
         _ => ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r {
-        script_err_shader!(trap, "opcode not defined for type");
+        if !matches!(val, ShaderType::Error(_)) {
+            script_err_shader!(trap, "{} cannot be negated", type_word(val, builtins));
+        }
     }
     r
 }
@@ -369,7 +408,7 @@ pub fn type_table_float_arithmetic(
         _ => ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r {
-        script_err_shader!(trap, "no wgsl conversion");
+        no_conversion(trap, lhs, rhs, builtins);
     }
     r
 }
@@ -429,7 +468,7 @@ pub fn type_table_int_arithmetic(
         _ => ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r {
-        script_err_shader!(trap, "no wgsl conversion");
+        no_conversion(trap, lhs, rhs, builtins);
     }
     r
 }
@@ -449,7 +488,7 @@ pub fn type_table_logic(
         _ => ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r {
-        script_err_shader!(trap, "no wgsl conversion");
+        no_conversion(trap, lhs, rhs, builtins);
     }
     r
 }
@@ -556,7 +595,7 @@ pub fn type_table_eq(
         _ => ShaderType::Error(NIL),
     };
     if let ShaderType::Error(_) = r {
-        script_err_shader!(trap, "no wgsl conversion");
+        no_conversion(trap, lhs, rhs, builtins);
     }
     r
 }

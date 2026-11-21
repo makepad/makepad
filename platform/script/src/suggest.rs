@@ -333,6 +333,18 @@ pub fn format_pod_type_from_builtins(
     if pod_ty == builtins.pod_i32 {
         return "i32".to_string();
     }
+    if pod_ty == builtins.pod_bool {
+        return "bool".to_string();
+    }
+    if pod_ty == builtins.pod_vec2b {
+        return "vec2b".to_string();
+    }
+    if pod_ty == builtins.pod_vec3b {
+        return "vec3b".to_string();
+    }
+    if pod_ty == builtins.pod_vec4b {
+        return "vec4b".to_string();
+    }
     if pod_ty == builtins.pod_vec2f {
         return "vec2f".to_string();
     }
