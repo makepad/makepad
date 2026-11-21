@@ -813,6 +813,23 @@ impl DynWorld {
             Pose { com:self.world_point(body,sub(self.rest_com(i),self.origins[i])),rot:[q[1],q[2],q[3],q[0]] }
         }).collect()
     }
+    /// The world velocity of the body's model point `at` (as printed) where it is now, and the
+    /// body's angular velocity. A sleeping body reads zero.
+    pub fn point_velocity(&self, body: usize, at: P3) -> (P3, P3) {
+        let mj_body = self.bodies[body];
+        if self.model.opt.enableflags & ENBL_SLEEP != 0 && self.data.body_awake[mj_body] == S_ASLEEP {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        let point = self.world_point(mj_body, sub(at, self.origins[body]));
+        let mut v = [0.0; 6];
+        core_util::object_velocity(&self.model, &self.data, OBJ_BODY, mj_body, &mut v, 0);
+        (self.velocity(mj_body, point), [v[0], v[1], v[2]])
+    }
+    /// The body's current rotation (x, y, z, w), as in [`Pose::rot`].
+    pub fn orientation(&self, body: usize) -> [f64; 4] {
+        let [w, x, y, z] = quaternion(&self.data.xquat, self.bodies[body]);
+        [x, y, z, w]
+    }
     /// Each string as it hangs now.
     pub fn strings(&self) -> Vec<StringPath> {
         self.assembly.strings.iter().enumerate().map(|(t,string)| {

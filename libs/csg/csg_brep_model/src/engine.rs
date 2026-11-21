@@ -20,18 +20,20 @@
 //! waits again, first of its class. A caller lends its own token while it waits. The worker
 //! starts at its first body: a document without B-rep parts never pays for one.
 
-use crate::guard::{guarded, stack_size, BrepError, CancelToken};
+use crate::guard::{caught, guarded, stack_size, BrepError, CancelToken};
+use crate::names::{self, Names};
 use crate::ops::{self, Body};
 use crate::profile::Frame;
 use crate::query::{self, EdgeInfo, EdgeShape};
 use crate::tess::{tessellate, TessOptions};
 use makepad_csg_brep::kernel::Kernel;
 use makepad_csg_brep::topology::{brep, FaceId};
-use makepad_csg_graph::edges::{EdgeFilter, EdgeKind, EdgeSel};
+use makepad_csg_cad::split;
+use makepad_csg_graph::edges::{EdgeFilter, EdgeKind, EdgeSel, Face, FaceName, Role};
 use makepad_csg_graph::eval::plane_frame;
-use makepad_csg_graph::{BoolMode, BrepEngine, BrepEntity, BrepFailure, BrepMeasure, BrepOp, BrepStep, Key, Open, TriMesh};
+use makepad_csg_graph::{BoolMode, BrepAt, BrepEngine, BrepEntity, BrepFailure, BrepMeasure, BrepOp, BrepStep, BrepTaken, Key, MirrorPlane, Open, SplitPiece, SplitPins, StepNote, TriMesh};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -41,6 +43,9 @@ use std::time::{Duration, Instant};
 const KEEP_BODIES: usize = 64;
 /// How many meshes stay on the worker, likewise: a few bodies' display and print detail.
 const KEEP_MESHES: usize = 32;
+/// How many steps' notes stay, the least recently built or asked for out first: a host asks for
+/// the notes of the steps it shows at each build, so theirs stay however many it made since.
+const KEEP_NOTES: usize = 256;
 /// Chords below this are print detail (mm): a slice's mesh, which speaks for no job (the slice
 /// says its own stages).
 const PRINT_DETAIL: f64 = 0.02;
@@ -48,16 +53,23 @@ const PRINT_DETAIL: f64 = 0.02;
 /// for the permit: the budget keeps account of how often its holders check in.
 const CHECKPOINT_EVERY: Duration = Duration::from_millis(5);
 
+/// The chord a point query meshes a body at when nothing meshed it yet (mm).
+const AT_CHORD: f64 = 0.05;
+/// The chord of the mesh a split plans its pins on (mm): their room to a tenth of a millimetre.
+const SPLIT_CHORD: f64 = 0.1;
+
 enum Want {
     Mesh(f64),
     Measure,
     Entities,
+    At([f64; 3], f64),
 }
 
 enum Answer {
     Mesh(Arc<TriMesh>),
     Measure(BrepMeasure),
     Entities(Vec<BrepEntity>, Vec<BrepEntity>),
+    At(BrepAt),
 }
 
 struct Job {
@@ -87,8 +99,13 @@ pub struct Engine {
 /// What the worker and its callers both read.
 #[derive(Default)]
 struct Shared {
-    /// The step keys of the bodies the worker keeps.
-    held: Mutex<HashSet<Key>>,
+    /// The step keys of the bodies the worker keeps, with what each step's written selections
+    /// took ([`BrepEngine::taken`]).
+    held: Mutex<HashMap<Key, Vec<BrepTaken>>>,
+    /// What steps noted when built ([`BrepEngine::note`]), with when each was last built or asked
+    /// for, and the clock of those: kept past the step's body, since a mesh made from it may
+    /// still show.
+    notes: Mutex<(HashMap<Key, (StepNote, u64)>, u64)>,
     /// Jobs of a class above Background sent and not started: a Background job running gives way
     /// while there are any. Counted once sent, so a job counted is in the channel or waiting; the
     /// worker may start one before it is counted (below zero meanwhile).
@@ -97,8 +114,28 @@ struct Shared {
 
 impl Shared {
     /// The held keys: an insert or a removal leaves the set whole, whatever unwound meanwhile.
-    fn held(&self) -> MutexGuard<'_, HashSet<Key>> {
+    fn held(&self) -> MutexGuard<'_, HashMap<Key, Vec<BrepTaken>>> {
         self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Step `key`'s note, as used now. O(1); O(KEEP_NOTES) when one goes out.
+    fn note(&self, key: Key, note: Option<StepNote>) -> Option<StepNote> {
+        let mut guard = self.notes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (notes, clock) = &mut *guard;
+        *clock += 1;
+        let now = *clock;
+        if let Some(note) = note {
+            notes.insert(key, (note, now));
+            if notes.len() > KEEP_NOTES {
+                if let Some(oldest) = notes.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| *k) {
+                    notes.remove(&oldest);
+                }
+            }
+        }
+        notes.get_mut(&key).map(|(note, used)| {
+            *used = now;
+            *note
+        })
     }
 }
 
@@ -125,7 +162,7 @@ impl Engine {
         let (reply, answer) = channel();
         let cancel = CancelToken::new();
         let class = makepad_cpu_budget::thread_class().unwrap_or(makepad_cpu_budget::VISIBLE);
-        self.send(Job { steps, want, cancel: cancel.clone(), job: makepad_jobs::current(), class, reply }).map_err(|message| BrepFailure { step: None, message })?;
+        self.send(Job { steps, want, cancel: cancel.clone(), job: makepad_jobs::current(), class, reply }).map_err(|message| BrepFailure { step: None, lost: None, message })?;
         // Waiting is no work: the caller's token is the budget's until the answer is in.
         let _lent = Lent::new();
         loop {
@@ -143,7 +180,7 @@ impl Engine {
 }
 
 fn gone() -> BrepFailure {
-    BrepFailure { step: None, message: "the B-rep worker is gone".into() }
+    BrepFailure { step: None, lost: None, message: "the B-rep worker is gone".into() }
 }
 
 /// The calling thread's CPU token, lent to the budget while this lives.
@@ -182,9 +219,21 @@ impl BrepEngine for Engine {
             _ => Err(gone()),
         }
     }
+    fn at(&self, steps: Vec<BrepStep>, p: [f64; 3], reach: f64) -> Result<BrepAt, BrepFailure> {
+        match self.ask(steps, Want::At(p, reach), None)? {
+            Answer::At(a) => Ok(a),
+            _ => Err(gone()),
+        }
+    }
     fn built(&self, keys: &[Key]) -> bool {
         let held = self.shared.held();
-        keys.iter().all(|k| held.contains(k))
+        keys.iter().all(|k| held.contains_key(k))
+    }
+    fn taken(&self, key: Key) -> Option<Vec<BrepTaken>> {
+        self.shared.held().get(&key).cloned()
+    }
+    fn note(&self, key: Key) -> Option<StepNote> {
+        self.shared.note(key, None)
     }
 }
 
@@ -273,6 +322,10 @@ fn checkpoint() {
     });
 }
 
+/// The meshes the worker keeps, by body and chord: each with the face (as the body lists its
+/// faces) of every triangle, and when it was last used.
+type Meshes = HashMap<(Key, u64), (Arc<TriMesh>, Arc<Vec<u32>>, u64)>;
+
 /// A body the worker keeps.
 struct Kept {
     /// As its step made it: the steps, meshes and queries that read it copy it. Nothing
@@ -281,6 +334,8 @@ struct Kept {
     used: u64,
     measure: Option<BrepMeasure>,
     entities: Option<(Vec<BrepEntity>, Vec<BrepEntity>)>,
+    /// Its faces' names in the body's face order, once something asked ([`Worker::names_of`]).
+    names: Option<Arc<Vec<Names>>>,
 }
 
 struct Worker {
@@ -292,8 +347,14 @@ struct Worker {
     /// Copies of inputs the step being built took: each its own key domain.
     serial: u64,
     bodies: HashMap<Key, Kept>,
-    meshes: HashMap<(Key, u64), (Arc<TriMesh>, u64)>,
+    meshes: Meshes,
     clock: u64,
+    /// The names of the first input of the step being built, when its selection names faces.
+    input_names: Option<Arc<Vec<Names>>>,
+    /// What the written selections of the step being built took.
+    taken: Vec<BrepTaken>,
+    /// What the step being built noted.
+    note: Option<StepNote>,
 }
 
 /// The body's entity for each of a copy's: `copy` and `body` list them in the same order.
@@ -305,6 +366,75 @@ fn as_listed<T: Copy + Eq + std::hash::Hash>(copy: Vec<T>, body: Vec<T>) -> Resu
     Ok(move |id| of.get(&id).copied().ok_or_else(|| BrepError::Kernel("an entity the copy does not list".into())))
 }
 
+/// Body `body`'s mesh within `chord`, from `copy` (a copy of it), with the face of each
+/// triangle as the body lists its faces.
+fn mesh_of(k: &Kernel, copy: &mut Body, body: &Body, chord: f64) -> Result<(Arc<TriMesh>, Arc<Vec<u32>>), BrepError> {
+    let t = tessellate(k, copy, &TessOptions { chord, ..TessOptions::default() })?;
+    let listed = brep::p1::faces(copy, None)?;
+    let face = as_listed(listed.clone(), brep::p1::faces(body, None)?)?;
+    let of: HashMap<u32, u32> = listed.into_iter().map(|f| Ok((f.index() as u32, face(f)?.index() as u32))).collect::<Result<_, BrepError>>()?;
+    let tri_face = t.tri_face.iter().map(|f| of.get(f).copied().unwrap_or(u32::MAX)).collect();
+    Ok((Arc::new(t.mesh), Arc::new(tri_face)))
+}
+
+/// Body `body`'s (edges, faces) from `copy` (a copy of it), named as the body names them (`names`:
+/// its faces' names in its face order, when they could be worked out).
+fn entities_of(k: &Kernel, copy: &mut Body, body: &Body, names: Option<&Vec<Names>>) -> Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepError> {
+    // The copy numbers its edges and faces afresh, and lists them in the body's order.
+    let edge = as_listed(brep::p1::edges(copy, None)?, brep::p1::edges(body, None)?)?;
+    let face = as_listed(brep::p1::faces(copy, None)?, brep::p1::faces(body, None)?)?;
+    let edges = query::edges(k, copy)?
+        .into_iter()
+        .map(|e| {
+            let points = match e.shape {
+                EdgeShape::Line => vec![e.start, e.end],
+                _ => query::sampled(k, copy, e.id, query::OUTLINE)?.unwrap_or(e.points),
+            };
+            Ok(BrepEntity {
+                id: edge(e.id)?.index(),
+                kind: shape_name(e.shape),
+                size: e.length,
+                at: e.mid,
+                normal: None,
+                convex: e.convex,
+                smooth: e.smooth,
+                radius: e.radius,
+                names: Vec::new(),
+                faces: names::edge_faces(copy, e.id)?.into_iter().map(|f| face(f).map(|f| f.index())).collect::<Result<_, _>>()?,
+                points,
+            })
+        })
+        .collect::<Result<Vec<BrepEntity>, BrepError>>()?;
+    let face_order = names::faces_of(copy)?;
+    let named = |f: FaceId| -> Vec<FaceName> {
+        match (names, face_order.iter().position(|g| *g == f)) {
+            (Some(n), Some(i)) => n.get(i).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    };
+    let faces = query::faces(k, copy)?
+        .into_iter()
+        .map(|f| Ok(BrepEntity { id: face(f.id)?.index(), kind: f.kind, size: f.area, at: f.centroid, normal: f.normal, convex: false, smooth: false, radius: None, names: named(f.id), faces: Vec::new(), points: Vec::new() }))
+        .collect::<Result<Vec<BrepEntity>, BrepError>>()?;
+    Ok((edges, faces))
+}
+
+/// What of body `key` is at `p`: the face of the nearest triangle of its meshes, and the sharp
+/// edge within `reach` nearest it (`edges`: its entities) with its tangent chain. A smooth edge
+/// shows no line, so the face is what is there.
+fn at(meshes: &Meshes, key: &Key, edges: &[BrepEntity], p: [f64; 3], reach: f64) -> BrepAt {
+    let found = meshes.iter().filter(|((k, _), _)| k == key).filter_map(|(_, (mesh, faces, _))| query::nearest_face(mesh, faces, p)).filter(|(f, _)| *f != u32::MAX).min_by(|a, b| a.1.total_cmp(&b.1));
+    let edge = edges.iter().filter(|e| !e.smooth).map(|e| (e.id, names::polyline_distance(&e.points, p))).filter(|(_, d)| *d <= reach).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id);
+    let chain = match edge {
+        Some(e) => {
+            let sampled: Vec<(u32, &[[f64; 3]])> = edges.iter().map(|e| (e.id, &e.points[..])).collect();
+            names::chain(&sampled, &[e])
+        }
+        None => Vec::new(),
+    };
+    BrepAt { face: found.map(|f| f.0), off: found.map_or(f64::MAX, |f| f.1), edge, chain }
+}
+
 /// A step's kernel draws from its key: the same step draws the same.
 fn seed(key: &Key) -> u64 {
     let mut word = [0u8; 8];
@@ -314,12 +444,12 @@ fn seed(key: &Key) -> u64 {
 
 impl Worker {
     fn new(shared: Arc<Shared>) -> Worker {
-        Worker { shared, failing: None, kernel: ops::new_kernel(), serial: 0, bodies: HashMap::new(), meshes: HashMap::new(), clock: 0 }
+        Worker { shared, failing: None, kernel: ops::new_kernel(), serial: 0, bodies: HashMap::new(), meshes: HashMap::new(), clock: 0, input_names: None, taken: Vec::new(), note: None }
     }
 
     fn serve(&mut self, job: &Job) -> Served {
         if job.cancel.is_cancelled() {
-            return Served::Answer(Err(BrepFailure { step: None, message: BrepError::Cancelled.to_string() }));
+            return Served::Answer(Err(BrepFailure { step: None, lost: None, message: BrepError::Cancelled.to_string() }));
         }
         let _permit = Permit::admit(job.class, &self.shared);
         self.failing = None;
@@ -329,7 +459,7 @@ impl Worker {
         if GAVE_WAY.with(Cell::take) {
             return Served::GaveWay;
         }
-        Served::Answer(answer.map_err(|e| BrepFailure { step: self.failing, message: e.to_string() }))
+        Served::Answer(answer.map_err(|e| BrepFailure { step: self.failing, lost: match &e { BrepError::Lost { index, .. } => Some(*index), _ => None }, message: e.to_string() }))
     }
 
     fn run(&mut self, steps: &[BrepStep], want: &Want) -> Result<Answer, BrepError> {
@@ -359,11 +489,36 @@ impl Worker {
             }
             built += 1;
             self.failing = Some(step.key);
+            // A selection that names faces reads its input's names, built first on their own kernel.
+            self.input_names = match (names_by(&step.op), step.inputs.first()) {
+                (true, Some(input)) => Some(self.names_of(steps, input)?),
+                _ => None,
+            };
+            self.taken.clear();
+            self.note = None;
             let body = self.step(step)?;
+            if let Some(note) = self.note.take() {
+                self.shared.note(step.key, Some(note));
+            }
+            self.input_names = None;
             self.failing = None;
-            self.bodies.insert(step.key, Kept { body, used: self.clock, measure: None, entities: None });
-            self.shared.held().insert(step.key);
+            self.bodies.insert(step.key, Kept { body, used: self.clock, measure: None, entities: None, names: None });
+            self.shared.held().insert(step.key, std::mem::take(&mut self.taken));
         }
+        // A tool reading the entities reads the faces' names too: built while every step's body
+        // of the recipe is still kept. Names that cannot be worked out leave the listing without
+        // them, not failed.
+        let entity_names = match want {
+            Want::Entities | Want::At(..) if self.bodies.get(&last.key).is_some_and(|k| k.entities.is_none()) => match caught(|| self.names_of(steps, &last.key)) {
+                Ok(names) => Some(names),
+                Err(BrepError::Cancelled) => return Err(BrepError::Cancelled),
+                Err(e) => {
+                    eprintln!("[brep] the faces' names: {e}; the entities are listed without them");
+                    None
+                }
+            },
+            _ => None,
+        };
         while self.bodies.len() > KEEP_BODIES {
             let oldest = self.bodies.iter().min_by_key(|(_, kept)| kept.used).map(|(k, _)| *k);
             if let Some(k) = oldest {
@@ -373,10 +528,11 @@ impl Worker {
         }
         let Worker { kernel, bodies, meshes, clock, .. } = self;
         let kept = bodies.get_mut(&last.key).ok_or_else(|| BrepError::Input("a recipe's body is gone".into()))?;
+        let meshed = |meshes: &Meshes| meshes.keys().any(|(k, _)| *k == last.key);
         match want {
             Want::Mesh(chord) => {
                 if let Some(m) = meshes.get_mut(&(last.key, chord.to_bits())) {
-                    m.1 = *clock;
+                    m.2 = *clock;
                     return Ok(Answer::Mesh(m.0.clone()));
                 }
             }
@@ -390,26 +546,35 @@ impl Worker {
                     return Ok(Answer::Entities(e.clone(), f.clone()));
                 }
             }
+            Want::At(p, reach) => {
+                if let (Some((edges, _)), true) = (&kept.entities, meshed(meshes)) {
+                    return Ok(Answer::At(at(meshes, &last.key, edges, *p, *reach)));
+                }
+            }
         }
         checkpoint();
         // A read of its own, like a step: what it works out reaches no other.
         *kernel = kernel.renewed(seed(&last.key));
         let copy = &mut ops::copy_body(kernel, &kept.body, 1)?;
         let k = &*kernel;
+        let keep = |meshes: &mut Meshes, chord: f64, mesh: (Arc<TriMesh>, Arc<Vec<u32>>)| {
+            meshes.insert((last.key, chord.to_bits()), (mesh.0, mesh.1, *clock));
+            while meshes.len() > KEEP_MESHES {
+                let oldest = meshes.iter().min_by_key(|(_, (_, _, used))| *used).map(|(k, _)| *k);
+                if let Some(k) = oldest {
+                    meshes.remove(&k);
+                }
+            }
+        };
         let answer = match want {
             Want::Mesh(chord) => {
                 if let Some(job) = &job {
                     job.stage("meshing", None, None);
                 }
-                let mesh = Arc::new(tessellate(k, copy, &TessOptions { chord: *chord, ..TessOptions::default() })?.mesh);
-                meshes.insert((last.key, chord.to_bits()), (mesh.clone(), *clock));
-                while meshes.len() > KEEP_MESHES {
-                    let oldest = meshes.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| *k);
-                    if let Some(k) = oldest {
-                        meshes.remove(&k);
-                    }
-                }
-                Answer::Mesh(mesh)
+                let mesh = mesh_of(k, copy, &kept.body, *chord)?;
+                let out = mesh.0.clone();
+                keep(meshes, *chord, mesh);
+                Answer::Mesh(out)
             }
             Want::Measure => {
                 if let Some(job) = &job {
@@ -421,34 +586,97 @@ impl Worker {
                 Answer::Measure(m)
             }
             Want::Entities => {
-                // Named as the body names them: the copy numbers its edges and faces afresh, and
-                // lists them in the body's order.
-                let edge = as_listed(brep::p1::edges(copy, None)?, brep::p1::edges(&kept.body, None)?)?;
-                let face = as_listed(brep::p1::faces(copy, None)?, brep::p1::faces(&kept.body, None)?)?;
-                let edges = query::edges(k, copy)?
-                    .into_iter()
-                    .map(|e| {
-                        Ok(BrepEntity {
-                            id: edge(e.id)?.index(),
-                            kind: shape_name(e.shape),
-                            size: e.length,
-                            at: e.mid,
-                            normal: None,
-                            convex: e.convex,
-                            smooth: e.smooth,
-                            radius: e.radius,
-                        })
-                    })
-                    .collect::<Result<Vec<BrepEntity>, BrepError>>()?;
-                let faces = query::faces(k, copy)?
-                    .into_iter()
-                    .map(|f| Ok(BrepEntity { id: face(f.id)?.index(), kind: f.kind, size: f.area, at: f.centroid, normal: f.normal, convex: false, smooth: false, radius: None }))
-                    .collect::<Result<Vec<BrepEntity>, BrepError>>()?;
+                let (edges, faces) = entities_of(k, copy, &kept.body, entity_names.as_deref())?;
                 kept.entities = Some((edges.clone(), faces.clone()));
                 Answer::Entities(edges, faces)
             }
+            Want::At(p, reach) => {
+                if kept.entities.is_none() {
+                    kept.entities = Some(entities_of(k, copy, &kept.body, entity_names.as_deref())?);
+                }
+                // A point is found on a mesh of the body: the one the view shows when there is one.
+                if !meshed(meshes) {
+                    let mesh = mesh_of(k, copy, &kept.body, AT_CHORD)?;
+                    keep(meshes, AT_CHORD, mesh);
+                }
+                let edges = kept.entities.as_ref().map(|e| &e.0[..]).unwrap_or_default();
+                Answer::At(at(meshes, &last.key, edges, *p, *reach))
+            }
         };
         Ok(answer)
+    }
+
+    /// The names of a kept step's faces, in its body's face order (`steps`: the recipe it is in).
+    /// Built once and kept with the body, on a kernel of their own: never the one a step is
+    /// being built in, whose input copies live there. Every body of the recipe is kept while it
+    /// runs.
+    fn names_of(&mut self, steps: &[BrepStep], key: &Key) -> Result<Arc<Vec<Names>>, BrepError> {
+        if let Some(n) = self.bodies.get(key).and_then(|k| k.names.clone()) {
+            return Ok(n);
+        }
+        let step = steps.iter().find(|s| s.key == *key).ok_or_else(|| BrepError::Input("names: a step outside its recipe".into()))?;
+        let in_names: Vec<Arc<Vec<Names>>> = step.inputs.iter().map(|i| self.names_of(steps, i)).collect::<Result<_, _>>()?;
+        checkpoint();
+        fn body<'a>(w: &'a Worker, key: &Key) -> Result<&'a Body, BrepError> {
+            w.bodies.get(key).map(|k| &k.body).ok_or_else(|| BrepError::Input("names: a step's body is gone".into()))
+        }
+        let mut k = self.kernel.renewed(seed(key));
+        let mut out = ops::copy_body(&mut k, body(self, key)?, 1)?;
+        let names = match &step.op {
+            BrepOp::Box { .. } | BrepOp::Sphere { .. } | BrepOp::Cylinder { .. } | BrepOp::Torus { .. } | BrepOp::Extrude { .. } | BrepOp::Revolve { .. } | BrepOp::Sweep { .. } | BrepOp::Loft { .. } => {
+                names::classify(&k, &mut out, *key, &step.op)?
+            }
+            // Moved, not changed: the same faces in the same order.
+            BrepOp::Place { .. } | BrepOp::Mirror { keep: false, .. } => {
+                let input = in_names.first().ok_or_else(|| BrepError::Input("names: a step without its input".into()))?;
+                if names::faces_of(&out)?.len() != input.len() {
+                    return Err(BrepError::Kernel("names: a moved body lists other faces than its input".into()));
+                }
+                (**input).clone()
+            }
+            op => {
+                let mut inputs = Vec::new();
+                let mut lists: Vec<Vec<Names>> = Vec::new();
+                for (n, i) in step.inputs.iter().enumerate() {
+                    inputs.push(ops::copy_body(&mut k, body(self, i)?, 2 + n as u64)?);
+                    lists.push((*in_names[n]).clone());
+                }
+                let picked: Vec<names::Picked>;
+                let mut rec = names::Step { key: *key, offset: 0.0, shell: 0.0, blend: None };
+                match op {
+                    // The image keeps the original's names: both sides answer them.
+                    BrepOp::Mirror { plane, center, .. } => {
+                        let mut image = ops::copy_body(&mut k, body(self, &step.inputs[0])?, 2 + step.inputs.len() as u64)?;
+                        ops::mirrored(&mut k, &mut image, *center, mirror_normal(*plane))?;
+                        inputs.push(image);
+                        lists.push((*in_names[0]).clone());
+                    }
+                    BrepOp::Fillet { radius: size, edges } | BrepOp::Chamfer { size, edges } => {
+                        let ids = select_edges(&k, &mut inputs[0], edges, Some(&lists[0]), &mut Vec::new())?;
+                        picked = names::picked(&k, &mut inputs[0], &lists[0], &ids)?;
+                        rec.blend = Some((&picked[..], *size, matches!(op, BrepOp::Fillet { .. })));
+                    }
+                    BrepOp::Shell { thickness, .. } => rec.shell = *thickness,
+                    BrepOp::Offset { distance } => rec.offset = *distance,
+                    // The cut's faces lie on the slab's face on the plane: the slab's names, `cut`.
+                    // A pin's faces, and a hole's, are the split's own and go unnamed.
+                    BrepOp::Split { center, normal, pins, .. } => {
+                        let plan = split_plan(&mut k, body(self, &step.inputs[0])?, 2 + step.inputs.len() as u64, *center, *normal, pins)?;
+                        let slab = split_slab(&mut k, &plan)?;
+                        let cut = Names::from([FaceName { origin: *key, role: Role::Named(Face::Cut) }]);
+                        lists.push(vec![cut; names::faces_of(&slab)?.len()]);
+                        inputs.push(slab);
+                    }
+                    _ => {}
+                }
+                names::carry(&k, &mut out, &mut inputs, &lists, &rec)?
+            }
+        };
+        let names = Arc::new(names);
+        if let Some(kept) = self.bodies.get_mut(key) {
+            kept.names = Some(names.clone());
+        }
+        Ok(names)
     }
 
     /// A private copy of an input, in a key domain of its own within the step.
@@ -466,6 +694,7 @@ impl Worker {
         self.build(step).map_err(|e| match e {
             BrepError::Kernel(m) => BrepError::Kernel(format!("{name}: {m}")),
             BrepError::Input(m) => BrepError::Input(format!("{name}: {m}")),
+            BrepError::Lost { index, message } => BrepError::Lost { index, message: format!("{name}: {message}") },
             other => other,
         })
     }
@@ -524,19 +753,19 @@ impl Worker {
             }
             BrepOp::Fillet { radius, edges } => {
                 let mut b = first(self)?;
-                let picked = select_edges(&self.kernel, &mut b, edges)?;
+                let picked = select_edges(&self.kernel, &mut b, edges, self.input_names.as_deref().map(|n| &n[..]), &mut self.taken)?;
                 ops::fillet(&mut self.kernel, &mut b, &picked, *radius)?;
                 Ok(b)
             }
             BrepOp::Chamfer { size, edges } => {
                 let mut b = first(self)?;
-                let picked = select_edges(&self.kernel, &mut b, edges)?;
+                let picked = select_edges(&self.kernel, &mut b, edges, self.input_names.as_deref().map(|n| &n[..]), &mut self.taken)?;
                 ops::chamfer(&mut self.kernel, &mut b, &picked, *size)?;
                 Ok(b)
             }
             BrepOp::Shell { thickness, open } => {
                 let mut b = first(self)?;
-                let faces = open_faces(&self.kernel, &mut b, *open)?;
+                let faces = open_faces(&self.kernel, &mut b, open, self.input_names.as_deref().map(|n| &n[..]), &mut self.taken)?;
                 ops::shell(&mut self.kernel, &b, *thickness, &faces)
             }
             BrepOp::Offset { distance } => {
@@ -551,7 +780,95 @@ impl Worker {
                 ops::place(&mut self.kernel, &mut b, *at, *rotate)?;
                 Ok(b)
             }
+            BrepOp::Mirror { plane, center, keep } => {
+                let mut image = first(self)?;
+                ops::mirrored(&mut self.kernel, &mut image, *center, mirror_normal(*plane))?;
+                if !*keep {
+                    return Ok(image);
+                }
+                let original = first(self)?;
+                ops::boolean(&mut self.kernel, ops::BoolMode::Union, original, image)
+            }
+            BrepOp::Split { center, normal, piece, pins } => {
+                let key = step.inputs.first().ok_or_else(|| BrepError::Input("needs a body".into()))?;
+                self.serial += 1;
+                let input = &self.bodies.get(key).ok_or_else(|| BrepError::Input("a step's input is missing".into()))?.body;
+                let plan = split_plan(&mut self.kernel, input, self.serial, *center, *normal, pins)?;
+                if *piece == SplitPiece::Pins && plan.spots.is_empty() {
+                    return Err(BrepError::Input("no place on the cut has room for a pin: a smaller 'pin' radius fits a thinner cut".into()));
+                }
+                self.note = plan.no_room.map(StepNote::SplitWithoutPins);
+                let mut out = match piece {
+                    SplitPiece::Below | SplitPiece::Above => {
+                        let b = first(self)?;
+                        let slab = split_slab(&mut self.kernel, &plan)?;
+                        let mode = if *piece == SplitPiece::Below { ops::BoolMode::Difference } else { ops::BoolMode::Intersection };
+                        Some(ops::boolean(&mut self.kernel, mode, b, slab)?)
+                    }
+                    SplitPiece::Pins => None,
+                };
+                let (gain, lose) = plan.rods(*piece);
+                for rod in &gain {
+                    let r = split_rod(&mut self.kernel, rod)?;
+                    out = Some(match out {
+                        Some(o) => ops::boolean(&mut self.kernel, ops::BoolMode::Union, o, r)?,
+                        None => r,
+                    });
+                }
+                let mut out = out.ok_or_else(|| BrepError::Input("a split's pins piece needs pins".into()))?;
+                for rod in &lose {
+                    let r = split_rod(&mut self.kernel, rod)?;
+                    out = ops::boolean(&mut self.kernel, ops::BoolMode::Difference, out, r)?;
+                }
+                Ok(out)
+            }
         }
+    }
+}
+
+/// A split's plan, from a mesh of its input (`body`, copied into key domain `serial`): every
+/// piece of the split, and the names of each, plan on the same mesh. O(the input's faces) to
+/// mesh, then the plan's section and pin search.
+fn split_plan(k: &mut Kernel, body: &Body, serial: u64, center: [f64; 3], normal: [f64; 3], pins: &SplitPins) -> Result<split::Plan, BrepError> {
+    let mut copy = ops::copy_body(k, body, serial)?;
+    let t = tessellate(k, &mut copy, &TessOptions { chord: SPLIT_CHORD, ..TessOptions::default() })?;
+    split::plan(&t.mesh, center, normal, pins).map_err(BrepError::Input)
+}
+
+/// The cube on the plan's normal side, one face on its plane.
+fn split_slab(k: &mut Kernel, plan: &split::Plan) -> Result<Body, BrepError> {
+    let [u, n, _] = plan.turn();
+    let mut b = ops::make_box(k, [plan.slab; 3])?;
+    let c = plan.slab_center;
+    ops::place_frame(k, &mut b, [c.x, c.y, c.z], [u.x, u.y, u.z], [n.x, n.y, n.z])?;
+    Ok(b)
+}
+
+/// A pin's or a hole's rod.
+fn split_rod(k: &mut Kernel, rod: &split::Rod) -> Result<Body, BrepError> {
+    let n = (rod.b - rod.a).normalize();
+    let u = if n.y.abs() < 0.9 { makepad_csg_math::dvec3(0.0, 1.0, 0.0).cross(n).normalize() } else { makepad_csg_math::dvec3(1.0, 0.0, 0.0).cross(n).normalize() };
+    // the cylinder stands along Y: Y to the rod, X square to it
+    let mut b = ops::make_cylinder(k, rod.radius, rod.length())?;
+    let c = rod.middle();
+    ops::place_frame(k, &mut b, [c.x, c.y, c.z], [u.x, u.y, u.z], [n.x, n.y, n.z])?;
+    Ok(b)
+}
+
+fn mirror_normal(plane: MirrorPlane) -> [f64; 3] {
+    match plane {
+        MirrorPlane::Yz => [1.0, 0.0, 0.0],
+        MirrorPlane::Xz => [0.0, 1.0, 0.0],
+        MirrorPlane::Xy => [0.0, 0.0, 1.0],
+    }
+}
+
+/// The step's selection names faces: its first input's names are built before it.
+fn names_by(op: &BrepOp) -> bool {
+    match op {
+        BrepOp::Fillet { edges, .. } | BrepOp::Chamfer { edges, .. } => !edges.named.is_empty(),
+        BrepOp::Shell { open: Open::Faces(_), .. } => true,
+        _ => false,
     }
 }
 
@@ -569,6 +886,8 @@ fn op_kind(op: &BrepOp) -> &'static str {
         BrepOp::Shell { .. } => "shells",
         BrepOp::Offset { .. } => "offsets",
         BrepOp::Place { .. } => "placements",
+        BrepOp::Mirror { .. } => "mirrors",
+        BrepOp::Split { .. } => "splits",
     }
 }
 
@@ -588,6 +907,8 @@ fn op_name(op: &BrepOp) -> &'static str {
         BrepOp::Shell { .. } => "shell",
         BrepOp::Offset { .. } => "offset",
         BrepOp::Place { .. } => "placement",
+        BrepOp::Mirror { .. } => "mirror",
+        BrepOp::Split { .. } => "split",
     }
 }
 
@@ -599,12 +920,37 @@ fn shape_name(s: EdgeShape) -> &'static str {
     }
 }
 
-/// The faces a shell leaves open: the flat ones at the body's top or bottom.
-fn open_faces(k: &Kernel, b: &mut Body, open: Open) -> Result<Vec<FaceId>, BrepError> {
-    if open == Open::Closed {
-        return Ok(Vec::new());
-    }
-    let want = if open == Open::Top { 1.0 } else { -1.0 };
+/// The faces a shell leaves open: the flat ones at the body's top or bottom, or the faces named
+/// (what each name took goes in `taken`).
+fn open_faces(k: &Kernel, b: &mut Body, open: &Open, names: Option<&[Names]>, taken: &mut Vec<BrepTaken>) -> Result<Vec<FaceId>, BrepError> {
+    let want = match open {
+        Open::Closed => return Ok(Vec::new()),
+        Open::Top => 1.0,
+        Open::Bottom => -1.0,
+        Open::Faces(list) => {
+            let names = names.ok_or_else(|| BrepError::Input("the faces to leave open have no names to be found by".into()))?;
+            let order = names::faces_of(b)?;
+            let mut out = Vec::new();
+            for (index, n) in list.iter().enumerate() {
+                let found = names::faces_named(names, n);
+                if found.is_empty() {
+                    return Err(BrepError::Lost { index, message: format!("no face named {} is left on this body to leave open", names::describe(n)) });
+                }
+                let mut kinds = Vec::with_capacity(found.len());
+                for i in &found {
+                    kinds.push(crate::tess::face_kind(k, b, order[*i])?.0);
+                }
+                kinds.sort_unstable();
+                taken.push(BrepTaken { named: names::describe(n), kinds });
+                for i in found {
+                    if !out.contains(&order[i]) {
+                        out.push(order[i]);
+                    }
+                }
+            }
+            return Ok(out);
+        }
+    };
     let faces = query::faces(k, b)?;
     let side: Vec<_> = faces.iter().filter(|f| f.normal.is_some_and(|n| n[1] * want > 0.999)).collect();
     let extreme = side.iter().map(|f| f.centroid[1] * want).fold(f64::MIN, f64::max);
@@ -662,15 +1008,42 @@ fn matches_filter(e: &EdgeInfo, f: &EdgeFilter, lo_y: f64, hi_y: f64) -> bool {
     true
 }
 
-/// The sharp edges a selector picks.
-pub fn select_edges(k: &Kernel, b: &mut Body, sel: &EdgeSel) -> Result<Vec<makepad_csg_brep::EdgeId>, BrepError> {
-    let edges: Vec<EdgeInfo> = query::edges(k, b)?.into_iter().filter(|e| !e.smooth).collect();
-    if sel.any.is_empty() {
+/// The edges of `b` that `sel` picks: by its rules among the sharp edges, and by its names (a
+/// body's face names, `names`, in its face order) among all. What each name took goes in `taken`.
+pub fn select_edges(k: &Kernel, b: &mut Body, sel: &EdgeSel, names: Option<&[Names]>, taken: &mut Vec<BrepTaken>) -> Result<Vec<makepad_csg_brep::EdgeId>, BrepError> {
+    let all = query::edges(k, b)?;
+    let mut out = Vec::new();
+    for (index, n) in sel.named.iter().enumerate() {
+        let names = names.ok_or_else(|| BrepError::Input("edges named by their faces need the body's names".into()))?;
+        let mut pieces = names::edges_named(b, names, &n.a, &n.b)?;
+        if pieces.is_empty() {
+            return Err(BrepError::Lost { index, message: format!("no edge between {} and {} is left on this body (the faces no longer meet)", names::describe(&n.a), names::describe(&n.b)) });
+        }
+        if let Some(q) = n.near {
+            let d = |id: &makepad_csg_brep::EdgeId| all.iter().find(|e| e.id == *id).map_or(f64::MAX, |e| e.points.iter().map(|p| (0..3).map(|i| (p[i] - q[i]).powi(2)).sum::<f64>()).fold(f64::MAX, f64::min));
+            pieces.sort_by(|a, b| d(a).total_cmp(&d(b)));
+            pieces.truncate(1);
+        }
+        if n.chain {
+            let sampled: Vec<_> = all.iter().map(|e| (e.id, &e.points[..])).collect();
+            pieces = names::chain(&sampled, &pieces);
+        }
+        let mut kinds: Vec<&'static str> = pieces.iter().filter_map(|id| all.iter().find(|e| e.id == *id)).map(|e| shape_name(e.shape)).collect();
+        kinds.sort_unstable();
+        let how = if n.chain { " chain" } else if n.near.is_some() { " near" } else { "" };
+        taken.push(BrepTaken { named: format!("edge({}, {}){how}", names::describe(&n.a), names::describe(&n.b)), kinds });
+        for e in pieces {
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+    }
+    let edges: Vec<EdgeInfo> = all.into_iter().filter(|e| !e.smooth).collect();
+    if sel.is_all() {
         return Ok(edges.iter().map(|e| e.id).collect());
     }
     let ys = edges.iter().flat_map(|e| e.points.iter().map(|p| p[1]));
     let (lo, hi) = ys.fold((f64::MAX, f64::MIN), |(l, h), y| (l.min(y), h.max(y)));
-    let mut out = Vec::new();
     for f in &sel.any {
         let hits: Vec<&EdgeInfo> = edges.iter().filter(|e| matches_filter(e, f, lo, hi)).collect();
         let picked: Vec<&EdgeInfo> = match f.near {

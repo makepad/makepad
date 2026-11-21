@@ -355,6 +355,7 @@ fn shape_pieces(shape: &Shape) -> Result<Vec<Piece>, BrepError> {
         Shape::Rect { center, size, corner, chamfer } => Ok(rect_pieces(*center, *size, *corner, *chamfer)),
         Shape::Circle { center, r } => Ok(vec![Piece::Arc(*center, *r, 0.0, 360.0)]),
         Shape::Ellipse { .. } => Err(input("an Ellipse sketch is not available in a brep profile yet; use a spline Path")),
+        Shape::Gear { .. } => Err(input("a Gear2D sketch is not available in a brep profile yet; m.extrude or m.sweep make it as a mesh")),
         Shape::Slot { a, b, r } => {
             let d = sub(*b, *a);
             let l = len(d);
@@ -380,6 +381,10 @@ fn shape_pieces(shape: &Shape) -> Result<Vec<Piece>, BrepError> {
         }
         Shape::Polygon { points, fillet } => polygon_pieces(points, *fillet),
         Shape::Path { start, segs } => path_pieces(*start, segs),
+        Shape::Offset { of, d } => match makepad_csg_cad::sketch::offset_shape(of, *d) {
+            Some(exact) => shape_pieces(&exact.map_err(input)?),
+            None => Err(input("an Offset of an Ellipse, a Path or a filleted Polygon is not available in a brep profile yet; offset a Rect, Circle, Slot, Regular or sharp Polygon")),
+        },
     }
 }
 

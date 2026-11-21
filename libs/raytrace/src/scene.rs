@@ -41,7 +41,8 @@ pub struct Material {
     /// `emission` is the reference emission at gain 1 and is never rewritten.
     /// Grouped materials reserve light records even while dark.
     pub light_group: u32,
-    /// Index of refraction for the Fresnel term (1.5 = glass).
+    /// Index of refraction for the Fresnel term (1.5 = glass); an opaque dielectric's
+    /// reflectance at normal incidence is ((ior - 1) / (ior + 1))^2 (0.04 at 1.5).
     pub ior: f32,
     /// 0 opaque .. 1 dielectric; scales each transmitted interface's weight.
     pub transmission: f32,

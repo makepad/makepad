@@ -9,7 +9,7 @@
 //! Curves are flattened to a chord tolerance; a full circle gets at least
 //! `min_segments` points.
 
-use crate::region::{clean_loop, regions_from_loops, Loop, Region, P2};
+use crate::region::{clean_loop, offset_loop, regions_from_loops, signed_area2, Loop, Region, P2};
 use std::f64::consts::{PI, TAU};
 
 /// How finely curves are flattened.
@@ -81,6 +81,12 @@ pub enum Shape {
     Polygon { points: Vec<P2>, fillet: f64 },
     /// A path from `start`; closed back to `start`.
     Path { start: P2, segs: Vec<Seg> },
+    /// `of` moved `d` outward along its normals (negative: inward), corners mitred: a clearance
+    /// round a shape, or a wall's inner outline. Round corners stay round ([`offset_shape`]).
+    Offset { of: Box<Shape>, d: f64 },
+    /// An involute spur gear's outline ([`crate::mech::Gear`], no bore: a circle in the same
+    /// sketch is one), a tooth at `deg` from +u. Swept with a twist it is a helical gear.
+    Gear { center: P2, module: f64, teeth: usize, pressure_deg: f64, backlash: f64, shift: f64, deg: f64 },
 }
 
 /// A sketch: shapes combined by nesting (a shape inside another is a hole,
@@ -111,16 +117,22 @@ impl Sketch {
             Seg::Fillet(r) => Seg::Fillet(r * f),
             Seg::Chamfer(d) => Seg::Chamfer(d * f),
         };
-        let shape = |s: &Shape| match s {
-            Shape::Rect { center, size, corner, chamfer } => Shape::Rect { center: p(center), size: p(size), corner: corner * f, chamfer: chamfer * f },
-            Shape::Circle { center, r } => Shape::Circle { center: p(center), r: r * f },
-            Shape::Ellipse { center, rx, ry } => Shape::Ellipse { center: p(center), rx: rx * f, ry: ry * f },
-            Shape::Slot { a, b, r } => Shape::Slot { a: p(a), b: p(b), r: r * f },
-            Shape::Regular { center, r, sides, deg } => Shape::Regular { center: p(center), r: r * f, sides: *sides, deg: *deg },
-            Shape::Polygon { points, fillet } => Shape::Polygon { points: points.iter().map(p).collect(), fillet: fillet * f },
-            Shape::Path { start, segs } => Shape::Path { start: p(start), segs: segs.iter().map(seg).collect() },
-        };
-        Sketch { shapes: self.shapes.iter().map(shape).collect() }
+        fn shape(s: &Shape, f: f64, p: &dyn Fn(&P2) -> P2, seg: &dyn Fn(&Seg) -> Seg) -> Shape {
+            match s {
+                Shape::Rect { center, size, corner, chamfer } => Shape::Rect { center: p(center), size: p(size), corner: corner * f, chamfer: chamfer * f },
+                Shape::Circle { center, r } => Shape::Circle { center: p(center), r: r * f },
+                Shape::Ellipse { center, rx, ry } => Shape::Ellipse { center: p(center), rx: rx * f, ry: ry * f },
+                Shape::Slot { a, b, r } => Shape::Slot { a: p(a), b: p(b), r: r * f },
+                Shape::Regular { center, r, sides, deg } => Shape::Regular { center: p(center), r: r * f, sides: *sides, deg: *deg },
+                Shape::Polygon { points, fillet } => Shape::Polygon { points: points.iter().map(p).collect(), fillet: fillet * f },
+                Shape::Path { start, segs } => Shape::Path { start: p(start), segs: segs.iter().map(seg).collect() },
+                Shape::Offset { of, d } => Shape::Offset { of: Box::new(shape(of, f, p, seg)), d: d * f },
+                Shape::Gear { center, module, teeth, pressure_deg, backlash, shift, deg } => {
+                    Shape::Gear { center: p(center), module: module * f, teeth: *teeth, pressure_deg: *pressure_deg, backlash: backlash * f, shift: *shift, deg: *deg }
+                }
+            }
+        }
+        Sketch { shapes: self.shapes.iter().map(|s| shape(s, f, &p, &seg)).collect() }
     }
 
     pub fn loops(&self, tol: &Tolerance) -> Result<Vec<Loop>, String> {
@@ -144,8 +156,64 @@ pub fn circle_loop(center: P2, r: f64, tol: &Tolerance) -> Loop {
     }).collect()
 }
 
+/// The shape `of` offset by `d` as a plain shape of its own kind, where there is one: a circle,
+/// slot or round corner grows its radius, a regular polygon or a sharp polygon its mitred
+/// outline, a rect its size and its corner (a corner rounded or cut stays so while it has room).
+/// None for an ellipse, a path or a filleted polygon, which offset as their flattened outline.
+/// An offset that shrinks a shape to nothing is an error.
+pub fn offset_shape(of: &Shape, d: f64) -> Option<Result<Shape, String>> {
+    fn gone<T>(d: f64) -> Result<T, String> {
+        Err(format!("an offset of {d} mm leaves nothing of the shape"))
+    }
+    let radius = |r: f64| if r + d > 0.0 { Ok(r + d) } else { gone(d) };
+    Some(match of {
+        Shape::Rect { center, size, corner, chamfer } => {
+            let size = [size[0].abs() + 2.0 * d, size[1].abs() + 2.0 * d];
+            if size[0] <= 0.0 || size[1] <= 0.0 {
+                return Some(gone(d));
+            }
+            // A cut corner's 45 degree edge moves out by d: it cuts d (2 - sqrt 2) further back.
+            let corner = if *corner > 0.0 { (corner + d).max(0.0) } else { 0.0 };
+            let chamfer = if *chamfer > 0.0 { (chamfer + d * (2.0 - std::f64::consts::SQRT_2)).max(0.0) } else { 0.0 };
+            Ok(Shape::Rect { center: *center, size, corner, chamfer })
+        }
+        Shape::Circle { center, r } => radius(*r).map(|r| Shape::Circle { center: *center, r }),
+        Shape::Slot { a, b, r } => radius(*r).map(|r| Shape::Slot { a: *a, b: *b, r }),
+        Shape::Regular { center, r, sides, deg } if *sides >= 3 => {
+            // The inradius grows by d; the circumradius by d / cos(pi / sides).
+            let r = r + d / (PI / *sides as f64).cos();
+            if r > 0.0 { Ok(Shape::Regular { center: *center, r, sides: *sides, deg: *deg }) } else { gone(d) }
+        }
+        Shape::Polygon { points, fillet } if *fillet <= 0.0 && points.len() >= 3 => {
+            let mut points = points.clone();
+            if signed_area2(&points) < 0.0 {
+                points.reverse();
+            }
+            offset_loop(&points, d).map(|points| Shape::Polygon { points, fillet: 0.0 }).map_or_else(|| gone(d), Ok)
+        }
+        Shape::Offset { of, d: inner } => return offset_shape(of, inner + d),
+        _ => return None,
+    })
+}
+
 pub fn shape_loop(shape: &Shape, tol: &Tolerance) -> Result<Loop, String> {
     let l = match shape {
+        Shape::Offset { of, d } => match offset_shape(of, *d) {
+            Some(exact) => shape_loop(&exact?, tol)?,
+            None => {
+                let mut l = shape_loop(of, tol)?;
+                // Outward is away from the shape's own area, whichever way it was drawn.
+                if signed_area2(&l) < 0.0 {
+                    l.reverse();
+                }
+                offset_loop(&l, *d).ok_or_else(|| format!("an offset of {d} mm leaves nothing of the shape"))?
+            }
+        },
+        Shape::Gear { center, module, teeth, pressure_deg, backlash, shift, deg } => {
+            let gear = crate::mech::Gear { module: *module, teeth: *teeth, pressure_deg: *pressure_deg, backlash: *backlash, shift: *shift, bore: 0.0 };
+            let (s, c) = deg.to_radians().sin_cos();
+            gear.region(tol)?.outer.into_iter().map(|[x, y]| [center[0] + x * c - y * s, center[1] + x * s + y * c]).collect()
+        }
         Shape::Rect { center, size, corner, chamfer } => {
             let (w, h) = (size[0].abs(), size[1].abs());
             if w <= 0.0 || h <= 0.0 {

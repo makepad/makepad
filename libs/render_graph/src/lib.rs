@@ -31,6 +31,8 @@ pub mod accum;
 pub mod bloom;
 #[cfg(feature = "gpu")]
 pub mod composite;
+#[cfg(feature = "curves")]
+pub mod curves;
 pub mod kits;
 pub mod locked;
 pub mod mode;
@@ -126,6 +128,7 @@ pub fn script_mod_passes(vm: &mut ScriptVm) {
         }
         program::script_mod(vm);
         accum::script_mod(vm);
+        curves::register(vm);
         tonemap::script_mod(vm);
     }
 }

@@ -87,6 +87,10 @@ pub struct PackedScene {
     pub tri_material: Vec<u32>,
     pub tri_priority: Vec<u16>,
     pub tri_coplanar_group: Vec<u32>,
+    /// BVH order: an opaque triangle in no coplanar group, or in one whose members are all
+    /// opaque. A shadow ray may end at the first one it meets (`Bvh::trace_shadow`); the ray
+    /// shader reads the same bit as the sign of the attribute's coplanar code.
+    pub tri_certain_blocker: Vec<bool>,
     pub tri_count: usize,
     pub bounds: (Vec3f, Vec3f),
     /// Bounds diagonal in scene units, computed once before rebasing.
@@ -185,6 +189,28 @@ impl PackedScene {
                 Vec3f::cross(t.v1 - t.v0, t.v2 - t.v0).length() * 0.5
             })
             .collect();
+        // Certain blockers: opaque in every member of their coplanar group, whether the group is
+        // keyed as the CPU walk keys it or clamped as the ray shader's code holds it.
+        let opaque = |m: u32| scene.materials.get(m as usize).is_some_and(|mm| !(mm.transmission.clamp(0.0, 1.0) > 0.0));
+        let mut mixed_groups = std::collections::HashSet::new();
+        for (old_i, &group) in scene.tri_coplanar_group.iter().enumerate() {
+            if group != 0 && !opaque(scene.tri_material.get(old_i).copied().unwrap_or(0)) {
+                mixed_groups.insert((false, group));
+                mixed_groups.insert((true, group.min(4095)));
+            }
+        }
+        // ...and no glass within 32 ray errors (by bounding boxes): a walk's hop off glass starts
+        // a ray error or two past it, so it never meets a face that close behind the glass.
+        let glass = |k: usize| !opaque(scene.tri_material.get(accel.tri_order[k] as usize).copied().unwrap_or(0));
+        let near_glass = |k: usize| {
+            let t = &accel.tris[k];
+            let lo = vec3f(t.v0.x.min(t.v1.x).min(t.v2.x), t.v0.y.min(t.v1.y).min(t.v2.y), t.v0.z.min(t.v1.z).min(t.v2.z));
+            let hi = vec3f(t.v0.x.max(t.v1.x).max(t.v2.x), t.v0.y.max(t.v1.y).max(t.v2.y), t.v0.z.max(t.v1.z).max(t.v2.z));
+            let far = vec3f(lo.x.abs().max(hi.x.abs()), lo.y.abs().max(hi.y.abs()), lo.z.abs().max(hi.z.abs()));
+            let pad = 32.0 * crate::bvh::ray_error(far, scene_scale);
+            accel.any_tri_in_box(lo - vec3f(pad, pad, pad), hi + vec3f(pad, pad, pad), glass)
+        };
+        let mut tri_certain_blocker = Vec::with_capacity(tri_count);
         let mut light_cdf = 0.0f32;
         let mut tri = Vec::with_capacity(tri_count * 12);
         let mut attr = Vec::with_capacity(tri_count * 16);
@@ -235,7 +261,13 @@ impl PackedScene {
             // unrelated nearby geometry remains ordinary nearest-hit.
             let coplanar_code = ((coplanar_group.min(4095) << 12)
                 | u32::from(priority.min(4095))) as f32;
-            attr.extend([u1[1], u2[0], u2[1], coplanar_code]);
+            let certain = opaque(m)
+                && (coplanar_group == 0
+                    || !(mixed_groups.contains(&(false, coplanar_group)) || mixed_groups.contains(&(true, coplanar_group.min(4095)))))
+                && !near_glass(new_i);
+            tri_certain_blocker.push(certain);
+            // A certain blocker stores -(code + 1): still exact, the sign is the bit.
+            attr.extend([u1[1], u2[0], u2[1], if certain { -1.0 - coplanar_code } else { coplanar_code }]);
             if scene.materials.get(m as usize).is_some_and(|mm| light_group != 0 || (select_pdf > 0.0 && mm.is_emissive())) {
                 light_cdf += select_pdf;
                 light.extend([new_i as f32, ngl * 0.5, select_pdf, light_cdf]);
@@ -423,6 +455,7 @@ impl PackedScene {
             tri_material,
             tri_priority,
             tri_coplanar_group,
+            tri_certain_blocker,
             tri_count,
             bounds,
             scene_scale,
@@ -745,7 +778,8 @@ mod tests {
         assert_eq!(p.tri_coplanar_group, vec![23]);
         assert_eq!(p.accel.priorities, vec![37]);
         assert_eq!(p.accel.coplanar_groups, vec![23]);
-        assert_eq!(p.attr.data[15], (23 * 4096 + 37) as f32, "ray shader group/priority lane");
+        assert_eq!(p.tri_certain_blocker, vec![true], "an opaque triangle in an all-opaque group");
+        assert_eq!(p.attr.data[15], -1.0 - (23 * 4096 + 37) as f32, "ray shader group/priority lane, its sign the blocker bit");
         assert_eq!(p.raster_verts[3], 37.0, "hybrid primary priority lane");
     }
 

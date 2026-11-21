@@ -408,7 +408,6 @@ pub fn sliver_count(mesh: &TriMesh, min_altitude: f64) -> usize {
 /// The mesh cut by the plane `axis = value` (axis 0 x, 1 y, 2 z), as
 /// regions in that plane's (u, v): x-cut (y, z), y-cut (x, z), z-cut (x, y).
 pub fn section(mesh: &TriMesh, axis: usize, value: f64) -> Vec<Region> {
-    let comp = |p: &Vec3d| p.component(axis);
     let uv = |p: Vec3d| -> P2 {
         match axis {
             0 => [p.y, p.z],
@@ -416,13 +415,60 @@ pub fn section(mesh: &TriMesh, axis: usize, value: f64) -> Vec<Region> {
             _ => [p.x, p.y],
         }
     };
+    cut(mesh, |p| p.component(axis) - value, uv)
+}
+
+/// A plane's frame: through `at`, `u` and `v` across it, `n` its unit normal (`u x v`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaneFrame {
+    pub at: Vec3d,
+    pub u: Vec3d,
+    pub v: Vec3d,
+    pub n: Vec3d,
+}
+
+impl PlaneFrame {
+    /// The plane through `at` facing `normal` (any length but zero); `u` square to Y unless the
+    /// plane is near level. None when the normal is not a direction.
+    pub fn new(at: Vec3d, normal: Vec3d) -> Option<PlaneFrame> {
+        let len = normal.length();
+        if !(len.is_finite() && len > 1e-12) {
+            return None;
+        }
+        let n = normal / len;
+        let helper = if n.y.abs() < 0.9 { dvec3(0.0, 1.0, 0.0) } else { dvec3(1.0, 0.0, 0.0) };
+        let u = helper.cross(n).normalize();
+        let v = n.cross(u);
+        Some(PlaneFrame { at, u, v, n })
+    }
+
+    /// A point's place in the plane (u, v).
+    pub fn uv(&self, p: Vec3d) -> P2 {
+        let d = p - self.at;
+        [d.dot(self.u), d.dot(self.v)]
+    }
+
+    /// The point of the plane at (u, v).
+    pub fn point(&self, q: P2) -> Vec3d {
+        self.at + self.u * q[0] + self.v * q[1]
+    }
+}
+
+/// The mesh cut by any plane, as regions in its (u, v) ([`PlaneFrame::uv`]).
+pub fn section_plane(mesh: &TriMesh, plane: &PlaneFrame) -> Vec<Region> {
+    cut(mesh, |p| (p - plane.at).dot(plane.n), |p| plane.uv(p))
+}
+
+/// The regions where the mesh crosses the zero of `side` (a point's signed distance from the
+/// plane), each crossing at `uv` in the plane.
+fn cut(mesh: &TriMesh, side: impl Fn(Vec3d) -> f64, uv: impl Fn(Vec3d) -> P2) -> Vec<Region> {
     // Segments where triangles cross the plane (vertices exactly on it nudged).
     let eps = 1e-9;
     let mut segs: Vec<(P2, P2)> = Vec::new();
     for t in &mesh.triangles {
         let ps: Vec<Vec3d> = t.iter().map(|&i| mesh.vertices[i as usize]).collect();
         let d: Vec<f64> = ps.iter().map(|p| {
-            let x = comp(p) - value;
+            let x = side(*p);
             if x.abs() < eps { eps } else { x }
         }).collect();
         let mut pts = Vec::with_capacity(2);

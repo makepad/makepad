@@ -176,6 +176,8 @@ pub(super) struct StreamState {
     wanted: Vec<(f32, StreamPiece)>,
     selection: Selection,
     raster: OcclusionRaster,
+    /// This frame's occluder candidates (score, box): rebuilt per frame into the same buffer.
+    occluder_candidates: Vec<(f32, Vec3f, Vec3f)>,
     /// This frame's pieces to draw: (piece, dither code, distance).
     draw_list: Vec<(StreamPiece, f32, f32)>,
     /// Props of near-drawn chunks and movers: (kind, transform, tint, dither).
@@ -273,7 +275,7 @@ impl Renderer {
             cell: (0..cells.len()).map(|_| Slot::Absent).collect(), prop_models: (0..kinds).map(|_| Slot::Absent).collect(),
             chunk_bounds, cells, props, occluders,
             inflight: 0, ready: Vec::new(), resident_bytes: 0, wanted: Vec::new(), selection: Selection::default(),
-            raster: OcclusionRaster::default(), draw_list: Vec::new(), prop_list: Vec::new(), movers: Vec::new(),
+            raster: OcclusionRaster::default(), occluder_candidates: Vec::new(), draw_list: Vec::new(), prop_list: Vec::new(), movers: Vec::new(),
             last_eye: None, velocity: Vec3f::default(), time: 0.0, extra_foci: Vec::new(), night: 0.0, headlight_radius: 0.0, stats: StreamStats::default(),
         };
         // Drain results of a previous source (generation mismatch drops them).
@@ -300,7 +302,7 @@ impl Renderer {
                 near: (0..n).map(|_| Slot::Absent).collect(), proxy: (0..n).map(|_| Slot::Absent).collect(),
                 cell: (0..src.cells.len()).map(|_| Slot::Absent).collect(), prop_models: (0..src.prop_models.len()).map(|_| Slot::Absent).collect(),
                 inflight: 0, ready: Vec::new(), resident_bytes: 0, wanted: Vec::new(), selection: Selection::default(),
-                raster: OcclusionRaster::default(), draw_list: Vec::new(), prop_list: Vec::new(), movers: Vec::new(),
+                raster: OcclusionRaster::default(), occluder_candidates: Vec::new(), draw_list: Vec::new(), prop_list: Vec::new(), movers: Vec::new(),
                 last_eye: None, velocity: Vec3f::default(), time: 0.0, extra_foci: Vec::new(), night: 0.0, headlight_radius: 0.0, stats: StreamStats::default(),
             }));
         }
@@ -424,13 +426,15 @@ impl Renderer {
         let mut selection = std::mem::take(&mut st.selection);
         select(&s, eye, &st.chunk_bounds, &st.cells, &Res(&st), &mut selection);
         let t_occ = Cx::monotonic_now();
-        let mut raster = std::mem::take(&mut st.raster);
+        // Borrowed for the frame and put back below (`take` would allocate a fresh raster each time).
+        let mut raster = std::mem::replace(&mut st.raster, OcclusionRaster::empty());
         let occlusion = s.occlusion && clip.is_some();
         if let (true, Some(clip)) = (occlusion, clip) {
             raster.begin(clip, eye);
             // The biggest boxes on screen first (extent over distance), up
             // to a budget — fewer occluders only ever means less culling.
-            let mut candidates: Vec<(f32, Vec3f, Vec3f)> = Vec::new();
+            let mut candidates = std::mem::take(&mut st.occluder_candidates);
+            candidates.clear();
             for (i, (lo, hi)) in st.chunk_bounds.iter().enumerate() {
                 if aabb_distance(*lo, *hi, eye) > s.occluder_range { continue; }
                 for (blo, bhi) in &st.occluders[i] {
@@ -445,6 +449,7 @@ impl Renderer {
                 candidates.truncate(OCCLUDERS);
             }
             for (_, lo, hi) in &candidates { raster.add_box(*lo, *hi); }
+            st.occluder_candidates = candidates;
             raster.finish();
             stats.occluders = raster.occluders;
         } else {
@@ -507,8 +512,10 @@ impl Renderer {
         }
         st.movers = movers;
         stats.props = st.prop_list.len() - stats.movers;
-        // Group props by kind so each kind is one instanced draw.
-        st.prop_list.sort_by_key(|p| p.0);
+        // Group props by kind so each kind is one instanced draw. Unstable:
+        // the order within a kind is only its instances' order in that draw,
+        // and a stable sort allocates a scratch half of the list every frame.
+        st.prop_list.sort_unstable_by_key(|p| p.0);
         stats.casters = casters.len();
         self.stream_casters = casters;
         self.gpu_baker.csm_casters_changed();

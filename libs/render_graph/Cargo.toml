@@ -11,7 +11,10 @@ license = "MIT OR Apache-2.0"
 # pass declarations and the kits' Splash source, for UI-free document
 # readers.
 default = ["gpu"]
-gpu = ["dep:makepad-draw", "dep:makepad-script-compute", "dep:makepad-tween-script"]
+# The shared tone curves alone (`curves`): a renderer that puts its own
+# light on the display with them, without the graph's passes.
+curves = ["dep:makepad-draw"]
+gpu = ["curves", "dep:makepad-draw", "dep:makepad-script-compute", "dep:makepad-tween-script"]
 
 [dependencies]
 makepad-script = { path = "../../platform/script" }

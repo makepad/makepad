@@ -44,52 +44,70 @@ impl Hasher {
     pub fn sketch(&mut self, s: &Sketch) {
         self.u(s.shapes.len() as u64);
         for shape in &s.shapes {
-            match shape {
-                Shape::Rect { center, size, corner, chamfer } => {
-                    self.u(0);
-                    self.p2(*center);
-                    self.p2(*size);
-                    self.f(*corner);
-                    self.f(*chamfer);
+            self.shape(shape);
+        }
+    }
+    fn shape(&mut self, shape: &Shape) {
+        match shape {
+            Shape::Rect { center, size, corner, chamfer } => {
+                self.u(0);
+                self.p2(*center);
+                self.p2(*size);
+                self.f(*corner);
+                self.f(*chamfer);
+            }
+            Shape::Circle { center, r } => {
+                self.u(1);
+                self.p2(*center);
+                self.f(*r);
+            }
+            Shape::Ellipse { center, rx, ry } => {
+                self.u(2);
+                self.p2(*center);
+                self.f(*rx);
+                self.f(*ry);
+            }
+            Shape::Slot { a, b, r } => {
+                self.u(3);
+                self.p2(*a);
+                self.p2(*b);
+                self.f(*r);
+            }
+            Shape::Gear { center, module, teeth, pressure_deg, backlash, shift, deg } => {
+                self.u(8);
+                self.p2(*center);
+                self.f(*module);
+                self.u(*teeth as u64);
+                self.f(*pressure_deg);
+                self.f(*backlash);
+                self.f(*shift);
+                self.f(*deg);
+            }
+            Shape::Regular { center, r, sides, deg } => {
+                self.u(4);
+                self.p2(*center);
+                self.f(*r);
+                self.u(*sides as u64);
+                self.f(*deg);
+            }
+            Shape::Polygon { points, fillet } => {
+                self.u(5);
+                self.u(points.len() as u64);
+                points.iter().for_each(|p| self.p2(*p));
+                self.f(*fillet);
+            }
+            Shape::Path { start, segs } => {
+                self.u(6);
+                self.p2(*start);
+                self.u(segs.len() as u64);
+                for s in segs {
+                    self.seg(s);
                 }
-                Shape::Circle { center, r } => {
-                    self.u(1);
-                    self.p2(*center);
-                    self.f(*r);
-                }
-                Shape::Ellipse { center, rx, ry } => {
-                    self.u(2);
-                    self.p2(*center);
-                    self.f(*rx);
-                    self.f(*ry);
-                }
-                Shape::Slot { a, b, r } => {
-                    self.u(3);
-                    self.p2(*a);
-                    self.p2(*b);
-                    self.f(*r);
-                }
-                Shape::Regular { center, r, sides, deg } => {
-                    self.u(4);
-                    self.p2(*center);
-                    self.f(*r);
-                    self.u(*sides as u64);
-                    self.f(*deg);
-                }
-                Shape::Polygon { points, fillet } => {
-                    self.u(5);
-                    self.u(points.len() as u64);
-                    points.iter().for_each(|p| self.p2(*p));
-                    self.f(*fillet);
-                }
-                Shape::Path { start, segs } => {
-                    self.u(6);
-                    self.p2(*start);
-                    self.u(segs.len() as u64);
-                    for s in segs {
-                        self.seg(s);
-                    }
-                }
+            }
+            Shape::Offset { of, d } => {
+                self.u(7);
+                self.f(*d);
+                self.shape(of);
             }
         }
     }

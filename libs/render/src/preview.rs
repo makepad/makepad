@@ -1,8 +1,7 @@
-//! Orbit camera + empty stage for Asset UI / VJ mesh preview.
+//! Orbit camera and stage for mesh previews.
 //!
-//! Viewers do not own a World. They pass a [`PreviewLook`] and optional
-//! ground/sky flags; the renderer builds the one-frame dummy the existing
-//! scene pass still wants.
+//! Viewers supply a [`PreviewLook`] and a [`PreviewStage`]. The renderer
+//! builds the world for the scene pass.
 
 use makepad_draw::*;
 use makepad_scene::{BodyKind, Entity, World, SkyConfig};
@@ -33,7 +32,7 @@ impl Default for PreviewLook {
     }
 }
 
-/// Optional ground slab + default sky for a statue/character stage.
+/// Ground, backdrop and lighting for a preview.
 #[derive(Clone, Copy, Debug)]
 pub struct PreviewStage {
     pub ground: bool,
@@ -44,6 +43,14 @@ pub struct PreviewStage {
     /// backdrop for judging a lit model, not a night scene. Independent of
     /// CSM.
     pub dark: bool,
+    /// Direction from the subject toward the key light in camera coordinates.
+    /// +X points right, +Y up and +Z toward the eye.
+    pub key_dir_view: Option<Vec3f>,
+    /// Neutral ambient intensity applied equally to the sky and ground hemispheres.
+    pub fill: Option<f32>,
+    /// Flat RGBA backdrop. When set, the pass owner clears to this color and
+    /// the renderer skips the sky dome. The ground slab has its own switch.
+    pub backdrop_color: Option<Vec4f>,
 }
 
 impl PreviewStage {
@@ -55,6 +62,9 @@ impl PreviewStage {
             ground_half: 256.0,
             ground_color: vec4(0.32, 0.38, 0.34, 1.0),
             dark: false,
+            key_dir_view: None,
+            fill: None,
+            backdrop_color: None,
         }
     }
 
@@ -65,6 +75,9 @@ impl PreviewStage {
             ground_half: 8.0,
             ground_color: vec4(0.0, 0.0, 0.0, 1.0),
             dark: false,
+            key_dir_view: None,
+            fill: None,
+            backdrop_color: None,
         }
     }
 }
@@ -95,7 +108,7 @@ pub fn preview_scene_state(look: PreviewLook, rect: Rect, time: f64) -> Option<S
     })
 }
 
-fn preview_world(look: PreviewLook, stage: PreviewStage) -> World {
+fn preview_world(look: PreviewLook, stage: PreviewStage, view: &Mat4f) -> World {
     let mut world = World::new();
     if stage.ground {
         let ground_color = if stage.dark {
@@ -115,7 +128,7 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> World {
     } else {
         world.entities.clear();
     }
-    world.sky = if !stage.sky {
+    world.sky = if !stage.sky || stage.backdrop_color.is_some() {
         None
     } else if stage.dark {
         Some(SkyConfig {
@@ -129,6 +142,14 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> World {
     } else {
         Some(SkyConfig::default())
     };
+    if let Some(dir) = stage.key_dir_view {
+        // The view rotation is orthonormal, so its transpose maps back to world space.
+        let world_dir = view.transpose().transform_vec4(vec4(dir.x, dir.y, dir.z, 0.0));
+        world.sun.dir = Some(world_dir.to_vec3f().normalize());
+    }
+    if let Some(fill) = stage.fill {
+        world.sun.ambient = Some(Vec3f::all(fill));
+    }
     if stage.dark {
         // Only the cast shadow deepens a little on the near-black slab; the
         // subject keeps its full studio lighting.
@@ -156,7 +177,7 @@ impl Renderer {
         skinned: Option<SkinnedBatch>,
         models_draw: Option<&mut crate::DrawSceneSkinned>,
     ) -> crate::RenderStats {
-        let world = preview_world(look, stage);
+        let world = preview_world(look, stage, &scene_state.view);
         self.draw_scene_full(
             cx,
             draw_list,

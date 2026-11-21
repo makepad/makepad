@@ -1600,7 +1600,8 @@ mod chain_fade_tests {
             assert_eq!(order.distances, [30.0], "the camera and world distance stay fixed");
             let root = &renderer.static_models[0].1;
             let selected = if expected == 0 { root } else { &root.lods[expected - 1].1 };
-            let casters = renderer.collect_lm_movers(&World::default(), eye, lod_scale, None);
+            let mut casters = Vec::new();
+            renderer.collect_lm_movers(&World::default(), eye, lod_scale, None, &mut casters);
             assert_eq!(casters.len(), 1);
             assert_eq!(casters[0].geometry, selected.geometry.geometry_id(), "caster follows bias {bias}");
         }
@@ -1640,7 +1641,8 @@ mod chain_fade_tests {
             assert_eq!(order.distances, [31.0], "sorting and other distance consumers keep world units");
             let root = &renderer.static_models[0].1;
             let selected = if expected == 0 { root } else { &root.lods[expected - 1].1 };
-            let casters = renderer.collect_lm_movers(&World::default(), eye, lod_scale, None);
+            let mut casters = Vec::new();
+            renderer.collect_lm_movers(&World::default(), eye, lod_scale, None, &mut casters);
             assert_eq!(casters.len(), 1);
             assert_eq!(casters[0].geometry, selected.geometry.geometry_id(), "caster follows view at FOV {fov}");
         }

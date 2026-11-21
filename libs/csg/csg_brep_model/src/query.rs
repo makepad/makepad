@@ -98,24 +98,30 @@ fn circle3(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<([f64; 3], f64)> {
     Some((o, dist(o, a)))
 }
 
+/// Edge `id` at `n` + 1 even steps of its curve's parameter, ends included; None for an edge
+/// without a curve.
+pub fn sampled(k: &Kernel, b: &Body, id: EdgeId, n: usize) -> Result<Option<Vec<[f64; 3]>>, BrepError> {
+    let range = edge_parameter_range(b, id)?;
+    let Some(curve) = edge::curve(b, id)? else { return Ok(None) };
+    let (lo, hi) = (range.min(), range.max());
+    let mut points = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        points.push(arr(curve.evaluate_point(k, lo + (hi - lo) * i as f64 / n as f64)?));
+    }
+    Ok(Some(points))
+}
+
+/// Segments an edge's outline takes ([`sampled`]) when it is not a line.
+pub const OUTLINE: usize = 32;
+
 /// Every edge of the body, sampled.
 pub fn edges(k: &Kernel, b: &mut Body) -> Result<Vec<EdgeInfo>, BrepError> {
     const SAMPLES: usize = 8;
     let ids = makepad_csg_brep::topology::brep::p1::edges(b, None)?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        let range = edge_parameter_range(b, id)?;
-        let Some(curve) = edge::curve(b, id)? else { continue };
-        let (lo, hi) = (range.min(), range.max());
-        let mut points = Vec::with_capacity(SAMPLES + 1);
-        let mut length = 0.0;
-        for i in 0..=SAMPLES {
-            let p = arr(curve.evaluate_point(k, lo + (hi - lo) * i as f64 / SAMPLES as f64)?);
-            if let Some(q) = points.last() {
-                length += dist(*q, p);
-            }
-            points.push(p);
-        }
+        let Some(points) = sampled(k, b, id, SAMPLES)? else { continue };
+        let length: f64 = points.windows(2).map(|w| dist(w[0], w[1])).sum();
         if length < 1e-9 {
             continue;
         }
@@ -160,4 +166,64 @@ pub fn faces(k: &Kernel, b: &mut Body) -> Result<Vec<FaceInfo>, BrepError> {
         out.push(FaceInfo { id, kind, area, centroid: arr(centroid), normal });
     }
     Ok(out)
+}
+
+/// The triangle of `mesh` nearest `p` (`tri_face`: each triangle's face): that face, and how
+/// far `p` is from it. O(triangles), most rejected by their box.
+pub fn nearest_face(mesh: &makepad_csg_graph::TriMesh, tri_face: &[u32], p: [f64; 3]) -> Option<(u32, f64)> {
+    let v = |i: u32| {
+        let q = mesh.vertices[i as usize];
+        [q.x, q.y, q.z]
+    };
+    let mut best: Option<(u32, f64)> = None;
+    let mut reach = f64::MAX;
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
+        if (0..3).any(|i| p[i] < a[i].min(b[i]).min(c[i]) - reach || p[i] > a[i].max(b[i]).max(c[i]) + reach) {
+            continue;
+        }
+        let d = dist(p, on_triangle(p, a, b, c));
+        if d < reach {
+            reach = d;
+            best = tri_face.get(t).map(|f| (*f, d));
+        }
+    }
+    best
+}
+
+/// The point of triangle `abc` nearest `p` (by its Voronoi regions).
+fn on_triangle(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
+    let sub = |x: [f64; 3], y: [f64; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+    let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    let at = |u: f64, w: f64| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * u + (c[i] - a[i]) * w);
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = sub(p, b);
+    let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return at(d1 / (d1 - d3), 0.0);
+    }
+    let cp = sub(p, c);
+    let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return at(0.0, d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return [0, 1, 2].map(|i| b[i] + (c[i] - b[i]) * w);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    at(vb * denom, vc * denom)
 }

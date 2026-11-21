@@ -6,6 +6,7 @@
 //! - [`solids`]: extrude (with draft), revolve, sweep and loft.
 //! - [`mech`]: involute spur gears, ISO metric threads, hole tools.
 //! - [`text`]: text from a font's glyph outlines.
+//! - [`split`]: a solid split along a plane, with alignment pins across the cut.
 //! - [`edges`]: a mesh's sharp edges, and fillets / chamfers on them.
 //! - [`constrain`]: the 2D sketch constraint solver (dimensions and
 //!   geometric constraints).
@@ -23,6 +24,7 @@ pub mod mech;
 pub mod region;
 pub mod sketch;
 pub mod solids;
+pub mod split;
 pub mod text;
 
 pub use bool3::{boolean_in, difference, intersection, union};

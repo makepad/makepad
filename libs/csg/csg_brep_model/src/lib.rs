@@ -8,6 +8,7 @@
 
 pub mod engine;
 pub mod guard;
+pub mod names;
 pub mod ops;
 pub mod profile;
 pub mod query;

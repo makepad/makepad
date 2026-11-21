@@ -4,13 +4,14 @@
 //! selftest renders the Cornell box on both and compares — and it counts
 //! rays, which the GPU cannot, so rays/s can be reported honestly.
 
-use crate::bvh::Hit;
+use crate::bvh::{ray_error, Hit, ShadowBlock};
 use crate::env_map::{EnvironmentFrame, EnvironmentLight};
 use crate::pack::{emission_pdf, PackedScene, ENV_DIR_BINS, ENV_PHI_BINS, ENV_THETA_BINS, MAX_SHADOW_GLASS_HITS};
 use crate::rng::{bounce_pairs, hash2, pixel_seed, sobol_2d, u32_to_unit};
 use crate::scene::{thin_glass_haze, Camera, Material, SceneInput};
 use crate::sky::SkyUniforms;
 use makepad_draw::*;
+use makepad_draw::shader::ggx::ggx_split_sum;
 
 /// CPU-only transport counters. They do not participate in sampling, so the
 /// reference estimator stays a line-for-line twin of the GPU shader.
@@ -122,7 +123,7 @@ fn ggx_d(nh: f32, a2: f32) -> f32 {
     a2 / (std::f32::consts::PI * d * d)
 }
 
-fn bsdf_eval(n: Vec3f, v: Vec3f, l: Vec3f, kd: Vec3f, f0: Vec3f, alpha: f32) -> Vec3f {
+fn bsdf_eval(n: Vec3f, v: Vec3f, l: Vec3f, kd: Vec3f, f0: Vec3f, alpha: f32, ms_on: f32) -> Vec3f {
     let h = unit(v + l);
     let nl = n.dot(l).max(0.0001);
     let nv = n.dot(v).max(0.0001);
@@ -134,7 +135,9 @@ fn bsdf_eval(n: Vec3f, v: Vec3f, l: Vec3f, kd: Vec3f, f0: Vec3f, alpha: f32) -> 
     let gv = nl * (nv * nv * (1.0 - a2) + a2).sqrt();
     let gl = nv * (nl * nl * (1.0 - a2) + a2).sqrt();
     let vis = 0.5 / (gv + gl).max(1.0e-6);
-    kd * (one - fr) * std::f32::consts::FRAC_1_PI + fr * (ggx_d(nh, a2) * vis)
+    // The multiple-scattering energy, as the shader's `bsdf_eval` takes it back (`ms_on` 1).
+    let ms = one + f0 * (ms_on * (1.0 / ggx_split_sum(nv, alpha.sqrt())[0] - 1.0));
+    kd * (one - fr) * std::f32::consts::FRAC_1_PI + fr * (ggx_d(nh, a2) * vis) * ms
 }
 
 fn bsdf_pdf(n: Vec3f, v: Vec3f, l: Vec3f, alpha: f32, ps: f32) -> f32 {
@@ -214,12 +217,6 @@ fn mix3(a: Vec3f, b: Vec3f, t: f32) -> Vec3f {
     a + (b - a) * t
 }
 
-fn ray_error(p: Vec3f, scene_scale: f32) -> f32 {
-    // Relative reconstruction bound (16 f32 ulps at the largest component)
-    // plus a scene-relative floor for geometry near the rebased origin.
-    scene_scale * 5.0e-9 + p.x.abs().max(p.y.abs()).max(p.z.abs()) * 1.907_348_6e-6
-}
-
 fn offset_ray(p: Vec3f, ng: Vec3f, dir: Vec3f, scene_scale: f32) -> Vec3f {
     let n = if ng.dot(dir) >= 0.0 { ng } else { -ng };
     let eps = ray_error(p, scene_scale);
@@ -285,12 +282,24 @@ impl<'a> CpuTracer<'a> {
     /// (possibly several overlapping BIM faces) raise tmin past each
     /// back-facing hit within 5e-5 of the scene diagonal.
     fn secondary_trace(&self, p: Vec3f, ng: Vec3f, rd: Vec3f, tmax: f32, skip: i32) -> Hit {
+        self.secondary_trace_blocking(p, ng, rd, tmax, skip, None)
+    }
+
+    /// `secondary_trace`, ending at a certain blocker within `block` (GPU `spawn_trace`'s block).
+    fn secondary_trace_blocking(&self, p: Vec3f, ng: Vec3f, rd: Vec3f, tmax: f32, skip: i32, block: Option<(f32, f32)>) -> Hit {
         let ro = offset_ray(p, ng, rd, self.packed.scene_scale);
         let mut tmin = 0.0;
         let mut hit = Hit::miss(tmax);
         for _ in 0..4 {
-            hit = self.trace(ro, rd, tmax, false, tmin, skip);
-            if hit.truncated {
+            hit = match block {
+                Some((min, max)) => {
+                    self.rays.set(self.rays.get() + 1);
+                    let block = ShadowBlock { min, max, certain: &self.packed.tri_certain_blocker };
+                    self.packed.accel.trace_shadow(ro, rd, tmin, tmax, skip, &block)
+                }
+                None => self.trace(ro, rd, tmax, false, tmin, skip),
+            };
+            if hit.truncated || hit.blocked() {
                 // A truncated traversal must surface as truncated (GPU twin
                 // returns immediately on its -2 code); the ladder must not
                 // retry it into a fake clean result.
@@ -645,9 +654,18 @@ impl<'a> CpuTracer<'a> {
         }
         // The extra trace proves that the ray escaped after the last allowed hit.
         for layer in 0..=MAX_SHADOW_GLASS_HITS {
-            let h = self.secondary_trace(p, ng, rd, tmax, skip);
+            // A front-facing certain blocker ends the ray at once (GPU twin). Exact: the walk
+            // below ends dark at it in every order. The margins keep the skin, the near band and
+            // the light's own end (tmax shrinks by a ray error a hop) as the walk has them.
+            let scale = self.packed.scene_scale;
+            let min = (scale * 5.0e-5).max(self.shadow_skin - travelled) + 32.0 * ray_error(p, scale);
+            let max = if tmax < scale * 2.5e6 { tmax - 32.0 * ray_error(p, scale).max(ray_error(p + rd * tmax, scale)) } else { tmax };
+            let h = self.secondary_trace_blocking(p, ng, rd, tmax, skip, Some((min, max)));
             if h.truncated {
                 return None;
+            }
+            if h.blocked() {
+                return Some(ShadowVisibility::default());
             }
             if !h.is_hit() {
                 return Some(ShadowVisibility { transmittance: tr });
@@ -666,7 +684,8 @@ impl<'a> CpuTracer<'a> {
             // Self-occlusion skin (GPU twin): a blocker within `shadow_skin`
             // of the ORIGINAL surface is a stacked coplanar layer of the
             // same construction assembly, not a shadow caster — step past
-            // it. `travelled` bounds the total skip to one skin depth.
+            // it. `travelled` is the distance from that surface, glass hops
+            // included, so the skin never reaches past a layer of glass.
             if !solid && travelled + h.t < self.shadow_skin {
                 travelled += h.t;
                 let tri = &self.packed.accel.tris[ti];
@@ -691,6 +710,7 @@ impl<'a> CpuTracer<'a> {
             let w0 = 1.0 - h.u - h.v;
             let segment_start = p;
             p = tri.v0 * w0 + tri.v1 * h.u + tri.v2 * h.v;
+            travelled += h.t;
             ng = geom_ng(tri);
             let paired_back_face = previous_glass
                 .is_some_and(|(previous_material, previous_normal)| {
@@ -928,6 +948,8 @@ impl<'a> CpuTracer<'a> {
             let mut f0 = vec3f(0.0, 0.0, 0.0);
             let mut kd = albedo;
             let mut far_sheet = false;
+            // A rough sheet's Fresnel-chosen reflection stays single-scattering (the shader's `ms_on`).
+            let mut ms_on = 1.0;
             if trans > 0.0 {
                 let haze = thin_glass_haze(m.roughness);
                 let fr = fresnel_dielectric(ng.dot(v).abs(), ior);
@@ -952,6 +974,7 @@ impl<'a> CpuTracer<'a> {
                 if r_lobe.0 < fr {
                     kd = vec3f(0.0, 0.0, 0.0);
                     f0 = vec3f(1.0, 1.0, 1.0);
+                    ms_on = 0.0;
                 } else if (r_lobe.0 - fr) / (1.0 - fr) < trans {
                     v = v - ng * (2.0 * v.dot(ng));
                     ng = -ng;
@@ -963,7 +986,9 @@ impl<'a> CpuTracer<'a> {
                 }
                 rx = r_lobe.1 / haze;
             } else {
-                f0 = mix3(vec3f(0.04, 0.04, 0.04), albedo, metal);
+                // An opaque dielectric reflects by its index (1.5: 0.04); a metal by its colour.
+                let fd = (ior - 1.0) / (ior + 1.0);
+                f0 = mix3(vec3f(fd * fd, fd * fd, fd * fd), albedo, metal);
             }
             kd = kd * (1.0 - metal);
             let alpha = rough * rough;
@@ -982,7 +1007,7 @@ impl<'a> CpuTracer<'a> {
                         if vis.x + vis.y + vis.z > 0.0 {
                             self.bump_stats(|stats| stats.sun_nee_successes += 1);
                             let e = self.sun_irradiance();
-                            let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha);
+                            let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha, ms_on);
                             let corr = shading_normal_correction(ng, n_nee, v, ld);
                             lsum = lsum + tp * f * e * vis * (nl * corr);
                         }
@@ -998,7 +1023,7 @@ impl<'a> CpuTracer<'a> {
                     if env.pdf > 0.0 && vis.x + vis.y + vis.z > 0.0 {
                         self.bump_stats(|stats| stats.sky_nee_successes += 1);
                         let ps_nee = spec_prob(f0, kd, n_nee.dot(v).max(0.0001));
-                        let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha);
+                        let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha, ms_on);
                         let pb = bsdf_pdf(n_nee, v, ld, alpha, ps_nee);
                         let wgt = if self.env_grid_dim() > 0 {
                             1.0
@@ -1050,7 +1075,7 @@ impl<'a> CpuTracer<'a> {
                         let lm = v3(p.mat.data[mi..mi + 3].try_into().unwrap());
                         let pl = dist * dist * lrec[2] / (cosl * lrec[1]).max(p.scene_area * 2.5e-13);
                         let ps_nee = spec_prob(f0, kd, n_nee.dot(v).max(0.0001));
-                        let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha);
+                        let f = bsdf_eval(n_nee, v, ld, kd, f0, alpha, ms_on);
                         let pb = bsdf_pdf(n_nee, v, ld, alpha, ps_nee);
                         let wgt = pl * pl / (pl * pl + pb * pb);
                         let corr = shading_normal_correction(ng, n_nee, v, ld);
@@ -1100,7 +1125,7 @@ impl<'a> CpuTracer<'a> {
             if nl <= 0.0 || ng.dot(ld) <= 0.0 {
                 break;
             }
-            let f = bsdf_eval(sample_n, v, ld, kd, f0, alpha);
+            let f = bsdf_eval(sample_n, v, ld, kd, f0, alpha, ms_on);
             let pb = bsdf_pdf(sample_n, v, ld, alpha, ps);
             if pb <= 0.0 {
                 break;
@@ -1537,7 +1562,7 @@ mod tests {
         let mut tracer = cpu_tracer(&scene, &packed);
         tracer.max_bounces = 1;
         let up = vec3f(0.0, 1.0, 0.0);
-        let expected = bsdf_eval(up, up, scene.sun.dir, vec3f(0.7, 0.7, 0.7), vec3f(0.04, 0.04, 0.04), 1.0)
+        let expected = bsdf_eval(up, up, scene.sun.dir, vec3f(0.7, 0.7, 0.7), vec3f(0.04, 0.04, 0.04), 1.0, 1.0)
             * tracer.sun_irradiance() * up.dot(scene.sun.dir);
         assert!(expected.x > 0.0 && expected.y > 0.0 && expected.z > 0.0);
         let image = tracer.render(12, 12, 32, 91);
@@ -1787,6 +1812,169 @@ mod tests {
         let p2 = vec3f(0.2, 0.3, 1.0) - packed2.origin;
         let shadowed = tracer2.shadow(p2, up, up, packed2.ray_tmax(), 0).expect("finite");
         assert_eq!(shadowed.transmittance, Vec3f::default(), "a separated caster is a real shadow");
+
+        // A card lying on a glass pane, within one skin of the glass but far from the deck: the
+        // skin counts from the deck, so the card shadows the deck through the pane.
+        let mut pane = SceneInput { up: vec3f(0.0, 0.0, 1.0), ..Default::default() };
+        pane.materials = vec![Material::default(), Material::glass([1.0; 3])];
+        pane.push_quad(quad(1.0), 0);
+        pane.push_quad(quad(2.0), 1);
+        pane.push_quad(quad(2.02), 0);
+        pane.ensure_normals();
+        let packed3 = PackedScene::pack(&pane);
+        assert!(0.02 < packed3.auto_shadow_skin(), "the card must lie within one skin of the glass");
+        let tracer3 = cpu_tracer(&pane, &packed3);
+        let p3 = vec3f(0.2, 0.3, 1.0) - packed3.origin;
+        let behind_glass = tracer3.shadow(p3, up, up, packed3.ray_tmax(), 0).expect("finite");
+        assert_eq!(behind_glass.transmittance, Vec3f::default(), "a card on the glass shadows through it");
+    }
+
+    #[test]
+    fn certain_blockers_end_shadow_rays_as_the_full_walk_does() {
+        // Y-up. A floor with a stacked layer inside its skin, a tiled glass pane, an opaque card
+        // lying on the pane (inside the pane's skin), up-facing patches in the near band behind the
+        // pane (stepped over today; tiled so the walk meets some before their glass), a closed
+        // box, a coplanar group of glass and opaque, an emitter, a wall, a ledge, and a card a
+        // hair behind a second pane.
+        let mut s = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+        s.materials = vec![Material::default(), Material::glass([0.9, 0.95, 1.0]), Material::emissive([1.0; 3], 5.0)];
+        let up_quad = |x0: f32, x1: f32, y: f32, z0: f32, z1: f32| [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]];
+        let down_quad = |x0: f32, x1: f32, y: f32, z0: f32, z1: f32| [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]];
+        s.push_quad(up_quad(-2.0, 2.0, 0.0, -2.0, 2.0), 0);
+        s.push_quad(up_quad(1.0, 2.0, 5.0e-4, -2.0, 2.0), 0);
+        let glass_from = s.tri_count();
+        for i in 0..8 {
+            for k in 0..8 {
+                let (x, z) = (-1.5 + 0.375 * i as f32, -1.5 + 0.375 * k as f32);
+                s.push_quad(up_quad(x, x + 0.375, 0.5, z, z + 0.375), 1);
+            }
+        }
+        s.push_quad(down_quad(-1.2, -0.2, 0.5 + 8.0e-4, -1.0, 1.0), 0);
+        for i in 0..6 {
+            for k in 0..10 {
+                let (x, z) = (0.05 + 0.24 * i as f32, -1.45 + 0.29 * k as f32);
+                s.push_quad(up_quad(x, x + 0.12, 0.5 + 1.2e-4, z, z + 0.15), 0);
+            }
+        }
+        crate::scene::push_box(&mut s, vec3f(0.6, 0.9, 0.8), vec3f(0.5, 0.4, 0.5), 0.3, 0);
+        let group_from = s.tri_count();
+        s.push_quad(down_quad(-1.4, -0.6, 1.4, -1.5, -0.5), 1);
+        s.push_quad(down_quad(-1.4, -0.6, 1.4, -1.5, -0.5), 0);
+        for tri in group_from..s.tri_count() {
+            s.tri_coplanar_group[tri] = 5;
+        }
+        s.push_quad(down_quad(-0.5, 0.5, 1.8, 0.5, 1.5), 2);
+        let wall_from = s.tri_count();
+        s.push_quad([[-1.0, 0.0, -2.0], [-1.0, 2.0, -2.0], [-1.0, 2.0, 2.0], [-1.0, 0.0, 2.0]], 0);
+        s.push_quad(down_quad(0.9, 1.4, 1.0, -1.4, -0.9), 0);
+        let contact_from = s.tri_count();
+        s.push_quad(up_quad(1.0, 1.6, 1.6, 0.4, 1.0), 1);
+        s.push_quad(down_quad(1.1, 1.5, 1.6 + 1.0e-6, 0.5, 0.9), 0);
+        s.ensure_normals();
+        let packed = PackedScene::pack(&s);
+        let bit = |old: usize| packed.tri_certain_blocker[packed.accel.tri_order.iter().position(|&o| o as usize == old).unwrap()];
+        assert!(bit(0) && !bit(glass_from), "the floor is a certain blocker, the glass is not");
+        assert!(!bit(group_from + 2), "an opaque member of a group with glass is not");
+        assert!(!bit(contact_from + 2), "nor is an opaque face a hair behind glass");
+        let mut walk = packed.clone();
+        walk.tri_certain_blocker.fill(false);
+        let (early, full) = (cpu_tracer(&s, &packed), cpu_tracer(&s, &walk));
+
+        // Where it ends a ray: the first front face of a certain blocker, inside the range only.
+        // Off the faces' diagonals: an edge is no place for an early end.
+        let box_below = vec3f(0.706, 0.7, 0.864) - packed.origin;
+        let box_inside = vec3f(0.706, 1.1, 0.864) - packed.origin;
+        let up = vec3f(0.0, 1.0, 0.0);
+        let range = |min: f32| ShadowBlock { min, max: packed.ray_tmax(), certain: &packed.tri_certain_blocker };
+        assert!(packed.accel.trace_shadow(box_below, up, 0.0, packed.ray_tmax(), -1, &range(0.0)).blocked(), "the box's bottom face");
+        let inside = packed.accel.trace_shadow(box_inside, up, 0.0, packed.ray_tmax(), -1, &range(0.0));
+        assert!(inside.is_hit() && !inside.blocked(), "a back face is walked, not taken as certain");
+        assert!(!packed.accel.trace_shadow(box_below, up, 0.0, packed.ray_tmax(), -1, &range(0.3)).blocked(), "below the range");
+        let none = ShadowBlock { min: 0.0, max: packed.ray_tmax(), certain: &walk.tri_certain_blocker };
+        assert!(!packed.accel.trace_shadow(box_below, up, 0.0, packed.ray_tmax(), -1, &none).blocked(), "no bit, no early end");
+
+        // The answer is the full walk's, bit for bit, toward the sky and toward the light.
+        let emitter = packed.tri_material.iter().position(|&m| m == 2).unwrap() as i32;
+        let dirs = [up, vec3f(0.4, 1.0, 0.0), vec3f(-0.4, 1.0, 0.2), vec3f(0.0, 1.0, -0.5), vec3f(0.9, 0.6, 0.3), vec3f(-1.0, 0.25, 0.1)];
+        let (mut lit, mut dark, mut tinted) = (0, 0, 0);
+        for i in 0..15 {
+            for k in 0..15 {
+                let p = vec3f(-1.75 + 0.25 * i as f32, 0.0, -1.75 + 0.25 * k as f32) - packed.origin;
+                let mut rays: Vec<(Vec3f, f32, i32)> = dirs.iter().map(|d| (d.normalize(), packed.ray_tmax(), -1)).collect();
+                for lp in [vec3f(-0.3, 1.8, 0.7), vec3f(0.2, 1.8, 1.3), vec3f(0.4, 1.8, 0.6)] {
+                    let lp = lp - packed.origin;
+                    let dist = (lp - p).length();
+                    rays.push(((lp - p) / dist, dist - ray_error(lp, packed.scene_scale), emitter));
+                }
+                for (rd, tmax, target) in rays {
+                    let a = early.shadow_from_sheet(p, up, rd, tmax, -1, false, target).map(|v| v.transmittance);
+                    let b = full.shadow_from_sheet(p, up, rd, tmax, -1, false, target).map(|v| v.transmittance);
+                    assert_eq!(a, b, "ray from {p:?} along {rd:?}");
+                    match a {
+                        Some(t) if t == vec3f(1.0, 1.0, 1.0) => lit += 1,
+                        Some(t) if t == Vec3f::default() => dark += 1,
+                        _ => tinted += 1,
+                    }
+                }
+            }
+        }
+        assert!(lit > 50 && dark > 50 && tinted > 50, "the fan crosses every case: {lit} lit, {dark} dark, {tinted} through glass");
+
+        // Grazing light rays from a wall just under the light, to points an ulp past its plane
+        // (as a sampled point can land): the ray meets the light early by that over the cosine,
+        // so the margins scale with it (the light itself is no blocker).
+        let wall = packed.accel.tri_order.iter().position(|&o| o as usize == wall_from).unwrap() as i32;
+        let wall_ng = geom_ng(&packed.accel.tris[wall as usize]);
+        let mut grazing = 0;
+        for k in 0..40 {
+            for j in 0..12 {
+                let p = vec3f(-1.0, 1.8 - 2.5e-5 * (1 + k) as f32, 0.4 + 0.1 * j as f32) - packed.origin;
+                let light = &packed.accel.tris[emitter as usize];
+                for (a, b) in [(0.3, 0.3), (0.6, 0.2), (0.2, 0.6), (0.25, 0.15)] {
+                    let lp = light.v0 * (1.0 - a - b) + light.v1 * a + light.v2 * b;
+                    let lp = vec3f(lp.x, f32::from_bits(lp.y.to_bits() + 1), lp.z);
+                    let dist = (lp - p).length();
+                    let rd = (lp - p) / dist;
+                    let tmax = dist - ray_error(lp, packed.scene_scale);
+                    let a = early.shadow_from_sheet(p, wall_ng, rd, tmax, wall, false, emitter).map(|v| v.transmittance);
+                    let b = full.shadow_from_sheet(p, wall_ng, rd, tmax, wall, false, emitter).map(|v| v.transmittance);
+                    assert_eq!(a, b, "grazing ray from {p:?} along {rd:?}");
+                    grazing += usize::from(a == Some(vec3f(1.0, 1.0, 1.0)));
+                }
+            }
+        }
+        assert!(grazing > 100, "grazing rays reach the light: {grazing}");
+
+        // Through the pane to a ledge's edge, an ulp apart: the walk meets the ledge from the
+        // hop's origin, a ray error aside, so a hit that near an edge is no early end.
+        let rd = vec3f(0.25, 1.0, 0.1).normalize();
+        let (mut met, mut missed) = (0, 0);
+        for k in -120..120 {
+            let p = vec3f(f32::from_bits(0.65f32.to_bits().wrapping_add_signed(k)), 0.0, -1.25) - packed.origin;
+            let a = early.shadow_from_sheet(p, up, rd, packed.ray_tmax(), -1, false, -1).map(|v| v.transmittance);
+            let b = full.shadow_from_sheet(p, up, rd, packed.ray_tmax(), -1, false, -1).map(|v| v.transmittance);
+            assert_eq!(a, b, "ray to the ledge's edge from {p:?}");
+            match a {
+                Some(t) if t == vec3f(0.0, 0.0, 0.0) => met += 1,
+                Some(_) => missed += 1,
+                None => {}
+            }
+        }
+        assert!(met > 20 && missed > 20, "the sweep crosses the edge: {met} met, {missed} missed");
+
+        // Through a pane to a card a micrometre behind it: a walk's hop off the glass starts past
+        // the card, so the walk never meets it and no early end may either.
+        let mut through = 0;
+        for i in 0..12 {
+            for k in 0..12 {
+                let p = vec3f(1.12 + 0.03 * i as f32, 0.0, 0.52 + 0.03 * k as f32) - packed.origin;
+                let a = early.shadow_from_sheet(p, up, up, packed.ray_tmax(), -1, false, -1).map(|v| v.transmittance);
+                let b = full.shadow_from_sheet(p, up, up, packed.ray_tmax(), -1, false, -1).map(|v| v.transmittance);
+                assert_eq!(a, b, "ray through a pane to the card behind it from {p:?}");
+                through += usize::from(a.is_some_and(|t| t != vec3f(0.0, 0.0, 0.0)));
+            }
+        }
+        assert!(through > 20, "the walk passes the card: {through}");
     }
 
     #[test]
@@ -2117,7 +2305,7 @@ mod tests {
         let expected_visibility = 0.96f32.powi(4);
         assert!((vis.x - expected_visibility).abs() < 1.0e-3, "closed case: {vis:?}");
         assert_eq!(tracer.stats().glass_shadow_hits, 4, "every real boundary counts");
-        let unoccluded = bsdf_eval(up, up, up, vec3f(0.7, 0.7, 0.7), vec3f(0.04, 0.04, 0.04), 1.0)
+        let unoccluded = bsdf_eval(up, up, up, vec3f(0.7, 0.7, 0.7), vec3f(0.04, 0.04, 0.04), 1.0, 1.0)
             * tracer.sun_irradiance();
         assert!(unoccluded.x > 0.0);
         let pixel = tracer.render(1, 1, 16, 29)[0];

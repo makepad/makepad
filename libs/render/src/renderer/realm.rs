@@ -754,12 +754,28 @@ impl Renderer {
     }
 
     /// Install the error material (hatched magenta) under `name`: what a
-    /// preview shows for a material that did not compile. A host that
-    /// keeps the last good material instead (Sandbox) never calls this.
+    /// preview shows for a material that did not compile, and what a host
+    /// draws for one that failed after it was installed
+    /// ([`Self::take_custom_material_failures`]), which no last good
+    /// material stands in for.
     pub fn install_error_material(&mut self, cx: &mut Cx, name: String) -> bool {
         match cx.try_with_vm(crate::custom_material::DrawSceneCustom::error_material) {
             Some(Ok(material)) => self.install_custom_material(name, material),
             _ => false,
+        }
+    }
+
+    /// Each installed material that turned out not to draw as written since
+    /// the last call, once, with why (a feature variant that did not build,
+    /// or a pipeline the backend's compiler refused, in its own words).
+    /// Such a material draws its stock look meanwhile; a host shows the
+    /// author the reason and may install the error material in its place.
+    /// Every frame: a few lookups per installed material, no allocation.
+    pub fn take_custom_material_failures(&mut self, cx: &Cx, mut failed: impl FnMut(&str, &str)) {
+        for (name, m) in self.custom_draws.iter_mut() {
+            if let Some(why) = m.take_failure(cx) {
+                failed(name, why);
+            }
         }
     }
 

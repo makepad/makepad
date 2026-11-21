@@ -279,6 +279,11 @@ pub struct CustomMaterial {
     /// Problems that did not stop the colour program (a caster that did not
     /// compile casts the stock shadow instead).
     pub warnings: Vec<material::Diagnostic>,
+    /// Why it does not draw as written, once known: a feature variant that
+    /// did not build, or a shader the backend's compiler refused. It draws
+    /// the stock look meanwhile; [`Self::take_failure`] hands it over once.
+    failure: Option<String>,
+    failure_taken: bool,
     /// What builds it again, and the reload walk (`Cx::reload_generation`)
     /// it was built after.
     recipe: Recipe,
@@ -302,7 +307,29 @@ impl CustomMaterial {
             ibl: false,
             texture: None,
             warnings: Vec::new(),
+            failure: None,
+            failure_taken: false,
         }
+    }
+
+    /// Whether this is the error material ([`DrawSceneCustom::error_material`]).
+    pub fn is_error_material(&self) -> bool {
+        matches!(self.recipe, Recipe::Error)
+    }
+
+    /// Why this material does not draw as written (a variant that did not
+    /// build, or a pipeline the backend refused, with the compiler's own
+    /// words), the first time that is known; `None` after, and while it
+    /// draws. A few lookups a frame, no allocation until it fails.
+    pub fn take_failure(&mut self, cx: &Cx) -> Option<&str> {
+        if self.failure_taken { return None; }
+        if self.failure.is_none() {
+            let built = self.variants.values().flatten().flat_map(|&(full, no_clip)| std::iter::once(full).chain(no_clip));
+            let log = self.stock.into_iter().chain(built).find_map(|id| cx.draw_shader_failure(id));
+            self.failure = log.map(|log| format!("the GPU's shader compiler refused it: {}", log.trim()));
+        }
+        self.failure_taken = self.failure.is_some();
+        self.failure.as_deref()
     }
 
     /// The colour program's own shader (the one built for every feature).
@@ -345,11 +372,12 @@ impl CustomMaterial {
             let Some(program) = self.program.clone() else { return (Some(stock), None) };
             let (lit, opaque) = (self.lit(), self.cuts_no_pixel(cx) && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
             let mut built = None;
+            let mut failed = None;
             let mut run = |vm: &mut ScriptVm| {
                 // Only against the heap that owns the program.
                 if vm.heap_key() != program.heap_key() { built = Some(None); return; }
-                let full = build_variant(vm, program.as_object(), stock, features, lit);
-                let no_clip = if opaque { build_variant(vm, program.as_object(), stock, Features { clip: false, ..features }, lit) } else { None };
+                let full = build_variant(vm, program.as_object(), stock, features, lit).unwrap_or_else(|e| { failed = Some(e); None });
+                let no_clip = if opaque { build_variant(vm, program.as_object(), stock, Features { clip: false, ..features }, lit).ok().flatten() } else { None };
                 built = Some(full.map(|full| (full, no_clip)));
             };
             let ran = match &self.host_vm {
@@ -359,6 +387,10 @@ impl CustomMaterial {
             match built {
                 Some(built) if ran => { self.variants.insert(features, built); }
                 _ => return (Some(stock), None),
+            }
+            if let Some(e) = failed {
+                // Drawn stock meanwhile: its host hears why (`take_failure`).
+                self.failure.get_or_insert_with(|| format!("it did not build for this frame's lighting: {e}"));
             }
         }
         match self.variants[&features] {
@@ -397,15 +429,15 @@ impl CustomMaterial {
 }
 
 /// `program`'s variant for `features` (the stock shader when it replaces
-/// nothing), `None` when it does not build or its layout differs.
-fn build_variant(vm: &mut ScriptVm, program: ScriptObject, stock: DrawShaderId, features: Features, lit: bool) -> Option<DrawShaderId> {
-    let Some(obj) = variants::variant_object(vm, program, features, lit) else { return Some(stock) };
-    let variant = instance_custom(vm, obj).ok()?.draw_vars.draw_shader_id?;
+/// nothing), `None` when its layout differs, the error when it does not build.
+fn build_variant(vm: &mut ScriptVm, program: ScriptObject, stock: DrawShaderId, features: Features, lit: bool) -> Result<Option<DrawShaderId>, MaterialError> {
+    let Some(obj) = variants::variant_object(vm, program, features, lit) else { return Ok(Some(stock)) };
+    let Some(variant) = instance_custom(vm, obj)?.draw_vars.draw_shader_id else { return Ok(None) };
     if !variants::same_layout(vm.cx(), stock, variant) {
         log!("render: a material's variant {features:?} has another layout than its shader; drawing through that");
-        return None;
+        return Ok(None);
     }
-    Some(variant)
+    Ok(Some(variant))
 }
 
 /// Build one program object on the lane and instance a draw struct from it.
@@ -417,7 +449,7 @@ fn instance_custom(vm: &mut ScriptVm, obj: ScriptObject) -> Result<DrawSceneCust
     draw.draw_vars.geometry_id = None;
     draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
     if !draw.draw_vars.can_instance() {
-        let detail = makepad_draw::makepad_platform::shader_error::take().unwrap_or_else(|| "see the shader diagnostic in the app log".into());
+        let detail = makepad_draw::makepad_platform::shader_error::take().unwrap_or_else(|| "the compiler gave no message".into());
         return Err(MaterialError::new(format!("the material's shader did not build: {detail}")));
     }
     Ok(draw)
@@ -760,7 +792,7 @@ mod tests {
             // the stock layout (build_variant checks it).
             let all = Features { clip: false, gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, reflections: false };
             for features in [all, Features::default()] {
-                let variant = build_variant(vm, program, stock, features, true).expect("the stock layout");
+                let variant = build_variant(vm, program, stock, features, true).ok().flatten().expect("the stock layout");
                 assert_ne!(stock, variant);
             }
             assert_eq!(m.shadow, None, "no displacement, no mask: the stock caster");
@@ -827,7 +859,7 @@ mod tests {
             for m in [&unlit, &error] {
                 let program = m.program.as_ref().unwrap().as_object();
                 let lit_on = Features { clip: true, csm: true, cluster: true, local_shadows: true, ..Default::default() };
-                assert!(build_variant(vm, program, m.stock_shader().unwrap(), lit_on, m.lit()).is_some_and(|v| Some(v) != m.stock_shader()));
+                assert!(build_variant(vm, program, m.stock_shader().unwrap(), lit_on, m.lit()).ok().flatten().is_some_and(|v| Some(v) != m.stock_shader()));
             }
             assert!(vm.take_errors().is_empty());
         });

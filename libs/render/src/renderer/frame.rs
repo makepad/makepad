@@ -444,12 +444,13 @@ impl Renderer {
             Some(batch) => self.pack_skin_palettes(cx.cx, &batch.items, &mut stats),
             None => self.skin_joint_bases.clear(),
         }
-        let mut lm_movers = if tiers.csm || local_shadows {
+        // The frame's caster lists reuse the renderer's buffers (taken here, put back below).
+        let mut lm_movers = std::mem::take(&mut self.frame_movers);
+        lm_movers.clear();
+        if tiers.csm || local_shadows {
             self.ensure_entity_caster_geometries(cx.cx);
-            self.collect_lm_movers(world, eye_pos, lod_scale, skinned.as_ref().map(|b| b.items.as_slice()))
-        } else {
-            Vec::new()
-        };
+            self.collect_lm_movers(world, eye_pos, lod_scale, skinned.as_ref().map(|b| b.items.as_slice()), &mut lm_movers);
+        }
         if tiers.csm && !self.world_atlas_required() {
             self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
         }
@@ -511,15 +512,19 @@ impl Renderer {
         stats.csm_gpu_ms = self.gpu_baker.csm_gpu_ms();
         if self.clustered_enabled {
             self.clustered.update(cx.cx, &self.frame_lights, cluster_view);
-            let statics = if local_shadows {
+            let mut statics = std::mem::take(&mut self.frame_local_statics);
+            statics.clear();
+            if local_shadows {
                 if !(tiers.csm && !self.world_atlas_required()) {
                     self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
                 }
-                self.collect_local_static_casters(cx.cx, world)
-            } else { Vec::new() };
+                self.collect_local_static_casters(cx.cx, world, &mut statics);
+            }
             self.clustered.render_shadows(cx.cx, camera_pos, &statics, &lm_movers);
             stats.clustered = self.clustered.stats();
+            self.frame_local_statics = statics;
         }
+        self.frame_movers = lm_movers;
         if !self.review_gi { self.gi.flush_retired(cx.cx); }
         if !self.review_gi && self.gi.mode()!=crate::GiMode::Off && self.clustered_enabled && cx.gpu_info().float_color_targets {
             self.run_fast_gi(cx, world, camera_pos, &scene_state, skinned.as_ref().map(|b| b.items.as_slice()), &sun, &mut stats);

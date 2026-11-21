@@ -2,7 +2,7 @@
 //! rounds or bevels.
 
 use crate::hash::Hasher;
-use crate::P3;
+use crate::{Key, P3};
 use makepad_csg_cad as cad;
 use makepad_csg_math::dvec3;
 use makepad_csg_mesh::mesh::TriMesh;
@@ -45,10 +45,128 @@ pub struct EdgeFilter {
     pub near: Option<P3>,
 }
 
-/// Edges picked by any of its filters; no filters: every sharp edge.
+/// A face of an exact body by name: the step that made it (its key) and its role there. Names
+/// never come from ids or order: a generator names its fresh faces by role, a modifying step
+/// carries its inputs' names to the faces that come from them and names the faces it makes by
+/// what they come from.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FaceName {
+    pub origin: Key,
+    pub role: Role,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Role {
+    /// A generator's own face.
+    Named(Face),
+    /// The side an extrude, revolve or sweep made from sketch segment `i`.
+    Side(u32),
+    /// A shell's inner face: every one is `s.inner`, and each also `s.inner(<outer>)`, the
+    /// outer face it is offset from.
+    Inner(Option<Box<FaceName>>),
+    /// A fillet's or chamfer's face along the edge between two named faces, the two in order
+    /// (`r.face(edge(a, b))`); every piece of a split edge has it.
+    Blend(Box<FaceName>, Box<FaceName>),
+    /// The patch where several blends of one step meet: the input faces round it, in order
+    /// (`r.corner(a, b, c)`).
+    Corner(Vec<FaceName>),
+}
+
+/// A generator's faces: `top bottom left right front back` (box), `wall top bottom` (cylinder,
+/// cone), `wall` (sphere, torus), `top bottom` (extrude), `start end` (revolve, sweep, loft),
+/// `cut` (a split's halves).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Face {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Front,
+    Back,
+    Wall,
+    Start,
+    End,
+    /// The faces a split's plane cut.
+    Cut,
+}
+
+impl Face {
+    pub const ALL: [Face; 10] = [Face::Top, Face::Bottom, Face::Left, Face::Right, Face::Front, Face::Back, Face::Wall, Face::Start, Face::End, Face::Cut];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Face::Top => "top",
+            Face::Bottom => "bottom",
+            Face::Left => "left",
+            Face::Right => "right",
+            Face::Front => "front",
+            Face::Back => "back",
+            Face::Wall => "wall",
+            Face::Start => "start",
+            Face::End => "end",
+            Face::Cut => "cut",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Face> {
+        Face::ALL.into_iter().find(|f| f.name() == name)
+    }
+}
+
+impl FaceName {
+    pub(crate) fn hash(&self, h: &mut Hasher) {
+        h.bytes(&self.origin);
+        match &self.role {
+            Role::Named(f) => {
+                h.u(0);
+                h.u(*f as u64);
+            }
+            Role::Side(i) => {
+                h.u(1);
+                h.u(*i as u64);
+            }
+            Role::Inner(of) => {
+                h.u(2);
+                match of {
+                    Some(n) => {
+                        h.u(1);
+                        n.hash(h);
+                    }
+                    None => h.u(0),
+                }
+            }
+            Role::Blend(a, b) => {
+                h.u(3);
+                a.hash(h);
+                b.hash(h);
+            }
+            Role::Corner(round) => {
+                h.u(4);
+                h.u(round.len() as u64);
+                for n in round {
+                    n.hash(h);
+                }
+            }
+        }
+    }
+}
+
+/// An edge by name: where a face named `a` meets one named `b`, every piece of it; `near` keeps
+/// the piece nearest a point; `chain` adds the edges continuing it tangent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgeName {
+    pub a: FaceName,
+    pub b: FaceName,
+    pub near: Option<P3>,
+    pub chain: bool,
+}
+
+/// Edges picked by any of its filters or names; neither: every sharp edge. Names pick only on
+/// an exact body.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EdgeSel {
     pub any: Vec<EdgeFilter>,
+    pub named: Vec<EdgeName>,
 }
 
 impl EdgeSel {
@@ -56,7 +174,25 @@ impl EdgeSel {
         EdgeSel::default()
     }
 
+    /// No filter and no name: every sharp edge.
+    pub fn is_all(&self) -> bool {
+        self.any.is_empty() && self.named.is_empty()
+    }
+
     pub(crate) fn hash(&self, h: &mut Hasher) {
+        h.u(self.named.len() as u64);
+        for n in &self.named {
+            n.a.hash(h);
+            n.b.hash(h);
+            match n.near {
+                Some(p) => {
+                    h.u(1);
+                    h.p3(p);
+                }
+                None => h.u(0),
+            }
+            h.u(n.chain as u64);
+        }
         h.u(self.any.len() as u64);
         for f in &self.any {
             h.u(f.top as u64);
@@ -100,6 +236,9 @@ impl EdgeSel {
 
     /// The chains of `mesh` it picks; an error lists the edges there are when none match.
     pub fn select<'a>(&self, mesh: &TriMesh, chains: &'a [cad::EdgeChain]) -> Result<Vec<&'a cad::EdgeChain>, String> {
+        if !self.named.is_empty() {
+            return Err("an edge named by its faces (m.edge(a, b)) picks only on an exact body (m.brep)".into());
+        }
         if self.any.is_empty() {
             return Ok(chains.iter().collect());
         }

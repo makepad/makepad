@@ -795,12 +795,17 @@ fn tags_cross_the_exact_body_engine_boundary() {
             Ok(self.meshes[&key].clone())
         }
         fn measure(&self, _: Vec<BrepStep>) -> Result<BrepMeasure, BrepFailure> {
-            Err(BrepFailure { step: None, message: "fixture has only tessellations".into() })
+            Err(BrepFailure { step: None, lost: None, message: "fixture has only tessellations".into() })
         }
         fn entities(&self, _: Vec<BrepStep>) -> Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepFailure> {
-            Err(BrepFailure { step: None, message: "fixture has only tessellations".into() })
+            Err(BrepFailure { step: None, lost: None, message: "fixture has only tessellations".into() })
+        }
+        fn at(&self, _: Vec<BrepStep>, _: [f64; 3], _: f64) -> Result<BrepAt, BrepFailure> {
+            Err(BrepFailure { step: None, lost: None, message: "fixture has only tessellations".into() })
         }
         fn built(&self, _: &[Key]) -> bool { false }
+        fn taken(&self, _: Key) -> Option<Vec<BrepTaken>> { None }
+        fn note(&self, _: Key) -> Option<StepNote> { None }
     }
     let mut g = Graph::new();
     let body = g.push(Op::Brep { op: BrepOp::Box { size: [1.0; 3] }, inputs: Vec::new() }).unwrap();

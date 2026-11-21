@@ -20,12 +20,15 @@ pub enum BrepError {
     Cancelled,
     /// The kernel recursed past its stack limit, or panicked on an internal invariant.
     Internal(String),
+    /// A selector names nothing on the body any more: `index` is its place among the names the
+    /// step selects by (its named edges, or the faces it leaves open).
+    Lost { index: usize, message: String },
 }
 
 impl std::fmt::Display for BrepError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BrepError::Kernel(m) | BrepError::Input(m) => f.write_str(m),
+            BrepError::Kernel(m) | BrepError::Input(m) | BrepError::Lost { message: m, .. } => f.write_str(m),
             BrepError::Cancelled => f.write_str("cancelled by a newer edit"),
             BrepError::Internal(m) => write!(f, "the kernel gave up: {m}"),
         }
@@ -73,6 +76,15 @@ impl CancelToken {
 /// stack size.
 pub fn guarded<T>(stack: usize, cancel: &CancelToken, tick: Option<fn()>, f: impl FnOnce() -> Result<T, BrepError>) -> Result<T, BrepError> {
     let _armed = limits::arm(stack.saturating_sub(STACK_MARGIN).max(1), cancel.flag(), tick);
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(payload) => Err(from_panic(payload)),
+    }
+}
+
+/// `f` with its panics as errors (a cancel too), inside a [`guarded`] call: for work whose
+/// failure need not end the call (the faces' names a listing can do without).
+pub(crate) fn caught<T>(f: impl FnOnce() -> Result<T, BrepError>) -> Result<T, BrepError> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(payload) => Err(from_panic(payload)),

@@ -18,6 +18,7 @@ mod hash;
 pub use eval::{text_width, Evaluator, Failure, PRINT_CHORD};
 pub use makepad_csg_cad::{Seg, Shape, Sketch, Tolerance};
 pub use makepad_csg_cad::bool3::disjoint_tool_bounds;
+pub use makepad_csg_cad::split::{NoRoom as SplitNoRoom, Piece as SplitPiece, Pins as SplitPins};
 pub use makepad_csg_mesh::mesh::TriMesh;
 pub use makepad_csg_mesh::subdiv;
 
@@ -113,11 +114,13 @@ pub enum HoleKind {
 }
 
 /// Which face a shell leaves open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Open {
     Top,
     Bottom,
     Closed,
+    /// The faces with these names (an exact body only).
+    Faces(Vec<edges::FaceName>),
 }
 
 /// A mirror plane through a point: `Yz` flips X, `Xz` flips Y, `Xy` flips Z.
@@ -155,6 +158,11 @@ pub enum BrepOp {
     Offset { distance: f64 },
     /// Scale, then rotate X, Y, Z (degrees), then move by `at`.
     Place { at: P3, rotate: P3, scale: P3 },
+    /// The mirror image across the plane through `center`; `keep` joins it with the original.
+    Mirror { plane: MirrorPlane, center: P3, keep: bool },
+    /// One piece of the input split by the plane through `center` facing `normal`, with `pins`
+    /// across the cut ([`makepad_csg_cad::split`]); the cut's faces are named `cut`.
+    Split { center: P3, normal: P3, piece: SplitPiece, pins: SplitPins },
 }
 
 /// One step of a body's recipe: everything it takes, by key.
@@ -195,6 +203,45 @@ pub struct BrepEntity {
     pub smooth: bool,
     /// An arc's radius.
     pub radius: Option<f64>,
+    /// A face's names (see [`edges::FaceName`]).
+    pub names: Vec<edges::FaceName>,
+    /// An edge's two faces, by their `id`.
+    pub faces: Vec<u32>,
+    /// An edge's curve sampled from end to end, finely enough to draw (a line: its two ends);
+    /// none for a face.
+    pub points: Vec<P3>,
+}
+
+/// What of an exact body is at a point (see [`BrepEngine::at`]). Ids as
+/// [`BrepEngine::entities`] lists them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BrepAt {
+    /// The face nearest the point.
+    pub face: Option<u32>,
+    /// How far the point is from that face (mm).
+    pub off: f64,
+    /// The sharp edge nearest the point, within the reach asked.
+    pub edge: Option<u32>,
+    /// That edge and the edges continuing it tangent at shared ends, it first.
+    pub chain: Vec<u32>,
+}
+
+/// What one written selection of a step took when the step was built: an edge named by its two
+/// faces (`edge(top, front)`, its `near` piece or its chain), or a face to leave open (`top`).
+/// A selection that takes another count or kind of entity than at the last build drifted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrepTaken {
+    /// The selection by the names it gives (no binding): `edge(top, front)`, `side(2)`.
+    pub named: String,
+    /// The kind of each entity it took, sorted: `line`, `circle`, `curve`; a face's surface.
+    pub kinds: Vec<&'static str>,
+}
+
+/// What building a step leaves to tell besides its body: a split whose cut had no room for the
+/// pins it asked for (the radius tried, and the largest that would stand).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StepNote {
+    SplitWithoutPins(SplitNoRoom),
 }
 
 /// A step that failed: which one and why.
@@ -202,6 +249,9 @@ pub struct BrepEntity {
 pub struct BrepFailure {
     /// The failing step's key; `None` when it isn't one step's fault.
     pub step: Option<Key>,
+    /// The step failed because a selector names nothing on its body any more: the selector's
+    /// place among the names the step selects by (its named edges, or the faces it leaves open).
+    pub lost: Option<usize>,
     pub message: String,
 }
 
@@ -213,9 +263,18 @@ pub trait BrepEngine: Send + Sync {
     fn measure(&self, steps: Vec<BrepStep>) -> Result<BrepMeasure, BrepFailure>;
     /// Its exact (edges, faces).
     fn entities(&self, steps: Vec<BrepStep>) -> Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepFailure>;
+    /// What of the last step's body is at point `p` (its frame, on or near its surface): the
+    /// face nearest it, and the sharp edge within `reach` mm nearest it with its tangent chain.
+    fn at(&self, steps: Vec<BrepStep>, p: P3, reach: f64) -> Result<BrepAt, BrepFailure>;
     /// Whether the engine holds the body of every step keyed in `keys`: a recipe of those steps
     /// builds nothing. Answered at once, whatever the engine is building.
     fn built(&self, keys: &[Key]) -> bool;
+    /// What the written selections of step `key` took when it was built, in the order written;
+    /// `None` when the engine does not hold its body. Answered at once, building nothing.
+    fn taken(&self, key: Key) -> Option<Vec<BrepTaken>>;
+    /// What building step `key` noted, kept past its body (a mesh made from it may still show);
+    /// `None` for a step built without a note. Answered at once, building nothing.
+    fn note(&self, key: Key) -> Option<StepNote>;
 }
 
 /// One operation. Positions of generators are their own frame (centred on the
@@ -227,6 +286,9 @@ pub enum Op {
     Box { size: P3, radius: f64 },
     /// The convex hull of points, with exact facets and outward winding.
     Hull { points: Vec<P3> },
+    /// The convex hull of the sources' mesh vertices and `points`: parts wrapped in one convex
+    /// skin (a draft-dependent source makes it one too).
+    HullOf { sources: Vec<NodeId>, points: Vec<P3> },
     /// Skin planar rings of equal point count, with flat caps fanned from the end origins.
     /// `prism` marks a two-ring straight extrusion with sharp outline corners for exact back ends.
     RingLoft { rings: Vec<Ring>, prism: bool },
@@ -252,6 +314,9 @@ pub enum Op {
     /// Holes drilled from each `at` along `dir` (into the material); depth none: through.
     Hole { source: NodeId, kind: HoleKind, diameter: f64, depth: Option<f64>, at: Vec<P3>, dir: P3 },
     Mirror { source: NodeId, plane: MirrorPlane, center: P3, keep: bool },
+    /// One piece of `source` split by the plane through `center` facing `normal`, with `pins`
+    /// across the cut ([`makepad_csg_cad::split`]).
+    Split { source: NodeId, center: P3, normal: P3, piece: SplitPiece, pins: SplitPins },
     /// Walls of `thickness`; the cavity is meshed from the source's distance at `cell`.
     Shell { source: NodeId, thickness: f64, open: Open, cell: Option<f64> },
     /// The surface moved out by `distance` (in, negative), meshed from the source's distance at `cell`.
@@ -281,10 +346,11 @@ impl Op {
     /// The nodes it reads.
     pub fn inputs(&self) -> Vec<NodeId> {
         match self {
-            Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Shell { source, .. } | Op::Offset { source, .. } | Op::Transform { source, .. } | Op::Tag { source, .. } => vec![*source],
+            Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Split { source, .. } | Op::Shell { source, .. } | Op::Offset { source, .. } | Op::Transform { source, .. } | Op::Tag { source, .. } => vec![*source],
             Op::Boolean { a, b, .. } => std::iter::once(*a).chain(b.iter().copied()).collect(),
             Op::Gear { mesh_with: Some((g, _)), .. } => vec![*g],
             Op::Brep { inputs, .. } => inputs.clone(),
+            Op::HullOf { sources, .. } => sources.clone(),
             _ => Vec::new(),
         }
     }
@@ -293,6 +359,7 @@ impl Op {
         match self {
             Op::Box { .. } => "box",
             Op::Hull { .. } => "hull",
+            Op::HullOf { .. } => "hull_of",
             Op::RingLoft { .. } => "ring_loft",
             Op::Sphere { .. } => "sphere",
             Op::Cylinder { .. } => "cylinder",
@@ -308,6 +375,7 @@ impl Op {
             Op::Chamfer { .. } => "chamfer",
             Op::Hole { .. } => "hole",
             Op::Mirror { .. } => "mirror",
+            Op::Split { .. } => "split",
             Op::Shell { .. } => "shell",
             Op::Offset { .. } => "offset",
             Op::Boolean { mode: BoolMode::Union, .. } => "union",
@@ -377,6 +445,12 @@ impl Graph {
                 h.f(*radius);
             }
             Op::Hull { points } => {
+                h.u(points.len() as u64);
+                points.iter().for_each(|p| h.p3(*p));
+            }
+            Op::HullOf { sources, points } => {
+                h.u(sources.len() as u64);
+                sources.iter().for_each(|s| child(&mut h, *s));
                 h.u(points.len() as u64);
                 points.iter().for_each(|p| h.p3(*p));
             }
@@ -528,10 +602,34 @@ impl Graph {
                 h.p3(*center);
                 h.u(*keep as u64);
             }
+            Op::Split { source, center, normal, piece, pins } => {
+                child(&mut h, *source);
+                h.p3(*center);
+                h.p3(*normal);
+                h.u(*piece as u64);
+                h.u(pins.count as u64);
+                h.opt(pins.radius);
+                h.opt(pins.depth);
+                h.u(pins.dowels as u64);
+                h.f(pins.clearance);
+                h.f(pins.clearance_end);
+                h.f(pins.wall);
+            }
             Op::Shell { source, thickness, open, cell } => {
                 child(&mut h, *source);
                 h.f(*thickness);
-                h.u(*open as u64);
+                match open {
+                    Open::Top => h.u(0),
+                    Open::Bottom => h.u(1),
+                    Open::Closed => h.u(2),
+                    Open::Faces(names) => {
+                        h.u(3);
+                        h.u(names.len() as u64);
+                        for n in names {
+                            n.hash(&mut h);
+                        }
+                    }
+                }
                 h.opt(*cell);
             }
             Op::Offset { source, distance, cell } => {

@@ -89,6 +89,13 @@ pub fn place(k: &mut Kernel, b: &mut Body, at: [f64; 3], rotate: [f64; 3]) -> Re
     Ok(())
 }
 
+/// Moves a body by a frame: X to `x`, Y to `y`, Z to their cross product (`x`, `y` unit and
+/// square), then to `at`.
+pub fn place_frame(k: &mut Kernel, b: &mut Body, at: [f64; 3], x: [f64; 3], y: [f64; 3]) -> Result<(), BrepError> {
+    p5::transform(k, b, &Axis2Placement::new(p3d(at), v3d(x), v3d(y)), None, false)?;
+    Ok(())
+}
+
 /// Scales a body about the origin by (x, y, z), uniform or not.
 pub fn scale(k: &mut Kernel, b: &mut Body, factor: [f64; 3]) -> Result<(), BrepError> {
     p5::transform(k, b, &Axis2Placement::IDENTITY, Some(v3d(factor)), true)?;

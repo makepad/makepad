@@ -6,6 +6,11 @@
 //! the events (hard contacts, limit hits) for haptics. The sim wakes the UI (the `wake` it was
 //! started with) when it publishes news after the UI took the news ([`Runner::take_news`]): a view
 //! that goes idle takes it, and no state it believes the sim is in can leave it asleep over news.
+//! A led clock lets another simulator set the total number of steps the runner may take; a [`Leader`]
+//! hands a running runner such a lead (with its probes) or gives it back to the wall clock.
+//! Motion probes deliver specific force and angular rate in body-fixed axes after every step on the sim thread.
+//! A lead's [`PoseRecord`] keeps the parts' poses after each step it allows, so a view can draw the
+//! instant the leader shows rather than the newest step.
 
 use crate::dyn_world::{DynWorld, Reset};
 use makepad_dynamics::thread::TaskPool;
@@ -13,6 +18,7 @@ use crate::geom::*;
 use crate::sim::{AnchorKind, Assembly, BodyAction, JointKind, MechWorld, Pose, StringPath};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +44,171 @@ pub const POINTER_HZ: f64 = 60.0;
 /// A hand's hold: firm enough that the part keeps up with the hand (Hz; well under a quarter of
 /// the substep rate, so it stays stable).
 pub const HAND_HZ: f64 = 60.0;
+
+/// How the runner paces its steps.
+#[derive(Clone, Debug)]
+pub enum Clock {
+    /// Real time (or slowed, by [`Command::Speed`]), as before.
+    Wall,
+    /// Another simulator leads: the atomic holds how many steps the runner may have taken since it started
+    /// (or since it took a [`Lead`]).
+    /// It takes every one of them, as fast as it can, and never more; Play, Pause, Step and Speed do not
+    /// pace it (the leader owns the play state). Reset rebuilds the world and the count goes on.
+    Led(Arc<AtomicU64>),
+}
+
+/// A point and an orthonormal frame fixed on a body, in the model frame as printed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Probe {
+    /// Assembly body index.
+    pub body: usize,
+    /// Sampling point as printed, in mm.
+    pub at: P3,
+    /// Directions of the probe's x, y and z axes as printed.
+    pub axes: [P3; 3],
+}
+
+/// One probe after one step, in the probe's axes: specific force (acceleration less the scene's gravity,
+/// mm/s^2: what an accelerometer reads) and angular rate (rad/s: what a gyro reads).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ProbeSample {
+    /// The step's mean specific force in mm/s^2.
+    pub specific_force: P3,
+    /// Angular rate at the end of the step in rad/s.
+    pub rate: P3,
+}
+
+/// Called on the sim thread after every step with the step's number (1 for the first step since the
+/// runner started) and one sample per probe, in the probes' order. It runs every step: it must not
+/// allocate or wait (an app writes into memory it prepared, such as a preallocated track).
+pub type ProbeSink = Box<dyn FnMut(u64, &[ProbeSample]) + Send>;
+
+/// The probes to sample together and the sink that receives their readings.
+pub struct Probes {
+    /// Probes in sample order. A probe with an out-of-range body is dropped at startup.
+    pub probes: Vec<Probe>,
+    /// Receives the readings after each step.
+    pub sink: ProbeSink,
+}
+
+/// How a runner starts; the default is a wall clock, no floor, no pool, no probes.
+pub struct Options {
+    /// Floor level across gravity, as in [`MechWorld::new`].
+    pub floor: Option<f64>,
+    /// The app's workpool for the dynamics engine's parallel work.
+    pub pool: Option<Arc<dyn TaskPool>>,
+    /// Determines when the runner may step.
+    pub clock: Clock,
+    /// Motion probes and their sim-thread sink.
+    pub probes: Option<Probes>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { floor: None, pool: None, clock: Clock::Wall, probes: None }
+    }
+}
+
+/// Another simulator taking the lead of a running runner ([`Runner::leader`]): the steps it allows,
+/// counted from when the runner takes this lead, the probes the runner samples from then, and
+/// where it records the parts' poses after each of those steps.
+pub struct Lead {
+    pub allowed: Arc<AtomicU64>,
+    pub probes: Probes,
+    pub poses: Option<Arc<PoseRecord>>,
+}
+
+/// The parts' poses after each step of a lead ([`Lead::poses`]), by step number (the lead's own, 1
+/// the first, unless the record is told to go on from another: [`PoseRecord::number_from`]), kept
+/// from the floor its reader sets ([`PoseRecord::keep_from`]) to the newest: a view of the
+/// leader's instant draws the parts as they were then, and a review of an earlier instant finds
+/// them while the floor is at or before it. One record can go on over several leads of one runner.
+///
+/// Past its byte budget the older half of the kept steps thins to every other step: the span
+/// stays and its resolution falls (the oldest the most), logged the first time.
+///
+/// Cost: the sim thread records one pose per part each step (one allocation; the lock held for a
+/// push, the drops below the floor and, once per quarter budget's growth, an O(kept) thinning);
+/// a reader copies one step's poses under a try-lock, O(log kept) to find it.
+pub struct PoseRecord {
+    kept: Mutex<VecDeque<(u64, Vec<Pose>)>>,
+    floor: AtomicU64,
+    first: AtomicU64,
+    bytes: usize,
+    thinned: AtomicBool,
+}
+
+impl PoseRecord {
+    /// A record that keeps about `bytes` of poses at full resolution.
+    pub fn new(bytes: usize) -> PoseRecord {
+        PoseRecord { kept: Mutex::new(VecDeque::new()), floor: AtomicU64::new(0), first: AtomicU64::new(1), bytes, thinned: AtomicBool::new(false) }
+    }
+
+    /// A lead handed this record from now on records its first step as step `first` (1 until
+    /// told), and on from there: the steps kept at or after it go as it records that one (they
+    /// were past the instant the record goes on from).
+    pub fn number_from(&self, first: u64) {
+        self.first.store(first, Ordering::Release);
+    }
+
+    /// Steps before `step` may go: the sim thread drops them as it records the next. The newest
+    /// is always kept.
+    pub fn keep_from(&self, step: u64) {
+        self.floor.store(step, Ordering::Release);
+    }
+
+    /// The poses after the newest kept step at or before `step` (the first kept for an earlier
+    /// one) and that step's number. None while nothing is recorded, or while the sim thread
+    /// records (a reader never waits; it asks again on its next frame).
+    pub fn at(&self, step: u64) -> Option<(u64, Vec<Pose>)> {
+        let kept = self.kept.try_lock().ok()?;
+        let i = kept.partition_point(|(s, _)| *s <= step).saturating_sub(1);
+        kept.get(i).map(|(s, poses)| (*s, poses.clone()))
+    }
+
+    fn record(&self, step: u64, poses: Vec<Pose>) {
+        let floor = self.floor.load(Ordering::Acquire);
+        let each = std::mem::size_of::<(u64, Vec<Pose>)>() + poses.len() * std::mem::size_of::<Pose>();
+        let Ok(mut kept) = self.kept.lock() else { return };
+        while kept.back().is_some_and(|(s, _)| *s >= step) {
+            kept.pop_back();
+        }
+        kept.push_back((step, poses));
+        while kept.len() > 1 && kept.front().is_some_and(|(s, _)| *s < floor) {
+            kept.pop_front();
+        }
+        if kept.len() * each > self.bytes {
+            let half = kept.len() / 2;
+            let mut i = 0;
+            kept.retain(|_| {
+                let keep = i == 0 || i >= half || i % 2 == 0;
+                i += 1;
+                keep
+            });
+            if !self.thinned.swap(true, Ordering::Relaxed) {
+                // Through the engine's log handler, which the app points at its log.
+                makepad_dynamics::util_errmem::warning_text(&format!("mech-sim: the pose record reached {} MB; its older steps thin (the span stays)", self.bytes >> 20));
+            }
+        }
+    }
+}
+
+/// Hands a running runner a lead, or gives it back to the wall clock, from any thread
+/// ([`Runner::leader`]). The runner takes the newest one up between two steps, at its next loop:
+/// its step count starts again at zero (the probes' sink sees step 1 first), and the probes it had
+/// are dropped on its thread. The world goes on as it was.
+#[derive(Clone)]
+pub struct Leader(Arc<Mutex<Option<Option<Lead>>>>);
+
+impl Leader {
+    /// `Some`: the runner steps only as the lead allows, sampling its probes; None: back to the wall
+    /// clock with no probes. Takes the slot's lock, which the runner holds only to take a lead.
+    pub fn set(&self, lead: Option<Lead>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(lead);
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -155,6 +326,8 @@ pub struct Runner {
     held: Arc<Snapshot>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Where another simulator hands the sim thread a lead ([`Runner::leader`]).
+    leader: Leader,
 }
 
 /// A rigid motion, a turn (a unit quaternion: w, x, y, z) and then a move, as the held ground
@@ -367,6 +540,14 @@ impl Engine {
         on!(self, w => w.poses())
     }
 
+    fn point_velocity(&self, body: usize, at: P3) -> (P3, P3) {
+        on!(self, w => w.point_velocity(body, at))
+    }
+
+    fn orientation(&self, body: usize) -> [f64; 4] {
+        on!(self, w => w.orientation(body))
+    }
+
     pub(crate) fn angles(&mut self, asm: &Assembly) -> Vec<f64> {
         on!(self, w => w.angles(asm))
     }
@@ -409,6 +590,71 @@ impl Engine {
         } else {
             Ok(Engine::Mech(MechWorld::new(asm, gravity, floor)))
         }
+    }
+}
+
+/// Rotate by a pose quaternion (x, y, z, w) in f64.
+fn rotate_q([x, y, z, w]: [f64; 4], p: P3) -> P3 {
+    let v = [x, y, z];
+    let u = scale(cross(v, p), 2.0);
+    add(madd(p, u, w), cross(v, u))
+}
+
+struct ProbeSampler {
+    probes: Vec<Probe>,
+    sink: ProbeSink,
+    samples: Vec<ProbeSample>,
+    prev_v: Vec<P3>,
+    prev_q: Vec<[f64; 4]>,
+}
+
+impl ProbeSampler {
+    fn new(Probes { mut probes, sink }: Probes, bodies: usize, world: &Engine) -> Self {
+        let count = probes.len();
+        probes.retain(|probe| probe.body < bodies);
+        let n = probes.len();
+        if n < count {
+            makepad_dynamics::util_errmem::warning_text(&format!("mech-sim: dropped {} probes with out-of-range bodies", count - n));
+        }
+        let mut sampler = Self {
+            probes,
+            sink,
+            samples: vec![ProbeSample::default(); n],
+            prev_v: vec![[0.0; 3]; n],
+            prev_q: vec![[0.0; 4]; n],
+        };
+        sampler.reset(world);
+        sampler
+    }
+
+    fn reset(&mut self, world: &Engine) {
+        for (i, probe) in self.probes.iter().enumerate() {
+            self.prev_v[i] = world.point_velocity(probe.body, probe.at).0;
+            self.prev_q[i] = world.orientation(probe.body);
+        }
+    }
+
+    fn sample(&mut self, world: &Engine, step: u64, dt: f64, gravity: P3) {
+        for (i, probe) in self.probes.iter().enumerate() {
+            let (v, angular) = world.point_velocity(probe.body, probe.at);
+            let q = world.orientation(probe.body);
+            let f = sub(scale(sub(v, self.prev_v[i]), 1.0 / dt), gravity);
+            // Express the velocity change in the axes at mid-step. The end orientation would
+            // mix the step's turn (order omega * dt) into the accelerometer; the midpoint cancels it to first order.
+            let prev = self.prev_q[i];
+            let dot4: f64 = prev.iter().zip(q).map(|(a, b)| a * b).sum();
+            let sign = if dot4 < 0.0 { -1.0 } else { 1.0 };
+            let mid: [f64; 4] = std::array::from_fn(|j| prev[j] + sign * q[j]);
+            let norm = mid.iter().map(|a| a * a).sum::<f64>().sqrt();
+            let mid = mid.map(|a| a / norm);
+            self.samples[i] = ProbeSample {
+                specific_force: probe.axes.map(|axis| dot(f, rotate_q(mid, axis))),
+                rate: probe.axes.map(|axis| dot(angular, rotate_q(q, axis))),
+            };
+            self.prev_v[i] = v;
+            self.prev_q[i] = q;
+        }
+        (self.sink)(step, &self.samples);
     }
 }
 
@@ -464,12 +710,11 @@ impl Runner {
     /// Start the sim thread, paused at the print pose. The sim calls `wake` (on its thread) when it
     /// publishes news the UI has not taken yet: an app passes its signal to the UI thread.
     pub fn start(asm: Assembly, gravity: P3, wake: impl Fn() + Send + 'static) -> Runner {
-        Self::start_with_floor(asm, gravity, None, None, wake)
+        Self::start_with(asm, gravity, Options::default(), wake)
     }
 
-    /// [`Runner::start`] with a floor across gravity (`MechWorld::new`'s level), for a piece that rests on the bed,
-    /// and the app's workpool for the dynamics engine's parallel work, which the sim thread helps with.
-    pub fn start_with_floor(asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn TaskPool>>, wake: impl Fn() + Send + 'static) -> Runner {
+    /// [`Runner::start`] with a choice of clock, floor, dynamics workpool and motion probes.
+    pub fn start_with(asm: Assembly, gravity: P3, options: Options, wake: impl Fn() + Send + 'static) -> Runner {
         let (tx, rx) = channel();
         // The print pose is known without constructing collision hulls on the caller's UI thread.
         // The physics world is built once, by its owning worker.
@@ -495,27 +740,34 @@ impl Runner {
         let latest = Arc::new(Mutex::new(first.clone()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
+        let leader = Leader(Arc::new(Mutex::new(None)));
         // the first snapshot is news: the UI shows the print pose before the sim answers
         let news = Arc::new(AtomicBool::new(true));
         let thread = {
             let outbox = Outbox { latest: latest.clone(), news: news.clone(), wake: Box::new(wake) };
-            let (events, stop) = (events.clone(), stop.clone());
+            let (events, stop, lead) = (events.clone(), stop.clone(), leader.clone());
             std::thread::Builder::new().name("mech-sim".into()).spawn(move || {
-                match Engine::new(&asm, gravity, floor) {
+                match Engine::new(&asm, gravity, options.floor) {
                     Ok(mut w) => {
-                        w.bind_pool(&pool);
-                        run(asm, gravity, floor, pool, w, rx, outbox, events, stop)
+                        w.bind_pool(&options.pool);
+                        run(asm, gravity, options, w, rx, outbox, events, stop, lead)
                     }
                     Err(e) => failed(&outbox, e, 0),
                 }
             }).ok()
         };
-        Runner { tx, sent: AtomicU64::new(0), latest, news, events, held: first, stop, thread }
+        Runner { tx, sent: AtomicU64::new(0), latest, news, events, held: first, stop, thread, leader }
     }
 
     pub fn send(&self, c: Command) {
         self.sent.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(c);
+    }
+
+    /// Where another simulator, on any thread, hands this runner a lead or gives it back
+    /// ([`Leader::set`]).
+    pub fn leader(&self) -> Leader {
+        self.leader.clone()
     }
 
     /// The newest snapshot has taken up every command sent, or no sim is left to. Building the
@@ -558,7 +810,11 @@ impl Drop for Runner {
     }
 }
 
-fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn TaskPool>>, mut w: Engine, rx: Receiver<Command>, outbox: Outbox, events: Arc<Mutex<Vec<Event>>>, stop: Arc<AtomicBool>) {
+fn run(mut asm: Assembly, gravity: P3, options: Options, mut w: Engine, rx: Receiver<Command>, outbox: Outbox, events: Arc<Mutex<Vec<Event>>>, stop: Arc<AtomicBool>, leader: Leader) {
+    let Options { floor, pool, mut clock, probes } = options;
+    let mut probes = probes.map(|p| ProbeSampler::new(p, asm.bodies.len(), &w));
+    // the lead's pose record and the number it records the lead's step 0 as
+    let mut record: Option<(Arc<PoseRecord>, u64)> = None;
     let dt = 1.0 / HZ;
     let mut running = false;
     let mut speed = 1.0;
@@ -572,6 +828,7 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
     let mut hanging = false;
     let strung = !asm.strings.is_empty() && asm.anchors.iter().any(|a| a.kind == AnchorKind::Held);
     let mut frame = 0u64;
+    let mut stepped = 0u64;
     let mut commands = 0u64;
     let mut owed = 0.0;
     let mut last = Instant::now();
@@ -593,6 +850,20 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
     while !stop.load(Ordering::Relaxed) {
         let mut single = false;
         let mut changed = false;
+        // another simulator takes the lead, or gives it back, between two steps; while `Leader::set`
+        // holds the slot, this loop's steps go on the clock it has and the next loop takes the lead
+        if let Some(lead) = leader.0.try_lock().ok().and_then(|mut slot| slot.take()) {
+            (clock, probes, record) = match lead {
+                Some(Lead { allowed, probes, poses }) => {
+                    let record = poses.map(|r| { let zero = r.first.load(Ordering::Acquire).saturating_sub(1); (r, zero) });
+                    (Clock::Led(allowed), Some(ProbeSampler::new(probes, asm.bodies.len(), &w)), record)
+                }
+                None => (Clock::Wall, None, None),
+            };
+            stepped = 0;
+            owed = 0.0;
+            last = Instant::now();
+        }
         while let Ok(c) = rx.try_recv() {
             changed = true;
             commands += 1;
@@ -605,6 +876,9 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                         Err(e) => return failed(&outbox, e, commands),
                     };
                     w.bind_pool(&pool);
+                    if let Some(probes) = &mut probes {
+                        probes.reset(&w);
+                    }
                     running = true;
                     owed = 0.0;
                     at_limit.iter_mut().for_each(|a| *a = false);
@@ -700,27 +974,33 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                 }
             }
         }
-        let now = Instant::now();
-        let wall = (now - last).as_secs_f64().min(0.1);
-        last = now;
-        if running {
-            owed += wall * speed;
-        }
-        let mut steps = (owed / dt).floor() as u64;
-        owed -= steps as f64 * dt;
-        if steps > MAX_CATCH_UP {
-            behind += (steps - MAX_CATCH_UP) as f64 * dt;
-            steps = MAX_CATCH_UP;
-            if behind_logged.elapsed().as_secs_f64() > 1.0 {
-                // Through the engine's log handler, which the app points at its log.
-                makepad_dynamics::util_errmem::warning_text(&format!("mech-sim: steps cost more than real time; {:.0} ms of sim time slowed down", behind * 1e3));
-                behind = 0.0;
-                behind_logged = Instant::now();
+        let steps = match &clock {
+            Clock::Wall => {
+                let now = Instant::now();
+                let wall = (now - last).as_secs_f64().min(0.1);
+                last = now;
+                if running {
+                    owed += wall * speed;
+                }
+                let mut steps = (owed / dt).floor() as u64;
+                owed -= steps as f64 * dt;
+                if steps > MAX_CATCH_UP {
+                    behind += (steps - MAX_CATCH_UP) as f64 * dt;
+                    steps = MAX_CATCH_UP;
+                    if behind_logged.elapsed().as_secs_f64() > 1.0 {
+                        // Through the engine's log handler, which the app points at its log.
+                        makepad_dynamics::util_errmem::warning_text(&format!("mech-sim: steps cost more than real time; {:.0} ms of sim time slowed down", behind * 1e3));
+                        behind = 0.0;
+                        behind_logged = Instant::now();
+                    }
+                }
+                if single && !running {
+                    steps = 1;
+                }
+                steps
             }
-        }
-        if single && !running {
-            steps = 1;
-        }
+            Clock::Led(allowed) => allowed.load(Ordering::Acquire).saturating_sub(stepped).min(MAX_CATCH_UP),
+        };
         for _ in 0..steps {
             if let Some(p) = drag_target {
                 on!(&mut w, w => w.drag(p, dt));
@@ -766,6 +1046,14 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
             if let Some(c) = &mut weave_steps {
                 c.add(started.elapsed().as_secs_f64() * 1e3);
             }
+            stepped += 1;
+            // before the probes' sink: a step its sink has seen is in the record
+            if let Some((record, zero)) = &record {
+                record.record(zero + stepped, w.poses());
+            }
+            if let Some(probes) = &mut probes {
+                probes.sample(&w, stepped, dt, gravity);
+            }
             frame += 1;
             for (a, b, speed) in on!(&w, w => w.hits()) {
                 if speed > 30.0 {
@@ -797,6 +1085,8 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(1));
+        if !matches!(&clock, Clock::Led(allowed) if allowed.load(Ordering::Acquire) > stepped) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }

@@ -17,7 +17,7 @@
 //!         depth and the accumulated variance
 //! far     sum the reference tiles at the current RGB gains
 //! carry   retain traced base light between resolution rungs
-//! tonemap add guided far light, then exposure + ACES + sRGB → BGRA8 view
+//! tonemap add guided far light, then the display transform (`DisplayCurve`) → BGRA8 view
 //! window  the widget draws the view target
 //! ```
 //!
@@ -253,7 +253,12 @@ script_mod! {
         }
 
         // ---- BVH4 traversal with Woop watertight triangle tests ----
-        trace: fn(ro: vec3, rd_in: vec3, tmax: f32, any_hit: f32, tmin: f32, skip: f32) -> vec4 {
+        // `block` (min, max): a shadow ray ends at the first front-facing certain blocker (an
+        // opaque triangle, packed with a negative coplanar code) met inside that range and inside
+        // the triangle by a margin m, returning tri -3. A later hop's origin sits up to 32 ray
+        // errors aside, which moves the hit by that over the cosine: m covers it, along the ray and
+        // across the triangle (tested times the cosine: in the plane, never). (1, -1) turns it off.
+        trace: fn(ro: vec3, rd_in: vec3, tmax: f32, any_hit: f32, tmin: f32, skip: f32, block: vec2) -> vec4 {
             var safe_rd = rd_in
             if abs(safe_rd.x) < 0.000000001 { safe_rd.x = if safe_rd.x < 0.0 { -0.000000001 } else { 0.000000001 } }
             if abs(safe_rd.y) < 0.000000001 { safe_rd.y = if safe_rd.y < 0.0 { -0.000000001 } else { 0.000000001 } }
@@ -344,7 +349,17 @@ script_mod! {
                                 let orig = u32(tb.w)
                                 var cand_front = 0.0
                                 if det * sz > 0.0 { cand_front = 1.0 }
-                                let coplanar = self.fetch_attr(ti * 4u + 3u).w
+                                let code = self.fetch_attr(ti * 4u + 3u).w
+                                if code < 0.0 && cand_front > 0.5 && t > tmin && t >= block.x && t <= block.y {
+                                    let cr = self.cross3(tb.xyz - ta.xyz, tc.xyz - ta.xyz)
+                                    let c = abs(dot(cr, rd_in))
+                                    let e = 32.0 * max(self.ray_error(ro), self.ray_error(ro + rd_in * t))
+                                    let ea = e * length(cr)
+                                    if (t - block.x) * c >= ea && (block.y - t) * c >= ea && u / det * c > e * length(tb.xyz - tc.xyz) && v / det * c > e * length(tc.xyz - ta.xyz) && w / det * c > e * length(ta.xyz - tb.xyz) {
+                                        return vec4(t, -3.0, 0.0, 0.0)
+                                    }
+                                }
+                                let coplanar = if code < 0.0 { -1.0 - code } else { code }
                                 let priority = u32(modf(coplanar, 4096.0))
                                 let group = u32(floor(coplanar / 4096.0))
                                 var take = 0.0
@@ -508,7 +523,12 @@ script_mod! {
             let d = nh * nh * (a2 - 1.0) + 1.0
             return a2 / (3.14159265 * d * d)
         }
-        bsdf_eval: fn(n: vec3, v: vec3, l: vec3, kd: vec3, f0: vec3, alpha: f32) -> vec3 {
+        // The GGX lobe's directional albedo E and Schlick share B, the raster's fit.
+        ggx_split_sum: mod.draw.ggx_split_sum
+        // The GGX lobe scatters once: with `ms` 1 the light that bounces between microfacets comes
+        // back as 1 + f0 (1 / E - 1), E the lobe's albedo at F0 = 1 (roughness sqrt(alpha)), so
+        // rough metals keep their brightness. CPU twin: cpu_ref.rs `bsdf_eval`.
+        bsdf_eval: fn(n: vec3, v: vec3, l: vec3, kd: vec3, f0: vec3, alpha: f32, ms_on: f32) -> vec3 {
             let h = normalize(v + l)
             let nl = max(dot(n, l), 0.0001)
             let nv = max(dot(n, v), 0.0001)
@@ -519,7 +539,8 @@ script_mod! {
             let gv = nl * sqrt(nv * nv * (1.0 - a2) + a2)
             let gl = nv * sqrt(nl * nl * (1.0 - a2) + a2)
             let vis = 0.5 / max(gv + gl, 0.000001)
-            return kd * (vec3(1.0, 1.0, 1.0) - fr) * 0.31830988618 + fr * (self.ggx_d(nh, a2) * vis)
+            let ms = vec3(1.0, 1.0, 1.0) + f0 * (ms_on * (1.0 / self.ggx_split_sum(nv, sqrt(alpha)).x - 1.0))
+            return kd * (vec3(1.0, 1.0, 1.0) - fr) * 0.31830988618 + fr * (self.ggx_d(nh, a2) * vis) * ms
         }
         bsdf_pdf: fn(n: vec3, v: vec3, l: vec3, alpha: f32, ps: f32) -> f32 {
             let h = normalize(v + l)
@@ -591,12 +612,12 @@ script_mod! {
             let eps = self.ray_error(p)
             return p + n * eps + dir * eps
         }
-        spawn_trace: fn(p: vec3, ng: vec3, rd: vec3, tmax: f32, skip: f32) -> vec4 {
+        spawn_trace: fn(p: vec3, ng: vec3, rd: vec3, tmax: f32, skip: f32, block: vec2) -> vec4 {
             let ro = self.offset_ray(p, ng, rd)
             var tmin = 0.0
             var h = vec4(tmax, -1.0, 0.0, 0.0)
             for step in 0..4 {
-                h = self.trace(ro, rd, tmax, 0.0, tmin, skip)
+                h = self.trace(ro, rd, tmax, 0.0, tmin, skip, block)
                 if h.y < 0.0 { return h }
                 if h.x >= self.scene_scale.x * 0.00005 { return h }
                 let ti = u32(h.y)
@@ -616,7 +637,7 @@ script_mod! {
         }
         // Legacy thin exported-pane pairing, shared by transport and guides.
         thin_transmission_trace: fn(p: vec3, ng: vec3, rd: vec3, ti: u32) -> vec4 {
-            var hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+            var hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti), vec2(1.0, -1.0))
             if hit.y >= 0.0 && hit.x < self.scene_scale.x * 0.0001 {
                 let back_ti = u32(hit.y)
                 let back_t0 = self.fetch_tri(back_ti * 3u)
@@ -630,7 +651,7 @@ script_mod! {
                 if back_t0.w == t0.w && dot(back_ng, raw_ng) < -0.9 {
                     let back_w0 = 1.0 - hit.z - hit.w
                     let back_p = back_t0.xyz * back_w0 + back_t1.xyz * hit.z + back_t2.xyz * hit.w
-                    hit = self.spawn_trace(back_p, back_ng, rd, self.scene_scale.x * 5000000.0, hit.y)
+                    hit = self.spawn_trace(back_p, back_ng, rd, self.scene_scale.x * 5000000.0, hit.y, vec2(1.0, -1.0))
                 }
             }
             return hit
@@ -654,7 +675,7 @@ script_mod! {
                 if m4.w > 0.5 {
                     let eta = if dot(ng, rd) < 0.0 { 1.0 / m2.x } else { m2.x }
                     if self.solid_fresnel(abs(dot(ng, -rd)), eta) >= 1.0 { break }
-                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti), vec2(1.0, -1.0))
                 } else {
                     hit = self.thin_transmission_trace(p, ng, rd, ti)
                 }
@@ -866,7 +887,15 @@ script_mod! {
             }
             // One final fixed iteration verifies escape after eight glass hits.
             for layer in 0..9 {
-                let h = self.spawn_trace(p, ng, rd, tmax, skip)
+                // A front-facing certain blocker ends the ray at once. Exact: the walk below ends
+                // dark at it in every order. The margins keep the skin, the near band and the
+                // light's own end (tmax shrinks by a ray error a hop) as the walk has them.
+                var block = vec2(max(self.scene_scale.x * 0.00005, self.shadow_skin - travelled) + 32.0 * self.ray_error(p), tmax)
+                if tmax < self.scene_scale.x * 2500000.0 {
+                    block.y = tmax - 32.0 * max(self.ray_error(p), self.ray_error(p + rd * tmax))
+                }
+                let h = self.spawn_trace(p, ng, rd, tmax, skip, block)
+                if h.y < -2.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
                 if h.y < -1.5 { return vec4(0.0, 0.0, 0.0, -1.0) }
                 if h.y < 0.0 { return vec4(tr, 0.0) }
                 // The sampled light's own triangle is the target, never a blocker.
@@ -882,7 +911,8 @@ script_mod! {
                 // Self-occlusion skin: a blocker within `shadow_skin` of the
                 // ORIGINAL surface is a stacked construction layer of the same
                 // assembly (mm separations), not a shadow caster — step past
-                // it. `travelled` bounds the total skip to one skin depth.
+                // it. `travelled` is the distance from that surface, glass hops
+                // included, so the skin never reaches past a layer of glass.
                 if !solid && travelled + h.x < self.shadow_skin {
                     travelled = travelled + h.x
                     ng = normalize(self.cross3(t1.xyz - t0.xyz, t2.xyz - t0.xyz))
@@ -904,6 +934,7 @@ script_mod! {
                 let segment_start = p
                 p = t0.xyz * w0 + t1.xyz * h.z + t2.xyz * h.w
                 skip = h.y
+                travelled = travelled + h.x
                 if paired_back_face {
                     previous_glass_material = -1.0
                     if tmax < self.scene_scale.x * 2500000.0 {
@@ -990,7 +1021,7 @@ script_mod! {
                     dir = normalize(fp - ro)
                 }
                 rd = dir
-                hit = self.trace(ro, rd, self.scene_scale.x * 5000000.0, 0.0, 0.0, -1.0)
+                hit = self.trace(ro, rd, self.scene_scale.x * 5000000.0, 0.0, 0.0, -1.0, vec2(1.0, -1.0))
             }
             if self.debug_mode > 2.5 && self.debug_mode < 3.5 {
                 let r = self.sobol2(sidx, pseed, 3u)
@@ -1038,7 +1069,7 @@ script_mod! {
                 let skw = 1.0 - hit.z - hit.w
                 let skp = sk0.xyz * skw + sk1.xyz * hit.z + sk2.xyz * hit.w
                 let sko = self.offset_ray(skp, normalize(skn), rd)
-                hit = self.trace(sko, rd, self.scene_scale.x * 5000000.0, 0.0, 0.0, f32(skt))
+                hit = self.trace(sko, rd, self.scene_scale.x * 5000000.0, 0.0, 0.0, f32(skt), vec2(1.0, -1.0))
             }
             var tp = vec3(1.0, 1.0, 1.0)
             var lsum = vec3(0.0, 0.0, 0.0)
@@ -1177,13 +1208,17 @@ script_mod! {
                     }
                     ro = p
                     carry = 0.0
-                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti), vec2(1.0, -1.0))
                     continue
                 }
                 var rx = r_lobe.x
                 var f0 = vec3(0.0, 0.0, 0.0)
                 var kd = albedo
                 var far_sheet = false
+                // A rough sheet's reflection is chosen by its Fresnel and drawn at F0 = 1: the light
+                // a dielectric's microfacets scatter more than once also goes through, so that
+                // lobe stays single-scattering (taking it all back would make light).
+                var ms_on = 1.0
                 if material_class > 0.5 {
                     let haze = if self.frost_lobe() > 0.5 { self.thin_glass_haze(m0.w) } else { 0.0 }
                     let fr = self.fresnel_dielectric(abs(dot(ng, v)), ior)
@@ -1193,7 +1228,7 @@ script_mod! {
                             rd = rd - ng * (2.0 * dot(rd, ng))
                             delta = 1.0
                             carry = 0.0
-                            hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                            hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti), vec2(1.0, -1.0))
                         } else {
                             tp = tp * albedo * trans
                             carry = carry + hit.x
@@ -1209,6 +1244,7 @@ script_mod! {
                         if r_lobe.x < fr {
                             kd = vec3(0.0, 0.0, 0.0)
                             f0 = vec3(1.0, 1.0, 1.0)
+                            ms_on = 0.0
                         } else if (r_lobe.x - fr) / (1.0 - fr) < trans {
                             v = v - ng * (2.0 * dot(v, ng))
                             ng = -ng
@@ -1219,7 +1255,9 @@ script_mod! {
                         rx = r_lobe.y / haze
                     }
                 } else {
-                    f0 = mix(vec3(0.04, 0.04, 0.04), albedo, metal)
+                    // An opaque dielectric reflects by its index (1.5: 0.04); a metal by its colour.
+                    let fd = (ior - 1.0) / (ior + 1.0)
+                    f0 = mix(vec3(fd * fd, fd * fd, fd * fd), albedo, metal)
                 }
                 kd = kd * (1.0 - metal)
                 let alpha = rough * rough
@@ -1238,7 +1276,7 @@ script_mod! {
                             if sh.x + sh.y + sh.z > 0.0 {
                                 let omega = 6.28318530718 * (1.0 - self.sun_dir.w)
                                 let e = self.sun_radiance.xyz * omega
-                                let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha)
+                                let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha, ms_on)
                                 let corr = self.shading_correction(ng, n_nee, v, ld)
                                 lsum = lsum + tp * f * e * sh.xyz * (nl * corr)
                             }
@@ -1255,7 +1293,7 @@ script_mod! {
                         if sh.w < 0.0 { return PtLightSample.new(vec3(1000000000000000000000000000000.0, 0.0, 0.0)) }
                         if pe > 0.0 && sh.x + sh.y + sh.z > 0.0 {
                             let ps_nee = self.spec_prob(f0, kd, max(dot(n_nee, v), 0.0001))
-                            let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha)
+                            let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha, ms_on)
                             let pb = self.bsdf_pdf(n_nee, v, ld, alpha, ps_nee)
                             var w = 1.0
                             if self.env_on > 0.5 || self.env_grid_dim < 0.5 { w = pe * pe / (pe * pe + pb * pb) }
@@ -1301,7 +1339,7 @@ script_mod! {
                             let lm = self.fetch_mat(u32(l0.w) * 5u + 1u).xyz
                             let pl = dist * dist * lrec.z / max(cosl * lrec.y, self.scene_scale.y * 0.00000000000025)
                             let ps_nee = self.spec_prob(f0, kd, max(dot(n_nee, v), 0.0001))
-                            let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha)
+                            let f = self.bsdf_eval(n_nee, v, ld, kd, f0, alpha, ms_on)
                             let pb = self.bsdf_pdf(n_nee, v, ld, alpha, ps_nee)
                             let w = pl * pl / (pl * pl + pb * pb)
                             let corr = self.shading_correction(ng, n_nee, v, ld)
@@ -1344,7 +1382,7 @@ script_mod! {
                 }
                 let nl = dot(sample_n, ld)
                 if nl <= 0.0 || dot(ng, ld) <= 0.0 { break }
-                let f = self.bsdf_eval(sample_n, v, ld, kd, f0, alpha)
+                let f = self.bsdf_eval(sample_n, v, ld, kd, f0, alpha, ms_on)
                 let pb = self.bsdf_pdf(sample_n, v, ld, alpha, ps)
                 if pb <= 0.0 { break }
                 let corr = self.shading_correction(ng, sample_n, v, ld)
@@ -1363,7 +1401,7 @@ script_mod! {
                 if self.frost_lobe() > 0.5 && far_sheet {
                     hit = self.thin_transmission_trace(p, ng, rd, ti)
                 } else {
-                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti))
+                    hit = self.spawn_trace(p, ng, rd, self.scene_scale.x * 5000000.0, f32(ti), vec2(1.0, -1.0))
                 }
             }
             let peak = max(max(lsum.x, lsum.y), lsum.z)
@@ -1887,7 +1925,8 @@ script_mod! {
     }
 
     mod.draw.PtTonemap = mod.std.set_type_default() do #(DrawTonemap::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
+        ..mod.draw.ToneCurves,
         src_tex: texture_2d(float)
         mom_tex: texture_2d(float)
         gbuf_tex: texture_2d(float)
@@ -1943,6 +1982,11 @@ script_mod! {
         }
         inv_res: uniform(vec2f)
         exposure: uniform(1.0)
+        // The host's white balance on the linear light, before the exposure.
+        white_balance: uniform(vec3(1.0, 1.0, 1.0))
+        // x = 1: the shared AgX look at the exposure as given (y its contrast,
+        // z its saturation); x = 0: metered ACES (`DisplayCurve`).
+        display_curve: uniform(vec4(0.0, 1.0, 1.0, 0.0))
         sky_display: uniform(0.0)
         view_mode: uniform(0.0)
         attr_inv: uniform(vec2f)
@@ -1988,25 +2032,27 @@ script_mod! {
             self.world = vec4(clipped.x, clipped.y, self.draw_depth, 1.0)
             return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
-        aces: fn(x: vec3) -> vec3 {
-            let a = 2.51
-            let b = 0.03
-            let c = 2.43
-            let d = 0.59
-            let e = 0.14
-            return clamp((x * (x * a + vec3(b, b, b))) / (x * (x * c + vec3(d, d, d)) + vec3(e, e, e)), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
-        }
         // Over-range colour keeps its hue. The curve per channel drives every
         // channel of a far over-range saturated colour toward 1, so a bright
         // crimson emitter shows magenta and a bright orange one yellow. Past
         // the display range the peak channel takes the curve and the others
         // keep their ratio to it; in range the per-channel curve is unchanged.
-        display: fn(x: vec3) -> vec3 {
+        aces_kept: fn(x: vec3) -> vec3 {
             let per_channel = self.aces(x)
             let peak = max(max(x.x, x.y), x.z)
             if peak <= 1.0 { return per_channel }
             let kept = x * (self.aces(vec3(peak, peak, peak)).x / peak)
             return mix(per_channel, kept, smoothstep(1.0, 2.0, peak))
+        }
+        // Linear light to the display (sRGB-encoded): the host's white
+        // balance and `exposure`, then its curve. The AgX look is the one a
+        // realtime picture of the same scene goes through, so the two meet.
+        to_display: fn(linear: vec3, exposure: float) -> vec3 {
+            let x = linear * self.white_balance * exposure
+            if self.display_curve.x > 0.5 {
+                return self.agx_look_fit(x, self.display_curve.y, self.display_curve.z)
+            }
+            return pow(self.aces_kept(x), vec3(0.4545454, 0.4545454, 0.4545454))
         }
         // A fixed 4x4 log-average meter is robust to a bright doorway or a
         // few fireflies and costs no readback. It only lifts dark frames:
@@ -2014,6 +2060,8 @@ script_mod! {
         // a 0.005-radiance room to a visible mid-shadow while retaining the
         // existing exposure control as a creative offset.
         metered_exposure: fn() -> f32 {
+            // A host that states its display transform states its exposure.
+            if self.display_curve.x > 0.5 { return self.exposure }
             var sum_log = 0.0
             var valid = 0.0
             for y in 0..4 {
@@ -2081,9 +2129,7 @@ script_mod! {
                 // raster shows until a tile lands. F12/track keep the lit
                 // G-buffer fallback (they draw on a flat editor background).
                 if self.untraced_transparent > 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
-                let f = self.fallback()
-                let m = self.display(f * self.exposure)
-                return vec4(pow(m, vec3(0.4545454, 0.4545454, 0.4545454)), 1.0)
+                return vec4(self.to_display(self.fallback(), self.exposure), 1.0)
             }
             var linear = c.xyz
             if self.far_scale > 0.0 { linear += self.far_light() }
@@ -2096,9 +2142,7 @@ script_mod! {
                     return vec4(clamp(linear, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), 1.0)
                 }
             }
-            let mapped = self.display(linear * self.metered_exposure())
-            let srgb = pow(mapped, vec3(0.4545454, 0.4545454, 0.4545454))
-            return vec4(srgb, 1.0)
+            return vec4(self.to_display(linear, self.metered_exposure()), 1.0)
         }
     }
 
@@ -2212,6 +2256,21 @@ pub struct DrawView {
 }
 
 /// What the settings panel edits. Any change restarts accumulation.
+/// How the tone map puts the traced light on the display.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DisplayCurve {
+    /// ACES, a colour past white keeping its hue, under a log-average meter that lifts a dark
+    /// frame up to 16x above `exposure` and never dims one: for a host that leaves the
+    /// exposure to the tracer.
+    MeteredAces,
+    /// The shared AgX look (`mod.draw.ToneCurves`' `agx_look_fit`) at `exposure` as given, with
+    /// no meter: `contrast` is its slope about mid-grey and `saturation` its punch (1 = the
+    /// stock look). For a host whose realtime picture goes through that look: given the
+    /// realtime picture's exposure and white balance too, the traced picture of the same scene
+    /// and light shows as the realtime one would.
+    AgxLook { contrast: f32, saturation: f32 },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderSettings {
     /// Stop after this many samples per pixel (0 = never).
@@ -2222,15 +2281,25 @@ pub struct RenderSettings {
     /// is the unbiased reference/final estimator.
     pub preview_clamp: Option<f32>,
     pub exposure: f32,
+    /// The white balance on the linear light before the exposure (1, 1, 1: as traced).
+    /// Display-only, like `exposure` and `curve`.
+    pub white_balance: [f32; 3],
+    /// The curve that puts the exposed light on the display.
+    pub curve: DisplayCurve,
     pub denoise: bool,
     pub denoise_sigma: f32,
     /// Adaptive sampling: pixels stop after `adaptive_min` samples once
     /// their relative variance drops below `adaptive_thresh`. 0 = off.
     pub adaptive_min: u32,
     pub adaptive_thresh: f32,
-    /// Requested trace GPU time per host frame (seconds). The scheduler uses
-    /// the smaller of this and `MAKEPAD_PT_BUDGET_MS` (default 4 ms).
+    /// The most GPU time a trace step may take (seconds) while nothing else in the window moves:
+    /// how long a first acted frame may wait behind a step. Infinite: no bound, the steps grow to
+    /// `TILES_PER_FRAME_MAX`.
     pub frame_budget: f64,
+    /// Something else in the window moves this frame (the person acts, an animation runs): a
+    /// trace step stays within the frame's slack (the display interval less the window frame's
+    /// GPU time and `SLICE_MARGIN_MS`), so the frames they watch come on time.
+    pub interactive: bool,
     /// 0 image, 1 spp heatmap, 2 relative noise.
     pub view_mode: u32,
     /// 0 normal, 1 shading normals, 2 albedo (primary hit only).
@@ -2276,6 +2345,8 @@ impl Default for RenderSettings {
             max_diffuse: 4,
             preview_clamp: None,
             exposure: 1.0,
+            white_balance: [1.0; 3],
+            curve: DisplayCurve::MeteredAces,
             denoise: false,
             denoise_sigma: 4.0,
             // Off: a finite target_spp must mean that many samples in every
@@ -2283,7 +2354,8 @@ impl Default for RenderSettings {
             // while the host spp counter kept climbing.
             adaptive_min: 0,
             adaptive_thresh: 0.0004,
-            frame_budget: 0.008,
+            frame_budget: f64::INFINITY,
+            interactive: false,
             view_mode: 0,
             debug_mode: 0,
             brute: false,
@@ -2323,6 +2395,13 @@ pub struct RenderStats {
     pub gpu_time_ms: f64,
     pub gpu_budget_ms: f64,
     pub gpu_samples: u64,
+    /// Trace steps that overran their slice.
+    pub late_slices: u64,
+    /// The tile count the steps climb at, and the median and p90 of its last completion times
+    /// (ms; 0 while none).
+    pub step_tiles: u32,
+    pub step_median_ms: f64,
+    pub step_p90_ms: f64,
     pub tri_count: usize,
     pub bvh_nodes: usize,
     pub bvh_depth: u32,
@@ -2386,61 +2465,152 @@ fn aligned_edge(edge: u32, alignment: u32) -> u32 {
     (edge / alignment * alignment).clamp(lo, hi)
 }
 
-fn adapt_gpu_budget(
-    tiles: u32,
-    next_edge: u32,
-    under_budget: u32,
-    submitted_tiles: u32,
-    submitted_edge: u32,
-    gpu_ms: f64,
-    budget_ms: f64,
-    alignment: u32,
-) -> GpuBudgetUpdate {
-    let mut out = GpuBudgetUpdate {
-        tiles: tiles.clamp(1, TILES_PER_FRAME_MAX),
-        next_edge: aligned_edge(next_edge, alignment),
-        under_budget,
-    };
-    if submitted_tiles == 0
-        || !gpu_ms.is_finite()
-        || !budget_ms.is_finite()
-        || gpu_ms <= 0.0
-        || budget_ms <= 0.0
-    {
-        return out;
+/// What trace steps take on the GPU, at each tile edge the sweeps took (`EdgeTimes`): an edge
+/// taken again resumes at the count its steps climbed to, and its times say what one tile costs
+/// there (`sweep_edge`).
+#[derive(Default)]
+struct StepTimes {
+    edges: Vec<EdgeTimes>,
+}
+
+/// What trace steps take on the GPU at one tile edge, by tile count: the last `COST_WINDOW`
+/// completion times (ms) of the steps of each count in `STEP_COUNTS`, and the count the steps
+/// climb at. A step's time is mostly that of its slowest tile, which depends on which tiles it
+/// holds more than on how many (over a glass lid: one 128 px tile a median 6.6 ms, six to twelve
+/// about 15 ms), so the times are read per count, not fitted. The steps take the largest count
+/// whose time fits the slice: a count goes up when its p90 fits (the tail is the cost: one late
+/// reading should not shrink the step) and down when its median does not. Since a step's tiles
+/// run side by side, its time grows slower than its count: going up, the count goes straight to
+/// the largest one that the p90 scaled by the count bounds within the slice, so a sweep's first
+/// steps take a few frames to reach their size, not a few readings per count. An edge not read
+/// before starts from one tile.
+#[derive(Default)]
+struct EdgeTimes {
+    /// The tile edge (px) the times were read at.
+    edge: u32,
+    by_count: [VecDeque<f64>; STEP_COUNTS.len()],
+    /// The count the steps climb at (an index into `STEP_COUNTS`).
+    level: usize,
+    /// Readings at this count before the count above is tried again: a count that went down
+    /// stays down for `COST_WINDOW` readings.
+    hold: u32,
+}
+
+impl StepTimes {
+    fn at(&self, edge: u32) -> Option<&EdgeTimes> {
+        self.edges.iter().find(|t| t.edge == edge)
     }
 
-    // Aim at 80% of the hard cap. The spare 20% absorbs scene/path variance
-    // and the fixed full-frame copy in the same trace command buffer.
-    let ratio = budget_ms * 0.8 / gpu_ms;
-    let desired_tiles = ((submitted_tiles as f64 * ratio).floor() as u32)
-        .clamp(1, TILES_PER_FRAME_MAX);
-    if gpu_ms > budget_ms || desired_tiles < out.tiles {
-        out.tiles = out.tiles.min(desired_tiles);
-        if submitted_tiles == 1 && gpu_ms > budget_ms {
-            let scaled = submitted_edge as f64 * ratio.max(0.01).sqrt();
-            out.next_edge = aligned_edge(scaled.floor() as u32 / 8 * 8, alignment);
+    /// A step's completion time at its tile `edge`, and the slice of the frame it is read on. A
+    /// reading at the count in use may move the count up.
+    fn add(&mut self, tiles: u32, edge: u32, ms: f64, slice_ms: f64) {
+        let at = match self.edges.iter().position(|t| t.edge == edge) {
+            Some(at) => at,
+            None => {
+                self.edges.push(EdgeTimes { edge, ..EdgeTimes::default() });
+                self.edges.len() - 1
+            }
+        };
+        self.edges[at].add(tiles, ms, slice_ms);
+    }
+
+    /// The next step's tiles at the sweep's `edge` for a frame of `slice_ms` (`EdgeTimes::plan`);
+    /// one at an edge not read yet.
+    fn plan(&mut self, edge: u32, slice_ms: f64) -> u32 {
+        self.edges.iter_mut().find(|t| t.edge == edge).map_or(1, |t| t.plan(slice_ms))
+    }
+
+    /// One tile's own median time at `edge`, once one-tile steps reported there, and how many did.
+    fn one_tile_ms(&self, edge: u32) -> Option<(f64, usize)> {
+        let times = &self.at(edge)?.by_count[0];
+        (!times.is_empty()).then(|| (quantile(times, 0.5), times.len()))
+    }
+
+    /// The most one tile takes at `edge`, as far as its steps tell: the least median of the
+    /// counts read at least three times there (a step takes as long as its slowest tile, at least).
+    fn one_tile_bound_ms(&self, edge: u32) -> Option<f64> {
+        self.at(edge)?.by_count.iter().filter(|t| t.len() >= 3).map(|t| quantile(t, 0.5)).min_by(f64::total_cmp)
+    }
+
+    /// The count in use at `edge`, and the median and p90 of its times (zeros before any).
+    fn in_use(&self, edge: u32) -> (u32, f64, f64) {
+        let Some(t) = self.at(edge) else { return (1, 0.0, 0.0) };
+        let times = &t.by_count[t.level];
+        let (median, p90) = if times.is_empty() { (0.0, 0.0) } else { (quantile(times, 0.5), quantile(times, 0.9)) };
+        (STEP_COUNTS[t.level], median, p90)
+    }
+}
+
+impl EdgeTimes {
+    fn add(&mut self, tiles: u32, ms: f64, slice_ms: f64) {
+        let Some(at) = STEP_COUNTS.iter().position(|&k| k == tiles) else { return };
+        let times = &mut self.by_count[at];
+        times.push_back(ms);
+        if times.len() > COST_WINDOW {
+            times.pop_front();
         }
-        out.under_budget = 0;
-        return out;
-    }
-
-    if gpu_ms < budget_ms * 0.65 {
-        out.under_budget = out.under_budget.saturating_add(1);
-        if out.under_budget >= 2 {
-            out.under_budget = 0;
-            if out.tiles < TILES_PER_FRAME_MAX {
-                let step = (out.tiles / 2).max(1);
-                out.tiles = desired_tiles.min(out.tiles.saturating_add(step));
-            } else if ratio > 1.25 {
-                let scaled = submitted_edge as f64 * ratio.sqrt();
-                out.next_edge = aligned_edge(scaled.floor() as u32 / 8 * 8, alignment);
+        if at != self.level {
+            return;
+        }
+        self.hold = self.hold.saturating_sub(1);
+        if self.hold == 0 && self.level + 1 < STEP_COUNTS.len() && times.len() >= 3 {
+            let (p90, k) = (quantile(times, 0.9), STEP_COUNTS[at] as f64);
+            if p90 <= slice_ms {
+                let bounded = STEP_COUNTS.iter().rposition(|&n| n as f64 / k * p90 <= slice_ms).unwrap_or(at);
+                self.level = bounded.max(at + 1);
             }
         }
-    } else {
-        out.under_budget = 0;
     }
-    out
+
+    /// The count in use for a frame of `slice_ms`, after going down past every count whose median
+    /// does not fit. One tile always runs.
+    fn plan(&mut self, slice_ms: f64) -> u32 {
+        while self.level > 0 && self.by_count[self.level].len() >= 3 && quantile(&self.by_count[self.level], 0.5) > slice_ms {
+            self.level -= 1;
+            self.hold = COST_WINDOW as u32;
+        }
+        STEP_COUNTS[self.level]
+    }
+}
+
+/// The value at quantile `q` of `values` (the nearest rank; `values` not empty).
+fn quantile(values: &VecDeque<f64>, q: f64) -> f64 {
+    let mut v: Vec<f64> = values.iter().copied().collect();
+    v.sort_by(f64::total_cmp);
+    v[((v.len() as f64 * q).ceil() as usize).clamp(1, v.len()) - 1]
+}
+
+/// The smallest tile edge (px) the sweeps take once trace steps report their times
+/// (`sweep_edge`). A step carries a fixed cost beside its tiles (the whole frame carried over, per
+/// light group: about 10 ms on a device with twenty), so a smaller edge only adds steps a sample:
+/// the drum machine's shot fell to 16 px tiles, 82 steps a sample, half a sample a second.
+const EDGE_HOLD: u32 = 64;
+
+/// The coming sweep's tile edge, from the step times at the edge in use (`times`). A larger tile
+/// carries more paths for little more time, so a sweep's tiles are as large as one tile's time
+/// allows. One tile that takes more than a display interval (`interval_ms`; its own median of at
+/// least three, read when the steps are down to one tile, as while the person acts) halves the
+/// edge, never under `EDGE_HOLD`, and the edge stays under that one for the scene (`ceiling`). A
+/// step of any count whose median is under half an interval doubles it: one tile takes no longer
+/// than the step. An edge under `EDGE_HOLD` goes straight to it.
+fn sweep_edge(times: &StepTimes, edge: u32, interval_ms: f64, ceiling: &mut u32, alignment: u32) -> u32 {
+    let hold = aligned_edge(EDGE_HOLD, alignment);
+    if edge < hold {
+        return hold;
+    }
+    if let Some((_, readings)) = times.one_tile_ms(edge).filter(|&(a, _)| a > interval_ms && edge > hold) {
+        if readings < 3 {
+            return edge;
+        }
+        *ceiling = (*ceiling).min(edge);
+        return aligned_edge(edge / 2, alignment).max(hold);
+    }
+    let up = aligned_edge(edge.saturating_mul(2), alignment);
+    if up < *ceiling && times.one_tile_bound_ms(edge).is_some_and(|bound| bound <= interval_ms / 2.0) {
+        up
+    } else {
+        edge
+    }
 }
 
 /// Ladder adjustment for a frame on which the trace pass has not reported a
@@ -2593,6 +2763,9 @@ pub struct RayTracer {
     /// A draw call is not a paint: the ping-pong buffers must hold its writes
     /// before the next step reads them.
     recorded: Option<(u64, [bool; 15])>,
+    /// When that recording was made, and when a wait for its paint was last logged.
+    recorded_time: f64,
+    wait_logged: f64,
     draw_gbuf: DrawGbuf,
     draw_copy: DrawCopy,
     draw_hold: DrawHold,
@@ -2617,6 +2790,9 @@ pub struct RayTracer {
     tile_edge: u32,
     /// The edge the NEXT sweep will use (controller output).
     next_edge: u32,
+    /// The smallest edge whose one tile took more than a display interval in this scene: the
+    /// edge stays under it (`sweep_edge`).
+    edge_ceiling: u32,
     /// The sweep: tiles in spiral order from the view centre outward
     /// (ring by Chebyshev distance, then by angle), rebuilt when the edge
     /// or the target size changes between sweeps; `sweep_index` walks it.
@@ -2644,7 +2820,14 @@ pub struct RayTracer {
     /// the post stages still run so the picture stays on screen.
     skip_trace: bool,
     paths_last_frame: f64,
-    draw_budget_ms: f64,
+    /// This sweep's trace steps, those that overran their slice, and the longest of them against
+    /// its slice (ms): logged once a sweep.
+    sweep_steps: u32,
+    sweep_late: u32,
+    sweep_late_ms: (f64, f64),
+    /// The submission serial that holds the last recording, read once it painted, and when:
+    /// one recording is on the GPU at a time.
+    on_gpu: Option<(u64, f64)>,
     gpu_under_budget: u32,
     /// The backend has reported at least one completion time for the trace
     /// pass of THIS tracer. Once true, the host-interval fallback never
@@ -2654,15 +2837,8 @@ pub struct RayTracer {
     /// Frames that actually dispatched trace tiles since the scene was set
     /// (idle present frames don't count). Gates the no-timing bring-up.
     dispatch_frames: u32,
-    /// Recent measured GPU cost per path (ms), tiles > 0 submissions only.
-    /// The MINIMUM of this window is the honest compute cost: a completion
-    /// sample on a busy compositor frame carries several ms of queue
-    /// scheduling that has nothing to do with the paths traced, and a
-    /// controller fed raw samples pins itself at the floor (measured live:
-    /// the same 16-tile submission reads 0.15 ms on a quiet frame and 14 ms
-    /// on a busy one). A genuinely slow GPU never produces a fast sample,
-    /// so the min never overstates the machine.
-    gpu_ms_per_path: VecDeque<f64>,
+    /// The trace steps' times at the sweep's edge (`StepTimes`, `sweep_edge`).
+    step_times: StepTimes,
     paths_done: f64,
     start_time: f64,
     last_time: f64,
@@ -2886,6 +3062,8 @@ impl RayTracer {
             held_picture: None,
             stages: Vec::new(),
             recorded: None,
+            recorded_time: 0.0,
+            wait_logged: 0.0,
             draw_gbuf,
             draw_copy,
             draw_hold,
@@ -2918,11 +3096,15 @@ impl RayTracer {
             guide_valid: false,
             skip_trace: false,
             paths_last_frame: 0.0,
-            draw_budget_ms: draw_budget_ms_from_env(),
+            sweep_steps: 0,
+            sweep_late: 0,
+            sweep_late_ms: (0.0, 0.0),
+            on_gpu: None,
             gpu_under_budget: 0,
             timing_ever: false,
             dispatch_frames: 0,
-            gpu_ms_per_path: VecDeque::new(),
+            step_times: StepTimes::default(),
+            edge_ceiling: u32::MAX,
             paths_done: 0.0,
             start_time: 0.0,
             last_time: 0.0,
@@ -2937,9 +3119,9 @@ impl RayTracer {
         me
     }
 
-    /// The hard GPU budget (ms) and the next sweep's measured tile edge.
+    /// The last trace step's slice (ms) and the next sweep's tile edge.
     pub fn draw_budget(&self) -> (f64, u32) {
-        (self.draw_budget_ms, self.next_edge)
+        (self.stats.gpu_budget_ms, self.next_edge)
     }
 
     /// Convenience for callers without a worker; packing runs on the calling thread.
@@ -2954,12 +3136,15 @@ impl RayTracer {
     /// picture until the first complete sweep of the new accumulation.
     pub fn set_packed(&mut self, cx: &mut Cx, packed: Arc<PackedScene>, hold: bool) {
         self.hold_picture(cx, hold);
-        self.tile_edge = TILE_START;
-        self.next_edge = TILE_START;
+        // a backend that reports its times starts at the edge the law holds to (`EDGE_HOLD`)
+        let start = if self.timing_ever { EDGE_HOLD } else { TILE_START };
+        self.tile_edge = start;
+        self.next_edge = start;
+        self.edge_ceiling = u32::MAX;
         self.tiles_per_frame = 1;
         self.gpu_under_budget = 0;
         self.dispatch_frames = 0;
-        self.gpu_ms_per_path.clear();
+        self.step_times = StepTimes::default();
         let upload = |cx: &mut Cx, tex: &Texture, dt: &crate::pack::DataTex| {
             *tex.get_format(cx) = TextureFormat::VecRGBAf32 {
                 width: dt.width,
@@ -3322,6 +3507,11 @@ impl RayTracer {
                 draw_list: DrawList::new(cx),
             });
         }
+        // The window's frame goes out before a step of the trace runs: it shows an
+        // earlier step and paints again once this one is done.
+        for stage in &self.stages {
+            stage.pass.set_background(cx, true);
+        }
         // Stage 1 contains the full-frame carry plus every trace tile. Its
         // command-buffer duration is the feedback signal for the tile budget.
         self.stages[1].pass.set_gpu_timing_enabled(cx, true);
@@ -3349,8 +3539,11 @@ impl RayTracer {
         Mat4f::mul(&proj, &view)
     }
 
+    /// Every stage of the recording made at `repaint` painted whole once, complete on the GPU.
+    /// A stage painted again since (every pass paints again for an evicted buffer or a ready
+    /// pipeline) writes the same picture: it reads the ping its step reads.
     fn painted(&self, cx: &Cx, repaint: u64, active: &[bool; 15]) -> bool {
-        self.stages.iter().zip(active).all(|(st, &on)| !on || st.pass.painted_whole_since(cx, repaint))
+        self.stages.iter().zip(active).all(|(st, &on)| !on || st.pass.painted_whole_once_since(cx, repaint))
     }
 
     fn attach_stage(cx: &mut Cx2d, stages: &[Stage], active: &[bool; 15], stage: usize, parent: Option<DrawPassId>) {
@@ -3409,13 +3602,42 @@ impl RayTracer {
         // gate the first step at the new size.
         if self.restart {
             self.recorded = None;
+            self.on_gpu = None;
         } else if let Some((repaint, active)) = self.recorded {
-            if !self.painted(cx.cx, repaint, &active) {
+            let painted = self.painted(cx.cx, repaint, &active);
+            if !painted {
+                // Each step's paint lands within a frame or two: a wait of a second means the
+                // stages do not paint at all, and says which and how.
+                let (now, waited) = (cx.time(), cx.time() - self.recorded_time);
+                if waited >= 1.0 && now - self.wait_logged >= 10.0 {
+                    self.wait_logged = now;
+                    if let Some(i) = (0..active.len()).find(|&i| active[i] && !self.stages[i].pass.painted_whole_once_since(cx.cx, repaint)) {
+                        let pass = &cx.cx.passes[self.stages[i].pass.draw_pass_id()];
+                        let how = if pass.painted_serial < repaint { "not painted whole since" } else { "painted, not complete on the GPU" };
+                        log!("raytrace: a trace step has waited {waited:.1} s for its paint: stage {i} {how} (dirty {})", pass.paint_dirty);
+                    }
+                }
+            }
+            // One recording is on the GPU at a time. A beat stays in flight until its background
+            // passes complete, so a recording made once the last one painted could queue a second
+            // step ahead of the frame a person waits on; the next one waits for the last to
+            // complete (its submission serial, read once it painted). A recording whose completion
+            // never comes stops holding after a second, and says so.
+            if painted && self.on_gpu.is_none() {
+                self.on_gpu = Some((cx.cx.frame_submission_serial(), cx.time()));
+            }
+            let incomplete = self.on_gpu.filter(|&(serial, _)| self.timing_ever && cx.cx.frame_completed_serial() < serial);
+            let on_gpu = incomplete.is_some_and(|(_, at)| cx.time() - at < 1.0);
+            if let Some((serial, at)) = incomplete.filter(|_| painted && !on_gpu) {
+                log!("raytrace: the frames up to {serial} did not complete in {:.1} s; the next step goes ahead", cx.time() - at);
+            }
+            if !painted || on_gpu {
                 for (i, &on) in active.iter().enumerate() {
                     if on { Self::attach_stage(cx, &self.stages, &active, i, self.parent_pass); }
                 }
                 return;
             }
+            self.on_gpu = None;
             self.recorded = None;
             // A recorded sample count is not a presentable image. Release only
             // after the threshold recording paints. Before scene holds, tiles
@@ -3495,9 +3717,13 @@ impl RayTracer {
             self.sweep_index = 0;
             self.sweep_wrapped = false;
             self.rung_shift = if s.progressive { start_rung_shift(w, h) } else { 0 };
-            // A restart keeps the tile size it had earned, halved; a NEW scene
-            // starts at the conservative startup edge (set_scene resets it).
-            self.next_edge = aligned_edge(self.next_edge / 2, alignment);
+            // Without completion times a restart keeps the tile size it had earned,
+            // halved; with them the law's edge stands (the step's cost outlives a
+            // restart). A NEW scene starts at the conservative startup edge (set_scene
+            // resets it).
+            if !self.timing_ever {
+                self.next_edge = aligned_edge(self.next_edge / 2, alignment);
+            }
             self.tile_edge = self.next_edge;
             self.tiles_per_frame = 1;
             self.gpu_under_budget = 0;
@@ -3524,18 +3750,20 @@ impl RayTracer {
         let dt = now - self.last_time;
         self.last_time = now;
         // ---- the dispatch-budget law -------------------------------------
-        // Metal completion handlers report the trace pass command buffer's
-        // actual GPUStartTime/GPUEndTime. Consume completed samples without
-        // waiting, map them to submitted tile counts, and keep the next trace
-        // buffer below the hard cap. Unsupported backends keep the safe
-        // one-tile startup instead of guessing from CPU frame intervals.
+        // The stages are background passes: they run after the window's frame. While something
+        // else in the window moves (`interactive`), a step's slice is the slack the frame leaves
+        // (the display interval less the window frame's GPU time and a margin), or the host's
+        // bound when that is less; otherwise the host's bound. Metal completion handlers report
+        // the trace pass's GPU time; completed samples are consumed without waiting and climb the
+        // step's tile count (`StepTimes`).
+        // Unsupported backends keep the safe one-tile startup instead of guessing from CPU
+        // frame intervals.
         let dt_ms = dt * 1000.0;
-        let requested_ms = if s.frame_budget.is_finite() {
-            (s.frame_budget * 1000.0).max(0.5)
-        } else {
-            self.draw_budget_ms
-        };
-        let budget_ms = requested_ms.min(self.draw_budget_ms);
+        let interval_ms = cx.cx.display_frame_interval() * 1000.0;
+        let window_ms = cx.cx.window_frame_gpu_time().map_or(interval_ms, |t| t * 1000.0);
+        let slack_ms = (interval_ms - window_ms - SLICE_MARGIN_MS).max(0.0);
+        let bound_ms = s.frame_budget * 1000.0;
+        let budget_ms = if s.interactive { slack_ms.min(bound_ms) } else { bound_ms };
         self.stats.gpu_budget_ms = budget_ms;
         // Samples carry the (tiles, edge) tag captured when their command
         // buffer was ENCODED: a pass replays on every window repaint, so
@@ -3547,43 +3775,28 @@ impl RayTracer {
             self.stats.gpu_time_ms = gpu_ms;
             self.stats.gpu_samples = self.stats.gpu_samples.saturating_add(1);
             self.timing_ever = true;
-            if submitted_tiles == 0 {
+            if submitted_tiles == 0 || !(gpu_ms > 0.0) {
                 continue;
             }
-            // Min-filter the completion samples per path before the
-            // controller sees them: queue-scheduling spikes on busy
-            // compositor frames otherwise read as permanent overruns and
-            // pin the ladder at one tiny tile (see `gpu_ms_per_path`).
-            let submitted_paths =
-                submitted_tiles as f64 * (submitted_edge as f64) * (submitted_edge as f64);
-            let filtered_ms = if submitted_paths > 0.0 && gpu_ms > 0.0 {
-                self.gpu_ms_per_path.push_back(gpu_ms / submitted_paths);
-                if self.gpu_ms_per_path.len() > 8 {
-                    self.gpu_ms_per_path.pop_front();
+            // A step at an earlier sweep's edge says nothing of this one.
+            if submitted_edge == self.tile_edge {
+                self.step_times.add(submitted_tiles, submitted_edge, gpu_ms, budget_ms);
+            }
+            // A step over its slice runs all the same; the frames after it are late. Counted,
+            // and logged once a sweep.
+            self.sweep_steps += 1;
+            if gpu_ms > budget_ms {
+                self.stats.late_slices += 1;
+                self.sweep_late += 1;
+                if gpu_ms > self.sweep_late_ms.0 {
+                    self.sweep_late_ms = (gpu_ms, budget_ms);
                 }
-                let per_path = self
-                    .gpu_ms_per_path
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min);
-                (per_path * submitted_paths).max(0.001)
-            } else {
-                gpu_ms
-            };
-            let update = adapt_gpu_budget(
-                self.tiles_per_frame,
-                self.next_edge,
-                self.gpu_under_budget,
-                submitted_tiles,
-                submitted_edge,
-                filtered_ms,
-                budget_ms,
-                alignment,
-            );
-            self.tiles_per_frame = update.tiles;
-            self.next_edge = update.next_edge;
-            self.gpu_under_budget = update.under_budget;
+            }
         }
+        if self.timing_ever {
+            self.tiles_per_frame = self.step_times.plan(self.tile_edge, budget_ms);
+        }
+        (self.stats.step_tiles, self.stats.step_median_ms, self.stats.step_p90_ms) = self.step_times.in_use(self.tile_edge);
         self.next_edge = aligned_edge(self.next_edge, alignment);
         if self.stats.gpu_samples == 0 {
             let update = adapt_without_timing(
@@ -3642,27 +3855,15 @@ impl RayTracer {
         // a fixed permutation of tiles, and a mid-sweep resize would cover
         // some pixels twice and others never (measured: 2.0 / 0.5 per cell).
         if self.sweep_index == 0 {
-            // Spend the budget as few large dispatches, not many small ones:
-            // when the measured ladder wants four-plus tiles a frame and the
-            // edge can still grow, promote the edge for the coming sweep and
-            // cut the tile count to keep paths-per-frame roughly constant —
-            // the next completion sample retrims either way.
-            if dispatching && self.tiles_per_frame >= 4 && self.next_edge < TILE_MAX {
-                let area = self.tiles_per_frame as u64 * (self.next_edge as u64 * self.next_edge as u64);
-                self.next_edge = (self.next_edge * 2).min(TILE_MAX);
-                self.tiles_per_frame =
-                    ((area / (self.next_edge as u64 * self.next_edge as u64)) as u32).clamp(1, TILES_PER_FRAME_MAX);
+            // The edge in use is the law's (`sweep_edge`, or the no-timing ladder). An edge taken
+            // before resumes at the count its steps climbed to; a new one starts with one tile.
+            if self.timing_ever {
+                self.next_edge = sweep_edge(&self.step_times, self.tile_edge, interval_ms, &mut self.edge_ceiling, alignment);
             }
-            // The measured controller can be driven to its floor by QUEUE
-            // NOISE: on a busy frame the trace command buffer's wall time
-            // carries a fixed several-ms scheduling overhead whatever the
-            // tile size, which reads as a permanent overrun and once pinned
-            // the pane crawls at 64 paths a frame (measured live: edge 8,
-            // one tile, 0.06 spp after 45 s). The controller still shrinks
-            // and grows on real signal, but dispatch never drops below
-            // `MIN_PATHS_PER_FRAME` — small dispatches, watchdog-safe, and a
-            // guaranteed convergence pace.
-            self.tile_edge = aligned_edge(self.next_edge.max(32), alignment);
+            if aligned_edge(self.next_edge, alignment) != self.tile_edge && self.timing_ever {
+                self.tiles_per_frame = self.step_times.plan(aligned_edge(self.next_edge, alignment), budget_ms);
+            }
+            self.tile_edge = aligned_edge(self.next_edge, alignment);
             let key = (self.tile_edge, rw, rh);
             if self.sweep_key != key || self.sweep_order.is_empty() {
                 self.sweep_order = spiral_order(rw as u32, rh as u32, self.tile_edge);
@@ -3670,21 +3871,15 @@ impl RayTracer {
             }
         }
         let edge = self.tile_edge;
-        // The dispatch envelope. Metal command-buffer intervals under a
-        // busy compositor both inflate (queue scheduling, concurrent
-        // buffers stretching Start..End) and lie low (samples matched to a
-        // lighter replay), so the measured controller only steers WITHIN a
-        // hard floor and ceiling: the floor guarantees convergence pace,
-        // the ceiling bounds the tracer's GPU appetite per host frame so
-        // the machine keeps breathing whatever the readings say.
-        let tile_area = edge.saturating_mul(edge);
-        let min_tiles = MIN_PATHS_PER_FRAME.div_ceil(tile_area);
-        let max_tiles_budget = (MAX_PATHS_PER_FRAME / tile_area).max(1);
-        let tiles_this_frame = self
-            .tiles_per_frame
-            .max(min_tiles)
-            .min(max_tiles_budget)
-            .min(TILES_PER_FRAME_MAX);
+        // The step's tiles at this sweep's edge: the no-timing ladder plans at the next sweep's
+        // edge, so a step planned at another edge keeps its paths; a one-tile step stays one
+        // tile (it reads the fixed time). With completion times the two edges are one.
+        let planned = self.tiles_per_frame as u64 * (self.next_edge as u64).pow(2);
+        let tiles_this_frame = if self.tiles_per_frame <= 1 {
+            1
+        } else {
+            ((planned / (edge as u64).pow(2).max(1)) as u32).clamp(1, TILES_PER_FRAME_MAX)
+        };
         let mut tiles: Vec<(u32, u32, u32, u32)> = Vec::new();
         if dispatching && !self.sweep_order.is_empty() {
             for _ in 0..tiles_this_frame {
@@ -3698,6 +3893,11 @@ impl RayTracer {
                     // the ladder may climb a rung next frame.
                     self.sweep_index = 0;
                     self.sweep_wrapped = true;
+                    if self.sweep_late > 0 {
+                        let (ms, slice) = self.sweep_late_ms;
+                        log!("raytrace: {} of {} trace steps overran their slice in the last sweep, the longest {ms:.1} ms of {slice:.1} ms", self.sweep_late, self.sweep_steps);
+                    }
+                    (self.sweep_steps, self.sweep_late, self.sweep_late_ms) = (0, 0, (0.0, 0.0));
                     break;
                 }
             }
@@ -4253,6 +4453,12 @@ impl RayTracer {
             dv.set_uniform(cx.cx, id!(src_res), &[rw as f32, rh as f32]);
             dv.set_uniform(cx.cx, id!(coarse), &[if shift > 0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(exposure), &[s.exposure]);
+            dv.set_uniform(cx.cx, id!(white_balance), &s.white_balance);
+            let curve = match s.curve {
+                DisplayCurve::MeteredAces => [0.0, 1.0, 1.0, 0.0],
+                DisplayCurve::AgxLook { contrast, saturation } => [1.0, contrast, saturation, 0.0],
+            };
+            dv.set_uniform(cx.cx, id!(display_curve), &curve);
             dv.set_uniform(cx.cx, id!(sky_display), &[if !env_on && sky.uniform_value <= 0.0 && sky.sky_strength > 0.0 { 1.0 } else { 0.0 }]);
             dv.set_uniform(cx.cx, id!(view_mode), &[s.view_mode as f32]);
             dv.set_uniform(cx.cx, id!(attr_inv), &[packed_inv.1.x, packed_inv.1.y]);
@@ -4275,6 +4481,7 @@ impl RayTracer {
         debug_assert!(active_stages.next().is_none());
 
         self.recorded = Some((cx.cx.repaint_id(), active));
+        self.recorded_time = now;
         self.recorded_gains = self.stats.gain_uploads;
         self.gains_dirty = false;
         self.display_stale = false;
@@ -4328,18 +4535,6 @@ impl RayTracer {
         self.seed
     }
 
-    /// Keep drawing while the image is converging.
-    /// Per-DRAW GPU budget in ms; the tile cap follows from it through the
-    /// scene's cost prior. The interactive preview asks for a small one so
-    /// no single command buffer can hold the GPU long enough to stall the
-    /// compositor. `MAKEPAD_PT_BUDGET_MS` in the environment wins.
-    pub fn set_draw_budget_ms(&mut self, ms: f64) {
-        if std::env::var("MAKEPAD_PT_BUDGET_MS").is_ok() {
-            return;
-        }
-        self.draw_budget_ms = ms.clamp(0.5, 16.0);
-    }
-
     pub fn set_paused(&mut self, paused: bool) {
         self.display_stale |= paused != self.paused;
         self.paused = paused;
@@ -4353,6 +4548,7 @@ impl RayTracer {
         self.skip_trace = skip;
     }
 
+    /// Keep drawing while the image is converging.
     pub fn wants_frame(&self) -> bool {
         if self.recorded.is_some() {
             return true;
@@ -4372,32 +4568,17 @@ pub const TILE_START: u32 = 32;
 pub const TILE_MAX: u32 = 128;
 /// Most tiles one frame queues (each its own draw).
 pub const TILES_PER_FRAME_MAX: u32 = 32;
-/// Paths per dispatching frame never fall below this, whatever the budget
-/// controller reads: a fixed queue-scheduling overhead of several ms rides
-/// every trace command buffer on a busy compositor frame, and a controller
-/// fed that noise pins itself at one tiny tile. Sixteen 32-px dispatches
-/// stay individually small (watchdog-safe) while guaranteeing ~half an spp
-/// per second at 30 Hz on a 1-Mpixel pane.
-pub const MIN_PATHS_PER_FRAME: u32 = 16384;
-/// ...and never above this: ~96k paths per 30 Hz tick is roughly a quarter
-/// of the measured saturated throughput on the dev machine — over 1.5 spp/s
-/// on a megapixel pane while the compositor and the realtime pane keep
-/// their frame time. The measured controller wanders inside the envelope.
-pub const MAX_PATHS_PER_FRAME: u32 = 98304;
+/// A trace step's slack is the display interval less the window frame's GPU time and this margin
+/// (ms): what the next window frame needs to find the GPU free.
+pub const SLICE_MARGIN_MS: f64 = 2.0;
+/// The tile counts a trace step climbs through (`StepTimes`).
+const STEP_COUNTS: [u32; 6] = [1, 2, 4, 8, 16, TILES_PER_FRAME_MAX];
+/// Completion times `StepTimes` keeps for each count.
+const COST_WINDOW: usize = 8;
 /// Tiles in the first Chebyshev ring (centre + 8 neighbours). The interactive
 /// host uses this as a present-gate threshold; the scheduler still restarts
 /// at one tile per frame.
 pub const FIRST_RING_TILES: u32 = 9;
-
-/// `MAKEPAD_PT_BUDGET_MS`: hard target for one trace command buffer (ms).
-pub fn draw_budget_ms_from_env() -> f64 {
-    std::env::var("MAKEPAD_PT_BUDGET_MS")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| *v > 0.0)
-        .unwrap_or(4.0)
-        .clamp(0.5, 50.0)
-}
 
 /// The coarsest rung of the resolution ladder for a `w`×`h` target: the
 /// deepest shift (≤ 3, i.e. 1/8) that keeps both coarse dimensions ≥ 96 px —
@@ -4461,7 +4642,7 @@ fn ortho_matrix(half_w: f32, half_h: f32, near: f32, far: f32) -> Mat4f {
 #[cfg(test)]
 mod sweep_tests {
     use super::{
-        adapt_gpu_budget, adapt_without_timing, reached_sample_limit, should_dispatch_trace, spiral_order, Capture, CaptureKind, RenderSettings, TILE_MIN, metered_exposure_from_rgb, tonemap_rgb,
+        adapt_without_timing, reached_sample_limit, sweep_edge, StepTimes, COST_WINDOW, EDGE_HOLD, TILES_PER_FRAME_MAX, TILE_MAX, should_dispatch_trace, spiral_order, Capture, CaptureKind, RenderSettings, metered_exposure_from_rgb, tonemap_rgb,
     };
 
     #[test]
@@ -4484,22 +4665,72 @@ mod sweep_tests {
     }
 
     #[test]
-    fn gpu_budget_cuts_tiles_on_an_overrun_and_grows_only_after_stability() {
-        let over = adapt_gpu_budget(8, 64, 2, 8, 64, 8.0, 4.0, 1);
-        assert_eq!(over.tiles, 3);
-        assert_eq!(over.under_budget, 0);
-
-        let one_tile_over = adapt_gpu_budget(1, 32, 0, 1, 32, 8.0, 4.0, 1);
-        assert_eq!(one_tile_over.tiles, 1);
-        assert_eq!(one_tile_over.next_edge, 16);
-
-        // Growth needs two consecutive under-budget completions.
-        let a = adapt_gpu_budget(1, TILE_MIN, 0, 1, TILE_MIN, 0.5, 4.0, 1);
-        let b = adapt_gpu_budget(a.tiles, a.next_edge, a.under_budget, 1, TILE_MIN, 0.5, 4.0, 1);
-        assert_eq!(a.tiles, 1);
-        assert_eq!(a.under_budget, 1);
-        assert_eq!(b.tiles, 2);
-        assert_eq!(b.under_budget, 0);
+    fn a_step_climbs_to_the_largest_count_its_times_fit_and_a_sweep_to_the_largest_tile() {
+        let e = TILE_MAX;
+        let mut times = StepTimes::default();
+        assert_eq!(times.plan(e, 50.0), 1, "nothing read: one tile");
+        // Three readings at a count whose p90 fits the slice: the next count.
+        for ms in [5.0, 6.0, 7.0] {
+            times.add(1, e, ms, 20.0);
+        }
+        assert_eq!(times.plan(e, 20.0), 2, "one tile's p90, 7 ms, bounds two tiles within 20 ms (14 ms), not four (28 ms)");
+        for ms in [8.0, 9.0, 40.0] {
+            times.add(2, e, ms, 50.0);
+        }
+        assert_eq!(times.plan(e, 50.0), 4, "a late reading under the slice still climbs, to the next count at least");
+        for ms in [30.0, 45.0, 60.0] {
+            times.add(4, e, ms, 50.0);
+        }
+        assert_eq!(times.plan(e, 50.0), 4, "a p90 over the slice holds the count; its median fits");
+        // The person acts: the slice is the slack, and the count goes down at once past every
+        // count whose median does not fit.
+        assert_eq!(times.plan(e, 14.0), 2, "two tiles' median, 9 ms, fits 14 ms");
+        assert_eq!(times.plan(e, 5.0), 1, "nothing fits 5 ms: one tile, which always runs");
+        // A count that went down waits COST_WINDOW readings before the one above is tried.
+        for _ in 0..COST_WINDOW - 1 {
+            times.add(1, e, 5.0, 50.0);
+        }
+        assert_eq!(times.plan(e, 50.0), 1, "held");
+        times.add(1, e, 5.0, 50.0);
+        assert_eq!(times.plan(e, 50.0), 8, "the hold is over: one tile's 5 ms bounds eight within 50 ms, past two and four");
+        // A sweep's first steps: three one-tile readings take the count to the bound at once.
+        let mut first = StepTimes::default();
+        for ms in [1.2, 1.4, 1.5] {
+            first.add(1, e, ms, 50.0);
+        }
+        assert_eq!(first.plan(e, 50.0), TILES_PER_FRAME_MAX, "one tile at 1.5 ms bounds the most tiles a step takes within 50 ms");
+        // With no bound the first three readings take the count to the most tiles a step takes.
+        let mut free = StepTimes::default();
+        for _ in 0..3 {
+            assert_eq!(free.plan(e, f64::INFINITY), 1);
+            free.add(1, e, 30.0, f64::INFINITY);
+        }
+        assert_eq!(free.plan(e, f64::INFINITY), TILES_PER_FRAME_MAX, "unbounded: the cap");
+        assert_eq!(free.plan(e / 2, f64::INFINITY), 1, "times at another edge say nothing of this one: one tile");
+        free.add(1, e / 2, 3.0, f64::INFINITY);
+        assert_eq!(free.plan(e / 2, f64::INFINITY), 1, "the new edge climbs from one tile");
+        assert_eq!(free.plan(e, f64::INFINITY), TILES_PER_FRAME_MAX, "the edge read before keeps its count");
+        // The sweep's edge, from the step times at it against a 16.7 ms interval.
+        let mut ceiling = u32::MAX;
+        let at = |edge: u32, tiles: u32, ms: f64, n: usize, ceiling: &mut u32| {
+            let mut times = StepTimes::default();
+            for _ in 0..n {
+                times.add(tiles, edge, ms, 0.0);
+            }
+            sweep_edge(&times, edge, 16.7, ceiling, 1)
+        };
+        assert_eq!(at(32, 1, 4.0, 1, &mut ceiling), EDGE_HOLD, "under the hold: straight to it");
+        assert_eq!(at(64, 1, 4.0, 3, &mut ceiling), 128, "a tile under half an interval: the edge doubles");
+        assert_eq!(at(64, 8, 6.0, 3, &mut ceiling), 128, "so does a step of eight: one tile takes no longer");
+        assert_eq!(at(64, 1, 12.0, 3, &mut ceiling), 64, "a step's fixed cost over half an interval: it stays");
+        assert_eq!(at(64, 1, 4.0, 2, &mut ceiling), 64, "fewer than three readings say nothing");
+        assert_eq!(at(128, 1, 30.0, 1, &mut ceiling), 128, "one slow reading alone does not halve it");
+        assert_eq!(at(64, 1, 30.0, 3, &mut ceiling), 64, "over an interval at the hold: it stays");
+        assert_eq!(at(128, 1, 30.0, 3, &mut ceiling), 64, "over an interval above it: it halves");
+        assert_eq!(at(64, 1, 4.0, 3, &mut ceiling), 64, "and stays under the edge that took too long");
+        let mut open = u32::MAX;
+        assert_eq!(at(TILE_MAX, 1, 1.0, 3, &mut open), TILE_MAX, "never past the largest");
+        assert_eq!(sweep_edge(&StepTimes::default(), 64, 16.7, &mut open, 1), 64, "nothing read: it stays");
     }
 
     #[test]
@@ -4605,17 +4836,6 @@ mod sweep_tests {
         assert_eq!(super::start_rung_shift(960, 540), 2);
         assert_eq!(super::start_rung_shift(300, 200), 1);
         assert_eq!(super::start_rung_shift(150, 150), 0);
-    }
-
-    #[test]
-    fn the_dispatch_floor_survives_a_pinned_controller() {
-        // A controller pinned at one tile still dispatches at least
-        // MIN_PATHS_PER_FRAME paths within the tile-count cap.
-        for edge in [32u32, 64, 128] {
-            let min_tiles = super::MIN_PATHS_PER_FRAME.div_ceil(edge * edge);
-            assert!(min_tiles <= super::TILES_PER_FRAME_MAX, "edge {edge}");
-            assert!(min_tiles * edge * edge >= super::MIN_PATHS_PER_FRAME, "edge {edge}");
-        }
     }
 
     #[test]

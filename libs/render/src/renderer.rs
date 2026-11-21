@@ -581,6 +581,11 @@ pub struct Renderer {
     /// flashes, host lights). Rebuilt per frame into the same buffer.
     frame_lights: Vec<crate::lightmap::LmLight>,
     frame_baked_count: usize,
+    /// This frame's dynamic casters and the local lights' static casters
+    /// (`collect_lm_movers`, `collect_local_static_casters`): rebuilt per
+    /// frame into the same buffers, which keep their capacity.
+    frame_movers: Vec<crate::gpu_lightmap::GpuLmMover>,
+    frame_local_statics: Vec<crate::gpu_lightmap::GpuBakeMesh>,
     /// Host-supplied transient lights ([`Self::add_frame_lights`]), drained
     /// into `frame_lights` each frame.
     host_lights: Vec<crate::lightmap::LmLight>,
@@ -896,6 +901,8 @@ impl Default for Renderer {
             lm_lights: Vec::new(),
             frame_lights: Vec::new(),
             frame_baked_count: 0,
+            frame_movers: Vec::new(),
+            frame_local_statics: Vec::new(),
             host_lights: Vec::new(),
             host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),light_daylight:SunLight::default().dir,camera_relative:false,
             model_headlight_owners: Vec::new(),

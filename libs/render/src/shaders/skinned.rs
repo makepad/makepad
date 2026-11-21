@@ -288,22 +288,32 @@ script_mod! {
         ..mod.draw.SceneOutputDither,
         // ---- material paint, OFF by default ----
         // A CAD host's paint atlas sits in the element lookup's texture, after its table: an
-        // element's texel 1 `.w` is its volume's header texel + 1 (0: unpainted). The vertex
+        // element's texel 1 `.w` is its volume's header texel as the atlas stores texel numbers
+        // (`PaintLookup::paint_number`; 0: unpainted). The vertex
         // stage keeps the position before the element move and the element index, so paint stays
         // on a part while it is dragged. Off with the lookup (every game path).
         v_paint: varying(vec4f),
         ..mod.draw.PaintLookup,
 
-        paint_texel: fn(i: f32) -> vec4 {
-            let ew = max(self.elem_ctl.x, 1.0)
+        // Texel i, its row and column whole numbers to the end (an f32 index stops holding every
+        // texel past 2^24).
+        paint_texel: fn(i: u32) -> vec4 {
+            let ew = u32(max(self.elem_ctl.x, 1.0))
             let eh = max(self.elem_ctl.y, 1.0)
-            return self.elem_map.sample_nearest(vec2((modf(i, ew) + 0.5) / ew, (floor(i / ew) + 0.5) / eh))
+            return self.elem_map.sample_nearest(vec2((f32(i % ew) + 0.5) / f32(ew), (f32(i / ew) + 0.5) / eh))
         }
 
-        // The element's paint header texel, -1 for none.
+        // Texel k of the element's entry in the table.
+        paint_elem: fn(k: u32) -> vec4 {
+            return self.paint_texel(u32(self.v_paint.w) * u32(self.elem_ctl.z) + k)
+        }
+
+        // The element's paint header, as the atlas stores texel numbers; -1 for none.
         paint_header: fn() -> f32 {
             if self.elem_ctl.w < 0.5 || self.elem_ctl.z < 3.5 || self.v_paint.w < 0.0 { return 0.0 - 1.0 }
-            return self.paint_texel(self.v_paint.w * self.elem_ctl.z + 1.0).w - 1.0
+            let h = self.paint_elem(1u).w
+            if h <= 0.0 { return 0.0 - 1.0 }
+            return h
         }
 
         // `albedo` with the element's paint at this fragment, edges a pixel wide; in w its light
@@ -314,8 +324,9 @@ script_mod! {
             let dw = length(dx) + length(dy)
             let hdr = self.paint_header()
             if hdr < 0.0 { return vec4(albedo, 0.0) }
-            let s = length(self.paint_texel(hdr + 3.0).xyz)
-            return self.paint_shade(hdr, self.paint_frame(hdr, self.v_paint.xyz), self.paint_turn(hdr + 3.0, cross(dx, dy)), dw * s, albedo)
+            let h = self.paint_number(hdr)
+            let s = length(self.paint_texel(h + 3u).xyz)
+            return self.paint_shade(hdr, self.paint_frame(h, self.v_paint.xyz), self.paint_turn(h + 3u, cross(dx, dy)), dw * s, albedo)
         }
 
         // The least light a floored paint shows at, scene-referred: `share` of its colour as the
@@ -671,7 +682,7 @@ script_mod! {
             if dot(self.host_clip.xyz, self.v_csm.xyz) + self.host_clip.w < 0.0 { self.clip() }
             let p = vec4(self.v_csm.xyz, 1.0)
             if max(max(abs(dot(self.host_box0, p)), abs(dot(self.host_box1, p))), abs(dot(self.host_box2, p))) > 1.0 {
-                if self.v_paint.w < 0.0 || self.paint_texel(self.v_paint.w * self.elem_ctl.z + 3.0).w > 0.0 - 0.5 { self.clip() }
+                if self.v_paint.w < 0.0 || self.paint_elem(3u).w > 0.0 - 0.5 { self.clip() }
             }
         }
         door_window: fn() {

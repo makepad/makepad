@@ -219,7 +219,7 @@ script_mod! {
                 let core = clamp(1.0 - d, 0.0, 1.0)
                 a = core * core
                 heat = core * core * core
-            } else if sprite < 3.5 || sprite > 12.5 || (sprite > 4.5 && sprite < 5.5) {
+            } else if sprite < 3.5 || (sprite > 12.5 && sprite < 13.5) || (sprite > 4.5 && sprite < 5.5) {
                 // Smoke, wisp, dust, fireball: flipbook density + normal.
                 if atlas_on > 0.5 {
                     var s = vec4(0.0, 0.0, 0.0, 0.0)
@@ -289,6 +289,11 @@ script_mod! {
             } else if sprite < 11.5 {
                 // Rain streak: thin across, soft at both ends.
                 a = (1.0 - smoothstep(0.1, 0.9, abs(p.y))) * smoothstep(1.0, 0.4, abs(p.x))
+            } else if sprite > 13.5 {
+                // Square: the whole quad is one flat face.
+                a = 1.0
+                n = vec3(0.0, 0.0, 1.0)
+                heat = 0.0
             } else {
                 // Snowflake.
                 a = smoothstep(1.0, 0.3, d)

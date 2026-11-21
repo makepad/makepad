@@ -26,6 +26,9 @@ pub fn text_width(text: &str, size: f64, spacing: f64, font: Font) -> Result<f64
 pub struct Failure {
     pub node: NodeId,
     pub op: &'static str,
+    /// A B-rep step's selector that names nothing on its body any more, by its place among the
+    /// names the step selects by ([`BrepFailure::lost`]).
+    pub lost: Option<usize>,
     pub message: String,
 }
 
@@ -62,6 +65,8 @@ pub struct Evaluator {
     /// The chord of an exact body's mesh (mm), times `draft`: what the meshes made from it
     /// (and their checks) see. A view shows it at its own ([`Self::brep_mesh`]).
     pub brep_chord: f64,
+    /// What building a kept mesh noted ([`Self::note`]), by its key in `cache`: dropped with it.
+    notes: HashMap<(Key, u64), StepNote>,
 }
 
 /// The chord (mm) exact bodies and cages are meshed at for print: about how far the mesh may
@@ -70,7 +75,7 @@ pub const PRINT_CHORD: f64 = 0.05;
 
 impl Default for Evaluator {
     fn default() -> Self {
-        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0, brep: None, brep_chord: PRINT_CHORD }
+        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0, brep: None, brep_chord: PRINT_CHORD, notes: HashMap::new() }
     }
 }
 
@@ -215,7 +220,7 @@ impl Evaluator {
     pub fn brep_measure(&self, g: &Graph, id: NodeId) -> Option<Result<BrepMeasure, BrepFailure>> {
         matches!(g.node(id).op, Op::Brep { .. }).then(|| match &self.brep {
             Some(e) => e.measure(brep_steps(g, id)),
-            None => Err(BrepFailure { step: None, message: "this build has no B-rep engine".into() }),
+            None => Err(BrepFailure { step: None, lost: None, message: "this build has no B-rep engine".into() }),
         })
     }
 
@@ -223,8 +228,36 @@ impl Evaluator {
     pub fn brep_entities(&self, g: &Graph, id: NodeId) -> Option<Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepFailure>> {
         matches!(g.node(id).op, Op::Brep { .. }).then(|| match &self.brep {
             Some(e) => e.entities(brep_steps(g, id)),
-            None => Err(BrepFailure { step: None, message: "this build has no B-rep engine".into() }),
+            None => Err(BrepFailure { step: None, lost: None, message: "this build has no B-rep engine".into() }),
         })
+    }
+
+    /// What of a body node is at point `p` (see [`BrepEngine::at`]).
+    pub fn brep_point(&self, g: &Graph, id: NodeId, p: [f64; 3], reach: f64) -> Option<Result<BrepAt, BrepFailure>> {
+        matches!(g.node(id).op, Op::Brep { .. }).then(|| match &self.brep {
+            Some(e) => e.at(brep_steps(g, id), p, reach),
+            None => Err(BrepFailure { step: None, lost: None, message: "this build has no B-rep engine".into() }),
+        })
+    }
+
+    /// What a body node's written selections took when the engine built it (see
+    /// [`BrepEngine::taken`]); `None` for no exact body, or one the engine no longer holds.
+    pub fn brep_taken(&self, g: &Graph, id: NodeId) -> Option<Vec<BrepTaken>> {
+        let node = g.node(id);
+        matches!(node.op, Op::Brep { .. }).then_some(())?;
+        self.brep.as_ref()?.taken(node.key)
+    }
+
+    /// What building node `id` noted ([`StepNote`]): an exact body's as its engine keeps it,
+    /// another's while its mesh at the current draft is kept. `None` for a node built without a
+    /// note, or not built. One lookup, nothing built.
+    pub fn note(&self, g: &Graph, id: NodeId) -> Option<StepNote> {
+        let node = g.node(id);
+        if let Op::Brep { .. } = node.op {
+            return self.brep.as_ref()?.note(node.key);
+        }
+        let draft = if self.drafted(g, id) { (self.draft_scale() * self.brep_chord).to_bits() } else { 0 };
+        self.notes.get(&(node.key, draft)).copied()
     }
 
     /// An evaluator that builds exact bodies with this engine.
@@ -242,6 +275,8 @@ impl Evaluator {
         self.round += 1;
         let keep = self.round.saturating_sub(KEEP_ROUNDS);
         self.cache.retain(|_, (_, used)| *used >= keep);
+        let cache = &self.cache;
+        self.notes.retain(|at, _| cache.contains_key(at));
         self.built = 0;
     }
 
@@ -258,18 +293,18 @@ impl Evaluator {
             return Ok(m.clone());
         }
         if cancelled.is_some_and(|c| c()) {
-            return Err(Failure { node: id, op: node.op.name(), message: "cancelled".into() });
+            return Err(Failure { node: id, op: node.op.name(), lost: None, message: "cancelled".into() });
         }
         let mut inputs = Vec::new();
         for i in node.op.inputs() {
             inputs.push(self.mesh(g, i, cancelled)?);
         }
         if let Some(big) = inputs.iter().find(|m| m.triangles.len() > MAX_TRIANGLES) {
-            return Err(Failure { node: id, op: node.op.name(), message: format!("an input has {} triangles (at most {MAX_TRIANGLES}): use a coarser cell or fewer segments", big.triangles.len()) });
+            return Err(Failure { node: id, op: node.op.name(), lost: None, message: format!("an input has {} triangles (at most {MAX_TRIANGLES}): use a coarser cell or fewer segments", big.triangles.len()) });
         }
-        let m = self.build(g, &node.op, &inputs, cancelled).map_err(|message| Failure { node: id, op: node.op.name(), message })?;
+        let m = self.build(g, (node.key, draft), &node.op, &inputs, cancelled).map_err(|message| Failure { node: id, op: node.op.name(), lost: None, message })?;
         if m.triangles.len() > MAX_TRIANGLES {
-            return Err(Failure { node: id, op: node.op.name(), message: format!("the result has {} triangles (at most {MAX_TRIANGLES}): use a coarser cell or fewer segments", m.triangles.len()) });
+            return Err(Failure { node: id, op: node.op.name(), lost: None, message: format!("the result has {} triangles (at most {MAX_TRIANGLES}): use a coarser cell or fewer segments", m.triangles.len()) });
         }
         let m = Arc::new(m);
         self.built += 1;
@@ -332,7 +367,7 @@ impl Evaluator {
         }
         let (tolerance, draft, finest_cell, round, brep_chord) = (self.tolerance, self.draft, self.finest_cell, self.round, self.brep_chord);
         let build = move |g: &Graph, group: Group, cancelled: &dyn Fn() -> bool| {
-            let mut e = Evaluator { tolerance, draft, finest_cell, cache: group.reads, round, built: 0, brep: None, brep_chord };
+            let mut e = Evaluator { tolerance, draft, finest_cell, cache: group.reads, round, built: 0, brep: None, brep_chord, notes: HashMap::new() };
             for id in group.ids {
                 if e.mesh(g, id, Some(cancelled)).is_err() {
                     break;
@@ -360,6 +395,7 @@ impl Evaluator {
             if let Some(e) = e {
                 self.built += e.built;
                 self.cache.extend(e.cache);
+                self.notes.extend(e.notes);
             }
         };
         // the caller's groups, with its cancel (which stops the others too)
@@ -405,14 +441,14 @@ impl Evaluator {
             return Ok(m.clone());
         }
         if cancelled.is_some_and(|c| c()) {
-            return Err(Failure { node: id, op: node.op.name(), message: "cancelled".into() });
+            return Err(Failure { node: id, op: node.op.name(), lost: None, message: "cancelled".into() });
         }
         // A recipe for the engine: bodies, no meshes of the steps before.
-        let engine = self.brep.clone().ok_or_else(|| Failure { node: id, op: node.op.name(), message: "this build has no B-rep engine".into() })?;
+        let engine = self.brep.clone().ok_or_else(|| Failure { node: id, op: node.op.name(), lost: None, message: "this build has no B-rep engine".into() })?;
         let mut m = engine.mesh(brep_steps(g, id), chord, cancelled).map_err(|f| {
             // The failure belongs at the step's own line, not the last op's.
             let at = f.step.and_then(|k| g.nodes.iter().position(|n| n.key == k)).map_or(id, |i| NodeId(i as u32));
-            Failure { node: at, op: g.node(at).op.name(), message: f.message }
+            Failure { node: at, op: g.node(at).op.name(), lost: f.lost, message: f.message }
         })?;
         if let Op::Brep { op, inputs } = &node.op {
             if let [source] = inputs.as_slice() {
@@ -463,7 +499,8 @@ impl Evaluator {
         s.regions(&self.tolerance)
     }
 
-    fn build(&mut self, g: &Graph, op: &Op, inputs: &[Arc<TriMesh>], cancelled: Option<&dyn Fn() -> bool>) -> Result<TriMesh, String> {
+    /// The mesh of `op` (kept at `at` in the cache) from its inputs' meshes.
+    fn build(&mut self, g: &Graph, at: (Key, u64), op: &Op, inputs: &[Arc<TriMesh>], cancelled: Option<&dyn Fn() -> bool>) -> Result<TriMesh, String> {
         let tol = self.tolerance;
         let mut out = match op {
             Op::Box { size, radius } => {
@@ -479,6 +516,16 @@ impl Evaluator {
                 Ok(rounded_box(*size, *radius, tol.segments(*radius, std::f64::consts::FRAC_PI_2).max(2)))
             }
             Op::Hull { points } => makepad_csg_primitives::hull(&points.iter().map(|p| v3(*p)).collect::<Vec<_>>()),
+            Op::HullOf { points, .. } => {
+                let mut all: Vec<_> = points.iter().map(|p| v3(*p)).collect();
+                // Only the vertices a triangle uses: a mesh may carry ones its last step dropped.
+                for m in inputs {
+                    let mut used = vec![false; m.vertices.len()];
+                    m.triangles.iter().flatten().for_each(|&i| used[i as usize] = true);
+                    all.extend(m.vertices.iter().zip(&used).filter(|(_, u)| **u).map(|(p, _)| *p));
+                }
+                makepad_csg_primitives::hull(&all)
+            }
             Op::RingLoft { rings, prism } => {
                 let rings: Vec<_> = rings.iter().map(|ring| makepad_csg_primitives::LoftRing {
                     origin: v3(ring.origin), u: v3(ring.u), v: v3(ring.v), points: ring.points.clone(), crease: ring.crease,
@@ -615,7 +662,40 @@ impl Evaluator {
                 }
                 Ok(if *keep { cad::union(source, &m) } else { m })
             }
-            Op::Shell { thickness, open, cell, .. } => shell(&inputs[0], *thickness, *open, cell.map(|c| c * self.draft_scale()), self.draft_scale()),
+            Op::Split { center, normal, piece, pins, .. } => {
+                let source = &inputs[0];
+                let plan = cad::split::plan(source, *center, *normal, pins)?;
+                if *piece == SplitPiece::Pins && plan.spots.is_empty() {
+                    return Err("no place on the cut has room for a pin: a smaller 'pin' radius fits a thinner cut".into());
+                }
+                if let Some(no_room) = plan.no_room {
+                    self.notes.insert(at, StepNote::SplitWithoutPins(no_room));
+                }
+                let [u, n, w] = plan.turn();
+                let placed = |m: TriMesh, at: Vec3d| {
+                    let mut m = place(m, (u, n, w));
+                    for p in &mut m.vertices {
+                        *p = *p + at;
+                    }
+                    m
+                };
+                let slab = placed(makepad_csg_primitives::cube(dvec3(plan.slab, plan.slab, plan.slab), true), plan.slab_center);
+                let rod = |r: &cad::split::Rod| placed(makepad_csg_primitives::cylinder(r.radius, r.length(), tol.segments(r.radius, std::f64::consts::TAU).max(12) as u32, true), r.middle());
+                let (gain, lose) = plan.rods(*piece);
+                let mut out = match piece {
+                    SplitPiece::Below => cad::difference(source, &slab),
+                    SplitPiece::Above => cad::intersection(source, &slab),
+                    SplitPiece::Pins => TriMesh::new(),
+                };
+                for g in &gain {
+                    out = if out.triangles.is_empty() { rod(g) } else { cad::union(&out, &rod(g)) };
+                }
+                for l in &lose {
+                    out = cad::difference(&out, &rod(l));
+                }
+                nonempty(out, "split's piece")
+            }
+            Op::Shell { thickness, open, cell, .. } => shell(&inputs[0], *thickness, open, cell.map(|c| c * self.draft_scale()), self.draft_scale()),
             Op::Offset { distance, cell, .. } => offset(&inputs[0], *distance, cell.map(|c| c * self.draft_scale()), self.draft_scale()),
             Op::Boolean { mode, .. } => {
                 let mut out = (*inputs[0]).clone();
@@ -852,7 +932,10 @@ fn offset(source: &TriMesh, d: f64, cell: Option<f64>, draft: f64) -> Result<Tri
 /// Hollow `source` to walls of `t`: the outer skin stays exactly as it was; the
 /// cavity (everything deeper than the wall) is meshed from the solid's distance
 /// field at `cell` and cut away, opened through the top or bottom face when asked.
-fn shell(source: &TriMesh, t: f64, open: Open, cell: Option<f64>, draft: f64) -> Result<TriMesh, String> {
+fn shell(source: &TriMesh, t: f64, open: &Open, cell: Option<f64>, draft: f64) -> Result<TriMesh, String> {
+    if let Open::Faces(_) = open {
+        return Err("a shell opens faces by name only on an exact body (m.brep.shell)".into());
+    }
     if !(t > 0.0) {
         return Err("'thickness' must be positive".into());
     }
@@ -881,7 +964,7 @@ fn shell(source: &TriMesh, t: f64, open: Open, cell: Option<f64>, draft: f64) ->
     let face = match open {
         Open::Top => Some(true),
         Open::Bottom => Some(false),
-        Open::Closed => None,
+        Open::Closed | Open::Faces(_) => None,
     };
     if let Some(top) = face {
         let cut_y = if top { bb.max.y - t - cell } else { bb.min.y + t + cell };

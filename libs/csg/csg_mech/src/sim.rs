@@ -919,6 +919,20 @@ impl MechWorld {
             .collect()
     }
 
+    /// The world velocity of the body's model point `at` (as printed) where it is now, and the
+    /// body's angular velocity. A sleeping body reads zero.
+    pub fn point_velocity(&self, body: usize, at: P3) -> (P3, P3) {
+        let id = self.bodies[body];
+        let point = body_get_world_point(&self.world, id, vf(sub(at, self.rest[body])));
+        (pf(body_get_world_point_velocity(&self.world, id, point)), pf(body_get_angular_velocity(&self.world, id)))
+    }
+
+    /// The body's current rotation (x, y, z, w), as in [`Pose::rot`].
+    pub fn orientation(&self, body: usize) -> [f64; 4] {
+        let q = body_get_transform(&self.world, self.bodies[body]).q;
+        [q.v.x as f64, q.v.y as f64, q.v.z as f64, q.s as f64]
+    }
+
     pub fn rest_com(&self, body: usize) -> P3 {
         self.rest[body]
     }

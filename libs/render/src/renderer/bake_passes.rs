@@ -6,9 +6,11 @@ impl Renderer {
     /// Local lights must see all opaque architecture, not just the subset
     /// owned by CSM when a world atlas is present. Reuse resident geometry;
     /// terrain/voxel conversions are cached with each tile's revision.
-    pub(super) fn collect_local_static_casters(&mut self, cx: &mut Cx, world: &World) -> Vec<crate::gpu_lightmap::GpuBakeMesh> {
+    /// Fills `out` (cleared first): the frame passes the same buffer every
+    /// time, so a city's tens of thousands of casters allocate nothing.
+    pub(super) fn collect_local_static_casters(&mut self, cx: &mut Cx, world: &World, out: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>) {
         use crate::gpu_lightmap::GpuBakeMesh;
-        let mut out = Vec::new();
+        out.clear();
         for inst in self.placed_models.iter().filter(|i| !i.dynamic) {
             if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
             let Some((_,model)) = self.static_models.iter().find(|(id,_)|id == &inst.model) else {continue;};
@@ -48,7 +50,6 @@ impl Renderer {
                 }
             }
         }
-        out
     }
 
     /// World primitives used to enter CSM through the realized atlas. Keep
@@ -115,15 +116,17 @@ impl Renderer {
     /// placed models (driven cars), skinned CHARACTERS (rest mesh + this
     /// frame's palette — [`Self::pack_skin_palettes`] must already have
     /// run), and Rigid/Mover primitive entities in their own shape (a
-    /// marble casts a round shadow, a crate a square one).
+    /// marble casts a round shadow, a crate a square one). Fills `out`
+    /// (cleared first), the buffer the frame passes every time.
     pub(super) fn collect_lm_movers(
         &self,
         world: &World,
         eye:Vec3f,
         lod_scale:f32,
         skinned_items: Option<&[SkinnedDraw]>,
-    ) -> Vec<crate::gpu_lightmap::GpuLmMover> {
-        let mut out = Vec::new();
+        out: &mut Vec<crate::gpu_lightmap::GpuLmMover>,
+    ) {
+        out.clear();
         // A static placed copy casts here only through its parts or a
         // morph; the models that have either at some level (usually none).
         // The rest (a scattered forest: thousands of copies) are skipped
@@ -134,12 +137,10 @@ impl Renderer {
             .map(|(k, _)| k.as_str()).collect();
         // A placed copy in a static block has no parts and no morph: it
         // pushes nothing here, so only the loose ones are walked.
-        let all: Vec<u32>;
-        let loose = match self.placed_blocks.loose_for(self.placed_models.len(), self.placed_scene_signature) {
-            Some(loose) => loose,
-            None => { all = (0..self.placed_models.len() as u32).collect(); &all }
-        };
-        for (target,inst) in loose.iter().map(|&i|(ModelTarget::Instance(i as usize),&self.placed_models[i as usize]))
+        // Without blocks every placed copy is loose (walked by index, not listed).
+        let loose = self.placed_blocks.loose_for(self.placed_models.len(), self.placed_scene_signature);
+        let every = if loose.is_none() { self.placed_models.len() as u32 } else { 0 };
+        for (target,inst) in loose.into_iter().flatten().copied().chain(0..every).map(|i|(ModelTarget::Instance(i as usize),&self.placed_models[i as usize]))
             .chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))) {
             if !inst.dynamic && matches!(target, ModelTarget::Instance(_)) && (static_movers.is_empty() || !static_movers.contains(inst.model.as_str())) {
                 continue;
@@ -259,6 +260,7 @@ impl Renderer {
             }
         }
         {
+            let caster_log = std::env::var_os("MAKEPAD_CSM_CASTER_LOG").is_some();
             for e in world.entities.iter() {
                 if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid | BodyKind::Kinematic)
                     || e.alpha_primitive
@@ -267,7 +269,7 @@ impl Renderer {
                 {
                     continue;
                 }
-                if std::env::var_os("MAKEPAD_CSM_CASTER_LOG").is_some() {
+                if caster_log {
                     log!(
                         "csm caster {:?}: id {} kind {:?} pos ({:.1},{:.1},{:.1}) half ({:.2},{:.2},{:.2}) scale ({:.2},{:.2},{:.2}) alpha {:.2}",
                         e.shape, e.id, e.kind, e.pos.x, e.pos.y, e.pos.z,
@@ -303,7 +305,6 @@ impl Renderer {
                 });
             }
         }
-        out
     }
 
     /// Per-frame GPU bake step: realizes scheduled jobs and encodes this

@@ -45,12 +45,14 @@ pub enum VfxSprite {
     Flake,
     /// Lumpy lit dust clump: impacts on dirt, footfalls.
     Dust,
+    /// A hard-edged solid square: the whole quad, no mask.
+    Square,
 }
 
 impl VfxSprite {
     pub const NAMES: &'static [&'static str] = &[
         "dot", "spark", "smoke", "wisp", "fire", "fireball", "debris", "ring", "droplet", "flash", "star",
-        "streak", "flake", "dust",
+        "streak", "flake", "dust", "square",
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -69,6 +71,7 @@ impl VfxSprite {
             "streak" | "rain" => Self::Streak,
             "flake" | "snow" => Self::Flake,
             "dust" => Self::Dust,
+            "square" => Self::Square,
             _ => return None,
         })
     }
@@ -974,6 +977,10 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
+        for (i, &name) in VfxSprite::NAMES.iter().enumerate() {
+            assert_eq!(VfxSprite::parse(name).map(VfxSprite::id), Some(i as f32), "sprite {name}");
+        }
+        assert_eq!(VfxSprite::parse("square"), Some(VfxSprite::Square));
     }
 
     #[test]

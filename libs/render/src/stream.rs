@@ -359,6 +359,15 @@ impl Default for OcclusionRaster {
 }
 
 impl OcclusionRaster {
+    /// A raster of no pixels that allocates nothing: what stands in while a
+    /// frame borrows the real one.
+    pub fn empty() -> Self {
+        OcclusionRaster {
+            width: 0, height: 0, depth: Vec::new(), tiles: Vec::new(),
+            clip: Mat4f::identity(), eye: Vec3f::default(), occluders: 0, triangles: 0,
+        }
+    }
+
     pub fn new(width: usize, height: usize) -> Self {
         let (w, h) = (width.max(OCC_TILE), height.max(OCC_TILE));
         OcclusionRaster {

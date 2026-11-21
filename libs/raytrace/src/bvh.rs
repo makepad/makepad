@@ -144,12 +144,38 @@ pub struct Hit {
 }
 
 impl Hit {
+    /// `tri` of a shadow ray that met a certain blocker (`Bvh::trace_shadow`).
+    pub const BLOCKED: i32 = -3;
     pub fn miss(tmax: f32) -> Self {
         Self { t: tmax, tri: -1, u: 0.0, v: 0.0, truncated: false }
     }
     pub fn is_hit(&self) -> bool {
         self.tri >= 0
     }
+    pub fn blocked(&self) -> bool {
+        self.tri == Self::BLOCKED
+    }
+}
+
+/// A shadow ray's early end: the first front-facing triangle marked in `certain` (BVH order) met
+/// inside `min..=max` and inside the triangle by a margin m ends the walk as `Hit::BLOCKED` (the
+/// GPU twin's `block`). A later hop's origin sits up to 32 ray errors aside, which moves the hit
+/// by that over the cosine: m covers it, along the ray and across the triangle (tested times the
+/// cosine, so a ray in the triangle's plane never ends early).
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowBlock<'a> {
+    pub min: f32,
+    pub max: f32,
+    pub certain: &'a [bool],
+}
+
+/// What a walk returns: the closest hit, the first hit found, or the closest unless a certain
+/// blocker ends it.
+#[derive(Clone, Copy)]
+enum Walk<'a> {
+    Closest,
+    Any,
+    Shadow(&'a ShadowBlock<'a>),
 }
 
 /// Per-ray constants for Woop's watertight ray/triangle test.
@@ -239,6 +265,27 @@ impl RayPrep {
 /// Calibrated to the building fixtures at a 200-unit diagonal; priority
 /// remains restricted to triangles in the same measured conflict group.
 #[inline]
+/// How far a spawned ray's origin may sit from its surface point (the GPU twin's `ray_error`).
+pub fn ray_error(p: Vec3f, scene_scale: f32) -> f32 {
+    // Relative reconstruction bound (16 f32 ulps at the largest component)
+    // plus a scene-relative floor for geometry near the rebased origin.
+    scene_scale * 5.0e-9 + p.x.abs().max(p.y.abs()).max(p.z.abs()) * 1.907_348_6e-6
+}
+
+/// Whether a shadow ray from `ro` along `rd` meets `tri` at `(t, u, v)` inside `block` and inside
+/// the triangle by the margin a later hop's displaced origin needs (see `ShadowBlock`).
+fn certainly_blocks(tri: &Tri, ro: Vec3f, rd: Vec3f, (t, u, v): (f32, f32, f32), block: &ShadowBlock, scene_scale: f32) -> bool {
+    let cr = Vec3f::cross(tri.v1 - tri.v0, tri.v2 - tri.v0);
+    let c = cr.dot(rd).abs();
+    let e = 32.0 * ray_error(ro, scene_scale).max(ray_error(ro + rd * t, scene_scale));
+    let ea = e * cr.length();
+    (t - block.min) * c >= ea
+        && (block.max - t) * c >= ea
+        && (1.0 - u - v) * c > e * (tri.v1 - tri.v2).length()
+        && u * c > e * (tri.v2 - tri.v0).length()
+        && v * c > e * (tri.v0 - tri.v1).length()
+}
+
 pub fn hit_tie_epsilon(t: f32, scene_scale: f32) -> f32 {
     scene_scale * 1.0e-5 + t.abs() * 2.0e-6
 }
@@ -394,7 +441,40 @@ impl Bvh {
         any_hit: bool,
         skip: i32,
     ) -> Hit {
-        self.trace_from_limit(ro, rd, tmin, tmax, any_hit, MAX_STEPS, skip).0
+        self.trace_from_limit(ro, rd, tmin, tmax, if any_hit { Walk::Any } else { Walk::Closest }, MAX_STEPS, skip).0
+    }
+
+    /// The closest hit, unless a certain blocker of `block` is met first: then `Hit::BLOCKED`.
+    /// Whether a triangle `pick` takes (BVH order) has a bounding box meeting the box `lo..=hi`.
+    pub fn any_tri_in_box(&self, lo: Vec3f, hi: Vec3f, pick: impl Fn(usize) -> bool) -> bool {
+        let meets = |min: [f32; 3], max: [f32; 3]| {
+            min[0] <= hi.x && max[0] >= lo.x && min[1] <= hi.y && max[1] >= lo.y && min[2] <= hi.z && max[2] >= lo.z
+        };
+        let mut i = 0;
+        while i < self.nodes.len() {
+            let nd = &self.nodes[i];
+            if meets(nd.min, nd.max) {
+                if nd.code < 0.0 {
+                    let first = nd.skip as usize;
+                    for k in first..first + (-nd.code) as usize {
+                        let t = &self.tris[k];
+                        let min = [t.v0.x.min(t.v1.x).min(t.v2.x), t.v0.y.min(t.v1.y).min(t.v2.y), t.v0.z.min(t.v1.z).min(t.v2.z)];
+                        let max = [t.v0.x.max(t.v1.x).max(t.v2.x), t.v0.y.max(t.v1.y).max(t.v2.y), t.v0.z.max(t.v1.z).max(t.v2.z)];
+                        if pick(k) && meets(min, max) {
+                            return true;
+                        }
+                    }
+                }
+                i += 1;
+            } else {
+                i = if nd.code < 0.0 { i + 1 } else { nd.skip as usize };
+            }
+        }
+        false
+    }
+
+    pub fn trace_shadow(&self, ro: Vec3f, rd: Vec3f, tmin: f32, tmax: f32, skip: i32, block: &ShadowBlock) -> Hit {
+        self.trace_from_limit(ro, rd, tmin, tmax, Walk::Shadow(block), MAX_STEPS, skip).0
     }
 
     fn trace_from_limit(
@@ -403,10 +483,12 @@ impl Bvh {
         rd: Vec3f,
         tmin: f32,
         tmax: f32,
-        any_hit: bool,
+        walk: Walk,
         max_steps: u32,
         skip: i32,
     ) -> (Hit, u32) {
+        let any_hit = matches!(walk, Walk::Any);
+        let block = if let Walk::Shadow(block) = walk { Some(block) } else { None };
         let mut hit = Hit::miss(tmax);
         let count = self.nodes.len() as u32;
         if count == 0 {
@@ -457,8 +539,18 @@ impl Bvh {
                         } else {
                             hit.t
                         };
-                        if let Some((t, u, v, front)) = ray.intersect(&self.tris[k as usize], tri_limit) {
+                        let certain = block.filter(|b| b.certain.get(k as usize).copied().unwrap_or(false));
+                        let limit = certain.map_or(tri_limit, |b| tri_limit.max(b.max));
+                        if let Some((t, u, v, front)) = ray.intersect(&self.tris[k as usize], limit) {
                             if t <= tmin || t > tmax {
+                                continue;
+                            }
+                            if certain.is_some_and(|b| {
+                                front && t >= b.min && t <= b.max && certainly_blocks(&self.tris[k as usize], ro, rd, (t, u, v), b, self.scene_scale)
+                            }) {
+                                return (Hit { t, tri: Hit::BLOCKED, u: 0.0, v: 0.0, truncated: false }, steps);
+                            }
+                            if t > tri_limit {
                                 continue;
                             }
                             let original = self.tri_order[k as usize];
@@ -502,7 +594,7 @@ impl Bvh {
     /// nodes actually visited. Lets a harness histogram traversal cost on a
     /// real model instead of guessing at `MAX_STEPS`.
     pub fn trace_counted(&self, ro: Vec3f, rd: Vec3f, tmax: f32, max_steps: u32) -> (Hit, u32) {
-        self.trace_from_limit(ro, rd, 0.0, tmax, false, max_steps, -1)
+        self.trace_from_limit(ro, rd, 0.0, tmax, Walk::Closest, max_steps, -1)
     }
 
     /// Brute force over every triangle (the oracle for the traversal test).
@@ -780,7 +872,7 @@ mod tests {
             vec3f(0.0, 0.0, -1.0),
             0.0,
             1.0e30,
-            false,
+            Walk::Closest,
             1,
             -1,
         );

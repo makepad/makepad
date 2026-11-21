@@ -1458,9 +1458,16 @@ impl GpuLightmapBaker {
         self.csm_drawn = None;
     }
 
+    /// The same casters handed again keep the cascades: their revision says when they change.
     pub(crate) fn set_cascade_casters(&mut self, casters: Option<std::rc::Rc<std::cell::RefCell<dyn CascadeCasters>>>) {
+        let same = match (&self.cascade_casters, &casters) {
+            (Some(had), Some(new)) => std::rc::Rc::ptr_eq(had, new),
+            (had, new) => had.is_none() && new.is_none(),
+        };
         self.cascade_casters = casters;
-        self.csm_drawn = None;
+        if !same {
+            self.csm_drawn = None;
+        }
     }
 
     /// A caster the cascades draw changed (the static caster lists, a
@@ -3273,6 +3280,28 @@ mod tests {
             },
             "explicit launch overrides must not be silently replaced by XR policy"
         );
+    }
+
+    #[test]
+    fn the_same_cascade_casters_handed_again_keep_the_drawn_cascades() {
+        struct Casters;
+        impl CascadeCasters for Casters {
+            fn revision(&self) -> u64 { 1 }
+            fn draw_cascade(&mut self, _cx: &mut CxDraw, _at: &CascadeTile) -> usize { 0 }
+        }
+        let drawn = CsmDrawn { frame: [crate::shadow_csm::CsmCascade::default(); CSM_CASCADES], res: 1024, lookup: None, casters: 1 };
+        let casters: std::rc::Rc<std::cell::RefCell<dyn CascadeCasters>> = std::rc::Rc::new(std::cell::RefCell::new(Casters));
+        let mut baker = GpuLightmapBaker::default();
+        baker.set_cascade_casters(Some(casters.clone()));
+        baker.csm_drawn = Some((drawn, 1));
+        // a second camera hands its fork the shared casters on every draw
+        baker.set_cascade_casters(Some(casters));
+        assert!(baker.csm_drawn.is_some(), "the same casters handed again keep the cascades drawn from them");
+        baker.set_cascade_casters(Some(std::rc::Rc::new(std::cell::RefCell::new(Casters))));
+        assert!(baker.csm_drawn.is_none(), "other casters draw the cascades again");
+        baker.csm_drawn = Some((drawn, 1));
+        baker.set_cascade_casters(None);
+        assert!(baker.csm_drawn.is_none(), "taking the casters away draws the cascades again");
     }
 
     #[test]

@@ -20,12 +20,14 @@ pub mod scene;
 pub mod sky;
 
 pub use env_map::{EnvironmentFrame, EnvironmentLight, EnvironmentMap};
-pub use gpu::{RayTracer, RenderSettings, RenderStats};
+pub use gpu::{DisplayCurve, RayTracer, RenderSettings, RenderStats};
 pub use scene::{Camera, Image, Material, SceneInput, Sun};
 
 use makepad_draw::*;
 
 /// Register the renderer's shaders. Call once after `makepad_widgets::script_mod`.
 pub fn script_mod(vm: &mut ScriptVm) {
+    // The tone map takes its curves from the shared copy.
+    makepad_render_graph::curves::register(vm);
     crate::gpu::script_mod(vm);
 }

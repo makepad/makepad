@@ -115,7 +115,7 @@ fn a_body_is_the_same_whatever_was_built_before() {
         let (block, round, bore, cut) = (key(&format!("block {width}")), key(&format!("round {width}")), key(&format!("bore {width}")), key(&format!("cut {width}")));
         vec![
             BrepStep { key: block, op: BrepOp::Box { size: [width, 20.0, 30.0] }, inputs: Vec::new() },
-            BrepStep { key: round, op: BrepOp::Fillet { radius: 2.0, edges: EdgeSel { any: vec![EdgeFilter { top: true, ..EdgeFilter::default() }] } }, inputs: vec![block] },
+            BrepStep { key: round, op: BrepOp::Fillet { radius: 2.0, edges: EdgeSel { any: vec![EdgeFilter { top: true, ..EdgeFilter::default() }], ..EdgeSel::default() } }, inputs: vec![block] },
             BrepStep { key: bore, op: BrepOp::Cylinder { radius: 5.0, top_radius: 5.0, height: 60.0 }, inputs: Vec::new() },
             BrepStep { key: cut, op: BrepOp::Boolean { mode: BoolMode::Difference }, inputs: vec![round, bore] },
         ]
@@ -166,7 +166,7 @@ fn a_background_build_gives_way_to_a_preview() {
     let (block, round, hollow) = (key("demo block"), key("demo round"), key("demo hollow"));
     let demo = vec![
         BrepStep { key: block, op: BrepOp::Box { size: [96.0, 30.0, 96.0] }, inputs: Vec::new() },
-        BrepStep { key: round, op: BrepOp::Fillet { radius: 4.0, edges: EdgeSel { any: vec![EdgeFilter { top: true, ..EdgeFilter::default() }] } }, inputs: vec![block] },
+        BrepStep { key: round, op: BrepOp::Fillet { radius: 4.0, edges: EdgeSel { any: vec![EdgeFilter { top: true, ..EdgeFilter::default() }], ..EdgeSel::default() } }, inputs: vec![block] },
         BrepStep { key: hollow, op: BrepOp::Shell { thickness: 2.4, open: Open::Bottom }, inputs: vec![round] },
     ];
     let preview = vec![BrepStep { key: key("preview block"), op: BrepOp::Box { size: [20.0, 20.0, 20.0] }, inputs: Vec::new() }];
