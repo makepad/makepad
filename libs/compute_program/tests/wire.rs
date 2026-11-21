@@ -92,6 +92,10 @@ fn frames_carry_their_values() {
         inputs: vec![Input::f32("field", &[1.0, 2.5, -3.0]), Input::words("view", ElemTy::F64, vec![1, 2, 3, 4].into())],
     };
     let (bytes, hashes) = wire::encode_open(&open, 2, &|_| false);
+    // After a frame's head, the same message, the buffer grown to its size once.
+    let mut framed = vec![7u8; 9];
+    assert_eq!(wire::encode_open_into(&mut framed, &open, 2, &|_| false), hashes);
+    assert!(framed[..9] == [7; 9] && framed[9..] == bytes[..], "an open after a head");
     let (back, inputs) = wire::decode_open(&bytes, 1 << 20, 2).unwrap();
     assert_eq!(back.program.source, open.program.source);
     assert_eq!(back.params, value);
@@ -124,8 +128,12 @@ fn frames_carry_their_values() {
         end: Some(Err(ProgramError::OverBudget("work"))),
     };
     for codec in CODECS {
-        let back = wire::decode_update(&wire::encode_update(&updates, codec, 2), 1 << 20, 2).unwrap();
+        let coded = wire::encode_update(&updates, codec, 2);
+        let back = wire::decode_update(&coded, 1 << 20, 2).unwrap();
         assert_eq!(format!("{back:?}"), format!("{updates:?}"), "{codec:?}");
+        let mut framed = vec![7u8; 9];
+        wire::encode_update_into(&mut framed, &updates, codec, 2);
+        assert!(framed[..9] == [7; 9] && framed[9..] == coded[..], "{codec:?}: an update after a head");
     }
     // Garbage is an error.
     let coded = wire::encode_update(&updates, Codec::DeltaLz4, 1);

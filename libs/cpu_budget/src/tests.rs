@@ -555,7 +555,10 @@ fn one_jit_job_runs_above_a_full_budget() {
     assert_eq!(b.state.lock().unwrap().running, 0);
 }
 
-/// One JIT job running keeps the others to the budget's limits.
+/// One JIT job running keeps the others to the budget's limits. While the JIT comes first
+/// Background is two parts: the builds take the cores the app's own Background work leaves, and the
+/// app's work never waits out the builds' backlog. (A game's loading-screen model builds once
+/// waited behind a row of builds that only the JIT could join.)
 #[test]
 fn a_second_jit_job_waits_for_a_token() {
     let b = budget(3);
@@ -567,6 +570,37 @@ fn a_second_jit_job_waits_for_a_token() {
     b.release(running);
     assert_eq!(rx.recv().unwrap(), 1);
     finish(second);
+
+    let b = budget(4);
+    b.set_jit_first(true);
+    let builds: Vec<_> = (0..4).map(|_| b.admit(BACKGROUND, JIT, "tier-up")).collect();
+    assert_eq!(b.state.lock().unwrap().jit_tokens, 4, "no app Background work: the builds take every core");
+    let (tx, rx) = mpsc::channel();
+    let build = worker(&b, BACKGROUND, JIT, 1, &tx);
+    until(&b, |s| s.waiters.len() == 1);
+    let model = worker(&b, BACKGROUND, APP, 2, &tx);
+    until(&b, |s| s.waiters.len() == 2);
+    assert!(b.contended(builds[0]), "a build's token goes back at its job's end");
+    b.release(builds[0]);
+    assert_eq!(rx.recv().unwrap(), 2, "the app's job, not the build that waited longer");
+    b.release(builds[1]);
+    assert_eq!(rx.recv().unwrap(), 1, "the app's part is full: the builds take the rest");
+    b.release(builds[2]);
+    let second = worker(&b, BACKGROUND, APP, 3, &tx);
+    until(&b, |s| s.waiters.len() == 1);
+    assert!(rx.try_recv().is_err(), "a token is free, but the app's part is background_limit jobs");
+    finish(model);
+    assert_eq!(rx.recv().unwrap(), 3);
+    b.set_jit_first(false);
+    finish(second);
+    let third = worker(&b, BACKGROUND, APP, 4, &tx);
+    until(&b, |s| s.waiters.len() == 1);
+    assert!(rx.try_recv().is_err(), "flag down: one part again, and the builds count against it");
+    finish(build);
+    b.release(builds[3]);
+    assert_eq!(rx.recv().unwrap(), 4);
+    finish(third);
+    assert_eq!(b.state.lock().unwrap().running, 0);
 }
 
 /// set_thread_idle: the thread runs at SCHED_IDLE, Background work leaves it there (it reads as

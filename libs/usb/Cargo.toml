@@ -1,0 +1,12 @@
+# Raw USB: enumerate, open, claim, control, bulk and interrupt transfers; Linux/macOS, std only.
+[package]
+name = "makepad-usb"
+version = "1.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+authors = ["Makepad <info@makepad.nl>"]
+description = "Raw USB: enumerate, open, claim, control, bulk and interrupt transfers; Linux/macOS, std only"
+
+[lib]
+name = "makepad_usb"

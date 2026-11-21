@@ -147,16 +147,7 @@ pub fn parse_profiles() -> Result<ParsedProfiles, String> {
     }
 
     let device_list = shell_env_cap(&[], &cwd, "xcrun", &["devicectl", "list", "devices"])?;
-    let mut devices = Vec::new();
-    for device in device_list.split('\n') {
-        if let Some(name) = device.split_whitespace().nth(0) {
-            if let Some(ident) = device.split_whitespace().nth(2) {
-                if ident.split("-").count() == 5 {
-                    devices.push((name.into(), ident.into()));
-                }
-            }
-        }
-    }
+    let mut devices = devicectl_devices(&device_list);
 
     // Also discover devices via ios-deploy for older iOS versions (< 17)
     if let Ok(ios_deploy_list) = shell_env_cap(
@@ -190,6 +181,51 @@ pub fn parse_profiles() -> Result<ParsedProfiles, String> {
         certs,
         devices,
     })
+}
+
+/// The (name, identifier) rows of `xcrun devicectl list devices`. Its table is
+/// padded to fixed columns: a name may hold spaces and a hostname may be empty,
+/// so each row is cut at the header's column starts, counted in characters.
+/// The identifier is a CoreDevice UUID, or a UDID printed with a " (UDID)"
+/// suffix; `devicectl --device` takes either.
+fn devicectl_devices(list: &str) -> Vec<(String, String)> {
+    let mut lines = list.lines();
+    let header: Vec<char> = loop {
+        match lines.next() {
+            Some(line) if line.trim_start().starts_with("Name") && line.contains("Identifier") => {
+                break line.chars().collect()
+            }
+            Some(_) => continue,
+            None => return Vec::new(),
+        }
+    };
+    let column = |title: &str| {
+        let title: Vec<char> = title.chars().collect();
+        header.windows(title.len()).position(|w| w == title.as_slice())
+    };
+    let Some(ident_at) = column("Identifier") else {
+        return Vec::new();
+    };
+    let name_end = column("Hostname").unwrap_or(ident_at);
+    let mut devices = Vec::new();
+    for row in lines {
+        let row: Vec<char> = row.chars().collect();
+        if row.len() <= ident_at {
+            continue;
+        }
+        let name: String = row[..name_end.min(row.len())].iter().collect();
+        let ident: String = row[ident_at..]
+            .iter()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
+        let is_ident = ident.contains('-')
+            && ident.chars().any(|c| c.is_ascii_hexdigit())
+            && ident.chars().all(|c| c == '-' || c.is_ascii_hexdigit());
+        if is_ident && !name.trim().is_empty() {
+            devices.push((name.trim().to_string(), ident));
+        }
+    }
+    devices
 }
 /*
 pub fn list_profiles()->Result<(), String>{

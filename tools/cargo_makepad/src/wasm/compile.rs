@@ -1576,13 +1576,13 @@ fn forward_hot_reload_fs_event(
 
 fn broadcast_hot_reload_event(
     event: WasmHotReloadEvent,
-    watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>,
+    watch_clients: &mut HashMap<u64, mpsc::Sender<WebSocketOut>>,
 ) {
     let payload = event.serialize_json().into_bytes();
     let stale_clients: Vec<u64> = watch_clients
         .iter()
         .filter_map(|(web_socket_id, sender)| {
-            sender.send(payload.clone()).err().map(|_| *web_socket_id)
+            sender.send(WebSocketOut::Binary(payload.clone())).err().map(|_| *web_socket_id)
         })
         .collect();
     for web_socket_id in stale_clients {
@@ -1600,7 +1600,7 @@ fn make_hot_reload_event(kind: &str) -> WasmHotReloadEvent {
 
 fn rebuild_wasm_app(
     plan: &WasmRebuildPlan,
-    watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>,
+    watch_clients: &mut HashMap<u64, mpsc::Sender<WebSocketOut>>,
 ) {
     broadcast_hot_reload_event(make_hot_reload_event("build_start"), watch_clients);
     println!("Wasm hot reload fallback: rebuilding app");
@@ -1995,7 +1995,7 @@ fn start_wasm_server(
 
     let loop_thread = std::thread::spawn(move || {
         let _hot_reload_watcher = hot_reload_watcher;
-        let mut watch_clients = HashMap::<u64, mpsc::Sender<Vec<u8>>>::new();
+        let mut watch_clients = HashMap::<u64, mpsc::Sender<WebSocketOut>>::new();
         let rebuild_plan = rebuild_plan;
         let mut rebuild_queued = false;
 

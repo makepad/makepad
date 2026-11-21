@@ -323,9 +323,30 @@ impl Connection {
                 if !self.autocommit {
                     return Err(Error::sql("a transaction is already open"));
                 }
+                if !self.pager.is_writable() {
+                    // A read-only connection's transaction is a read
+                    // transaction: every statement until COMMIT or ROLLBACK
+                    // reads the one snapshot taken here.
+                    if !matches!(kind, TxKind::Deferred) {
+                        return Err(Error::unsupported(crate::pager::READ_ONLY_CONNECTION));
+                    }
+                    self.pager.begin_read_tx()?;
+                    self.autocommit = false;
+                    return Ok(());
+                }
                 self.pager
                     .begin_write(!matches!(kind, TxKind::Deferred))?;
                 self.autocommit = false;
+                Ok(())
+            }
+            Stmt::Commit | Stmt::Rollback if !self.pager.is_writable() => {
+                if self.autocommit {
+                    return Err(Error::sql("no transaction is open"));
+                }
+                // Ending a read transaction: the snapshot and its lock go
+                // with the statement's idle release.
+                self.pager.end_read_tx();
+                self.autocommit = true;
                 Ok(())
             }
             Stmt::Commit => {
@@ -1383,12 +1404,20 @@ impl Connection {
                 None => one("journal_mode", Value::text(self.pager.journal_mode())),
             },
             "wal_checkpoint" => {
-                let moved = self.pager.checkpoint()?;
+                // PASSIVE, like the autocheckpoint: another connection in this
+                // process holding a snapshot means nothing is folded (busy).
+                let busy = self.pager.other_readers() > 0;
+                let (log, moved) = if busy {
+                    (self.pager.wal_frames(), 0)
+                } else {
+                    let moved = self.pager.checkpoint()?;
+                    (moved, moved)
+                };
                 QueryResult {
                     columns: vec!["busy".into(), "log".into(), "checkpointed".into()],
                     rows: vec![vec![
-                        Value::Integer(0),
-                        Value::Integer(moved as i64),
+                        Value::Integer(busy as i64),
+                        Value::Integer(log as i64),
                         Value::Integer(moved as i64),
                     ]],
                 }

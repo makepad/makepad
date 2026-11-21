@@ -236,10 +236,16 @@ impl GpuDevice {
             let copy = vm.value(module, id!(Copy)).as_object().ok_or("the program GPU library has no Copy")?;
             Ok::<_, String>((ComputeKernel::new(vm, fill, "program fill")?, ComputeKernel::new(vm, copy, "program copy")?))
         })?;
+        // the programs' buffers are a working set: the device's budget bounds them, not one
+        // document's share of it (a fixed 1 GiB refused a finer solve's GPU engine on any device)
         let budget = cx.gpu_admission().budget();
-        let doc = cx.gpu_admission().register(PASS);
+        let doc = cx.gpu_admission().register_working_set(PASS);
+        let max_buffer_bytes = match max_gpu_buffer_bytes() {
+            0 => u64::MAX,
+            bytes => bytes,
+        };
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| SignalToUI::set_ui_signal());
-        let (link, rx) = GpuLink::new(GpuInfo { target, budget_bytes: budget.document_bytes.min(budget.device_bytes) }, wake.clone());
+        let (link, rx) = GpuLink::new(GpuInfo { target, budget_bytes: budget.device_bytes, max_buffer_bytes }, wake.clone());
         let (done_tx, done_rx) = mpsc::channel();
         let device = GpuDevice {
             rx,

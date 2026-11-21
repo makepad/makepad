@@ -1,0 +1,16 @@
+# Serial ports: raw 8N1 at any baud, timeouts, modem lines, and the byte line (`line`) a device
+# protocol runs over; Linux, Android, macOS and Windows, std only.
+[package]
+name = "makepad-serial"
+version = "1.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+authors = ["Makepad <info@makepad.nl>"]
+description = "Serial ports: raw 8N1 at any baud, timeouts, modem lines; Linux, Android, macOS and Windows, std only"
+
+[lib]
+name = "makepad_serial"
+
+[dependencies]
+makepad-usb = { path = "../usb", version = "1.0.0" }

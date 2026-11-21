@@ -606,7 +606,8 @@ fn op_buffer(vm: &mut ScriptVm, d: &mut Driver, ty: ScriptValue, n: ScriptValue,
     let mut available = d.limits.buffer_bytes.saturating_sub(d.buffer_bytes);
     if gpu {
         let g = gpu_of(d, what)?;
-        available = available.min(g.link.info().budget_bytes.saturating_sub(g.bytes));
+        let info = g.link.info();
+        available = available.min(info.budget_bytes.saturating_sub(g.bytes)).min(info.max_buffer_bytes);
     }
     if words > i32::MAX as usize || bytes > available {
         // A value the program answers (a coarser level, fewer buffers), not an error.
@@ -1727,7 +1728,7 @@ fn op_device(vm: &mut ScriptVm, d: &mut Driver) -> Res<ScriptValue> {
                 ComputeTarget::Msl => "msl",
                 ComputeTarget::Hlsl => "hlsl",
             });
-            object(vm, &[("target", target), ("buffer_bytes", num(info.budget_bytes as f64))])
+            object(vm, &[("target", target), ("buffer_bytes", num(info.budget_bytes as f64)), ("max_buffer_bytes", num(info.max_buffer_bytes as f64))])
         }
         None => NIL,
     };

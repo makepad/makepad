@@ -72,6 +72,152 @@ pub struct AccessUnit {
     pub keyframe: bool,
 }
 
+impl AccessUnit {
+    /// The picture size (width, height) the access unit's sequence
+    /// parameter set declares, when it carries one (a keyframe does): the
+    /// stream's real size, which changes when the sender's camera turns.
+    pub fn picture_size(&self) -> Option<(u32, u32)> {
+        split_annex_b(&self.data).into_iter().find(|nal| nal.first().is_some_and(|b| b & 0x1f == 7)).and_then(sps_size)
+    }
+}
+
+/// The picture size (width, height, after the frame cropping) an H.264
+/// sequence parameter set NAL unit (header byte first) declares: ITU-T
+/// H.264 7.3.2.1.1 read up to `frame_cropping`, sizes per 7.4.2.1.1.
+/// `None` for another NAL unit, or a set cut short or out of range.
+pub fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
+    if nal.first()? & 0x1f != 7 {
+        return None;
+    }
+    // The RBSP: emulation prevention bytes (00 00 03) dropped.
+    let mut rbsp = Vec::with_capacity(nal.len());
+    let mut zeros = 0;
+    for &b in &nal[1..] {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    let mut r = Bits { data: &rbsp, at: 0 };
+    let profile = r.u(8)?;
+    r.u(16)?; // constraint flags and level
+    r.ue()?; // seq_parameter_set_id
+    let (mut chroma, mut separate) = (1, false);
+    if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        chroma = r.ue()?;
+        if chroma > 3 {
+            return None;
+        }
+        if chroma == 3 {
+            separate = r.u(1)? == 1;
+        }
+        r.ue()?; // bit_depth_luma_minus8
+        r.ue()?; // bit_depth_chroma_minus8
+        r.u(1)?; // qpprime_y_zero_transform_bypass_flag
+        if r.u(1)? == 1 {
+            for i in 0..if chroma == 3 { 12 } else { 8 } {
+                if r.u(1)? == 1 {
+                    // scaling_list(): deltas until the next scale is 0 (7.3.2.1.1.1).
+                    let (mut last, mut next) = (8i64, 8i64);
+                    for _ in 0..if i < 6 { 16 } else { 64 } {
+                        if next != 0 {
+                            next = (last + r.se()? + 256).rem_euclid(256);
+                        }
+                        if next != 0 {
+                            last = next;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    r.ue()?; // log2_max_frame_num_minus4
+    match r.ue()? {
+        0 => {
+            r.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+        }
+        1 => {
+            r.u(1)?; // delta_pic_order_always_zero_flag
+            r.se()?; // offset_for_non_ref_pic
+            r.se()?; // offset_for_top_to_bottom_field
+            let cycle = r.ue()?;
+            if cycle > 255 {
+                return None;
+            }
+            for _ in 0..cycle {
+                r.se()?;
+            }
+        }
+        _ => {}
+    }
+    r.ue()?; // max_num_ref_frames
+    r.u(1)?; // gaps_in_frame_num_value_allowed_flag
+    let width_mbs = r.ue()? as u64 + 1;
+    let height_units = r.ue()? as u64 + 1;
+    let frame_mbs_only = r.u(1)? as u64;
+    if frame_mbs_only == 0 {
+        r.u(1)?; // mb_adaptive_frame_field_flag
+    }
+    r.u(1)?; // direct_8x8_inference_flag
+    let mut crop = [0u64; 4];
+    if r.u(1)? == 1 {
+        for side in &mut crop {
+            *side = r.ue()? as u64;
+        }
+    }
+    let fields = 2 - frame_mbs_only;
+    // Crop units: a 4:2:0 or 4:2:2 picture crops by its chroma samples.
+    let (unit_x, unit_y) = match (chroma, separate) {
+        (1, _) => (2, 2 * fields),
+        (2, _) => (2, fields),
+        _ => (1, fields),
+    };
+    let width = (width_mbs * 16).checked_sub(unit_x * (crop[0] + crop[1]))?;
+    let height = (fields * height_units * 16).checked_sub(unit_y * (crop[2] + crop[3]))?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+}
+
+/// A big-endian bit reader for RBSP syntax (u(n), ue(v), se(v)).
+struct Bits<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl Bits<'_> {
+    fn u(&mut self, n: u32) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = self.data.get(self.at / 8)?;
+            v = v << 1 | ((byte >> (7 - self.at % 8)) & 1) as u32;
+            self.at += 1;
+        }
+        Some(v)
+    }
+
+    /// ue(v): unsigned Exp-Golomb (9.1).
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.u(1)? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        u32::try_from((1u64 << zeros) - 1 + self.u(zeros)? as u64).ok()
+    }
+
+    /// se(v): signed Exp-Golomb (9.1.1).
+    fn se(&mut self) -> Option<i64> {
+        let k = self.ue()? as i64;
+        Some(if k % 2 == 1 { (k + 1) / 2 } else { -k / 2 })
+    }
+}
+
 /// What the receiver asks the sender for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Feedback {
@@ -416,7 +562,6 @@ pub fn packetize(au: &[u8], timestamp: u32, seq: &mut u16, ssrc: u32, mtu: usize
         .collect()
 }
 
-#[cfg(any(test, feature = "browser"))]
 fn split_annex_b(au: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
     let mut i = 0;
@@ -527,6 +672,24 @@ mod tests {
         assert_eq!(&p[h.payload.0..h.payload.1], &[0x41, 0xaa], "CSRCs, the extension and the padding skipped");
         assert!(parse(&p[..10]).is_none() && parse(&[0x40; 20]).is_none(), "short packets and other versions refused");
         assert!(is_rtcp(&[0x81, 201, 0, 7, 0, 0, 0, 1]) && !is_rtcp(&p), "RTCP packet types 192..=223");
+
+        // The stream's real size from its sequence parameter set: a phone
+        // held upright (constrained baseline, 720x1280), and a High profile
+        // 1920x1080 (coded 1088, cropped 8 rows) with scaling lists to skip.
+        let upright = [0x67, 0x42, 0xc0, 0x1f, 0xda, 0x02, 0xd0, 0x28, 0x64];
+        let high = [
+            0x67, 0x64, 0x00, 0x28, 0xad, 0x98, 0xa2, 0x83, 0xa0, 0xa4, 0x92, 0x49, 0x24, 0x92, 0x49, 0x24, 0x92, 0x49, 0x24, 0x92,
+            0x49, 0x24, 0x92, 0x49, 0x24, 0x92, 0x49, 0x24, 0x92, 0x49, 0x24, 0x92, 0x49, 0x36, 0x80, 0x78, 0x02, 0x27, 0xe5, 0x40,
+        ];
+        assert_eq!((sps_size(&upright), sps_size(&high)), (Some((720, 1280)), Some((1920, 1080))), "the SPS sizes, cropped");
+        assert_eq!((sps_size(&upright[..5]), sps_size(&[0x68, 0xce, 0x38, 0x80])), (None, None), "a set cut short, and a PPS, have none");
+        let mut keyframe = START.to_vec();
+        keyframe.extend_from_slice(&upright);
+        keyframe.extend_from_slice(&START);
+        keyframe.extend_from_slice(&[0x65, 0x88, 0x84]);
+        let au = AccessUnit { data: keyframe, timestamp: 0, keyframe: true };
+        assert_eq!(au.picture_size(), Some((720, 1280)), "a keyframe's access unit carries its size");
+        assert_eq!(AccessUnit { data: au.data[upright.len() + 4..].to_vec(), timestamp: 0, keyframe: true }.picture_size(), None, "a picture without its SPS does not");
     }
 
     /// Hostile senders cost bounded memory and feedback: a jump far ahead

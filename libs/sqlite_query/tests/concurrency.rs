@@ -341,8 +341,8 @@ fn a_checkpointed_away_snapshot_never_answers_with_another_page() {
     let truth = Database::open(&path).unwrap().pager().page(probe).unwrap();
     match reader.pager().page(probe) {
         // Refusing is the right answer: the snapshot this offset belonged to
-        // is gone.
-        Err(Error::Busy(_)) => {}
+        // is gone, and the error says so (a fresh snapshot answers).
+        Err(e @ Error::Busy(_)) => assert!(e.is_snapshot_reset(), "a lost snapshot reads as one: {e}"),
         Ok(bytes) => assert_eq!(
             &bytes[..],
             &truth[..],
@@ -356,5 +356,50 @@ fn a_checkpointed_away_snapshot_never_answers_with_another_page() {
     assert_eq!(
         reader.query("SELECT COUNT(*) FROM t", &[]).unwrap().rows[0][0].as_integer(),
         Some(1800)
+    );
+
+    // A reader in the middle of a statement holds its snapshot while the
+    // writer commits past the autocheckpoint (1000 frames). Folding the log
+    // then would overwrite database pages the snapshot still reads, and
+    // truncating it would take its frames away: no checkpoint runs until the
+    // reader is done, so every row it reads is the snapshot's.
+    let before: Vec<String> = reader
+        .query("SELECT v FROM t ORDER BY id", &[])
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r[0].as_text().unwrap().to_string())
+        .collect();
+    let stmt = reader.prepare("SELECT v FROM t ORDER BY id").unwrap();
+    let mut seen = Vec::new();
+    let mut log_at_end = 0;
+    stmt.for_each(&mut reader, &[], |row| {
+        if seen.is_empty() {
+            for round in 0..6 {
+                w.execute("UPDATE t SET v = ?1 || v", &[Value::text(format!("r{round}"))])
+                    .unwrap();
+            }
+            log_at_end = w.pager().wal_frames();
+        }
+        seen.push(row[0].as_text().unwrap().to_string());
+        Ok(true)
+    })
+    .unwrap();
+    assert!(
+        log_at_end >= 1000,
+        "the writer's commits passed the autocheckpoint while the reader read ({log_at_end} frames)"
+    );
+    assert!(
+        seen == before,
+        "a reader's statement reads the snapshot it began with across a writer's commits past the autocheckpoint ({} rows, {} differ)",
+        seen.len(),
+        seen.iter().zip(&before).filter(|(a, b)| a != b).count()
+    );
+    // Once the reader is done, the next commit folds the log.
+    fill(&mut w, 1800, 1801);
+    assert_eq!(
+        w.pager().wal_frames(),
+        0,
+        "the first commit after the reader is done checkpoints the log"
     );
 }

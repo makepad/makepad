@@ -20,8 +20,12 @@ use std::sync::{mpsc, Arc};
 pub struct GpuInfo {
     /// What its kernels compile to.
     pub target: ComputeTarget,
-    /// Bytes its programs may hold at once (the device's budget less what the app keeps).
+    /// Bytes its programs may hold at once: the device's working set (Metal's recommended
+    /// working set, Vulkan's device-local heaps, D3D's budget), not one document's share of it.
     pub budget_bytes: u64,
+    /// The largest one buffer it allocates and binds (Metal's `maxBufferLength`, Vulkan's
+    /// `maxStorageBufferRange`); `u64::MAX` where the device does not say.
+    pub max_buffer_bytes: u64,
 }
 
 /// One op of a session on its GPU buffers (by the session's slot) and kernels (by the

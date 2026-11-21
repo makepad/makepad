@@ -28,6 +28,7 @@ use crate::codec::{self, Codec, Reader};
 use crate::cpu::ElemTy;
 use crate::session::{Class, Input, Limits, Output, OutputData, Program, ProgramError, Updates};
 use crate::value::Value;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 pub const OPEN: u8 = 16;
@@ -116,33 +117,55 @@ pub fn input_hash(words: &[u32]) -> u128 {
 /// input's hash (in order).
 pub fn encode_open(open: &Open, threads: usize, kept: &dyn Fn(u128) -> bool) -> (Vec<u8>, Vec<u128>) {
     let mut w = Vec::new();
-    put_str(&mut w, &open.program.name);
-    put_str(&mut w, &open.program.source);
-    put_value(&mut w, &open.params);
+    let hashes = encode_open_into(&mut w, open, threads, kept);
+    (w, hashes)
+}
+
+/// [`encode_open`] after what `w` holds already (a frame's head): `w` grows once, to the
+/// message's exact size, and a raw input's words go into it as they are.
+pub fn encode_open_into(w: &mut Vec<u8>, open: &Open, threads: usize, kept: &dyn Fn(u128) -> bool) -> Vec<u128> {
+    let mut head = Vec::new();
+    put_str(&mut head, &open.program.name);
+    put_str(&mut head, &open.program.source);
+    put_value(&mut head, &open.params);
     let l = &open.limits;
     for x in [l.fuel, l.heap_bytes as u64, l.stack_values as u64, l.call_frames as u64, l.work, l.buffer_bytes, l.read_words as u64, l.kernels as u64] {
-        w.extend_from_slice(&x.to_le_bytes());
+        head.extend_from_slice(&x.to_le_bytes());
     }
-    w.extend_from_slice(&open.seed.to_le_bytes());
-    w.push(open.codec.id());
-    w.push(open.class.budget());
-    put_str(&mut w, &open.keep);
-    w.extend_from_slice(&(open.inputs.len() as u32).to_le_bytes());
+    head.extend_from_slice(&open.seed.to_le_bytes());
+    head.push(open.codec.id());
+    head.push(open.class.budget());
+    put_str(&mut head, &open.keep);
+    head.extend_from_slice(&(open.inputs.len() as u32).to_le_bytes());
     let mut hashes = Vec::with_capacity(open.inputs.len());
-    for input in &open.inputs {
-        put_str(&mut w, &input.name);
-        put_str(&mut w, input.ty.name());
-        let hash = input_hash(&input.data);
+    let payloads: Vec<Option<Cow<[u8]>>> = open
+        .inputs
+        .iter()
+        .map(|input| {
+            let hash = input_hash(&input.data);
+            hashes.push(hash);
+            (!kept(hash)).then(|| codec::encode(bytemuck::cast_slice(&input.data), 4, open.codec, threads))
+        })
+        .collect();
+    let size = head.len()
+        + open.inputs.iter().zip(&payloads).map(|(input, p)| 4 + input.name.len() + 4 + input.ty.name().len() + 16 + 1 + p.as_ref().map_or(0, |p| PAYLOAD_HEAD + p.len())).sum::<usize>();
+    w.reserve_exact(size);
+    let start = w.len();
+    w.extend_from_slice(&head);
+    for ((input, payload), hash) in open.inputs.iter().zip(&payloads).zip(&hashes) {
+        put_str(w, &input.name);
+        put_str(w, input.ty.name());
         w.extend_from_slice(&hash.to_le_bytes());
-        if kept(hash) {
-            w.push(BY_HASH);
-        } else {
-            w.push(WITH_DATA);
-            put_words(&mut w, &input.data, open.codec, threads);
+        match payload {
+            None => w.push(BY_HASH),
+            Some(payload) => {
+                w.push(WITH_DATA);
+                put_payload(w, input.data.len(), open.codec, payload);
+            }
         }
-        hashes.push(hash);
     }
-    (w, hashes)
+    debug_assert_eq!(w.len() - start, size);
+    hashes
 }
 
 /// An input of an `OPEN` as it came: its hash, and its data unless it came by the hash alone.
@@ -196,7 +219,7 @@ pub fn decode_open(bytes: &[u8], max_input_words: usize, threads: usize) -> Resu
                 if data.len() % ty.words() != 0 {
                     return Err(format!("input `{name}`: not whole elements"));
                 }
-                Some(data.into())
+                Some(data)
             }
             BY_HASH => None,
             _ => return Err(format!("input `{name}`: neither data nor a hash")),
@@ -290,50 +313,48 @@ pub fn decode_ack(bytes: &[u8]) -> Result<(String, bool, u64), String> {
 /// `UPDATE`: outputs coded with `codec` on up to `threads` cores.
 pub fn encode_update(u: &Updates, codec: Codec, threads: usize) -> Vec<u8> {
     let mut w = Vec::new();
-    w.extend_from_slice(&(u.outputs.len() as u32).to_le_bytes());
-    for o in &u.outputs {
-        put_str(&mut w, &o.name);
-        w.push(o.state as u8);
-        w.extend_from_slice(&o.version.to_le_bytes());
-        w.extend_from_slice(&o.rev.to_le_bytes());
-        put_str(&mut w, o.ty.name());
-        let (kind, width, bytes, range): (u8, usize, &[u8], Option<(f32, f32)>) = match &o.data {
-            OutputData::Words(words) => (0, 4, bytemuck::cast_slice(words), None),
-            OutputData::F16(h) => (1, 2, bytemuck::cast_slice(h), None),
-            OutputData::U8 { lo, hi, levels } => (2, 1, levels, Some((*lo, *hi))),
-        };
-        w.push(kind);
-        if let Some((lo, hi)) = range {
-            w.extend_from_slice(&lo.to_bits().to_le_bytes());
-            w.extend_from_slice(&hi.to_bits().to_le_bytes());
-        }
-        w.extend_from_slice(&((bytes.len() / width) as u32).to_le_bytes());
-        w.push(codec.id());
-        let payload = codec::encode(bytes, width, codec, threads);
-        w.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        w.extend_from_slice(&payload);
-    }
-    w.extend_from_slice(&(u.values.len() as u32).to_le_bytes());
+    encode_update_into(&mut w, u, codec, threads);
+    w
+}
+
+/// [`encode_update`] after what `w` holds already (a frame's head): `w` grows once, to the
+/// message's exact size, and a raw output's bytes go into it as they are.
+pub fn encode_update_into(w: &mut Vec<u8>, u: &Updates, codec: Codec, threads: usize) {
+    let outputs: Vec<(u8, usize, Cow<[u8]>, Option<(f32, f32)>)> = u
+        .outputs
+        .iter()
+        .map(|o| {
+            let (kind, width, bytes, range): (u8, usize, &[u8], Option<(f32, f32)>) = match &o.data {
+                OutputData::Words(words) => (0, 4, bytemuck::cast_slice(words), None),
+                OutputData::F16(h) => (1, 2, bytemuck::cast_slice(h), None),
+                OutputData::U8 { lo, hi, levels } => (2, 1, levels, Some((*lo, *hi))),
+            };
+            (kind, bytes.len() / width, codec::encode(bytes, width, codec, threads), range)
+        })
+        .collect();
+    // what follows the outputs, small: coded first so the message's size is known
+    let mut tail = Vec::new();
+    tail.extend_from_slice(&(u.values.len() as u32).to_le_bytes());
     for (name, value) in &u.values {
-        put_str(&mut w, name);
-        put_value(&mut w, value);
+        put_str(&mut tail, name);
+        put_value(&mut tail, value);
     }
     match &u.progress {
         Some((f, text)) => {
-            w.push(1);
-            w.extend_from_slice(&f.to_bits().to_le_bytes());
-            put_str(&mut w, text);
+            tail.push(1);
+            tail.extend_from_slice(&f.to_bits().to_le_bytes());
+            put_str(&mut tail, text);
         }
-        None => w.push(0),
+        None => tail.push(0),
     }
     match &u.end {
-        None => w.push(0),
+        None => tail.push(0),
         Some(Ok(v)) => {
-            w.push(1);
-            put_value(&mut w, v);
+            tail.push(1);
+            put_value(&mut tail, v);
         }
         Some(Err(e)) => {
-            w.push(2);
+            tail.push(2);
             let (kind, text) = match e {
                 ProgramError::Load(m) => (0, m.as_str()),
                 ProgramError::Program(m) => (1, m.as_str()),
@@ -342,11 +363,31 @@ pub fn encode_update(u: &Updates, codec: Codec, threads: usize) -> Vec<u8> {
                 ProgramError::Lost(m) => (4, m.as_str()),
                 ProgramError::DeviceLost => (5, ""),
             };
-            w.push(kind);
-            put_str(&mut w, text);
+            tail.push(kind);
+            put_str(&mut tail, text);
         }
     }
-    w
+    let size = 4
+        + u.outputs.iter().zip(&outputs).map(|(o, (_, _, payload, range))| 4 + o.name.len() + 1 + 8 + 8 + 4 + o.ty.name().len() + 1 + range.map_or(0, |_| 8) + PAYLOAD_HEAD + payload.len()).sum::<usize>()
+        + tail.len();
+    w.reserve_exact(size);
+    let start = w.len();
+    w.extend_from_slice(&(u.outputs.len() as u32).to_le_bytes());
+    for (o, (kind, count, payload, range)) in u.outputs.iter().zip(&outputs) {
+        put_str(w, &o.name);
+        w.push(o.state as u8);
+        w.extend_from_slice(&o.version.to_le_bytes());
+        w.extend_from_slice(&o.rev.to_le_bytes());
+        put_str(w, o.ty.name());
+        w.push(*kind);
+        if let Some((lo, hi)) = range {
+            w.extend_from_slice(&lo.to_bits().to_le_bytes());
+            w.extend_from_slice(&hi.to_bits().to_le_bytes());
+        }
+        put_payload(w, *count, codec, payload);
+    }
+    w.extend_from_slice(&tail);
+    debug_assert_eq!(w.len() - start, size);
 }
 
 /// An `UPDATE` back; no output may have more than `max_elements` elements.
@@ -370,21 +411,9 @@ pub fn decode_update(bytes: &[u8], max_elements: usize, threads: usize) -> Resul
         let len = r.u32()? as usize;
         let payload = r.take(len)?;
         let data = match (kind, range) {
-            (0, _) => {
-                let mut words = vec![0u32; count];
-                codec::decode(payload, 4, codec, bytemuck::cast_slice_mut(&mut words), threads)?;
-                OutputData::Words(words.into())
-            }
-            (1, _) => {
-                let mut h = vec![0u16; count];
-                codec::decode(payload, 2, codec, bytemuck::cast_slice_mut(&mut h), threads)?;
-                OutputData::F16(h.into())
-            }
-            (2, Some((lo, hi))) => {
-                let mut b = vec![0u8; count];
-                codec::decode(payload, 1, codec, &mut b, threads)?;
-                OutputData::U8 { lo, hi, levels: b.into() }
-            }
+            (0, _) => OutputData::Words(decoded(payload, count, codec, threads)?),
+            (1, _) => OutputData::F16(decoded(payload, count, codec, threads)?),
+            (2, Some((lo, hi))) => OutputData::U8 { lo, hi, levels: decoded(payload, count, codec, threads)? },
             _ => return Err("an output of an unknown kind".into()),
         };
         u.outputs.push(Output { name, state, version, rev, ty, data });
@@ -436,15 +465,18 @@ fn put_str(w: &mut Vec<u8>, s: &str) {
     w.extend_from_slice(s.as_bytes());
 }
 
-fn put_words(w: &mut Vec<u8>, words: &[u32], codec: Codec, threads: usize) {
-    let payload = codec::encode(bytemuck::cast_slice(words), 4, codec, threads);
-    w.extend_from_slice(&(words.len() as u32).to_le_bytes());
+/// Bytes [`put_payload`] writes before the payload itself.
+const PAYLOAD_HEAD: usize = 4 + 1 + 4;
+
+/// `count` elements' coded `payload`: the count, the codec, the payload's length, the payload.
+fn put_payload(w: &mut Vec<u8>, count: usize, codec: Codec, payload: &[u8]) {
+    w.extend_from_slice(&(count as u32).to_le_bytes());
     w.push(codec.id());
     w.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    w.extend_from_slice(&payload);
+    w.extend_from_slice(payload);
 }
 
-fn get_words(r: &mut Reader, words_left: &mut usize, threads: usize) -> Result<Vec<u32>, String> {
+fn get_words(r: &mut Reader, words_left: &mut usize, threads: usize) -> Result<Arc<[u32]>, String> {
     let n = r.u32()? as usize;
     if n > *words_left {
         return Err("the inputs are over the node's input budget".into());
@@ -452,10 +484,17 @@ fn get_words(r: &mut Reader, words_left: &mut usize, threads: usize) -> Result<V
     *words_left -= n;
     let codec = Codec::from_id(r.u8()?).ok_or("an unknown codec")?;
     let len = r.u32()? as usize;
-    let payload = r.take(len)?;
-    let mut words = vec![0u32; n];
-    codec::decode(payload, 4, codec, bytemuck::cast_slice_mut(&mut words), threads)?;
-    Ok(words)
+    decoded(r.take(len)?, n, codec, threads)
+}
+
+/// `count` elements decoded from `payload` straight into the `Arc` that holds them (no copy
+/// after: a `Vec` into an `Arc` is one).
+fn decoded<T: bytemuck::Pod>(payload: &[u8], count: usize, codec: Codec, threads: usize) -> Result<Arc<[T]>, String> {
+    // SAFETY: all-zero bytes are a valid `T` (`Pod`)
+    let mut out: Arc<[T]> = unsafe { Arc::<[T]>::new_zeroed_slice(count).assume_init() };
+    let fresh = Arc::get_mut(&mut out).expect("a new Arc is unique");
+    codec::decode(payload, std::mem::size_of::<T>(), codec, bytemuck::cast_slice_mut(fresh), threads)?;
+    Ok(out)
 }
 
 pub fn put_value(w: &mut Vec<u8>, v: &Value) {

@@ -118,8 +118,15 @@ impl Rasterizer {
         if p0.y < 0.0 {
             x -= p0.y * dxdy;
         }
+        // Every write lands in its own row: a row has `width + 1` cells and is summed on its own
+        // (`for_each_pixel`), so a column left of the image adds at column 0 (it covers the whole
+        // visible row, as the winding says) and one right of it at the never-read last cell. An
+        // outline past the image's edge (rounding at large sizes, or bounds that miss a point)
+        // can then neither leave the buffer nor wrap into a neighbouring row.
+        let last = self.width as i32;
         for y in y0..self.height.min(p1.y.ceil() as usize) {
             let linestart = y * (self.width + 1);
+            let cell = |x: i32| linestart + x.clamp(0, last) as usize;
             let dy = ((y + 1) as f32).min(p1.y) - (y as f32).max(p0.y);
             let xnext = x + dxdy * dy;
             let d = dy * dir;
@@ -130,41 +137,36 @@ impl Rasterizer {
             let x1i = x1ceil as i32;
             if x1i <= x0i + 1 {
                 let xmf = 0.5 * (x + xnext) - x0floor;
-                let linestart_x0i = linestart as isize + x0i as isize;
-                if linestart_x0i < 0 {
-                    continue; // oob index
-                }
-                self.a[linestart_x0i as usize] += d - d * xmf;
-                if x0i < self.width as i32 {
-                    self.a[linestart_x0i as usize + 1] += d * xmf;
-                }
+                self.a[cell(x0i)] += d - d * xmf;
+                self.a[cell(x0i + 1)] += d * xmf;
             } else {
                 let s = (x1 - x0).recip();
                 let x0f = x0 - x0floor;
                 let a0 = 0.5 * s * (1.0 - x0f) * (1.0 - x0f);
                 let x1f = x1 - x1ceil + 1.0;
                 let am = 0.5 * s * x1f * x1f;
-                let linestart_x0i = linestart as isize + x0i as isize;
-                if linestart_x0i < 0 {
-                    continue; // oob index
-                }
-                self.a[linestart_x0i as usize] += d * a0;
-                if x0i < self.width as i32 {
-                    if x1i == x0i + 2 {
-                        self.a[linestart_x0i as usize + 1] += d * (1.0 - a0 - am);
-                    } else {
-                        let a1 = s * (1.5 - x0f);
-                        self.a[linestart_x0i as usize + 1] += d * (a1 - a0);
-                        for xi in x0i + 2..x1i - 1 {
-                            self.a[linestart + xi as usize] += d * s;
-                        }
-                        let a2 = a1 + (x1i - x0i - 3) as f32 * s;
-                        self.a[linestart + (x1i - 1) as usize] += d * (1.0 - a2 - am);
+                self.a[cell(x0i)] += d * a0;
+                if x1i == x0i + 2 {
+                    self.a[cell(x0i + 1)] += d * (1.0 - a0 - am);
+                } else {
+                    let a1 = s * (1.5 - x0f);
+                    self.a[cell(x0i + 1)] += d * (a1 - a0);
+                    // Only the columns inside the row take a cell each; the rest add at an edge.
+                    let (inner0, inner1) = (x0i + 2, x1i - 1);
+                    let (vis0, vis1) = (inner0.max(0), inner1.min(last + 1));
+                    if vis0 > inner0 {
+                        self.a[cell(0)] += d * s * (vis0.min(inner1) - inner0).max(0) as f32;
                     }
+                    for xi in vis0..vis1 {
+                        self.a[cell(xi)] += d * s;
+                    }
+                    if inner1 > vis1.max(inner0) {
+                        self.a[cell(last)] += d * s * (inner1 - vis1.max(inner0)) as f32;
+                    }
+                    let a2 = a1 + (x1i - x0i - 3) as f32 * s;
+                    self.a[cell(x1i - 1)] += d * (1.0 - a2 - am);
                 }
-                if x1i < self.width as i32 {
-                    self.a[linestart + x1i as usize] += d * am;
-                }
+                self.a[cell(x1i)] += d * am;
             }
             x = xnext;
         }

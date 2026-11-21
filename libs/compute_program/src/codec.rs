@@ -13,6 +13,7 @@
 //!
 //! A block-coded payload: `u32 blocks`, `u32 bytes` per block, then the blocks' LZ4 data.
 
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Elements per block (256 KiB of words).
@@ -81,11 +82,12 @@ impl Codec {
     }
 }
 
-/// `bytes` (whole elements of `width` bytes) coded with `codec` on up to `threads` cores.
-pub fn encode(bytes: &[u8], width: usize, codec: Codec, threads: usize) -> Vec<u8> {
+/// `bytes` (whole elements of `width` bytes) coded with `codec` on up to `threads` cores; `raw`
+/// is the bytes themselves (no copy: the message they go into is the one copy).
+pub fn encode(bytes: &[u8], width: usize, codec: Codec, threads: usize) -> Cow<'_, [u8]> {
     debug_assert!(matches!(width, 1 | 2 | 4) && bytes.len() % width == 0);
-    match codec {
-        Codec::Raw => bytes.to_vec(),
+    Cow::Owned(match codec {
+        Codec::Raw => return Cow::Borrowed(bytes),
         Codec::DeltaDeflate => {
             let mut planes = vec![0u8; bytes.len()];
             transform(bytes, &mut planes, width, true, true);
@@ -111,7 +113,7 @@ pub fn encode(bytes: &[u8], width: usize, codec: Codec, threads: usize) -> Vec<u
             }
             out
         }
-    }
+    })
 }
 
 /// `out` (exactly the elements' bytes) back from `payload`, on up to `threads` cores.

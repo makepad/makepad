@@ -282,6 +282,18 @@ pub struct Pager {
     autocheckpoint: u32,
     /// Write support; `None` for a read-only pager.
     write: Option<WriteSupport>,
+    /// Shared with every other connection to this file in this process: the
+    /// writer's slot and the count of snapshots held.
+    shared: Arc<ProcessLock>,
+    /// This connection is counted among the file's readers in `shared`: from
+    /// `begin_read` to `unlock`, while it holds a snapshot.
+    reading: bool,
+    /// A read transaction holds the snapshot `begin_read` took: later reads
+    /// keep it instead of moving to the newest commit, until `end_read_tx`.
+    read_tx: bool,
+    /// While checkpoints wait for readers: the log size at which the wait is
+    /// reported again (0 = none waiting).
+    deferred_report_at: u32,
 }
 
 /// Identity of one committed snapshot, for page-cache validity: the change
@@ -366,6 +378,7 @@ impl Pager {
         let header = DbHeader::parse(&hdr)?;
         let page_size = header.page_size as usize;
         let usable = header.usable_size();
+        let shared = stores.process_lock();
         let mut pager = Pager {
             path: stores
                 .path(StoreKind::Main)
@@ -384,6 +397,10 @@ impl Pager {
             busy_timeout: Duration::from_secs(5),
             autocheckpoint: DEFAULT_AUTOCHECKPOINT,
             write: None,
+            shared,
+            reading: false,
+            read_tx: false,
+            deferred_report_at: 0,
         };
         pager.begin_read()?;
         if pager.journal_is_hot()? {
@@ -696,10 +713,14 @@ impl Pager {
             busy_timeout,
             autocheckpoint: DEFAULT_AUTOCHECKPOINT,
             write: Some(WriteSupport {
-                process_lock,
+                process_lock: process_lock.clone(),
                 holds_process_write: false,
                 tx: None,
             }),
+            shared: process_lock,
+            reading: false,
+            read_tx: false,
+            deferred_report_at: 0,
         };
         pager.recover_hot_journal()?;
         pager.reload_header()?;
@@ -962,6 +983,51 @@ impl Pager {
             // transaction has already allocated.
             return Ok(());
         }
+        if self.read_tx && self.reading {
+            // A read transaction reads the snapshot it began with.
+            return Ok(());
+        }
+        // Counted before the snapshot is read (see `ProcessLock::enter_read`).
+        let counted_here = !self.reading;
+        if counted_here {
+            self.shared.enter_read();
+            self.reading = true;
+        }
+        let begun = self.begin_read_counted();
+        if begun.is_err() && counted_here {
+            self.leave_read();
+        }
+        begun
+    }
+
+    /// Begin a read transaction: take the newest committed snapshot and keep
+    /// it for every read until [`Pager::end_read_tx`] (a read-only
+    /// connection's `BEGIN`). Its count among the readers holds checkpoints
+    /// back meanwhile, so the log under it is never started over.
+    pub fn begin_read_tx(&mut self) -> Result<()> {
+        self.begin_read()?;
+        self.read_tx = true;
+        Ok(())
+    }
+
+    /// End a read transaction; the next `unlock` gives the snapshot up.
+    pub fn end_read_tx(&mut self) {
+        self.read_tx = false;
+    }
+
+    fn leave_read(&mut self) {
+        if self.reading {
+            self.reading = false;
+            self.shared.leave_read();
+        }
+    }
+
+    /// Other connections in this process that hold a snapshot of this file now.
+    pub fn other_readers(&self) -> usize {
+        self.shared.readers().saturating_sub(self.reading as usize)
+    }
+
+    fn begin_read_counted(&mut self) -> Result<()> {
         if self.in_wal_mode() && self.shm.is_none() {
             self.acquire_wal_ownership()?;
         }
@@ -1332,8 +1398,37 @@ impl Pager {
         self.release_process_write();
         // Keep the log from growing without bound, like SQLite's autocheckpoint.
         if self.wal.as_ref().map(|w| w.frames()).unwrap_or(0) >= self.autocheckpoint {
-            self.checkpoint()?;
+            self.checkpoint_unless_read()?;
         }
+        Ok(())
+    }
+
+    /// The autocheckpoint, SQLite's PASSIVE rule without read marks: while any
+    /// other connection in this process holds a snapshot, nothing is folded
+    /// (it would overwrite database pages that snapshot still reads) and the
+    /// next commit tries again. Readers never wait for it. The log grows while
+    /// they overlap without a gap, which is reported as it doubles.
+    fn checkpoint_unless_read(&mut self) -> Result<()> {
+        let frames = self.wal_frames();
+        let readers = self.other_readers();
+        if readers > 0 {
+            if frames >= self.deferred_report_at {
+                eprintln!(
+                    "sqlite: {}: checkpoint waits for {readers} reader(s) holding a snapshot; the log holds {frames} frames",
+                    self.path.display()
+                );
+                self.deferred_report_at = frames.saturating_mul(2);
+            }
+            return Ok(());
+        }
+        if self.deferred_report_at > 0 {
+            eprintln!(
+                "sqlite: {}: checkpoint ran once its readers were done ({frames} frames)",
+                self.path.display()
+            );
+            self.deferred_report_at = 0;
+        }
+        self.checkpoint()?;
         Ok(())
     }
 
@@ -1357,6 +1452,7 @@ impl Drop for Pager {
     fn drop(&mut self) {
         let _ = self.rollback();
         self.release_process_write();
+        self.leave_read();
     }
 }
 
@@ -1410,9 +1506,11 @@ impl Pager {
     /// read-only handle still hands its shared slot back between statements,
     /// so it can watch a database some other program is writing.
     pub fn unlock(&mut self) -> Result<()> {
-        if self.in_transaction() {
+        if self.in_transaction() || self.read_tx {
             return Ok(());
         }
+        // The snapshot is given up here, whatever the release below answers.
+        self.leave_read();
         {
             let Pager { file, lock, .. } = self;
             lock.release(file.as_ref())?;

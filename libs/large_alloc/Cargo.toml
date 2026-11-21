@@ -1,0 +1,10 @@
+[package]
+name = "makepad-large-alloc"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad: a global allocator wrapper that maps large blocks straight from the OS on macOS, so a freed one leaves the process"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

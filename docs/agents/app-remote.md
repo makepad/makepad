@@ -112,6 +112,7 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `close [w=ID]`, `resize w=W h=H`, `window k=maximize\|fullscreen\|resize\|dragquery` | Window operations |
 | `activity` | Native user activity counters, see below |
 | `trace`, `midi`, `ai`, `ai transcript`, `handsoff`, `shader consts`, `shader const` | Diagnostics and overlays |
+| `ai say=TEXT`, `ai confirm=run\|always\|cancel` | A line into the app's chat as the person's turn, and an answer to its confirm card; `say=/<svc>.<tool> {json}` runs that tool in the turn with no model (its row and turn buttons, as a model's call); a plain line takes a real model turn on the person's credits when a model is picked, so agents drive turns with the console form unless a model turn is the thing under test; `ai transcript` reads the result |
 | `tweak ...`, `design <op> ...` | Design feedback and source edits, see [Tweaker](tweaker.md) |
 | `quit [native=1]` | Graceful shutdown without a final grab; `native=1` asks as a logout does (macOS: AppKit's `terminate:`, so a held quit is answered on its real path; a hidden run needs `MAKEPAD_HAL_BACKEND=metal`, as an offscreen one has no AppKit app and refuses it) |
 

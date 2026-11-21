@@ -99,6 +99,10 @@ buckets ask for one, and the queue decides where and when.
 - **Priority**: interactive (an agent or a person waits on it) or background (buckets after
   their gate, prebuilds, CI, correctness legs). On a shared box interactive work gets a
   hundred times the CPU share of background work.
+  - In a lease nobody attends (background or timed), a JIT run that parks is released at once
+    (a panic unwinds, any other park stops the run). A fixture that parks on purpose and
+    decides the park itself declares it with `RELAX_EXPECTED_CRASH=<why>` in the run's
+    environment, and the node leaves that park alone.
 - **Budgets**: each box has a cores budget and a RAM budget.
   - A lease is charged its asked cores (`--cores`), or its class's share. An ask under its
     class's measured cores is charged the measure, and its run still gets only what it asked.
@@ -156,7 +160,9 @@ buckets ask for one, and the queue decides where and when.
     seeded with the archive's files (a capture to look at); it goes with the session;
   - `devhub live look <id>`: patched, a frame drawn, and a grab in
     `local/screencap/<lane>/` (a look, not a playtest);
-  - `live wait <id> patched|verdict|settled|frame` waits for one of those;
+  - `live wait <id> patched|verdict|settled|frame` waits for one of those; neither `frame` (the
+    first frame drawn) nor `settled` (the JIT idle) says the app has loaded its document (a
+    `--demo`) or registered its services yet, so check that the first call's answer has them;
     `live act <id> <inspect cmd>` drives the app. A call goes on through a restart of the master or its
     box's hub when asking again does nothing twice (it reads, or only waited for room). A cut
     `session relaunch` is sent again only when devhub sees it did not apply; any other cut

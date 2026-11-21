@@ -156,4 +156,19 @@ fn a_read_only_reader_sees_what_a_writer_commits() {
     // and the next statement moves to the newest committed snapshot.
     assert_eq!(titles(&mut reader), ["first", "second", "third"]);
     assert_eq!(sidecars(&db), Vec::<String>::new());
+
+    // On a write-ahead log, a read-only connection's transaction is a read
+    // transaction: its statements read the snapshot BEGIN took, beside a
+    // writer committing, until COMMIT moves it on. It can only be deferred.
+    writer.execute("PRAGMA journal_mode=WAL", &[]).unwrap();
+    let mut reader = Connection::open_read_only(&db, TIMEOUT).unwrap();
+    assert!(reader.execute("BEGIN IMMEDIATE", &[]).is_err(), "a read-only connection cannot reserve a write");
+    reader.execute("BEGIN", &[]).unwrap();
+    assert_eq!(titles(&mut reader), ["first", "second", "third"]);
+    writer.execute("INSERT INTO items(title) VALUES('fourth')", &[]).unwrap();
+    assert_eq!(titles(&mut reader), ["first", "second", "third"], "a read transaction keeps its snapshot across a writer's commit");
+    reader.execute("COMMIT", &[]).unwrap();
+    assert_eq!(titles(&mut reader), ["first", "second", "third", "fourth"], "the next statement after COMMIT reads the newest commit");
+    reader.execute("BEGIN", &[]).unwrap();
+    reader.execute("ROLLBACK", &[]).unwrap();
 }

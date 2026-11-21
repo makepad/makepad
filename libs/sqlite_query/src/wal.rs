@@ -54,7 +54,7 @@ pub fn checksum(buf: &[u8], seed: (u32, u32), big_endian: bool) -> (u32, u32) {
 /// `refresh()` picks up the newest committed content; guessing is the one
 /// thing a reader must not do.
 fn snapshot_gone() -> Error {
-    Error::Busy("the write-ahead log was reset while this snapshot was in use".into())
+    Error::Busy(crate::error::SNAPSHOT_RESET.into())
 }
 
 pub fn wal_path(db_path: &Path) -> PathBuf {

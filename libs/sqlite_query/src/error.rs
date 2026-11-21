@@ -28,7 +28,19 @@ pub enum Error {
     Constraint(String),
 }
 
+/// Why a snapshot's read failed after a checkpoint started the log over under
+/// it (SQLite's SQLITE_BUSY_SNAPSHOT): the statement is read again on a fresh
+/// snapshot, never answered from a guess.
+pub(crate) const SNAPSHOT_RESET: &str = "the write-ahead log was reset while this snapshot was in use";
+
 impl Error {
+    /// The read lost its snapshot to a checkpoint (see [`SNAPSHOT_RESET`]): the
+    /// same statement on a fresh snapshot is the answer. Any other busy is a
+    /// lock another connection holds.
+    pub fn is_snapshot_reset(&self) -> bool {
+        matches!(self, Error::Busy(m) if m == SNAPSHOT_RESET)
+    }
+
     pub fn corrupt(msg: impl Into<String>) -> Self {
         Error::Corrupt(msg.into())
     }

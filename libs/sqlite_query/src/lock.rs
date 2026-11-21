@@ -15,6 +15,7 @@ use crate::storage::{PageStore, StoreLock};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, OnceLock};
@@ -296,9 +297,16 @@ mod tests {
 /// same file inside one process never see each other's locks — SQLite solves
 /// this with a per-inode registry and so do we. Writers register here and
 /// serialize; cross-process exclusion is still the byte-range locks above.
+///
+/// Readers register too, for as long as they hold a snapshot (a statement, or
+/// an explicit transaction): a checkpoint folds the log into the database file,
+/// and a snapshot older than the newest commit would read pages of the file the
+/// fold just overwrote with later versions. So no checkpoint runs while another
+/// connection in this process holds one (see `Pager::checkpoint_unless_read`).
 pub struct ProcessLock {
     state: Mutex<bool>,
     changed: Condvar,
+    readers: AtomicUsize,
 }
 
 impl ProcessLock {
@@ -306,7 +314,25 @@ impl ProcessLock {
         ProcessLock {
             state: Mutex::new(false),
             changed: Condvar::new(),
+            readers: AtomicUsize::new(0),
         }
+    }
+
+    /// A connection takes a snapshot. Counted before the snapshot is read, so a
+    /// writer that counts none after its commit knows every later snapshot
+    /// includes that commit.
+    pub fn enter_read(&self) {
+        self.readers.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A connection gives its snapshot up.
+    pub fn leave_read(&self) {
+        self.readers.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Connections in this process holding a snapshot now.
+    pub fn readers(&self) -> usize {
+        self.readers.load(Ordering::SeqCst)
     }
 
     /// One owner in the browser: the slot is free or it is not, nobody to wait for.

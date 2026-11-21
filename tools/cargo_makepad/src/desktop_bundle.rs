@@ -26,6 +26,8 @@
 //!
 //! Name, identifier and icon come from `[package.metadata.makepad.desktop]`
 //! in the app's `Cargo.toml`; `--name=`, `--identifier=` and `--icon=<png>` override them.
+//! `--agent` makes a macOS agent app (`LSUIElement`): no Dock icon, app-switcher entry or menu
+//! bar, for an app another app starts.
 //! The icon override is relative to the command's working directory. The display name stays
 //! intact in metadata and launcher entries; reserved filename characters become `-` on disk.
 //! Cargo arguments, including `--message-format=json-render-diagnostics`, pass through to
@@ -72,6 +74,7 @@ struct BundleOptions {
     icon: Option<PathBuf>,
     cert: Option<String>,
     adhoc: bool,
+    agent: bool,
 }
 
 /// The app's manifest metadata with any command-line overrides applied.
@@ -83,6 +86,8 @@ struct BundleMeta {
     /// Privacy prompts the app declares, as (Info.plist key, text), in
     /// [`USAGE_KEYS`] order.
     usage: Vec<(&'static str, String)>,
+    /// `--agent`: `LSUIElement` (macOS)
+    agent: bool,
 }
 
 /// The privacy prompts an app may declare under
@@ -211,6 +216,8 @@ fn parse_options(args: &[String]) -> Result<(BundleOptions, Vec<String>), String
             options.cert = Some(cert.to_string());
         } else if arg == "--adhoc" {
             options.adhoc = true;
+        } else if arg == "--agent" {
+            options.agent = true;
         } else {
             cargo_args.push(arg.clone());
         }
@@ -263,6 +270,7 @@ fn apply_overrides(meta: &mut BundleMeta, options: &BundleOptions, cwd: &Path) {
     if let Some(name) = &options.name { meta.name = name.clone(); }
     if let Some(identifier) = &options.identifier { meta.identifier = identifier.clone(); }
     if let Some(icon) = &options.icon { meta.icon = Some(cwd.join(icon)); }
+    meta.agent |= options.agent;
 }
 
 /// Keep the display name intact in metadata and use a single safe component on disk.
@@ -306,7 +314,7 @@ fn bundle_meta_from(toml: &makepad_toml_parser::TomlDocument, crate_dir: &Path, 
         }
         Some(_) => return Err("[package.metadata.makepad.desktop.usage] must be a table".to_string()),
     }
-    Ok(BundleMeta { name, identifier, icon, usage })
+    Ok(BundleMeta { name, identifier, icon, usage, agent: false })
 }
 
 /// Build the whole bundle at `stage`.
@@ -345,10 +353,12 @@ fn copy_resources(resources: &Path, built: &Path, binary_name: &str, build_crate
     let mut deps: Vec<(String, PathBuf)> = get_crate_dep_dirs(build_crate, target_dir, &host).into_iter().collect();
     deps.sort();
     crates.extend(deps);
-    let mut mapped: Vec<String> = Vec::new();
-    for (name, dir) in &crates {
-        let name = name.replace('-', "_");
-        if mapped.contains(&name) {
+    // (the name its resource paths carry, its package's), for each crate that has resources
+    let mut mapped: Vec<(String, String)> = Vec::new();
+    for (package, dir) in &crates {
+        let package = package.replace('-', "_");
+        let name = resource_name(dir).unwrap_or_else(|| package.clone());
+        if mapped.iter().any(|(n, _)| *n == name) {
             continue;
         }
         let dest = resources.join(&name);
@@ -357,23 +367,41 @@ fn copy_resources(resources: &Path, built: &Path, binary_name: &str, build_crate
         // A font kept under fonts/ that also sits in resources/ is already there.
         fonts.copy_tree_filtered(&dir.join("fonts"), &dest.join("fonts"), &format!("{name}/fonts"), |relative| !is_font_path(relative) || resource_dir.join(relative).is_file(), |_| Ok(()))?;
         if dest.is_dir() {
-            mapped.push(name);
+            mapped.push((name, package));
         }
     }
     fonts.finish()?.print();
+    Ok(package_map(&mapped, &build_crate.replace('-', "_"), &binary_name.replace('-', "_")))
+}
 
-    // A bin target's own crate name is the binary's, which is what its
-    // `crate://self` paths name; it maps to the package's resources.
-    let own = build_crate.replace('-', "_");
-    let alias = binary_name.replace('-', "_");
-    let mut map = String::new();
-    for name in &mapped {
-        map.push_str(&format!("{name}\tresources/{name}\n"));
+/// The name a crate's resource paths carry, when its `[lib] name` is not its package's: the
+/// first segment of its module paths, which `crate_resource("self:...")` resolves to
+/// (`makepad-story`'s lib is `story`). `None`: the package's name.
+fn resource_name(crate_dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    match parse_toml(&text).ok()?.get_path(&["lib", "name"]) {
+        Some(Toml::Str(name, _)) if !name.trim().is_empty() => Some(name.trim().replace('-', "_")),
+        _ => None,
     }
-    if alias != own && mapped.contains(&own) && !mapped.contains(&alias) {
-        map.push_str(&format!("{alias}\tresources/{own}\n"));
+}
+
+/// The package map's text: each crate with resources by the name its resource paths carry, and by
+/// its package's name where that differs; a bin target's own crate name is the binary's, which is
+/// what its `crate://self` paths name, so it maps to the package's resources too. `build`: the
+/// built package's name, `binary`: its binary's (both with `_`).
+fn package_map(mapped: &[(String, String)], build: &str, binary: &str) -> String {
+    let mut rows: Vec<(String, &str)> = mapped.iter().map(|(name, _)| (name.clone(), name.as_str())).collect();
+    for (name, package) in mapped {
+        if !rows.iter().any(|(n, _)| n == package) {
+            rows.push((package.clone(), name));
+        }
     }
-    Ok(map)
+    if let Some((own, _)) = mapped.iter().find(|(_, package)| package == build) {
+        if !rows.iter().any(|(n, _)| n == binary) {
+            rows.push((binary.to_string(), own));
+        }
+    }
+    rows.iter().map(|(name, dir)| format!("{name}\tresources/{dir}\n")).collect()
 }
 
 /// The Linux / Windows layout: one folder the app runs from wherever it is.
@@ -558,6 +586,7 @@ fn info_plist(binary_name: &str, meta: &BundleMeta) -> String {
     let id = xml_escape(&meta.identifier);
     let name = xml_escape(&meta.name);
     let usage: String = meta.usage.iter().map(|(key, text)| format!("    <key>{key}</key>\n    <string>{}</string>\n", xml_escape(text))).collect();
+    let agent = meta.agent;
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
@@ -582,7 +611,7 @@ fn info_plist(binary_name: &str, meta: &BundleMeta) -> String {
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>LSUIElement</key>
-    <false/>
+    <{agent}/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -668,6 +697,25 @@ fn remove_dir_if_present(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_crate_whose_lib_has_its_own_name_finds_its_resources_by_it() {
+        let dir = std::env::temp_dir().join(format!("makepad-resource-name-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"makepad-story\"\n\n[lib]\nname = \"story\"\npath = \"src/lib.rs\"\n").unwrap();
+        assert_eq!(resource_name(&dir).as_deref(), Some("story"), "its module paths start with its lib's name");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"makepad-demo\"\n").unwrap();
+        assert_eq!(resource_name(&dir), None);
+        fs::remove_dir_all(&dir).unwrap();
+        let mapped = [("story".to_string(), "makepad_story".to_string()), ("makepad_widgets".to_string(), "makepad_widgets".to_string())];
+        assert_eq!(
+            package_map(&mapped, "makepad_story", "makepad_story"),
+            "story\tresources/story\nmakepad_widgets\tresources/makepad_widgets\nmakepad_story\tresources/story\n",
+            "the lib's name and the package's (and so the binary's) all reach its resources"
+        );
+        let mapped = [("makepad_demo".to_string(), "makepad_demo".to_string())];
+        assert_eq!(package_map(&mapped, "makepad_demo", "demo"), "makepad_demo\tresources/makepad_demo\ndemo\tresources/makepad_demo\n");
+    }
+
     fn meta_of(manifest: &str) -> BundleMeta {
         let toml = parse_toml(manifest).unwrap();
         bundle_meta_from(&toml, Path::new("/src/app"), "makepad-demo", "demo").unwrap()
@@ -678,15 +726,15 @@ mod tests {
         let meta = meta_of(
             "[package]\nname = \"makepad-demo\"\n\n[package.metadata.makepad.desktop]\nname = \"Makepad Demo\"\nidentifier = \"nl.makepad.demo\"\nicon = \"resources/demo.png\"\n",
         );
-        assert_eq!(meta, BundleMeta { name: "Makepad Demo".into(), identifier: "nl.makepad.demo".into(), icon: Some(PathBuf::from("/src/app/resources/demo.png")), usage: Vec::new() });
+        assert_eq!(meta, BundleMeta { name: "Makepad Demo".into(), identifier: "nl.makepad.demo".into(), icon: Some(PathBuf::from("/src/app/resources/demo.png")), usage: Vec::new(), agent: false });
     }
 
     #[test]
     fn without_a_desktop_table_the_packager_names_or_the_crate_are_used() {
         let meta = meta_of("[package]\nname = \"makepad-demo\"\n\n[package.metadata.packager]\nproduct_name = \"Demo\"\nidentifier = \"rs.demo\"\n");
-        assert_eq!(meta, BundleMeta { name: "Demo".into(), identifier: "rs.demo".into(), icon: None, usage: Vec::new() });
+        assert_eq!(meta, BundleMeta { name: "Demo".into(), identifier: "rs.demo".into(), icon: None, usage: Vec::new(), agent: false });
         let meta = meta_of("[package]\nname = \"makepad-demo\"\n");
-        assert_eq!(meta, BundleMeta { name: "demo".into(), identifier: "dev.makepad.makepad-demo".into(), icon: None, usage: Vec::new() });
+        assert_eq!(meta, BundleMeta { name: "demo".into(), identifier: "dev.makepad.makepad-demo".into(), icon: None, usage: Vec::new(), agent: false });
     }
 
     #[test]
@@ -702,7 +750,7 @@ mod tests {
 
     #[test]
     fn bundle_overrides_and_cargo_json_option() {
-        let args: Vec<String> = ["--name=Clock / Timer: native", "--identifier=nl.makepad.clock.native", "--icon=icons/clock.png", "--message-format=json-render-diagnostics", "-p", "clock"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["--name=Clock / Timer: native", "--identifier=nl.makepad.clock.native", "--icon=icons/clock.png", "--agent", "--message-format=json-render-diagnostics", "-p", "clock"].iter().map(|s| s.to_string()).collect();
         let (options, cargo) = parse_options(&args).unwrap();
         assert_eq!(options.name.as_deref(), Some("Clock / Timer: native"));
         assert_eq!(options.identifier.as_deref(), Some("nl.makepad.clock.native"));
@@ -715,6 +763,8 @@ mod tests {
         assert_eq!(meta.icon, Some(PathBuf::from("workspace/icons/clock.png")));
         assert_eq!(file_title(&meta.name), "Clock - Timer- native");
         assert!(info_plist("clock", &meta).contains("<string>Clock / Timer: native</string>"));
+        assert!(info_plist("clock", &meta).contains("<key>LSUIElement</key>\n    <true/>"), "--agent: an agent app");
+        assert!(info_plist("clock", &meta_of("[package]\nname = \"clock\"\n")).contains("<key>LSUIElement</key>\n    <false/>"));
         assert!(desktop_entry(Path::new("apps/clock"), "clock", &meta).contains("Name=Clock / Timer: native\n"));
         for option in ["--name=", "--identifier=", "--identifier=../clock", "--icon="] {
             assert!(parse_options(&[option.to_string()]).is_err(), "{option}");
@@ -739,14 +789,14 @@ mod tests {
 
     #[test]
     fn plist_text_is_escaped() {
-        let meta = BundleMeta { name: "A & B <C>".into(), identifier: "x.y".into(), icon: None, usage: Vec::new() };
+        let meta = BundleMeta { name: "A & B <C>".into(), identifier: "x.y".into(), icon: None, usage: Vec::new(), agent: false };
         let plist = info_plist("demo", &meta);
         assert!(plist.contains("<string>A &amp; B &lt;C&gt;</string>"));
     }
 
     #[test]
     fn a_folder_install_gets_a_launcher_entry() {
-        let meta = BundleMeta { name: "Demo".into(), identifier: "nl.makepad.demo".into(), icon: None, usage: Vec::new() };
+        let meta = BundleMeta { name: "Demo".into(), identifier: "nl.makepad.demo".into(), icon: None, usage: Vec::new(), agent: false };
         let text = desktop_entry(Path::new("/home/x/apps/De$mo"), "demo", &meta);
         assert!(text.contains("Exec=\"/home/x/apps/De\\$mo/demo\"\n"), "{text}");
         assert!(text.contains("StartupWMClass=nl.makepad.demo\n"));
