@@ -172,6 +172,18 @@ pub fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Siz
     )
 }
 
+/// The largest raster size (device pixels per em) at which an outline glyph `size_in_ems` big, with
+/// `padding` all around, fits within half the atlas's side in each dimension. A larger image could
+/// never sit in the atlas beside the frame's other glyphs, so a bigger glyph is rasterized at this
+/// size and drawn scaled (a glyph draws at its font size over its own `dpxs_per_em`): text that
+/// big is soft, never a giant allocation. Infinite for an empty outline.
+pub fn max_outline_dpxs_per_em(size_in_ems: Size<f32>, padding: usize, atlas_size: Size<usize>) -> f32 {
+    // One pixel under the room, so the ceiling of the image size never passes it.
+    let room = |side: usize| ((side / 2).saturating_sub(2 * padding) as f32 - 1.0).max(1.0);
+    let fit = |room: f32, ems: f32| if ems > 0.0 { room / ems } else { f32::INFINITY };
+    fit(room(atlas_size.width), size_in_ems.width).min(fit(room(atlas_size.height), size_in_ems.height))
+}
+
 pub fn is_msdf_complexity_acceptable(
     settings: MsdfComplexitySettings,
     complexity: OutlineComplexity,
@@ -228,8 +240,9 @@ pub fn plan_outline_sdf(
     let mut outline = None;
     let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
     let outline = outline.unwrap_or_else(|| font.glyph_outline_rc(glyph_id).unwrap());
-    let image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
     let padding = settings.sdfer.padding;
+    dpxs_per_em = dpxs_per_em.min(max_outline_dpxs_per_em(bounds_in_ems.size, padding, settings.atlas_size));
+    let image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
     Some(SdfPlan {
         key: GlyphImageKey {
             font_id: font.id(),
@@ -277,9 +290,10 @@ pub fn plan_outline_msdf(
     if !is_msdf_complexity_acceptable(settings.msdf_complexity, outline.complexity()) {
         return None;
     }
-    let dpxs_per_em = dpxs_per_em.max(settings.msdf_resolution.min_dpxs_per_em);
-    let image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
     let padding = settings.msdfer.padding;
+    let dpxs_per_em = dpxs_per_em.max(settings.msdf_resolution.min_dpxs_per_em)
+        .min(max_outline_dpxs_per_em(bounds_in_ems.size, padding, settings.atlas_size));
+    let image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
     Some(MsdfPlan {
         key: GlyphImageKey {
             font_id: font.id(),
@@ -784,7 +798,35 @@ fn push_non_empty_rect(out: &mut Vec<Rect<usize>>, rect: Rect<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_text_atlas_size_value, Size};
+    use super::{parse_text_atlas_size_value, plan_outline_msdf, plan_outline_sdf, Settings, Size};
+
+    /// A glyph asked for at a huge size (a label zoomed far in, 3D text seen up close) plans and
+    /// renders at the size its atlas can hold, and draws scaled: the 16,000 px request that once
+    /// took a gigabyte per glyph now takes a bounded image. Ordinary sizes are untouched.
+    #[test]
+    fn a_huge_outline_glyph_rasterizes_at_the_atlas_bound() {
+        use crate::{font::{Font, FontId}, font_face::FontFace, sdfer::Sdfer, HostBuf};
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../widgets/resources/IBMPlexSans-Text.ttf");
+        let data = HostBuf::from_file_mmap_or_read(path).expect("the test font reads");
+        let font = Font::new(FontId::from(1), FontFace::from_data_and_index(data, 0).expect("the test font parses"), 0.0, 0.0);
+        let glyph = font.face().with_ttf_parser_face(|face| face.glyph_index('M')).expect("the font has M").0;
+        let settings = Settings { atlas_size: Size::new(2048, 2048), ..Settings::default() };
+        let room = 2048 / 2;
+        let huge = 16_000.0;
+
+        let sdf = plan_outline_sdf(&font, glyph, huge, &settings).expect("M has an outline");
+        assert!(sdf.key.size.width <= room && sdf.key.size.height <= room, "bounded plan: the padded SDF fits half the atlas side, {:?}", sdf.key.size);
+        assert!(sdf.dpxs_per_em < huge / 10.0, "capped size: the raster is far below the request, {}", sdf.dpxs_per_em);
+        let image = sdf.render(&mut Sdfer::new(settings.sdfer));
+        assert_eq!(image.size(), sdf.key.size, "bounded render: the image is the planned one, not the requested size");
+        assert!(image.size().width > room / 2, "still sharp: the capped glyph uses most of its room");
+
+        let msdf = plan_outline_msdf(&font, glyph, huge, &settings).expect("M takes a multi-channel field");
+        assert!(msdf.key.size.width <= room && msdf.key.size.height <= room, "bounded MSDF plan: {:?}", msdf.key.size);
+
+        let small = plan_outline_sdf(&font, glyph, 64.0, &settings).expect("M has an outline");
+        assert_eq!(small.dpxs_per_em, 64.0, "ordinary sizes rasterize as asked");
+    }
 
     #[test]
     fn parses_text_atlas_size_from_env_value() {

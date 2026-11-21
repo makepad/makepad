@@ -79,11 +79,16 @@ mod inner {
         queue: VecDeque<Job>,
         /// [`shutdown`] ran: the workers end once the queue is empty, new work runs on the caller.
         stopped: bool,
+        /// callers parked for a result ([`receive_helping`])
+        waiting: usize,
     }
 
     struct Queue {
         jobs: Mutex<Jobs>,
+        /// the workers park on it for the next job
         ready: Condvar,
+        /// a caller parks on it for its result or a job to help with ([`receive_helping`])
+        helpers: Condvar,
     }
 
     impl Queue {
@@ -95,11 +100,19 @@ mod inner {
             }
             jobs.queue.push_back(job);
             self.ready.notify_one();
+            // a parked caller helps where every worker is busy: a worker waiting on its own nested
+            // work waits on jobs only a caller may be free to run
+            if jobs.waiting > 0 {
+                self.helpers.notify_one();
+            }
             Ok(())
         }
 
-        fn try_pop(&self) -> Option<Job> {
-            self.jobs.lock().unwrap().queue.pop_front()
+        /// A job ended: the callers parked for a result look again.
+        fn finished(&self) {
+            if self.jobs.lock().unwrap().waiting > 0 {
+                self.helpers.notify_all();
+            }
         }
 
         /// The next job; `None` once the pool shut down and the queue is drained.
@@ -119,6 +132,7 @@ mod inner {
         fn stop(&self) {
             self.jobs.lock().unwrap().stopped = true;
             self.ready.notify_all();
+            self.helpers.notify_all();
         }
 
         fn stopped(&self) -> bool {
@@ -134,8 +148,9 @@ mod inner {
     impl Pool {
         fn new(size: usize) -> Pool {
             let queue = Arc::new(Queue {
-                jobs: Mutex::new(Jobs { queue: VecDeque::new(), stopped: false }),
+                jobs: Mutex::new(Jobs { queue: VecDeque::new(), stopped: false, waiting: 0 }),
                 ready: Condvar::new(),
+                helpers: Condvar::new(),
             });
             for index in 0..size {
                 let queue = queue.clone();
@@ -154,29 +169,35 @@ mod inner {
 
         fn submit(&self, f: impl FnOnce() + Send + 'static) {
             let cancel = inherited_cancel();
-            if let Err(job) = self.queue.push(Box::new(move || run_with_inherited_cancel(cancel, f))) {
+            let queue = self.queue.clone();
+            let job: Job = Box::new(move || {
+                // (on unwind too: a caller parked for its result looks again)
+                let _finished = Finished(&queue);
+                run_with_inherited_cancel(cancel, f)
+            });
+            if let Err(job) = self.queue.push(job) {
                 job();
             }
         }
+    }
 
-        fn help_one(&self) -> bool {
-            match self.queue.try_pop() {
-                Some(job) => {
-                    job();
-                    true
-                }
-                None => false,
-            }
+    struct Finished<'a>(&'a Queue);
+
+    impl Drop for Finished<'_> {
+        fn drop(&mut self) {
+            self.0.finished();
         }
     }
 
     static POOL: OnceLock<Pool> = OnceLock::new();
 
+    /// The pool: a long-lived pool's cores less two workers, the machine's unless its run was given
+    /// fewer ([`makepad_cpu_budget::pool_cores`]: `MAKEPAD_POOL_CORES`, else `MAKEPAD_CPU_CORES`), as
+    /// the platform's app pool sizes. It took the machine's alone: 14 workers in a test given 4
+    /// cores of a 16-core box, beside the app's pool and the JIT's workers each the box's size, and
+    /// the box stood at load 57 (11-18).
     fn get_pool() -> &'static Pool {
-        POOL.get_or_init(|| {
-            let cpus = thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
-            Pool::new(cpus.saturating_sub(2).max(1))
-        })
+        POOL.get_or_init(|| Pool::new((makepad_cpu_budget::pool_cores() as usize).saturating_sub(2).max(1)))
     }
 
     /// Ends the pool's workers once the queued work is done (the app is shutting down: under
@@ -201,18 +222,55 @@ mod inner {
         if inline() { f() } else { get_pool().submit(f); }
     }
 
+    /// Times a caller looked for its result ([`receive_helping`]), for the test that it parks.
+    #[cfg(test)]
+    pub(super) static LOOKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A caller's wait on a job a worker already runs, `ms` long: nothing queued to help with.
+    #[cfg(test)]
+    pub(super) fn wait_on_a_running_job(ms: u64) -> usize {
+        let (started_tx, started) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        get_pool().submit(move || {
+            let _ = started_tx.send(());
+            thread::sleep(std::time::Duration::from_millis(ms));
+            let _ = tx.send(1);
+        });
+        started.recv().unwrap();
+        receive_helping(rx)
+    }
+
+    /// A caller's wait for its result. It runs the queued jobs meanwhile (a worker waiting on its
+    /// own nested work could wait on jobs no free worker is left to run) and parks while there are
+    /// none, until a job ends or another is queued. It spun on `yield_now` before: every waiting
+    /// caller stayed runnable and took a core from the work it waited on, on every machine (a live
+    /// Fab test had all 14 of its CSG workers on CPU, 11-18).
     fn receive_helping<R>(rx: mpsc::Receiver<R>) -> R {
-        let pool = get_pool();
+        let queue = &get_pool().queue;
+        let take = |rx: &mpsc::Receiver<R>| match rx.try_recv() {
+            Ok(value) => Some(value),
+            Err(mpsc::TryRecvError::Disconnected) => panic!("CSG pool task failed"),
+            Err(mpsc::TryRecvError::Empty) => None,
+        };
         loop {
-            match rx.try_recv() {
-                Ok(value) => return value,
-                Err(mpsc::TryRecvError::Disconnected) => panic!("CSG pool task failed"),
-                Err(mpsc::TryRecvError::Empty) => {
-                    if !pool.help_one() {
-                        thread::yield_now();
-                    }
-                }
+            #[cfg(test)]
+            LOOKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(value) = take(&rx) {
+                return value;
             }
+            let mut jobs = queue.jobs.lock().unwrap();
+            if let Some(job) = jobs.queue.pop_front() {
+                drop(jobs);
+                job();
+                continue;
+            }
+            // (looked at again under the lock: a job that ends after this says so to a parked caller)
+            if let Some(value) = take(&rx) {
+                return value;
+            }
+            jobs.waiting += 1;
+            let mut jobs = queue.helpers.wait(jobs).unwrap();
+            jobs.waiting -= 1;
         }
     }
 
@@ -371,6 +429,20 @@ mod tests {
             results, (0..task_count).collect::<Vec<_>>(),
             "after panics every worker is still there",
         );
+    }
+
+    /// A caller waiting on its result parks while no job is queued: it spun on `yield_now` before,
+    /// runnable the whole wait, which took a core from the work it waited on (11-18).
+    #[cfg(feature = "threads")]
+    #[test]
+    fn a_waiting_caller_parks_until_its_result() {
+        let looks = || super::inner::LOOKS.load(Ordering::Relaxed);
+        let before = looks();
+        assert_eq!(super::inner::wait_on_a_running_job(50), 1);
+        let looked = looks() - before;
+        // (other tests' callers share the count: a few looks each; a spinning one looked
+        // hundreds of thousands of times in 50 ms)
+        assert!(looked < 1_000, "the caller looked {looked} times in a 50 ms wait");
     }
 
     #[test]
