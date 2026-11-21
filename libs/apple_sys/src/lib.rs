@@ -87,6 +87,23 @@ extern "C" {
 }
 
 #[cfg(target_os = "ios")]
+#[link(name = "ARKit", kind = "framework")]
+extern "C" {}
+
+// ARKit returns homogeneous aggregates of SIMD columns in vector registers on arm64.
+#[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+#[repr(C)]
+pub struct simd_float4x4 {
+    pub columns: [core::arch::aarch64::float32x4_t; 4],
+}
+
+#[cfg(all(target_os = "ios", target_arch = "aarch64"))]
+#[repr(C)]
+pub struct simd_float3x3 {
+    pub columns: [core::arch::aarch64::float32x4_t; 3],
+}
+
+#[cfg(target_os = "ios")]
 #[link(name = "UIKit", kind = "framework")]
 extern "C" {
     pub static UIKeyboardFrameBeginUserInfoKey: ObjcId;
@@ -663,6 +680,8 @@ extern "C" {
     ) -> *mut c_void;
     pub fn CVPixelBufferRelease(pixelBuffer: CVPixelBufferRef);
     pub fn CVPixelBufferRetain(pixelBuffer: CVPixelBufferRef) -> CVPixelBufferRef;
+    #[cfg(target_os = "ios")]
+    pub fn CVPixelBufferGetIOSurface(pixelBuffer: CVPixelBufferRef) -> IOSurfaceRef;
     pub fn CVPixelBufferCreateWithPlanarBytes(
         allocator: *const c_void,
         width: usize,
