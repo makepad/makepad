@@ -6,12 +6,12 @@ use makepad_studio_protocol::AppToStudio;
 use std::{collections::BTreeMap, sync::{mpsc::Sender, Mutex, OnceLock}};
 
 #[derive(Clone)]
-struct Child { name: String, ui: RemoteUi, sender: Sender<Vec<u8>> }
+struct Child { name: String, ui: RemoteUi, sender: Sender<makepad_app_host::hub::WebSocketOut> }
 fn children() -> &'static Mutex<BTreeMap<ClientId, Child>> {
     static CHILDREN: OnceLock<Mutex<BTreeMap<ClientId, Child>>> = OnceLock::new();
     CHILDREN.get_or_init(Default::default)
 }
-pub fn connected(id: ClientId, name: &str, sender: Sender<Vec<u8>>) {
+pub fn connected(id: ClientId, name: &str, sender: Sender<makepad_app_host::hub::WebSocketOut>) {
     disconnected(id);
     children().lock().unwrap().insert(id, Child { name: name.into(), ui: RemoteUi::default(), sender });
 }

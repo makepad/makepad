@@ -4,7 +4,9 @@
 //! closes admission (the fleet routes jobs to other nodes), cancels running jobs as
 //! `local-use: gaming` so their clients reroute, and unloads its models.
 //!
-//! A game is a game app in focus (the Sandbox), a fullscreen space, or gamepad input. Play
+//! A game is a game app in focus (the Sandbox), a fullscreen game app or foreign (Wayland)
+//! window, or gamepad input. A makepad app that is not a game may be fullscreen without
+//! it: a party's big screen, a slideshow, a presenter's output, which may need the hub. Play
 //! ends once none has been seen for [`REOPEN_IDLE_S`]: a pause between rounds does not
 //! reload a 27B model.
 //! Plain state over tick times, so it is tested without a hub, a GPU or a pad.
@@ -17,6 +19,16 @@ const GAME_APPS: &[&str] = &["sandbox"];
 
 pub fn is_game(app: &str) -> bool {
     GAME_APPS.contains(&app)
+}
+
+/// What on the screen is play, if anything: a fullscreen window (its app's registry id, and
+/// whether it is a foreign Wayland client) of a game app or a foreign client, or a game app
+/// in focus.
+pub fn play(fullscreen: &[(&str, bool)], focused: Option<&str>) -> Option<String> {
+    if let Some((app, _)) = fullscreen.iter().find(|(app, foreign)| *foreign || is_game(app)) {
+        return Some(format!("{} fullscreen", if app.is_empty() { "a foreign window" } else { app }));
+    }
+    focused.filter(|app| is_game(app)).map(|app| format!("{app} in focus"))
 }
 
 #[derive(Default)]
@@ -71,5 +83,12 @@ mod tests {
         assert!(l.tick(501.0, None, &pressed));
         assert!(!l.tick(501.0 + REOPEN_IDLE_S, None, &pressed), "a held, unchanged state is not new input");
         assert!(is_game("sandbox") && !is_game("terminal"));
+        // What counts as play: a fullscreen makepad app that is not a game (a party's big
+        // screen, which needs the hub) does not; a fullscreen game or foreign window does.
+        assert_eq!(play(&[("makepad-app-party", false)], Some("makepad-app-party")), None, "a fullscreen app that is not a game");
+        assert_eq!(play(&[("sandbox", false)], None).as_deref(), Some("sandbox fullscreen"), "a fullscreen game");
+        assert_eq!(play(&[("", true)], None).as_deref(), Some("a foreign window fullscreen"), "a fullscreen foreign window");
+        assert_eq!(play(&[], Some("sandbox")).as_deref(), Some("sandbox in focus"), "a game in focus");
+        assert_eq!(play(&[], Some("terminal")), None, "nothing of a game on screen");
     }
 }

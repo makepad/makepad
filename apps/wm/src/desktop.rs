@@ -211,6 +211,14 @@ script_mod! {
             let distance=min(tl,br)
             let edge=if distance<1.0 {outer}else{inner}
             let color=mix(base,edge,(1.0-step(2.0,distance))*self.bevel)
+            // A square frame lies on whole points: each of its rings one colour, with no
+            // coverage ramp blending its outer and inner edges into the desk.
+            if self.frame_width > 0.0 && self.radius == 0.0 {
+                if distance >= self.frame_width {
+                    return vec4(0.0)
+                }
+                return vec4(color*self.color.w,self.color.w)
+            }
             // Window titles are rectangular content inside the complete
             // window's compositor mask. A second SDF coverage ramp here
             // exposes the wallpaper along the join with the app surface.

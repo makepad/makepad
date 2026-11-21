@@ -119,7 +119,7 @@ pub use desktop::DesktopStyle;
 pub use run_view::MpRunViewAction;
 pub use makepad_app_module;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use binds::{match_bind_armed, WmAction};
 use desk::{WmDesk, WmDeskAction, WmState};
@@ -578,6 +578,10 @@ impl App {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    /// The apps this session said it runs under the JIT for want of a compiled build
+    /// (`say_jit_fallbacks`): each is said once.
+    #[rust]
+    jit_noted: HashSet<String>,
     #[rust]
     state: Option<WmState>,
     #[rust]
@@ -2525,6 +2529,25 @@ impl App {
         self.pending_focus = if focused { None } else { Some(client) };
         self.update_bar(cx);
         self.redraw_all(cx);
+    }
+
+    /// An installed WM's app that started under the JIT because no compiled build of it is beside
+    /// the WM (`ClientSlot::jit_note`): logged at each start, and a notification the first time in
+    /// this session, so a gap in the compiled apps shows instead of running the JIT silently.
+    fn say_jit_fallbacks(&mut self, cx: &mut Cx) {
+        let notes: Vec<(String, String)> = self
+            .state_mut()
+            .clients
+            .values_mut()
+            .filter(|slot| !slot.warm && slot.jit_note.is_some())
+            .filter_map(|slot| Some((slot.app.clone(), slot.jit_note.take()?)))
+            .collect();
+        for (app, note) in notes {
+            log!("wm: {note}");
+            if self.jit_noted.insert(app) {
+                self.notify(cx, "Running under the JIT", &note);
+            }
+        }
     }
 
     /// A freshly linked binary stalls on its first exec while macOS scans
@@ -4609,12 +4632,18 @@ impl App {
             self.trays_changed(cx);
         }
         self.gpu_yield_report(cx);
+        let desk = self.desk(cx);
         let play = self.state.as_ref().and_then(|s| {
-            if s.screens.any_fullscreen() {
-                return Some("a fullscreen space".to_string());
-            }
-            let slot = s.clients.get(&s.screens.focused_client()?)?;
-            local_use::is_game(&slot.app).then(|| format!("{} in focus", slot.app))
+            let fullscreen: Vec<(&str, bool)> = s
+                .screens
+                .fullscreen_clients()
+                .map(|c| {
+                    let foreign = desk.borrow::<WmDesk>().is_some_and(|d| d.is_wayland(c));
+                    (s.clients.get(&c).map_or("", |slot| slot.app.as_str()), foreign)
+                })
+                .collect();
+            let focused = s.screens.focused_client().and_then(|c| s.clients.get(&c)).map(|slot| slot.app.as_str());
+            local_use::play(&fullscreen, focused)
         });
         let gaming = self.local_use.tick(host::now(), play, cx.game_input_states());
         self.hub_link.set_gaming(processes, gaming);
@@ -6933,7 +6962,7 @@ impl MatchEvent for App {
                     if let Some(state) = self.state.as_ref() {
                         if let Some(slot) = state.clients.get(&client) {
                             if let Some(sender) = &slot.sender {
-                                let _ = sender.send(msg_bin);
+                                let _ = sender.send(makepad_app_host::hub::WebSocketOut::Binary(msg_bin));
                             }
                         }
                     }
@@ -7560,6 +7589,7 @@ impl AppMain for App {
                 self.poll_backgrounds(cx);
                 self.drain_client_lines(cx);
                 self.explain_first_exec_scan(cx);
+                self.say_jit_fallbacks(cx);
                 self.update_status(cx);
                 self.wifi_tick(cx);
                 // A hotplug published since, or a lost screen's removal

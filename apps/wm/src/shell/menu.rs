@@ -721,15 +721,19 @@ impl MenuModel {
                 rows.push(self.row_for(item, String::new(), item.divider));
             }
         } else {
-            // Live search over the open submenu's SUBTREE, scored.
-            let prefix = if path.is_empty() {
+            // Live search over the open submenu's SUBTREE, scored. A style's own top menu
+            // (NeXTSTEP's Workspace, Windows 2000's Start) stands in for the root: its
+            // submenus are the tree's own (its Applications is Apps), so typing there
+            // searches the whole tree, as typing at the root does.
+            let scope = if matches!(path.as_str(), "workspace" | "start") { "" } else { path.as_str() };
+            let prefix = if scope.is_empty() {
                 String::new()
             } else {
-                format!("{}.", path)
+                format!("{}.", scope)
             };
             let mut scored: Vec<(i64, String, usize)> = Vec::new();
             for (order, item) in items.iter().enumerate() {
-                if item.id.is_empty() || item.disabled {
+                if item.id.is_empty() || item.id == path || item.disabled {
                     continue;
                 }
                 if !prefix.is_empty() && !item.id.starts_with(&prefix) {

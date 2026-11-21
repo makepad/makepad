@@ -35,7 +35,10 @@ ci.step("desktop is up", fn(){
     ci.sleep(3.0)
     wm.no_errors()
     let start = wm.grab("start")
-    ci.accept(start, FRAME + "The application is a desktop window manager: it draws a whole desktop inside its own window. 1. Is the whole picture one flat colour from edge to edge? expected NO 2. Is there a bar or panel along the top edge or the bottom edge, running most of the width, with small icons or text in it? expected YES 3. Does a wallpaper or a flat desktop colour fill most of the remaining area? expected YES")
+    // A test home has no saved wallpaper: the desk shows its first drawn
+    // background (the warp grid), which a judge asked only about "a
+    // wallpaper or a flat colour" called neither.
+    ci.accept(start, FRAME + "The application is a desktop window manager: it draws a whole desktop inside its own window. 1. Is the whole picture one flat colour from edge to edge? expected NO 2. Is there a bar or panel along the top edge or the bottom edge, running most of the width, with small icons or text in it? expected YES 3. Does a desktop background fill most of the remaining area: a wallpaper picture, a drawn pattern such as a grid of lines, stars or terrain, or a flat colour? expected YES")
     ci.accept(start, FRAME + "Some failures paint text over the whole window: a red or black panel with words such as panic, error, thread, unwrap, failed or backtrace, or a long block of monospace text filling the screen. 1. Does such an error panel or block of text cover the window? expected NO 2. Do any of the words panic, error, thread, unwrap, failed or backtrace appear in the picture? expected NO")
 })
 
@@ -96,6 +99,10 @@ ci.step("a hosted window presents and grabs through maximise, restore and resize
     let calc = wm.hosted("makepad-app-calculator")
     let width = fn(){ calc.size()[0] }
     let grabs = fn(step){ calc.grab("calculator-" + step) }
+    // from a size well under any desk: the calculator opens about as wide as a small desk (1380
+    // of a laptop screen's 1400), where maximise has nothing left to add
+    calc.cmd("resize w=520 h=640")
+    ci.sleep(1.5)
     let normal = width()
     grabs("normal")
     calc.cmd("window k=maximize wait=1")
@@ -112,7 +119,7 @@ ci.step("a hosted window presents and grabs through maximise, restore and resize
     ci.sleep(1.5)
     ci.check(width() < big - 50.0, "restore did not shrink the window")
     grabs("restored")
-    calc.cmd("resize w=520 h=640")
+    calc.cmd("resize w=720 h=600")
     ci.sleep(1.5)
     let resized = width()
     ci.check(resized < normal - 20.0 || resized > normal + 20.0, "resize changed nothing: " + normal + " -> " + resized)

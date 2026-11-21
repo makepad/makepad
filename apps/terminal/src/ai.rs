@@ -207,6 +207,7 @@ mod tests {
             tool: "run".into(),
             args: format!(r#"{{"command":"{command}"}}"#),
             caller: None,
+            origin: makepad_ai_services::CallOrigin::Conversation,
         }
     }
 

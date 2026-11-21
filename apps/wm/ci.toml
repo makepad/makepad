@@ -2,10 +2,17 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-17"
-digest = "82d14de8cfa83a33dd1cef4cfc39316749fde9c7605f90667561ad35fa97aa28"
-main = "ad661172208bcaaeaaccf3fe832433c372b2eb40"
-work = "4c4c6f5970806623480262f5a00a34cabb91a2fc"
+date = "2026-11-20"
+digest = "09a2492861d093a0d9a9fd1201924b139c5fd8632ae18bc3c5d838dcaf1c0109"
+main = "04df76375c13cb26181ca1f25d61b73a3344a1fb"
+work = "8f0c688cbdccf91e5fae8ed43c5c22b9ac4345ca"
+
+[app.macos]
+capture = ""
+date = "2026-11-21"
+digest = "41e34097c8f05dc4504f6aac5b5666f0582b8378953d00942ccf964192b72401"
+main = "8f01edd24dac7585cd79d03e399af3213b3a8a36"
+work = "591848a44be03cc1b887e3538a148c0e4f3d9e16"
 
 [ci]
 box = "whole"

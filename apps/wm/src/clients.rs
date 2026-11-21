@@ -631,7 +631,7 @@ pub struct ClientSlot {
     pub ground: Option<makepad_widgets::Vec4f>,
     pub child: Option<Child>,
     task_pool: Option<TaskPool>,
-    pub sender: Option<Sender<Vec<u8>>>,
+    pub sender: Option<Sender<makepad_app_host::hub::WebSocketOut>>,
     pub socket: Option<u64>,
     /// The child's main window id in the studio protocol (0 until
     /// CreateWindow says otherwise).
@@ -695,6 +695,9 @@ pub struct ClientSlot {
     /// title says `TEST: lane <name>`, and it is never the dock's instance of its app (a dock
     /// launch neither focuses it nor counts it as running).
     pub test_lane: Option<String>,
+    /// Started under the JIT although this WM is an installed one, whose apps run their compiled
+    /// builds: none of this app is beside it. The WM says so once (`say_jit_fallbacks`).
+    pub jit_note: Option<String>,
 }
 
 impl ClientSlot {
@@ -732,6 +735,7 @@ impl ClientSlot {
             parent: None,
             service: false,
             test_lane: None,
+            jit_note: None,
         }
     }
 
@@ -958,6 +962,7 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         parent: None,
         service: false,
         test_lane: None,
+        jit_note: None,
     }
 }
 
@@ -985,6 +990,14 @@ pub fn spawn_client(
     lines: Sender<ClientLine>,
 ) -> Result<ClientSlot, String> {
     let entry = makepad_app_registry::find(&app.id).ok_or_else(|| format!("unknown app: {}", app.id))?;
+    // without a checkout or the JIT's tool, an installed build runs as itself
+    let runner = runner.available(entry, repo_root().as_deref());
+    // An installed WM runs its apps' compiled builds (bundles beside its own); an app with none
+    // there still starts, under the JIT from the checkout, and the WM says so rather than
+    // silently (a warm instance once it is adopted).
+    let jit_note = (runner == Runner::Jit).then(makepad_app_registry::installed_folder).flatten().map(|folder| {
+        format!("{} has no compiled build in {}: it runs under the JIT from the checkout", app.label, folder.display())
+    });
     let mut extra: Vec<String> = app.args.iter().chain(extra_args).cloned().collect();
     // Under the JIT the app's own arguments follow `run <package> --`: the terminal's start
     // folder is one of them (a native launch appends it to the command itself).
@@ -999,6 +1012,7 @@ pub fn spawn_client(
     slot.status = launch.status().to_string();
     slot.launch = Some(launch);
     slot.launch_cwd = cwd.cloned();
+    slot.jit_note = jit_note;
     Ok(slot)
 }
 

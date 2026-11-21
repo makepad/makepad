@@ -41,7 +41,7 @@
 //! A WM that is not its node's ([`guest_wm`]: hidden, under a lease, or second on the session)
 //! starts no hub and leaves the node's alone, unless `MAKEPAD_WM_AI_HUB_CONF` names its settings:
 //! test desktops must not take the GPU or the port of the real one. The hub's output goes to
-//! `~/.makepad/wm/ai-hub.log`.
+//! `~/.makepad/wm/ai-hub.log`, the run before it to `ai-hub.log.old`.
 
 use makepad_ai_hub_panel::hub_control::IdleStop;
 use std::path::{Path, PathBuf};
@@ -174,6 +174,9 @@ pub fn test_wm() -> bool {
 /// the default path, so it got another). It keeps none of the node's services and leaves them
 /// alone: two that keep them stop each other's hubs as rivals, under the node's leases (11-05).
 /// The update's WM comes after the old one is gone, so it holds the default path and adopts them.
+/// On a Mac the WM is an app among the others: the node's devhub is launchd's service there and
+/// the AI Hub an app of its own, so the WM keeps neither (a Dock-started WM that knows its
+/// checkout would start a second devhub beside the service).
 pub fn guest_wm() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -181,7 +184,11 @@ pub fn guest_wm() -> bool {
         let exported = std::env::var_os(wm_socket::SOCKET_ENV).filter(|p| !p.is_empty()).map(PathBuf::from);
         test_wm() || second_on_session(exported.as_deref(), wm_socket::runtime_dir().as_deref())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         test_wm()
     }
@@ -560,7 +567,8 @@ pub struct Supervised<C: ServiceConf> {
     idle_outcome: Option<IdleStop>,
     /// The deploy's build command (tests give a short child).
     build_command: fn(&Supervised<C>) -> Result<Command, String>,
-    /// Its output's log (`~/.makepad/wm/ai-hub.log`): the reason of an exit is in its tail.
+    /// Its output's log (`~/.makepad/wm/ai-hub.log`): the reason of an exit is in its tail. The
+    /// run before it is in `ai-hub.log.old`.
     log: PathBuf,
     /// `~/.makepad/wm/ai-hub.state`.
     state: PathBuf,
@@ -862,7 +870,12 @@ impl<C: ServiceConf> Supervised<C> {
         if let Some(dir) = self.log.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        // Its output goes to the log file, not a pipe: it outlives this WM.
+        // Its output goes to the log file, not a pipe: it outlives this WM. The last run's log is
+        // kept beside it (`<file>.log.old`, as devhub keeps its own): a run that ended without a
+        // word, killed by the kernel for memory say, leaves its last lines there.
+        let mut old = self.log.clone().into_os_string();
+        old.push(".old");
+        let _ = std::fs::rename(&self.log, &old);
         let out = std::fs::File::create(&self.log).ok();
         let err = out.as_ref().and_then(|f| f.try_clone().ok());
         cmd.stdin(Stdio::null())
@@ -1011,6 +1024,10 @@ impl<C: ServiceConf> Supervised<C> {
 
     /// Why it ended: its exit status, with the app's last error or panic line when it said one.
     fn exit_reason(&self, status: &str) -> String {
+        // A kill gives the app no say, so an error line in its tail is not why it ended.
+        if status.contains("SIGKILL") {
+            return format!("{status}: killed from outside (the kernel's out-of-memory killer, or a kill -9)");
+        }
         let tail = self.tail();
         let said = tail.iter().rev().find(|l| l.contains("panicked") || l.contains("error") || l.contains("Error"));
         match said {

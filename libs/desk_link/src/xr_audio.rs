@@ -349,7 +349,9 @@ const MAX_FRAMES: u32 = 24;
 /// the audio callback ([`XrAudioPlayer`]) and the stats.
 pub struct XrAudioRx {
     ring: JitterRing,
-    /// Bumped when a new session starts: the player starts over.
+    /// A retiring receiver must finish its last insert before the link worker resets the ring.
+    ring_writer: Mutex<()>,
+    /// The player starts over when a session starts or ends.
     generation: AtomicU32,
     /// The desktop's clock less this one's (ns), from the ping with the shortest round trip
     /// of the last few; `offset_ok` once there is one.
@@ -383,6 +385,7 @@ impl XrAudioRx {
     pub fn new() -> Arc<XrAudioRx> {
         Arc::new(XrAudioRx {
             ring: JitterRing::new(),
+            ring_writer: Mutex::new(()),
             generation: AtomicU32::new(0),
             offset_ns: AtomicI64::new(0),
             offset_ok: AtomicBool::new(false),
@@ -406,14 +409,13 @@ impl XrAudioRx {
     }
 
     /// A session began: datagrams arrive on `socket` (the pose socket, connected to the
-    /// server), sealed with `key`. Ends with the next `start` or [`XrAudioRx::stop`].
+    /// server), sealed with `key`. Ends with the next `start`, [`Self::end_session`] or [`Self::stop`].
     pub fn start(self: &Arc<Self>, socket: &UdpSocket, key: Vec<u8>) -> Result<(), String> {
         let socket = socket.try_clone().map_err(|e| format!("audio socket: {e}"))?;
         socket.set_read_timeout(Some(Duration::from_millis(100))).map_err(|e| e.to_string())?;
-        self.ring.reset();
         self.offset_ok.store(false, Ordering::Release);
         self.pings.lock().unwrap().clear();
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = self.reset_ring();
         let rx = self.clone();
         std::thread::Builder::new()
             .name("xr-audio-rx".into())
@@ -431,6 +433,10 @@ impl XrAudioRx {
                     }
                     for (i, s) in samples[..count].iter_mut().enumerate() {
                         *s = i16::from_le_bytes([a.pcm[2 * i], a.pcm[2 * i + 1]]);
+                    }
+                    let _writer = rx.ring_writer.lock().unwrap();
+                    if rx.generation.load(Ordering::Acquire) != generation {
+                        break;
                     }
                     rx.ring.insert(a.seq, &samples[..count], false);
                     rx.received.fetch_add(1, Ordering::Relaxed);
@@ -454,6 +460,17 @@ impl XrAudioRx {
             })
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    fn reset_ring(&self) -> u32 {
+        let _writer = self.ring_writer.lock().unwrap();
+        self.ring.reset();
+        self.generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    /// Ends the current receive thread and clears its audio so a later session can start.
+    pub fn end_session(&self) {
+        self.reset_ring();
     }
 
     pub fn stop(&self) {

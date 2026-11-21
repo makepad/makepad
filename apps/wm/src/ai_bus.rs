@@ -56,6 +56,8 @@ pub enum Route {
 #[derive(Default)]
 pub struct AiBus {
     pub pane_client: Option<ClientId>,
+    /// Clients whose first rejected AI frame has already been logged.
+    logged_rejections: HashSet<ClientId>,
     /// The last manifest each client registered, for replay.
     manifests: HashMap<ClientId, ServiceManifest>,
     /// Clients that are module instances in this process (`m<id>`
@@ -359,7 +361,11 @@ impl AiBus {
     /// not ours and yields `Drop`.
     pub fn on_custom(&mut self, client: ClientId, json: &str) -> Route {
         if self.is_pane(client) {
-            let Some(down) = HostedDown::parse(json) else { return Route::Drop };
+            let down = match HostedDown::parse_checked(json) {
+                Some(Ok(down)) => down,
+                Some(Err(rejected)) => return self.rejected_route(client, rejected),
+                None => return Route::Drop,
+            };
             let Some(to) = down.to.clone() else { return Route::Drop };
             if to.as_str() == OS_ENDPOINT {
                 return match down.msg {
@@ -375,7 +381,11 @@ impl AiBus {
                 _ => Route::Drop,
             };
         }
-        let Some(mut up) = HostedUp::parse(json) else { return Route::Drop };
+        let mut up = match HostedUp::parse_checked(json) {
+            Some(Ok(up)) => up,
+            Some(Err(rejected)) => return self.rejected_route(client, rejected),
+            None => return Route::Drop,
+        };
         // The sender's claim is never used: the link IS the identity.
         up.from = Some(Self::endpoint_of(client));
         if self.to_registry(client, &up) {
@@ -393,8 +403,24 @@ impl AiBus {
         Route::ToPane(up.to_json())
     }
 
+    fn rejected_route(&mut self, client: ClientId, rejected: RejectedFrame) -> Route {
+        if self.logged_rejections.insert(client) {
+            makepad_widgets::error!("wm rejected an AI service frame from client {client}: {}", rejected.error);
+        }
+        let (true, Some(call_id)) = (rejected.mismatch, rejected.call_id) else { return Route::Drop };
+        let from = if self.is_pane(client) {
+            let Some(to) = rejected.endpoint else { return Route::Drop };
+            EndpointId(to)
+        } else {
+            Self::endpoint_of(client)
+        };
+        let result = ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH);
+        Route::ToPane(HostedUp { from: Some(from), msg: ServiceUp::Result(result) }.to_json())
+    }
+
     /// A client died: the pane hears an `Unregister` on its behalf.
     pub fn client_died(&mut self, client: ClientId) -> Option<String> {
+        self.logged_rejections.remove(&client);
         if self.is_pane(client) {
             self.pane_client = None;
             return None;
@@ -450,7 +476,7 @@ mod tests {
     }
 
     fn call(tool: &str, args: &str) -> ServiceCall {
-        ServiceCall { call_id: "c".into(), tool: tool.into(), args: args.into(), caller: None }
+        ServiceCall { call_id: "c".into(), tool: tool.into(), args: args.into(), caller: None, origin: CallOrigin::Conversation }
     }
 
     #[test]
@@ -473,6 +499,18 @@ mod tests {
         // The pane addresses the client; the WM routes by endpoint.
         let down = HostedDown { to: Some(EndpointId("w4".into())), msg: ServiceDown::Call(call("stat", "{}")) };
         assert!(matches!(bus.on_custom(9, &down.to_json()), Route::ToClient(4, _)));
+        for call_id in ["p1", "p2"] {
+            let request = ServiceCall { call_id: call_id.into(), ..call("stat", "{}") };
+            let missing_origin = HostedDown { to: down.to.clone(), msg: ServiceDown::Call(request) }
+                .to_json().replace(r#","origin":{"Conversation":[]}"#, "");
+            let Route::ToPane(answer) = bus.on_custom(9, &missing_origin) else {
+                panic!("expected a mismatch answer for {call_id}");
+            };
+            assert_eq!(HostedUp::parse(&answer), Some(HostedUp {
+                from: down.to.clone(),
+                msg: ServiceUp::Result(ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH)),
+            }));
+        }
         // An os call is the WM's own.
         let os = HostedDown { to: Some(EndpointId("os".into())), msg: ServiceDown::Call(call("launch", r#"{"app":"Route"}"#)) };
         match bus.on_custom(9, &os.to_json()) {
@@ -508,7 +546,7 @@ mod tests {
         let w4 = EndpointId("w4".into());
         assert_eq!(registry.manifest(&w4).map(|m| m.id), Some("files".into()));
         // A registry call goes down to the client, addressed to w4…
-        let rx = registry.call_remote(&w4, call("stat", "{}")).unwrap();
+        let rx = registry.call_remote(&w4, ServiceCall { origin: CallOrigin::Remote, ..call("stat", "{}") }).unwrap();
         let down = bus.drain_registry();
         assert!(matches!(down.as_slice(), [(4, json)] if HostedDown::parse(json).unwrap().to == Some(w4.clone())));
         // …and its answer goes back to the registry, not to the pane.
@@ -662,7 +700,7 @@ mod local_tests {
         assert!(replay[1].contains("\"m4\""));
         // A call addressed to it is the host's to run; the wrong kind of
         // address for the same id drops.
-        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None };
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation };
         let down = HostedDown { to: Some(EndpointId("m4".into())), msg: ServiceDown::Call(call.clone()) };
         match bus.on_custom(9, &down.to_json()) {
             Route::Local(4, ServiceDown::Call(c)) => assert_eq!(c.call_id, "c1"),

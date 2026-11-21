@@ -1,9 +1,8 @@
 //! Desk Link XR: remote rendering for a headset. A desktop app renders its XR view with the
 //! headset's predicted eyes and streams the stereo picture back; the headset shows it with the
-//! eyes it was rendered with (its compositor reprojects to the current pose). Same framing, TLS
-//! and fleet identity as the desktop protocol (`type u8 | length u32 | payload`), its own
-//! messages and port: an XR session is not a desktop session (no screens, no desktop input; the
-//! headset's controllers and hands reach the XR app only as pose data).
+//! eyes it was rendered with (its compositor reprojects to the current pose). XR uses the same message
+//! framing as Desk Link (`type u8 | length u32 | payload`) over TLS on its own port. The viewer proves
+//! its device key in the hello. Controllers and hands reach the XR app as pose data.
 //!
 //! The app's game audio goes down as datagrams of its own ([`audio_datagram`]) from the
 //! session's pose socket to the address the poses come from: raw 16-bit stereo PCM at 48 kHz,
@@ -14,7 +13,7 @@
 //! display frame (the `XrFrame` the app draws with: head, both eyes, controllers, hands; a
 //! sequence number and the headset's sample and display times), `State` (visible / focused),
 //! `Stats` (decode and motion-to-photon per shown picture), `Ping`, `Keyframe`, `Recenter`.
-//! Desktop → headset: `Welcome` (the picture size, codec and tiles), then per rendered frame one
+//! Desktop → headset: `Welcome` (the picture size, codec and tiles, the server's caps), then per rendered frame one
 //! `Video` per tile (the pose's sequence number, the eyes the picture was rendered with, the
 //! server-side stage durations, one Annex-B access unit), `Pong`, `Bye`, `Note`.
 //!
@@ -27,11 +26,17 @@
 //! warp for the colour and the band; the headset samples it back at the eye's own pixels.
 //! With two tiles each eye's column is a stream of its own (one encoder each, the GPU's two
 //! encode engines); with one tile both columns side by side are one stream.
+//! A client with [`codecs::MONO`] gets one column: its view's.
 
 use crate::{In, Out};
 use std::io;
 
-pub const XR_VERSION: u16 = 8;
+/// The protocol's version, checked for equality in `Hello`. From 9 on, additions are additive:
+/// a new capability or message gets a bit in [`codecs`] (the client's, in `Hello`) or in
+/// [`server_caps`] (the server's, in `Welcome`); a side sends a new message only when the
+/// other's bits name it, and skips a message type it does not know ([`is_unknown_message`]).
+/// The version changes only when the framing or an existing message's layout changes.
+pub const XR_VERSION: u16 = 9;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
 /// finest near the eye); 0 = no depth (nothing drawn there). 10 cm: things held up to the face
 /// keep their depth (at 25 cm everything nearer read as 25 cm, and the room's occlusion hid
@@ -194,6 +199,37 @@ pub mod codecs {
     /// Not a codec: the headset sends its microphone when asked (`XrServerMsg::Mic`; a
     /// headset without it is never asked).
     pub const MIC: u32 = 1 << 18;
+    /// Not a codec: the display has ONE view, not two eyes. Its poses carry that view as both
+    /// eyes; the server renders, packs and sends one column in one tile, each `Video`'s eyes
+    /// both that view. A server that does not leaves [`super::server_caps::MONO`] out of its
+    /// `Welcome`, and the client ends the link ("server too old").
+    pub const MONO: u32 = 1 << 19;
+    /// Not a codec: the display is a held window (a phone or tablet: no lens, touch input, no
+    /// hands or controllers, the camera's frame rate), not a worn headset. The server sends it
+    /// no foveation ([`super::Fovea::OFF`]) and no `Refresh` asks, and tells the app the
+    /// display's kind. Only honoured by a server with [`super::server_caps::HANDHELD`].
+    pub const HANDHELD: u32 = 1 << 20;
+    /// The viewer can keep its link open on standby and start a stream on a later welcome.
+    pub const STANDBY: u32 = 1 << 21;
+    /// Not a codec: a handheld that shows its picture through the eyes the `Video` head
+    /// carries, wherever they lie in its own view. The server may then narrow each pose's view
+    /// to the app's content (an off-axis part of the device's view, the same encode size) and
+    /// the device maps the picture back into its view; outside it, nothing. A client without
+    /// it gets its own view, as before.
+    pub const REFRAME: u32 = 1 << 22;
+}
+
+/// `Welcome::caps` bits: what the server honours beyond version 9's base. A client sends a
+/// message added after version 9 only when its bit is here; a server sets a bit only when it
+/// honours it.
+pub mod server_caps {
+    /// One view for a [`super::codecs::MONO`] client (one column, one tile).
+    pub const MONO: u32 = 1 << 0;
+    /// [`super::codecs::HANDHELD`] honoured (no foveation, no `Refresh` asks, the display's
+    /// kind told to the app).
+    pub const HANDHELD: u32 = 1 << 1;
+    /// The server keeps links to viewers that advertise [`super::codecs::STANDBY`].
+    pub const STANDBY: u32 = 1 << 2;
 }
 
 /// `XrClientMsg::Mic::state`: what the headset's microphone is doing.
@@ -216,8 +252,7 @@ pub const CODEC_HEVC: u8 = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum XrClientMsg {
-    /// `instance`: the headset's instance id (`crate::xr_pair`): the server keeps it as paired
-    /// when the PIN typed on the desktop matched this headset.
+    /// The viewer's PIN tag binds its instance ID to its key and this connection's certificate.
     Hello { version: u16, name: String, authorization: String, instance: u64, eye: [u32; 2], refresh_mhz: u32, codecs: u32 },
     /// `frame`: one `XrFrame` (makepad_hal `buffers::Wire`) predicted for `display_ns`.
     Pose { seq: u64, sample_ns: u64, display_ns: u64, frame: Vec<u8> },
@@ -341,10 +376,12 @@ pub struct WorldBrick {
 #[derive(Clone, Debug, PartialEq)]
 pub enum XrServerMsg {
     /// `size`: the whole picture (both eye columns); `tiles`: 1 (one stream) or 2 (a stream per eye).
-    /// `instance`: the server's instance id (the headset keeps the pair by it); `session`: this
+    /// `instance`: the server's instance id (saved with its public point); `session`: this
     /// link's id. `eye`: the eye size the pictures are rendered at, `fovea`: how its columns are
-    /// foveated into `size`.
-    Welcome { version: u16, server: String, instance: u64, session: u64, size: [u32; 2], codec: u8, tiles: u8, encoder: String, eye: [u32; 2], fovea: Fovea },
+    /// foveated into `size`. `caps`: the [`server_caps`] bits. `pin_ok` confirms a PIN used for this hello.
+    /// `app`, `test`: the server's app and its test run's label (empty for none), as in its
+    /// pairing answer (a device linked by address has no answer to name the host by).
+    Welcome { version: u16, server: String, instance: u64, session: u64, size: [u32; 2], codec: u8, tiles: u8, encoder: String, eye: [u32; 2], fovea: Fovea, caps: u32, pin_ok: Vec<u8>, app: String, test: String },
     Refused { reason: String },
     /// Tile `tile` of the picture of pose `seq` (predicted for the headset's `display_ns`),
     /// rendered with `eyes`; `focus_m`: the depth (m) of what the view centres on, for
@@ -371,8 +408,7 @@ pub enum XrServerMsg {
     /// Mixed reality (the room through the picture's empty parts) or VR (the picture opaque,
     /// no passthrough): the server's app's choice. Sent after the welcome and on every change.
     SeeThrough { on: bool },
-    /// The desktop's PIN was changed or cleared: the pair is over (both forget it) and the
-    /// server ends the link.
+    /// The desktop forgot this viewer. The viewer forgets the server and the link ends.
     Unpaired,
     /// The server's settings for the headset's own per-frame mechanisms (the headset executes
     /// them; the policy is the server's): its fixed foveation (0 none .. 3 high), the range its
@@ -393,6 +429,12 @@ pub enum XrServerMsg {
     /// (`XrClientMsg::Mic`). Only to a headset whose `Hello::codecs` has [`codecs::MIC`]; off
     /// until asked, and off again when the link ends.
     Mic { on: bool },
+    /// Keeps the link open while this device receives no view (only to a client whose hello
+    /// has [`codecs::STANDBY`]). `showing` names the device getting the view, or is empty when
+    /// none does. `server`, `instance` and `pin_ok` are as in `Welcome`: a device paired by PIN
+    /// while another streams confirms its pairing with them. A later `Welcome` and `Uplink`
+    /// start a stream on this link; another `Standby` stops it.
+    Standby { server: String, instance: u64, showing: String, pin_ok: Vec<u8>, app: String, test: String },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -435,13 +477,30 @@ mod tag {
     pub const HAPTIC: u8 = 113;
     pub const CAPTURE_S: u8 = 114;
     pub const MIC_S: u8 = 115;
+    pub const STANDBY: u8 = 116;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("unknown XR {side} message {ty}"))
+    io::Error::new(io::ErrorKind::Unsupported, format!("unknown XR {side} message {ty}"))
+}
+
+/// Whether a decode error is a message type this side does not know (a newer peer's): the
+/// reader skips it and logs the type once.
+pub fn is_unknown_message(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Unsupported
 }
 
 impl XrClientMsg {
+    /// Reads only the messages a standby link uses. Skip stream data without unpacking it.
+    pub fn decode_standby(ty: u8, payload: &[u8]) -> io::Result<Option<Self>> {
+        use tag::*;
+        match ty {
+            PING | STATE => Self::decode(ty, payload).map(Some),
+            HELLO | POSE | STATS | KEYFRAME | WORLD | REPORT | CAPTURE_C | MIC_C | RECENTER => Ok(None),
+            _ => Err(bad(ty, "client")),
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
@@ -539,17 +598,23 @@ impl XrServerMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
-            XrServerMsg::Welcome { version, server, instance, session, size, codec, tiles, encoder, eye, fovea } => {
+            XrServerMsg::Welcome { version, server, instance, session, size, codec, tiles, encoder, eye, fovea, caps, pin_ok, app, test } => {
                 let mut o = Out::new(WELCOME);
                 o.u16(*version).str(server).u64(*instance).u64(*session).u32(size[0]).u32(size[1]).u8(*codec).u8(*tiles).str(encoder).u32(eye[0]).u32(eye[1]);
                 for v in fovea.center.iter().chain(fovea.ramp.iter()).chain(fovea.edge.iter()) {
                     o.f32(*v);
                 }
+                o.u32(*caps).bytes(pin_ok).str(app).str(test);
                 o.done()
             }
             XrServerMsg::Refused { reason } => {
                 let mut o = Out::new(REFUSED);
                 o.str(reason);
+                o.done()
+            }
+            XrServerMsg::Standby { server, instance, showing, pin_ok, app, test } => {
+                let mut o = Out::new(STANDBY);
+                o.str(server).u64(*instance).str(showing).bytes(pin_ok).str(app).str(test);
                 o.done()
             }
             XrServerMsg::Video { seq, tile, key, display_ns, eyes, focus_m, stages, size, codec, data } => {
@@ -634,8 +699,13 @@ impl XrServerMsg {
                 encoder: r.str()?,
                 eye: [r.u32()?, r.u32()?],
                 fovea: Fovea { center: [r.f32()?, r.f32()?], ramp: [r.f32()?, r.f32()?], edge: [r.f32()?, r.f32()?] },
+                caps: r.u32()?,
+                pin_ok: r.bytes()?.to_vec(),
+                app: r.str()?,
+                test: r.str()?,
             },
             REFUSED => XrServerMsg::Refused { reason: r.str()? },
+            STANDBY => XrServerMsg::Standby { server: r.str()?, instance: r.u64()?, showing: r.str()?, pin_ok: r.bytes()?.to_vec(), app: r.str()?, test: r.str()? },
             VIDEO => {
                 let (seq, tile, key, display_ns) = (r.u64()?, r.u8()?, r.bool()?, r.u64()?);
                 let mut eyes = [XrRenderEye::default(); 2];
@@ -836,6 +906,7 @@ pub mod link {
     //! The headset's end: a TLS connection to an XR server on its own thread (TLS contexts are not
     //! shared between threads); the caller sends and receives through channels and never waits.
     use super::*;
+    use crate::xr_pair::{ViewerHello, ViewerPairing};
     use crate::{write_all, Inbox};
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -863,7 +934,7 @@ pub mod link {
     #[derive(Clone, Debug)]
     pub struct HeadsetInfo {
         pub name: String,
-        /// The headset's instance id (`crate::xr_pair::HeadsetPairing`).
+        /// The device's instance ID from its pairing file.
         pub instance: u64,
         pub eye: [u32; 2],
         pub refresh_mhz: u32,
@@ -871,11 +942,20 @@ pub mod link {
     }
 
     impl XrLink {
-        /// Connects to `host:port` (the server proves itself with its fleet certificate; the
-        /// hello carries this device's fleet proof). Returns once the TLS handshake and the hello
-        /// are done; the `Welcome` (or `Refused`) arrives on [`XrLink::try_recv`].
-        pub fn connect(host: &str, port: u16, info: HeadsetInfo, wake: Arc<dyn Fn() + Send + Sync>) -> Result<XrLink, String> {
-            let (mut stream, _server, authorization) = makepad_network::fleet::id::connect(host, &port.to_string()).map_err(|e| format!("connect {host}:{port}: {e}"))?;
+        /// Connects with the viewer's own key. Returns once the TLS handshake and the hello are
+        /// done; the `Welcome` (or `Refused`) arrives on [`XrLink::try_recv`], and the caller
+        /// checks it before using the link.
+        pub fn connect_viewer(host: &str, port: u16, mut info: HeadsetInfo, viewer: &ViewerPairing, wake: Arc<dyn Fn() + Send + Sync>) -> Result<(XrLink, ViewerHello), String> {
+            use makepad_network::{fleet::id, tls, SocketStream};
+            let bare = host.trim_start_matches('[').trim_end_matches(']');
+            let (stream, der) = SocketStream::connect_capture(bare, &port.to_string()).map_err(|e| format!("connect {host}:{port}: {e}"))?;
+            let (point, _) = tls::x509::leaf_point_and_fleet_identity(&der).ok_or("the XR server has no P-256 certificate point")?;
+            let (authorization, hello) = viewer.hello(point, &tls::fingerprint(&der), id::now_secs()).map_err(|e| format!("sign viewer hello: {e}"))?;
+            info.instance = viewer.device.instance;
+            Ok((Self::send_hello(stream, info, authorization, wake)?, hello))
+        }
+
+        fn send_hello(mut stream: makepad_network::SocketStream, info: HeadsetInfo, authorization: String, wake: Arc<dyn Fn() + Send + Sync>) -> Result<XrLink, String> {
             let hello = XrClientMsg::Hello { version: XR_VERSION, name: info.name, authorization, instance: info.instance, eye: info.eye, refresh_mhz: info.refresh_mhz, codecs: info.codecs };
             write_all(&mut stream, &hello.encode()).map_err(|e| format!("hello: {e}"))?;
             stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
@@ -969,6 +1049,7 @@ pub mod link {
         let mut inbox = Inbox::default();
         let mut buf = vec![0u8; 1 << 20];
         let mut last_heard = Instant::now();
+        let mut unknown_logged = [false; 256];
         loop {
             loop {
                 match out.try_recv() {
@@ -1017,6 +1098,12 @@ pub mod link {
                                 wake();
                                 if end {
                                     return why;
+                                }
+                            }
+                            Err(e) if is_unknown_message(&e) => {
+                                if !unknown_logged[ty as usize] {
+                                    unknown_logged[ty as usize] = true;
+                                    eprintln!("xr link: skipping unknown server message {ty} (a newer server)");
                                 }
                             }
                             Err(e) => return e.to_string(),
@@ -1114,9 +1201,17 @@ mod tests {
     }
 
     #[test]
+    fn unknown_message_types_are_skipped_not_fatal() {
+        assert!(is_unknown_message(&XrClientMsg::decode(250, &[]).unwrap_err()));
+        assert!(is_unknown_message(&XrServerMsg::decode(250, &[1, 2]).unwrap_err()));
+        assert!(!is_unknown_message(&XrClientMsg::decode(tag::HELLO, &[1]).unwrap_err()));
+        assert!(!is_unknown_message(&XrServerMsg::decode(tag::WELCOME, &[1]).unwrap_err()));
+    }
+
+    #[test]
     fn xr_messages_round_trip() {
         let client = [
-            XrClientMsg::Hello { version: XR_VERSION, name: "quest".into(), authorization: "MKID x".into(), instance: 42, eye: [1680, 1760], refresh_mhz: 72_000, codecs: codecs::HEVC },
+            XrClientMsg::Hello { version: XR_VERSION, name: "quest".into(), authorization: format!("MKXV 04{}.1000.{}.{}", "ab".repeat(64), "cd".repeat(64), "ef".repeat(16)), instance: 42, eye: [1680, 1760], refresh_mhz: 72_000, codecs: codecs::HEVC },
             XrClientMsg::Pose { seq: 9, sample_ns: 1, display_ns: 2, frame: vec![1, 2, 3] },
             XrClientMsg::State { visible: true, focused: false },
             XrClientMsg::Stats { seq: 9, decode_us: 4000, m2p_us: 50_000 },
@@ -1134,8 +1229,9 @@ mod tests {
             assert_eq!(XrClientMsg::decode(ty, &p).unwrap(), m);
         }
         let server = [
-            XrServerMsg::Welcome { version: XR_VERSION, server: "89".into(), instance: 7, session: 9, size: [2560, 1824], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into(), eye: [2016, 2112], fovea: Fovea::DEFAULT },
+            XrServerMsg::Welcome { version: XR_VERSION, server: "89".into(), instance: 7, session: 9, size: [2560, 1824], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into(), eye: [2016, 2112], fovea: Fovea::DEFAULT, caps: server_caps::MONO | server_caps::HANDHELD, pin_ok: vec![0x5a; 16], app: "Fab".into(), test: "lane 7".into() },
             XrServerMsg::Refused { reason: "busy".into() },
+            XrServerMsg::Standby { server: "89".into(), instance: 7, showing: "headset".into(), pin_ok: vec![0xa5; 16], app: "Fab".into(), test: String::new() },
             XrServerMsg::Video {
                 seq: 9,
                 tile: 1,

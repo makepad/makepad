@@ -1409,6 +1409,11 @@ impl WmDesk {
         self.items.remove(&client);
     }
 
+    /// `client` is a foreign Wayland window.
+    pub fn is_wayland(&self, client: ClientId) -> bool {
+        self.wayland_clients.contains(&client)
+    }
+
     /// The next tile asked for `client` is a foreign Wayland window's.
     pub fn mark_wayland(&mut self, client: ClientId) {
         self.wayland_clients.insert(client);
@@ -1875,6 +1880,18 @@ impl WmDesk {
             self.draw_window_chrome(cx, client, draw_rect, title_h, focus, fade);
             inner.pos.y += title_h;
             inner.size.y = (inner.size.y-title_h).max(1.0);
+        } else if own_chrome && compact.is_none() && !spanned && !self.skin.active() {
+            // The app draws its caption; the frame around the window is the desk's, as its
+            // resize edges are: Windows 2000's raised one, NeXTSTEP's line and resize bar, in
+            // the border (and the bar's room) kept for them above.
+            let classic = self.style.weights[3] as f32;
+            if classic > 0.001 {
+                self.draw_window_frame(cx, draw_rect, classic, fade);
+            }
+            let next = self.style.weights[4] as f32;
+            if next > 0.01 {
+                self.draw_next_frame(cx, draw_rect, next, fade);
+            }
         }
 
         // A translucent panel only while the child has nothing to show —
@@ -2583,24 +2600,52 @@ impl WmDesk {
             self.title_hits.push((client, edge, ChromeHit::Resize(x, y)));
         }
     }
+    /// The retro styles' raised frame: a ring around the window, in the border the desk keeps
+    /// for it (`inset`), `weight` its share of the style mix.
+    fn draw_window_frame(&mut self, cx: &mut Cx2d, r: Rect, weight: f32, fade: f64) {
+        use crate::shell::{rgb, alpha};
+        let t=&self.style;
+        let opacity = ((1.0-t.weights[0])*fade) as f32;
+        self.chrome.pressed=0.0;
+        self.chrome.top_only=0.0;self.chrome.title_gradient=0.0;
+        self.chrome.radius=t.value([0.0,10.0,8.0,0.0,0.0]) as f32;
+        self.chrome.bevel=weight;
+        self.chrome.color=alpha(if t.dark && t.target.supports_dark() {rgb(40,40,42)}else{rgb(212,208,200)},opacity);
+        self.chrome.frame_width=t.value([2.0,2.0,2.0,3.0,1.0]) as f32;
+        self.chrome.color.w *= weight;
+        self.chrome.draw_abs(cx,r);
+        self.chrome.frame_width=0.0;
+    }
+    /// NeXTSTEP's frame: a black line around the window and the three-section resize bar along
+    /// its bottom, in the border and the bar's room the desk keeps for them; `weight` its share
+    /// of the style mix.
+    fn draw_next_frame(&mut self, cx: &mut Cx2d, r: Rect, weight: f32, fade: f64) {
+        use crate::shell::{rgb, alpha, ui::rect};
+        let opacity = ((1.0-self.style.weights[0])*fade) as f32*weight;
+        let ink=alpha(rgb(0,0,0),opacity);
+        let light=alpha(rgb(255,255,255),opacity);
+        self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y,r.size.x,1.0),ink);
+        self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y,1.0,r.size.y),ink);
+        self.shell_draw.solid(cx,rect(r.pos.x+r.size.x-1.0,r.pos.y,1.0,r.size.y),ink);
+        self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y+r.size.y-1.0,r.size.x,1.0),ink);
+        let bottom=r.pos.y+r.size.y-9.0;
+        self.shell_draw.solid(cx,rect(r.pos.x+1.0,bottom,r.size.x-2.0,8.0),alpha(rgb(170,170,170),opacity));
+        self.shell_draw.solid(cx,rect(r.pos.x+1.0,bottom,r.size.x-2.0,1.0),light);
+        for x in [r.pos.x+28.0,r.pos.x+r.size.x-29.0] {
+            self.shell_draw.solid(cx,rect(x,bottom,1.0,8.0),ink);
+            self.shell_draw.solid(cx,rect(x+1.0,bottom,1.0,8.0),light);
+        }
+    }
     fn draw_window_chrome(&mut self, cx: &mut Cx2d, client: ClientId, r: Rect, h: f64, focus: f64, fade: f64) {
         if self.skin.active() { return; }
         use crate::desktop::DesktopStyle;
         use crate::shell::{rgb, alpha, ui::{rect,Ico,HAlign}};
+        let classic = self.style.weights[3] as f32;
+        let next = self.style.weights[4] as f32;
+        let retro = classic + next;
+        self.draw_window_frame(cx, r, retro, fade);
         let t=&self.style;
         let opacity = ((1.0-t.weights[0])*fade) as f32;
-        let classic = t.weights[3] as f32;
-        let next = t.weights[4] as f32;
-        let retro = classic + next;
-        self.chrome.pressed=0.0;
-        self.chrome.top_only=0.0;self.chrome.title_gradient=0.0;
-        self.chrome.radius=t.value([0.0,10.0,8.0,0.0,0.0]) as f32;
-        self.chrome.bevel=retro;
-        self.chrome.color=alpha(if t.dark && t.target.supports_dark() {rgb(40,40,42)}else{rgb(212,208,200)},opacity);
-        self.chrome.frame_width=t.value([2.0,2.0,2.0,3.0,1.0]) as f32;
-        self.chrome.color.w *= retro;
-        self.chrome.draw_abs(cx,r);
-        self.chrome.frame_width=0.0;
         let edge=3.0*t.weights[3]+t.weights[4];
         let title=rect(r.pos.x+edge,r.pos.y+edge,r.size.x-edge*2.0,h);
         self.chrome.top_only=1.0;
@@ -2623,23 +2668,14 @@ impl WmDesk {
             self.shell_draw.solid(cx,rect(title.pos.x,title.pos.y+h-2.0,title.size.x,2.0),alpha(rgb(212,208,200),opacity*classic));
         }
         if next>0.01 {
-            // NeXT's fine title bevel and three-section bottom resize bar.
+            // NeXT's frame and resize bar, and its fine title bevel.
+            self.draw_next_frame(cx,r,next,fade);
             let ink=alpha(rgb(0,0,0),opacity*next);
             let light=alpha(rgb(255,255,255),opacity*next);
-            self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y,r.size.x,1.0),ink);
-            self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y,1.0,r.size.y),ink);
-            self.shell_draw.solid(cx,rect(r.pos.x+r.size.x-1.0,r.pos.y,1.0,r.size.y),ink);
-            self.shell_draw.solid(cx,rect(r.pos.x,r.pos.y+r.size.y-1.0,r.size.x,1.0),ink);
             self.shell_draw.solid(cx,rect(title.pos.x,title.pos.y,title.size.x,1.0),light);
             self.shell_draw.solid(cx,rect(title.pos.x,title.pos.y+h-1.0,title.size.x,1.0),ink);
-            let bottom=r.pos.y+r.size.y-9.0;
-            self.shell_draw.solid(cx,rect(r.pos.x+1.0,bottom,r.size.x-2.0,8.0),alpha(rgb(170,170,170),opacity*next));
-            self.shell_draw.solid(cx,rect(r.pos.x+1.0,bottom,r.size.x-2.0,1.0),light);
-            for x in [r.pos.x+28.0,r.pos.x+r.size.x-29.0] {
-                self.shell_draw.solid(cx,rect(x,bottom,1.0,8.0),ink);
-                self.shell_draw.solid(cx,rect(x+1.0,bottom,1.0,8.0),light);
-            }
         }
+        let t=&self.style;
         self.title_hits.push((client,title,ChromeHit::Title));
         let ink=alpha(if t.target == DesktopStyle::Macos {lerp_color(rgb(152,152,158),if t.dark {rgb(229,229,231)}else{rgb(36,36,38)},mac_focus)}else if retro>0.5 || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(30,30,34)},opacity);
         let text=self.titles.get(&client).cloned().unwrap_or_default();

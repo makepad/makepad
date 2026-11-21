@@ -39,8 +39,6 @@ script_mod! {
             tex: texture_2d(float)
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(1.0, 1.0))
-            host_dpi_factor: instance(1.0)
-            packed_header: instance(1.0)
             // The size the app was last told, in pixels (0: unknown). A frame drawn at
             // another size (an older one, while a resize waits for the app) is shown at
             // its own size from the top-left, not stretched; past its edge the edge
@@ -58,37 +56,13 @@ script_mod! {
             // Premultiplied output, so one multiply fades everything.
             fade: instance(1.0)
             pixel: fn() {
-                let cpos = self.crop_origin + self.pos * self.crop_span
-                let uv = cpos
-                if self.packed_header < 0.5 {
-                    if self.expect_px.x <= 0.0 || self.expect_px.y <= 0.0 {
-                        return self.tex.sample(uv * self.tex_scale) * self.fade
-                    }
-                    let drawn = self.tex_scale * self.tex_size
-                    let px = min(uv * self.expect_px, max(drawn - vec2(0.5), vec2(0.5)))
-                    return self.tex.sample(px / self.tex_size) * self.fade
+                let uv = self.crop_origin + self.pos * self.crop_span
+                if self.expect_px.x <= 0.0 || self.expect_px.y <= 0.0 {
+                    return self.tex.sample(uv * self.tex_scale) * self.fade
                 }
-                let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
-                let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
-                let tp = vec2(tp1.r * 65280.0 + tp1.b * 255.0, tp2.r * 65280.0 + tp2.b * 255.0)
-                if tp.x <= 0.0 || tp.y <= 0.0 {
-                    return #0000
-                }
-                // The mapping uses the ORIGINAL rect size (quad / span),
-                // so texels remain screen-fixed while the quad shrinks.
-                let counter = ((self.rect_size / self.crop_span) * self.host_dpi_factor) / tp
-                let tex_scale = tp / self.tex_size
-                // Row zero carries the child's size tracking pixels. Never
-                // blend that transport metadata (or unused swapchain space)
-                // into the visible window edge.
-                let sample_uv = clamp(uv * tex_scale * counter,
-                    vec2(0.5, 1.5) / self.tex_size,
-                    max(tp - vec2(0.5), vec2(0.5, 1.5)) / self.tex_size)
-                let fb = self.tex.sample(sample_uv)
-                if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                    return #2 * self.fade
-                }
-                return fb * self.fade
+                let drawn = self.tex_scale * self.tex_size
+                let px = min(uv * self.expect_px, max(drawn - vec2(0.5), vec2(0.5)))
+                return self.tex.sample(px / self.tex_size) * self.fade
             }
         }
         no_fb_view: Splash {
@@ -222,9 +196,6 @@ impl ScriptHook for MpRunView {
         vm.with_cx_mut(|cx| {
             self.draw_app.set_texture(0, &cx.null_texture());
             self.hosted.start(cx);
-            self.draw_app
-                .draw_vars
-                .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         });
     }
 }
@@ -363,13 +334,11 @@ impl MpRunView {
                 self.draw_app.set_texture(0, &presented.texture);
                 self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_scale), &presented.tex_scale);
                 self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_size), &presented.tex_size);
-                self.draw_app.draw_vars.set_dyn_instance(cx, id!(packed_header), &[presented.packed_header]);
             }
             None => {
                 self.draw_app.set_texture(0, &cx.null_texture());
                 self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_scale), &[0.0f32, 0.0f32]);
                 self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_size), &[1.0f32, 1.0f32]);
-                self.draw_app.draw_vars.set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
             }
         }
     }
@@ -611,9 +580,6 @@ impl Widget for MpRunView {
         let origin = cx.get_current_window_id().map(|w| cx.windows[w].window_geom.position + rect.pos);
         self.hosted.set_screen_origin(origin);
         self.hosted.painted();
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
         let told = self.hosted.trace_config().0 * dpi_factor;
         // the pixels the app draws for the size it was told: rounded, as the hosted shell sizes its frames
         let told = [told.x.round() as u32, told.y.round() as u32];

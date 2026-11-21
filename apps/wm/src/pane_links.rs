@@ -178,7 +178,7 @@ mod tests {
         let _ = registry.pump();
         assert_eq!(registry.services().len(), 2);
         // A call the engine sends down reaches the host half as a pane call…
-        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None };
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation };
         assert!(registry.send(&endpoints[1], ServiceDown::Call(call)));
         let calls = links.drain();
         assert!(matches!(calls.as_slice(), [PaneCall::Instance(4, c)] if c.call_id == "c1"), "one instance call");
