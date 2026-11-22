@@ -231,7 +231,7 @@ impl ClaudeModel {
         let arr = tools
             .iter()
             .map(|t| {
-                let schema = json::parse(t.parameters.as_bytes()).unwrap_or(json::Value::Obj(Vec::new()));
+                let schema = t.schema_value();
                 json::Value::Obj(vec![
                     ("name".to_string(), json::Value::Str(t.name.replace('.', "__"))),
                     ("description".to_string(), json::Value::Str(t.description.clone())),

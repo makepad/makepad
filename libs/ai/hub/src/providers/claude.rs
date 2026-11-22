@@ -49,6 +49,36 @@ pub struct ParseState {
     /// same textual think block the fleet Qwen lane emits, so every client
     /// renders reasoning one way and none of it lands in the history.
     pub thinking_open: bool,
+    /// Stream lines this turn that did not read as JSON (see [`read_line`]).
+    pub unread_lines: u32,
+}
+
+/// One stream line, read at the tool depth: a tool call sits several levels below the
+/// line's envelope, deeper than the strict parser's default. A line that still does not
+/// read is counted and the first one's error logged (its size and depth, not its text),
+/// so a dropped tool call is never silent.
+fn read_line(line: &str, parse: &mut ParseState, what: &str) -> Option<Value> {
+    match json::parse_depth(line.as_bytes(), json::TOOL_JSON_DEPTH) {
+        Ok(v) => Some(v),
+        Err(error) => {
+            parse.unread_lines += 1;
+            if parse.unread_lines == 1 {
+                eprintln!(
+                    "chat {what}: a stream line could not be read ({error}; {} bytes, {} levels deep, the limit is {}); it was skipped",
+                    line.len(), json::nesting_depth(line.as_bytes()), json::TOOL_JSON_DEPTH,
+                );
+            }
+            None
+        }
+    }
+}
+
+/// At a turn's end: how many of its stream lines were skipped, when more than the one
+/// [`read_line`] already logged.
+fn log_unread(parse: &ParseState, what: &str) {
+    if parse.unread_lines > 1 {
+        eprintln!("chat {what}: {} stream lines of this turn could not be read and were skipped", parse.unread_lines);
+    }
 }
 
 pub struct ClaudeCodeChatProvider {
@@ -158,7 +188,7 @@ impl ClaudeCodeChatProvider {
         let mut events = Vec::new();
         if let Some(parse) = session.parse.as_mut() {
             for line in drained.lines {
-                let Ok(v) = json::parse(line.as_bytes()) else { continue };
+                let Some(v) = read_line(&line, parse, "Claude Code") else { continue };
                 if v.get("type").and_then(Value::as_str) == Some("result") {
                     if let Some(usage) = usage_note(&v) {
                         eprintln!("chat Claude Code turn: {usage}");
@@ -181,6 +211,7 @@ impl ClaudeCodeChatProvider {
                 events.push(ProviderEvent::Error(session.cli.exit_error("Claude Code")));
             }
             if session.cli.finished || drained.exited {
+                log_unread(parse, "Claude Code");
                 session.parse = None;
             }
         }
@@ -477,7 +508,7 @@ pub fn poll_messages_turn(
         if cli.finished {
             break;
         }
-        if let Ok(v) = json::parse(line.as_bytes()) {
+        if let Some(v) = read_line(&line, parse, what) {
             let (mut evs, done) = parse_stream_line(&v, parse);
             for ev in &mut evs {
                 if let ProviderEvent::Error(raw) = ev {
@@ -497,6 +528,7 @@ pub fn poll_messages_turn(
     }
     if cli.finished && (drained.exited || events.iter().any(|e| matches!(e, ProviderEvent::Done { .. } | ProviderEvent::Error(_)))) {
         if let Some((cli, mut parse)) = turn.take() {
+            log_unread(&parse, what);
             if let Some(sid) = parse.session_id.take() {
                 *resume = Some(sid);
             }

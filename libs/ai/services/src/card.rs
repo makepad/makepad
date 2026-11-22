@@ -197,7 +197,7 @@ impl Card {
     /// filled from `prefill` (an object of arguments the person asked for;
     /// unknown names and nulls are dropped).
     pub fn for_schema(tool: &str, description: &str, schema: &str, layout: Option<&CardLayout>, prefill: &Value) -> Result<Card, String> {
-        let mut input = makepad_strict_json::parse(schema.as_bytes()).map_err(|e| format!("the schema of `{tool}` does not parse: {e}"))?;
+        let mut input = crate::wire::parse_tool_json(schema).map_err(|e| format!("the schema of `{tool}` does not parse: {e}"))?;
         let properties: &[(String, Value)] = match input.get("properties") {
             Some(Value::Obj(properties)) => properties,
             _ => &[],

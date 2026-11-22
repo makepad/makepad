@@ -234,7 +234,10 @@ impl TopicDef {
             if schema.len() > MAX_PARAMETERS_BYTES {
                 return Some(format!("topic '{}.{}' schema is {} bytes; the cap is {}", service, self.name, schema.len(), MAX_PARAMETERS_BYTES));
             }
-            if !matches!(makepad_strict_json::parse(schema.as_bytes()), Ok(makepad_strict_json::Value::Obj(_))) {
+            if let Some(deep) = too_deep(schema) {
+                return Some(format!("topic '{}.{}' schema {deep}", service, self.name));
+            }
+            if !matches!(parse_tool_json(schema), Ok(makepad_strict_json::Value::Obj(_))) {
                 return Some(format!("topic '{}.{}' schema is not a JSON object", service, self.name));
             }
         }
@@ -289,7 +292,10 @@ impl ToolDef {
         if self.parameters.len() > MAX_PARAMETERS_BYTES {
             return Some(format!("tool '{}.{}' schema is {} bytes; the cap is {}", service, self.name, self.parameters.len(), MAX_PARAMETERS_BYTES));
         }
-        match makepad_strict_json::parse(self.parameters.as_bytes()) {
+        if let Some(deep) = too_deep(&self.parameters) {
+            return Some(format!("tool '{}.{}' schema {deep}", service, self.name));
+        }
+        match parse_tool_json(&self.parameters) {
             Ok(makepad_strict_json::Value::Obj(fields)) => {
                 let is_object = fields
                     .iter()
@@ -308,6 +314,20 @@ impl ToolDef {
         }
         None
     }
+}
+
+/// A tool schema (or a call's arguments) as admission, the model adapters and
+/// the providers' tool-call streams read it: `TOOL_JSON_DEPTH` deep, not the
+/// strict parser's default, which real schemas outgrow.
+pub fn parse_tool_json(text: &str) -> Result<makepad_strict_json::Value, &'static str> {
+    makepad_strict_json::parse_depth(text.as_bytes(), makepad_strict_json::TOOL_JSON_DEPTH)
+}
+
+/// Why a schema is refused for its depth, naming the depth and the limit.
+fn too_deep(schema: &str) -> Option<String> {
+    let depth = makepad_strict_json::nesting_depth(schema.as_bytes());
+    (depth > makepad_strict_json::TOOL_JSON_DEPTH)
+        .then(|| format!("nests {depth} levels deep; the limit is {}", makepad_strict_json::TOOL_JSON_DEPTH))
 }
 
 /// Who a service is and what it will do.
@@ -1430,6 +1450,22 @@ mod tests {
         let mut not_object = route();
         not_object.tools[0].parameters = r#"{"type":"string"}"#.into();
         assert!(not_object.validate().unwrap_err().contains("argument object"));
+        // Schemas nest past the strict parser's default: a dozen levels are served as declared;
+        // past the tool depth the tool is refused, saying how deep it went and the limit.
+        let nest = |levels: usize| format!(r#"{{"type":"object","properties":{}{{"type":"string"}}{}}}"#,
+            r#"{"a":{"type":"object","properties":"#.repeat(levels), "}}".repeat(levels));
+        let mut deep = route();
+        deep.tools[0].parameters = nest(6);
+        assert_eq!(makepad_strict_json::nesting_depth(deep.tools[0].parameters.as_bytes()), 14);
+        deep.validate().expect("a 14-level schema is served");
+        assert!(deep.clone().admit().is_empty());
+        let mut too_deep = route();
+        too_deep.tools[0].parameters = nest(35);
+        let depth = makepad_strict_json::nesting_depth(too_deep.tools[0].parameters.as_bytes());
+        let why = format!("schema nests {depth} levels deep; the limit is {}", makepad_strict_json::TOOL_JSON_DEPTH);
+        assert!(too_deep.validate().unwrap_err().contains(&why), "{why}");
+        let problems = too_deep.admit();
+        assert!(problems.len() == 1 && problems[0].contains(&why) && problems[0].contains("not served"), "{problems:?}");
         let mut brief = route();
         brief.brief = "x".repeat(MAX_BRIEF_BYTES + 1);
         assert!(brief.validate().unwrap_err().contains("brief"));

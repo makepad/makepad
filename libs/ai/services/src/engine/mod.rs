@@ -49,6 +49,24 @@ pub struct ToolDefinition {
     pub parameters: String,
 }
 
+impl ToolDefinition {
+    /// The argument schema as a model request carries it, read at the tool depth.
+    /// Admission refuses a schema that does not read, so this fails only for a tool
+    /// that skipped admission: the model then gets an object schema saying why and
+    /// the log names the tool, never a silent empty schema.
+    pub fn schema_value(&self) -> makepad_strict_json::Value {
+        use makepad_strict_json::Value;
+        crate::wire::parse_tool_json(&self.parameters).unwrap_or_else(|error| {
+            let why = format!(
+                "the schema of tool '{}' could not be read ({error}; it nests {} levels deep, the limit is {})",
+                self.name, makepad_strict_json::nesting_depth(self.parameters.as_bytes()), makepad_strict_json::TOOL_JSON_DEPTH,
+            );
+            makepad_platform::error!("{why}");
+            Value::Obj(vec![("type".into(), Value::Str("object".into())), ("description".into(), Value::Str(why))])
+        })
+    }
+}
+
 /// A picture for the model to look at with its next input: a reference
 /// image the person dropped into the chat, or a capture a tool made.
 /// PNG or JPEG, normalised by whoever attaches it (at most 1024 px a side).

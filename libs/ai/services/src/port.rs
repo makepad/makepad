@@ -89,6 +89,7 @@ pub struct AiServicePort {
     /// The nonce this port registers with; how `Registered` finds it.
     port_tag: u32,
     endpoint: Option<EndpointId>,
+    last_context: std::cell::RefCell<Option<ServiceContext>>,
     chat_open: bool,
     logged_rejection: bool,
 }
@@ -129,6 +130,7 @@ impl AiServicePort {
             transport,
             port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
             endpoint: None,
+            last_context: Default::default(),
             chat_open: false,
             logged_rejection: false,
         };
@@ -149,6 +151,7 @@ impl AiServicePort {
             transport: Transport::InProcess { up: host.up, down: host.down },
             port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
             endpoint: None,
+            last_context: Default::default(),
             chat_open: false,
             logged_rejection: false,
         };
@@ -203,7 +206,17 @@ impl AiServicePort {
     }
 
     fn parse_hosted_event(&mut self, event: &Event) -> Option<HostedDown> {
-        let Event::Custom(json) = event else { return None };
+        let json = match event {
+            Event::Custom(json) => json,
+            Event::HostAttached => {
+                self.register();
+                if let Some(context) = self.last_context.get_mut().clone() {
+                    self.send(ServiceUp::Context(context));
+                }
+                return None;
+            }
+            _ => return None,
+        };
         match HostedDown::parse_checked(json)? {
             Ok(frame) => Some(frame),
             Err(rejected) => {
@@ -290,7 +303,11 @@ impl AiServicePort {
             truncate_to_char_boundary(&mut text, MAX_CONTEXT_BYTES - 3);
             text.push('…');
         }
-        self.send(ServiceUp::Context(ServiceContext { text }));
+        let context = ServiceContext { text };
+        if !matches!(self.transport, Transport::InProcess { .. }) {
+            *self.last_context.borrow_mut() = Some(context.clone());
+        }
+        self.send(ServiceUp::Context(context));
     }
 
     /// Publish one message to a subscription the host asked this service
@@ -500,7 +517,7 @@ impl AiServicePort {
     /// programming error, logged.
     pub fn open(cx: &mut Cx, manifest: ServiceManifest) -> Option<AiServicePort> {
         #[cfg(not(target_arch = "wasm32"))]
-        if cx.hal_is_embedded() { return Self::hosted(cx, manifest); }
+        if cx.hal_parent_sender().is_some() { return Self::hosted(cx, manifest); }
         Self::open_in(cx.in_makepad_studio(), &crate::engine::ServiceRegistry::process(), manifest)
     }
 

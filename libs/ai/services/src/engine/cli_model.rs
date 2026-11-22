@@ -92,7 +92,7 @@ fn tool_protocol(tools: &[ToolDefinition]) -> String {
             &json::obj(vec![
                 ("name", json::s(t.name.clone())),
                 ("description", json::s(t.description.clone())),
-                ("parameters", json::parse(t.parameters.as_bytes()).unwrap_or(json::Value::Obj(Vec::new()))),
+                ("parameters", t.schema_value()),
             ])
             .to_json(),
         );

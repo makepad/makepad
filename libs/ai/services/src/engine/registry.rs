@@ -78,8 +78,8 @@ impl ServiceRegistry {
 
     /// The process's registry: every in-process service of this process, whichever chat panel
     /// shows them, and what the process's `app` service lists and calls. Created on first use,
-    /// which also serves `app` on the process's endpoint, except in a process the window
-    /// manager hosts: its services are the WM's to serve.
+    /// which also serves `app` on the process's endpoint, except in a host's `--stdin-loop`
+    /// child: its services are the host's to serve.
     pub fn process() -> ServiceRegistry {
         static PROCESS: OnceLock<ServiceRegistry> = OnceLock::new();
         PROCESS

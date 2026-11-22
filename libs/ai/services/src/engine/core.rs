@@ -1226,7 +1226,8 @@ impl EngineCore {
             return None;
         }
         // Arguments: an object, with the instance selector taken out.
-        let (args_json, wanted) = match makepad_strict_json::parse(args.as_bytes()) {
+        // A call nests as deep as its tool's schema allows: read at the tool depth.
+        let (args_json, wanted) = match crate::wire::parse_tool_json(&args) {
             Ok(Value::Obj(fields)) => {
                 let wanted = fields
                     .iter()
@@ -1271,11 +1272,18 @@ impl EngineCore {
         // destructive one parks.
         let propose = propose && risk >= Risk::Request;
         if gated || propose {
-            let mut schema = makepad_strict_json::parse(def.parameters.as_bytes()).unwrap_or(Value::Null);
+            let mut schema = match crate::wire::parse_tool_json(&def.parameters) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    let why = format!("the schema of `{tool}` does not parse: {error}");
+                    self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
+                    return None;
+                }
+            };
             // A request (or a proposal) is a settings card; a destructive
             // call keeps the plain confirm row.
             let card = if risk == Risk::Request || propose {
-                let prefill = makepad_strict_json::parse(call.args.as_bytes()).unwrap_or(Value::Null);
+                let prefill = crate::wire::parse_tool_json(&call.args).unwrap_or(Value::Null);
                 match Card::for_schema(&tool, &def.description, &def.parameters, def.layout.as_ref(), &prefill) {
                     Ok(card) => {
                         // The edits are checked against the schema with the card's map keys typed.
