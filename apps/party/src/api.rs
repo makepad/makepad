@@ -1500,6 +1500,7 @@ mod tests {
     #[derive(Default)]
     struct Redrawn {
         opened: Vec<(u32, u32)>,
+        resized: Vec<(u32, u32)>,
         pictures: Vec<Vec<u8>>,
         prompts: Vec<String>,
         closed: usize,
@@ -1536,7 +1537,8 @@ mod tests {
             self.0.lock().unwrap().prompts.push(prompt.into());
             Ok(())
         }
-        fn resize(&mut self, _size: (u32, u32)) -> Result<(), String> {
+        fn resize(&mut self, size: (u32, u32)) -> Result<(), String> {
+            self.0.lock().unwrap().resized.push(size);
             Ok(())
         }
     }
@@ -1686,6 +1688,7 @@ mod tests {
         assert_eq!(redrawn.lock().unwrap().closed, 0, "the offer alone keeps a's redraw");
         assert_eq!(party.live.host_wish(Some("paper stars".into())), Ok(()));
         until("the host edits a's live redraw", &|| redrawn.lock().unwrap().prompts.last().is_some_and(|p| p.contains("paper stars")));
+        let prompted = redrawn.lock().unwrap().prompts.len();
         let answer = String::from_utf8(offer.body).unwrap();
         assert!(taker.connect(&taker_socket, &answer, calls, Duration::from_secs(3)), "the taker's call connects");
         until("b takes the slot", &|| named(&state("GET", "live", &b)).as_deref() == Some("starting"));
@@ -1694,11 +1697,14 @@ mod tests {
         let pushed = stream_until(port, "live/stream", Some(&a), 1);
         assert_eq!(sj::parse(&pushed).unwrap(), bumped, "the displaced phone gets the same state on its stream");
         assert!(party.live.latest().is_none(), "b starts with no frame from a");
-        until("b opens a fresh redraw", &|| redrawn.lock().unwrap().opened.len() == 2);
+        // One redraw for the whole party: b takes a's in place, in b's shape.
+        until("b takes the redraw in b's shape, with its prompt", &|| {
+            let seen = redrawn.lock().unwrap();
+            seen.resized.last() == Some(&(288, 512)) && seen.prompts.len() > prompted
+        });
         {
             let seen = redrawn.lock().unwrap();
-            assert_eq!(seen.closed, 1, "a's redraw has closed");
-            assert_eq!(seen.opened[1], (288, 512), "b's redraw uses b's offer");
+            assert_eq!((seen.opened.len(), seen.closed), (1, 0), "the takeover keeps the one redraw: no second session on the hub");
             assert!(seen.prompts.last().unwrap().contains("paper stars"), "the host wish carries into b's redraw");
         }
         let hung_up = |socket: &std::net::UdpSocket| {
@@ -1714,7 +1720,7 @@ mod tests {
         assert_eq!(named(&left).as_deref(), Some("out"));
         assert!(left.get("bumped").is_none(), "leaving voluntarily clears the slot");
         until("leaving hangs up b's call", &|| hung_up(&taker_socket));
-        until("leaving lets the hub and frame go", &|| redrawn.lock().unwrap().closed == 2 && party.live.latest().is_none());
+        until("leaving lets the hub and frame go", &|| redrawn.lock().unwrap().closed == 1 && party.live.latest().is_none());
         let again = state("POST", "live/queue", &a);
         assert_eq!(named(&again).as_deref(), Some("up"));
         assert!(again.get("bumped").is_none(), "rejoining clears the bump");

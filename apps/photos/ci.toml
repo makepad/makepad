@@ -2,17 +2,17 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-20"
-digest = "1eddc0c85d82cfedb63b6a93e4d63f96ca9507cbe1acc1a0e3b1d6d7b3527576"
-main = "04df76375c13cb26181ca1f25d61b73a3344a1fb"
-work = "8f0c688cbdccf91e5fae8ed43c5c22b9ac4345ca"
+date = "2026-11-22"
+digest = "99d5404acd9613d83e47c55d566c3fb1664fa8e27e94d1e1b73e78a3a00fa2a0"
+main = "756c1cd5a82ab87c3ce06d6606a396d19f275e2e"
+work = "58ed8e1cd52d9bdbb999645fb158057ab9e1eca1"
 
 [app.macos]
 capture = ""
-date = "2026-11-19"
-digest = "fe20a13147dbb39d3f7b62e6abc1903a6a52c574a70606217506ddf3b90bb3af"
-main = "9e6cb64351d5c114136cccbabc61eaacf999830b"
-work = "6116e11c66d9da006e0dedc1b21a94d859681887"
+date = "2026-11-22"
+digest = "cf58980d4251aa7ee2fc0e19f6eb817fcfed4f6b014530c8dd19a8819f971910"
+main = "630aafc05b6202d28b40e1055b3102bb7d1b9e5f"
+work = "3ee06c1e7679b81e40fa5f55f97e30e91f6b06b3"
 
 [app.windows]
 capture = ""

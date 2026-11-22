@@ -354,8 +354,6 @@ pub struct MaterialLab {
     initialized: bool,
     #[rust(false)]
     announced: bool,
-    #[rust]
-    frames: u64,
 }
 
 impl MaterialLab {
@@ -403,6 +401,7 @@ impl MaterialLab {
             ModelInstance {
                 model: model.into(),
                 custom_material: name.map(|n| CustomMaterialInstance { name: n.into(), params: Vec4f::default() }),
+                layer_materials: Vec::new(),
                 transform,
                 tint: vec4(0.8, 0.8, 0.8, 1.0),
                 color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
@@ -489,7 +488,6 @@ impl Widget for MaterialLab {
                 let world = items_world(scene);
                 self.renderer.draw_scene_full(cx3d, &mut self.draw_list, &mut draws, &world, scene_state, None, Some(&mut self.draw_models))
             };
-            self.frames += 1;
             if !self.announced { log!("material lab: {} model instances, {} draws, {} culled, {} tris", stats.model_instances, stats.model_draws, stats.model_culled, stats.model_triangles); }
         }
         cx.end_pass(&self.pass);
@@ -499,27 +497,22 @@ impl Widget for MaterialLab {
         // PASS_H, so the viewport must be too (an area-placed pass would
         // follow the window and draw past the texture).
         self.area = self.draw_bg.area();
-        // Metal compiles pipelines asynchronously: keep drawing until every
-        // material's pipeline is ready (the lanes fall back to stock until
-        // then), and say so once for the test.
-        if !self.announced && scene() != Scene::Hooks {
-            // Built-in item materials compile on first use; give the
-            // pipelines time, then say so once. The IBL scene's environment
-            // prepares off the UI thread: ready waits until it is in the
-            // frame, however fast the frames come.
-            let names = ["__item_unlit"];
-            let ready = names.iter().all(|n| self.renderer.custom_material_shader(n).is_some_and(|id| cx.cx.draw_shader_ready(id, false)));
-            if ready && self.frames > 90 && !self.renderer.environment_pending() {
+        // Metal compiles pipelines asynchronously, and a material draws through
+        // a stock lane until its pipeline exists. Ready is the first frame the
+        // renderer waited on nothing (`items_ready`: the environment, the item
+        // materials, the PBR and stock IBL pipelines) and drew nothing through a
+        // fallback lane (`drew_fallback`), so the grab sees every material however
+        // fast the frames come or the pipelines compile. Said once for the test.
+        if !self.announced {
+            let hooks = ["finish", "unlit", "error", "vertex", "lighting", "light"];
+            let installed = scene() != Scene::Hooks || hooks.iter().all(|n| self.renderer.custom_material(n).is_some());
+            if installed && self.renderer.items_ready(cx.cx) && !self.renderer.drew_fallback() {
                 self.announced = true;
-                log!("material lab: ready, world scene, {} items skipped", self.renderer.skipped_items());
-            }
-        }
-        if !self.announced && scene() == Scene::Hooks {
-            let names = ["finish", "unlit", "error", "vertex", "lighting", "light"];
-            let ready = names.iter().filter(|n| self.renderer.custom_material_shader(n).is_some_and(|id| cx.cx.draw_shader_ready(id, false))).count();
-            if ready == names.len() {
-                self.announced = true;
-                log!("material lab: ready, {ready} materials");
+                if scene() == Scene::Hooks {
+                    log!("material lab: ready, {} materials", hooks.len());
+                } else {
+                    log!("material lab: ready, world scene, {} items skipped", self.renderer.skipped_items());
+                }
             }
         }
         cx.new_next_frame();

@@ -960,7 +960,7 @@ impl FileEditor {
         let file = self.path.as_deref().map(|path| self.root.join(path));
         // Without a save dialog (Linux outside the WM) the PDF goes beside the file.
         let dialogs = cfg!(any(target_os = "macos", target_os = "windows", target_os = "ios"))
-            || makepad_widgets::makepad_platform::hosted_relay::host_serves_file_dialogs();
+            || makepad_widgets::makepad_platform::hosted_by_window_manager();
         if !dialogs {
             if let Some(file) = file {
                 self.make_pages(cx, PrintTo::File(file.with_extension("pdf")));

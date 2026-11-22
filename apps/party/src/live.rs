@@ -451,8 +451,9 @@ pub struct Live {
     pub redrawing: AtomicBool,
     /// The box's own camera, for the screen between live guests.
     pub camera: Arc<CameraFeed>,
-    /// The screen's redraw has a picture up (a guest's or the box camera's):
-    /// it stays across a takeover until the new source's frames come.
+    /// The screen's redraw has a picture up the wall may show (the box
+    /// camera's, or a call's on the screen): it stays across a takeover until
+    /// the new source's frames come. A "Just me" call's frames never set it.
     picture_up: AtomicBool,
 }
 
@@ -571,9 +572,15 @@ impl Live {
         self.framed.notify_all();
     }
 
-    /// The live slot as the wall shows it, if a guest has it.
+    /// The live slot as the wall shows it, if a guest has it (or the box
+    /// camera's picture between guests). A guest who asked for "Just me" is
+    /// on no screen from that moment, whatever the redraw last showed.
     pub fn board(&self) -> Option<Board> {
-        let shown = self.slots().shown();
+        let slots = self.slots();
+        if slots.current.as_ref().is_some_and(|s| s.call.is_some() && !s.screen) {
+            return None;
+        }
+        let shown = slots.shown();
         if shown != Some(Standing::Live) && self.picture_up.load(std::sync::atomic::Ordering::Relaxed) {
             return Some(Board { standing: Standing::Live });
         }
@@ -981,7 +988,29 @@ impl Live {
             };
             eprintln!("[party] live: the screen: {what} takes it{}", if b.redraw.is_some() { ", in the same redraw" } else { "" });
             (b.since, b.keyframe, b.asked, b.sent, b.wish) = (now, false, f64::NEG_INFINITY, false, u64::MAX);
+            if !self.picture_up.load(std::sync::atomic::Ordering::SeqCst) {
+                // A picture the wall may not show (a "Just me" call's) is not
+                // kept for the next source.
+                self.set_latest(None);
+            }
             self.camera.wanted.store(true, std::sync::atomic::Ordering::Release);
+            // A call takes the redraw in its offer's shape, as a fresh one
+            // would open (its keyframes' size corrects it); feed keeps the
+            // camera's.
+            if let (Source::Call { call, size, .. }, Some(redraw)) = (source, b.redraw.as_mut()) {
+                if size != b.size {
+                    match redraw.resize(size) {
+                        Ok(()) => {
+                            eprintln!("[party] live: call {call}: the redraw takes its offer's {}x{}, from {}x{}", size.0, size.1, b.size.0, b.size.1);
+                            b.size = size;
+                        }
+                        Err(e) => {
+                            self.close_redraw(b, &e);
+                            b.retry_at = now + REDRAW_RETRY;
+                        }
+                    }
+                }
+            }
         }
         b.source = source;
         if b.redraw.is_none() && now >= b.retry_at && !self.take_running.load(std::sync::atomic::Ordering::SeqCst) {
@@ -992,7 +1021,7 @@ impl Live {
             if let Source::Camera { .. } = source {
                 if let Some(frame) = lock(&self.camera.frame).take() {
                     self.camera.wanted.store(true, std::sync::atomic::Ordering::Release);
-                    self.show_frame(frame);
+                    self.show_frame(frame, true);
                 }
             }
             return;
@@ -1065,7 +1094,7 @@ impl Live {
                             // Warming up: the camera shows as it is meanwhile, and
                             // the hub keeps only the newest frame it was sent.
                             self.camera.wanted.store(true, std::sync::atomic::Ordering::Release);
-                            self.show_frame(frame);
+                            self.show_frame(frame, true);
                         }
                     }
                 }
@@ -1082,7 +1111,11 @@ impl Live {
                     b.sent = false;
                     self.camera.wanted.store(true, std::sync::atomic::Ordering::Release);
                 }
-                self.show_frame(frame);
+                let public = match source {
+                    Source::Call { call, .. } => self.slots().current.as_ref().is_some_and(|s| s.call == Some(call) && s.screen),
+                    _ => true,
+                };
+                self.show_frame(frame, public);
                 if let Source::Call { call, started: false, .. } = source {
                     if b.keyframe && self.change(|slots, _| slots.started(call)) {
                         eprintln!("[party] live: call {call} is on the big screen, {} ms after it took the screen", ms_since(now, b.since));
@@ -1095,17 +1128,27 @@ impl Live {
         Ok(())
     }
 
-    fn show_frame(&self, frame: Rgb) {
+    /// Puts a frame up for the screens and the guest's own phone; only a
+    /// `public` one (the box camera's, or a call's on the screen) may reach
+    /// the wall. The flag is lowered before a private frame lands and raised
+    /// after a public one, so the wall never pairs it with the wrong frame.
+    fn show_frame(&self, frame: Rgb, public: bool) {
         let count = self.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if !public {
+            self.picture_up.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         self.set_latest(Some(LiveFrame::new(count, frame)));
-        self.picture_up.store(true, std::sync::atomic::Ordering::SeqCst);
+        if public {
+            self.picture_up.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn close_redraw(&self, b: &mut Bridge, why: &str) {
         let had = b.redraw.take().is_some();
         (b.warm, b.sent) = (false, false);
         self.redrawing.store(false, std::sync::atomic::Ordering::SeqCst);
-        if self.picture_up.swap(false, std::sync::atomic::Ordering::SeqCst) && self.slots().shown() != Some(Standing::Live) {
+        self.picture_up.store(false, std::sync::atomic::Ordering::SeqCst);
+        if self.slots().shown() != Some(Standing::Live) {
             self.set_latest(None);
         }
         if had {
