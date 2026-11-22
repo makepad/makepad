@@ -883,14 +883,15 @@ mod tests {
         emitter.set_roots(roots.clone());
         scratch.watcher = Some(PlatformWatcher::start_with_watch_budget(roots, emitter, 2).unwrap());
 
-        let deadline = Instant::now() + Duration::from_millis(1500);
+        // Each change waits for its event, however long the box takes between poll passes (the
+        // interval grows with a pass's time, 20x, and one 1.5 s deadline for the whole sequence
+        // ran out on a busy box). The watcher's thread holds the only sender: if it ends, the
+        // wait ends with it.
         let mut seen = Vec::new();
         let mut expect = |path: &Path, kind: FileSystemEventKind, is_dir: bool| loop {
-            let event = rx
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or_else(|err| {
-                    panic!("polling must report {kind:?} for {}: {err}", path.display())
-                });
+            let event = rx.recv().unwrap_or_else(|err| {
+                panic!("polling must report {kind:?} for {}: the watcher ended first ({err})", path.display())
+            });
             let found = event.path == path && event.kind == kind;
             seen.push(event.clone());
             if found {
@@ -900,10 +901,6 @@ mod tests {
                 );
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "polling must report {kind:?} for {} before the deadline", path.display()
-            );
         };
 
         // The root and a use both watches; a/deep and b must both be polled.

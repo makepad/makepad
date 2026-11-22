@@ -321,7 +321,7 @@ fn standalone_current_span() -> Option<Vec<String>> {
 /// True when this process is hosted as an wm tile (or a Studio run view).
 pub fn hosted(cx: &Cx) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
-    if cx.hal_is_embedded() { return true; }
+    if cx.hal_parent_sender().is_some() { return true; }
     cx.in_makepad_studio()
 }
 
@@ -336,8 +336,11 @@ pub fn warm_start() -> bool {
 /// (nothing was sent; the caller may fall back).
 pub fn send(cx: &Cx, req: &WmRequest) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
-    if cx.hal_is_embedded() { return cx.hal_send_parent_message(&req.to_json()); }
-    if !hosted(cx) {
+    if let Some(sender) = cx.hal_parent_sender() {
+        sender.send(&req.to_json());
+        return true;
+    }
+    if !cx.in_makepad_studio() {
         return false;
     }
     Cx::send_studio_message(AppToStudio::Custom(req.to_json()));

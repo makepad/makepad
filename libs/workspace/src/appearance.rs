@@ -147,7 +147,7 @@ pub fn describe(name: &str) -> String {
 /// the installed sheet alone — the WM's theme wins, and a reload re-runs
 /// this with the picker's sheet already in place.
 pub fn install_initial(vm: &mut ScriptVm, settings: &Settings) {
-    if vm.cx().in_makepad_studio() {
+    if vm.cx().in_host() {
         return;
     }
     if desktop_style::current_name(vm).is_some() {
