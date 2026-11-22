@@ -232,7 +232,15 @@ impl LiveScore {
     }
 
     pub fn status(&self) -> Status {
-        self.status.lock().map(|s| s.clone()).unwrap_or_default()
+        self.with_status(Clone::clone)
+    }
+
+    /// Read the current composer status while holding its lock.
+    pub(crate) fn with_status<R>(&self, read: impl FnOnce(&Status) -> R) -> R {
+        match self.status.lock() {
+            Ok(status) => read(&status),
+            Err(_) => read(&Status::default()),
+        }
     }
 }
 

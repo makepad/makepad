@@ -81,6 +81,10 @@ impl Shared {
     fn beat(&self) -> f64 {
         f64::from_bits(self.beat.load(Ordering::Acquire))
     }
+
+    fn is_playing(&self) -> bool {
+        self.playing.load(Ordering::Acquire) && !self.parked.load(Ordering::Acquire)
+    }
 }
 
 struct Clock(Arc<Shared>);
@@ -443,7 +447,7 @@ impl GameMusic {
 
     /// The beat at the output, and whether it plays.
     pub fn beat(&self) -> (f64, bool) {
-        (self.shared.beat(), self.shared.playing.load(Ordering::Acquire) && !self.shared.parked.load(Ordering::Acquire))
+        (self.shared.beat(), self.shared.is_playing())
     }
 
     /// Everything that happened since the last poll, in order (call it
@@ -457,28 +461,35 @@ impl GameMusic {
         }
         // Sections and cues are the composer's: they come due by beat.
         let now = self.shared.beat();
-        let (section, cues): (Option<String>, Vec<(String, f64)>) = match (&self.live, &mut self.inline) {
-            (Some(live), _) => {
-                let status = live.status();
-                (status.section, status.cues)
+        let mut collect = |section: Option<&str>, cues: (&[(String, f64)], &[(String, f64)])| {
+            if section != self.section.as_deref() && self.shared.is_playing() {
+                self.section = section.map(str::to_owned);
+                if let Some(name) = &self.section {
+                    out.push(MusicEvent::Section { beat: now, name: name.clone() });
+                }
             }
-            (_, Some(inline)) => (inline.composer.section_at(now), inline.composer.cues.iter().cloned().collect()),
-            _ => (None, Vec::new()),
+            let mut last = self.cued;
+            for (name, beat) in cues.0.iter().chain(cues.1) {
+                if *beat > self.cued && *beat <= now {
+                    out.push(MusicEvent::Cue { beat: *beat, name: name.clone() });
+                    last = last.max(*beat);
+                }
+            }
+            self.cued = last;
         };
-        if section != self.section && self.beat().1 {
-            if let Some(name) = &section {
-                out.push(MusicEvent::Section { beat: now, name: name.clone() });
+        match (&self.live, &mut self.inline) {
+            (Some(live), _) => live.with_status(|status| {
+                collect(status.section.as_deref(), (&status.cues, &[]));
+            }),
+            (_, Some(inline)) => {
+                let composer = &mut inline.composer;
+                let section = composer.section_index_at(now)
+                    .and_then(|i| composer.doc.sections.get(i))
+                    .map(|section| section.name.as_str());
+                collect(section, composer.cues.as_slices());
             }
-            self.section = section;
+            _ => collect(None, (&[], &[])),
         }
-        let mut last = self.cued;
-        for (name, beat) in cues {
-            if beat > self.cued && beat <= now {
-                out.push(MusicEvent::Cue { beat, name });
-                last = last.max(beat);
-            }
-        }
-        self.cued = last;
         out
     }
 

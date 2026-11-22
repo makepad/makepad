@@ -1,18 +1,22 @@
-//! Hearing a score as data, for an AI that cannot listen: levels per node,
+//! Hearing a score as data, for an AI that cannot listen: levels and sound measurements per node,
 //! the master's spectrum in octave bands with a verdict, onsets on the
 //! sixteenth grid, and the notes each loop played. Measured on an offline
 //! render, which is exactly what plays live.
 
 use crate::build::Samples;
 use crate::model::{self, Diag};
+use crate::palette::{measure, Features};
 use crate::render::{render_with, RenderOpts};
 use crate::theory;
+use makepad_audio_engine::{schedule::SPAN, CHUNK};
 use makepad_audio_synth::dsp::{Filter, FilterMode};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Level {
     pub peak_db: f32,
     pub rms_db: f32,
+    /// The first sounding part of a loop or effect in the listened window.
+    pub measured: Option<Features>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,6 +42,21 @@ pub struct Heard {
 
 pub const BANDS: [f32; 10] = [31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 
+// The catalogue measures a note over three seconds. Four leaves room for its tail
+// while keeping a long listen from storing the whole window for every node.
+const NODE_CAPTURE_SECONDS: usize = 4;
+const SOUNDING_PEAK: f32 = 0.001; // -60 dBFS
+
+#[derive(Default)]
+struct NodeCapture {
+    peak_probe: Option<u16>,
+    audio_span: Option<u16>,
+    peak: f32,
+    sum: f64,
+    chunks: usize,
+    mono: Vec<f32>,
+}
+
 fn db(x: f32) -> f32 {
     if x <= 1e-9 { -180.0 } else { 20.0 * x.log10() }
 }
@@ -58,20 +77,47 @@ pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>
     let end_s = (from_bar + bars) as f64 * beats_per_bar * seconds_per_beat;
     let rate = 48_000.0f32;
     let (w0, w1) = ((start_s * rate as f64) as usize, (end_s * rate as f64) as usize);
-    let names: Vec<String> = doc.loops.iter().map(|l| l.name.clone()).chain(doc.fx.iter().map(|f| f.name.clone())).collect();
-    // Per node: peak, sum of squares of the chunk RMS, chunks.
-    let mut acc = vec![(0.0f32, 0.0f64, 0usize); names.len()];
+    let mut nodes: Vec<_> = doc.loops.iter().map(|l| &l.name).chain(doc.fx.iter().map(|f| &f.name))
+        .map(|name| (name, NodeCapture::default())).collect();
+    let max_frames = NODE_CAPTURE_SECONDS * rate as usize;
     let opts = RenderOpts { rate, seconds: Some(end_s), seed: None, params, start: None, held };
     let rendered = render_with(source, &opts, samples, &mut |frame, instance| {
-        if frame <= w0 || frame > w1 + makepad_audio_engine::CHUNK {
+        let chunk_start = frame - instance.schedule.last_frames as usize;
+        if chunk_start == 0 {
+            for (name, node) in &mut nodes {
+                let id = format!("{}/{name}", instance.name);
+                node.peak_probe = instance.layout.probes.get(&format!("{id}.peak")).copied();
+                node.audio_span = instance.layout.audio_probes.get(&format!("{id}.audio")).copied();
+            }
+        }
+        if frame <= w0 || frame > w1 + CHUNK {
             return;
         }
-        for (i, name) in names.iter().enumerate() {
-            let Some(probe) = instance.layout.probes.get(&format!("{}/{name}.peak", instance.name)) else { continue };
-            let peak = instance.schedule.probes[*probe as usize];
-            acc[i].0 = acc[i].0.max(peak);
-            acc[i].1 += (peak * peak * 0.5) as f64;
-            acc[i].2 += 1;
+        let start = chunk_start.max(w0);
+        let end = frame.min(w1);
+        for (_, node) in &mut nodes {
+            let Some(probe) = node.peak_probe else { continue };
+            let peak = instance.schedule.probes[probe as usize];
+            node.peak = node.peak.max(peak);
+            node.sum += (peak * peak * 0.5) as f64;
+            node.chunks += 1;
+
+            if start >= end || node.mono.len() == max_frames || (node.mono.is_empty() && peak <= SOUNDING_PEAK) {
+                continue;
+            }
+            let Some(span) = node.audio_span else { continue };
+            let count = (end - start).min(max_frames - node.mono.len());
+            let offset = span as usize * SPAN + (start - chunk_start);
+            let left = &instance.schedule.arena[offset..offset + count];
+            let right = &instance.schedule.arena[offset + CHUNK..offset + CHUNK + count];
+            if node.mono.is_empty() {
+                // The meter holds earlier peaks. Only sound inside the window starts a capture.
+                if !left.iter().chain(right).any(|x| x.abs() > SOUNDING_PEAK) {
+                    continue;
+                }
+                node.mono = Vec::with_capacity((w1 - start).min(max_frames));
+            }
+            node.mono.extend(left.iter().zip(right).map(|(l, r)| (l + r) * 0.5));
         }
     })?;
     let w1 = w1.min(rendered.left.len());
@@ -84,10 +130,14 @@ pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>
         ms += ((l * l + r * r) * 0.5) as f64;
     }
     let rms = (ms / mono.len().max(1) as f64).sqrt() as f32;
-    heard.master = Level { peak_db: round1(db(peak)), rms_db: round1(db(rms)) };
-    for (i, name) in names.iter().enumerate() {
-        let (peak, sum, n) = acc[i];
-        heard.nodes.push((name.clone(), Level { peak_db: round1(db(peak)), rms_db: round1(db((sum / n.max(1) as f64).sqrt() as f32)) }));
+    heard.master = Level { peak_db: round1(db(peak)), rms_db: round1(db(rms)), measured: None };
+    for (name, node) in nodes {
+        let measured = (!node.mono.is_empty()).then(|| measure(&node.mono, &node.mono, rate));
+        heard.nodes.push((name.clone(), Level {
+            peak_db: round1(db(node.peak)),
+            rms_db: round1(db((node.sum / node.chunks.max(1) as f64).sqrt() as f32)),
+            measured,
+        }));
     }
     // Octave bands: a band-pass per centre, the RMS of each.
     let mut levels = Vec::new();
@@ -217,6 +267,12 @@ mod tests {
         assert_eq!(heard.onsets[0].matches('x').count(), 4, "{:?}", heard.onsets);
         assert!(heard.master.rms_db > -40.0 && heard.master.peak_db <= 0.0, "{:?}", heard.master);
         assert!(heard.nodes.iter().all(|(_, l)| l.rms_db > -60.0), "{:?}", heard.nodes);
+        let features = |name| heard.nodes.iter().find(|(n, _)| n == name).unwrap().1.measured.unwrap();
+        let kick = features("kick");
+        let sub = features("bass");
+        // The kick starts with a click. The A1 sub puts nearly all its energy below 250 Hz.
+        assert!(kick.attack_ms < 25.0, "kick attack: {kick:?}");
+        assert!(sub.low > 0.9 && sub.centroid < kick.centroid, "bass {sub:?}, kick {kick:?}");
         assert!(heard.bands.iter().any(|(hz, l)| *hz <= 63.0 && *l > -12.0), "{:?}", heard.bands);
         let bass = &heard.notes.iter().find(|(n, _)| n == "bass").unwrap().1;
         assert_eq!(bass.len(), 2);

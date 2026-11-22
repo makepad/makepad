@@ -12,6 +12,7 @@
 
 use crate::listen::{self, Heard, Level};
 use crate::model::Diag;
+use crate::palette::Features;
 use crate::NoSamples;
 use makepad_strict_json::{self as json, Value};
 
@@ -239,15 +240,7 @@ pub fn instrument_search(args: &Value) -> Value {
             ("matched", Value::Arr(hit.matched.iter().map(|m| json::s(m.clone())).collect())),
         ];
         if let Some(f) = e.features {
-            fields.push(("measured", json::obj(vec![
-                ("centroid_hz", num(f.centroid.round() as f64)),
-                ("attack_ms", num(f.attack_ms.round() as f64)),
-                ("decay_ms", num(f.decay_ms.round() as f64)),
-                ("low", num((f.low * 100.0).round() as f64 / 100.0)),
-                ("mid", num((f.mid * 100.0).round() as f64 / 100.0)),
-                ("high", num((f.high * 100.0).round() as f64 / 100.0)),
-                ("lufs", num((f.lufs * 10.0).round() as f64 / 10.0)),
-            ])));
+            fields.push(("measured", measured_json(f)));
             if let Some(gain) = crate::palette::balance_gain(e) {
                 fields.push(("gain", num((gain * 100.0).round() as f64 / 100.0)));
             }
@@ -335,9 +328,27 @@ fn num(value: f64) -> Value {
     Value::F64((value * 1000.0).round() / 1000.0)
 }
 
+fn measured_json(f: Features) -> Value {
+    json::obj(vec![
+        ("centroid_hz", num(f.centroid.round() as f64)),
+        ("attack_ms", num(f.attack_ms.round() as f64)),
+        ("decay_ms", num(f.decay_ms.round() as f64)),
+        ("low", num((f.low * 100.0).round() as f64 / 100.0)),
+        ("mid", num((f.mid * 100.0).round() as f64 / 100.0)),
+        ("high", num((f.high * 100.0).round() as f64 / 100.0)),
+        ("lufs", num((f.lufs * 10.0).round() as f64 / 10.0)),
+    ])
+}
+
 /// `score_listen`'s answer for what was heard.
 pub fn heard_json(heard: &Heard) -> Value {
-    let level = |l: &Level| json::obj(vec![("peak_db", num(l.peak_db as f64)), ("rms_db", num(l.rms_db as f64))]);
+    let level = |l: &Level| {
+        let mut fields = vec![("peak_db", num(l.peak_db as f64)), ("rms_db", num(l.rms_db as f64))];
+        if let Some(f) = l.measured {
+            fields.push(("measured", measured_json(f)));
+        }
+        json::obj(fields)
+    };
     let texts = |list: &[String]| Value::Arr(list.iter().map(|t| json::s(t.clone())).collect());
     json::obj(vec![
         ("ok", Value::Bool(true)),

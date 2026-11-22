@@ -577,7 +577,12 @@ aim it near -12 dBFS for -10 LUFS, peaks at the limiter's ceiling.
 You cannot hear. After every change call `score_listen` (4-8 bars from
 where you changed) and read it: per-loop levels against the table above,
 the band balance verdict, the onset grid (is the groove what you meant?),
-the notes each loop played, the warnings (a silent loop, clipping). Call
+the notes each loop played, the warnings (a silent loop, clipping).
+Compare a loop or FX with `instrument_search` using its `measured` block.
+It measures the mono mix of the first 4 seconds from the node's first sound in
+the window, so a long evolving pad's numbers describe its onset.
+Later, louder notes can affect the attack and decay. LUFS uses the mono mix.
+A node that stays at or below -60 dBFS has no block. Call
 `score_check` when a loop may raise an error. Fix, listen again. Before
 `score_render`: a section change at least every 16 bars and a variation
 every 4, transitions on the boundaries, a resolved ending, a mix and a

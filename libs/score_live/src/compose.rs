@@ -247,7 +247,7 @@ impl Composer {
         }
     }
 
-    fn section_index_at(&mut self, beat: f64) -> Option<usize> {
+    pub(crate) fn section_index_at(&mut self, beat: f64) -> Option<usize> {
         let bar = self.doc.beats_per_bar();
         loop {
             let &(start, index, place) = self.timeline.entries.last()?;

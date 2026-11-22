@@ -1810,4 +1810,26 @@ fn a_library_patch_plays_or_says_the_library_is_missing() {
         let plain = render(&plays("Tandem{}", A_NOTE), &opts, &NoSamples).unwrap_or_else(|d| panic!("{d:?}"));
         assert_ne!(rendered.left, plain.left, "the patch plays the starting sound");
     }
+
+    // The rest outlasts the capture limit. The final three seconds match the
+    // catalogue's root note at velocity 100, held for 1.5 seconds.
+    use makepad_strict_json::{self as json, Value};
+    let sub = crate::palette::entries().into_iter().find(|e| e.id == "patch:sub").unwrap();
+    let source = format!(
+        "use mod.score.*\nlet clock = Clock{{bpm: 60 sig: [8 4]}}\nlet inst = {}\nlet line = Loop{{play: inst beats: 8 notes: [[5 {} 1.5 {}]]}}\nlet quiet = Bus{{}}\nScore{{clock inst line quiet}}\n",
+        sub.code(), sub.root, 100.0 / 127.0,
+    );
+    let args = json::obj(vec![("source", json::s(source)), ("bars", Value::Int(1))]);
+    let heard = crate::tools::call("score_listen", &args, None).unwrap();
+    let nodes = heard.get("nodes").expect("score_listen rendered the one-note score");
+    assert!(nodes.get("quiet").unwrap().get("measured").is_none(), "silent bus: {nodes:?}");
+    let measured = nodes.get("line").unwrap().get("measured").expect("the sub note sounded");
+    let number = |key| match measured.get(key) {
+        Some(Value::Int(v)) => *v as f32,
+        Some(Value::F64(v)) => *v as f32,
+        value => panic!("expected a number for {key}, got {value:?}"),
+    };
+    let expected = sub.features.unwrap();
+    assert!((number("attack_ms") - expected.attack_ms).abs() <= 5.0, "sub attack: {measured:?} vs {expected:?}");
+    assert!((number("centroid_hz") - expected.centroid).abs() <= 0.1 * expected.centroid, "sub centroid: {measured:?} vs {expected:?}");
 }
