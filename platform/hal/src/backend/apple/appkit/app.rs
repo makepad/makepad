@@ -106,6 +106,10 @@ pub struct App {
     /// pointers to them past `windowWillClose:`) and are flagged retired
     windows: RefCell<Vec<&'static Win>>,
     ime: RefCell<ImeKeyboard>,
+    /// the key each held key (by `keyCode`) reported when pressed: its release reports the same
+    /// one when the layout's character for it moved meanwhile (Command let go first on a layout
+    /// that switches under Command), so no key stays down
+    held_keys: RefCell<HashMap<u16, makepad_key_code::KeyCode>>,
     last_key_mod: Cell<u32>,
     /// the main menu consumed the key event being dispatched (`menuAction:` ran)
     menu_command_fired: Cell<bool>,
@@ -146,6 +150,7 @@ pub fn app() -> &'static App {
             classes: OnceCell::new(),
             windows: RefCell::new(Vec::new()),
             ime: RefCell::new(ImeKeyboard::default()),
+            held_keys: RefCell::new(HashMap::new()),
             last_key_mod: Cell::new(0),
             menu_command_fired: Cell::new(false),
             menu_sid: Cell::new(0),
@@ -650,10 +655,11 @@ unsafe fn process_ns_event(event: ObjcId) {
     match kind {
         NSEventType::NSKeyUp => {
             let native_key: u16 = msg_send![event, keyCode];
+            let held = a.held_keys.borrow_mut().remove(&native_key);
             if !a.ime.borrow_mut().key_up(native_key) {
                 return;
             }
-            if let (Some(key), Some(win)) = (keys::get_event_keycode(event), key_window(event)) {
+            if let (Some(key), Some(win)) = (held.or_else(|| keys::get_event_keycode(event)), key_window(event)) {
                 win.key(key.to_index(), false, keys::event_mods(event), false);
             }
         }
@@ -666,6 +672,7 @@ unsafe fn process_ns_event(event: ObjcId) {
                 return;
             }
             let (Some(key), Some(win)) = (keys::get_event_keycode(event), key_window(event)) else { return };
+            a.held_keys.borrow_mut().insert(native_key, key);
             let mods = keys::event_mods(event);
             if (mods & (input::MOD_LOGO | input::MOD_CONTROL)) != 0 && key == makepad_key_code::KeyCode::KeyV {
                 // the paste chord: the pasteboard's text arrives as an event, ahead of the key

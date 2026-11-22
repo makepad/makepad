@@ -17,8 +17,8 @@ use std::time::Duration;
 
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cap grab", "[session=<n>] [window=<index>] [timeout=3000] [file=<path.mkcap>]", "record the app's next complete frame (every pass, draw, shader, buffer and texture) and save it"),
-    ("cap frame", "[file=<x.mkcap>]", "the captured frame: passes, draws by owner, shaders, resources, what was not captured"),
-    ("cap draws", "[pass=P<k>] [owner=<text>] [sort=order|pixels] [n=40]", "the draw list with owners, shaders and pixels each draw changed"),
+    ("cap frame", "[file=<x.mkcap>]", "the newest capture (recorded on first use when there is none; cap grab records a new one): passes, draws by owner, shaders, resources, what was not captured"),
+    ("cap draws", "[pass=P<k>] [owner=<text>] [sort=order|pixels] [n=40]", "the newest capture's draw list with owners, shaders and pixels each draw changed (cap grab records a new frame)"),
     ("cap draw", "D<k>", "one draw: owner, shader and its source, state, bound textures and buffers, instances, pixels changed"),
     ("cap code", "D<k>|S<k>", "a draw's pipeline: its shader's source location and the backend code it runs"),
     ("cap rt", "D<k> [png=<path>] [max=1000] [mark=0] [wire=1]", "the render target right after a draw, as a PNG for viewing (wire=1: the draw's triangle edges over it)"),
@@ -209,6 +209,17 @@ fn kb(b: u64) -> String {
 fn ms(ns: u64) -> String {
     let m = ns as f64 / 1e6;
     if m < 0.1 { format!("{} µs", sig(ns as f64 / 1e3)) } else { format!("{} ms", sig(m)) }
+}
+
+fn capture_age(at_unix_ms: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let age = now.saturating_sub(Duration::from_millis(at_unix_ms));
+    match age.as_secs() {
+        0 => format!("{:.1} s", age.as_secs_f64()),
+        s @ 1..=59 => format!("{s} s"),
+        s @ 60..=3599 => format!("{} min", s / 60),
+        s => format!("{} h", s / 3600),
+    }
 }
 
 fn short(s: &str, n: usize) -> String {
@@ -499,6 +510,7 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if let Some(params) = makepad_remote::params::inspect(&what) {
         if let Err(e) = req.validate_params(params) { out.err(&e); return true; }
     }
+    let mut newest = None;
     let r = match sub {
         "grab" => grab(req).map(|(c, path)| {
             let mut t = frame_text(&c);
@@ -514,17 +526,20 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
             (None, _) => Err("no capture yet; try: cap grab".into()),
             (_, None) => Err("cap save <path.mkcap>".into()),
         },
-        "frame" | "draws" | "draw" | "code" | "rt" | "pixel" | "overdraw" | "mesh" | "tex" | "time" => source(req).and_then(|c| match sub {
-            "frame" => Ok(frame_text(&c)),
-            "draws" => draws_text(&c, req),
-            "draw" => draw_text(&c, req),
-            "code" => code_text(&c, req),
-            "mesh" => mesh_text(&c, req),
-            "rt" => rt_text(&c, req),
-            "pixel" => pixel_text(&c, req),
-            "overdraw" => overdraw_text(&c, req),
-            "tex" => tex_text(&c, req),
-            _ => time_text(&c, req),
+        "frame" | "draws" | "draw" | "code" | "rt" | "pixel" | "overdraw" | "mesh" | "tex" | "time" => source(req).and_then(|c| {
+            newest = req.get("file").is_none().then_some((c.frame, c.at_unix_ms));
+            match sub {
+                "frame" => Ok(frame_text(&c)),
+                "draws" => draws_text(&c, req),
+                "draw" => draw_text(&c, req),
+                "code" => code_text(&c, req),
+                "mesh" => mesh_text(&c, req),
+                "rt" => rt_text(&c, req),
+                "pixel" => pixel_text(&c, req),
+                "overdraw" => overdraw_text(&c, req),
+                "tex" => tex_text(&c, req),
+                _ => time_text(&c, req),
+            }
         }),
         _ => Err(format!("no cap command `{sub}`; try: cap grab | frame | draws | draw D<k> | code D<k> | rt D<k> | pixel x,y | overdraw | mesh D<k> | tex X<k> | time | save | list")),
     };
@@ -535,6 +550,10 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
         _ => "replay",
     };
     out.measured(&what, src, &[]);
+    if let Some((frame, at)) = newest {
+        let age = capture_age(at);
+        out.line(&format!("F{frame} was recorded {age} ago and is the newest capture; cap grab records the current frame."));
+    }
     match r {
         Ok(text) => {
             for l in text.lines() {

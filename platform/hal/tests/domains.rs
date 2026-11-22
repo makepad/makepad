@@ -372,6 +372,10 @@ fn a_wm_runs_two_child_domains() {
     hal.submit(&pw.buf());
     assert_eq!(rig.stats(plain).denied, 4);
     assert_eq!(rig.stats(a).forwarded, 1);
+    pw.clear();
+    pw.parent_message(b"no window host");
+    hal.submit(&pw.buf());
+    assert_eq!(rig.stats(plain).denied, 5, "a parentless session on a backend without a window host is denied");
 
     // focus: keyboard / IME / cursor / clipboard requests of a child count only while it has it
     let ask = |hal: &Hal, d: u32| {

@@ -371,6 +371,7 @@ impl Cx {
                 && (live[draw_pass_id.0] == Some(true) || requested)
             {
                 self.passes[draw_pass_id].time_fps_frames.asked = false;
+                self.passes[draw_pass_id].reads_time = false;
                 passes_todo.push(draw_pass_id);
                 window_requested |= requested && self.pass_root_window(draw_pass_id).is_some();
             }
@@ -1410,6 +1411,11 @@ impl Cx {
         }
         SEEN.store(seen, Ordering::Relaxed);
         self.live_patches = seen;
+        // files the app read that the save changed: after its code and designs are in, so a
+        // file that needs the save's new code is taken in by it
+        if !patched.resources.is_empty() {
+            self.call_event_handler(&Event::ResourcesChanged(crate::event::ResourcesChangedEvent { paths: patched.resources }));
+        }
         self.redraw_all();
         // the wake may be a restart request (std::relax::restart_requested)
         crate::restart::poll_requested();
@@ -2064,8 +2070,8 @@ impl Cx {
         // now, except those a live draw call still names (see
         // `CxGeometryPool`); the scan runs only when something was dropped.
         if self.geometries.has_unreleased() {
-            let referenced = self.draw_lists.referenced_geometries();
-            self.geometries.release_unreferenced(&referenced);
+            self.draw_lists.referenced_geometries_into(&mut self.referenced_geometries);
+            self.geometries.release_unreferenced(&self.referenced_geometries);
         }
 
         if Cx::has_studio_web_socket() {
@@ -2137,7 +2143,11 @@ pub(crate) fn samples_incomplete_target(
 #[allow(dead_code)]
 pub(crate) struct SampledPicture {
     /// A producer still has to paint it ([`samples_incomplete_target`]): the
-    /// consumer paints again after it.
+    /// consumer paints again after it. Not a producer the consumer feeds (a
+    /// feedback read: a probe field's relight reads the field its own chain
+    /// paints after it): counted, a settled loop re-dirtied itself at every
+    /// paint and repainted every pass it feeds each frame, so a scene that
+    /// stood still never stopped painting.
     pub(crate) to_paint: bool,
     /// A producer's picture is unfinished (`CxDrawPass::incomplete`: painted
     /// with a draw left out, or keeping an older picture, while a pipeline
@@ -2188,7 +2198,9 @@ pub(crate) fn sampled_picture(
         if painted_now {
             fresh = Some(fresh.unwrap_or(false) | pass.incomplete);
         } else {
-            picture.to_paint |= pass.paint_dirty;
+            // A producer the consumer feeds (its consumer, painted after it by construction) is a
+            // feedback read: the consumer reads its last picture by design and owes it no paint.
+            picture.to_paint |= pass.paint_dirty && !feeds(passes, consumer, producer);
             picture.unfinished |= if pass.paint_dirty { pass.left_out } else { pass.incomplete };
         }
     }
@@ -2196,6 +2208,21 @@ pub(crate) fn sampled_picture(
         Some(unfinished) => SampledPicture { to_paint: false, unfinished },
         None => picture,
     }
+}
+
+/// Whether `pass` paints into `consumer` through its chain of parents: `consumer` samples its
+/// output, so it paints after `pass`.
+fn feeds(passes: &crate::draw_pass::CxDrawPassPool, pass: DrawPassId, consumer: DrawPassId) -> bool {
+    let mut id = pass;
+    // a cycle in stale parent links (recycled pass slots) ends the walk
+    for _ in 0..passes.0.pool.len() {
+        match passes[id].parent {
+            CxDrawPassParent::DrawPass(parent) if parent == consumer => return true,
+            CxDrawPassParent::DrawPass(parent) => id = parent,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// A drawing kept for a frame drawn again (`Cx::keep_unrepeated_recordings`):
@@ -2352,6 +2379,18 @@ mod tests {
         for n in 3..6 {
             assert_eq!(frame(&mut cx, n, [false, true]), (true, true), "frame {n}: `a` leaves its own draw out again");
         }
+        // `b` still to paint is owed a paint by an unrelated reader of its picture, not by one
+        // that paints into it (`a` under `b`: `b` samples it, so `a` paints first and reads
+        // `b`'s last picture by design). Counted, a loop that stood still dirtied itself at
+        // every paint and repainted every pass it feeds each frame (fast GI under a held
+        // scene, 11-22).
+        cx.passes[b].paint_dirty = true;
+        let unrelated = sampled_picture(&cx.passes, &cx.textures, tb.texture_id(), a, 6);
+        assert!(unrelated.to_paint, "an unrelated reader is owed `b`'s paint");
+        cx.passes[a].parent = CxDrawPassParent::DrawPass(b);
+        let feedback = sampled_picture(&cx.passes, &cx.textures, tb.texture_id(), a, 6);
+        assert!(!feedback.to_paint, "a feedback read is owed nothing");
+        assert_eq!(feedback.unfinished, unrelated.unfinished, "and sees the same picture of `b`");
     }
 
     /// A target two passes of one recording write: `a` writes `t`, `b` reads it into `u`, `c`
@@ -2956,6 +2995,20 @@ mod tests {
         cx.request_remote_window_present(window);
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.contains(&pass), "an explicit repaint paints the window");
+        // and only the window: a child pass that already painted its list keeps its picture
+        // (painted again, a pass that reads its own last picture stepped on, and two grabs of a
+        // still window differed)
+        let (child, _child_list) = pass_with_current_list(&mut cx);
+        let child = child.draw_pass_id();
+        cx.passes[child].parent = CxDrawPassParent::DrawPass(pass);
+        cx.repaint_pass_and_child_passes(pass);
+        cx.note_window_redraw();
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert!(todo.contains(&child), "the child paints with its window");
+        cx.passes[child].paint_dirty = false;
+        cx.request_remote_window_present(window);
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert!(todo.contains(&pass) && !todo.contains(&child), "a remote present repaints the window alone: {todo:?}");
     }
 
     #[test]
@@ -2963,19 +3016,38 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (animated, _animated_list) = pass_with_current_list(&mut cx);
         let (idle, _idle_list) = pass_with_current_list(&mut cx);
-        let (animated, idle) = (animated.draw_pass_id(), idle.draw_pass_id());
+        let (animated, idle_id) = (animated.draw_pass_id(), idle.draw_pass_id());
         let mut todo = Vec::new();
 
         cx.passes[animated].repaint_next = true;
         cx.demo_time_repaint = true;
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(todo, vec![animated]);
-        assert!(!cx.passes[idle].paint_dirty);
+        assert!(!cx.passes[idle_id].paint_dirty);
 
         // The flag is used up: without another request nothing repaints.
         cx.passes[animated].paint_dirty = false;
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert!(todo.is_empty());
+
+        // A picture that never read the clock does not change with it.
+        idle.set_own_time(&mut cx, Some(2.0));
+        cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+        assert!(todo.is_empty(), "an owner time alone repaints nothing that ignores it");
+        assert!(!cx.passes[idle_id].request_time_repaint(0.0, &mut cx.time_fps_clock), "its paint now reads the clock");
+        for time in [3.0, 4.0] {
+            idle.set_own_time(&mut cx, Some(time));
+            cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
+            assert_eq!(todo, [idle_id], "a changed owner clock repaints the recording");
+            cx.passes[idle_id].paint_dirty = false;
+            for fps in [0.0, 12.0] {
+                assert!(!cx.passes[idle_id].request_time_repaint(fps, &mut cx.time_fps_clock));
+            }
+            assert!(cx.time_fps_clock.next_due.is_none(), "an owner clock schedules no wake");
+            idle.set_own_time(&mut cx, Some(time));
+            cx.compute_pass_repaint_order(&mut todo, 1.0, 0.0);
+            assert!(todo.is_empty(), "holding the owner's time leaves the recording clean");
+        }
     }
 
     #[test]
@@ -2983,6 +3055,9 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (pass, _list) = pass_with_current_list(&mut cx);
         let pass = pass.draw_pass_id();
+        let (owned, _owned_list) = pass_with_current_list(&mut cx);
+        let owned_id = owned.draw_pass_id();
+        owned.set_own_time(&mut cx, Some(42.0));
         let mut todo = Vec::new();
 
         assert_eq!(cx.pass_time(100.0), 0.0);
@@ -2993,12 +3068,25 @@ mod tests {
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
         assert_eq!(cx.pass_time(101.0), 1.0);
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
-        assert_eq!(cx.pass_time(101.5), 1.5);
+        let stamp = cx.pass_time(101.5);
+        assert_eq!(stamp, 1.5);
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.passes[owned_id].set_time(stamp, uniforms_gen);
+        assert_eq!(cx.passes[owned_id].pass_uniforms.time, 42.0);
+        cx.passes[owned_id].paint_dirty = false;
 
         // Once it painted without asking again, the next repaint starts the clock over.
         cx.passes[pass].paint_dirty = false;
         cx.compute_pass_repaint_order(&mut todo, 0.0, 0.0);
-        assert_eq!(cx.pass_time(200.0), 0.0);
+        let stamp = cx.pass_time(200.0);
+        assert_eq!(stamp, 0.0);
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.passes[owned_id].set_time(stamp, uniforms_gen);
+        assert_eq!(cx.passes[owned_id].pass_uniforms.time, 42.0, "a frame-clock rebase preserves owner time");
+        owned.set_own_time(&mut cx, None);
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.passes[owned_id].set_time(stamp, uniforms_gen);
+        assert_eq!(cx.passes[owned_id].pass_uniforms.time, stamp, "None restores frame stamps");
         assert_eq!(cx.pass_time(200.25), 0.25);
 
         // A pass that still owes a frame but was left behind by a redraw can't paint, so it owes nothing.

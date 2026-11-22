@@ -170,6 +170,74 @@ pub fn threads_waited_ns(skip: impl Fn(&str) -> bool) -> u64 {
     0
 }
 
+/// How many of the process's threads wait in the kernel uninterruptibly now: on the disk (a
+/// file's sync, a read) or on a page it reads in. Such a thread runs no CPU and is not idle. Not
+/// those whose names `skip` picks (a name as the OS keeps it: Linux cuts it to 15 bytes). Linux
+/// reads each thread's state from /proc/self/task/<tid>/stat (`D`): a small file a thread, so a
+/// caller reads it seldom (a test's wait, once a look).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn threads_in_io_wait(skip: impl Fn(&str) -> bool) -> u32 {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else { return 0 };
+    let mut waiting = 0;
+    for task in tasks.flatten() {
+        // "tid (comm) state ...": the comm may hold spaces and parentheses
+        let stat = std::fs::read_to_string(task.path().join("stat")).unwrap_or_default();
+        let Some((head, rest)) = stat.rsplit_once(')') else { continue };
+        let name = head.split_once('(').map_or("", |(_, name)| name);
+        if rest.split_whitespace().next() == Some("D") && !skip(name) {
+            waiting += 1;
+        }
+    }
+    waiting
+}
+
+/// See the Linux one: macOS keeps each thread's run state (THREAD_EXTENDED_INFO,
+/// TH_STATE_UNINTERRUPTIBLE).
+#[cfg(target_os = "macos")]
+pub fn threads_in_io_wait(skip: impl Fn(&str) -> bool) -> u32 {
+    #[repr(C)]
+    struct Ext { user: u64, system: u64, cpu_usage: i32, policy: i32, run_state: i32, flags: i32, sleep_time: i32, curpri: i32, pri: i32, maxpri: i32, name: [std::ffi::c_char; 64] }
+    extern "C" {
+        static mach_task_self_: u32;
+        fn task_threads(task: u32, list: *mut *mut u32, count: *mut u32) -> i32;
+        fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        fn mach_port_deallocate(task: u32, name: u32) -> i32;
+        fn mach_vm_deallocate(task: u32, address: u64, size: u64) -> i32;
+    }
+    const THREAD_EXTENDED_INFO: i32 = 5;
+    const TH_STATE_UNINTERRUPTIBLE: i32 = 4;
+    let mut waiting = 0;
+    // SAFETY: the task's own thread list, each port released and the list deallocated after use;
+    // `ext` is a zeroed THREAD_EXTENDED_INFO of the count passed
+    unsafe {
+        let task = mach_task_self_;
+        let (mut list, mut count): (*mut u32, u32) = (std::ptr::null_mut(), 0);
+        if task_threads(task, &mut list, &mut count) != 0 {
+            return 0;
+        }
+        for &thread in std::slice::from_raw_parts(list, count as usize) {
+            let mut ext: Ext = std::mem::zeroed();
+            let mut n = (std::mem::size_of::<Ext>() / 4) as u32;
+            if thread_info(thread, THREAD_EXTENDED_INFO, &mut ext as *mut Ext as *mut i32, &mut n) == 0
+                && ext.run_state == TH_STATE_UNINTERRUPTIBLE
+                && !skip(&std::ffi::CStr::from_ptr(ext.name.as_ptr()).to_string_lossy())
+            {
+                waiting += 1;
+            }
+            mach_port_deallocate(task, thread);
+        }
+        mach_vm_deallocate(task, list as u64, count as u64 * 4);
+    }
+    waiting
+}
+
+/// See the Linux one: Windows keeps no such state outside its event tracing, and answers 0.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+pub fn threads_in_io_wait(skip: impl Fn(&str) -> bool) -> u32 {
+    let _ = skip;
+    0
+}
+
 /// The processes `pid` started that run now, and the ones they started in turn (not `pid`), each
 /// as (its pid, its CPU so far in nanoseconds), into `out`: what a program runs in the programs it
 /// launched (a tool it runs for a request, a build), which its own CPU time does not show. A

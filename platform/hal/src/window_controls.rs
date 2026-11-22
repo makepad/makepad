@@ -244,6 +244,12 @@ pub mod hosted_window_op {
     /// host's other windows (`x` 1) or stop (`x` 0) (`WindowHandle::set_topmost`). Sent
     /// after the window's creation, and again on it while the window is topmost.
     pub const TOPMOST: u8 = 9;
+    /// Child to host, for any of its windows (the first too): the host gives the window its
+    /// window buttons (`x` 1: the app shows none of its own now, a chromeless window or one in
+    /// full screen with no caption) or leaves them to the app (`x` 0, as when nothing is said).
+    /// A WM shows its plain caption over such a full-screen window at the top edge, the only
+    /// way out of it by the mouse (the platform's `WindowButtons` under a WM).
+    pub const HOST_BUTTONS: u8 = 10;
 }
 
 /// A hosted app's windows after its first (an output window, a second view): the host
@@ -297,6 +303,8 @@ mod hosted_window_tests {
         assert_eq!(HostedWindow::parse(&title.to_json()), Some(title));
         let mv = HostedWindow { x: 1610.5, y: -2.0, ..HostedWindow::new(3, hosted_window_op::MOVE) };
         assert_eq!(HostedWindow::parse(&mv.to_json()), Some(mv));
+        let buttons = HostedWindow { x: 1.0, ..HostedWindow::new(0, hosted_window_op::HOST_BUTTONS) };
+        assert_eq!(HostedWindow::parse(&buttons.to_json()), Some(buttons));
         assert_eq!(HostedWindow::parse(&HostedResize { w: 1.0, h: 2.0 }.to_json()), None);
         // a clipboard's flavours, quotes, new lines and non-ASCII text included
         let clip = HostedClipboard { request: 7, text: "a\tb \"c\"\n—".into(), html: "<p class=\"x\">a</p>\n".into(), markdown: "**a** `b`\n".into() };

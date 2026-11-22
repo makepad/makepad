@@ -47,9 +47,54 @@ pub fn event_button_number(event: ObjcId) -> usize {
     unsafe { msg_send![event, buttonNumber] }
 }
 
+/// The key of a key-down or key-up event. `keyCode` is where the key sits (its US-layout name), so a
+/// letter or punctuation key is named by the character the active layout gives it instead, as
+/// Win32's virtual keys and XKB's keysyms already name it: a shortcut follows the letter a Dvorak,
+/// Colemak or AZERTY user presses. The character is the one the key types under the event's
+/// Command alone (a layout that switches to QWERTY under Command keeps its QWERTY shortcuts).
+/// Main thread only: off it, AppKit's layout lookup waits on the main queue.
 pub fn get_event_keycode(event: ObjcId) -> Option<KeyCode> {
     let scan_code: std::os::raw::c_ushort = unsafe { msg_send![event, keyCode] };
+    let position = position_keycode(scan_code)?;
+    if !LAYOUT_KEYS.iter().any(|(key, _)| *key == position) {
+        return Some(position);
+    }
+    let flags: u64 = unsafe { msg_send![event, modifierFlags] };
+    let command = flags & NSEventModifierFlags::NSCommandKeyMask as u64;
+    let typed: ObjcId = unsafe { msg_send![event, charactersByApplyingModifiers: command] };
+    let typed = if typed == nil { None } else { nsstring_to_string(typed).chars().next() };
+    Some(layout_keycode(position, typed))
+}
 
+/// The keys a layout gives its own characters, and what each types on a US layout.
+const LAYOUT_KEYS: [(KeyCode, char); 37] = [
+    (KeyCode::KeyA, 'a'), (KeyCode::KeyB, 'b'), (KeyCode::KeyC, 'c'), (KeyCode::KeyD, 'd'),
+    (KeyCode::KeyE, 'e'), (KeyCode::KeyF, 'f'), (KeyCode::KeyG, 'g'), (KeyCode::KeyH, 'h'),
+    (KeyCode::KeyI, 'i'), (KeyCode::KeyJ, 'j'), (KeyCode::KeyK, 'k'), (KeyCode::KeyL, 'l'),
+    (KeyCode::KeyM, 'm'), (KeyCode::KeyN, 'n'), (KeyCode::KeyO, 'o'), (KeyCode::KeyP, 'p'),
+    (KeyCode::KeyQ, 'q'), (KeyCode::KeyR, 'r'), (KeyCode::KeyS, 's'), (KeyCode::KeyT, 't'),
+    (KeyCode::KeyU, 'u'), (KeyCode::KeyV, 'v'), (KeyCode::KeyW, 'w'), (KeyCode::KeyX, 'x'),
+    (KeyCode::KeyY, 'y'), (KeyCode::KeyZ, 'z'),
+    (KeyCode::Minus, '-'), (KeyCode::Equals, '='), (KeyCode::LBracket, '['), (KeyCode::RBracket, ']'),
+    (KeyCode::Backslash, '\\'), (KeyCode::Semicolon, ';'), (KeyCode::Quote, '\''), (KeyCode::Comma, ','),
+    (KeyCode::Period, '.'), (KeyCode::Slash, '/'), (KeyCode::Backtick, '`'),
+];
+
+/// The key a layout key at `position` names when it types `typed`: the key of that letter or
+/// punctuation mark, or the position when the character has no key of its own (none for a dead
+/// key, a non-Latin letter: such a layout's shortcuts stay on the US positions, as AppKit's do).
+/// Digits, editing, function and numpad keys are never layout keys and keep their position.
+fn layout_keycode(position: KeyCode, typed: Option<char>) -> KeyCode {
+    if !LAYOUT_KEYS.iter().any(|(key, _)| *key == position) {
+        return position;
+    }
+    typed
+        .and_then(|c| LAYOUT_KEYS.iter().find(|(_, us)| *us == c.to_ascii_lowercase()))
+        .map_or(position, |(key, _)| *key)
+}
+
+/// The key at a `keyCode` position, by its name on a US layout.
+fn position_keycode(scan_code: u16) -> Option<KeyCode> {
     Some(match scan_code {
         0x00 => KeyCode::KeyA,
         0x01 => KeyCode::KeyS,

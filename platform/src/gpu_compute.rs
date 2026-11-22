@@ -312,7 +312,7 @@ impl Cx {
             if crate::gpu_frame_timer::enabled() {
                 let group = before.and_then(|p| self.get_pass_window_id(p)).map(|window|
                     (window.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id);
-                fb.timings.insert(serial, (group.unwrap_or(serial), pass.name.clone(), group.is_none()));
+                fb.time_pass(serial, group.unwrap_or(serial), &pass.name, group.is_none());
             }
             fb.stats.frames += 1;
             fb.stats.passes += 1;

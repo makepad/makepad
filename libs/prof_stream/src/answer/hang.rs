@@ -117,7 +117,29 @@ pub fn threads(a: &mut Answer) {
         head.push_str(&format!(" {} program threads wait on a lock or event.", waiting.len()));
     }
     a.head = head;
-    let mut t = Table::new(&["id", "name", "role", "state", "CPU s", "waits"]);
+    let mut t = Table::new(&["id", "name", "role", "state", "CPU s", "pri", "P s", "E s", "waits"]);
+    // where the OS tells them (macOS): the scheduling priority a thread runs at now (a range over
+    // a group) and its CPU on the performance and the efficiency cores; empty cells elsewhere, and
+    // the table drops a column no row fills
+    let os = |group: &[&Value]| -> [String; 3] {
+        let pris: Vec<f64> = group.iter().filter(|r| r.get("pri").is_some()).map(|r| f(r, "pri")).collect();
+        let pri = match (pris.iter().cloned().reduce(f64::min), pris.iter().cloned().reduce(f64::max)) {
+            (Some(lo), Some(hi)) if lo == hi => format!("{lo}"),
+            (Some(lo), Some(hi)) => format!("{lo}..{hi}"),
+            _ => String::new(),
+        };
+        if !group.iter().any(|r| r.get("p_ms").is_some()) {
+            return [pri, String::new(), String::new()];
+        }
+        let sum = |k: &str| sig(group.iter().map(|r| f(r, k)).sum::<f64>() / 1000.0);
+        [pri, sum("p_ms"), sum("e_ms")]
+    };
+    let row = |cells: [String; 5], group: &[&Value], waits: String| -> Vec<String> {
+        let mut v: Vec<String> = cells.into();
+        v.extend(os(group));
+        v.push(waits);
+        v
+    };
     // a pool (3+ threads named `<base>-<n>` / `<base><n>`, none waiting) is one row
     let base = |n: &str| n.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end_matches(['-', '_', ' ']).to_string();
     let mut pools: Vec<(String, Vec<&Value>)> = Vec::new();
@@ -143,33 +165,32 @@ pub fn threads(a: &mut Answer) {
             done.push(p.0.clone());
             let ids: Vec<&str> = p.1.iter().map(|x| s(x, "id")).collect();
             let running = p.1.iter().filter(|x| s(x, "state") == "running").count();
-            t.row(vec![format!("{}..{}", ids[0], ids[ids.len() - 1]), format!("{}* ({} threads)", p.0, ids.len()), s(r, "role").into(), format!("{} running", running), sig(p.1.iter().map(|x| f(x, "cpu_ms")).sum::<f64>() / 1000.0), String::new()]);
+            t.row(row([format!("{}..{}", ids[0], ids[ids.len() - 1]), format!("{}* ({} threads)", p.0, ids.len()), s(r, "role").into(), format!("{} running", running), sig(p.1.iter().map(|x| f(x, "cpu_ms")).sum::<f64>() / 1000.0)], &p.1, String::new()));
             continue;
         }
         let name = if n.is_empty() { "(unnamed)" } else { n };
-        t.row(vec![s(r, "id").into(), name.into(), s(r, "role").into(), s(r, "state").into(), sig(f(r, "cpu_ms") / 1000.0), a.names.text(s(r, "waits"))]);
+        t.row(row([s(r, "id").into(), name.into(), s(r, "role").into(), s(r, "state").into(), sig(f(r, "cpu_ms") / 1000.0)], &[*r], a.names.text(s(r, "waits"))));
     }
     // Relax's threads: one row per role, a busy one (5% or more of the CPU) on its own
-    let mut roles: Vec<(String, usize, f64, Vec<String>)> = Vec::new();
+    let mut roles: Vec<(String, Vec<&Value>)> = Vec::new();
     for r in &rt {
         let c = f(r, "cpu_ms");
         if c * 100.0 / total >= 5.0 || !s(r, "waits").is_empty() && s(r, "role") == "owner" {
-            t.row(vec![s(r, "id").into(), s(r, "name").into(), s(r, "role").into(), s(r, "state").into(), sig(c / 1000.0), a.names.text(s(r, "waits"))]);
+            t.row(row([s(r, "id").into(), s(r, "name").into(), s(r, "role").into(), s(r, "state").into(), sig(c / 1000.0)], &[*r], a.names.text(s(r, "waits"))));
             continue;
         }
         let role = s(r, "role").to_string();
         match roles.iter_mut().find(|x| x.0 == role) {
-            Some(x) => {
-                x.1 += 1;
-                x.2 += c;
-                x.3.push(s(r, "id").to_string());
-            }
-            None => roles.push((role, 1, c, vec![s(r, "id").to_string()])),
+            Some(x) => x.1.push(*r),
+            None => roles.push((role, vec![*r])),
         }
     }
-    for (role, n, c, ids) in &roles {
+    for (role, group) in &roles {
+        let ids: Vec<&str> = group.iter().map(|r| s(r, "id")).collect();
         let span = if ids.len() > 3 { format!("{}..{}", ids[0], ids[ids.len() - 1]) } else { ids.join(",") };
-        t.row(vec![span, format!("{} thread{}", n, if *n == 1 { "" } else { "s" }), role.clone(), String::new(), sig(c / 1000.0), String::new()]);
+        let n = group.len();
+        let c: f64 = group.iter().map(|r| f(r, "cpu_ms")).sum();
+        t.row(row([span, format!("{} thread{}", n, if n == 1 { "" } else { "s" }), role.clone(), String::new(), sig(c / 1000.0)], group, String::new()));
     }
     a.line(&t.md());
     a.more("stacks thread=<id>");

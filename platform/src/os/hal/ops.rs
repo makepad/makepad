@@ -214,20 +214,6 @@ impl Cx {
     }
 
     fn hal_file_dialog(&mut self, kind: DialogKind, settings: crate::file_dialogs::FileDialog) {
-        // A host that draws the pickers for its children (the Linux WM: a hosted child has no
-        // display of its own to show one on) gets the request, and its answer arrives as the
-        // same `FileDialogAction` (hosted_relay.rs).
-        if self.hal.hosted.is_some() && crate::hosted_relay::host_serves_file_dialogs() {
-            let name = match kind {
-                DialogKind::SelectFile => "select_file",
-                DialogKind::SaveFile => "save_file",
-                DialogKind::SelectFolder => "select_folder",
-                DialogKind::SaveFolder => "save_folder",
-            };
-            let relay = crate::hosted_relay::relay_file_dialog(name, &settings);
-            Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::FileDialog(relay)));
-            return;
-        }
         self.hal.next_dialog += 1;
         let req = self.hal.next_dialog;
         self.hal.dialogs.insert(req, PendingDialog { kind, id: settings.id });
@@ -263,6 +249,14 @@ impl Cx {
         let fb = &mut self.hal.frames;
         let title = fb.intern(&job.title);
         fb.w.print_pdf(req, title, &job.pdf);
+    }
+
+    /// A hosted app's window `w` shows no window buttons of its own (`show`) or does: its host
+    /// gives it its own where it does not (`hosted_window_op::HOST_BUTTONS`).
+    fn hal_hosted_buttons(&mut self, w: WindowId, show: bool) {
+        if self.windows[w].is_created {
+            Self::send_hosted_window(makepad_hal::window_controls::HostedWindow { x: show as u8 as f64, ..makepad_hal::window_controls::HostedWindow::new(w.id(), makepad_hal::window_controls::hosted_window_op::HOST_BUTTONS) });
+        }
     }
 
     /// Drains the platform ops into HAL commands. False when the app asked to quit.
@@ -421,6 +415,10 @@ impl Cx {
                     self.hal.frames.w.window_state(hal_window_id(w), window_state::SHOW);
                     if self.hal.hosted.is_none() { self.hal.frames.w.activate_app(); }
                 }
+                // A hosted app's host gives a window its buttons where the app shows none: it is told
+                // by window id once the window exists there.
+                CxOsOp::HideWindowButtons(w) if self.hal.hosted.is_some() => self.hal_hosted_buttons(w, false),
+                CxOsOp::ShowWindowButtons(w) if self.hal.hosted.is_some() => self.hal_hosted_buttons(w, true),
                 CxOsOp::HideWindowButtons(w) => self.hal.frames.w.window_buttons(hal_window_id(w), false),
                 CxOsOp::ShowWindowButtons(w) => self.hal.frames.w.window_buttons(hal_window_id(w), true),
                 CxOsOp::CenterWindowButtons(w, y_center) => {

@@ -7,6 +7,7 @@ use {
         geometry::{Geometry, GeometryId},
         makepad_live_id::*,
         makepad_script::heap::ScriptHeap,
+        makepad_script::makepad_shader::FnReturnFacts,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::shader::*,
         makepad_script::shader_reflection::DrawShaderDesc,
@@ -188,6 +189,19 @@ impl CxDrawShaders {
 }
 
 impl Cx {
+    /// The return facts for the unique function with this key name. An unknown shader,
+    /// a prebuilt shader, a missing function or an overloaded name yields `None`.
+    pub fn draw_shader_return_facts(
+        &self,
+        shader: DrawShaderId,
+        key_name: LiveId,
+    ) -> Option<&FnReturnFacts> {
+        let mapping = &self.draw_shaders.shaders.get(shader.index)?.mapping;
+        let mut matches = mapping.return_facts.iter().filter(|f| f.key_name == key_name);
+        let facts = matches.next()?;
+        matches.next().is_none().then_some(facts)
+    }
+
     /// Whether draw shaders compile with the constant table: annotated float
     /// literals in fn bodies become hot-patchable scope-uniform slots
     /// instead of folded code. Explicit `set_shader_const_table_mode` wins;
@@ -1000,6 +1014,7 @@ pub struct CxDrawShaderMapping {
     pub samplers: Vec<ShaderSampler>,
     pub texture_sampler_indices: Vec<usize>,
     pub uses_time: bool,
+    pub return_facts: Box<[FnReturnFacts]>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
@@ -1611,6 +1626,7 @@ impl CxDrawShaderMapping {
             samplers: desc.samplers().to_vec(),
             texture_sampler_indices,
             uses_time: desc.uses_time(),
+            return_facts: desc.return_facts().into(),
             rect_pos,
             rect_size,
             draw_clip,

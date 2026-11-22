@@ -782,7 +782,7 @@ impl Gpu for D3d11 {
         self.encode_frame(s, sid, target, kind, packet, view, now)
     }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
-        let t = self.window_image(s, window);
+        let t = self.window_image_for(s.id, s, window);
         let rect = t.as_ref().map_or([0; 4], |t| [0, 0, t.desc.w, t.desc.h]);
         self.read(s, t, req, rect);
     }

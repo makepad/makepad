@@ -13,7 +13,27 @@
 
 use crate::buffers::CmdWriter;
 use crate::codec::{k, Field, Packer, Reader, CMD_WORDS};
-use crate::types::Cmd;
+use crate::types::{Cmd, Id};
+
+/// The render target layout a pipeline was probed in. A window keeps its key if the HAL
+/// replaces its target with another format. Metal can still repaint an unprobed draw it
+/// skipped by posting a repeat `PipelineReady`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipelineLayout {
+    /// The window whose colour zero is `format::WINDOW_TARGET`, or `Id::NONE` offscreen.
+    pub window: Id,
+    /// HAL formats in attachment order, with `ABSENT` for an unused slot.
+    pub colors: [u32; 4],
+    pub depth: u32,
+    pub samples: u8,
+    /// GPU multiview count. Side-by-side view rects use a single-view pipeline.
+    pub views: u8,
+}
+
+impl PipelineLayout {
+    /// An unused colour or depth attachment. Zero is the valid format `RGBA8`.
+    pub const ABSENT: u32 = u32::MAX;
+}
 
 macro_rules! hal_commands {
     ($($(#[doc = $doc:literal])* $name:ident = $tag:literal, $ctor:ident { $($f:ident : $kind:ident),* $(,)? };)*) => {
@@ -230,11 +250,16 @@ hal_commands! {
     /// A frame draws the pipeline while the HAL still compiles it: its compile goes ahead of
     /// those no frame draws.
     PipelineWanted = 63, pipeline_wanted { id: obj };
+    /// A frame wants this pipeline in the session's interned layout. The low byte of
+    /// `samples_views` is samples per pixel and the high byte is the GPU view count.
+    PipelineWantedIn = 64, pipeline_wanted_in { id: obj, layout: u32, window: id, colors: urect, depth: u32, samples_views: flags };
 
     // ---- frames
     /// Render `packet` (index into `CmdBuf::frames`) to `target`; `kind` is `target::*`.
     Frame = 70, frame { target: obj, kind: u32, packet: u32 };
     /// Answered by a `Readback` event with the same `req`.
+    /// A borrower sees its own newest frame at full size. The host sees the presented window
+    /// including any layer, panel or badge.
     Snapshot = 72, snapshot { window: obj, req: u32 };
 
     /// Answers a `DragQuery` (`to` = [`input::reply::QUERY`], `answer` = a `drag_query` value) or a

@@ -930,6 +930,7 @@ impl State {
             | OsCmd::XrRefreshRate { .. }
             | OsCmd::XrHaptic { .. }
             | OsCmd::ClipboardActions { .. }
+            | OsCmd::HostMessage { .. }
             | OsCmd::ShareText { .. }
             | OsCmd::MobileUi { .. }
             | OsCmd::BackUnhandled

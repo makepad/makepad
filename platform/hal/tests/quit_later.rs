@@ -88,35 +88,38 @@ mod mac {
 
     const WIN: Id = Id::new(0, 1);
     const DEADLINE: Duration = Duration::from_secs(30);
-    const HELD: &str = "makepad-hal: the quit is held for the sessions (NSTerminateLater)";
-    const ACCEPTED: &str = "makepad-hal: the held quit ends the app (replyToApplicationShouldTerminate: YES)";
-    const CANCELLED: &str = "makepad-hal: the held quit was cancelled (replyToApplicationShouldTerminate: NO)";
-    const FAILED: &str = "makepad-hal: the held quit ends the app with 101: its thread panicked";
+    /// The child's own word that its quit was held (AppKit answered NSTerminateLater): the app ran on
+    /// while its quit waited for it, a frame presented and its main thread ran a block queued after
+    /// the ask. A quit answered NOW exits from inside AppKit's delegate and never runs that block (a
+    /// frame alone can present before that exit: a HAL that answered NOW passed on it, 11-22). (The
+    /// HAL's own lines for each answer went with the push review of 11-16.)
+    const HELD: &str = "quit_later: the app ran on while its quit was held (a frame, a main-thread block)";
+    /// The child's own word that `terminate:` returned: only a held quit answered NO returns it.
+    const CANCELLED: &str = "quit_later: terminate: returned after the session's QuitCancel";
 
-    /// A held-quit case's child ended as it should.
+    /// A held-quit case's child ended as it should. How each answer shows without the HAL saying it:
+    /// YES ends the process with 0 and the main loop never returns; a stop with a code (a panicking
+    /// thread's 101) ends it with that code, the main loop never returning; NO returns `terminate:`
+    /// and the app runs on until its main loop returns.
     pub fn check(case: &str, out: &Output, err: &str) {
-        assert!(err.contains(HELD), "{case}: AppKit was not answered NSTerminateLater");
+        assert!(err.contains(HELD), "{case}: AppKit was not answered NSTerminateLater (the app did not run on while its quit was held)");
         if case == "panic" {
-            assert_eq!(out.status.code(), Some(101), "panic: a held quit ended by a panicking thread keeps the failure code");
-            assert!(err.contains(FAILED), "panic: the stop path did not end the app with 101 itself");
-            assert!(!err.contains(ACCEPTED), "panic: the held termination was answered YES instead");
+            assert_eq!(out.status.code(), Some(101), "panic: a held quit ended by a panicking thread keeps the failure code (not YES's 0)");
+            assert!(!err.contains(RETURNED), "panic: the main loop returned instead of the stop path ending the app with 101 itself");
             return;
         }
         if case == "code" {
-            assert_eq!(out.status.code(), Some(CODE), "code: a held quit ended by a stop with a code keeps that code");
-            assert!(err.contains(&format!("makepad-hal: the held quit ends the app with {CODE}\n")), "code: the stop path did not end the app with the code itself");
-            assert!(!err.contains(ACCEPTED), "code: the held termination was answered YES instead");
+            assert_eq!(out.status.code(), Some(CODE), "code: a held quit ended by a stop with a code keeps that code (not YES's 0)");
             assert!(!err.contains(RETURNED), "code: the main loop returned instead of the stop ending the app");
             return;
         }
         assert!(out.status.success(), "{case}: the child failed: {}", out.status);
         if case == "quit" {
-            assert!(err.contains(ACCEPTED), "quit: the held termination was not answered YES");
-            assert!(!err.contains(RETURNED), "quit: the main loop returned instead of AppKit exiting");
+            assert!(!err.contains(RETURNED), "quit: the main loop returned instead of the held termination's YES ending the app");
+            assert!(!err.contains(CANCELLED), "quit: the held termination was answered NO");
         } else {
             assert!(err.contains(CANCELLED), "cancel: the held termination was not answered NO");
-            assert!(err.contains(RETURNED), "cancel: the main loop did not return after the session closed");
-            assert!(!err.contains(ACCEPTED), "cancel: the cancelled termination was also answered YES");
+            assert!(err.contains(RETURNED), "cancel: the main loop did not return after the session closed (the cancelled termination was answered YES too)");
         }
     }
 
@@ -182,6 +185,20 @@ mod mac {
         wait_for(hal, &mut store, case, "the session did not receive QUIT_REQUESTED", |e| {
             matches!(e, HalEvent::Lifecycle { kind: lifecycle::QUIT_REQUESTED })
         });
+        // held while the app finishes: its frames go on until it answers
+        w.clear();
+        present(hal, &mut w, 2);
+        wait_for(hal, &mut store, case, "no frame presented while the quit was held", |e| matches!(e, HalEvent::FrameDone { frame: 2, .. }));
+        // and the main thread runs on: AppKit waits for the answer in its run loop
+        let (ran_tx, ran_rx) = mpsc::sync_channel(1);
+        assert!(dispatch_main(move || { let _ = ran_tx.try_send(()); }), "{case}: the main loop did not accept a block while the quit was held");
+        let deadline = Instant::now() + DEADLINE;
+        while ran_rx.try_recv().is_err() {
+            assert!(Instant::now() < deadline, "{case}: the main thread did not run on while the quit was held");
+            let mut buf = store.buf();
+            hal.pump(10_000_000, &mut buf);
+        }
+        eprintln!("{HELD}");
 
         if case == "panic" {
             panic!("quit_later: the app panics while its quit is held");
@@ -204,9 +221,10 @@ mod mac {
             let mut buf = store.buf();
             hal.pump(10_000_000, &mut buf);
         }
+        eprintln!("{CANCELLED}");
         w.clear();
-        present(hal, &mut w, 2);
-        wait_for(hal, &mut store, case, "a frame did not present after NO", |e| matches!(e, HalEvent::FrameDone { frame: 2, .. }));
+        present(hal, &mut w, 3);
+        wait_for(hal, &mut store, case, "a frame did not present after NO", |e| matches!(e, HalEvent::FrameDone { frame: 3, .. }));
         w.clear();
         w.window_close(WIN);
         hal.submit(&w.buf());

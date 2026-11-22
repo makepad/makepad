@@ -722,6 +722,10 @@ impl Cx {
                     self.hal.frames.w.drag_reply(window, input::reply::QUERY, answer, fullscreen);
                 }
             }
+            #[cfg(target_os = "linux")]
+            HalEvent::AppMessage { message, .. } if message == makepad_hal::wm_socket::HOST_ATTACHED.as_bytes() => {
+                self.call_event_handler(&Event::HostAttached);
+            }
             HalEvent::AppMessage { window, message } => {
                 self.dispatch_studio_msg(makepad_studio_protocol::StudioToApp::Custom(String::from_utf8_lossy(message).into_owned()),
                     window_id(window), dvec2(0.0, 0.0));
@@ -1090,6 +1094,11 @@ impl Cx {
             HalEvent::PipelineReady { pipeline } => {
                 // a draw built before the pipeline was ready was skipped by the HAL: paint again
                 if self.hal.frames.pipeline_ready(pipeline) {
+                    self.hal_repaint_all(RepaintAll::PipelineReady);
+                }
+            }
+            HalEvent::PipelineLayoutReady { pipeline, layout } => {
+                if self.hal.frames.pipeline_layout_ready(pipeline, layout) {
                     self.hal_repaint_all(RepaintAll::PipelineReady);
                 }
             }

@@ -43,6 +43,8 @@ use std::time::Duration;
 
 /// The variable a WM sets for its children: the path of its socket.
 pub const SOCKET_ENV: &str = "MAKEPAD_WM_SOCKET";
+/// A replacement window host has attached. Each app session receives this as an app message.
+pub const HOST_ATTACHED: &str = r#"{"makepad_host_attached":{}}"#;
 /// The lane a test instance runs for (devhub's lease environment sets it for every lane run).
 pub const TEST_LANE_ENV: &str = "MAKEPAD_TEST_LANE";
 
@@ -353,7 +355,7 @@ static CLIENT_NAME: OnceLock<String> = OnceLock::new();
 
 /// The name a process gives the WM when it asks to be hosted (the WM finds the app's label
 /// and icon by it): its package. An app's `app_main` names its package
-/// (`discover_window_manager`) and a host running someone else's code (`makepad run`) names the
+/// (`name_for_window_manager`) and a host running someone else's code (`makepad run`) names the
 /// app it runs, both before opening the HAL; only a process that does neither falls back to the
 /// executable's name.
 pub fn set_client_name(name: &str) {
@@ -574,9 +576,12 @@ mod tests {
             let (backend, why) = choose(None, false, wayland, || Probe::Mismatch(7));
             assert_eq!(backend, Backend::Incompatible);
             assert!(why.contains("another hosted wire (0000000000000007)"), "{why}");
-            let (backend, why) = choose(None, false, wayland, || Probe::Incompatible { theirs: Versions { min: 3, max: 4 } });
+            let newer = Versions { min: Versions::THIS.max + 1, max: Versions::THIS.max + 2 };
+            let (backend, why) = choose(None, false, wayland, || Probe::Incompatible { theirs: newer });
             assert_eq!(backend, Backend::Incompatible);
-            assert!(why.contains("hosted protocol 3-4") && why.contains(&format!("this build {}-{}", Versions::THIS.min, Versions::THIS.max)), "{why}");
+            assert!(why.contains(&format!("hosted protocol {}-{}", newer.min, newer.max))
+                && why.contains(&format!("this build {}-{}", Versions::THIS.min, Versions::THIS.max)),
+                "the incompatibility names the newer WM's range and this build's range: {why}");
             let fallback = if wayland { Backend::Wayland } else { Backend::X11 };
             assert_eq!(choose(None, false, wayland, || Probe::Absent).0, fallback);
             assert_eq!(choose(None, false, wayland, || Probe::Dead("refused".into())).0, fallback);

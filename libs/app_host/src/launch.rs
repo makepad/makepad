@@ -140,10 +140,7 @@ pub fn signal_on_exit(_spawner: &ThreadSpawner, _child: &Child, _name: String) -
 pub fn configure(cmd: &mut Command, hub_port: u16, id: ClientId, bin: &str) {
     cmd.env("STUDIO_HOST", format!("http://127.0.0.1:{}", hub_port))
         .env("STUDIO_BUILD", id.to_string())
-        .env("STUDIO_CRATE", bin)
-        // A host that draws its children's pickers says so itself (the WM); this host's
-        // own host's promise is not this host's.
-        .env_remove(makepad_platform::hosted_relay::HOST_FILE_DIALOGS_ENV);
+        .env("STUDIO_CRATE", bin);
     #[cfg(unix)]
     own_process_group(cmd);
 }

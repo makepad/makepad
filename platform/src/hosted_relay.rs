@@ -203,18 +203,6 @@ pub fn permission_status_from_name(name: &str) -> PermissionStatus {
     }
 }
 
-/// Set by a host that shows the file and folder pickers for its children
-/// (the Linux WM draws them): a hosted child then relays its file dialogs
-/// instead of opening its own. Not passed on to a child's own children
-/// (`makepad_app_host::launch::configure` removes it).
-pub const HOST_FILE_DIALOGS_ENV: &str = "MAKEPAD_HOST_FILE_DIALOGS";
-
-/// Whether this process's host shows its file dialogs (`HOST_FILE_DIALOGS_ENV`).
-pub fn host_serves_file_dialogs() -> bool {
-    static SERVES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SERVES.get_or_init(|| std::env::var(HOST_FILE_DIALOGS_ENV).is_ok_and(|v| v == "1"))
-}
-
 pub fn relay_file_dialog(kind: &str, dialog: &FileDialog) -> RelayFileDialog {
     RelayFileDialog {
         id: dialog.id.0,

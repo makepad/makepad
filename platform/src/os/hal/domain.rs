@@ -63,15 +63,18 @@ impl Cx {
         self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::EMBEDDED != 0)
     }
 
-    /// Send an application message without a socket or a process-global routing slot.
+    /// Send a message to the app's window host: its parent domain, or the WM its shell is a client of.
     pub fn hal_send_parent_message(&self, message: &str) -> bool {
         let Some(sender) = self.hal_parent_sender() else { return false };
         sender.send(message);
         true
     }
 
+    /// A sender for the app's window host: its parent domain, or the WM its shell is a client of.
     pub fn hal_parent_sender(&self) -> Option<HalParentSender> {
-        self.hal_is_embedded().then(|| HalParentSender { session: self.hal.info.unwrap().session })
+        use makepad_hal::info_flags::{EMBEDDED, WM_HOSTED};
+        let info = self.hal.info?;
+        (info.flags & (EMBEDDED | WM_HOSTED) != 0).then_some(HalParentSender { session: info.session })
     }
 
     /// A correlated caption query; a later press cannot consume an earlier answer.

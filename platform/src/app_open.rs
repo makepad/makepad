@@ -143,13 +143,16 @@ mod native {
 
     /// Instances started for an agent, a test or a host run on their own:
     /// a `--remote` or hidden run must never land in the user's window, and
-    /// a hosted child belongs to its host. `MAKEPAD_NEW_INSTANCE=1` asks for
-    /// the same by hand.
+    /// a hosted child belongs to its host. A window manager's launch is its
+    /// own client too: the WM shows it in a tile or a Quick Look preview of its
+    /// own, even while the person has the app open. `MAKEPAD_NEW_INSTANCE=1`
+    /// asks for the same by hand.
     fn exempt() -> bool {
         std::env::var_os("MAKEPAD_NEW_INSTANCE").is_some()
             || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()
             || crate::remote::requested()
             || crate::app_main::should_run_stdin_loop_from_env()
+            || crate::app_main::launched_by_window_manager()
     }
 
     pub fn claim_single_instance(app_name: &str) -> SingleInstance {

@@ -11,6 +11,8 @@
 use crate::{
     cx::Cx,
     cx_api::CxOsApi,
+    draw_pass::{DrawPassId, PassLayout},
+    draw_shader::DrawShaderId,
     texture::{Texture, TextureFormat, TextureSize},
     window::WindowId,
 };
@@ -109,6 +111,35 @@ impl Cx {
         }
         #[cfg(target_arch = "wasm32")]
         { let _ = (shader, float16); true }
+    }
+
+    /// Whether this shader can draw into `pass` this frame without skipping the draw or
+    /// compiling pipeline state at submit. True on wasm and where compilation is synchronous.
+    /// After a `false`, [`Event::DrawShadersReady`](crate::event::Event::DrawShadersReady)
+    /// tells the caller when to ask again, as for [`Self::draw_shader_ready`].
+    pub fn draw_shader_ready_in(&self, shader: DrawShaderId, pass: DrawPassId) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.is_draw_shader_pass_ready(shader, pass) }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (shader, pass); true }
+    }
+
+    /// The pipeline layout of the pass's current attachments, when its target is known.
+    pub fn pass_layout(&self, pass: DrawPassId) -> Option<PassLayout> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.fb_pass_layout(pass).map(PassLayout) }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = pass; Some(PassLayout(())) }
+    }
+
+    /// Whether this shader can draw into `layout` without skipping the draw or compiling
+    /// pipeline state at submit. After a `false`, [`Event::DrawShadersReady`](crate::event::Event::DrawShadersReady)
+    /// tells the caller when to ask again. True on wasm and where compilation is synchronous.
+    pub fn draw_shader_ready_for(&self, shader: DrawShaderId, layout: &PassLayout) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.is_draw_shader_layout_ready(shader, || Some(layout.0)) }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (shader, layout); true }
     }
 
     /// Whether `shader`'s pipeline failed to build. It never draws, and no

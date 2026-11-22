@@ -126,10 +126,11 @@ pub fn run_app(app: fn()) {
     app();
 }
 
-/// Whether this process runs hosted: its host launched it as a `--stdin-loop` child, or a
-/// makepad window manager admitted it ([`discover_window_manager`]).
+/// Whether this process runs hosted: its host launched it as a `--stdin-loop` child. A makepad
+/// window manager hosts a Linux app through the app's HAL shell instead, whatever built it
+/// ([`hosted_by_window_manager`]).
 pub fn should_run_stdin_loop_from_env() -> bool {
-    launched_by_host() || admitted_by_window_manager().is_some()
+    launched_by_host()
 }
 
 /// The host started this process as its child (`--stdin-loop` / `MAKEPAD_STDIN_LOOP`): the
@@ -187,77 +188,30 @@ pub(crate) fn set_hal_window_manager(on: bool) {
     HAL_WINDOW_MANAGER.store(on, std::sync::atomic::Ordering::Release);
 }
 
-/// A makepad window manager hosts this app's windows, however it got there: the WM launched it
-/// (`MAKEPAD_WM_CAPTION_CONTENT=1`), it adopted the process at startup (native Linux), or the HAL
-/// shell the app runs on is the WM's client (`makepad run`). Its windows then draw their own caption
-/// with the WM's window controls.
-pub fn hosted_by_window_manager() -> bool {
+/// A makepad window manager started this process: it sets `MAKEPAD_WM_CAPTION_CONTENT=1` on every
+/// launch (`apps/wm/src/clients.rs`). Not an app a person starts from a terminal under the WM.
+pub fn launched_by_window_manager() -> bool {
     static LAUNCHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LAUNCHED.get_or_init(|| std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1"))
-        || admitted_by_window_manager().is_some()
-        || HAL_WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
 }
 
-/// Where a running makepad window manager admitted this process (Linux, native builds).
-#[derive(Clone, Copy, Debug)]
-pub struct WmAdmission {
-    pub port: u16,
-    pub client: u64,
-    pub crate_name: &'static str,
+/// A makepad window manager hosts this app's windows: the WM launched it
+/// (`MAKEPAD_WM_CAPTION_CONTENT=1`, from the first line), or the HAL shell the app runs on is the
+/// WM's client (set when the HAL starts; on Linux the shell is the one way an app becomes a WM's
+/// client, JIT run or compiled). Its windows then draw their own caption with the WM's window
+/// controls.
+pub fn hosted_by_window_manager() -> bool {
+    launched_by_window_manager() || HAL_WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
 }
 
-#[cfg(all(target_os = "linux", not(relax)))]
-static ADMITTED: std::sync::OnceLock<Option<WmAdmission>> = std::sync::OnceLock::new();
-
-pub fn admitted_by_window_manager() -> Option<WmAdmission> {
-    #[cfg(all(target_os = "linux", not(relax)))]
-    return ADMITTED.get().copied().flatten();
-    #[cfg(not(all(target_os = "linux", not(relax))))]
-    None
-}
-
-/// Linux: a UI process looks for a makepad window manager before any display server. Unless
-/// the launch forced a backend (`--linux-backend=`, a backend token in `MAKEPAD`), its host
-/// launched it, it runs hidden or headless, or it is a window manager itself, a live WM that
-/// speaks a common hosted-protocol version adopts it: its windows become WM windows over the
-/// same hosted path as the apps the WM launches. An incompatible WM stops discovery; with no
-/// live WM the HAL picks Wayland, then X11.
-/// Under Relax the HAL shell does this for the whole `makepad run` process.
-pub fn discover_window_manager(crate_name: &'static str) {
-    // The name this process gives a WM that hosts it (also the HAL's own WM shell and its
-    // reattach to the next WM): its package, which the WM finds the app's label and icon by.
-    // Never the executable's file name: a rebuild replaces the binary under a running app and
-    // Linux then reads it as "<path> (deleted)".
+/// The name this process gives a makepad window manager that hosts it (Linux): its package, which
+/// the WM finds the app's label and icon by. The HAL's WM shell gives it when it attaches and at
+/// its reattach to the next WM; the shell, not this, makes the app the WM's client. Never the
+/// executable's file name: a rebuild replaces the binary under a running app and Linux then reads
+/// it as "<path> (deleted)". Under Relax `makepad run` names its process itself.
+pub fn name_for_window_manager(crate_name: &'static str) {
     #[cfg(all(target_os = "linux", not(relax)))]
     makepad_hal::wm_socket::set_client_name(crate_name);
-    #[cfg(all(target_os = "linux", not(relax)))]
-    ADMITTED.get_or_init(|| {
-        use makepad_hal::wm_socket::{self, Backend};
-        if launched_by_host() || is_window_manager() || OUTLIVES_WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
-            || resolve_studio_host_from_env().is_some()
-            || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()
-            || std::env::var("MAKEPAD_HAL_BACKEND").is_ok_and(|b| !b.is_empty())
-        {
-            return None;
-        }
-        let forced = wm_socket::forced(std::env::args(), std::env::var("MAKEPAD").ok().as_deref());
-        let wire = makepad_studio_protocol::WIRE;
-        let (backend, reason) = wm_socket::choose(forced, false, false, || wm_socket::discovered(wire).clone());
-        if backend != Backend::Wm {
-            return None;
-        }
-        let path = wm_socket::discovery_path()?;
-        match wm_socket::adopt(&path, wire, std::process::id(), crate_name) {
-            Ok(admission) => {
-                crate::log!("makepad WM at {} hosts this app as client {} ({reason})", path.display(), admission.client);
-                Some(WmAdmission { port: admission.port, client: admission.client, crate_name })
-            }
-            Err(probe) => {
-                crate::error!("the makepad WM at {} did not adopt this app: {probe:?}", path.display());
-                None
-            }
-        }
-    });
     #[cfg(not(all(target_os = "linux", not(relax))))]
     let _ = crate_name;
 }
@@ -338,16 +292,10 @@ fn resolve_studio_host_from_env() -> Option<String> {
 }
 
 pub(crate) fn resolve_studio_host() -> String {
-    if let Some(wm) = admitted_by_window_manager() {
-        return normalize_studio_host(&format!("127.0.0.1:{}", wm.port));
-    }
     resolve_studio_host_from_env().unwrap_or_default()
 }
 
 pub(crate) fn resolve_studio_build() -> Option<String> {
-    if let Some(wm) = admitted_by_window_manager() {
-        return Some(wm.client.to_string());
-    }
     std::env::var("STUDIO_BUILD")
         .ok()
         .and_then(|build| {
@@ -362,9 +310,6 @@ pub(crate) fn resolve_studio_build() -> Option<String> {
 }
 
 pub(crate) fn resolve_studio_crate() -> Option<String> {
-    if let Some(wm) = admitted_by_window_manager() {
-        return Some(wm.crate_name.to_string());
-    }
     std::env::var("STUDIO_CRATE")
         .ok()
         .and_then(|crate_name| {
@@ -898,7 +843,7 @@ macro_rules! app_main {
             $crate::set_window_manager(<$app as AppMain>::window_manager());
             $crate::set_outlives_window_manager(<$app as AppMain>::outlives_window_manager());
             $crate::set_menu_bar_app(<$app as AppMain>::menu_bar_app());
-            $crate::discover_window_manager(env!("CARGO_PKG_NAME"));
+            $crate::name_for_window_manager(env!("CARGO_PKG_NAME"));
             $crate::startup_trace("pre_start (objc classes)");
 
             // The event-handler closure (which captures `app` and

@@ -3,8 +3,11 @@
 //! and the next frames too. The window is hidden (an offscreen window of the default backend:
 //! Metal on macOS, Vulkan on Linux), so this runs on any box and puts nothing on a screen.
 //!
-//! Then the app rests, with nothing to draw, and paints on: a rest is no stall, so no present gap
-//! reads as long as it.
+//! Frames painted on every NextFrame count their whole interval: no rest falls between them.
+//!
+//! Then the app rests, with nothing to draw, and paints on. For the rest's first half it still asks
+//! for every NextFrame and paints nothing (beats with no frame's work), then it idles. Neither is a
+//! stall, so no present gap reads as long as either half.
 use makepad_platform::makepad_error_log::{self, LogLevel};
 use makepad_platform::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +17,8 @@ use std::time::{Duration, Instant};
 /// The `[frames]` lines logged so far.
 static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// How long the app rests between its two runs of frames, in seconds.
+/// How long the app rests between its two runs of frames, in seconds: the first half on NextFrame,
+/// the second idle.
 const REST: f64 = 2.5;
 /// The lines logged when the rest ended, 0 before.
 static AFTER_REST: AtomicUsize = AtomicUsize::new(0);
@@ -33,12 +37,17 @@ fn most(lines: &[String], prefix: &str) -> u32 {
 /// Whether `lines` hold the first frame after a rest: the print the rest's first beat makes holds
 /// the frames before the rest, and the next one holds that frame.
 fn past_first_frame(lines: &[String]) -> bool {
-    lines.iter().filter(|l| l.contains("present gap: ")).count() >= 2
+    lines.iter().filter(|l| l.starts_with("[frames] present gap: ")).count() >= 2
+}
+
+/// The mean present gap of the first print that counted presents, in ms.
+fn first_mean(lines: &[String]) -> f64 {
+    lines.iter().find_map(|l| l.strip_prefix("[frames] present gap: n=")?.split_once("mean=")?.1.split("ms").next()?.parse().ok()).unwrap_or(0.0)
 }
 
 /// The longest present gap any print counted, in ms.
 fn worst(lines: &[String]) -> f64 {
-    lines.iter().filter_map(|l| l.split_once("present gap: n=")?.1.split_once("max=")?.1.split("ms").next()?.parse().ok()).fold(0.0, f64::max)
+    lines.iter().filter_map(|l| l.strip_prefix("[frames] present gap: n=")?.split_once("max=")?.1.split("ms").next()?.parse().ok()).fold(0.0, f64::max)
 }
 
 fn main() {
@@ -49,6 +58,7 @@ fn main() {
     // the window and what it paints, and every frame asks for the next one and paints again
     let mut window: Option<(WindowHandle, DrawPass, DrawList)> = None;
     let mut rest = Timer::empty();
+    let mut rest_from = start;
     let mut cx = Cx::new(Box::new(move |cx, event| match event {
         Event::Startup => {
             let (handle, mut pass, list) = (WindowHandle::new(cx), DrawPass::new(cx), DrawList::new(cx));
@@ -61,6 +71,9 @@ fn main() {
         }
         Event::NextFrame(_) => {
             if !rest.is_empty() {
+                if rest_from.elapsed().as_secs_f64() < REST / 2.0 {
+                    cx.new_next_frame();
+                }
                 return;
             }
             let lines = LINES.lock().unwrap();
@@ -69,8 +82,10 @@ fn main() {
                 cx.quit();
                 return;
             }
-            if after == 0 && most(&lines, "present gap: n=") > 0 {
+            if after == 0 && most(&lines, "[frames] present gap: n=") > 0 {
                 rest = cx.start_timeout(REST);
+                rest_from = Instant::now();
+                cx.new_next_frame();
                 return;
             }
             drop(lines);
@@ -92,11 +107,16 @@ fn main() {
 
     let lines = LINES.lock().unwrap().clone();
     let shown = lines.join("\n");
-    assert!(most(&lines, "present gap: n=") > 0, "no print counted presents in 30 s:\n{shown}");
+    assert!(most(&lines, "[frames] present gap: n=") > 0, "no print counted presents in 30 s:\n{shown}");
     assert!(most(&lines, "next_frame gap: n=") > 0, "no print counted next frames:\n{shown}");
     let after = AFTER_REST.load(Ordering::Relaxed);
     assert!(after > 0 && past_first_frame(&lines[after..]), "no print came after the rest in 30 s:\n{shown}");
-    assert!(worst(&lines) < REST * 1000.0, "a present gap counted the rest:\n{shown}");
+    // a rest between frames painted on every NextFrame would leave a gap of a draw's length (a
+    // display beats at a few hundred Hz at most)
+    assert!(first_mean(&lines) > 4.0, "frames painted on every NextFrame counted rests between them:\n{shown}");
+    // under either half of the rest, by a fifth of it
+    let bar = 0.4 * REST * 1000.0;
+    assert!(worst(&lines) < bar, "a present gap counted the rest, or its beats that only dispatched NextFrame:\n{shown}");
     let beats = [" display=", " cadence=", " host="].map(|p| most(&lines, p));
     assert!(beats.iter().any(|&n| n > 0), "no print counted beats:\n{shown}");
     println!("{shown}");

@@ -125,6 +125,13 @@ impl CxKeyboard {
     }
 
     pub fn park_key_focus(&mut self, window: WindowId) {
+        // A second loss of the keyboard while nothing took the focus since keeps what the first
+        // parked: a WM that said so twice as a returning app's tile came (its window ready, then
+        // its first frame) parked the empty focus over the terminal's, which then came back to
+        // nothing and dropped the first keys (11-22).
+        if self.next_key_focus.is_empty() && self.parked_key_focus.iter().any(|(w, ..)| *w == window) {
+            return;
+        }
         self.parked_key_focus.retain(|(w, ..)| *w != window);
         self.parked_key_focus.push((window, self.key_focus, self.is_key_focus_from_user));
         self.set_key_focus(Area::Empty);
@@ -309,8 +316,20 @@ mod takes_text_tests {
         kb.set_key_focus_takes_text(field, true);
         kb.park_key_focus(window);
         assert!(!settle(&mut kb, field), "a window that loses the keyboard leaves nothing focused, and no text");
+        kb.park_key_focus(window);
+        assert!(!settle(&mut kb, field), "told again that it lost the keyboard: still nothing focused");
         kb.unpark_key_focus(window);
-        assert!(settle(&mut kb, field), "getting the keyboard back restores the field, which says it again");
+        assert!(settle(&mut kb, field), "getting the keyboard back restores the field, which says it again (the second loss parked nothing over it)");
+        kb.park_key_focus(window);
+        settle(&mut kb, field);
+        kb.set_key_focus(button);
+        settle(&mut kb, field);
+        kb.park_key_focus(window);
+        settle(&mut kb, field);
+        kb.unpark_key_focus(window);
+        assert!(!settle(&mut kb, field) && kb.key_focus() == button, "a focus given while the window was away is what a second loss parks");
+        kb.restore_key_focus(field, true);
+        assert!(settle(&mut kb, field));
         kb.restore_key_focus(button, true);
         assert!(!settle(&mut kb, field), "a restore to the button: no text");
         kb.restore_key_focus(field, true);

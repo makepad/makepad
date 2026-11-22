@@ -588,6 +588,9 @@ pub mod format {
     /// R8 target of the texture's size), 1 chroma (RG8, half the size). Outside `COUNT`: D3D11
     /// alone maps it (a shared texture an encoder reads where it lies).
     pub const NV12: u32 = 33;
+    /// Symbolic colour attachment zero in a pipeline layout. The HAL resolves it to the
+    /// render-target format it selected for that layout's window when building the state.
+    pub const WINDOW_TARGET: u32 = u32::MAX - 1;
 
     /// Bytes per texel; 0 for an unknown format.
     pub const fn texel_bytes(f: u32) -> u64 {

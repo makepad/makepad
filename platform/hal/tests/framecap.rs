@@ -246,6 +246,13 @@ fn a_captured_frame_replays_to_the_same_pixels() {
         _ => false,
     });
     let mut cap2 = (*framecap::wait(seq, Duration::from_secs(10)).expect("the two-packet capture")).clone();
+    let reply = makepad_remote::cmd::answer(|req, out| { framecap::dispatch(req, out); }, "cap frame");
+    let reply = std::str::from_utf8(&reply).unwrap();
+    let age = reply.lines().nth(1) // first answer line after the measurement header
+        .and_then(|line| line.strip_prefix(&format!("F{} was recorded ", cap2.frame)))
+        .and_then(|rest| rest.strip_suffix(" ago and is the newest capture; cap grab records the current frame."))
+        .and_then(|age| age.split_once(' '));
+    assert!(age.is_some_and(|(n, unit)| n.parse::<f64>().is_ok() && matches!(unit, "s" | "min" | "h")), "{reply}");
     cap2.backend = info.backend;
     cap2.dialect = info.dialect;
     assert_eq!((cap2.passes.len(), cap2.draws.len()), (2, 2), "both packets recorded");

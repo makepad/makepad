@@ -654,6 +654,20 @@ impl Cx {
         ready
     }
 
+    pub(crate) fn is_draw_shader_pass_ready(&self, shader: crate::draw_shader::DrawShaderId, pass: crate::draw_pass::DrawPassId) -> bool {
+        self.is_draw_shader_layout_ready(shader, || self.fb_pass_layout(pass))
+    }
+
+    pub(crate) fn is_draw_shader_layout_ready(&self, shader: crate::draw_shader::DrawShaderId, layout: impl FnOnce() -> Option<makepad_hal::cmds::PipelineLayout>) -> bool {
+        // Headless completes pipeline creation synchronously and has no render-target state.
+        if self.hal.info.is_some_and(|info| info.backend == makepad_hal::backend_id::HEADLESS) { return true; }
+        let ready = !self.hal.device_lost && self.draw_shaders[shader.index].pipeline_id.is_some_and(|pipe| {
+            layout().is_some_and(|desc| self.hal.frames.pipeline_ready_in(pipe, desc))
+        });
+        if !ready { self.hal.frames.asked_unready(); }
+        ready
+    }
+
     pub fn is_draw_shader_window_failed(&self, shader_id: crate::draw_shader::DrawShaderId) -> bool {
         self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| self.hal.frames.pipeline_has_failed(pipe))
     }

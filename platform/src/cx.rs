@@ -16,7 +16,7 @@ use {
             NextFrame, Trigger, WindowGeomChangeEvent,
         },
         file_dialogs::FileDialogState,
-        geometry::CxGeometryPool,
+        geometry::{CxGeometryPool, GeometryId},
         gpu_info::GpuInfo,
         perf_monitor::PerfMonitor,
         performance_stats::PerformanceStats,
@@ -129,6 +129,7 @@ pub struct Cx {
     pub publications: crate::shared_instances::Publications,
     pub uniform_buffers: CxUniformBufferPool,
     pub geometries: CxGeometryPool,
+    pub(crate) referenced_geometries: HashSet<GeometryId>,
 
     pub draw_shaders: CxDrawShaders,
 
@@ -1088,6 +1089,7 @@ impl Cx {
             a11y_answer_drawn: false,
             draw_matrices: Default::default(),
             geometries: Default::default(),
+            referenced_geometries: HashSet::new(),
             textures,
             publications,
             uniform_buffers: Default::default(),

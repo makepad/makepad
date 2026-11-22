@@ -26,6 +26,7 @@
 //!
 //! Off until something calls [`set_enabled`]; disabled backends do no work.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -73,7 +74,7 @@ static STATE: Mutex<State> = Mutex::new(State {
 
 /// Passes a client follows on its own (`watch`), beside the one consumer of
 /// `take_frames`: the name and the per-frame ms not taken yet.
-static WATCHED: Mutex<Vec<(String, Vec<f32>)>> = Mutex::new(Vec::new());
+static WATCHED: Mutex<Vec<(String, VecDeque<f32>)>> = Mutex::new(Vec::new());
 
 /// Samples kept for a watcher that takes them late; older ones drop.
 const KEEP_WATCHED: usize = 240;
@@ -84,15 +85,24 @@ pub fn watch(name: &str) {
     set_enabled(true);
     if let Ok(mut w) = WATCHED.lock() {
         if !w.iter().any(|e| e.0 == name) {
-            w.push((name.to_string(), Vec::new()));
+            w.push((name.to_string(), VecDeque::new()));
         }
     }
 }
 
 /// The ms of a watched pass since the last call, oldest first.
 pub fn take_watched(name: &str) -> Vec<f32> {
-    let Ok(mut w) = WATCHED.lock() else { return Vec::new() };
-    w.iter_mut().find(|e| e.0 == name).map_or_else(Vec::new, |e| std::mem::take(&mut e.1))
+    let mut samples = Vec::new();
+    drain_watched(name, &mut samples);
+    samples
+}
+
+/// Append the watched samples in completion order, retaining both buffers.
+pub fn drain_watched(name: &str, out: &mut Vec<f32>) {
+    let Ok(mut watched) = WATCHED.lock() else { return };
+    if let Some((_, samples)) = watched.iter_mut().find(|e| e.0 == name) {
+        out.extend(samples.drain(..));
+    }
 }
 
 /// An individual dispatch's GPU duration, independent of frame aggregation.
@@ -101,9 +111,9 @@ pub(crate) fn record_dispatch(name: &str, ns: u64) {
     let Ok(mut watched) = WATCHED.lock() else { return };
     if let Some((_, samples)) = watched.iter_mut().find(|e| e.0 == name) {
         if samples.len() >= KEEP_WATCHED {
-            samples.remove(0);
+            samples.pop_front();
         }
-        samples.push(ns as f32 * 0.000001);
+        samples.push_back(ns as f32 * 0.000001);
     }
 }
 
@@ -118,9 +128,9 @@ fn note_watched(timing: &GpuFrameTiming, pass_count: usize) {
         }
         if let Some(ms) = sum {
             if samples.len() >= KEEP_WATCHED {
-                samples.remove(0);
+                samples.pop_front();
             }
-            samples.push(ms);
+            samples.push_back(ms);
         }
     }
 }
@@ -229,24 +239,60 @@ pub fn finish_frame(frame: u64) {
     *open_len = kept;
 }
 
+/// Reusable consumer storage. A meter can retain a prefix across several
+/// reads to assemble a reporting window, then overwrite it on the next read.
+#[derive(Default)]
+pub struct GpuFrameReadout {
+    frames: Vec<GpuFrameTiming>,
+    len: usize,
+    spare_names: Vec<String>,
+}
+
+impl GpuFrameReadout {
+    /// The frames kept by the consumer, in completion order.
+    pub fn frames(&self) -> &[GpuFrameTiming] {
+        &self.frames[..self.len]
+    }
+
+    /// End a reporting window or discard its latest batch, keeping the storage.
+    pub fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+
+    /// Append all newly finished frames and return just the appended slice.
+    pub fn take(&mut self) -> &[GpuFrameTiming] {
+        let Ok(mut state) = STATE.lock() else { return &[] };
+        let start = self.len;
+        let end = start + state.done_len;
+        if self.frames.len() < end {
+            self.frames.resize_with(end, GpuFrameTiming::default);
+        }
+        for (i, target) in self.frames[start..end].iter_mut().enumerate() {
+            let source = &state.done[(state.done_head + i) % KEEP_FRAMES];
+            target.busy_ms = source.timing.busy_ms;
+            target.span_ms = source.timing.span_ms;
+            let count = source.pass_count;
+            if target.passes.len() > count {
+                self.spare_names.extend(target.passes.drain(count..).map(|(name, _)| name));
+            }
+            target.passes.resize_with(count, || (self.spare_names.pop().unwrap_or_default(), 0.0));
+            for ((name, ms), (src_name, src_ms)) in target.passes.iter_mut().zip(&source.timing.passes) {
+                name.clone_from(src_name);
+                *ms = *src_ms;
+            }
+        }
+        state.done_head = 0;
+        state.done_len = 0;
+        self.len = end;
+        &self.frames[start..end]
+    }
+}
+
 /// The frames finished since the last call, oldest first.
-/// Owned output is allocated here; recording and finishing reuse their buffers.
 pub fn take_frames() -> Vec<GpuFrameTiming> {
-    STATE.lock().map(|mut s| {
-        let frames = (0..s.done_len)
-            .map(|i| {
-                let frame = &s.done[(s.done_head + i) % KEEP_FRAMES];
-                GpuFrameTiming {
-                    busy_ms: frame.timing.busy_ms,
-                    span_ms: frame.timing.span_ms,
-                    passes: frame.timing.passes[..frame.pass_count].to_vec(),
-                }
-            })
-            .collect();
-        s.done_head = 0;
-        s.done_len = 0;
-        frames
-    }).unwrap_or_default()
+    let mut readout = GpuFrameReadout::default();
+    readout.take();
+    readout.frames
 }
 
 /// The partition described in the module docs. `spans`: (name, start, end)

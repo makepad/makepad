@@ -29,6 +29,44 @@ use {
     },
 };
 
+/// [`Event::ResourcesChanged`]: the changed files, absolute and lexically normalized (no `.` or
+/// `..`, not canonicalized: a live session's files may lie in a virtual folder with no real
+/// parent). Ask with [`Self::touches`] / [`Self::touches_under`], which normalize the same way.
+#[derive(Clone, Debug, Default)]
+pub struct ResourcesChangedEvent {
+    pub paths: Vec<String>,
+}
+
+impl ResourcesChangedEvent {
+    /// Whether `path` is one of the changed files.
+    pub fn touches(&self, path: &std::path::Path) -> bool {
+        let p = lexical_path(path);
+        self.paths.iter().any(|c| lexical_path(std::path::Path::new(c)) == p)
+    }
+
+    /// Whether a changed file lies in `dir` or under it (or is `dir`: a listed folder that gained
+    /// or lost a file).
+    pub fn touches_under(&self, dir: &std::path::Path) -> bool {
+        let d = lexical_path(dir);
+        self.paths.iter().any(|c| lexical_path(std::path::Path::new(c)).starts_with(&d))
+    }
+}
+
+/// `path` made absolute against the current folder and its `.` and `..` resolved by its text.
+fn lexical_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let abs = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().map(|d| d.join(path)).unwrap_or_else(|_| path.to_path_buf()) };
+    let mut out = std::path::PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => { out.pop(); }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Events that can be sent between the Makepad framework and the application.
 #[derive(Debug)]
 pub enum Event {
@@ -150,6 +188,11 @@ pub enum Event {
     /// (e.g. `Label::set_text`) can early-return and keep their runtime
     /// value instead of being clobbered by the stale DSL literal.
     ScriptReapply,
+    /// Files the app read at run time changed under a live session (a save of a file that is no
+    /// compiled input: a level, a kit, a shader or data file it loads): a hint, raised after the
+    /// save's code patch was taken in. The app compares what it holds with the files and takes in
+    /// what differs; native builds never raise it.
+    ResourcesChanged(ResourcesChangedEvent),
     /// A window has gained focus and is now the active window receiving user input.
     WindowGotFocus(WindowId),
     /// A window has lost focus and is no longer the active window receiving user input.
@@ -282,6 +325,8 @@ pub enum Event {
     /// Application-defined event sent via the studio/debug control protocol.
     /// Respond with `Cx::send_studio_message(AppToStudio::Custom(..))`.
     Custom(String),
+    /// A replacement window host attached. Services can register again and publish their context.
+    HostAttached,
 
     Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
@@ -469,6 +514,8 @@ impl Event {
             57 => "XrLocal",
             58 => "ImeAction",
             60 => "Custom",
+            101 => "HostAttached",
+            102 => "ResourcesChanged",
             61 => "PopupDismissed",
             62 => "SelectionHandleDrag",
             66 => "ScriptReapply",
@@ -606,6 +653,8 @@ impl Event {
 
             Self::XrLocal(_) => 57,
             Self::Custom(_) => 60,
+            Self::HostAttached => 101,
+            Self::ResourcesChanged(_) => 102,
             Self::ScriptReapply => 66,
         }
     }

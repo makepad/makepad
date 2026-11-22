@@ -24,6 +24,7 @@ pub(crate) enum Done {
     BufferLeases { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
     PipelineReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id },
+    PipelineLayoutReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id, layout: u32 },
     PipelineFailed { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id, log: String },
     /// A recorded window frame is in its capture buffer (a retained `CVPixelBuffer`).
     Surface { sid: u32, incarnation: Arc<crate::font::FrameProgress>, window: crate::Id, w: u32, h: u32, buffer: usize },
@@ -33,7 +34,7 @@ impl Done {
     fn sid(&self) -> u32 {
         match self {
             Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::BufferLeases { sid, .. } | Done::PipelineReady { sid, .. }
-            | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
+            | Done::PipelineLayoutReady { sid, .. } | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
         }
     }
 }

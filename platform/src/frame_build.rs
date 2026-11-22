@@ -27,13 +27,16 @@ use crate::{
     makepad_live_id::*,
     makepad_math::{PointUsize, RectUsize, SizeUsize},
     shared_instances::PublishReceipt,
-    texture::{CompressedTextureFormat, TextureCategory, Texture, TextureFormat, TextureId, TexturePixel, TextureUpdated},
+    texture::{CompressedTextureFormat, TextureCategory, Texture, TextureAlloc, TextureFormat, TextureId, TexturePixel, TextureUpdated},
     uniform_buffer::UniformBufferId,
 };
 use makepad_hal::{
+    cmds::PipelineLayout,
     format, pass_load as load, pipeline_binding as binding, pipeline_blend, pipeline_flags, usage, Attr, CmdWriter, Draw, FrameMeta, HalInfo, Id, Inst, Pass, PipelineDesc, Slice, StrId,
 };
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 struct TexRec {
     id: Id,
@@ -88,12 +91,36 @@ pub(crate) enum PipelineWait {
     Compile,
 }
 
+struct PipeLayoutRec {
+    layout: u32,
+    wanted: bool,
+    ready: bool,
+}
+
+/// The window (also the clock for offscreen XR) and the sampling mode of the HAL pass.
+struct PassTarget {
+    window: Option<crate::window::WindowId>,
+    stereo: bool,
+    offscreen_xr: bool,
+    samples: u32,
+    views: u32,
+}
+
+impl PassTarget {
+    fn render_window(&self) -> Option<crate::window::WindowId> {
+        self.window.filter(|_| !self.offscreen_xr)
+    }
+}
+
 /// One HAL pipeline: the draw shaders with the same code, colour format and blend op share it.
 pub(crate) struct PipeRec {
     id: Id,
     /// the first draw shader that created it: its mapping holds the code the others compare with
     first_shader: usize,
     ready: bool,
+    /// Graphics keep their legacy ready bit across reset. A layout probe needs the base
+    /// answer from the replacement device as well as its layout answer.
+    rebuilding: bool,
     /// a draw was built for it before the HAL said it was ready (the HAL skipped that draw)
     drawn_unready: bool,
     failed: bool,
@@ -105,11 +132,17 @@ pub(crate) struct PipeRec {
     /// a caller with a fallback asked whether it can draw while it compiled
     /// ([`FrameBuilder::probed_unready`]): the frame would draw it
     probed: std::cell::Cell<bool>,
+    /// Only layouts a caller has probed.
+    layouts: RefCell<Vec<PipeLayoutRec>>,
 }
 
 impl PipeRec {
     fn new(id: Id, first_shader: usize) -> Self {
-        Self { id, first_shader, ready: false, drawn_unready: false, failed: false, failure: None, pick: None, wanted: false, probed: Default::default() }
+        Self { id, first_shader, ready: false, rebuilding: false, drawn_unready: false, failed: false, failure: None, pick: None, wanted: false, probed: Default::default(), layouts: Default::default() }
+    }
+
+    fn ready_on_device(&self) -> bool {
+        self.ready && !self.rebuilding
     }
 }
 
@@ -158,6 +191,12 @@ pub(crate) struct FrameBuilder {
     pub(crate) w: CmdWriter,
     /// a pipeline was probed while it compiled since the last `want_probed`
     probes: std::cell::Cell<bool>,
+    /// Interned on the first probe of a layout. Its index is the id the HAL echoes.
+    layouts: RefCell<Vec<PipelineLayout>>,
+    draw_layout: Option<PipelineLayout>,
+    warned_layouts: Vec<(usize, PipelineLayout)>,
+    /// (pipe, entry in that pipe's layouts) to want on the next submit.
+    layout_probes: RefCell<Vec<(usize, usize)>>,
     /// an app was told a draw shader cannot draw yet (`Cx::draw_shader_ready`) since the last
     /// `Event::DrawShadersReady`
     asked: std::cell::Cell<bool>,
@@ -171,7 +210,8 @@ pub(crate) struct FrameBuilder {
     /// live patches (`Cx::live_patches`) it was built with.
     window_presenting: HashMap<(Id, u64), u64>,
     /// Packet serial -> (window/repaint group, pass name, closes the presented frame).
-    pub(crate) timings: HashMap<u64, (u64, String, bool)>,
+    pub(crate) timings: HashMap<u64, (u64, Rc<str>, bool)>,
+    timing_names: HashSet<Rc<str>>,
     /// Packets painting a pass with GPU timing on, answered by their `FrameDone`.
     pub(crate) gpu_times: crate::draw_pass::PendingGpuTimes,
     pub(crate) info: HalInfo,
@@ -395,6 +435,8 @@ impl FrameBuilder {
     pub(crate) fn backend_changed(&mut self, info: HalInfo) {
         self.info = info;
         self.pipes.clear();
+        self.warned_layouts.clear();
+        self.layout_probes.get_mut().clear();
         self.pipe_by_hash.clear();
         self.backend_changes += 1;
     }
@@ -436,6 +478,18 @@ impl FrameBuilder {
         if self.warned.insert(what) {
             crate::warning!("hal: {what}");
         }
+    }
+
+    pub(crate) fn time_pass(&mut self, serial: u64, group: u64, name: &str, closes: bool) {
+        let name = match self.timing_names.get(name) {
+            Some(name) => Rc::clone(name),
+            None => {
+                let name = Rc::<str>::from(name);
+                self.timing_names.insert(Rc::clone(&name));
+                name
+            }
+        };
+        self.timings.insert(serial, (group, name, closes));
     }
 
     pub(crate) fn intern(&mut self, s: &str) -> StrId {
@@ -628,8 +682,11 @@ impl FrameBuilder {
     /// (the retained ones' draw items are returned: they upload on their next draw); render
     /// targets keep their ids and are painted again. Frames the old device dropped count as done.
     pub(crate) fn device_reset(&mut self, reupload: impl Fn(usize, u64) -> bool) -> Vec<(usize, usize)> {
+        self.layout_probes.get_mut().clear();
         for pipe in &mut self.pipes {
+            pipe.layouts.get_mut().clear();
             if pipe.first_shader == usize::MAX { pipe.ready = false; pipe.failed = false; pipe.failure = None; }
+            pipe.rebuilding = pipe.ready;
         }
         let slots: Vec<usize> = self.tex.iter().filter(|(slot, r)| reupload(**slot, r.gen)).map(|(slot, _)| *slot).collect();
         for slot in slots {
@@ -696,12 +753,23 @@ impl FrameBuilder {
                 // memory for it), and then its draws, left out so far, paint again.
                 let was_failed = std::mem::take(&mut p.failed);
                 p.failure = None;
+                p.rebuilding = false;
                 let again = std::mem::replace(&mut p.ready, true);
                 self.answered = true;
                 std::mem::take(&mut p.drawn_unready) || again || was_failed
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn pipeline_layout_ready(&mut self, id: Id, layout: u32) -> bool {
+        let Some(p) = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id) else { return false };
+        let Some(entry) = p.layouts.get_mut().iter_mut().find(|e| e.layout == layout && e.wanted) else { return false };
+        if std::mem::replace(&mut entry.ready, true) { return false; }
+        self.answered = true;
+        // Like a repeat PipelineReady, this can complete a draw the HAL skipped on a ready
+        // pipeline. If the base is pending, its own answer still owes that repaint.
+        p.ready_on_device()
     }
 
     /// An app asked whether a draw shader can draw, and it cannot yet: the next pipeline
@@ -744,11 +812,43 @@ impl FrameBuilder {
         }
     }
 
-    /// Wants the pipelines probed since the last call that still compile.
+    /// A known pair needs only the pipeline's small list and an index into the layout table.
+    /// A new pair is also the probe to submit, even if the base pipeline already answered.
+    pub(crate) fn pipeline_ready_in(&self, pipe: usize, desc: PipelineLayout) -> bool {
+        let Some(p) = self.pipes.get(pipe).filter(|p| !p.failed) else { return false };
+        let mut layouts = self.layouts.borrow_mut();
+        let mut entries = p.layouts.borrow_mut();
+        if let Some(entry) = entries.iter().find(|e| layouts[e.layout as usize] == desc) {
+            return p.ready_on_device() && entry.ready;
+        }
+        let layout = layouts.iter().position(|l| *l == desc).unwrap_or_else(|| {
+            layouts.push(desc);
+            layouts.len() - 1
+        }) as u32;
+        self.layout_probes.borrow_mut().push((pipe, entries.len()));
+        entries.push(PipeLayoutRec { layout, wanted: false, ready: false });
+        if !p.ready { p.probed.set(true); }
+        false
+    }
+
+    /// Wants newly probed layouts and promotes base pipelines probed while compiling.
     pub(crate) fn want_probed(&mut self) {
-        if !self.probes.replace(false) { return; }
-        for pipe in 0..self.pipes.len() {
-            if self.pipes[pipe].probed.get() { self.want(pipe); }
+        let want_pipelines = self.probes.replace(false);
+        if !want_pipelines && self.layout_probes.get_mut().is_empty() { return; }
+        for (pipe, index) in self.layout_probes.get_mut().drain(..) {
+            let p = &mut self.pipes[pipe];
+            let entry = &mut p.layouts.get_mut()[index];
+            if !entry.ready && !entry.wanted {
+                let desc = self.layouts.get_mut()[entry.layout as usize];
+                self.w.pipeline_wanted_in(p.id, entry.layout, desc.window, desc.colors, desc.depth, u16::from_le_bytes([desc.samples, desc.views]));
+                entry.wanted = true;
+                p.wanted = true; // PipelineWantedIn also promotes the base compile
+            }
+        }
+        if want_pipelines {
+            for pipe in 0..self.pipes.len() {
+                if self.pipes[pipe].probed.get() { self.want(pipe); }
+            }
         }
     }
 
@@ -806,6 +906,17 @@ impl FrameBuilder {
     /// answer repaints; a failed one is never drawn, and its picture is final without it.
     pub(crate) fn draw_with(&mut self, pipe: usize) -> bool {
         let p = &mut self.pipes[pipe];
+        if let Some(layout) = self.draw_layout {
+            let asked = p.layouts.get_mut();
+            let layouts = self.layouts.get_mut();
+            if !asked.is_empty() && !asked.iter().any(|entry| layouts[entry.layout as usize] == layout)
+                && !self.warned_layouts.contains(&(pipe, layout))
+            {
+                self.warned_layouts.push((pipe, layout));
+                let asked: Vec<_> = asked.iter().map(|entry| layouts[entry.layout as usize]).collect();
+                crate::warning!("pipeline {:?} was asked ready for {:?} but draws into {:?}: its readiness gate does not cover this pass", p.id, asked, layout);
+            }
+        }
         if !p.ready && !p.failed {
             p.drawn_unready = true;
             self.pass_whole = false;
@@ -846,6 +957,13 @@ pub(crate) fn hal_format(pixel: &TexturePixel) -> Option<u32> {
         TexturePixel::Nv12 => format::NV12,
         _ => return None,
     })
+}
+
+pub(crate) fn attachment_format(format: &TextureFormat, depth: bool, allocated: Option<&TextureAlloc>) -> u32 {
+    // The allocation recipe selects the format independently of size. A shared
+    // texture can have its format only in its existing allocation.
+    let recipe = if depth { format.as_depth_alloc(1, 1) } else { format.as_render_alloc(1, 1) };
+    recipe.as_ref().or(allocated).and_then(|alloc| hal_format(&alloc.pixel)).unwrap_or(PipelineLayout::ABSENT)
 }
 
 fn pipeline_color_format(f: DrawShaderColorFormat) -> u32 {
@@ -1553,6 +1671,57 @@ impl Cx {
         }
     }
 
+    fn fb_pass_target(&self, pass_id: DrawPassId, picking: bool) -> Option<PassTarget> {
+        let parent = &self.passes[pass_id].parent;
+        // An XR pass can also drive a single-view display.
+        let stereo = matches!(parent, CxDrawPassParent::Xr);
+        let offscreen_xr = stereo && self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
+        let window = match parent {
+            CxDrawPassParent::Window(w) => Some(*w),
+            // The XR window only paces this texture pass. Its layout can be probed
+            // before the window has been created or supplied its first frame.
+            CxDrawPassParent::Xr if offscreen_xr => self.hal.xr.as_ref().map(|xr| xr.window),
+            CxDrawPassParent::Xr => Some(self.hal.xr.as_ref()?.window),
+            _ => None,
+        };
+        let multiview = stereo && !offscreen_xr && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
+        let samples = if stereo && !picking { self.hal_xr_msaa_now() } else { 0 };
+        Some(PassTarget { window, stereo, offscreen_xr, samples, views: if multiview { 2 } else { 0 } })
+    }
+
+    pub(crate) fn fb_pass_layout(&self, pass_id: DrawPassId) -> Option<PipelineLayout> {
+        let target = self.fb_pass_target(pass_id, false)?;
+        Some(self.fb_target_layout(pass_id, &target))
+    }
+
+    fn fb_target_layout(&self, pass_id: DrawPassId, target: &PassTarget) -> PipelineLayout {
+        let pass = &self.passes[pass_id];
+        let texture_format = |texture: &Texture, depth: bool| {
+            let tex = &self.textures[texture.texture_id()];
+            attachment_format(&tex.format, depth, tex.alloc.as_ref())
+        };
+        let mut colors = [PipelineLayout::ABSENT; 4];
+        let window = target.render_window();
+        if window.is_some() {
+            colors[0] = format::WINDOW_TARGET;
+        } else {
+            for (slot, attachment) in colors.iter_mut().zip(&pass.color_textures) {
+                *slot = match (texture_format(&attachment.texture, false), attachment.cube_face.unwrap_or(0)) {
+                    (format::NV12, 0) => format::R8,
+                    (format::NV12, 1) => format::RG8,
+                    (fmt, _) => fmt,
+                };
+            }
+        }
+        PipelineLayout {
+            window: window.map_or(Id::NONE, crate::event::hal_intake::hal_window_id),
+            colors,
+            depth: pass.depth_texture.as_ref().map_or(PipelineLayout::ABSENT, |t| texture_format(t, true)),
+            samples: target.samples.max(1) as u8,
+            views: target.views.max(1) as u8,
+        }
+    }
+
     /// One pass into one FramePacket. None when the pass paints nothing now.
     fn fb_pass(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, input_ns: u64) -> Option<u64> {
         let picking = self.pick.paint.is_some();
@@ -1578,21 +1747,12 @@ impl Cx {
             }
             return None;
         };
-        // stereo means an XR pass, including a display with one view
-        let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
-        // an XR display without a display of its own (`info_flags::XR_OFFSCREEN`): the XR pass
-        // renders into its own textures, its views side by side; the XR window only paces it
-        let offscreen_xr = stereo && self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
+        let target = self.fb_pass_target(pass_id, picking)?;
+        let (stereo, offscreen_xr) = (target.stereo, target.offscreen_xr);
+        if stereo && self.hal.xr.as_ref()?.frame.is_none() { return None; }
         let views = if offscreen_xr { self.hal_xr_views() } else { 2 };
-        let multiview = stereo && !offscreen_xr && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
-        let (window, is_window) = match self.passes[pass_id].parent {
-            CxDrawPassParent::Window(w) => (Some(w), true),
-            CxDrawPassParent::Xr => match self.hal.xr.as_ref() {
-                Some(xr) if xr.frame.is_some() => (Some(xr.window), !offscreen_xr),
-                _ => return None,
-            },
-            _ => (None, false),
-        };
+        let multiview = target.views > 1;
+        let (window, is_window) = (target.window, target.render_window().is_some());
         #[cfg(target_os = "android")]
         self.fb_send_app_background(fb, pass_id);
         if let Some(w) = window {
@@ -1716,13 +1876,11 @@ impl Cx {
         if !picking { self.compute_encode(fb, Some(pass_id)); }
         let serial = self.textures.1.serials.submit();
 
-        let mut pass = Pass { color: [Id::NONE; 4], depth: Id::NONE, ..Default::default() };
+        let mut pass = Pass { color: [Id::NONE; 4], depth: Id::NONE, samples: target.samples, views: target.views, ..Default::default() };
         // the viewport is the target's pixel size: a fractional scale (2.7x on a phone) rounds the
         // attachments, and a viewport rounding up would exceed them
         pass.viewport = [0.0, 0.0, tw as f32, th as f32];
         pass.dpi = dpi as f32;
-        // an XR pass multisampled (`Cx::xr_set_msaa`; never a pick)
-        if stereo && !picking { pass.samples = self.hal_xr_msaa_now(); }
         if is_window {
             if let Some((_, image)) = hosted_target {
                 pass.color[0] = image;
@@ -1796,6 +1954,9 @@ impl Cx {
         let step = self.passes[pass_id].zbias_step;
         fb.pass_whole = true;
         fb.pass_drew_all = true;
+        // Picking substitutes private pipelines and targets. Readiness probes describe
+        // the colour draw, which uses the pass's own attachments.
+        fb.draw_layout = if fb.layouts.get_mut().is_empty() || picking { None } else { Some(self.fb_target_layout(pass_id, &target)) };
         if multiview {
             // both eyes in one pass: the draws are built once, the GPU renders each eye's layer
             // with its camera (the uniforms' `_r` matrices are the right eye's)
@@ -1804,7 +1965,6 @@ impl Cx {
                 let mut p = pass;
                 p.uniforms = fb.w.keep(uniforms.as_slice());
                 p.viewport = [0.0, 0.0, (tw / 2) as f32, th as f32];
-                p.views = 2;
                 if !p.depth.is_none() { p.load[4] = load::CLEAR; }
                 fb.w.pass(p);
                 let mut zbias = 0.0f32;
@@ -1831,6 +1991,7 @@ impl Cx {
             self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
             self.draw_damage.end_repaint();
         }
+        fb.draw_layout = None;
         let end = makepad_hal::clock_ns();
         let (target, kind) = match (window.filter(|_| is_window), self.passes[pass_id].color_textures.first()) {
             (Some(w), _) => (Id::new(w.0 as u32, w.1 as u32), makepad_hal::target::WINDOW | capture_flag(w.0) | if self.window_snapshot_wanted(w.0) || self.hal_capture_due(w) || (fb.pass_whole && self.screenshot_requests.iter().any(|request| crate::remote::grab_waits_on_window(request.request_id, w.id()))) { makepad_hal::target::SNAPSHOT } else { 0 }),
@@ -1890,7 +2051,7 @@ impl Cx {
                 };
                 // a frame closes with its window's pass, or with an offscreen XR pass (whose
                 // frame is never presented: it would fold into the next window frame)
-                fb.timings.insert(serial, (group, name.to_string(), is_window || offscreen_xr));
+                fb.time_pass(serial, group, name, is_window || offscreen_xr);
             }
         }
         fb.stats.frames += 1;
@@ -2796,13 +2957,15 @@ mod tests {
     /// with a fallback asked for counts as drawn.
     #[test]
     fn a_first_frame_waits_only_for_the_pipelines_it_draws() {
+        use makepad_hal::{HalCmd, HalEvent};
+
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut fb = FrameBuilder::default();
-        let (_pass, list, _target) = texture_pass(&mut cx);
+        let (pass, list, target) = texture_pass(&mut cx);
         fb.pipes.push(PipeRec::new(Id::new(0, 1), 0));
         fb.pipes.push(PipeRec::new(Id::new(1, 1), 1));
         let drawn = shader(&mut cx, Some(0));
-        shader(&mut cx, Some(1));
+        let probed = crate::draw_shader::DrawShaderId { index: shader(&mut cx, Some(1)) };
         record_draw(&mut cx, &list, drawn);
         assert_eq!(cx.fb_frame_pipelines_pending(&mut fb), 1, "the one it draws, compiling");
         assert!(fb.pipes[0].wanted && !fb.pipes[1].wanted, "only what it draws jumps the queue");
@@ -2812,6 +2975,68 @@ mod tests {
         fb.probed_unready(1);
         assert_eq!(cx.fb_frame_pipelines_pending(&mut fb), 1, "a probed one would be drawn");
         assert!(fb.pipes[1].wanted);
+
+        fb.submitted();
+        assert!(!fb.take_answer(), "no app waited for the first pipeline");
+        cx.hal.frames = fb;
+        let pass_id = pass.draw_pass_id();
+        let hdr = Texture::new_with_format(&mut cx, TextureFormat::RenderRGBAf16 { size: crate::texture::TextureSize::Auto, initial: true });
+        pass.add_color_texture(&mut cx, &hdr, DrawPassClearColor::ClearWith(Default::default()));
+        let depth = Texture::new_with_format(&mut cx, TextureFormat::DepthD32 { size: crate::texture::TextureSize::Auto, initial: true });
+        pass.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::InitWith(1.0));
+        let offscreen = crate::PassLayout::offscreen(
+            &[cx.textures[target.texture_id()].format.clone(), cx.textures[hdr.texture_id()].format.clone()],
+            Some(&cx.textures[depth.texture_id()].format),
+        );
+        assert_eq!(cx.pass_layout(pass_id), Some(offscreen), "the declared formats match the attached colour and depth targets");
+        assert!(!cx.draw_shader_ready_for(probed, &offscreen), "the explicit layout waits for the same pipeline");
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "a compiling pipeline cannot draw in the layout");
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "two probes before submit share a request");
+        cx.hal.frames.want_probed();
+        let writer = &cx.hal.frames.w;
+        let [cmd] = writer.cmds() else { panic!("expected exactly one layout request") };
+        let Some(HalCmd::PipelineWantedIn { id: pipeline, layout, window, colors, depth, samples_views }) = cmd.decode(writer.arena()) else {
+            panic!("expected PipelineWantedIn");
+        };
+        assert_eq!((pipeline, window), (Id::new(1, 1), Id::NONE));
+        assert_eq!(colors, [format::BGRA8, format::RGBA16F, PipelineLayout::ABSENT, PipelineLayout::ABSENT], "attachment order before first draw");
+        assert_eq!((depth, samples_views.to_le_bytes()), (format::DEPTH32F, [1, 1]));
+        cx.hal.frames.submitted();
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "still waiting across submits");
+        cx.hal.frames.want_probed();
+        assert!(cx.hal.frames.w.is_empty(), "the next submit sends nothing for the same pair");
+        cx.hal_intake(0, HalEvent::PipelineLayoutReady { pipeline, layout });
+        assert!(cx.hal.frames.take_answer(), "the layout answer wakes the caller");
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "the base pipeline still compiles");
+        cx.hal_intake(0, HalEvent::PipelineReady { pipeline });
+        assert!(cx.hal.frames.take_answer(), "the base answer wakes the caller again");
+        assert!(cx.draw_shader_ready_in(probed, pass_id), "both answers allow the draw");
+
+        let window = crate::window::WindowId(2, 1);
+        cx.passes[pass_id].parent = CxDrawPassParent::Window(window);
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "a ready offscreen layout cannot answer for a window");
+        cx.hal.frames.want_probed();
+        let writer = &cx.hal.frames.w;
+        let [cmd] = writer.cmds() else { panic!("expected one request for the window") };
+        let Some(HalCmd::PipelineWantedIn { layout, window, colors, .. }) = cmd.decode(writer.arena()) else { panic!("expected PipelineWantedIn") };
+        assert_eq!(window, Id::new(2, 1));
+        assert_eq!(colors, [format::WINDOW_TARGET, PipelineLayout::ABSENT, PipelineLayout::ABSENT, PipelineLayout::ABSENT]);
+        cx.hal_intake(0, HalEvent::PipelineLayoutReady { pipeline, layout });
+        assert!(cx.draw_shader_ready_in(probed, pass_id), "the window's own layout answered");
+        cx.passes[pass_id].parent = CxDrawPassParent::Window(crate::window::WindowId(2, 2));
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "a new window in the same slot needs its own state");
+        cx.hal.frames.submitted();
+        let _ = cx.hal.frames.device_reset(|_, _| false);
+        cx.passes[pass_id].parent = CxDrawPassParent::None;
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "reset invalidates the offscreen layout too");
+        cx.hal.frames.want_probed();
+        assert_eq!(cx.hal.frames.w.cmds().len(), 1, "reset discards old wants and permits a fresh one");
+        let writer = &cx.hal.frames.w;
+        let Some(HalCmd::PipelineWantedIn { layout, .. }) = writer.cmds()[0].decode(writer.arena()) else { panic!("expected a fresh layout request") };
+        cx.hal_intake(0, HalEvent::PipelineLayoutReady { pipeline, layout });
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "the old device's base answer cannot make the new layout ready");
+        cx.hal_intake(0, HalEvent::PipelineReady { pipeline });
+        assert!(cx.draw_shader_ready_in(probed, pass_id), "both answers came from the replacement device");
     }
 
     #[test]

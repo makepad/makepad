@@ -284,7 +284,8 @@ impl crate::cx::Cx {
     /// does. A no-op when no host is attached.
     /// A native window draws its own chrome (an app-drawn caption, `Window::set_drag_region`):
     /// the platform leaves its decorations off. Under a window manager every makepad
-    /// window draws its own caption and nothing is said.
+    /// window draws its own caption and nothing is said; a window that shows no window
+    /// buttons of its own says that (`CxOsOp::ShowWindowButtons`), and the WM gives it its own.
     pub fn set_own_window_chrome(&mut self, on: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         self.platform_ops.push_back(crate::cx_api::CxOsOp::SetOwnChrome(on));

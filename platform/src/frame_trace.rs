@@ -20,7 +20,10 @@
 //! nothing, and that is no stall: a rest runs from a turn of the loop that left
 //! no work for a frame and none on its way to the screen, to when the loop next
 //! started on something that left one (an input it took, or its wake), and the
-//! gap leaves it out. A handler's time is not rest. The line says so.
+//! gap leaves it out. A NextFrame request alone is no frame's work: the wait
+//! for the beat that dispatches it rests if that beat draws nothing, and counts
+//! if it draws (an animation's frames count whole). A handler's time is not
+//! rest. The line says so.
 //!
 //! Off, each call is one atomic load.
 
@@ -55,6 +58,17 @@ pub(crate) fn note_drawn() {
 /// Draw events dispatched since start.
 pub fn drawn_frames() -> u64 {
     DRAWN.load(Ordering::Relaxed)
+}
+
+/// What a turn of the HAL loop left for a frame.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Left {
+    /// Work for a frame, or a frame on its way to the screen.
+    Frame,
+    /// NextFrame requests alone: the beat that dispatches them draws only if a handler asks.
+    NextFrame,
+    /// Nothing.
+    Nothing,
 }
 
 /// What woke a beat of the HAL loop.
@@ -132,6 +146,12 @@ pub struct FrameTrace {
     resting: Option<f64>,
     /// Seconds of rest since the last present.
     rested: f64,
+    /// A turn left NextFrame requests alone at this time: the wait to the next turn rests if the
+    /// beat that dispatches them draws nothing (`tick_rest` until then).
+    ticking: Option<f64>,
+    tick_rest: f64,
+    /// NextFrame was dispatched in this turn.
+    dispatched: bool,
     /// The frames (HAL frame ids) built by a repaint that took input, with that input's time.
     acted: Vec<(u64, f64)>,
     /// The last present was of a frame that took input.
@@ -161,6 +181,9 @@ impl FrameTrace {
             turn_from: None,
             resting: None,
             rested: 0.0,
+            ticking: None,
+            tick_rest: 0.0,
+            dispatched: false,
             acted: Vec::new(),
             acting: false,
             acted_present: Hist::default(),
@@ -197,6 +220,7 @@ impl FrameTrace {
             self.next_frame.add((time - prev) * 1000.0);
         }
         self.last_next_frame = Some(time);
+        self.dispatched = true;
     }
 
     /// The loop started on something at this time: an input it took, or a wake. A turn's oldest
@@ -207,15 +231,30 @@ impl FrameTrace {
         }
     }
 
-    /// The loop's turn is over at `now`; `due`: it leaves work for a frame, or a frame on its way
-    /// to the screen. A rest ends when the loop started on what made a frame due.
-    pub fn turn_over(&mut self, due: bool, now: f64) {
+    /// The loop's turn is over at `now`, leaving `left`. A rest ends when the loop started on
+    /// what left something. While NextFrame requests alone are left, the waits between turns
+    /// rest once a beat dispatches them and leaves no frame (it drew nothing), and count once one
+    /// leaves a frame.
+    pub fn turn_over(&mut self, left: Left, now: f64) {
         let from = self.turn_from.take().unwrap_or(now);
-        if !due {
+        let dispatched = std::mem::take(&mut self.dispatched);
+        if let Some(since) = self.ticking.take() {
+            let since = self.last_present.map_or(since, |prev| since.max(prev));
+            self.tick_rest += (from - since).max(0.0);
+        }
+        if left == Left::Frame {
+            self.tick_rest = 0.0;
+        } else if dispatched || left == Left::Nothing {
+            self.rested += std::mem::take(&mut self.tick_rest);
+        }
+        if left == Left::Nothing {
             self.resting.get_or_insert(now);
         } else if let Some(rest) = self.resting.take() {
             let rest = self.last_present.map_or(rest, |prev| rest.max(prev));
             self.rested += (from - rest).max(0.0);
+        }
+        if left == Left::NextFrame {
+            self.ticking = Some(now);
         }
     }
 
@@ -298,27 +337,45 @@ mod tests {
         let mut t = FrameTrace::new();
         assert_eq!(t.gap(1.0), None, "the first has nothing to count from");
         // frames that run on count whole
-        t.turn_over(true, 1.002);
+        t.turn_over(Left::Frame, 1.002);
         assert!(near(t.gap(1.008), 8.0));
         // a rest, a wake that asked for nothing, then an input: from the input
-        t.turn_over(false, 1.008);
-        t.turn_over(false, 2.0);
+        t.turn_over(Left::Nothing, 1.008);
+        t.turn_over(Left::Nothing, 2.0);
         t.turn_from = Some(4.0);
-        t.turn_over(true, 4.001);
+        t.turn_over(Left::Frame, 4.001);
         assert!(near(t.gap(4.04), 40.0));
         // a stall with a frame due counts whole
-        t.turn_over(true, 5.0);
+        t.turn_over(Left::Frame, 5.0);
         assert!(near(t.gap(8.04), 4000.0));
         // a stall in the handler the rest ended for counts whole
-        t.turn_over(false, 8.04);
+        t.turn_over(Left::Nothing, 8.04);
         t.turn_from = Some(9.0);
-        t.turn_over(true, 12.0);
+        t.turn_over(Left::Frame, 12.0);
         assert!(near(t.gap(12.01), 3010.0));
         // a wake's work counts from the wake
-        t.turn_over(false, 12.01);
+        t.turn_over(Left::Nothing, 12.01);
         t.turn_from = Some(13.0);
-        t.turn_over(true, 13.1);
+        t.turn_over(Left::Frame, 13.1);
         assert!(near(t.gap(13.11), 110.0));
+        // an animation: the wait for a beat that dispatched NextFrame and drew counts whole
+        t.turn_over(Left::NextFrame, 13.112);
+        t.turn_from = Some(13.127);
+        t.dispatched = true;
+        t.turn_over(Left::Frame, 13.128);
+        assert!(near(t.gap(13.129), 19.0));
+        // beats that dispatch NextFrame and draw nothing rest but for their own time; the wait
+        // for the one that draws counts
+        t.turn_over(Left::NextFrame, 13.13);
+        for wake in [13.15, 13.17] {
+            t.turn_from = Some(wake);
+            t.dispatched = true;
+            t.turn_over(Left::NextFrame, wake + 0.001);
+        }
+        t.turn_from = Some(13.19);
+        t.dispatched = true;
+        t.turn_over(Left::Frame, 13.191);
+        assert!(near(t.gap(13.2), 32.0));
     }
 
     #[test]
@@ -326,18 +383,18 @@ mod tests {
         let mut t = FrameTrace::new();
         let _ = t.gap(1.0);
         // two rests between two presents
-        t.turn_over(false, 1.0);
+        t.turn_over(Left::Nothing, 1.0);
         t.turn_from = Some(2.0);
-        t.turn_over(true, 2.0);
-        t.turn_over(false, 2.1);
+        t.turn_over(Left::Frame, 2.0);
+        t.turn_over(Left::Nothing, 2.1);
         t.turn_from = Some(3.1);
-        t.turn_over(true, 3.1);
+        t.turn_over(Left::Frame, 3.1);
         assert!(near(t.gap(3.12), 120.0));
         // a present heard after a turn found nothing due: the rest is from the present
-        t.turn_over(false, 3.11);
+        t.turn_over(Left::Nothing, 3.11);
         assert!(near(t.gap(3.13), 10.0));
         t.turn_from = Some(5.0);
-        t.turn_over(true, 5.0);
+        t.turn_over(Left::Frame, 5.0);
         assert!(near(t.gap(5.01), 10.0));
     }
 

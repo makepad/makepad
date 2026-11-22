@@ -7,7 +7,7 @@ use super::device::Done;
 use super::resources::*;
 use super::{Metal, Win};
 use crate::backend::Pixels;
-use crate::session::Session;
+use crate::session::{Session, HOST};
 use crate::types::*;
 use makepad_apple_sys::*;
 use std::sync::Mutex;
@@ -222,7 +222,18 @@ impl Metal {
     pub(super) fn readback_window(&mut self, s: &mut Session, window: Id, req: u32) {
         let sid = s.id;
         let (owner, physical) = self.window_key(sid, window);
-        let Some(win) = self.retained_window(owner, physical) else {
+        let source = if sid != HOST && owner == HOST {
+            if let Some(overlay) = self.overlays.get(&physical) {
+                // Both panels and window layers keep the borrower's full frame in the base.
+                overlay.base.as_ref()
+            } else {
+                self.win.get(&(owner, physical.index)).filter(|w| w.gen == physical.gen)
+                    .or_else(|| self.restores.get(&physical))
+            }
+        } else {
+            self.retained_window(owner, physical)
+        };
+        let Some(win) = source else {
             // a real window that keeps no frames has nothing to read; otherwise no frame has been
             // drawn into the window yet
             let status = if self.shell.is_some() && !self.retain { readback::NO_RASTER } else { readback::FAILED };

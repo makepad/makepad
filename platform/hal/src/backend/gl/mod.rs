@@ -465,11 +465,22 @@ impl Gpu for GlBackend {
     #[cfg(target_os = "android")]
     fn auto_adopt(&self) -> bool { self.shell.as_ref().is_some_and(|s| s.auto_adopt()) }
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
-        if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
+        // under a makepad WM its shell relays the dialog for the WM to draw (linux/wm.rs)
+        #[cfg(target_os = "linux")]
+        let wm = self.shell.is_some_and(|s| s.window_manager());
+        #[cfg(not(target_os = "linux"))]
+        let wm = false;
+        if !wm && matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
         #[cfg(target_os = "linux")]
         { if let Some(shell) = self.shell { shell.command(sid, command); return true; } false }
         #[cfg(target_os = "android")]
         { self.shell.as_mut().is_some_and(|s| s.command(sid, command)) }
+    }
+    #[cfg(target_os = "linux")]
+    fn host_message(&mut self, sid: u32, message: &[u8]) -> bool {
+        let Some(shell) = self.shell.filter(|s| s.window_manager()) else { return false };
+        shell.command(sid, exec::OsCmd::HostMessage { message: message.to_vec() });
+        true
     }
     fn texture_create(&mut self, s: &mut Session, id: Id, t: &mut TextureObj) -> Result<(), String> {
         let obj = self.new_texture(t.clone()).map_err(|e| { eprintln!("[hal-gl] texture create: {e}"); e })?;
@@ -595,7 +606,7 @@ impl Gpu for GlBackend {
         self.encode_frame(s, sid, target, kind, packet, view, now)
     }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
-        let t = self.window_image(s, window);
+        let t = self.window_image_for(s.id, s, window);
         let rect = t.as_ref().map_or([0; 4], |t| [0, 0, t.desc.w, t.desc.h]);
         self.read(s, t, req, rect);
     }

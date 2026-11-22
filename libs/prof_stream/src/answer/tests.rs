@@ -121,6 +121,20 @@ fn thread_pools_fold_into_one_row() {
     let r = render("threads", &lines(&l));
     assert!(r.contains("| T2..T5 | makepad-pool* (4 threads) | program | 0 running | 0.04 |"), "{}", r);
     assert!(r.starts_with("6 threads: 5 of the program, 1 of Relax."), "{}", r);
+    assert!(!r.contains("| pri |") && !r.contains("| P s |"), "no priority or core-type columns without the OS's fields: {}", r);
+    // where the OS gives them (macOS): the priority now (a range over a pool) and the CPU on the
+    // performance and the efficiency cores, summed over a pool
+    let mut l = String::from("{\"measured\":\"threads\",\"at_ms\":1,\"source\":\"os\",\"partial\":[]}\n");
+    l.push_str("{\"id\":\"T1\",\"name\":\"main\",\"role\":\"main\",\"state\":\"running\",\"cpu_ms\":900,\"pri\":47,\"p_ms\":850,\"e_ms\":50}\n");
+    for i in 0..4 {
+        l.push_str(&format!("{{\"id\":\"T{}\",\"name\":\"makepad-pool-{}\",\"role\":\"program\",\"state\":\"waiting\",\"cpu_ms\":10,\"pri\":{},\"p_ms\":6,\"e_ms\":4}}\n", i + 2, i, if i < 2 { 31 } else { 20 }));
+    }
+    l.push_str("{\"id\":\"T9\",\"name\":\"run-owner\",\"role\":\"owner\",\"state\":\"waiting\",\"cpu_ms\":5,\"pri\":31,\"p_ms\":5,\"e_ms\":0}\n");
+    let r = render("threads", &lines(&l));
+    assert!(r.contains("| id | name | role | state | CPU s | pri | P s | E s |"), "the columns: {}", r);
+    assert!(r.contains("| T1 | main | main | running | 0.9 | 47 | 0.85 | 0.05 |"), "a thread's own: {}", r);
+    assert!(r.contains("| T2..T5 | makepad-pool* (4 threads) | program | 0 running | 0.04 | 20..31 | 0.024 | 0.016 |"), "a pool's range and sums: {}", r);
+    assert!(r.contains("| T9 | 1 thread | owner |  | 0.005 | 31 | 0.005 | 0 |"), "a role row: {}", r);
 }
 
 #[test]

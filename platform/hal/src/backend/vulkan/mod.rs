@@ -976,8 +976,16 @@ impl Gpu for Vulkan {
     }
     #[cfg(target_os = "linux")]
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
-        if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
+        // under a makepad WM its shell relays the dialog for the WM to draw (linux/wm.rs)
+        let wm = self.shell.is_some_and(|s| s.window_manager());
+        if !wm && matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
         if let Some(shell) = self.shell { shell.command(sid, command); true } else { false }
+    }
+    #[cfg(target_os = "linux")]
+    fn host_message(&mut self, sid: u32, message: &[u8]) -> bool {
+        let Some(shell) = self.shell.filter(|s| s.window_manager()) else { return false };
+        shell.command(sid, exec::OsCmd::HostMessage { message: message.to_vec() });
+        true
     }
     fn gpu_budget(&self) -> Option<(u64, u64)> {
         self.dev.memory_budget(false).map(|b| (b.budget, b.usage))
@@ -1195,7 +1203,9 @@ impl Gpu for Vulkan {
         result
     }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
-        let image = self.window_image(s, window); let rect = self.window_rect(s.id, window, image.as_deref()); self.read(s, image, req, rect);
+        let image = self.window_image_for(s.id, s, window);
+        let rect = self.window_rect(s.id, window, image.as_deref());
+        self.read(s, image, req, rect);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) { self.copy_window(s, window, texture, req); }
     fn window_closed(&mut self, sid: u32, id: Id) {

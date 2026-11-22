@@ -369,9 +369,13 @@ impl Vulkan {
 
     /// A window with a badge layer reads as it was last presented: with the layer.
     pub(super) fn window_image(&mut self, s: &mut Session, id: Id) -> Option<Arc<Image>> {
+        self.window_image_for(HOST, s, id)
+    }
+
+    pub(super) fn window_image_for(&mut self, viewer: u32, s: &mut Session, id: Id) -> Option<Arc<Image>> {
         if let Some(em) = s.windows.get(s.id, id).ok().and_then(|w| w.val.embedded) { return self.resolve(s, em.tex); }
         let (sid, id) = self.window_key(s.id, id);
-        if let Some(last) = self.badged.get(&id.index).filter(|_| sid == HOST).and_then(|b| b.last.clone()) { return Some(last); }
+        if let Some(last) = self.badged.get(&id.index).filter(|_| sid == HOST && viewer == HOST).and_then(|b| b.last.clone()) { return Some(last); }
         // the newest frame went straight to the shell's target: a read of this frame takes it from there
         if sid == HOST && self.retained_stale.contains(&id.index) {
             if let Some(direct) = self.direct_frame.get(&id.index) { return Some(direct.clone()); }

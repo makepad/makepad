@@ -202,6 +202,8 @@ hal_events! {
     /// A named compute dispatch completed inside a submission.
     DispatchTime = 71, dispatch_time { name: rng, gpu_ns: u64 };
     PipelineReady = 52, pipeline_ready { pipeline: id };
+    /// The pipeline's state for this interned layout is ready. Its base pipeline answers separately.
+    PipelineLayoutReady = 72, pipeline_layout_ready { pipeline: id, layout: u32 };
     /// The packet left draws out: a pipeline they use was still being built for its target's
     /// layout (they come with a later packet, after `PipelineReady`). Posted before its `FrameDone`.
     FramePartial = 68, frame_partial { window: obj, frame: u64 };

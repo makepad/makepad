@@ -28,8 +28,13 @@ impl AppStatus {
 
     /// Standalone apps have no host to notify. Call when the status changes.
     pub fn send(&self, cx: &Cx) {
+        let json = StatusEnvelope { makepad_app_status: self.clone() }.serialize_json();
+        // the app's host: the window host the HAL names (a parent domain, or the WM its shell is
+        // a client of), or else Studio over its socket
+        #[cfg(not(target_arch = "wasm32"))]
+        if cx.hal_send_parent_message(&json) { return; }
         if cx.in_makepad_studio() {
-            Cx::send_studio_message(AppToStudio::Custom(StatusEnvelope { makepad_app_status: self.clone() }.serialize_json()));
+            Cx::send_studio_message(AppToStudio::Custom(json));
         }
     }
 

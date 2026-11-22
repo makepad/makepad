@@ -1355,6 +1355,13 @@ impl CxDrawListPool {
     /// only when it is not in this set (`CxGeometryPool::release_unreferenced`).
     pub fn referenced_geometries(&self) -> HashSet<GeometryId> {
         let mut referenced = HashSet::new();
+        self.referenced_geometries_into(&mut referenced);
+        referenced
+    }
+
+    /// Refill an existing set with all geometries named by active draw calls.
+    pub fn referenced_geometries_into(&self, referenced: &mut HashSet<GeometryId>) {
+        referenced.clear();
         for list in 0..self.0.pool.len() {
             let generation = self.0.pool[list].generation;
             if !self.0.is_live_generation(list, generation) {
@@ -1367,7 +1374,6 @@ impl CxDrawListPool {
                 }
             }
         }
-        referenced
     }
 }
 impl std::ops::Index<DrawListId> for CxDrawListPool {

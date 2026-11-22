@@ -28,6 +28,7 @@ use super::shell::Shared;
 use super::media::Media;
 use super::super::{Backend, Pixels};
 use crate::buffers::{CmdView, PipelineBlob};
+use crate::cmds::PipelineLayout;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
 use crate::types::*;
@@ -331,13 +332,13 @@ impl Metal {
         let mut owed = Vec::new();
         self.retired.retain(|mailbox| {
             let alone = mailbox.alone();
-            owed.extend(mailbox.take().into_iter().filter(|done| !matches!(done, Done::PipelineReady { .. } | Done::PipelineFailed { .. })));
+            owed.extend(mailbox.take().into_iter().filter(|done| !matches!(done, Done::PipelineReady { .. } | Done::PipelineLayoutReady { .. } | Done::PipelineFailed { .. })));
             !alone
         });
         for done in owed.into_iter().chain(completions) {
             let (sid, incarnation) = match &done {
                 Done::Frame { sid, incarnation, .. } | Done::DispatchTime { sid, incarnation, .. } | Done::Readback { sid, incarnation, .. } | Done::BufferLeases { sid, incarnation, .. }
-                | Done::PipelineReady { sid, incarnation, .. }
+                | Done::PipelineReady { sid, incarnation, .. } | Done::PipelineLayoutReady { sid, incarnation, .. }
                 | Done::PipelineFailed { sid, incarnation, .. } | Done::Surface { sid, incarnation, .. } => (*sid, incarnation),
             };
             // Every completion belongs to a session incarnation, including driver callbacks
@@ -398,6 +399,13 @@ impl Metal {
                                 if !std::mem::replace(&mut p.announced, true) { s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
                             }
                             s.events.pipeline_ready(id);
+                        }
+                    }
+                }
+                Done::PipelineLayoutReady { sid, id, layout, .. } => {
+                    if let Some(s) = world.session_mut(sid) {
+                        if s.pipelines.get(sid, id).is_ok() {
+                            s.events.pipeline_layout_ready(id, layout);
                         }
                     }
                 }
@@ -812,6 +820,24 @@ impl Gpu for Metal {
         let prof_source = crate::gpu_prof::keep_sources().then(|| state.source.clone());
         self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: ready, stats, source: prof_source });
         if ready { PipeStatus::Ready } else { PipeStatus::Pending }
+    }
+
+    /// Only a live graphics pipeline has Metal render states to wait for. Other ids can
+    /// take the executor's layout acknowledgement and still require their own base answer.
+    fn pipeline_wanted_in(&mut self, s: &mut Session, id: Id, layout: u32, desc: &PipelineLayout) -> bool {
+        let Some(pipe) = self.pipe.get(&(s.id, id.index)).filter(|p| p.gen == id.gen) else { return false };
+        let count = desc.colors.iter().position(|f| *f == PipelineLayout::ABSENT).unwrap_or(desc.colors.len());
+        let mut formats = [MTLPixelFormat::BGRA8Unorm; 4];
+        for (slot, &format) in formats.iter_mut().zip(&desc.colors[..count]) {
+            let texture = if format == format::WINDOW_TARGET { frame::embedded_target(s, desc.window).unwrap_or(Id::NONE) } else { Id::NONE };
+            *slot = frame::attachment_format(s, texture, format);
+        }
+        let samples = match desc.samples {
+            n @ (2 | 4 | 8) if self.info.msaa & u32::from(n) != 0 => n,
+            _ => 1,
+        };
+        pipe.state.want_layout(&self.dev, layout, &formats[..count], samples);
+        true
     }
 
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {

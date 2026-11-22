@@ -1234,6 +1234,14 @@ impl Cx {
         self.in_makepad_studio
     }
 
+    /// A host runs this app: Makepad Studio's run view, or a makepad window manager (it launched
+    /// the app, adopted it, or the app's HAL shell is the WM's client). The host owns what
+    /// surrounds the app: its look (the host's style sheet), its AI pane and its status line.
+    /// `in_makepad_studio` alone says a studio socket carries the app's messages.
+    pub fn in_host(&self) -> bool {
+        self.in_makepad_studio || crate::app_main::hosted_by_window_manager()
+    }
+
     pub fn cpu_cores(&self) -> usize {
         self.cpu_cores
     }
@@ -1900,7 +1908,13 @@ impl Cx {
         if self.get_global_ref::<crate::ime::HostedImeState>() == Some(&state) {
             return;
         }
-        if self.in_makepad_studio {
+        // to the app's window host (its parent domain, or the WM its HAL shell is a client of),
+        // else over Studio's socket
+        #[cfg(not(target_arch = "wasm32"))]
+        let sent = self.hal_send_parent_message(&state.to_json());
+        #[cfg(target_arch = "wasm32")]
+        let sent = false;
+        if !sent && self.in_makepad_studio {
             Self::send_studio_message(crate::studio::AppToStudio::Custom(state.to_json()));
         }
         *self.global::<crate::ime::HostedImeState>() = state;
@@ -2572,7 +2586,11 @@ impl Cx {
     }
 
     /// An external grab/input-frame request is work even for an idle, hidden
-    /// window. Repaint its pass tree without invalidating tweaked draw buffers.
+    /// window. Repaint its window pass without invalidating tweaked draw
+    /// buffers; its child passes paint when dirty, as on any frame. A clean
+    /// child's picture is current, and painting it again changes what the
+    /// grab sees where a pass reads its own last picture (a probe field's
+    /// relight, a temporal resolve): each grab stepped it once more.
     /// Standalone macOS first records any already-pending Draw, then submits
     /// this window before later input, without advancing NextFrame. Other
     /// backends service this work on their ordinary next-render path.
@@ -2583,7 +2601,7 @@ impl Cx {
         self.window_redrawn = true;
         self.remote_present_owed = true;
         if let Some(pass) = self.windows[window_id].main_pass_id {
-            self.repaint_pass_and_child_passes(pass);
+            self.passes[pass].paint_dirty = true;
         }
     }
 

@@ -166,7 +166,7 @@ mod tests {
 /// JIT-owned inspect commands. Host and program providers validate their own schemas.
 pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
     Some(match (cmd, sub) {
-        ("session", "relaunch") => params!("process": "boolean"),
+        ("session", "relaunch") => params!("process": "boolean", "anyway": "boolean"),
         ("cache", "verify") => params!("n": "integer"),
         ("session" | "pin" | "help" | "ping" | "threads" | "cpu" | "waits" | "vms" | "panics" | "pause" | "resume" | "rm" | "continue" | "versions" | "cache" | "frame", _) => "",
         ("inputs", _) => params!("match": "string", "of": "string"),

@@ -24,6 +24,17 @@ use makepad_gpu_trace::kind as pass_kind;
 /// and starts another, so the GPU never waits longer than this behind the encoder
 const ENCODE_SLICE: Duration = Duration::from_millis(2);
 
+/// A pick or drawable uses BGRA8. A render texture (including an embedded window's
+/// surface) uses its HAL format. Both state selection and layout probes use this rule.
+pub(super) fn attachment_format(s: &Session, texture: Id, format: u32) -> MTLPixelFormat {
+    let format = if texture.is_none() { Some(format) } else { s.textures.get(s.id, texture).ok().map(|t| t.val.format) };
+    format.and_then(mtl_format).unwrap_or(MTLPixelFormat::BGRA8Unorm)
+}
+
+pub(super) fn embedded_target(s: &Session, window: Id) -> Option<Id> {
+    s.windows.get(s.id, window).ok()?.val.embedded.map(|em| em.tex)
+}
+
 /// An encoder the GPU profiler times: its group in the batch's samples, or (a split pass) the
 /// encoders of its shader runs in samples of their own.
 pub(super) struct ProfPass {
@@ -1426,13 +1437,12 @@ impl Metal {
                 return None;
             }
             // an embedded window (a child domain's) draws into its surface, lent to the parent
-            let embedded = s.windows.get(sid, target).ok().and_then(|w| w.val.embedded);
-            if let Some(em) = embedded {
-                let Some(obj) = texture_obj(&mut self.tex, self.dev.device, s, em.tex, seq) else {
+            if let Some(tex) = embedded_target(s, target) {
+                let Some(obj) = texture_obj(&mut self.tex, self.dev.device, s, tex, seq) else {
                     s.stale();
                     return None;
                 };
-                colors.push((0, em.tex, obj));
+                colors.push((0, tex, obj));
             } else {
                 let obj = self.window_target(s, sid, target, vw.round() as u32, vh.round() as u32, now)?;
                 let (owner, physical) = self.window_key(sid, target);
@@ -1458,13 +1468,7 @@ impl Metal {
         // the formats every draw's pipeline state is built for (a pick draws into 8-bit twins)
         let formats: Vec<MTLPixelFormat> = colors
             .iter()
-            .map(|(_, id, _)| {
-                if pick || id.is_none() {
-                    MTLPixelFormat::BGRA8Unorm
-                } else {
-                    s.textures.get(sid, *id).ok().and_then(|e| mtl_format(e.val.format)).unwrap_or(MTLPixelFormat::BGRA8Unorm)
-                }
-            })
+            .map(|(_, id, _)| attachment_format(s, if pick { Id::NONE } else { *id }, format::WINDOW_TARGET))
             .collect();
         // an MSAA pass draws in multisampled twins of its attachments, resolved into them at its end
 

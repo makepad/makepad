@@ -180,7 +180,7 @@ impl Report {
     pub fn text(&self) -> String {
         let app = match self.app_state {
             Some(true) => "app state kept",
-            Some(false) => "app fields start fresh (the app has no AppMain::restart_state)",
+            Some(false) => "app fields start fresh (the app kept no state)",
             None => "no app state",
         };
         format!(
@@ -230,6 +230,20 @@ pub fn requested() -> bool {
     #[cfg(relax)]
     {
         std::relax::restart_requested()
+    }
+    #[cfg(not(relax))]
+    {
+        false
+    }
+}
+
+/// Whether the restart Relax asks for skips the app's say (`session relaunch anyway=1`, asked
+/// from outside the app by whoever drives its run), as the caption's restart does
+/// ([`restart_anyway`]).
+fn requested_anyway() -> bool {
+    #[cfg(relax)]
+    {
+        std::relax::restart_anyway()
     }
     #[cfg(not(relax))]
     {
@@ -443,7 +457,7 @@ pub fn try_restart(app: &mut dyn crate::app_main::AppMain, cx: &mut Cx) {
     static LAST_ASK_MS: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     let last = LAST_ASK_MS.load(Ordering::Relaxed);
-    let anyway = ANYWAY.load(Ordering::Acquire);
+    let anyway = ANYWAY.load(Ordering::Acquire) || requested_anyway();
     if last != 0 && now < last + 1000 && !anyway {
         return;
     }

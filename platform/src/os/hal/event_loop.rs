@@ -333,8 +333,16 @@ impl Cx {
         self.windows.id_iter().any(|id| self.windows[id].is_created && !self.windows[id].paint_paused)
     }
 
-    /// The paint clock stands still when nothing needs a frame.
+    /// The paint clock stands still when nothing needs a frame: it beats for a frame's work
+    /// (`hal_frame_work`) and for NextFrame requests to dispatch.
     pub(super) fn hal_has_work(&self) -> bool {
+        self.hal_frame_work()
+            || (!self.hosted_frames_held() && !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled())
+    }
+
+    /// The work a beat has for a frame, NextFrame requests aside: those ask for a beat, which
+    /// draws only if a handler asks for a draw. The frame trace's due frame (`hal_trace_turn`).
+    fn hal_frame_work(&self) -> bool {
         if self.hosted_frames_held() {
             return false;
         }
@@ -342,10 +350,8 @@ impl Cx {
         if self.hal.pending_ime_hide {
             return true;
         }
-        let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
         self.any_passes_dirty()
             || (self.need_redrawing() && self.app_draws_now())
-            || next_frames_due
             || self.demo_time_repaint
             // the next beat runs them (`run_live_edit_if_needed`)
             || self.pending_script_reapply
@@ -998,11 +1004,20 @@ impl Cx {
     }
 
     /// `MAKEPAD_TRACE=frames`: this turn of the loop is over. `on_its_way`: a frame is on the GPU.
+    /// It leaves a frame while one is on its way or the loop has a frame's work; NextFrame
+    /// requests alone are told apart (`frame_trace::Left`).
     fn hal_trace_turn(&mut self, on_its_way: bool) {
         if crate::frame_trace::on() {
+            use crate::frame_trace::Left;
             let on_its_way = on_its_way || self.hal.hosted.as_ref().is_some_and(|hosted| hosted.frame_on_its_way());
-            let due = on_its_way || self.hal_has_work();
-            self.hal.frame_trace.turn_over(due, makepad_hal::clock_ns() as f64 * 1e-9);
+            let left = if on_its_way || self.hal_frame_work() {
+                Left::Frame
+            } else if self.hal_has_work() {
+                Left::NextFrame
+            } else {
+                Left::Nothing
+            };
+            self.hal.frame_trace.turn_over(left, makepad_hal::clock_ns() as f64 * 1e-9);
         }
     }
 

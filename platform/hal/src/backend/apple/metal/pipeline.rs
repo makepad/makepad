@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// One pipeline state for a target layout other than the pipeline's own: the pass's attachment
-/// formats and whether the draw blends, built from the retained functions on first use.
+/// formats, blend mode and sample count, built from the retained functions on a want or draw.
 pub struct Variant {
     formats: Vec<MTLPixelFormat>,
     blend: bool,
@@ -21,12 +21,21 @@ pub struct Variant {
     pipeline: OnceLock<Result<RcObjcId, String>>,
 }
 
+struct WantedLayout {
+    layout: u32,
+    /// The single-sample draws select the pipeline's declared solid and blend states.
+    base: bool,
+    variants: Vec<Arc<Variant>>,
+    answered: bool,
+}
+
 /// What the compile completion handlers fill and the backend thread reads without waiting.
 pub struct PipeState {
     functions: OnceLock<(RcObjcId, RcObjcId)>,
     pub solid: OnceLock<Result<RcObjcId, String>>,
     pub blend: OnceLock<Result<RcObjcId, String>>,
     variants: Mutex<Vec<Arc<Variant>>>,
+    wanted: Mutex<Vec<WantedLayout>>,
     /// bit `i` set when the shader writes colour output `i`
     written: u8,
     /// `blend_op: @Max`: blending pipelines take the per-channel max
@@ -168,9 +177,9 @@ impl PipeState {
 
     fn settle(&self) {
         if self.settled.fetch_add(1, Ordering::AcqRel) == 1 && !self.failed.load(Ordering::Acquire) {
-            let ok = matches!(self.solid.get(), Some(Ok(_))) && matches!(self.blend.get(), Some(Ok(_)));
-            if ok {
+            if self.base_ready() {
                 self.mailbox.push(Done::PipelineReady { sid: self.sid, id: self.id, incarnation: self.incarnation.clone() });
+                self.answer_layouts();
             } else {
                 let log = [self.solid.get(), self.blend.get()].into_iter().flatten().find_map(|r| r.as_ref().err().cloned()).unwrap_or_default();
                 self.failure(log);
@@ -178,13 +187,79 @@ impl PipeState {
         }
     }
 
+    fn base_ready(&self) -> bool {
+        matches!(self.solid.get(), Some(Ok(_))) && matches!(self.blend.get(), Some(Ok(_)))
+    }
+
+    fn uses_base(&self, formats: &[MTLPixelFormat], samples: u8) -> bool {
+        samples <= 1 && formats == self.declared.as_slice()
+    }
+
+    pub(super) fn want_layout(self: &Arc<Self>, dev: &Device, layout: u32, formats: &[MTLPixelFormat], samples: u8) {
+        if self.failed.load(Ordering::Acquire) { return; }
+        {
+            let mut wanted = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+            if wanted.iter().any(|w| w.layout == layout) { return; }
+            let base = self.uses_base(formats, 1);
+            let mut variants = Vec::new();
+            let mut add_variants = |n| {
+                variants.push(self.variant(formats, false, n));
+                if self.can_blend { variants.push(self.variant(formats, true, n)); }
+            };
+            if !base { add_variants(1); }
+            if samples > 1 { add_variants(samples); }
+            wanted.push(WantedLayout { layout, base, variants, answered: false });
+        }
+        // Publishing the want before checking the functions pairs with the library callback
+        // publishing the functions before checking the wants. Either thread can claim the job.
+        let jobs = self.claim_wanted();
+        if !jobs.is_empty() {
+            let state = self.clone();
+            let device = RcObjcId::from_unowned(NonNull::new(dev.device).expect("device"));
+            // The same worker as a first draw's state (`select`): the build call is
+            // asynchronous, so even its inline run on a full queue does not wait.
+            dev.compile(Box::new(move || {
+                for v in jobs { state.clone().compile_variant(device.as_id(), v, true); }
+            }));
+        }
+        self.answer_layouts();
+    }
+
+    fn claim_variant(&self, v: &Variant) -> bool {
+        !v.queued.load(Ordering::Relaxed) && self.functions.get().is_some() && !v.queued.swap(true, Ordering::AcqRel)
+    }
+
+    /// Take shared references under the lock. Metal can call a completion as soon as a
+    /// build is submitted, so every driver call runs after releasing it.
+    fn claim_wanted(&self) -> Vec<Arc<Variant>> {
+        self.wanted.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|w| !w.answered)
+            .flat_map(|w| &w.variants).filter(|v| self.claim_variant(v)).cloned().collect()
+    }
+
+    fn answer_layouts(&self) {
+        if self.failed.load(Ordering::Acquire) { return; }
+        let base_ready = self.base_ready();
+        let mut answers = Vec::new();
+        {
+            let mut wanted = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+            for w in wanted.iter_mut() {
+                if !w.answered && (!w.base || base_ready) && w.variants.iter().all(|v| matches!(v.pipeline.get(), Some(Ok(_)))) {
+                    w.answered = true;
+                    answers.push(w.layout);
+                }
+            }
+        }
+        for layout in answers {
+            self.mailbox.push(Done::PipelineLayoutReady { sid: self.sid, id: self.id, layout, incarnation: self.incarnation.clone() });
+        }
+    }
+
     /// The state for a draw into `formats` with `samples` per pixel (an MSAA pass's; else 1);
-    /// never waits. A target layout of its own is built from the retained functions on first use
-    /// and the draw is skipped until it is ready.
+    /// never waits. The first draw of an unprobed state queues it and skips until it is ready.
     pub fn select(self: &Arc<Self>, dev: &Device, formats: &[MTLPixelFormat], blend: bool, samples: u8) -> Select {
         if self.failed.load(Ordering::Acquire) { return Select::Failed; }
         let want_blend = blend && self.can_blend;
-        if samples <= 1 && formats == self.declared.as_slice() {
+        if self.uses_base(formats, samples) {
             return match if want_blend { self.blend.get() } else { self.solid.get() } {
                 Some(Ok(p)) => Select::State(p.as_id()),
                 Some(Err(_)) => Select::Failed,
@@ -195,12 +270,20 @@ impl PipeState {
             return Select::Failed;
         }
         let variant = self.variant(formats, want_blend, samples.max(1));
-        if !variant.queued.load(Ordering::Relaxed) && self.enqueue_variant(dev, &variant) {
-            variant.queued.store(true, Ordering::Relaxed);
+        if self.claim_variant(&variant) {
+            let state = self.clone();
+            let job = variant.clone();
+            let device = RcObjcId::from_unowned(NonNull::new(dev.device).expect("device"));
+            dev.compile(Box::new(move || state.compile_variant(device.as_id(), job, false)));
         }
         match variant.pipeline.get() {
             Some(Ok(p)) => Select::State(p.as_id()),
-            Some(Err(_)) => Select::Failed,
+            Some(Err(e)) => {
+                // A probed Add state can fail while the app still uses its fallback.
+                // Selecting that failed state reports the same pipeline failure as a lazy build.
+                if self.blend_add { self.failure(e.clone()); }
+                Select::Failed
+            }
             None => Select::Pending,
         }
     }
@@ -221,21 +304,8 @@ impl PipeState {
         v
     }
 
-    /// Queues a variant's state. False while the library is still compiling (the caller retries
-    /// on a later draw).
-    fn enqueue_variant(self: &Arc<Self>, dev: &Device, variant: &Arc<Variant>) -> bool {
-        if self.functions.get().is_none() {
-            return false;
-        }
-        let state = self.clone();
-        let variant = variant.clone();
-        let device = RcObjcId::from_unowned(NonNull::new(dev.device).expect("device"));
-        dev.compile(Box::new(move || state.compile_variant(device.as_id(), variant)));
-        true
-    }
-
     /// Builds one variant's state from the retained functions.
-    fn compile_variant(self: Arc<Self>, device: ObjcId, variant: Arc<Variant>) {
+    fn compile_variant(self: Arc<Self>, device: ObjcId, variant: Arc<Variant>, probed: bool) {
         let Some((vertex, fragment)) = self.functions.get() else { return };
         let descriptor = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] }).expect("descriptor"));
         unsafe {
@@ -261,7 +331,7 @@ impl PipeState {
                 } else { describe_error(error, "Metal returned no pipeline") }),
             };
             if let Err(e) = &result {
-                if state.blend_add {
+                if state.blend_add && !probed {
                     state.failure(e.clone());
                     let _ = variant.pipeline.set(result);
                     return;
@@ -269,8 +339,12 @@ impl PipeState {
                 eprintln!("[metal] pipeline variant {:?} at {} samples: {e}", variant.formats, variant.samples);
             }
             let _ = variant.pipeline.set(result);
-            // a draw into this layout was skipped: the app paints again
-            state.mailbox.push(Done::PipelineReady { sid: state.sid, id: state.id, incarnation: state.incarnation.clone() });
+            // A lazy draw still gets its repaint. An early speculative build must not
+            // announce a base that is still compiling. Its settle will repaint in that case.
+            if !probed || (state.base_ready() && !state.failed.load(Ordering::Acquire)) {
+                state.mailbox.push(Done::PipelineReady { sid: state.sid, id: state.id, incarnation: state.incarnation.clone() });
+            }
+            state.answer_layouts();
         });
         unsafe {
             let _: () = msg_send![device, newRenderPipelineStateWithDescriptor: descriptor.as_id() completionHandler: &completion];
@@ -296,6 +370,7 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         solid: OnceLock::new(),
         blend: OnceLock::new(),
         variants: Mutex::new(Vec::new()),
+        wanted: Mutex::new(Vec::new()),
         written: desc.outputs as u8,
         blend_max: desc.blend & pipeline_blend::MAX != 0,
         blend_add: desc.blend & pipeline_blend::ADD != 0,
@@ -321,6 +396,8 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         for (formats, blend, samples, p) in c.variants {
             variants.push(Arc::new(Variant { formats, blend, samples, queued: AtomicBool::new(true), pipeline: OnceLock::from(Ok(p)) }));
         }
+        // The new session can only want a layout after create returns. It will find these
+        // completed states and can queue missing variants immediately from the restored functions.
         drop(variants);
         return state;
     }
@@ -400,9 +477,11 @@ fn compile(device: RcObjcId, ready: Arc<PipeState>, precise: bool) {
         let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
         let function = |name: &str| NonNull::new(unsafe { msg_send![library, newFunctionWithName: str_to_nsstring(name)] }).map(RcObjcId::from_owned);
         if let (Some(vertex), Some(fragment)) = (function("vertex_main"), function("fragment_main")) {
-            // kept for the variants built on first use: the passes of other attachment layouts
-            // (an HDR target, MRT)
+            // Both layout wants and first draws into other targets use these functions.
             let _ = ready.functions.set((vertex.clone(), fragment.clone()));
+            for variant in ready.claim_wanted() {
+                ready.clone().compile_variant(callback_device.as_id(), variant, true);
+            }
             // independent descriptors: a driver may consume them after this call returns
             for blend in [true, false] {
                 let descriptor = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] }).expect("descriptor"));

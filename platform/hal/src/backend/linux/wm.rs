@@ -23,7 +23,7 @@ use crate::window_controls::{hosted_window_op, HostedAppFrame, HostedClipboard, 
 use crate::{session, wm_socket, Id};
 use makepad_micro_serde::SerBin;
 use makepad_studio_protocol::{
-    AppToStudio, AppToStudioVec, ChildRelay, HostRelay, MouseCursor, PinchPhase, PresentableDraw, PresentableImageId, RelayTray, RelayTrayItem, RemoteKeyModifiers, ScrollPhase,
+    AppToStudio, AppToStudioVec, ChildRelay, HostRelay, MouseCursor, PinchPhase, PresentableDraw, PresentableImageId, RelayFileDialog, RelayTray, RelayTrayItem, RemoteKeyModifiers, ScrollPhase,
     drag_answer, drag_double, window_op, HostedAppearance, HostedCaption, HostedDragAnswer, HostedDragQuery, HostedDropdown, HostedWindowOp, dropdown_op, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
 };
 use std::collections::{HashMap, VecDeque};
@@ -436,14 +436,16 @@ impl Hub {
         stream.write_all(&out)
     }
 
-    fn send(&self, msgs: Vec<AppToStudio>) {
-        if msgs.is_empty() { return; }
-        if self.broken.load(Ordering::Acquire) { return; }
+    fn send(&self, msgs: Vec<AppToStudio>) -> bool {
+        if msgs.is_empty() { return true; }
+        if self.broken.load(Ordering::Acquire) { return false; }
         if let Err(e) = self.frame(0x2, &AppToStudioVec(msgs).serialize_bin()) {
             self.broken.store(true, Ordering::Release);
             self.publish_link("broken");
             eprintln!("[hal-wm] the WM's hub socket failed: {e}");
+            return false;
         }
+        true
     }
 
     fn close(&self) {
@@ -531,6 +533,23 @@ struct Win {
     /// A tray dropdown (`window_kind::DROPDOWN`): the WM shows it as a flyout under the tray's
     /// bar item, never as a tile.
     dropdown: bool,
+    /// The app shows none of its own window buttons in it now (`OsCmd::WindowButtons`): the WM
+    /// gives it its own (`hosted_window_op::HOST_BUTTONS`), said again to a WM that hosts this
+    /// process anew.
+    host_buttons: bool,
+}
+
+struct HeldButtons {
+    bits: u32,
+    /// The recipient's origin in the WM's pointer coordinates.
+    origin: (f64, f64),
+}
+
+#[derive(Default)]
+struct HeldInput {
+    keys: Vec<(Key, u32)>,
+    buttons: HashMap<Key, HeldButtons>,
+    pointer: (f64, f64),
 }
 
 pub(super) struct App {
@@ -557,6 +576,17 @@ pub(super) struct App {
     /// WM as relays; relay id -> (session, its request id).
     clip_reads: HashMap<u64, (u32, u64)>,
     next_clip_read: u64,
+    /// The WM echoes the relay id; each session numbers its own dialog requests.
+    dialogs: HashMap<u64, (u32, u32)>,
+    next_dialog: u64,
+    /// Application messages waiting for the next WM, in send order across sessions.
+    host_messages: VecDeque<(u32, Vec<u8>)>,
+    /// Latest title and folder per session, in the order they were set.
+    host_state: Vec<(u32, &'static str, Vec<u8>)>,
+    /// The sessions that sent the WM an application message: until an app session holds the input
+    /// window (none is made yet, or a run's boot window is not lent yet), the WM's messages that
+    /// are no state reach them as they come, as the answer to what they sent.
+    speakers: Vec<u32>,
     /// A read's richer flavours the WM sent just ahead of its answer (`HostedClipboard`).
     clip_flavours: Option<HostedClipboard>,
     /// The last primary selection this process made (also sent to the WM).
@@ -581,6 +611,15 @@ pub(super) struct App {
     detached_at: Option<std::time::Instant>,
     /// The last reason a reattach attempt failed (logged once per distinct reason).
     reattach_error: Option<String>,
+    /// The socket notice of the WM this process is (or was last) attached to, read as it attached
+    /// (a WM's clean quit removes it): a reattach joins only a WM of its kind ([`may_reattach`]).
+    host_notice: Option<String>,
+    /// The WMs a reattach passed over, with why (each logged once per detach).
+    passed_over: Vec<String>,
+    /// Keys and buttons down at their recipients: a detach releases them.
+    held: HeldInput,
+    /// This WM asked the process to close its windows.
+    killed: bool,
     quit_sent: bool,
     stopping: bool,
 }
@@ -623,7 +662,8 @@ impl App {
         Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(port, &client.to_string()), aux: None,
             pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false,
             clip_reads: HashMap::new(), next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),
-            hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false })
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
+            hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: read_notice(&path), passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false })
     }
 
     fn key_of(&self, window_id: usize) -> Option<Key> {
@@ -784,22 +824,42 @@ impl App {
                     self.hub.send(vec![AppToStudio::TickDone]);
                 }
             }
-            StudioToApp::MouseDown(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_down(id, x, y, e.button_raw_bits, mods(&e.modifiers))),
+            StudioToApp::MouseDown(e) => {
+                let Some((recipient, x, y)) = self.pointer_at(e.x, e.y) else { return };
+                let held = self.held.buttons.entry(recipient).or_insert(HeldButtons { bits: 0, origin: (e.x - x, e.y - y) });
+                held.bits |= e.button_raw_bits;
+                self.state.shared.push(recipient, |q, id| q.mouse_down(id, x, y, e.button_raw_bits, mods(&e.modifiers)));
+            }
             StudioToApp::MouseMove(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_move(id, x, y, 0.0, 0.0, mods(&e.modifiers))),
-            StudioToApp::MouseUp(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_up(id, x, y, e.button_raw_bits, mods(&e.modifiers))),
-            StudioToApp::MouseCancel(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.mouse_cancel(id, x, y, e.button_raw_bits, mods(&e.modifiers))),
+            StudioToApp::MouseUp(e) | StudioToApp::MouseCancel(e) => {
+                let Some((recipient, x, y)) = self.pointer_at(e.x, e.y) else { return };
+                if let Some(held) = self.held.buttons.get_mut(&recipient) {
+                    held.bits &= !e.button_raw_bits;
+                    if held.bits == 0 { self.held.buttons.remove(&recipient); }
+                }
+                let release = if matches!(msg, StudioToApp::MouseCancel(_)) {
+                    crate::buffers::EventQueue::mouse_cancel
+                } else {
+                    crate::buffers::EventQueue::mouse_up
+                };
+                self.state.shared.push(recipient, |q, id| release(q, id, x, y, e.button_raw_bits, mods(&e.modifiers)));
+            }
             StudioToApp::Scroll(e) => self.pointer_to(e.x, e.y, |q, id, x, y| q.scroll(id, x, y, e.sx, e.sy, mods(&e.modifiers), !e.is_mouse, phase(e.phase))),
             StudioToApp::Pinch(e) => {
                 let phase = match e.phase { PinchPhase::Begin => input::pinch::BEGIN, PinchPhase::Update => input::pinch::UPDATE, PinchPhase::End => input::pinch::END };
                 self.pointer_to(e.x, e.y, |q, id, x, y| q.pinch(id, x, y, e.scale, phase));
             }
-            StudioToApp::KeyDown(e) => {
+            StudioToApp::KeyDown(e) | StudioToApp::KeyUp(e) => {
+                let Some(recipient) = self.input_recipient() else { return };
+                let key = e.key_code.to_index();
                 let m = key_mods(e.modifiers.shift, e.modifiers.control, e.modifiers.alt, e.modifiers.logo);
-                self.pointer(|q, id| q.key_down(id, e.key_code.to_index(), e.is_repeat, m));
-            }
-            StudioToApp::KeyUp(e) => {
-                let m = key_mods(e.modifiers.shift, e.modifiers.control, e.modifiers.alt, e.modifiers.logo);
-                self.pointer(|q, id| q.key_up(id, e.key_code.to_index(), m));
+                if matches!(msg, StudioToApp::KeyDown(_)) {
+                    if !self.held.keys.contains(&(recipient, key)) { self.held.keys.push((recipient, key)); }
+                    self.state.shared.push(recipient, |q, id| q.key_down(id, key, e.is_repeat, m));
+                } else {
+                    self.held.keys.retain(|entry| *entry != (recipient, key));
+                    self.state.shared.push(recipient, |q, id| q.key_up(id, key, m));
+                }
             }
             StudioToApp::TextInput(e) => {
                 let kind = if e.was_paste { input::text::PASTE } else { input::text::TYPED };
@@ -809,6 +869,7 @@ impl App {
             // close button asks (the app may save first; `makepad run` ends the run).
             // With no window left to ask (the app closed its own), the process is asked to quit.
             StudioToApp::Kill => {
+                self.killed = true;
                 if self.windows.is_empty() {
                     self.quit();
                 }
@@ -869,8 +930,18 @@ impl App {
                         None => self.wm_state.push((name.to_string(), json.clone())),
                     }
                 }
-                if let Some(key) = self.input_recipient() {
+                let recipient = self.input_recipient();
+                if let Some(key) = recipient {
                     self.state.shared.push(key, |q, id| q.app_message(id, json.as_bytes()));
+                }
+                // Until an app session holds the input window (none is made yet, or a run's boot
+                // window is not lent yet), the sessions that spoke to the WM hear its other
+                // messages too: the answer to what they sent (the AI bus's `Registered` to a port
+                // opened at startup). State waits for the window, which hears its latest value.
+                if recipient.is_none_or(|(s, _)| s == session::HOST) && wm_state_name(&json).is_none() {
+                    for &sid in &self.speakers {
+                        self.state.shared.push((sid, Id::NONE), |q, id| q.app_message(id, json.as_bytes()));
+                    }
                 }
             }
             // The WM's activation of a tile: the window gains or loses focus as on any shell.
@@ -901,6 +972,13 @@ impl App {
                     self.state.shared.push((sid, Id::NONE), |q, _| q.clipboard(req, true, &bytes));
                 }
             }
+            StudioToApp::Relay(HostRelay::FileDialog(result)) => {
+                if let Some((sid, req)) = self.dialogs.remove(&result.id) {
+                    let paths: Vec<&str> = result.paths.iter().map(String::as_str).collect();
+                    let bytes = crate::buffers::pack_strs(&paths);
+                    self.state.shared.push((sid, Id::NONE), |q, _| q.dialog_result(req, paths.len() as u32, &bytes));
+                }
+            }
             _ => {}
         }
     }
@@ -914,16 +992,21 @@ impl App {
     /// The window a pointer message at `x, y` (the child's window space, where a later window
     /// sits at its own origin: its geometry's left and top) is for, and the point in it. A point
     /// in no window is the first window's, as the native hosted path does (`window_id_contains`).
-    fn pointer_at(&self, x: f64, y: f64) -> Option<(Key, f64, f64)> {
+    fn pointer_at(&mut self, x: f64, y: f64) -> Option<(Key, f64, f64)> {
+        self.held.pointer = (x, y);
         let inside = self.windows.values().filter(|w| !w.dropdown).find_map(|w| {
             let ([left, top, width, height], _, _) = w.geom?;
             (x >= left && y >= top && x <= left + width && y <= top + height).then_some((w.recipient, x - left, y - top))
         });
-        inside.or_else(|| self.input_recipient().map(|key| (key, x, y)))
+        let (recipient, local_x, local_y) = inside.or_else(|| self.input_recipient().map(|key| (key, x, y)))?;
+        if let Some(held) = self.held.buttons.get_mut(&recipient) {
+            held.origin = (x - local_x, y - local_y);
+        }
+        Some((recipient, local_x, local_y))
     }
 
     /// A pointer message at `x, y` to the window it is in, with the point in that window.
-    fn pointer_to(&self, x: f64, y: f64, f: impl FnOnce(&mut crate::buffers::EventQueue, Id, f64, f64)) {
+    fn pointer_to(&mut self, x: f64, y: f64, f: impl FnOnce(&mut crate::buffers::EventQueue, Id, f64, f64)) {
         if let Some((key, x, y)) = self.pointer_at(x, y) {
             self.state.shared.push(key, |q, id| f(q, id, x, y));
         }
@@ -1003,6 +1086,22 @@ fn wm_state_name(json: &str) -> Option<&str> {
     STATE.contains(&name).then_some(name)
 }
 
+/// Only the title and folder in the app's WM request envelope survive the connection.
+fn wm_request_state(message: &[u8]) -> Option<&'static str> {
+    use makepad_micro_serde::{DeJson, JsonValue};
+    let key = message.trim_ascii_start().strip_prefix(b"{")?.trim_ascii_start();
+    if !key.starts_with(b"\"wm\"") { return None; }
+    let envelope = JsonValue::deserialize_json(std::str::from_utf8(message).ok()?).ok()?;
+    let request = envelope.get("wm")?.object()?;
+    if request.len() != 1 { return None; }
+    for (kind, field) in [("Title", "title"), ("Cwd", "path")] {
+        if request.get(kind).and_then(|body| body.get(field)).and_then(JsonValue::as_str).is_some() {
+            return Some(kind);
+        }
+    }
+    None
+}
+
 fn key_mods(shift: bool, control: bool, alt: bool, logo: bool) -> u32 {
     (shift as u32 * input::MOD_SHIFT) | (control as u32 * input::MOD_CONTROL) | (alt as u32 * input::MOD_ALT) | (logo as u32 * input::MOD_LOGO)
 }
@@ -1047,17 +1146,107 @@ fn tray_item(item: &crate::types::MenuItem, label: String) -> RelayTrayItem {
     }
 }
 
+/// Whether the WM's state file (`<socket>.state`) asks its apps to outlive it: a `keep=1` line.
+fn state_keeps_apps(state: &str) -> bool {
+    state.lines().any(|line| line == "keep=1")
+}
+
+/// The kind of WM a socket notice names (its `lane=` line): empty for a node's own WM, else the
+/// lane of a test desktop.
+fn notice_lane(state: &str) -> &str {
+    state.lines().find_map(|line| line.strip_prefix("lane=")).unwrap_or("")
+}
+
+/// Whether a process that left the WM whose notice was `left` may join the WM whose notice is
+/// `next`: only one of the same kind, so a node's apps never land in a lane's test WM (and die
+/// with it) nor a test WM's apps on the node's; and one that keeps its apps when the old one
+/// kept this process. A process whose old WM published none joins no WM (it quits at the
+/// hang-up instead, [`detach_on_hangup`]).
+fn may_reattach(left: Option<&str>, next: Option<&str>) -> Result<(), String> {
+    let Some(left) = left else { return Err("the WM this process left published no host notice (an older build)".into()) };
+    let Some(next) = next else { return Err("it publishes no host notice (an older WM)".into()) };
+    let kind = |lane: &str| if lane.is_empty() { "the node's own WM".to_string() } else { format!("a test WM of lane {lane}") };
+    let (was, is) = (notice_lane(left), notice_lane(next));
+    if was != is {
+        return Err(format!("it is {}, and this process's was {}", kind(is), kind(was)));
+    }
+    if state_keeps_apps(left) && !state_keeps_apps(next) {
+        return Err("it does not keep its apps, and this process was kept".into());
+    }
+    Ok(())
+}
+
+/// Whether a process whose WM hung up waits for the next one: it has a tray, or its WM asked
+/// for its apps to be kept and did not Kill this one; and that WM published its notice as this
+/// process attached (`known`), without which no next WM can be told to be of its kind
+/// ([`may_reattach`]). Otherwise it quits.
+fn detach_on_hangup(has_tray: bool, killed: bool, keep: bool, known: bool) -> bool {
+    known && (has_tray || (!killed && keep))
+}
+
+/// The notice a WM publishes beside its socket (`<socket>.state`), if any.
+fn read_notice(socket: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(socket.with_added_extension("state")).ok()
+}
+
 /// How often a detached process looks for the next WM.
 const REATTACH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl App {
-    /// The WM went away and this process has a tray (its windows can come back, its service
-    /// keeps running): it lets go of the old WM's shared images and waits for the next WM at
-    /// the same socket. Nothing draws meanwhile; timers, signals and the app's work go on.
+    fn send_host_message(&self, message: &[u8]) -> bool {
+        if self.detached_at.is_some() || self.state.hung_up.load(Ordering::Acquire) || self.hub.broken.load(Ordering::Acquire) {
+            return false;
+        }
+        self.hub.send(vec![AppToStudio::Custom(String::from_utf8_lossy(message).into_owned())])
+    }
+
+    fn send_file_dialog(&mut self, kind: u32, title: String, location: String, filename: String, filters: Vec<String>) -> Option<u64> {
+        if self.detached_at.is_some() || self.hub.broken.load(Ordering::Acquire) { return None; }
+        let name = match kind & 0xff {
+            dialog_kind::SELECT_FILE => "select_file",
+            dialog_kind::SAVE_FILE => "save_file",
+            dialog_kind::SELECT_FOLDER => "select_folder",
+            dialog_kind::SAVE_FOLDER => "save_folder",
+            _ => return None,
+        };
+        self.next_dialog += 1;
+        let id = self.next_dialog;
+        let filters = filters.chunks(2).map(|pair| {
+            let extensions = pair.get(1).map(|s| s.split(',').map(str::to_owned).collect()).unwrap_or_default();
+            (pair[0].clone(), extensions)
+        }).collect();
+        let dialog = RelayFileDialog {
+            id, kind: name.into(), multiple: kind & dialog_kind::MULTIPLE != 0, filters,
+            title: (!title.is_empty()).then_some(title),
+            location: (!location.is_empty()).then_some(location),
+            filename: (!filename.is_empty()).then_some(filename),
+        };
+        self.hub.send(vec![AppToStudio::Relay(ChildRelay::FileDialog(dialog))]);
+        (!self.hub.broken.load(Ordering::Acquire)).then_some(id)
+    }
+
+    /// Release the old WM's shared images and wait for the next WM. While drawing is
+    /// suspended, timers, signals and the app's work go on.
     fn detach(&mut self) {
+        for (_, (sid, req)) in self.dialogs.drain() {
+            self.state.shared.push((sid, Id::NONE), |q, _| q.dialog_result(req, 0, &[]));
+        }
+        for (recipient, key) in self.held.keys.drain(..) {
+            self.state.shared.push(recipient, |q, id| q.key_up(id, key, 0));
+        }
+        let (x, y) = self.held.pointer;
+        for (recipient, held) in self.held.buttons.drain() {
+            let mut bits = held.bits;
+            while bits != 0 {
+                let button = 1u32 << bits.trailing_zeros();
+                self.state.shared.push(recipient, |q, id| q.mouse_up(id, x - held.origin.0, y - held.origin.1, button, 0));
+                bits &= !button;
+            }
+        }
         a11y::detached();
-        eprintln!("[hal-wm] the makepad WM went away; this process keeps its tray and waits for the next WM");
+        eprintln!("[hal-wm] the makepad WM went away; this process waits for the next WM");
         self.detached_at = Some(std::time::Instant::now());
+        self.passed_over.clear();
         lock(&self.state.rings).clear();
         {
             let mut s = shell::snapshot();
@@ -1088,8 +1277,8 @@ impl App {
         }
     }
 
-    /// A detached process asks the WM socket again; a live WM adopts it as a new client: its
-    /// windows are announced again (a hidden one stays minimised) and its trays shown again.
+    /// A detached process asks the WM sockets again, passing over WMs of another kind than the one
+    /// it left; a live WM adopts it as a new client: its windows are announced again (a hidden one stays minimised) and its trays shown again.
     fn reattach(&mut self) {
         if self.detached_at.is_some_and(|at| at.elapsed() < REATTACH_EVERY) { return; }
         self.detached_at = Some(std::time::Instant::now());
@@ -1097,6 +1286,15 @@ impl App {
         let mut found = None;
         let mut last = String::from("no WM socket to ask");
         for path in wm_socket::reattach_paths() {
+            let notice = read_notice(&path);
+            if let Err(why) = may_reattach(self.host_notice.as_deref(), notice.as_deref()) {
+                last = format!("{}: {why}", path.display());
+                if !self.passed_over.contains(&last) {
+                    eprintln!("[hal-wm] passed over the WM at {last}");
+                    self.passed_over.push(last.clone());
+                }
+                continue;
+            }
             {
                 let mut s = shell::snapshot();
                 s.wm_socket = Some(path.to_string_lossy().into_owned());
@@ -1105,11 +1303,11 @@ impl App {
                 s.admitted = None;
             }
             match wm_socket::adopt(&path, WIRE, std::process::id(), &name) {
-                Ok(admission) => { found = Some((path, admission)); break; }
+                Ok(admission) => { found = Some((path, admission, notice)); break; }
                 Err(e) => last = format!("{}: {e:?}", path.display()),
             }
         }
-        let Some((path, admission)) = found else {
+        let Some((path, admission, notice)) = found else {
             shell::snapshot().refused = Some(last.clone());
             // once per distinct reason, so a long wait is visible without a line a second
             if self.reattach_error.as_deref() != Some(last.as_str()) {
@@ -1119,6 +1317,7 @@ impl App {
             return;
         };
         self.reattach_error = None;
+        self.host_notice = notice;
         {
             let mut s = shell::snapshot();
             s.protocol = Some(admission.version);
@@ -1137,8 +1336,15 @@ impl App {
         };
         eprintln!("[hal-wm] the makepad WM at {} hosts this process again as client {} ({name}, hosted protocol {})", path.display(), admission.client, admission.version);
         a11y::start(hub.clone());
-        self.hub = hub;
         self.aux_path = hosted_ipc::aux_path(admission.port, &admission.client.to_string());
+        let sessions = crate::Hal::global().with_world(|world| world.session_ids());
+        self.finish_reattach(hub, &sessions);
+    }
+
+    /// Announce this process to the replacement hub before replaying its apps' messages.
+    fn finish_reattach(&mut self, hub: Arc<Hub>, sessions: &[u32]) {
+        self.hub = hub;
+        self.killed = false;
         self.detached_at = None;
         self.state.detached.store(false, Ordering::Release);
         self.hidden = false;
@@ -1152,9 +1358,24 @@ impl App {
             }
             if let Some(w) = self.windows.get_mut(&key) { w.requested = true; }
         }
+        let buttons: Vec<AppToStudio> = self.windows.values().filter(|w| w.host_buttons).map(|w| AppToStudio::Custom(HostedWindow { x: 1.0, ..HostedWindow::new(w.window_id, hosted_window_op::HOST_BUTTONS) }.to_json())).collect();
+        self.hub.send(buttons);
         let trays: Vec<AppToStudio> = self.trays.values().map(|(_, t)| AppToStudio::Relay(ChildRelay::SetTray(t.clone()))).collect();
         self.hub.send(trays);
+        for (_, _, message) in &self.host_state {
+            self.send_host_message(message);
+        }
+        if !self.host_messages.is_empty() {
+            eprintln!("[hal-wm] kept {} app messages while detached", self.host_messages.len());
+            while let Some((_, message)) = self.host_messages.front() {
+                if !self.send_host_message(message) { break; }
+                self.host_messages.pop_front();
+            }
+        }
         if self.app_drawn { self.hub.send(vec![AppToStudio::Custom(HostedAppFrame.to_json())]); }
+        for &sid in sessions {
+            self.state.shared.push((sid, Id::NONE), |q, id| q.app_message(id, wm_socket::HOST_ATTACHED.as_bytes()));
+        }
         self.ask_frame();
     }
 }
@@ -1171,7 +1392,7 @@ impl Shell for App {
                     self.next_window += 1;
                     let geom = self.early.remove(&window_id);
                     let dropdown = kind & 0xff == window_kind::DROPDOWN;
-                    let old = self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown });
+                    let old = self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown, host_buttons: false });
                     {
                         let mut s = shell::snapshot();
                         if let Some(w) = old { s.windows.remove(&w.window_id); }
@@ -1211,6 +1432,15 @@ impl Shell for App {
                             self.hub.send(vec![AppToStudio::Custom(HostedWindow::new(w.window_id, hosted_window_op::CLOSED).to_json())]);
                         }
                     }
+                }
+                // Whether the app shows window buttons of its own in the window now: the WM gives
+                // it its own where it does not (its plain caption over a full-screen window).
+                OsCmd::WindowButtons { id, show } => {
+                    let Some(key) = self.resolve((sid, id)) else { return };
+                    let Some(w) = self.windows.get_mut(&key).filter(|w| !w.dropdown && w.host_buttons != show) else { return };
+                    w.host_buttons = show;
+                    let window_id = w.window_id;
+                    self.hub.send(vec![AppToStudio::Custom(HostedWindow { x: show as u8 as f64, ..HostedWindow::new(window_id, hosted_window_op::HOST_BUTTONS) }.to_json())]);
                 }
                 // The app's caption buttons: the WM minimises, maximises or closes the tile.
                 OsCmd::WindowState { id, state } => {
@@ -1316,7 +1546,7 @@ impl Shell for App {
                         self.hub.send(vec![AppToStudio::Custom(HostedResize { w: geom[2] as f64, h: geom[3] as f64 }.to_json())]);
                     }
                 }
-                OsCmd::Cursor { cursor, .. } => self.hub.send(vec![AppToStudio::SetCursor(mouse_cursor(cursor))]),
+                OsCmd::Cursor { cursor, .. } => { self.hub.send(vec![AppToStudio::SetCursor(mouse_cursor(cursor))]); }
                 // the flavours go just ahead of the text the studio protocol carries
                 OsCmd::ClipSet { data } => {
                     let flavours = HostedClipboard { request: 0, text: data.text.clone(), html: data.html, markdown: data.markdown };
@@ -1355,7 +1585,25 @@ impl Shell for App {
                     self.hub.send(vec![AppToStudio::Relay(ChildRelay::ReadClipboard { request_id: self.next_clip_read })]);
                 }
                 OsCmd::PrintPdf { req, .. } => self.state.shared.push((sid, Id::NONE), |q, _| q.print_result(req, crate::print_status::UNSUPPORTED, &[])),
-                OsCmd::FileDialog { req, .. } => self.state.shared.push((sid, Id::NONE), |q, _| q.dialog_result(req, 0, &[])),
+                OsCmd::HostMessage { message } => {
+                    if !self.speakers.contains(&sid) { self.speakers.push(sid); }
+                    if let Some(kind) = wm_request_state(&message) {
+                        self.send_host_message(&message);
+                        self.host_state.retain(|(s, k, _)| (*s, *k) != (sid, kind));
+                        self.host_state.push((sid, kind, message));
+                    } else if !self.host_messages.is_empty() || !self.send_host_message(&message) {
+                        // Behind any still queued, so one-shot messages keep their order.
+                        self.host_messages.push_back((sid, message));
+                    }
+                    return; // An app message does not change frame pacing.
+                }
+                OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
+                    if let Some(id) = self.send_file_dialog(kind, title, location, filename, filters) {
+                        self.dialogs.insert(id, (sid, req));
+                    } else {
+                        self.state.shared.push((sid, Id::NONE), |q, _| q.dialog_result(req, 0, &[]));
+                    }
+                }
                 OsCmd::DirectDisplay { req, command } => self.state.shared.push((sid, Id::NONE), |q, _| {
                     q.direct_display_result(req, command.tag() as u32, false, b"a WM-hosted window does not own direct displays");
                 }),
@@ -1363,6 +1611,10 @@ impl Shell for App {
             },
             Op::CloseSession(sid) => {
                 self.clip_reads.retain(|_, (s, _)| *s != sid);
+                self.dialogs.retain(|_, (s, _)| *s != sid);
+                self.host_messages.retain(|(s, _)| *s != sid);
+                self.host_state.retain(|(s, _, _)| *s != sid);
+                self.speakers.retain(|s| *s != sid);
                 let gone: Vec<u64> = self.trays.iter().filter(|(_, (s, _))| *s == sid).map(|(t, _)| *t).collect();
                 for tray in gone {
                     self.trays.remove(&tray);
@@ -1449,13 +1701,26 @@ impl Shell for App {
         // a frame finished: a window held back by MAX_IN_FLIGHT may be granted the next one
         if redraw || self.windows.values().any(|w| w.requested && !w.awaiting) { self.ask_frame(); }
         self.finish_tick();
+        // The reader publishes the hang-up after queuing its last messages. Sample it first
+        // so a Kill queued during this dispatch is handled before its hang-up.
+        let hung_up = self.state.hung_up.load(Ordering::Acquire);
         let msgs = std::mem::take(&mut *lock(&self.state.inbox));
         for msg in msgs { self.message(msg); }
         if self.detached_at.is_some() {
             self.reattach();
-        } else if self.state.hung_up.load(Ordering::Acquire) {
-            // A process with a tray outlives its WM (a WM restart): it waits for the next one.
-            if self.trays.is_empty() { self.quit(); } else { self.detach(); }
+        } else if hung_up {
+            self.state.hung_up.store(false, Ordering::Relaxed);
+            let socket = shell::snapshot().wm_socket.clone();
+            let keep = socket.and_then(|path| read_notice(std::path::Path::new(&path))).is_some_and(|state| state_keeps_apps(&state));
+            let (tray, known) = (!self.trays.is_empty(), self.host_notice.is_some());
+            if detach_on_hangup(tray, self.killed, keep, known) {
+                self.detach();
+            } else {
+                if !known && detach_on_hangup(tray, self.killed, keep, true) {
+                    eprintln!("[hal-wm] the makepad WM went away and this process quits: that WM published no host notice as it attached (an older build), so no next WM can be told to be of its kind");
+                }
+                self.quit();
+            }
         }
         self.publish_pace();
         Ok(())
@@ -1560,10 +1825,11 @@ mod tests {
         let hub = Hub::connect(port, 78, WIRE, HOSTED_VERSIONS.1, "makepad-app-hidden", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let key = (9_001, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         // covered: the app holds its own frames, but one it asks for anyway (a grab's) is asked of
         // the WM and granted at the next Tick
         app.message(StudioToApp::Custom(HostedVisible { visible: false }.to_json()));
@@ -1591,11 +1857,12 @@ mod tests {
         let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-resize", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let (tile, later) = ((9_002, Id::new(1, 1)), (9_002, Id::new(2, 1)));
-        app.windows.insert(tile, Win { window_id: 0, recipient: tile, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
-        app.windows.insert(later, Win { window_id: 1, recipient: later, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(tile, Win { window_id: 0, recipient: tile, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
+        app.windows.insert(later, Win { window_id: 1, recipient: later, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         // a later window is the app's own business; the tile's size is the WM's
         app.command(Op::Cmd(later.0, OsCmd::WindowGeom { id: later.1, geom: [0.0, 0.0, 300.0, 200.0] }));
         app.command(Op::Cmd(tile.0, OsCmd::WindowGeom { id: tile.1, geom: [0.0, 0.0, 640.0, 480.0] }));
@@ -1611,25 +1878,58 @@ mod tests {
     /// A tray goes to the WM as a relay (items, check marks, lines, the glyph), a menu choice
     /// comes back to the session that set it, a closed session's tray is removed, and a process
     /// with a tray waits for the next WM when its WM goes away instead of quitting.
+    /// File pickers return their paths to their session and detach cancels outstanding pickers.
+    /// The replacement WM receives messages queued by sessions that survived the detach.
+    /// A detached process joins only a WM of the kind it left (the node's own, or its lane's test WM).
     fn trays_relay_to_the_wm_and_outlive_it() {
         use crate::types::{menu_kind, MenuItem};
+        use makepad_studio_protocol::RelayFileDialogResult;
+        assert!(detach_on_hangup(true, true, false, true), "a tray outlives the WM even after Kill without keep");
+        assert!(!detach_on_hangup(false, true, true, true), "Kill quits an app without a tray even with keep");
+        assert!(detach_on_hangup(false, false, true, true), "keep detaches an app without a tray on hang-up");
+        assert!(!detach_on_hangup(false, false, false, true), "a hang-up without keep quits an app without a tray");
+        assert!(!detach_on_hangup(true, false, true, false), "no app waits when its WM published no notice: no next WM could be told to be of its kind");
+        assert!(state_keeps_apps("epoch=ab12\nkeep=1\n"), "keep=1 is recognized alongside other keys");
+        assert!(!state_keeps_apps("keep=0"), "keep=0 disables keep");
+        assert!(!state_keeps_apps(""), "an empty state file does not keep apps");
+        assert!(!state_keeps_apps("keep=1x"), "only an exact keep=1 line keeps apps");
+        let node_wm = "epoch=ab12\nkeep=1\nlane=\n";
+        let lane_wm = "epoch=cd34\nkeep=1\nlane=devhubfix\n";
+        assert_eq!(may_reattach(Some(node_wm), Some("epoch=ef56\nkeep=1\nlane=\n")), Ok(()), "a kept app joins the node's next WM");
+        let why = may_reattach(Some(node_wm), Some(lane_wm)).unwrap_err();
+        assert!(why.contains("a test WM of lane devhubfix") && why.contains("the node's own WM"), "the node's apps never join a lane's test WM, and the skip says why: {why}");
+        assert!(may_reattach(Some(lane_wm), Some(node_wm)).is_err(), "a test WM's apps never join the node's WM");
+        assert!(may_reattach(Some(lane_wm), Some("epoch=0\nkeep=1\nlane=other\n")).is_err(), "nor another lane's test WM");
+        assert_eq!(may_reattach(Some(lane_wm), Some("epoch=9\nkeep=1\nlane=devhubfix\n")), Ok(()), "a test WM's apps join the lane's next test WM");
+        assert!(may_reattach(Some(node_wm), None).is_err(), "a kept app passes over a WM that publishes no notice");
+        assert!(may_reattach(Some(node_wm), Some("keep=0\nlane=\n")).is_err(), "a kept app passes over a WM that would not keep it");
+        assert_eq!(may_reattach(Some("keep=0\nlane=\n"), Some("keep=0\nlane=\n")), Ok(()), "a tray joins a WM of its kind that keeps nothing");
+        let why = may_reattach(None, Some(node_wm)).unwrap_err();
+        assert!(why.contains("no host notice"), "an app whose old WM published no notice rejoins no WM, and says why: {why}");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0u8];
-            while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
-            stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..2).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
-        });
+        let connect = |state: &Arc<State>| {
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (wm, _) = listener.accept().unwrap();
+            (Hub::start(client, state.clone()).unwrap(), wm)
+        };
+        let received = |hub: &Hub, wm: &mut TcpStream| {
+            // A ping delimits the writes so the old socket can stay writable through detach.
+            hub.frame(0x9, &[]).unwrap();
+            let mut sent = Vec::new();
+            loop {
+                let (opcode, bytes) = read_client_frame(wm);
+                if opcode == 0x9 { return sent; }
+                sent.push(AppToStudioVec::deserialize_bin(&bytes).unwrap().0);
+            }
+        };
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-aihub", state.clone()).unwrap();
+        let (hub, mut old_wm) = connect(&state);
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let item = |kind, cmd| MenuItem { parent: 0, kind, cmd, key: 0, str: Default::default() };
         let items = vec![
             (item(menu_kind::ITEM | menu_kind::DISABLED, 1), "Serving".to_string()),
@@ -1641,7 +1941,29 @@ mod tests {
         assert_eq!(app.trays.get(&77).map(|(sid, _)| *sid), Some(4), "the choice goes to the session that set it");
         app.command(Op::CloseSession(4));
         assert!(app.trays.is_empty(), "a closed session's tray goes");
-        let sent = server.join().unwrap();
+        // Two sessions may use the same request number. Only the second picker gets a reply.
+        let sid = 9_102;
+        let answered_sid = 9_103;
+        let req = 17;
+        app.command(Op::Cmd(sid, OsCmd::FileDialog {
+            req, kind: dialog_kind::SAVE_FOLDER, title: String::new(), location: String::new(), filename: String::new(), filters: Vec::new(),
+        }));
+        app.command(Op::Cmd(answered_sid, OsCmd::FileDialog {
+            req, kind: dialog_kind::SELECT_FILE | dialog_kind::MULTIPLE, title: "Open documents".into(),
+            location: "docs".into(), filename: "draft.md".into(),
+            filters: vec!["Text".into(), "md,txt".into(), "Images".into(), "png".into()],
+        }));
+        let host_message = |sid, text: &str| Op::Cmd(sid, OsCmd::HostMessage { message: text.as_bytes().to_vec() });
+        let title = r#"{"wm":{"Title":{"title":"café"}}}"#;
+        let cwd = r#"{"wm":{"Cwd":{"path":"documents"}}}"#;
+        let launch = r#"{"wm":{"Launch":{"app":"terminal","args":[]}}}"#;
+        app.command(host_message(sid, title));
+        app.command(host_message(sid, cwd));
+        app.command(host_message(sid, launch));
+        let sent = received(&app.hub, &mut old_wm);
+        assert_eq!(sent.len(), 7, "the WM receives both tray relays, both dialog requests and all three app messages");
+        assert!(matches!(sent[4].as_slice(), [AppToStudio::Custom(text)] if text == title), "the WM gets the exact app text: {:?}", sent[4]);
+        assert!(matches!(sent[6].as_slice(), [AppToStudio::Custom(text)] if text == launch), "the original WM gets the launch action");
         match sent[0].as_slice() {
             [AppToStudio::Relay(ChildRelay::SetTray(t))] => {
                 assert_eq!((t.tray, t.width, t.height, t.alpha.as_slice(), t.tooltip.as_str()), (77, 2, 1, &[0u8, 255][..], "AI Hub"));
@@ -1654,12 +1976,107 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(sent[1].as_slice(), [AppToStudio::Relay(ChildRelay::RemoveTray { tray: 77 })]), "{:?}", sent[1]);
-        // The WM goes away with a tray up: detached, not quitting.
+        let [AppToStudio::Relay(ChildRelay::FileDialog(pending))] = sent[2].as_slice() else { panic!("{:?}", sent[2]) };
+        assert_eq!(pending, &RelayFileDialog { id: pending.id, kind: "save_folder".into(), ..Default::default() });
+        let [AppToStudio::Relay(ChildRelay::FileDialog(open))] = sent[3].as_slice() else { panic!("{:?}", sent[3]) };
+        assert_ne!(open.id, pending.id, "each outstanding dialog has its own relay id");
+        assert_eq!(open, &RelayFileDialog {
+            id: open.id, kind: "select_file".into(), multiple: true, title: Some("Open documents".into()),
+            location: Some("docs".into()), filename: Some("draft.md".into()),
+            filters: vec![("Text".into(), vec!["md".into(), "txt".into()]), ("Images".into(), vec!["png".into()])],
+        });
+        let chosen = ["docs/first draft.md", "docs/café.txt"];
+        app.message(StudioToApp::Relay(HostRelay::FileDialog(RelayFileDialogResult {
+            id: open.id, save: false, folder: false, paths: chosen.iter().map(|s| s.to_string()).collect(),
+        })));
+        let mut results = Vec::new();
+        if let Some(mut queue) = lock(&app.state.shared.inbox).remove(&answered_sid) {
+            queue.drain_with(|e, payload| if let Some(crate::HalEvent::DialogResult { req, count, paths }) = e.decode(payload) {
+                results.push((req, count, crate::buffers::read_strs(paths, count)));
+            });
+        }
+        assert_eq!(results, [(req, 2, chosen.map(String::from).to_vec())], "the requesting session gets its paths in order");
+        assert!(!lock(&app.state.shared.inbox).contains_key(&sid), "the other session's dialog is still pending");
+        use makepad_studio_protocol::{KeyCode, KeyEvent, MouseButton, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp};
+        let first = Id::new(1, 1);
+        let later = Id::new(2, 1);
+        for (window_id, id, left) in [(0, first, 0.0), (1, later, 100.0)] {
+            app.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0,
+                geom: Some(([left, 0.0, 80.0, 60.0], 1.0, None)), dropdown: false, host_buttons: false });
+        }
+        let key = KeyEvent { key_code: KeyCode::KeyA, ..Default::default() };
+        app.message(StudioToApp::KeyDown(key));
+        app.message(StudioToApp::KeyDown(KeyEvent { is_repeat: true, ..key }));
+        let released = KeyEvent { key_code: KeyCode::KeyB, ..key };
+        app.message(StudioToApp::KeyDown(released));
+        app.message(StudioToApp::KeyUp(released));
+        let primary = MouseButton::PRIMARY.bits();
+        let secondary = MouseButton::SECONDARY.bits();
+        app.message(StudioToApp::MouseDown(RemoteMouseDown { x: 110.0, y: 5.0, button_raw_bits: primary, ..Default::default() }));
+        app.message(StudioToApp::MouseDown(RemoteMouseDown { x: 110.0, y: 5.0, button_raw_bits: secondary, ..Default::default() }));
+        app.message(StudioToApp::MouseCancel(RemoteMouseUp { x: 110.0, y: 5.0, button_raw_bits: secondary, ..Default::default() }));
+        app.message(StudioToApp::MouseMove(RemoteMouseMove { x: 70.0, y: 20.0, ..Default::default() }));
+        lock(&app.state.shared.inbox).remove(&sid);
+
+        // The WM goes away with a tray up: detached, not quitting, once it attached to a WM that
+        // published its notice; without one (an older WM) it quits instead.
         app.trays.insert(78, (0, RelayTray::default()));
         app.state.hung_up.store(true, Ordering::Release);
+        app.host_notice = Some("keep=0\nlane=\n".into());
         app.dispatch().unwrap();
         assert!(app.detached_at.is_some() && !app.quit_sent, "a tray app waits for the next WM");
-        app.state.detached.store(false, Ordering::Release);
+        let mut keys = Vec::new();
+        let mut buttons = Vec::new();
+        let mut cancelled = Vec::new();
+        if let Some(mut queue) = lock(&app.state.shared.inbox).remove(&sid) {
+            queue.drain_with(|event, payload| match event.decode(payload) {
+                Some(crate::HalEvent::KeyUp { window, key, .. }) => keys.push((window, key)),
+                Some(crate::HalEvent::MouseUp { window, x, y, button, .. }) => buttons.push((window, x, y, button)),
+                Some(crate::HalEvent::DialogResult { req, count, paths }) => cancelled.push((req, count, paths.to_vec())),
+                _ => {}
+            });
+        }
+        assert_eq!(cancelled, [(req, 0, Vec::new())], "detach cancels the outstanding dialog on its session");
+        assert!(!lock(&app.state.shared.inbox).contains_key(&answered_sid), "detach leaves the completed dialog alone");
+        assert_eq!(keys, [(first, key.key_code.to_index())], "detach releases each still-held key once to its recipient");
+        assert_eq!(buttons, [(later, -30.0, 20.0, primary)], "detach releases only held buttons to their recipient at the last pointer position");
+
+        let closing_sid = 9_104;
+        let new_title = r#"{"wm":{"Title":{"title":"updated"}}}"#;
+        let other_title = r#"{"wm":{"Title":{"title":"second session"}}}"#;
+        app.command(host_message(sid, "first"));
+        app.command(host_message(sid, new_title));
+        app.command(host_message(answered_sid, other_title));
+        app.command(host_message(closing_sid, cwd));
+        app.command(host_message(closing_sid, "from a closing session"));
+        app.command(host_message(answered_sid, "second"));
+        app.command(Op::CloseSession(closing_sid));
+        let during_detach = received(&app.hub, &mut old_wm);
+
+        let (hub, mut next_wm) = connect(&app.state);
+        app.finish_reattach(hub, &[sid, answered_sid]);
+        let replay: Vec<_> = received(&app.hub, &mut next_wm).into_iter().flatten().collect();
+        assert!(matches!(replay.as_slice(), [
+            AppToStudio::CreateWindow { window_id: 0, .. }, AppToStudio::CreateWindow { window_id: 1, .. },
+            AppToStudio::Relay(ChildRelay::SetTray(_)), AppToStudio::Custom(_), ..
+        ]), "the new WM gets the windows and tray before the queued messages: {replay:?}");
+        let texts: Vec<_> = replay.iter().filter_map(|msg| match msg { AppToStudio::Custom(text) => Some(text.as_str()), _ => None }).collect();
+        assert!(!texts.contains(&title) && !texts.contains(&launch), "the old title and the previously delivered launch are never replayed");
+        assert_eq!(texts, [cwd, new_title, other_title, "first", "second"],
+            "each live session's latest title and folder reach the new WM once before the queued messages, in send order");
+        assert!(during_detach.is_empty() && app.host_messages.is_empty(), "messages stayed off the old connection and the new WM drained the queue");
+        for session in [sid, answered_sid] {
+            let mut attached = Vec::new();
+            if let Some(mut queue) = lock(&app.state.shared.inbox).remove(&session) {
+                queue.drain_with(|event, payload| {
+                    if let Some(crate::HalEvent::AppMessage { window, message }) = event.decode(payload) {
+                        attached.push((window, message.to_vec()));
+                    }
+                });
+            }
+            assert_eq!(attached, [(Id::NONE, wm_socket::HOST_ATTACHED.as_bytes().to_vec())],
+                "each live session hears the host-attached marker once, even without a window");
+        }
     }
 
     #[test]
@@ -1682,8 +2099,9 @@ mod tests {
         let hub = Hub::connect(port, 81, WIRE, HOSTED_VERSIONS.1, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let id = Id::new(5, 1);
         app.command(Op::Cmd(6, OsCmd::WindowCreate { id, kind: window_kind::DROPDOWN, parent: Id::NONE, geom: [0.0; 4] }));
         assert!(app.windows[&(6, id)].dropdown);
@@ -1725,10 +2143,11 @@ mod tests {
         let hub = Hub::connect(port, 80, WIRE, HOSTED_VERSIONS.1, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let key = (9_003, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         let presenter = Presenter(state.clone());
         // frame 1 is on the GPU; the app asks again and the next Tick grants frame 2
         app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
@@ -1772,10 +2191,11 @@ mod tests {
         let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
-        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         let presenter = Presenter(state.clone());
         // each granted beat submits a frame and asks for the next one at once
         for _ in 0..MAX_IN_FLIGHT {
@@ -1812,18 +2232,19 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..10).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+            (0..11).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-clock", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(1, 1));
         let lent = (9_002, Id::new(4, 1));
-        app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         // two presses (a double click) before the app answers: the answers keep the WM's ids
         app.message(StudioToApp::Custom(HostedDragQuery { id: 11, x: 40.0, y: 8.0 }.to_json()));
         app.message(StudioToApp::Custom(HostedDragQuery { id: 12, x: 41.0, y: 8.0 }.to_json()));
@@ -1840,7 +2261,7 @@ mod tests {
         // a later window (an output window) is a tile of its own: what the app asks of it names it
         let later = (lent.0, Id::new(5, 1));
         let origin = ([100_000.0, 0.0, 300.0, 200.0], 1.0, None);
-        app.windows.insert(later, Win { window_id: 3, recipient: later, requested: false, awaiting: false, ahead: 0, geom: Some(origin), dropdown: false });
+        app.windows.insert(later, Win { window_id: 3, recipient: later, requested: false, awaiting: false, ahead: 0, geom: Some(origin), dropdown: false, host_buttons: false });
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: later.1, state: window_state::FULLSCREEN }));
         app.command(Op::Cmd(lent.0, OsCmd::WindowState { id: later.1, state: window_state::RESTORE }));
         // a press in it (at its origin in the child's window space) is asked of that window, at
@@ -1864,6 +2285,10 @@ mod tests {
         assert!(lock(&app.state.shared.inbox).contains_key(&session::HOST), "the load screen is woken");
         app.message(StudioToApp::Custom(HostedAppearance { dark: false }.to_json()));
         assert_eq!(super::super::host_dark(), Some(false));
+        // the app shows no window buttons of its own in the window (chromeless, or full screen
+        // with no caption): the WM is told once, by the window's id, to give it its own
+        app.command(Op::Cmd(lent.0, OsCmd::WindowButtons { id: lent.1, show: true }));
+        app.command(Op::Cmd(lent.0, OsCmd::WindowButtons { id: lent.1, show: true }));
         // the app's caption close said yes and the app closed its window: the WM closes the tile,
         // and its Kill then finds no window to ask, so the process is asked to quit
         app.command(Op::Cmd(lent.0, OsCmd::WindowClose { id: lent.1 }));
@@ -1887,13 +2312,15 @@ mod tests {
         assert_eq!(HostedWindow::parse(&sent[6]), Some(HostedWindow::new(3, hosted_window_op::RESTORE)));
         assert_eq!(HostedDragAnswer::parse(&sent[7]), Some(HostedDragAnswer { id: 13, response: drag_answer::CAPTION, double_click: drag_double::FULLSCREEN }));
         assert_eq!(HostedWindow::parse(&sent[8]), Some(HostedWindow::new(3, hosted_window_op::CLOSED)));
-        assert_eq!(HostedWindowOp::parse(&sent[9]), Some(HostedWindowOp { op: window_op::CLOSE }));
+        assert_eq!(HostedWindow::parse(&sent[9]), Some(HostedWindow { x: 1.0, ..HostedWindow::new(0, hosted_window_op::HOST_BUTTONS) }));
+        assert_eq!(HostedWindowOp::parse(&sent[10]), Some(HostedWindowOp { op: window_op::CLOSE }));
     }
 
     /// `makepad run` under the WM: the WM's style sheet and its activation of the tile arrive while
     /// the run's own boot window has it (the app's domain is not up yet); the session the window is
     /// lent to then hears the latest of each, as an app the WM launched hears them at its start.
-    /// Events that are no state (a drag query, a back press) are not replayed.
+    /// Events that are no state (a drag query, a back press) are not replayed; an answer to what
+    /// the app's domain sent the WM reaches it before the lend.
     #[test]
     fn a_lent_window_hears_the_wm_state_sent_before_the_lend() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1911,10 +2338,11 @@ mod tests {
         server.join().unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            dialogs: HashMap::new(), next_dialog: 0, host_messages: VecDeque::new(), host_state: Vec::new(), speakers: Vec::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, host_notice: None, passed_over: Vec::new(), held: HeldInput::default(), killed: false, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(77, 1));
-        app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false, host_buttons: false });
         let old_style = r#"{"makepad_style":{"name":"windows"}}"#;
         let style = r#"{"makepad_style":{"name":"macos"}}"#;
         let back = r#"{"makepad_back":{}}"#;
@@ -1930,15 +2358,26 @@ mod tests {
             got
         };
         // (the boot window heard them as they came: session::HOST's inbox is shared with other tests)
-        // lent to the app's domain: the latest style, and the tile's focus as the WM last said it
         let lent = (9_101, Id::new(4, 1));
+        let app_messages = |heard: &[(u16, String, Option<String>)]| -> Vec<String> {
+            heard.iter().filter(|(tag, ..)| *tag == crate::events::event_tag::AppMessage).map(|(_, json, _)| json.clone()).collect()
+        };
+        // the app's domain asks the WM before the window is lent to it (an AI port opened at its
+        // start): the answer, no state, reaches it at once, not only the boot window
+        app.command(Op::Cmd(lent.0, OsCmd::HostMessage { message: br#"{"makepad_ask":{}}"#.to_vec() }));
+        let answer = r#"{"makepad_answer":{}}"#;
+        app.message(StudioToApp::Custom(answer.to_string()));
+        assert_eq!(app_messages(&drain(&app, lent.0)), [answer], "the session that asked hears the answer before its lend");
+        // lent to the app's domain: the latest style, and the tile's focus as the WM last said it
         app.command(Op::Lend { host: host.1, session: lent.0, alias: lent.1 });
         let heard = drain(&app, lent.0);
-        let messages: Vec<&str> = heard.iter().filter(|(tag, ..)| *tag == crate::events::event_tag::AppMessage).map(|(_, json, _)| json.as_str()).collect();
-        assert_eq!(messages, [style], "only the latest state, no events");
+        assert_eq!(app_messages(&heard), [style], "only the latest state, no events");
         let focus: Vec<&String> = heard.iter().filter(|(tag, ..)| *tag == crate::events::event_tag::Focus).filter_map(|(.., e)| e.as_ref()).collect();
         assert_eq!(focus.len(), 1);
         assert!(focus[0].contains("focused: false"), "{focus:?}");
+        // the window is the app's now: it hears the next answer once, as the input recipient
+        app.message(StudioToApp::Custom(answer.to_string()));
+        assert_eq!(app_messages(&drain(&app, lent.0)), [answer], "an answer after the lend reaches the app once");
     }
 
     #[test]

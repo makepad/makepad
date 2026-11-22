@@ -476,7 +476,7 @@ fn a_window_layer_samples_the_apps_newest_frame_and_goes() {
     let req = OpenReq { backend: backend_id::GL, flags: open_flags::OFFSCREEN_WINDOWS | open_flags::RETAIN_WINDOWS, ..Default::default() };
     let info = hal.open_host(&req);
     assert_eq!(info.backend, backend_id::GL, "GLES HAL initialization failed");
-    assert_ne!(info.flags & info_flags::WINDOW_LAYERS, 0);
+    assert_ne!(info.flags & info_flags::WINDOW_LAYERS, 0, "the backend must support window layers");
     let mut w = CmdWriter::new(HOST);
     w.window_create(WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 32.0, 32.0], false);
     w.texture_create(LAYER, usage::RENDER_TARGET | usage::SAMPLED, format::BGRA8, 32, 32, [1, 1], Attr::default());
@@ -493,29 +493,30 @@ fn a_window_layer_samples_the_apps_newest_frame_and_goes() {
     w.pipeline_create(SAMPLED_PIPE, dialect::GLSL, Attr::default(), &blob);
     hal.submit(&w.buf());
     until(&hal, HOST, |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == SAMPLED_PIPE));
-    // the app adopts the window and draws its triangle (base along the bottom) on black
+    // The new background distinguishes the borrower's frame under the layer from its first frame.
     let sid = hal.open(&OpenReq { app_key: 99, ..req }).session;
-    assert_ne!(sid, HOST);
+    assert_ne!(sid, HOST, "the borrower must have its own session");
     resources(&hal, sid);
     let app_frame = |serial: u64| {
         let mut w = CmdWriter::new(sid);
         if serial == 11 { w.window_create(APP_WINDOW, window_kind::NORMAL, Id::NONE, [0.0; 4], true); }
         w.frame_begin(serial, FrameMeta::default());
-        w.pass(pass(Id::NONE, 32, 32, [0.0, 0.0, 0.0, 1.0]));
+        let clear = if serial == 11 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0, 1.0] };
+        w.pass(pass(Id::NONE, 32, 32, clear));
         w.draw(draw());
         w.frame_end(APP_WINDOW, target::WINDOW);
         hal.submit(&w.buf());
         frame_done(&hal, sid, serial);
     };
     app_frame(11);
-    let shown = |req: u32| {
-        let mut w = CmdWriter::new(HOST);
-        w.snapshot(WINDOW, req);
+    let snapshot = |session, window, req| {
+        let mut w = CmdWriter::new(session);
+        w.snapshot(window, req);
         hal.submit(&w.buf());
-        pixels(&hal, HOST, req)
+        pixels(&hal, session, req)
     };
     let at = |image: &[u8], x: usize, y: usize| image[(y * 32 + x) * 4..][..4].to_vec();
-    assert_eq!(at(&shown(1), 26, 27), [255; 4], "the app's frame shows");
+    assert_eq!(at(&snapshot(HOST, WINDOW, 1), 26, 27), [255; 4], "the app's frame shows");
     // the layer comes on; the app draws under it
     w.clear();
     w.window_overlay(WINDOW, true, [0.0, 0.0, 32.0, 32.0], LAYER, false);
@@ -531,24 +532,29 @@ fn a_window_layer_samples_the_apps_newest_frame_and_goes() {
     w.frame_end(WINDOW, target::WINDOW);
     hal.submit(&w.buf());
     frame_done(&hal, HOST, 101);
-    let image = shown(2);
+    let image = snapshot(HOST, WINDOW, 2);
     assert_eq!(at(&image, 5, 27), [255; 4], "the app's frame, sampled from the layer texture");
-    assert_eq!(at(&image, 5, 2), [0, 0, 0, 255]);
+    assert_eq!(at(&image, 5, 2), [0, 0, 0, 255], "the layer samples the newest background");
     assert_eq!(at(&image, 26, 27), [0, 0, 255, 255], "session 0's frame covers the app's");
-    assert_eq!(at(&image, 26, 2), [0, 0, 255, 255]);
+    assert_eq!(at(&image, 26, 2), [0, 0, 255, 255], "the host sees blue over the app's background");
+    let borrower = snapshot(sid, APP_WINDOW, 2);
+    assert_eq!(borrower.len(), 32 * 32 * 4, "the borrower gets the full window under the layer");
+    assert_eq!(at(&borrower, 26, 27), [255; 4], "the borrower sees its white triangle under the layer");
+    assert_eq!(at(&borrower, 26, 2), [0, 0, 0, 255], "the borrower sees its newest black background under the layer");
     // the layer goes: the app's frame again, never session 0's
     w.clear();
     w.window_overlay(WINDOW, false, [0.0; 4], Id::NONE, false);
     hal.submit(&w.buf());
     app_frame(13);
-    let image = shown(3);
-    assert_eq!(at(&image, 26, 27), [255; 4]);
-    assert_eq!(at(&image, 26, 2), [0, 0, 0, 255]);
+    let image = snapshot(HOST, WINDOW, 3);
+    assert_eq!(at(&image, 26, 27), [255; 4], "the host sees the app's triangle after the layer goes");
+    assert_eq!(at(&image, 26, 2), [0, 0, 0, 255], "the host sees the app's background after the layer goes");
+    assert_eq!(snapshot(sid, APP_WINDOW, 3), image, "borrower and host snapshots match after the layer goes");
     hal.with_world(|w| {
-        assert_eq!(w.session(HOST).unwrap().stats.bad_args, 0);
-        assert_eq!(w.session(sid).unwrap().stats.bad_args, 0);
+        assert_eq!(w.session(HOST).unwrap().stats.bad_args, 0, "the host's commands must be valid");
+        assert_eq!(w.session(sid).unwrap().stats.bad_args, 0, "the borrower's commands must be valid");
     });
-    assert!(hal.close(sid));
+    assert!(hal.close(sid), "the borrower's session must close");
 }
 
 /// One pass with two views side by side (`Pass::view_rects`), as the eyes of an XR frame: each

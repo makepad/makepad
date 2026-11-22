@@ -9,7 +9,7 @@ use crate::{
     //makepad_live_id::*,
     makepad_script::*,
     script::vm::*,
-    texture::Texture,
+    texture::{Texture, TextureFormat},
     window::WindowId,
 };
 use crate::makepad_network::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
@@ -120,9 +120,6 @@ impl GpuTimeQuery {
     fn set_tag(&self, tag: u64) {
         self.recorder.tag.store(tag, Ordering::Relaxed);
     }
-    fn take_samples(&self) -> Vec<f64> {
-        self.receiver.try_iter().map(|(_, ms)| ms).collect()
-    }
     fn take_tagged_samples(&self) -> Vec<(u64, f64)> {
         self.receiver.try_iter().collect()
     }
@@ -133,6 +130,57 @@ pub struct DrawPass(PoolId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DrawPassId(pub(crate) usize);
+
+impl DrawPassId {
+    /// Read the same paint receipt as a pass handle when walking a recorded pass chain.
+    pub fn holds_whole_paint_since(self, cx: &Cx, repaint: u64, asked: u64) -> bool {
+        let p = &cx.passes[self];
+        !p.incomplete
+            && p.painted_serial >= repaint
+            && p.painted_frame != 0
+            && p.painted_frame <= asked
+            && cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire) >= p.painted_frame
+            && !cx.frames_partial(p.painted_frame, p.painted_frame)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type LayoutKey = makepad_hal::cmds::PipelineLayout;
+#[cfg(target_arch = "wasm32")]
+type LayoutKey = ();
+
+/// The colour formats, depth format, sample count and view count a pass's pipelines
+/// are keyed on. A window's layout comes only from its pass, via [`Cx::pass_layout`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PassLayout(pub(crate) LayoutKey);
+
+impl PassLayout {
+    /// The layout of a single-sample, single-view offscreen pass, in colour attachment
+    /// order. Texture sizes do not affect pipeline readiness.
+    pub fn offscreen(colors: &[TextureFormat], depth: Option<&TextureFormat>) -> Self {
+        debug_assert!(colors.len() <= 4, "a pass has at most four colour attachments");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crate::frame_build::attachment_format;
+            let mut formats = [LayoutKey::ABSENT; 4];
+            for (slot, color) in formats.iter_mut().zip(colors) {
+                *slot = attachment_format(color, false, None);
+            }
+            Self(LayoutKey {
+                window: makepad_hal::Id::NONE,
+                colors: formats,
+                depth: depth.map_or(LayoutKey::ABSENT, |fmt| attachment_format(fmt, true, None)),
+                samples: 1,
+                views: 1,
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = depth;
+            Self(())
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct CxDrawPassPool(pub(crate) IdPool<CxDrawPass>);
@@ -315,6 +363,22 @@ impl DrawPass {
     pub fn set_as_xr_pass(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.parent = CxDrawPassParent::Xr;
+    }
+
+    /// Give `draw_pass.time` the owner's clock. The recording repaints when its owner
+    /// records it again, or supplies a different time while its last paint drew a shader
+    /// that reads the clock. The platform neither stamps the frame clock into this pass
+    /// nor requests frames for its time-driven shaders. `None` puts the pass back on the
+    /// frame clock.
+    pub fn set_own_time(&self, cx: &mut Cx, time: Option<f32>) {
+        let pass = &mut cx.passes[self.draw_pass_id()];
+        if pass.own_time != time {
+            pass.own_time = time;
+            // A cached picture no shader of which reads the clock is the same at any time.
+            if pass.reads_time {
+                pass.paint_dirty = true;
+            }
+        }
     }
 
     /// Whether this pass's colour target holds linear light (`DrawPassUniforms::linear_light`).
@@ -604,13 +668,7 @@ impl DrawPass {
     /// elsewhere): a producer that reads each recording back once asks this when the read has
     /// come back.
     pub fn holds_whole_paint_since(&self, cx: &Cx, repaint: u64, asked: u64) -> bool {
-        let p = &cx.passes[self.draw_pass_id()];
-        !p.incomplete
-            && p.painted_serial >= repaint
-            && p.painted_frame != 0
-            && p.painted_frame <= asked
-            && cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire) >= p.painted_frame
-            && !cx.frames_partial(p.painted_frame, p.painted_frame)
+        self.draw_pass_id().holds_whole_paint_since(cx, repaint, asked)
     }
 
     /// Whether a paint of a recording made at or after `repaint` completed whole on the GPU,
@@ -629,10 +687,13 @@ impl DrawPass {
     }
 
     pub fn take_gpu_times_ms(&self, cx: &Cx) -> Vec<f64> {
-        cx.passes[self.draw_pass_id()]
-            .gpu_time_query
-            .as_ref()
-            .map_or_else(Vec::new, GpuTimeQuery::take_samples)
+        self.gpu_times_ms(cx).collect()
+    }
+
+    /// Consume completed durations in arrival order, without collecting them.
+    pub fn gpu_times_ms<'a>(&self, cx: &'a Cx) -> impl Iterator<Item = f64> + 'a {
+        cx.passes[self.draw_pass_id()].gpu_time_query.iter()
+            .flat_map(|query| query.receiver.try_iter().map(|(_, ms)| ms))
     }
 
     /// Label the pass's CURRENT content; every completion sample encoded
@@ -843,6 +904,11 @@ pub struct CxDrawPass {
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxDrawPassParent,
     pub paint_dirty: bool,
+    /// An owner can advance the recorded shaders independently of the frame clock.
+    pub own_time: Option<f32>,
+    /// The last paint drew a shader that reads `draw_pass.time` (set by `request_time_repaint`,
+    /// cleared when the pass is queued to paint).
+    pub reads_time: bool,
     /// Opt-in liveness: when this pass's CONSUMER (its parent) repaints,
     /// this pass re-encodes too. The gauss blur chain lives on it — glass
     /// blurs the world in realtime instead of holding the last rebuild —
@@ -1008,6 +1074,10 @@ impl CxDrawPass {
     /// A backend calls this for each draw it paints whose shader reads `draw_pass.time`, and ORs what it
     /// returns into `Cx::demo_time_repaint`: true when the draw wants every frame.
     pub(crate) fn request_time_repaint(&mut self, time_fps: f64, clock: &mut TimeFpsClock) -> bool {
+        self.reads_time = true;
+        if self.own_time.is_some() {
+            return false;
+        }
         // A rate nearer every frame than every other frame repaints every frame like 0 does, since the
         // display's own ticks pace it anyway and their measured interval jitters.
         let period = 1.0 / time_fps;
@@ -1070,6 +1140,8 @@ impl Default for CxDrawPass {
             view_scale: dvec2(1.0, 1.0),
             parent: CxDrawPassParent::None,
             paint_dirty: false,
+            own_time: None,
+            reads_time: false,
             live_with_parent: false,
             background: false,
             attached_by: None,
@@ -1123,7 +1195,7 @@ impl CxDrawPass {
     }
 
     pub fn set_time(&mut self, time: f32, uniforms_gen: u64) {
-        self.pass_uniforms.time = time;
+        self.pass_uniforms.time = self.own_time.unwrap_or(time);
         self.mark_pass_uniforms_dirty(uniforms_gen);
     }
 

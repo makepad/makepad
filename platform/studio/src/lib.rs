@@ -24,7 +24,8 @@ pub use native_app::*;
 /// hub admits a client at the version it negotiated on the WM socket (`proto=<v>` in its `/app`
 /// URL); a client that states none is admitted only on this build's [`WIRE`]. A host sends a
 /// client only messages of the version it was admitted at.
-pub const HOSTED_VERSIONS: (u32, u32) = (1, 2);
+/// In version 3, an app detaches on hang-up without `Kill` when the WM's state file says `keep=1`.
+pub const HOSTED_VERSIONS: (u32, u32) = (1, 3);
 
 /// The hosted wire's fingerprint: every source file whose types travel
 /// between a host and its `--stdin-loop` children (binary, by ordinal), and

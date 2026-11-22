@@ -4,7 +4,7 @@
 //! without a device; the Metal backend implements them with one.
 
 use crate::buffers::{pack_domains, read_items, read_rects, read_strs, CmdView, PipelineBlob};
-use crate::cmds::HalCmd;
+use crate::cmds::{HalCmd, PipelineLayout};
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
 use crate::types::*;
@@ -79,6 +79,9 @@ pub enum OsCmd {
     /// `HalCmd::XrHaptic`.
     XrHaptic { id: Id, hand: u32, amplitude: f32, duration_us: u32 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
+    /// A parentless session's application message for the WM hosting its windows.
+    #[cfg(target_os = "linux")]
+    HostMessage { message: Vec<u8> },
     PrintPdf { req: u32, title: String, pdf: std::sync::Arc<[u8]> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -167,6 +170,9 @@ pub trait Gpu {
     /// A frame draws the pipeline while it compiles: a backend with a compile queue starts it
     /// ahead of the pipelines no frame draws.
     fn pipeline_wanted(&mut self, _sid: u32, _id: Id) {}
+    /// True when the backend handles the layout acknowledgement. With no separate state to
+    /// build, the executor acknowledges the layout as soon as the pipeline has been wanted.
+    fn pipeline_wanted_in(&mut self, _s: &mut Session, _id: Id, _layout: u32, _desc: &PipelineLayout) -> bool { false }
     /// Executes one frame packet for a live target and answers `FrameDone`. `None` = the packet
     /// was malformed (no `FrameDone`); otherwise the surfaces lent by other sessions that the
     /// frame sampled and whether it encoded a window pass (see [`lent_state`]).
@@ -242,6 +248,8 @@ pub trait Gpu {
     fn os(&mut self, _sid: u32, _cmd: OsCmd) -> bool {
         false
     }
+    /// A session without a parent sends its window host a message; false when this backend's window system is no host.
+    fn host_message(&mut self, _sid: u32, _message: &[u8]) -> bool { false }
     /// A media command (video playback, native views, audio, MIDI, camera, game input, location,
     /// permissions). False when the backend has no media: the executor then answers with the
     /// failure the command's event table gives ([`media_unavailable`]).
@@ -1000,7 +1008,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         }
         HalCmd::ParentMessage { message } => {
             let Some(s) = world.session(sid) else { return };
-            if s.parent == 0 { deny(world, sid); return; }
+            if s.parent == 0 {
+                if !gpu.host_message(sid, message) { deny(world, sid); }
+                return;
+            }
             let parent = s.parent;
             world.to_session(parent, |q| q.child_message(sid, message));
             return;
@@ -1915,6 +1926,17 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         },
         HalCmd::PipelineWanted { id } => match s.pipelines.get(sid, id) {
             Ok(_) => gpu.pipeline_wanted(sid, id),
+            Err(_) => s.stale(),
+        },
+        HalCmd::PipelineWantedIn { id, layout, window, colors, depth, samples_views } => match s.pipelines.get(sid, id) {
+            Ok(_) => {
+                gpu.pipeline_wanted(sid, id);
+                let [samples, views] = samples_views.to_le_bytes();
+                let desc = PipelineLayout { window, colors, depth, samples, views };
+                if !gpu.pipeline_wanted_in(s, id, layout, &desc) {
+                    s.events.pipeline_layout_ready(id, layout);
+                }
+            }
             Err(_) => s.stale(),
         },
         HalCmd::PipelineDestroy { id } => match s.pipelines.remove(sid, id) {

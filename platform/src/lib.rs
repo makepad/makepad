@@ -205,8 +205,8 @@ pub fn host_dark() -> Option<bool> {
 #[cfg(all(target_os = "android", not(relax)))]
 pub use crate::app_main::android_on_load;
 pub use crate::app_main::{
-    admitted_by_window_manager, attach_parent_console, discover_window_manager, hosted_by_window_manager, is_window_manager, launched_by_host, set_menu_bar_app, set_outlives_window_manager,
-    new_cx_with_font_set, resolve_studio_http, run_app, set_window_manager, should_run_stdin_loop_from_env, WmAdmission,
+    attach_parent_console, hosted_by_window_manager, is_window_manager, launched_by_host, launched_by_window_manager, set_menu_bar_app, set_outlives_window_manager,
+    new_cx_with_font_set, resolve_studio_http, run_app, set_window_manager, should_run_stdin_loop_from_env, name_for_window_manager,
 };
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
@@ -278,7 +278,7 @@ pub use {
         draw_matrix::DrawMatrix,
         draw_pass::{
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
-            DrawPassId, ScriptDrawPass, union_rects,
+            DrawPassId, PassLayout, ScriptDrawPass, union_rects,
         },
         draw_vars::{DrawVars, DRAW_CALL_MAX_UNIFORM_FLOATS, DRAW_CALL_TEXTURE_SLOTS},
         sploded::{SplodedParams, SplodedView},

@@ -2463,8 +2463,13 @@ mod imp {
                 // what the app's other threads wanted and a loaded box did not give them: not this
                 // thread's (its CPU says its work; its waits are mostly to answer asks such as this
                 // one), nor the serving threads', nor the runtime's (a busy JIT is none of the app's)
+                // and its threads waiting on the disk now (not the serving ones)
                 let waited = match waited {
-                    true => format!(",\"waited_ns\":{}", makepad_hal::clock::threads_waited_ns(makepad_remote::own_thread).saturating_sub(makepad_remote::runtime_waited_ns())),
+                    true => format!(
+                        ",\"waited_ns\":{},\"io_threads\":{}",
+                        makepad_hal::clock::threads_waited_ns(makepad_remote::own_thread).saturating_sub(makepad_remote::runtime_waited_ns()),
+                        makepad_hal::clock::threads_in_io_wait(makepad_remote::own_thread)
+                    ),
                     false => String::new(),
                 };
                 let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"answered_ns\":{answered},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served},\"runtime_cpu_ns\":{runtime},\"faults\":{faults}{waited}}}")));
