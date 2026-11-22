@@ -57,6 +57,18 @@ fn snapshot_gone() -> Error {
     Error::Busy(crate::error::SNAPSHOT_RESET.into())
 }
 
+/// Read `buf.len()` bytes of the log at `at`. A log shorter than the length
+/// this reader saw a moment ago was started over by a checkpoint meanwhile
+/// (it truncates the file, then writes the next generation's header): that is
+/// a lost snapshot, which the caller retakes, not a failing disk.
+fn read_log(file: &dyn PageStore, at: u64, buf: &mut [u8]) -> Result<()> {
+    match file.read_at(at, buf) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(snapshot_gone()),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 pub fn wal_path(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_os_string();
     s.push("-wal");
@@ -126,7 +138,7 @@ impl Wal {
             return Ok(None);
         }
         let mut hdr = [0u8; WAL_HEADER_SIZE];
-        file.read_at(0, &mut hdr)?;
+        read_log(file.as_ref(), 0, &mut hdr)?;
         let magic = be_u32(&hdr, 0)?;
         let big_endian_cksum = match magic {
             WAL_MAGIC_LE_CKSUM => false,
@@ -262,9 +274,8 @@ impl Wal {
         let mut frame_hdr = [0u8; WAL_FRAME_HEADER_SIZE];
         let mut page = vec![0u8; self.page_size];
         while offset + frame_size <= len {
-            self.file.read_at(offset, &mut frame_hdr)?;
-            self.file
-                .read_at(offset + WAL_FRAME_HEADER_SIZE as u64, &mut page)?;
+            read_log(self.file.as_ref(), offset, &mut frame_hdr)?;
+            read_log(self.file.as_ref(), offset + WAL_FRAME_HEADER_SIZE as u64, &mut page)?;
             let pgno = be_u32(&frame_hdr, 0)?;
             let truncate = be_u32(&frame_hdr, 4)?;
             let fsalt = (be_u32(&frame_hdr, 8)?, be_u32(&frame_hdr, 12)?);
@@ -313,7 +324,7 @@ impl Wal {
             return Ok(());
         }
         let mut hdr = [0u8; WAL_HEADER_SIZE];
-        self.file.read_at(0, &mut hdr)?;
+        read_log(self.file.as_ref(), 0, &mut hdr)?;
         let salt = (be_u32(&hdr, 16)?, be_u32(&hdr, 20)?);
         let seq = be_u32(&hdr, 12)?;
         let generation_changed = salt != self.salt || seq != self.checkpoint_seq;
@@ -359,9 +370,8 @@ impl Wal {
         let mut frame_hdr = [0u8; WAL_FRAME_HEADER_SIZE];
         let mut page = vec![0u8; self.page_size];
         while offset + frame_size <= len {
-            self.file.read_at(offset, &mut frame_hdr)?;
-            self.file
-                .read_at(offset + WAL_FRAME_HEADER_SIZE as u64, &mut page)?;
+            read_log(self.file.as_ref(), offset, &mut frame_hdr)?;
+            read_log(self.file.as_ref(), offset + WAL_FRAME_HEADER_SIZE as u64, &mut page)?;
             let pgno = be_u32(&frame_hdr, 0)?;
             let truncate = be_u32(&frame_hdr, 4)?;
             let fsalt = (be_u32(&frame_hdr, 8)?, be_u32(&frame_hdr, 12)?);
@@ -436,22 +446,14 @@ impl Wal {
         // page, decoded as this one.
         let header_at = offset.saturating_sub(WAL_FRAME_HEADER_SIZE as u64);
         let mut hdr = [0u8; WAL_FRAME_HEADER_SIZE];
-        match self.file.read_at(header_at, &mut hdr) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(snapshot_gone()),
-            Err(e) => return Err(Error::Io(e)),
-        }
+        read_log(self.file.as_ref(), header_at, &mut hdr)?;
         if be_u32(&hdr, 0)? != pgno
             || (be_u32(&hdr, 8)?, be_u32(&hdr, 12)?) != self.salt
             || header_at + WAL_FRAME_HEADER_SIZE as u64 != offset
         {
             return Err(snapshot_gone());
         }
-        match self.file.read_at(offset, out) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(snapshot_gone()),
-            Err(e) => return Err(Error::Io(e)),
-        }
+        read_log(self.file.as_ref(), offset, out)?;
         Ok(true)
     }
 

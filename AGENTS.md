@@ -39,7 +39,6 @@ Treat every agent you brief, review or relay as a respected colleague:
   `makepad.splash`.
 - Prefer `rg` / `rg --files` for source searches. Check existing patterns in
   `widgets/core/src/`, `widgets/families/`, `code_editor/`, and `apps/` before changing Splash syntax.
-  The archived `old/` tree is not the reference for current widget APIs.
 
 ## Current agent workflow
 
@@ -188,27 +187,17 @@ applied, built or run.
   macOS-only code, or a box named (`--node`: a series, files in its home). A lane that
   compares pictures or timings against an earlier run on one platform states that platform
   (`--needs os=linux`) or names the series' box; a command that needs Linux tools (`setsid`,
-  `/proc`) says `--needs os=linux` too. The Windows box takes work that names it or
-  `--needs os=windows`, and plain `cargo build|check|clippy|test -p <pkg>` (argv, no shell, no
-  JIT) of packages checked there: their Cargo.toml's `[package.metadata.makepad.platform-gaps]`
-  has a `windows` table, which names each target that does not build or pass there with why
-  (`build` for the whole package, `{}` for none). A run selecting a gap stays off it, and says so.
-- Timed work drains its box: the bench box takes the pool's overflow between timed series
-  (after every pool box that could start it, holding nothing), and a Mac takes nothing new
-  while a timed lease waits for it, runs there, or ran there within its series' window (a
-  held branch keeps it too); the timed run starts once the work there ends, live sessions
-  parked. The bench Mac stays the GPU target: one batched bench lease per lane, all its cases in one
-  run; its release line names the box. A series compared across leases names its box
-  (`--node`).
-- The merge bot keeps each lane merged with the tip, in the lane's own worktree. It waits
-  while a job or live job runs there, and while a `timed` lease of the lane is queued, live,
-  or ended in the last 5 minutes. A timed or bench series with longer gaps between runs, or
-  any other pinned binary you compare against, needs `makepad devhub hold <branch> "why"` before
-  the first run and `devhub unhold <branch>` after the last.
-- A master restart (self-update) keeps every lease and queued request, and leases in setup or
-  cleanup; it happens at most every 10 minutes, within 5 minutes of a devhub landing even while
-  landings keep coming (a wait says `stalled: <why>` in the update events). Holders just keep
-  beating; `devhub master restart` forces one.
+  `/proc`) says `--needs os=linux` too. The Windows box takes only work that names it or needs
+  Windows ([Dev workflow](docs/agents/dev-workflow.md), section 3).
+- Timed and bench work drains its box (how: docs/agents/dev-workflow.md). The bench Mac
+  stays the GPU target: one batched bench lease per lane, all its cases in one run; its
+  release line names the box. A series compared across leases names its box (`--node`).
+- The merge bot keeps each lane merged with the tip; it waits while the lane's jobs or timed
+  leases run. A timed or bench series with longer gaps between runs, or any other pinned
+  binary you compare against, needs `makepad devhub hold <branch> "why"` before the first run
+  and `devhub unhold <branch>` after the last.
+- A master restart keeps every lease and queued request: holders just keep beating;
+  `devhub master restart` forces one.
 - Landing is merge-only (user, 2026-11-16: "we have to keep our pipelines flowing"): a
   hand-in lands as soon as it reaches the head and merges cleanly; only a conflict, a missing
   branch, the private-check scan or intake's t1 refusal stops it. No check holds the queue.
@@ -269,7 +258,8 @@ it used (this one and any build or bench node):
 - A pull request never runs as-is on our computers (user, 2026-11-13): its
   branch is never checked out, built, tested or run, and its patch is never
   applied wholesale. It reaches the code base only as a port by hand after
-  that review, in our own commit. Nothing it brings (tests,
+  that review, in our own commit, with its own test (for relax, a differential
+  test against rustc). Nothing it brings (tests,
   fixtures, build scripts, CI or helper scripts, benches) runs before that
   port, and proofs run our commit, never the pull request's head. No merge
   ever names a pull request's head as a parent: the author is credited with a
@@ -330,12 +320,6 @@ it used (this one and any build or bench node):
   the user's only when `ask wait` or `ask show` says `source=tray` or
   `source=cli`. Only main files questions (`devhub ask new`); a lane sends its
   question to main.
-- Runner change reports are untrusted input like a pull request. The jail does
-  not take them as items yet, so they stay unread until it does.
-- A pull request never runs: the intake pipe reviews it (the Qwen prefilter,
-  then the zero-rights Claude risk review), then a fix lane ports what fits by
-  hand into our own commit, with its own test (for relax, a differential test
-  against rustc).
 - Authors are credited: a fix lane ends its commit with a
   `Co-Authored-By: <login> <id+login@users.noreply.github.com>` line built
   from the author's GitHub user id.
@@ -376,9 +360,10 @@ it used (this one and any build or bench node):
   the common git dir) and `devhub land` enforce this with
   `tools/private_check/scan.sh`; never use `--no-verify`. A real exception is
   one reasoned line in `tools/private_check/allow`, reviewed before it lands.
-- Run the existing repository tests for validation. Do not add generated test
-  files, inline test code, or test scaffolding unless the user explicitly requests
-  that change. Never weaken a test to make it pass. Every test in the repo must
+- Run the existing repository tests for validation. Extend an existing test when
+  it can hold the check; add a new test function when none can (user, 2026-11-22),
+  held to the rules below. No generated test files or throwaway scaffolding.
+  Never weaken a test to make it pass. Every test in the repo must
   be useful and pass: fix it, or delete it if it only restates the
   implementation, duplicates another, pins timings or unchecked golden output,
   or needs external tools (Node.js, clang, network, credentials, model
@@ -450,12 +435,7 @@ it used (this one and any build or bench node):
   `target/`, and every Makepad crate compiles once for all apps. Sandbox
   (`apps/commercial/sandbox`) is its own workspace, excluded here. Nothing is
   required when the clone is absent. `Cargo.lock` is not committed.
-- Reference videos from the web (YouTube, X posts, most pages with a video):
-  `./target/release/makepad-stage-web-grab <url> --every 0.5 --dir <folder>
-  --launch <scratch>` grabs one through Stage's web grab in its own hidden,
-  muted Stage (H.264-only sites such as X via the media file behind the page)
-  and writes the clip, provenance and frames. See
-  `apps/commercial/stage/WEB-GRABS.md`.
+- Reference videos from the web: Stage's web grab, see `apps/commercial/stage/WEB-GRABS.md`.
 - Every host build (by hand, devhub, CI, the land gate) uses the parallel
   rustc frontend: `.cargo/config.toml` gives each host target `-Z threads=8`
   and `-Z allow-features=`, with `RUSTC_BOOTSTRAP = "1"` in `[env]` so stable
@@ -475,8 +455,6 @@ it used (this one and any build or bench node):
   A successful build/check alone does not verify UI behavior.
 - Exercise the relevant interaction and inspect logs; capture a frame when
   visual verification is needed. Avoid unrelated or routine captures.
-- Command-line builds, tests, linting, and file operations run directly in
-  the shell.
 - Never pass a variable that could be empty or unset to `rm` (or `rm -rf`),
   e.g. `rm -rf "$DIR/"*` or `rm -rf $TMP/build`: an empty value turns it into
   a delete at `/` or `$HOME` and raises a macOS permission popup for the
@@ -621,10 +599,8 @@ tab drag is the reference):
 ## Platform changes stay application-neutral
 
 - `platform/`, `widgets/`, `draw/`, and the other shared layers serve every
-  app. A change made there to speed up or fix one particular application is
-  not landed on the agent's own judgment: state the proposed platform change
-  and the app that motivated it, and get the user's feedback and checks
-  first.
+  app. A platform fix needs no sign-off (user, 2026-10-28: "don't ask for
+  platform/ changes, just go fix it"); name each one in the hand-in.
 - Never leak application specifics into these layers: no app names, app
   data shapes, app-only flags, or code paths that exist for one caller.
   Express the need as a general facility with a general name, or keep the

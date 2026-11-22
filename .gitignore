@@ -7,6 +7,8 @@
 /apps/commercial/
 #   git clone git@github.com:makepad/source-library.git apps/source-library
 /apps/source-library/
+#   git clone git@github.com:makepad/apps.git apps/apps
+/apps/apps/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html

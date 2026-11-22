@@ -1,2 +1,3 @@
 # Real exceptions to tools/private_check/rules: <path or dir/> <rule> <reason>. Keep this near-empty.
 tools/arch_usb/ home-path the USB image provisions its own default user's home; not a person's
+fab/elec/sim/tests/proofs/cosim.rs node-number cycle numbers in a test's expected stops (commercial, later makepad/apps), not a machine

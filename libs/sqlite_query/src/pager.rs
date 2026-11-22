@@ -1197,6 +1197,17 @@ impl Pager {
         if pgno > self.page_count {
             self.page_count = pgno;
         }
+        // Page 1 carries the header: the transaction reads back what it wrote there (a
+        // `PRAGMA user_version` after setting it, the schema cookie after DDL), as SQLite does; a
+        // rollback reloads the committed one. A fresh database stages its page 1 empty before
+        // its header is written, which parses as no header and keeps the one it has.
+        if pgno == 1 {
+            if let Ok(header) = DbHeader::parse(data) {
+                if header.page_size == self.header.page_size {
+                    self.header = header;
+                }
+            }
+        }
         Ok(())
     }
 

@@ -41,9 +41,9 @@ if grep -rniI --exclude-dir=local --exclude-dir='target*' --exclude-dir=.git --e
 fi
 
 scope="libs/raytrace examples/raytrace Cargo.toml makepad.splash"
-# Fab (the commercial modeler) when the commercial checkout is present.
-if [ -d apps/commercial/fab ]; then
-    scope="apps/commercial/fab $scope"
+# Fab (makepad/apps) when its checkout is present.
+if [ -d apps/apps/fab ]; then
+    scope="apps/apps/fab $scope"
 fi
 if grep -rniIE --exclude-dir='target*' "$vendor_one|$vendor_two|$old_renderer|$old_shell|$comparison" $scope > "$matches"; then
     echo "forbidden vendor, comparison, or retired naming found:" >&2

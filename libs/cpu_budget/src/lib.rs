@@ -16,6 +16,15 @@
 //! JIT's builds, and the builds take the physical cores less the app's jobs that wait within it. No
 //! producer waits out the other's backlog, and waiters stay in ticket order. With the flag down
 //! Background is one part, as before.
+//! On a machine with two kinds of core (Apple silicon) the budget also places Background work on
+//! them, by what it is to the program (`set_thread_work`): a build of hot code takes a performance
+//! core only where the person's work leaves one (`fast_room`: the cores less the Interactive and
+//! Visible jobs that run, averaged, and the threads that hold a core against a deadline,
+//! `set_thread_deadline`), and work that only replaces something in use runs on the efficiency
+//! cores while any of the person's work runs. The OS's priorities cannot do it there: QoS DEFAULT
+//! is the class of the person's Visible work itself, and below it the kernel still runs a thread on
+//! a performance core the moment one is free for an instant, so a realtime pipeline that sleeps and
+//! wakes every round finds its core taken. Only QoS BACKGROUND keeps a thread off them.
 use relax_api::relax_api;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -124,7 +133,23 @@ struct State {
     changes: u64,
     /// Threads in `wait_for_change`: a change with none costs no wake.
     watchers: usize,
+    /// The tokens of the person's work that run (Interactive and Visible rows that count), since
+    /// `urgent_at`; `urgent_area` sums tokens times nanoseconds, and the span since `window_at`
+    /// (its area then `window_area`) makes the next reading of `Budget::demand` (`Budget::roll`).
+    urgent: usize,
+    urgent_at: u64,
+    urgent_area: u64,
+    window_at: u64,
+    window_area: u64,
+    /// The last span's reading, in thousandths of a token.
+    last_window: u64,
 }
+/// The span the person's demand on the cores is averaged over (`Budget::roll`). A live run's packs
+/// start and end at its round rate (about 1.7 thousand rounds a second in a live audio simulation),
+/// so an instant reads 0 or 3 tokens by chance; a tenth of a second holds a few hundred rounds. The
+/// reading is the larger of the last two spans: work that starts counts within one span, work that
+/// ended leaves after two. A wrong reading only places a build on the other kind of core.
+const DEMAND_SPAN_NS: u64 = 100_000_000;
 /// The JIT's Background jobs Visible work makes room for while they wait, counting the one JIT job that always runs:
 /// two permits. A cold slice runs on the code those jobs compile: starved of them it stays on slow code, and takes
 /// longer at more CPU.
@@ -151,6 +176,16 @@ struct Budget {
     jit_first: AtomicBool,
     /// `jit_part` at the table's last change, for the JIT's queue (`jit_background_limit`).
     jit_width: AtomicUsize,
+    /// The performance cores of a machine with two kinds of core (Apple silicon), within the
+    /// budget's; 0 on a machine with one kind: placement by kind of work is then the OS's alone.
+    fast: usize,
+    /// The person's work on the cores, in thousandths of a token: the larger of the last two
+    /// spans' averages (`roll`).
+    demand: AtomicU64,
+    /// Threads that hold a core against a deadline outside admission (`set_thread_deadline`).
+    deadlines: AtomicUsize,
+    /// Threads whose tier-up builds hold a performance core now (`set_thread_work`).
+    fast_tier_ups: AtomicUsize,
     state: Mutex<State>,
     /// Woken on each change of the table (`State::changes`, `wait_for_change`).
     changed: Condvar,
@@ -178,6 +213,10 @@ impl Budget {
             physical: physical.clamp(1, cores),
             jit_first: AtomicBool::new(false),
             jit_width: AtomicUsize::new(0),
+            fast: 0,
+            demand: AtomicU64::new(0),
+            deadlines: AtomicUsize::new(0),
+            fast_tier_ups: AtomicUsize::new(0),
             state: Mutex::new(State {
                 slots: vec![None; cores], waiters: Vec::new(), ticket: 0,
                 running: 0, jit_running: 0, background: 0, app_waiting: 0, visible: 0, jit_background: 0, jit_waiting: 0, jit_tokens: 0, waiting: 0, parked: [0; 3], admitted: [0; 3],
@@ -186,6 +225,7 @@ impl Budget {
                 strand_worst: VecDeque::new(),
                 changes: 0,
                 watchers: 0,
+                urgent: 0, urgent_at: 0, urgent_area: 0, window_at: 0, window_area: 0, last_window: 0,
             }),
             changed: Condvar::new(),
             classes: (0..ROWS).map(|_| AtomicU8::new(INTERACTIVE)).collect(),
@@ -197,7 +237,34 @@ impl Budget {
             max_strand_wait: AtomicU64::new(0),
         }
     }
+    /// The budget of a machine with `fast` performance cores (two kinds of core; 0: one kind).
+    fn with_fast(mut self, fast: usize) -> Self {
+        self.fast = fast.min(self.cores);
+        self
+    }
     fn now(&self) -> u64 { monotonic_ns().wrapping_sub(self.origin) }
+    /// The person's work's tokens counted up to `now`, and a new reading of `demand` once a span
+    /// passed. Two integer updates on most calls; under the lock, with the caller's clock.
+    fn roll(&self, s: &mut State, now: u64) {
+        s.urgent_area = s.urgent_area.saturating_add(s.urgent as u64 * now.saturating_sub(s.urgent_at));
+        s.urgent_at = s.urgent_at.max(now);
+        let span = now.saturating_sub(s.window_at);
+        if span < DEMAND_SPAN_NS { return; }
+        let reading = (s.urgent_area - s.window_area).saturating_mul(1000) / span;
+        self.demand.store(reading.max(s.last_window), Relaxed);
+        s.last_window = reading;
+        s.window_at = now;
+        s.window_area = s.urgent_area;
+    }
+    /// The performance cores the person's work leaves now: 0 on a machine with one kind of core.
+    fn fast_room(&self) -> usize {
+        let demand = (self.demand.load(Relaxed) as usize).div_ceil(1000);
+        self.fast.saturating_sub(demand + self.deadlines.load(Relaxed))
+    }
+    /// Some of the person's work runs, or ran within the last two spans, or a thread holds a core
+    /// against a deadline. (Placement reads it on macOS only.)
+    #[cfg(any(target_os = "macos", test))]
+    fn urgent(&self) -> bool { self.deadlines.load(Relaxed) > 0 || self.demand.load(Relaxed) > 0 }
     /// The budget's lock only when the phase flips.
     fn set_jit_first(&self, on: bool) {
         if self.jit_first.swap(on, Relaxed) != on {
@@ -335,7 +402,8 @@ impl Budget {
         job.above = job.client == JIT && s.running >= self.class_limit(&s, job.class, job.client);
         ADMITTED.with(|admitted| admitted.set(true));
         s.slots[index] = Some(job);
-        Self::start_counting(&mut s, &job);
+        self.roll(&mut s, now);
+        self.start_counting(&mut s, &job, now);
         s.admitted[job.class as usize] += 1;
         self.classes[index].store(job.class, Relaxed);
         self.refresh(&mut s);
@@ -372,10 +440,18 @@ impl Budget {
     }
     fn remove(&self, s: &mut State, permit: u32, now: u64) -> Job {
         let job = s.slots[permit as usize].take().expect("released CPU permit");
-        if !job.lent { Self::stop_counting(s, &job, now); }
+        if !job.lent { self.stop_counting(s, &job, now); }
         job
     }
-    fn start_counting(s: &mut State, job: &Job) {
+    /// A row of the person's work: its token counts in `demand`. The JIT's own Interactive work (a
+    /// waited compile, the start-up's checks ahead) is not: it is what early preference is for, and
+    /// counted here it would push the JIT's own tier-ups off the performance cores at a start.
+    fn urgent_row(job: &Job) -> bool { job.class != BACKGROUND && !job.above && job.client != JIT }
+    fn start_counting(&self, s: &mut State, job: &Job, now: u64) {
+        if Self::urgent_row(job) {
+            self.roll(s, now);
+            s.urgent += 1;
+        }
         s.running += usize::from(!job.above);
         s.jit_running += usize::from(job.client == JIT);
         s.background += usize::from(job.class == BACKGROUND && job.client != JIT);
@@ -383,7 +459,11 @@ impl Budget {
         s.jit_background += usize::from(job.class == BACKGROUND && job.client == JIT);
         s.jit_tokens += usize::from(job.class == BACKGROUND && job.client == JIT && !job.above);
     }
-    fn stop_counting(s: &mut State, job: &Job, now: u64) {
+    fn stop_counting(&self, s: &mut State, job: &Job, now: u64) {
+        if Self::urgent_row(job) {
+            self.roll(s, now);
+            s.urgent -= 1;
+        }
         s.running -= usize::from(!job.above);
         s.jit_running -= usize::from(job.client == JIT);
         s.background -= usize::from(job.class == BACKGROUND && job.client != JIT);
@@ -406,7 +486,7 @@ impl Budget {
             let Some(job) = s.slots[i].as_mut().filter(|j| j.thread == me && j.client != JIT && !j.lent) else { continue };
             job.lent = true;
             let job = *job;
-            Self::stop_counting(&mut s, &job, now);
+            self.stop_counting(&mut s, &job, now);
             lent = true;
         }
         if lent { self.refresh(&mut s); }
@@ -421,7 +501,7 @@ impl Budget {
         assert!(!job.lent, "lent a CPU permit twice");
         job.lent = true;
         let job = *job;
-        Self::stop_counting(&mut s, &job, now);
+        self.stop_counting(&mut s, &job, now);
         self.refresh(&mut s);
     }
     /// The calling thread is awake: its lent tokens are its own again, at once, whatever is running
@@ -434,7 +514,7 @@ impl Budget {
         let mut back = false;
         for i in 0..s.slots.len() {
             if s.slots[i].as_ref().is_some_and(|j| j.thread == me && j.lent) {
-                Self::count_again(&mut s, i, now);
+                self.count_again(&mut s, i, now);
                 back = true;
             }
         }
@@ -444,16 +524,16 @@ impl Budget {
     fn take_back_permit(&self, permit: u32) {
         let mut s = self.lock();
         let now = self.now();
-        Self::count_again(&mut s, permit as usize, now);
+        self.count_again(&mut s, permit as usize, now);
         self.refresh(&mut s);
     }
-    fn count_again(s: &mut State, index: usize, now: u64) {
+    fn count_again(&self, s: &mut State, index: usize, now: u64) {
         let job = s.slots[index].as_mut().expect("took back a released CPU permit");
         job.lent = false;
         job.admitted_at = now;
         job.checkpoint_at = now;
         let job = *job;
-        Self::start_counting(s, &job);
+        self.start_counting(s, &job, now);
     }
     fn tokens(&self) -> Tokens {
         let s = self.lock();
@@ -485,6 +565,7 @@ impl Budget {
     /// on: no reason to yield, or it holds locks).
     fn yields(&self, s: &mut State, permit: u32, held_locks: u32, lock_site: &str) -> Option<Job> {
         let now = self.now();
+        self.roll(s, now);
         let job = s.slots[permit as usize].as_mut().expect("released CPU permit");
         let span = Span { label: job.label, ns: now.saturating_sub(job.checkpoint_at) };
         job.checkpoint_at = now;
@@ -537,8 +618,13 @@ impl Budget {
         let client = job.client;
         let above = job.above;
         let app = client != JIT;
+        let was = *job;
         job.class = class;
         job.admitted_at = now;
+        if !was.lent && Self::urgent_row(&was) != Self::urgent_row(&Job { class, ..was }) {
+            self.roll(&mut s, now);
+            if class == BACKGROUND { s.urgent -= 1 } else { s.urgent += 1 }
+        }
         s.runtime[old as usize] += elapsed;
         s.background -= usize::from(old == BACKGROUND && app);
         s.background += usize::from(class == BACKGROUND && app);
@@ -611,6 +697,10 @@ impl Budget {
         if above != 0 { let _ = write!(out, ", {above} JIT job above the budget"); }
         let _ = write!(out, ", jit settled: {}", if jit_settled() { "yes" } else { "no" });
         if self.jit_first.load(Relaxed) { out.push_str(", jit first"); }
+        if self.fast > 0 {
+            let _ = write!(out, ", fast room {} of {} (the person's work {:.1}, deadline threads {}, tier-ups on them {})", self.fast_room(), self.fast,
+                self.demand.load(Relaxed) as f64 / 1000.0, self.deadlines.load(Relaxed), self.fast_tier_ups.load(Relaxed));
+        }
         if let Some(w) = worst {
             let _ = write!(out, ", worst: {} {:?} waited {}", CLASSES[w.class as usize], w.label.text(), human(w.ns));
             if let Some((class, span)) = w.culprit {
@@ -700,7 +790,7 @@ fn global() -> &'static Budget {
     BUDGET.get_or_init(|| {
         let cores = granted_cores(thread::available_parallelism().map_or(1, usize::from), std::env::var("MAKEPAD_CPU_CORES").ok().as_deref());
         // (a machine whose topology is not known: every CPU a core)
-        Budget::new(cores, match physical_cores() { 0 => cores, n => n.min(cores) })
+        Budget::new(cores, match physical_cores() { 0 => cores, n => n.min(cores) }).with_fast(fast_cores())
     })
 }
 
@@ -766,6 +856,24 @@ fn physical_cores() -> usize {
 }
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", windows)))]
 fn physical_cores() -> usize { 0 }
+/// The performance cores of a machine with two kinds of core (`hw.nperflevels` 2 on Apple
+/// silicon); 0 on one with one kind, and where the OS does not say.
+#[cfg(target_os = "macos")]
+fn fast_cores() -> usize {
+    unsafe extern "C" {
+        fn sysctlbyname(name: *const u8, old: *mut u8, oldlen: *mut usize, new: *const u8, newlen: usize) -> i32;
+    }
+    let read = |name: &[u8]| {
+        let mut n: i32 = 0;
+        let mut len = std::mem::size_of::<i32>();
+        let r = unsafe { sysctlbyname(name.as_ptr(), &mut n as *mut i32 as *mut u8, &mut len, std::ptr::null(), 0) };
+        if r == 0 { n.max(0) as usize } else { 0 }
+    };
+    if read(b"hw.nperflevels\0") < 2 { return 0; }
+    read(b"hw.perflevel0.physicalcpu\0")
+}
+#[cfg(not(target_os = "macos"))]
+fn fast_cores() -> usize { 0 }
 
 #[relax_api]
 pub fn cores() -> u32 { global().cores as u32 }
@@ -775,8 +883,8 @@ pub fn limit() -> u32 { global().limit as u32 }
 /// that share for its steady work, at most [`cores`]; else [`cores`] ([`granted_cores`] says which
 /// variable sizes what). A pool's threads stay for the whole run, while a compile burst (the JIT's,
 /// at a launch) is short and is what an interactive launch waits on: devhub gives a live test
-/// session's pools its call's charge and leaves the budget, and so the JIT, the box. A live Fab
-/// test's app pool and CSG pool each took the box's 16 cores beside the JIT's workers while the
+/// session's pools its call's charge and leaves the budget, and so the JIT, the box. A live app
+/// test's app pool and geometry pool each took the box's 16 cores beside the JIT's workers while the
 /// budget counted it a small ask, and its box stood at load 57 (11-18). Read on each call: a
 /// pool reads it once, at its start.
 pub fn pool_cores() -> u32 {
@@ -1038,7 +1146,7 @@ pub fn set_wait_hook(hook: extern "C" fn(u8)) { let _ = WAIT_HOOK.set(hook); }
 /// The class `set_thread_class` last gave the calling thread (the UI thread: Interactive); None: it
 /// set none, or a promotion failed. A job the thread waits for runs at its class meanwhile.
 #[relax_api]
-pub fn thread_class() -> Option<u8> { THREAD_CLASS.with(Cell::get).map(|class| match class { 3 => INTERACTIVE, IDLE | BACKGROUND_HOT => BACKGROUND, class => class }) }
+pub fn thread_class() -> Option<u8> { THREAD_CLASS.with(Cell::get).map(|class| match class { 3 => INTERACTIVE, IDLE | BACKGROUND_HOT | BACKGROUND_BEHIND => BACKGROUND, class => class }) }
 #[relax_api]
 pub fn queued(class: u8, client: u8, delta: i32) {
     valid(class, client);
@@ -1086,8 +1194,22 @@ thread_local! {
     static UI_THREAD: Cell<bool> = const { Cell::new(false) };
     /// this thread runs at the OS's idle policy (Linux SCHED_IDLE): set_thread_idle
     static IDLE_NOW: Cell<bool> = const { Cell::new(false) };
-    /// the Background work this thread runs is measured hot: set_thread_hot
-    static HOT: Cell<bool> = const { Cell::new(false) };
+    /// what the Background work this thread runs is to the program: set_thread_work
+    static WORK: Cell<u8> = const { Cell::new(WORK_PLAIN) };
+    /// this thread's counts in the budget, taken out when it ends
+    static MARKS: Marks = const { Marks { deadline: Cell::new(false), fast: Cell::new(false) } };
+}
+/// A thread's counts in the budget: it holds a core against a deadline (`Budget::deadlines`), its
+/// tier-up builds hold a performance core (`Budget::fast_tier_ups`). A thread that ends counts no more.
+struct Marks {
+    deadline: Cell<bool>,
+    fast: Cell<bool>,
+}
+impl Drop for Marks {
+    fn drop(&mut self) {
+        if self.deadline.get() { global().deadlines.fetch_sub(1, Relaxed); }
+        if self.fast.get() { global().fast_tier_ups.fetch_sub(1, Relaxed); }
+    }
 }
 /// Applies the class to the calling thread, caching successful applications only.
 /// Linux may refuse a promotion without CAP_SYS_NICE; failure is returned, not hidden.
@@ -1123,42 +1245,113 @@ pub fn set_thread_idle() -> bool {
 pub fn thread_idle() -> bool { IDLE_NOW.with(Cell::get) }
 /// The OS class code of `set_thread_idle` (below Background; 3 is the UI's).
 const IDLE: u8 = 4;
-/// The OS class code of Background work measured hot (`set_thread_hot`): its budget class stays
-/// Background (tokens, limits, the ledger); only the OS's class of the thread differs.
+/// The OS class code of a tier-up build on a performance core (`WORK_TIER_UP` with room there):
+/// its budget class stays Background (tokens, limits, the ledger); only the OS's class of the
+/// thread differs. macOS QoS DEFAULT: at UTILITY the kernel queues it on efficiency cores beside
+/// idle performance cores.
 const BACKGROUND_HOT: u8 = 5;
+/// The OS class code of Background work kept off the performance cores (`WORK_BEHIND` while the
+/// person's work runs, `WORK_TIER_UP` without room): macOS QoS BACKGROUND, which Apple silicon runs
+/// on the efficiency cores only. Its budget class stays Background.
+const BACKGROUND_BEHIND: u8 = 6;
 
-/// The Background work the calling thread runs from now on is measured hot (`true`): work whose
-/// result something that runs now waits on, such as a tier-up of code the program keeps calling,
-/// against work nobody measured (speculation, checks ahead, encoding). Its budget class stays
-/// Background. On macOS the thread runs at QoS DEFAULT instead of UTILITY while it does: at
-/// UTILITY the kernel queues it on efficiency cores beside idle performance cores, and it ranks
-/// below the program's own threads either way. Elsewhere it changes nothing. A thread at the idle
-/// policy, or the UI's, stays where it is.
-pub fn set_thread_hot(hot: bool) -> bool {
-    if HOT.with(|h| h.replace(hot)) == hot { return true; }
+/// What a thread's Background work is to the program (`set_thread_work`). Nobody's measured
+/// demand: speculation, checks ahead, encoding, the JIT's housekeeping. macOS QoS UTILITY.
+pub const WORK_PLAIN: u8 = 0;
+/// The program runs slower code until this lands: a tier-up of code it was measured running, the
+/// first build of code it reached. On a machine with two kinds of core it takes a performance core
+/// while the tier-ups on them are fewer than the person's work leaves (`fast_room`), else an
+/// efficiency core; on one kind, QoS DEFAULT, below the program's own threads.
+pub const WORK_TIER_UP: u8 = 1;
+/// It replaces something in use with the same kind of thing, or nothing calls it yet: a plan made
+/// behind the one a live run plays on, a rebuild of code at the tier it has, a build ahead of an
+/// install. Nothing waits for it, and it never takes a core from the person's work: while any of
+/// that runs (`fast_room`'s demand, a deadline thread) it runs at QoS BACKGROUND, on the
+/// efficiency cores of Apple silicon; else as plain work. (At UTILITY a live simulation's re-plan
+/// ran 95 % of its units on a base M4's 4 performance cores beside the realtime round, which ran
+/// 13 % slower and gapped, 11-22.)
+pub const WORK_BEHIND: u8 = 2;
+
+/// The Background work the calling thread runs is `kind` from now on (`WORK_PLAIN`,
+/// `WORK_TIER_UP`, `WORK_BEHIND`), until its next call. Its budget class stays Background; only
+/// the OS's class of the thread differs, and only on macOS: Linux keeps Background's nice and
+/// SCHED_BATCH (a thread without CAP_SYS_NICE could not come back from a lower class for the pool's
+/// next job), Windows Background's normal priority (strict priority would starve it), and wasm has
+/// no OS classes. A thread at the idle policy, or the UI's, stays where it is. The placement is
+/// read again wherever the class is applied: at admission and at every checkpoint, so a build that
+/// started in a quiet moment leaves the performance cores at its next checkpoint once the person's
+/// work starts. Called at a job's start and end; O(1), an OS call only on a change. An op of the
+/// crate: a JIT-compiled app's pool job calls it, and the class it keeps is the provided crate's,
+/// with `set_thread_class`'s.
+#[relax_api]
+pub fn set_thread_work(kind: u8) -> bool {
+    assert!(kind <= WORK_BEHIND, "invalid kind of Background work {kind}");
+    WORK.with(|w| w.set(kind));
     match THREAD_CLASS.with(Cell::get) {
-        Some(BACKGROUND | BACKGROUND_HOT) => apply_thread_class(BACKGROUND),
+        Some(BACKGROUND | BACKGROUND_HOT | BACKGROUND_BEHIND) => apply_thread_class(BACKGROUND),
         _ => true,
     }
 }
+/// What the calling thread's Background work is now (`set_thread_work`).
+pub fn thread_work() -> u8 { WORK.with(Cell::get) }
+
+/// The calling thread holds a core against a deadline from now on (`true`), outside admission: a
+/// live simulation's worker, an audio render thread. It counts as one core of the person's work in
+/// `fast_room` until `false` or its end. O(1), no OS call. An op of the crate, as
+/// `set_thread_work`.
+#[relax_api]
+pub fn set_thread_deadline(on: bool) {
+    MARKS.with(|m| if m.deadline.replace(on) != on {
+        if on { global().deadlines.fetch_add(1, Relaxed); } else { global().deadlines.fetch_sub(1, Relaxed); }
+    });
+}
+
+/// The performance cores the person's work leaves now (the cores of the faster kind less the
+/// Interactive and Visible jobs that run, averaged over a span, and the deadline threads); 0 on a
+/// machine with one kind of core. For the budget's report, the JIT's hold ledger and tests.
+pub fn fast_room() -> u32 { global().fast_room() as u32 }
+
+/// The OS class code of Background work of the calling thread's kind (`set_thread_work`), now.
+#[cfg(target_os = "macos")]
+fn background_class() -> u8 {
+    let budget = global();
+    match WORK.with(Cell::get) {
+        WORK_TIER_UP if budget.fast == 0 => BACKGROUND_HOT,
+        WORK_TIER_UP => {
+            // a performance core while the tier-ups on them, this one apart, are fewer than the room
+            let others = budget.fast_tier_ups.load(Relaxed).saturating_sub(usize::from(MARKS.with(|m| m.fast.get())));
+            if others < budget.fast_room() { BACKGROUND_HOT } else { BACKGROUND_BEHIND }
+        }
+        WORK_BEHIND if budget.urgent() => BACKGROUND_BEHIND,
+        _ => BACKGROUND,
+    }
+}
+/// Elsewhere every kind of Background work has Background's OS class.
+#[cfg(not(target_os = "macos"))]
+fn background_class() -> u8 { BACKGROUND }
 
 fn apply_thread_class(class: u8) -> bool {
     THREAD_CLASS.with(|current| {
         // Background work on a thread at the idle policy: it stays there, below Background (a
         // thread without CAP_SYS_NICE could not leave it anyway)
         if class == BACKGROUND && IDLE_NOW.with(Cell::get) { return true; }
-        let class = if class == BACKGROUND && HOT.with(Cell::get) { BACKGROUND_HOT } else { class };
+        let class = if class == BACKGROUND { background_class() } else { class };
         if current.get() == Some(class) { return true; }
         let applied = os_class(class);
         // A failed call may have partially changed the OS state.
         current.set(if applied { Some(class) } else { None });
+        // the tier-ups that hold a performance core: counted while this thread's class is theirs
+        let fast = applied && class == BACKGROUND_HOT && global().fast > 0;
+        MARKS.with(|m| if m.fast.replace(fast) != fast {
+            if fast { global().fast_tier_ups.fetch_add(1, Relaxed); } else { global().fast_tier_ups.fetch_sub(1, Relaxed); }
+        });
         applied
     })
 }
 #[cfg(target_os = "macos")]
 fn os_class(class: u8) -> bool {
     unsafe extern "C" { fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32; }
-    unsafe { pthread_set_qos_class_self_np([0x19, 0x15, 0x11, 0x21, 0x11, 0x15][class as usize], 0) == 0 }
+    unsafe { pthread_set_qos_class_self_np([0x19, 0x15, 0x11, 0x21, 0x11, 0x15, 0x09][class as usize], 0) == 0 }
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn os_class(class: u8) -> bool {
@@ -1172,11 +1365,11 @@ fn os_class(class: u8) -> bool {
     }
     static BASE: OnceLock<i32> = OnceLock::new();
     let base = *BASE.get_or_init(|| unsafe { getpriority(0, getpid() as u32) }.clamp(0, 19));
-    let nice = (base + [1, 3, 8, 0, 8, 8][class as usize]).min(19);
+    let nice = (base + [1, 3, 8, 0, 8, 8, 8][class as usize]).min(19);
     unsafe {
         let priority = setpriority(0, 0, nice) == 0;
         // SCHED_IDLE 5, SCHED_BATCH 3, SCHED_OTHER 0; a refused change leaves the policy as it was
-        let policy = sched_setscheduler(0, match class { IDLE => 5, BACKGROUND | BACKGROUND_HOT => 3, _ => 0 }, &SchedParam { priority: 0 }) == 0;
+        let policy = sched_setscheduler(0, match class { IDLE => 5, BACKGROUND | BACKGROUND_HOT | BACKGROUND_BEHIND => 3, _ => 0 }, &SchedParam { priority: 0 }) == 0;
         if policy { IDLE_NOW.with(|idle| idle.set(class == IDLE)); }
         priority && policy && getpriority(0, 0) == nice
     }
@@ -1191,7 +1384,7 @@ fn os_class(class: u8) -> bool {
     // Background at Normal, not below: Windows priority is strict, so below another program's busy threads
     // it gets almost no time (tier-up all but stopped, the program stayed on its slow code); the budget
     // decides how much of the machine Background takes
-    unsafe { SetThreadPriority(GetCurrentThread(), [1, 0, 0, 2, 0, 0][class as usize]) != 0 }
+    unsafe { SetThreadPriority(GetCurrentThread(), [1, 0, 0, 2, 0, 0, 0][class as usize]) != 0 }
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
 fn os_class(_class: u8) -> bool { false }

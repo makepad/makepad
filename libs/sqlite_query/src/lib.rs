@@ -187,15 +187,31 @@ impl Statement {
     }
 }
 
+/// A read-only handle's pager and schema, from its first snapshot. That
+/// snapshot (the pager's open takes it) can be lost to a checkpoint that starts
+/// the log over while it is read; the next one is taken from the new log.
+/// Idle handles hold nothing: every statement takes its own read lock.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_snapshot(open: impl Fn() -> Result<Pager>) -> Result<(Pager, Schema)> {
+    loop {
+        let opened = open().and_then(|mut pager| {
+            let schema = Schema::load(&mut pager)?;
+            pager.unlock()?;
+            Ok((pager, schema))
+        });
+        match opened {
+            Err(e) if e.is_snapshot_reset() => continue,
+            opened => return opened,
+        }
+    }
+}
+
 impl Database {
     /// Open a database file (following its `-wal` when present).
     pub fn open(path: &Path) -> Result<Database> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut pager = Pager::open(path)?;
-            let schema = Schema::load(&mut pager)?;
-            // Idle handles hold nothing: every statement takes its own read lock.
-            pager.unlock()?;
+            let (pager, schema) = open_snapshot(|| Pager::open(path))?;
             return Ok(Database {
                 pager,
                 schema,
@@ -212,9 +228,7 @@ impl Database {
     pub fn open_with_cache(path: &Path, cache_pages: usize) -> Result<Database> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut pager = Pager::open_with_cache(path, cache_pages)?;
-            let schema = Schema::load(&mut pager)?;
-            pager.unlock()?;
+            let (pager, schema) = open_snapshot(|| Pager::open_with_cache(path, cache_pages))?;
             return Ok(Database {
                 pager,
                 schema,

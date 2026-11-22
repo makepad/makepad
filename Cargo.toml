@@ -404,10 +404,11 @@ workspace.exclude = [
     # The vendored brotli crates (and their allocators): dependencies, not members, so their
     # own test suites (which read upstream test corpora not vendored here) are not ours to run
     "libs/brotli",
-    # Private repositories cloned into apps/<name> are members through
-    # apps/*/src/.. above: Source Library, and the commercial products at
-    # apps/commercial (a members package at its root naming Stage's and
-    # Scope's crates).
+    # Repositories cloned into apps/<name> are members through apps/*/src/..
+    # above: Source Library, the open apps at apps/apps (makepad/apps: Fab and
+    # the crates it shares, named by a members package at its root), and the
+    # commercial products at apps/commercial (a members package at its root
+    # naming Stage's and Scope's crates; some of them use makepad/apps' crates).
     # Stage's donors are preserved sources, not built.
     "apps/commercial/stage/donors",
     "libs/terminal_core",

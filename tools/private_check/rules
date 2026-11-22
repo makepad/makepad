@@ -35,11 +35,11 @@ and gpu-near-host [0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?\.[0-9]
 # a node's number as its machine's name, for the numbers the untracked patterns give as
 # `define node-number <ERE>` (none there: these are off): "<N>'s", "<N>, <date>", "<N> sat" (the
 # subject of a verb), "(<N>, ... <date>)", "(<date>, ... <N>)". Seven comments such as "(<N>, 11-06)"
-# and "<N>'s" reached work through the hooks (11-06). The number after a word that makes it a code,
+# and "<N>'s" reached work through the hooks (11-06), and "<N> held" a doc comment (11-21). The number after a word that makes it a code,
 # a count or a place in something (`exit <N>`, `line <N> is`) is none, nor one inside a name.
 node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@'s([^a-z0-9_]|$)
 node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@, (20[0-9][0-9]-)?[01][0-9]-[0-3][0-9]([^0-9]|$)
-node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@ (sat|sits|ran|runs|took|takes|showed|shows|saw|sees|lost|loses|kept|keeps|went|goes|booted|boots|rebooted|reboots|crashed|crashes|hung|hangs|stalled|stalls|froze|freezes|died|dies|answered|answers|refused|refuses|restarted|restarts|stopped|stops|served|serves|built|builds|rebuilt|rebuilds|rolled|rolls|woke|wakes|slept|sleeps|swapped|swaps|panicked|idled|idles|shipped|ships)([^a-z0-9_]|$)
+node-number (^|[^0-9a-z.#_:/=-])([a-z]+ +)?@node-number@ (sat|sits|ran|runs|took|takes|showed|shows|saw|sees|lost|loses|kept|keeps|went|goes|booted|boots|rebooted|reboots|crashed|crashes|hung|hangs|stalled|stalls|froze|freezes|died|dies|answered|answers|refused|refuses|restarted|restarts|stopped|stops|served|serves|built|builds|rebuilt|rebuilds|rolled|rolls|woke|wakes|slept|sleeps|swapped|swaps|panicked|idled|idles|shipped|ships|held|holds)([^a-z0-9_]|$)
 node-number \(([^()]*[^0-9a-z.#_:/=-])?([a-z]+ +)?@node-number@(,|;| and | or )([^()]*[^0-9])?(20[0-9][0-9]-)?[01][0-9]-[0-3][0-9]([^0-9)][^()]*)?\)
 node-number \(([^()]*[^0-9])?(20[0-9][0-9]-)?[01][0-9]-[0-3][0-9][^0-9)]([^()]*[^0-9a-z.#_:/=-])?([a-z]+ +)?@node-number@(\)|(,|;| and | or )[^()]*\))
 # "(<N>: ...)", a note the box's number leads, and "held <N> at", "on <N>.", a box held or worked on:
@@ -70,3 +70,11 @@ node-number (--node[ =]+|node=)@node-number@([^0-9.]|$)
 node-number usage *\(@node-number@\)
 node-number \(@node-number@, +(the|a|an|lane|user|node|when|after|before|on|with)([^a-z]|$)
 node-number (lane|trace|user|session|run|bench|measured)[a-z ]*, @node-number@\)
+
+# a Mac node's name, for the names the untracked patterns give as `define mac-name <ERE>` (none there:
+# this is off), quoted as a value: the untracked file's prose shapes ("on <name>", "--node <name>")
+# let a test's `Node::new("<name>", ...)` and its session id `"<name>.0"` through (11-21). Quoted
+# beside node, host, server, box or machine, or with an instance number; a name alone in quotes is
+# none, as the short names are sizes, measures and registers too (a screw's `name: "<name>"`).
+node-name (node|nodes|host|hosts|hostname|server|servers|box|boxes|machine|machines)[^"'`]?[^"'`]?[^"'`]?[^"'`]?[^"'`]?[^"'`]?["'`]@mac-name@(\.[0-9]+)?["'`]
+node-name ["'`]@mac-name@\.[0-9]+["'`]

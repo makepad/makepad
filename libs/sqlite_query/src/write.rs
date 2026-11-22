@@ -98,10 +98,22 @@ impl Connection {
         stores: Arc<dyn PageStoreSet>,
         busy_timeout: Duration,
     ) -> Result<Connection> {
-        let mut pager = Pager::open_store_with_cache(stores, crate::pager::DEFAULT_CACHE_PAGES)?;
-        pager.set_busy_timeout(busy_timeout);
-        pager.begin_read()?;
-        let schema = Schema::load(&mut pager)?;
+        // The first snapshot (the pager's open takes it) can be lost to a
+        // checkpoint that starts the log over while it is read; the next one
+        // is taken from the new log.
+        let (pager, schema) = loop {
+            let opened = Pager::open_store_with_cache(stores.clone(), crate::pager::DEFAULT_CACHE_PAGES)
+                .and_then(|mut pager| {
+                    pager.set_busy_timeout(busy_timeout);
+                    pager.begin_read()?;
+                    let schema = Schema::load(&mut pager)?;
+                    Ok((pager, schema))
+                });
+            match opened {
+                Err(e) if e.is_snapshot_reset() => continue,
+                opened => break opened?,
+            }
+        };
         let schema_cookie = pager.header().schema_cookie;
         let mut connection = Connection {
             pager,

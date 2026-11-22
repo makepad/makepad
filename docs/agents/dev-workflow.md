@@ -36,15 +36,18 @@ JIT. The numbers are one day of all lanes (medians / p90):
   - pool: builds, tests, screens, live sessions;
   - hot: small jobs on a warm JIT with a fast handoff;
   - bench: timed work. Between timed series it takes the pool's overflow, any kind, after
-    every pool box that could start it; a queued timed lease drains it;
+    every pool box that could start it, holding nothing; a queued timed lease drains it;
   - the Macs: pool boxes like the others (any work with no platform need, within the Mac's
-    RAM by measure); a timed lease drains them;
+    RAM by measure); a timed lease drains them: a Mac takes nothing new while a timed lease
+    waits for it, runs there, or ran there within its series' window (a held branch keeps it
+    too), and the timed run starts once the work there ends, live sessions parked;
   - the user's app box: a person's display. Lanes show apps there and never take it;
   - device: phones and headsets, through their own commands.
 - **Self-update**:
   - the master builds work's tip (one build at a time; landings during a build go into the
     next) and execs into each build as it ends: no uptime or settle holds it (that gate went
-    on 11-08: a fix waited 10 min for it); leases, queued requests and launches survive it;
+    on 11-08: a fix waited 10 min for it); leases (in setup or cleanup too), queued requests
+    and launches survive it;
   - each hub rolls to the same build as it ends (`devhub rolls`), a median 5.8 min after a
     landing (p90 10.3); its runs and leases survive the restart, holders re-attach;
   - a devhub call exits 75 when a restart cut it and left it unknown whether it applied. A
@@ -57,11 +60,14 @@ JIT. The numbers are one day of all lanes (medians / p90):
 
 - One lane per task: `devhub lane new <name>` makes worktrees in both repos (makepad on
   `rc-<name>` from work, apps/commercial on `rc-<name>` from main) and the devhub record.
-  `--no-commercial` for a makepad-only lane. Never `git worktree add`; `devhub lane adopt`
-  registers one that exists.
+  `--no-commercial` for a makepad-only lane; `--with <repo>` (repeatable) adds a half in
+  that nested repository, `apps/<repo>` on `rc-<name>` from the branch its checkout is on (Fab:
+  `--with apps`), merged, landed and cleaned up with the others. Never `git worktree add`;
+  `devhub lane adopt` registers one that exists.
 - Lane notes and scratch state go in `local/agent_state/<lane>/`, never in tracked files.
 - The merge bot keeps every lane merged with the tip, in the lane's own worktree. It waits
-  while a job, a live session or a recent timed lease of the lane runs there.
+  while a job or a live session of the lane runs there, and while a `timed` lease of the
+  lane is queued, live, or ended in the last 5 minutes.
   - `devhub hold <branch> "why"` keeps it off a lane whose pinned binary you compare against;
     `devhub unhold <branch>` after the last run.
   - Its merges land on your branch in your worktree: check that HEAD is yours before an
@@ -138,6 +144,12 @@ buckets ask for one, and the queue decides where and when.
   - a request that waits long shows in the health readout. Main can `job bump` it.
   - Never cancel and resubmit: the request loses its place.
 
+- The Windows box takes work that names it or `--needs os=windows`, and plain `cargo
+  build|check|clippy|test -p <pkg>` (argv, no shell, no JIT) of packages checked there: their
+  Cargo.toml's `[package.metadata.makepad.platform-gaps]` has a `windows` table, which names each
+  target that does not build or pass there with why (`build` for the whole package, `{}` for none).
+  A run selecting a gap stays off it, and says so.
+
 ## 4. Jobs
 
 - `devhub job submit [--kind K] [--cost C] [--lane L] -- <cmd>` returns an id at once. Then:
@@ -190,7 +202,8 @@ buckets ask for one, and the queue decides where and when.
     `[package.metadata.makepad.native-tests]`, `"test:<name>" = "<why>"` (or `lib`,
     `bin:<name>`). A run that selects one goes to cargo whole, and the tests bucket gives each
     one a unit of its own under `cargo test`. It is for a test the JIT cannot host, such as one
-    that re-runs its own binary as a JIT runner;
+    that re-runs its own binary as a JIT runner. devhub reads it from the lane's committed tree:
+    an edit of it routes nothing until it is committed;
   - `--native "<reason>"`: native-vs-JIT baselines and timed perf series.
   The refusal names the JIT command.
 - **One JIT and one cache per box**, shared by every lane:

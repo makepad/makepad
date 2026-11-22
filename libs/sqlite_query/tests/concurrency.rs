@@ -67,15 +67,35 @@ fn readers_see_the_state_before_an_open_write_transaction() {
             .execute("INSERT INTO t(v) VALUES (?1)", &[Value::text(format!("w{i}"))])
             .unwrap();
     }
-    // Nothing is in the file yet: a fresh reader still sees two rows.
+    // The writer reads back the header fields it wrote, as SQLite does: a migration that sets
+    // user_version step by step inside one transaction reads each step's number (it read the
+    // committed one and repeated its first step forever, 11-22).
+    let cookie = |c: &mut Connection| c.query("PRAGMA schema_version", &[]).unwrap().rows[0][0].as_integer();
+    let cookie_before = cookie(&mut writer);
+    writer.execute("PRAGMA user_version=7", &[]).unwrap();
+    writer.execute("CREATE TABLE u(x)", &[]).unwrap();
+    assert_eq!(writer.user_version(), 7, "the writer reads back the user_version it set");
+    assert_eq!(writer.query("PRAGMA user_version", &[]).unwrap().rows[0][0].as_integer(), Some(7));
+    assert_ne!(cookie(&mut writer), cookie_before, "the writer reads back the schema cookie its DDL bumped");
+    // Nothing is in the file yet: a fresh reader still sees two rows, and the old header.
     let mut reader = Database::open(&path).unwrap();
     let before = reader.query("SELECT COUNT(*) FROM t", &[]).unwrap();
     assert_eq!(before.rows[0][0].as_integer(), Some(2));
+    assert_eq!(reader.user_version(), 0);
 
     writer.execute("COMMIT", &[]).unwrap();
     let mut reader = Database::open(&path).unwrap();
     let after = reader.query("SELECT COUNT(*) FROM t", &[]).unwrap();
     assert_eq!(after.rows[0][0].as_integer(), Some(52));
+    assert_eq!(reader.user_version(), 7);
+
+    // A rolled-back header write is gone from the writer's reads too.
+    writer.execute("BEGIN IMMEDIATE", &[]).unwrap();
+    writer.execute("PRAGMA user_version=9", &[]).unwrap();
+    assert_eq!(writer.user_version(), 9);
+    writer.execute("ROLLBACK", &[]).unwrap();
+    assert_eq!(writer.user_version(), 7, "a rollback restores the committed user_version");
+    assert_eq!(writer.query("PRAGMA user_version", &[]).unwrap().rows[0][0].as_integer(), Some(7));
 }
 
 #[test]
@@ -402,4 +422,95 @@ fn a_checkpointed_away_snapshot_never_answers_with_another_page() {
         0,
         "the first commit after the reader is done checkpoints the log"
     );
+
+    // A reader that opens while a checkpoint starts the log over: it reads the
+    // log's length, the checkpoint truncates the log and writes the next
+    // generation's header, and the reader's scan then runs past the new end
+    // (a store's connection threads open readers on demand, so this happens
+    // right after a deferred checkpoint runs). The stale length is replayed
+    // here exactly: the open takes a fresh snapshot, never an I/O error.
+    fill(&mut w, 1801, 1900);
+    let stale_len = std::fs::metadata(scratch.path("c.db-wal")).unwrap().len();
+    assert!(w.pager().wal_frames() > 8, "the log holds frames to scan");
+    w.execute("PRAGMA wal_checkpoint", &[]).unwrap();
+    assert_eq!(w.pager().wal_frames(), 0, "the checkpoint started the log over");
+    let stale = std::sync::Arc::new(std::sync::Mutex::new(Some(stale_len)));
+    let stores = std::sync::Arc::new(StaleLogLength {
+        inner: makepad_sqlite::FileStoreSet::new(&path),
+        stale_len: stale.clone(),
+    });
+    let mut r = Connection::open_store_read_only(stores, Duration::from_secs(5))
+        .expect("a reader whose first scan ran past a restarted log opens on a fresh snapshot");
+    assert!(stale.lock().unwrap().is_none(), "the open read the stale length");
+    assert_eq!(
+        r.query("SELECT COUNT(*) FROM t", &[]).unwrap().rows[0][0].as_integer(),
+        Some(1900),
+        "the fresh snapshot is the checkpointed database"
+    );
+}
+
+/// A file store set whose log answers one length query with the length it had
+/// before a checkpoint truncated it, as a reader sees it when the truncation
+/// lands between its length query and its reads.
+struct StaleLogLength {
+    inner: makepad_sqlite::FileStoreSet,
+    stale_len: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+}
+
+struct StaleLog {
+    inner: std::sync::Arc<dyn makepad_sqlite::PageStore>,
+    stale_len: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+}
+
+impl makepad_sqlite::PageStoreSet for StaleLogLength {
+    fn open(
+        &self,
+        kind: makepad_sqlite::StoreKind,
+        options: makepad_sqlite::StoreOpenOptions,
+    ) -> std::io::Result<Option<std::sync::Arc<dyn makepad_sqlite::PageStore>>> {
+        let opened = self.inner.open(kind, options)?;
+        Ok(match (kind, opened) {
+            (makepad_sqlite::StoreKind::Wal, Some(inner)) => Some(std::sync::Arc::new(StaleLog { inner, stale_len: self.stale_len.clone() })),
+            (_, opened) => opened,
+        })
+    }
+    fn remove(&self, kind: makepad_sqlite::StoreKind) -> std::io::Result<()> {
+        self.inner.remove(kind)
+    }
+    fn process_lock(&self) -> std::sync::Arc<makepad_sqlite::lock::ProcessLock> {
+        self.inner.process_lock()
+    }
+    fn path(&self, kind: makepad_sqlite::StoreKind) -> Option<std::path::PathBuf> {
+        self.inner.path(kind)
+    }
+}
+
+impl makepad_sqlite::PageStore for StaleLog {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn write_at(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        self.inner.write_at(offset, data)
+    }
+    fn len(&self) -> std::io::Result<u64> {
+        match self.stale_len.lock().unwrap().take() {
+            Some(stale) => Ok(stale),
+            None => self.inner.len(),
+        }
+    }
+    fn truncate(&self, len: u64) -> std::io::Result<()> {
+        self.inner.truncate(len)
+    }
+    fn sync(&self) -> std::io::Result<()> {
+        self.inner.sync()
+    }
+    fn lock(&self, kind: makepad_sqlite::StoreLock, start: u64, len: u64) -> std::io::Result<bool> {
+        self.inner.lock(kind, start, len)
+    }
+    fn unlock(&self, start: u64, len: u64) -> std::io::Result<()> {
+        self.inner.unlock(start, len)
+    }
+    fn is_write_locked(&self, start: u64, len: u64) -> std::io::Result<bool> {
+        self.inner.is_write_locked(start, len)
+    }
 }

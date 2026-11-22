@@ -89,18 +89,37 @@ fn interactive_stops_at_cores() {
 
 /// Why (user): clicking through plates under the JIT sat at "waiting for a free worker": the JIT's
 /// builds held the tokens Interactive had left, with no checkpoint in their optimiser for seconds.
+/// And on a machine with two kinds of core the builds leave the performance cores the person's
+/// work takes (`fast_room`): a live run's sound gapped while hot builds shared a base M4's 4 (11-22).
 #[test]
 fn a_persons_work_never_waits_for_the_jits_background_builds() {
-    let b = budget(16);
+    let b = Arc::new(Budget::new(16, 16).with_fast(4));
+    // a span of the person's work from its last change: `tokens` of it, read exactly
+    let span = |b: &Budget| {
+        let mut s = b.lock();
+        let at = s.urgent_at;
+        (s.window_at, s.window_area) = (at, s.urgent_area);
+        b.roll(&mut s, at + DEMAND_SPAN_NS);
+    };
+    assert_eq!((b.fast_room(), b.urgent()), (4, false), "nobody's work: every performance core");
     let jit: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, JIT, "O3")).collect();
     let tiles: Vec<_> = (0..2).map(|_| b.admit(VISIBLE, APP, "tiles")).collect();
     let mut load = vec![b.admit(INTERACTIVE, APP, "a load")];
     assert_eq!(b.state.lock().unwrap().running, 16, "every core has a token");
+    assert_eq!(b.state.lock().unwrap().urgent, 3, "the tiles and the load are the person's work, the builds are not");
+    span(&b);
+    assert_eq!((b.fast_room(), b.urgent()), (1, true), "4 performance cores less the 3 the person's work takes");
+    b.deadlines.fetch_add(1, Relaxed);
+    assert_eq!(b.fast_room(), 0, "a thread that holds a core against a deadline takes the last");
+    b.deadlines.fetch_sub(1, Relaxed);
     let (tx, rx) = mpsc::channel();
     let helper = worker(&b, INTERACTIVE, APP, 1, &tx);
     assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(300)), Ok(1), "the load waited for the builds' tokens");
     load.extend((0..12).map(|_| b.admit(INTERACTIVE, APP, "a load")));
     assert_eq!(b.state.lock().unwrap().running, 13 + 2 + 14);
+    span(&b);
+    assert_eq!(b.fast_room(), 0, "the person's work takes every performance core: the builds run on the others");
+    assert!(!Budget::urgent_row(&Job::new(INTERACTIVE, JIT, "a waited compile", 0)), "the JIT's own Interactive work is not the person's");
     assert!(b.should_yield(jit[0]), "the builds leave at their next checkpoint");
     assert!(b.should_yield(tiles[0]), "and what ranks below the load");
     assert!(load.iter().all(|p| !b.should_yield(*p)), "the load keeps its helpers: it is within the cores");
@@ -114,8 +133,13 @@ fn a_persons_work_never_waits_for_the_jits_background_builds() {
     finish(last);
     finish(helper);
     for p in load.into_iter().chain(tiles).chain(jit) { b.release(p); }
+    span(&b);
+    assert_eq!((b.fast_room(), b.urgent()), (0, true), "work that ended leaves the reading after two spans, not one");
+    span(&b);
+    assert_eq!((b.fast_room(), b.urgent()), (4, false), "and then every performance core is free again");
+    assert_eq!(Budget::new(16, 16).fast_room(), 0, "one kind of core: no performance cores to place on");
     let s = b.state.lock().unwrap();
-    assert_eq!((s.running, s.jit_tokens), (0, 0));
+    assert_eq!((s.running, s.jit_tokens, s.urgent), (0, 0, 0));
 }
 
 /// Why (user): what a plate load builds is Visible, and it sat behind the same builds. The builds
@@ -378,6 +402,7 @@ fn reclass_updates_yield_and_background_accounting() {
     b.reclass(p, INTERACTIVE);
     assert!(!b.should_yield(p));
     assert_eq!(b.state.lock().unwrap().background, 0);
+    assert_eq!(b.state.lock().unwrap().urgent, 1, "the promoted job counts as the person's work");
     assert_eq!(b.checkpoint(p, 0, ""), p);
     b.release(p);
     assert_eq!(rx.recv().unwrap(), 1);
