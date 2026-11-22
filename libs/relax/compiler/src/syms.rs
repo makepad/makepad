@@ -19,7 +19,7 @@ use crate::program::DefId;
 use relax_backend::rir::{Mem, Sym, SymClass};
 use crate::types::{TyId, TyKind};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use relax_session::sync::Mutex;
 
@@ -68,6 +68,10 @@ pub enum SymKind {
     /// What code calls through, named by a stable string (jit.rs `RtNote`). `Func::notes`
     /// carries it to a `RelocKind::Note`. Its value is zero and no code reads it.
     Note(String),
+    /// the made cell of the vtable whose data symbol is `.0` (Syms::made_cell): a byte set the
+    /// first time code makes a trait object with that vtable (lower.rs note_made), so a patch
+    /// tells a trait object that was made from one only some code that never ran would make
+    Made(u32),
 }
 
 /// What the bytes of a data object hold.
@@ -107,6 +111,8 @@ pub struct Syms {
     pub vals: u64,
     /// `rir::SymClass` per id (u8): how a backend may encode the symbol (`Env::sym_class`)
     pub classes: u64,
+    /// a byte per id: the made cell of a vtable's data symbol (`SymKind::Made`, made_cell)
+    made: u64,
     /// kind per id (append-only: read without a lock)
     kinds: crate::conc::AppendVec<SymKind>,
     inner: Mutex<SymsInner>,
@@ -191,7 +197,7 @@ pub fn vtable_name_keys(name: &str) -> impl Iterator<Item = &str> {
 
 impl Syms {
     pub fn new(vals: u64, dom0: u64) -> Syms {
-        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), vtable_count: AtomicUsize::new(0), thunk_count: AtomicUsize::new(0), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
+        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), made: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), vtable_count: AtomicUsize::new(0), thunk_count: AtomicUsize::new(0), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
     }
 
 
@@ -210,6 +216,38 @@ impl Syms {
         let s = self.push(own.clone(), value);
         g.map.insert(own, s.id);
         s
+    }
+
+    /// Vtable data symbol `vt`'s made cell: a byte code sets the first time it makes a trait
+    /// object with that vtable (lower.rs note_made), and the cache and image linkers set for a
+    /// vtable data they link points at (a constant holding a `&dyn`: its value exists, no code
+    /// made it this run). One a twin's code reaches is set when the twin is built (sandbox.rs).
+    pub fn made_cell(&self, vt: Sym) -> u64 {
+        self.made + vt.id as u64
+    }
+
+    pub fn is_made(&self, vt: Sym) -> bool {
+        unsafe { (*(self.made_cell(vt) as *const AtomicU8)).load(Ordering::Acquire) != 0 }
+    }
+
+    pub fn set_made(&self, vt: Sym) {
+        unsafe { (*(self.made_cell(vt) as *const AtomicU8)).store(1, Ordering::Release) }
+    }
+
+    /// The symbol of vtable data symbol `vt`'s made cell, as code names it.
+    pub fn made_sym(&self, vt: Sym) -> Sym {
+        self.intern(SymKind::Made(vt.id), self.made_cell(vt))
+    }
+
+    /// Whether code that makes trait objects with vtable data symbol `vt` sets its made cell
+    /// (its symbol exists: the makers lowered or linked so far name it).
+    pub fn has_made_cell(&self, vt: Sym) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).map.contains_key(&SymKind::Made(vt.id))
+    }
+
+    /// Whether symbol `s` is the start of a vtable's data object.
+    pub fn is_vtable_sym(&self, s: Sym) -> bool {
+        s.off == 0 && matches!(self.kind(s.id), Some(SymKind::Data(i)) if self.is_vtable_obj(i))
     }
 
     /// The symbol for a real-time call-site note.
@@ -322,6 +360,21 @@ impl Syms {
         }
         let vtables = d.vtables.len() > vtables;
         if vtables { self.vtable_count.store(d.vtables.len(), Ordering::Release); }
+        // a placed object that is no vtable and points at one (a constant holding a `&dyn`): the
+        // trait object exists, though no code made it this run (made_cell)
+        let is_vt = |i: usize| d.objs.get(i).and_then(|o| o.name.as_deref()).is_some_and(|n| n.starts_with(VTABLE_NAME));
+        for i in first as usize..d.objs.len() {
+            if is_vt(i) {
+                continue;
+            }
+            if let DataKind::Relocs(r) = &d.objs[i].kind {
+                for (_, t) in r {
+                    if t.off == 0 && matches!(self.kind(t.id), Some(SymKind::Data(k)) if is_vt(k as usize)) {
+                        self.set_made(*t);
+                    }
+                }
+            }
+        }
         drop(d);
         // (the data lock released: the real-time reach's lock goes first)
         if vtables {
@@ -603,6 +656,18 @@ pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> relax_backend::passes::RoRead {
 pub(crate) fn data_thunks(u: &Unit, addr: u64, out: &mut Vec<u32>) {
     if let Some(idx) = u.syms.data_at(addr).and_then(|s| u.syms.obj_of(s)) {
         obj_thunks(u, vec![idx], out, true);
+    }
+}
+
+/// The vtables the vtable at `addr` points at: its supertraits', which an upcast of a trait object
+/// with it reaches.
+pub(crate) fn vtable_supers(u: &Unit, addr: u64, out: &mut Vec<u64>) {
+    let Some(idx) = u.syms.data_at(addr).and_then(|s| u.syms.obj_of(s)) else { return };
+    let Some((_, _, ptrs, _)) = obj_ptrs(u, idx) else { return };
+    for t in ptrs.iter().filter_map(|p| p.1) {
+        if u.syms.is_vtable_sym(t) {
+            out.push(u.syms.value(t));
+        }
     }
 }
 
@@ -1143,6 +1208,7 @@ pub fn describe(u: &Unit, s: Sym) -> String {
         Some(SymKind::SbTable) => "sandbox-table".to_string(),
         Some(SymKind::SbHost(n)) => format!("sandbox-host:{}", n),
         Some(SymKind::Note(n)) => format!("note:{n}"),
+        Some(SymKind::Made(v)) => format!("made:{}", describe(u, Sym::new(v))),
         Some(SymKind::Rw(k)) => {
             let b = u.syms.rw_blocks.lock().unwrap_or_else(|e| e.into_inner());
             let (sz, al) = b.get(k as usize).copied().unwrap_or((0, 0));
@@ -1425,6 +1491,8 @@ pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
         SymKind::Data(_) | SymKind::Thunk(_) | SymKind::Missing(_) => SymClass::Near,
         // (the tier records are a reservation of their own, outside the code area)
         SymKind::Foreign(_) | SymKind::Provided(_) | SymKind::StaticAddr(_) | SymKind::TierRec(_) => SymClass::Far,
+        // (an address of the symbol table's own reservation)
+        SymKind::Made(_) => SymClass::Far,
         // (an offset of the sandbox's own, or an address outside the unit's code area)
         SymKind::SbThunk(_) | SymKind::SbPlace(_) | SymKind::SbTls(_) | SymKind::SbTable | SymKind::SbHost(_) => SymClass::Far,
         SymKind::Site(_) | SymKind::ThreadLocal(_) | SymKind::Note(_) => SymClass::Imm,

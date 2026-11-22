@@ -11,8 +11,11 @@ use std::collections::BTreeSet;
 use crate::fxhash::HashMap;
 
 pub(super) type TierEntry = (u32, u8, u64, u64);
+/// `Base`: a baseline slot's O2 build (it ran baseline code, or the startup sampled it); `TwinBase`:
+/// the base of a twin, asked for by the twin's install or its callers' relowering (nothing calls
+/// the base until its build links: `budget::WORK_BEHIND`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum O2Kind { Normal, Base, Borrow, Verified }
+pub(super) enum O2Kind { Normal, Base, TwinBase, Borrow, Verified }
 
 pub(super) enum Job {
     Ahead(Arc<FrontShared>, AheadWork),
@@ -427,16 +430,26 @@ fn background_drains(tier: usize, visible: bool, rest: usize, o3: usize, backgro
 fn eligible(class: u8, burst: bool, noninteractive: usize) -> bool {
     !(burst && class != budget::INTERACTIVE && noninteractive != 0)
 }
-/// A tier-up of code the program was measured running (set_thread_hot: on macOS QoS DEFAULT, not
-/// UTILITY): an O3 build queued by its calls, its loops, its counted window or a retier, and an O2
-/// build of a slot with heat. Speculation, look-ahead, checks, a marked slot's build (`#[relax(O3)]`,
-/// a twin's base) and the housekeeping tick are nobody's measured demand: UTILITY.
-fn measured_hot(job: &Job, now: &HeatNow) -> bool {
+/// What a job's build is to the program while it runs (`budget::set_thread_work`, which places it
+/// on the cores: on Apple silicon a tier-up takes a performance core the person's work leaves,
+/// work behind runs on the efficiency cores while the person's work runs).
+/// - Tier-up: the program runs slower code until it lands. An O3 build queued by its calls, its
+///   loops or its counted window, an O2 build of a slot with heat, a reach build (code the program
+///   reached runs baseline or not at all).
+/// - Behind: it replaces code with code of the same tier and body, or nothing calls it yet. A
+///   retier (O3 rebuilt for a verdict that came), a verified O1 rebuild, a borrow build, a twin's
+///   base. (The callees an O3 install builds ahead of it: `prebuild_callees`, inside the O3 job.)
+/// - Plain: nobody's measured demand. Speculation, look-ahead, checks, a marked slot's build
+///   (`#[relax(O3)]`), a baseline O2 build of a slot without heat, the housekeeping tick.
+fn work_kind(job: &Job, now: &HeatNow) -> u8 {
     match job {
-        Job::O3(e) => e.1 != super::Q_MARKED,
-        Job::O2(u, id, O2Kind::Normal) => now.heat(*u, *id).0 > 0,
-        Job::Reach(_, _, waited) => *waited,
-        _ => false,
+        Job::O3(e) if e.1 == super::Q_RETIER => budget::WORK_BEHIND,
+        Job::O3(e) if e.1 == super::Q_MARKED => budget::WORK_PLAIN,
+        Job::O3(_) => budget::WORK_TIER_UP,
+        Job::O2(_, _, O2Kind::Verified | O2Kind::Borrow | O2Kind::TwinBase) => budget::WORK_BEHIND,
+        Job::O2(u, id, O2Kind::Normal | O2Kind::Base) if now.heat(*u, *id).0 > 0 => budget::WORK_TIER_UP,
+        Job::Reach(..) => budget::WORK_TIER_UP,
+        _ => budget::WORK_PLAIN,
     }
 }
 
@@ -1129,8 +1142,8 @@ fn worker_loop(index: usize) {
                     // that finds the rest blocked (the startup's ahead width) costs the owner its
                     // queue lock and the cores their caches
                     let more = q.runnable();
-                    let hot = measured_hot(&e.job, &now);
-                    Some((e, job, more, go_idle, hot))
+                    let work = work_kind(&e.job, &now);
+                    Some((e, job, more, go_idle, work))
                 });
                 // the hold ledger: a tier-up that starts ends the open interval; a worker that parks
                 // finds why the best queued one does not start (other work started leaves it open)
@@ -1150,7 +1163,7 @@ fn worker_loop(index: usize) {
                 }), other))
             };
             match next {
-                Ok((entry, permit, more, go_idle, hot)) => {
+                Ok((entry, permit, more, go_idle, work)) => {
                     worker.waiting.store(false, Ordering::SeqCst);
                     crate::lifeline::beat();
                     if go_idle {
@@ -1165,9 +1178,9 @@ fn worker_loop(index: usize) {
                         Some(TierActive(tier.0))
                     } else { None };
                     let (slot, cpu) = (entry.slot.map(|s| s.1), cpu_ns());
-                    budget::set_thread_hot(hot);
+                    budget::set_thread_work(work);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(entry.job)));
-                    budget::set_thread_hot(false);
+                    budget::set_thread_work(budget::WORK_PLAIN);
                     note_job(tier, slot, cpu_ns().saturating_sub(cpu));
                     drop(active);
                     if let Err(payload) = result {
@@ -1245,7 +1258,7 @@ pub(super) fn view(n: usize) -> Vec<String> {
         };
         let why = match &e.job {
             Job::O3(t) => Q_WHY[t.1 as usize],
-            Job::O2(_, _, kind) => match kind { O2Kind::Normal => "optimize", O2Kind::Base => "baseline", O2Kind::Borrow => "borrow", O2Kind::Verified => "verified O1" },
+            Job::O2(_, _, kind) => match kind { O2Kind::Normal => "optimize", O2Kind::Base => "baseline", O2Kind::TwinBase => "twin's base", O2Kind::Borrow => "borrow", O2Kind::Verified => "verified O1" },
             Job::Ahead(_, AheadWork::Slot(_)) => "prepare", Job::Ahead(_, AheadWork::Body(..)) => "inline candidate", Job::Ahead(_, AheadWork::Look(..)) => "look ahead", Job::Spec(..) => "speculate", Job::Reach(..) => "real-time reach", Job::Tick => "housekeeping", Job::Check(..) => "dependency check",
         };
         let name = slot_label(e.slot);

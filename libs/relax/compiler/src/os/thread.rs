@@ -139,7 +139,10 @@ mod unix {
     /// on that thread is taken as a kick (only a program that handles SIGEMT can see that).
     /// The kicker claims a thread's entry (a full chunk links another: nothing allocates in a
     /// handler); the handler only reads and counts down; the thread gives its entries back at its
-    /// end with the signal blocked first (`kicks_done`), so no kick counted there arrives after.
+    /// end with the signal blocked first (`kicks_done`), so no kick counted there arrives on it.
+    /// Linux drops a signal still pending on a thread that ends; Darwin hands it to the process,
+    /// and another thread takes it: there it is a kick on its way that no thread counts
+    /// (`take_moved_kick`).
     mod kicks {
         use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering::SeqCst};
         const N: usize = 64;
@@ -199,9 +202,29 @@ mod unix {
             }
             e.pending.fetch_sub(1, SeqCst);
         };
+        ON_THE_WAY.fetch_add(1, SeqCst);
         if unsafe { pthread_kill(t as usize, crate::os::fault::watchdog_signal()) } != 0 {
             e.pending.fetch_sub(1, SeqCst);
+            ON_THE_WAY.fetch_sub(1, SeqCst);
         }
+    }
+
+    /// Kicks sent and not yet taken, on any thread (two that macOS made one delivery stay counted).
+    static ON_THE_WAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn taken() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let _ = ON_THE_WAY.try_update(SeqCst, SeqCst, |n| n.checked_sub(1));
+    }
+
+    /// In the watchdog signal's handler, for a delivery that is no kick of this thread's: is it a
+    /// kick sent to a thread that ended before it came? Darwin hands a signal still pending on an
+    /// ending thread to the process, and any thread may take it (the kick of a run's end races its
+    /// threads' ends). It is taken while kicks sent are not all taken. Linux drops such a signal:
+    /// never one there. Async-signal-safe.
+    pub fn take_moved_kick() -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        cfg!(target_vendor = "apple") && ON_THE_WAY.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok()
     }
 
     /// In the watchdog signal's handler: is this delivery a kick? (One is counted off.)
@@ -209,7 +232,11 @@ mod unix {
     pub fn take_kick() -> bool {
         use std::sync::atomic::Ordering::SeqCst;
         let me = current();
-        kicks::entries().any(|e| e.thread.load(SeqCst) == me && e.pending.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok())
+        let kick = kicks::entries().any(|e| e.thread.load(SeqCst) == me && e.pending.try_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok());
+        if kick {
+            taken();
+        }
+        kick
     }
 
     /// The calling thread ends: the watchdog's signal is blocked on it from here (a kick sent now
@@ -219,9 +246,28 @@ mod unix {
         crate::os::progsig::block_here(crate::os::fault::watchdog_signal());
         let me = current();
         for e in kicks::entries().filter(|e| e.thread.load(SeqCst) == me) {
-            e.pending.store(0, SeqCst);
+            ENDED_UNTAKEN.fetch_add(e.pending.swap(0, SeqCst), SeqCst);
             e.thread.store(0, SeqCst);
         }
+    }
+
+    /// Kicks still counted on their threads when those ended (`kicks_done`): sent, never taken.
+    static ENDED_UNTAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// What the kick count knows, for a delivery of the watchdog's signal that is no kick
+    /// (async-signal-safe): kicks counted on threads now, entries given back with kicks still
+    /// counted, kicks still counted on threads that ended, and kicks sent and not yet taken.
+    pub fn kick_counts() -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut pending, mut freed) = (0, 0);
+        for e in kicks::entries() {
+            let n = e.pending.load(SeqCst);
+            pending += n;
+            if e.thread.load(SeqCst) == 0 && n != 0 {
+                freed += 1;
+            }
+        }
+        (pending, freed, ENDED_UNTAKEN.load(SeqCst), ON_THE_WAY.load(SeqCst))
     }
 
     /// A run's end: ends the system call thread `t` is waiting in (EINTR: no handler restarts one).
@@ -246,7 +292,7 @@ mod unix {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
-    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, set_own_name, take_kick};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kick_counts, kicks_done, name, note_current, own_name, set_own_name, take_kick, take_moved_kick};
 
     pub fn realtime() -> bool {
         extern "C" {
@@ -259,7 +305,7 @@ mod imp {
 
 #[cfg(target_vendor = "apple")]
 mod imp {
-    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kicks_done, name, note_current, own_name, set_own_name, take_kick};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, kick_counts, kicks_done, name, note_current, own_name, set_own_name, take_kick, take_moved_kick};
     use super::unix::pthread_self;
 
     /// A thread with a time-constraint policy (CoreAudio's IO threads, audio workgroups).

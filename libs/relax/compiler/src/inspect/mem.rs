@@ -6,7 +6,12 @@
 //!   add up to the RSS. `regions/...` (macOS): resident pages by VM tag, private vs shared --
 //!   shared file pages are counted whole, so they do not add up to the kernel's resident size.
 //! - `malloc/...`: the allocator's own view: in use, held free (the retention a trim returns; on
-//!   Linux what of it is resident at most), and glibc's free chunks, trimmed pages included.
+//!   Linux its resident part: exact with glibc's mapping names, else a bound), and glibc's free
+//!   chunks, trimmed pages included.
+//! - `owned/...` (Linux, with glibc's mapping names, `GLIBC_TUNABLES=glibc.mem.decorate_maps=1`):
+//!   what the allocators handed out (malloc in use, Relax's arenas live, the domain heaps in use)
+//!   plus the anonymous memory outside every allocator's mappings, by node. A leak grows it; an
+//!   allocator keeping freed pages does not (CI's restart_in_place judges it).
 //! - `relax/...`: what Relax holds for the app: JIT code / data / statics, the burst arena, the
 //!   compiler's heap by subsystem when RELAX_MEM_REPORT counts it, structure sizes on request.
 //!
@@ -88,6 +93,7 @@ pub fn take(compiler: bool, partial: &mut Vec<String>) -> Snap {
     os_regions(&mut s);
     malloc_stats(&mut s);
     relax_parts(&mut s, compiler, partial);
+    owned_parts(&mut s);
     s
 }
 
@@ -97,6 +103,10 @@ fn os_regions(s: &mut Snap) {
     let home = std::env::var("RELAX_HOME").unwrap_or_default();
     let mut cat = String::new();
     let (mut rss, mut anon) = (0u64, 0u64);
+    // where the last malloc arena mapping ended, and its heap: glibc names a secondary arena's
+    // first range when it makes the heap, and the part a later grow_heap makes writable stays
+    // unnamed, so an unnamed mapping right after it in the same heap is that arena's too
+    let mut arena_end: Option<(u64, u64)> = None;
     let flush = |s: &mut Snap, cat: &str, rss: u64, anon: u64| {
         if rss == 0 {
             return;
@@ -113,8 +123,13 @@ fn os_regions(s: &mut Snap) {
             flush(s, &cat, rss, anon);
             rss = 0;
             anon = 0;
-            let path = line.split_whitespace().nth(5).unwrap_or("");
-            cat = classify_path(path, &home);
+            let mut range = first.split('-').map(|x| u64::from_str_radix(x, 16).unwrap_or(0));
+            let (lo, hi) = (range.next().unwrap_or(0), range.next().unwrap_or(0));
+            cat = classify_path(smaps_name(line), &home);
+            if cat == UNNAMED && arena_end.is_some_and(|(end, heap)| lo == end && lo & !(ARENA_HEAP - 1) == heap) {
+                cat = MALLOC_ARENAS.into();
+            }
+            arena_end = (cat == MALLOC_ARENAS).then(|| (hi, lo & !(ARENA_HEAP - 1)));
         } else if let Some(v) = line.strip_prefix("Rss:") {
             rss = kb(v);
         } else if let Some(v) = line.strip_prefix("Anonymous:") {
@@ -135,8 +150,29 @@ fn kb(v: &str) -> u64 {
     v.split_whitespace().next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0) * 1024
 }
 
+/// A mapping's name in an smaps header line: all after the inode, spaces included (`[anon: glibc:
+/// malloc arena]`, a path with a space, ` (deleted)`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-const UNNAMED: &str = "unnamed (malloc arenas + large blocks, thread stacks, driver memory)";
+fn smaps_name(line: &str) -> &str {
+    let mut rest = line;
+    for _ in 0..5 {
+        rest = rest.trim_start();
+        rest = rest.find(char::is_whitespace).map_or("", |i| &rest[i..]);
+    }
+    rest.trim()
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const UNNAMED: &str = "unnamed (driver memory, raw mappings; malloc's and glibc's thread stacks without its mapping names)";
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const MALLOC_ARENAS: &str = "malloc arenas";
+/// The size and alignment of a glibc secondary arena's heap (HEAP_MAX_SIZE on 64-bit targets).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const ARENA_HEAP: u64 = 64 << 20;
+/// The anonymous mappings an allocator hands out from (`rss/anon/` nodes): what of them is in use
+/// is its own `owned` part, the rest it holds free.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const ALLOCATOR_MAPPINGS: [&str; 7] = ["malloc main heap", MALLOC_ARENAS, "malloc large blocks", "Relax burst arena", "named relax-compiler", "named relax-slots", "named relax-domain"];
 
 /// What a mapping is, from its smaps name.
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -150,7 +186,14 @@ fn classify_path(path: &str, home: &str) -> String {
         p if p.starts_with("[anon:relax-jit-data") => "Relax JIT data".into(),
         p if p.starts_with("[anon:relax-burst") => "Relax burst arena".into(),
         p if p.starts_with("[anon:relax-stack") => "Relax compile stacks".into(),
-        p if p.starts_with("[anon:") => format!("named {}", p.trim_start_matches("[anon:").trim_end_matches(']')),
+        // glibc's names (glibc.mem.decorate_maps, 2.39 on): ` glibc: malloc arena`, ` glibc:
+        // malloc` (a block mmapped whole), ` glibc: pthread stack: <tid>`
+        p if p.starts_with("[anon:") => match p["[anon:".len()..].trim_end_matches(']').trim() {
+            "glibc: malloc arena" => MALLOC_ARENAS.into(),
+            "glibc: malloc" => "malloc large blocks".into(),
+            n if n.starts_with("glibc: pthread stack") => "thread stacks".into(),
+            n => format!("named {}", n),
+        },
         p if p.starts_with("/dev/dri") || p.starts_with("/dev/nvidia") || p.contains("/drm") => "GPU driver mappings".into(),
         p if p.starts_with("/memfd:") => format!("memfd {}", p.trim_start_matches("/memfd:").split(' ').next().unwrap_or("")),
         p if p.contains("/.relax/") || p.contains("/relax/") || (!home.is_empty() && p.starts_with(home)) => "Relax cache files".into(),
@@ -435,13 +478,54 @@ fn malloc_stats(s: &mut Snap) {
     s.add("malloc/in use", in_use);
     s.add("malloc/in use/large blocks (mmapped)", m.hblkhd as u64);
     // fordblks counts free chunks whether or not a trim already gave their pages back, so it is
-    // no resident size. What they keep resident is at most the anonymous memory of malloc's
-    // mappings (the main heap, the unnamed mappings, which also hold thread stacks and driver
-    // memory) beyond what is in use: os_regions ran first.
-    let anon = s.get("rss/anon/malloc main heap") + s.get(&format!("rss/anon/{}", UNNAMED));
-    s.add("malloc/held free", (m.fordblks as u64).min(anon.saturating_sub(in_use)));
+    // no resident size. What they keep resident is the anonymous memory of malloc's mappings
+    // beyond what is in use (os_regions ran first): with glibc's names those are exact; without,
+    // the arenas are among the unnamed mappings, with thread stacks and driver memory, and the
+    // free chunks bound it.
+    let heap = s.get("rss/anon/malloc main heap");
+    let held = if glibc_names(s) {
+        (heap + s.get(&format!("rss/anon/{}", MALLOC_ARENAS)) + s.get("rss/anon/malloc large blocks")).saturating_sub(in_use)
+    } else {
+        (m.fordblks as u64).min((heap + s.get(&format!("rss/anon/{}", UNNAMED))).saturating_sub(in_use))
+    };
+    s.add("malloc/held free", held);
     s.add("malloc/free chunks, trimmed included (not resident)", m.fordblks as u64);
 }
+
+/// Whether glibc named its mappings (`GLIBC_TUNABLES=glibc.mem.decorate_maps=1`, glibc 2.39 on):
+/// its thread stacks are, in every process with a thread it made.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn glibc_names(s: &Snap) -> bool {
+    ["thread stacks", MALLOC_ARENAS, "malloc large blocks"].iter().any(|n| s.nodes.iter().any(|x| x.0.strip_prefix("rss/anon/") == Some(*n)))
+}
+
+/// The `owned` nodes (with glibc's names; module doc): A malloc in use, B Relax's arenas live
+/// (compiler, burst, slots), C the domain heaps in use, D the anonymous memory outside
+/// ALLOCATOR_MAPPINGS, by its `rss/anon/` node. Held-free pages are in none of them.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn owned_parts(s: &mut Snap) {
+    if !glibc_names(s) {
+        return;
+    }
+    let a = s.get("malloc/in use");
+    let b = s.get("relax/compiler arena live") + s.get("relax/burst arena live") + s.get("relax/slot arena live");
+    let c: u64 = crate::domain::list().iter().map(|d| d.arena_in_use as u64).sum();
+    let outside: Vec<(String, u64)> = s.nodes.iter()
+        .filter_map(|(k, v)| k.strip_prefix("rss/anon/").filter(|n| !ALLOCATOR_MAPPINGS.contains(n)).map(|n| (n.to_string(), *v)))
+        .collect();
+    let d: u64 = outside.iter().map(|x| x.1).sum();
+    s.add("owned", a + b + c + d);
+    s.add("owned/malloc in use", a);
+    s.add("owned/Relax arenas live", b);
+    s.add("owned/domain heaps in use", c);
+    s.add("owned/outside allocators", d);
+    for (n, v) in outside {
+        s.add(&format!("owned/outside allocators/{}", n), v);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn owned_parts(_s: &mut Snap) {}
 
 #[cfg(target_vendor = "apple")]
 fn malloc_stats(s: &mut Snap) {
@@ -629,6 +713,10 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     }
     let (inuse, free) = (snap.get("malloc/in use"), snap.get("malloc/held free"));
     total.push_str(&format!(",\"malloc_in_use_mb\":{},\"malloc_held_free_mb\":{}", mb(inuse), mb(free)));
+    if snap.nodes.iter().any(|x| x.0 == "owned") {
+        total.push_str(&format!(",\"owned_mb\":{},\"owned_parts_mb\":{{\"malloc_in_use\":{},\"relax_arenas_live\":{},\"domain_heaps_in_use\":{},\"outside_allocators\":{}}}",
+            mb(snap.get("owned")), mb(snap.get("owned/malloc in use")), mb(snap.get("owned/Relax arenas live")), mb(snap.get("owned/domain heaps in use")), mb(snap.get("owned/outside allocators"))));
+    }
     if let Some(p) = &prev {
         let was = p.iter().find(|x| x.0 == "rss").map_or(0, |x| x.1);
         total.push_str(&format!(",\"rss_since_last_mb\":{}", smb(rss as i64 - was as i64)));

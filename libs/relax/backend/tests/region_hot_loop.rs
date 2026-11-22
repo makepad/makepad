@@ -186,7 +186,7 @@ fn hot_path_holds_the_spilled_value() {
                 assert_eq!(run(n, seed), reference(n, seed, outer), "outer {} freq {} n {}", outer, fr.is_some(), n);
             }
         }
-        let (g, al) = allocate_split(&relax_session::Options::default(), &f, &reg_config(), true, Some(&freq));
+        let (g, al, _) = allocate_split(&relax_session::Options::default(), &f, &reg_config(), true, Some(&freq));
         let h = g.as_ref().unwrap_or(&f);
         // the hot path in the allocated function (the loop split may add and reorder blocks): the
         // body (i & 3), its predecessor (the header) and its move-only successor (the latch)

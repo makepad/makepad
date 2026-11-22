@@ -450,11 +450,14 @@ pub fn panic_parked(os_id: u64) -> bool {
 /// on: the quit waits for the app's main to return, and a paused main never did (a quit waited
 /// forever behind a stale report's pause that named no domain, 11-08).
 pub fn quit_releases() {
+    // First: `quit_resumes` says the program goes on only while it is paused, and a park released
+    // first resumed it on the park's own thread before that test, without a word (1 quit in about
+    // 15 on a box pinned to one CPU; every time with a pause between the release and the test).
+    super::instrument::quit_resumes();
     for p in PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         let _ = p.decision.compare_exchange(0, 1, SeqCst, SeqCst);
     }
     RESUME.notify_all();
-    super::instrument::quit_resumes();
 }
 
 /// A domain is stopping: let its parked panics unwind so its ordinary cleanup can run.

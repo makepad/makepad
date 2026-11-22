@@ -174,15 +174,15 @@ step_checks() {
   tf=$(bash tools/run/fixture/tests_features.sh 2>&1); echo "$tf"; case "$tf" in *"tests_features: ok"*) ;; *) step_fail tests-features;; esac
   # (the checks above built this tree's JIT)
   jit=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
-  se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) step_fail strict-errors;; esac
+  se=$(bash libs/relax/compiler/tests/strict_errors/run.sh "$jit" 2>&1); printf '%s\n' "$se" > "$log/strict-errors"; echo "$se" | grep -E 'FAILED|^strict_errors'; case "$se" in *"strict_errors: ok"*) ;; *) step_fail strict-errors;; esac
   # `makepad check --json`'s rows: codes, phases and suggestions as the producers recorded them
-  cj=$(bash libs/relax/compiler/tests/check_json/run.sh "$jit" 2>&1); echo "$cj" | grep -E '^[-+]\{|^unexpected|^check_json' | cut -c1-230; case "$cj" in *"check_json: ok"*) ;; *) step_fail check-json;; esac
+  cj=$(bash libs/relax/compiler/tests/check_json/run.sh "$jit" 2>&1); printf '%s\n' "$cj" > "$log/check-json"; echo "$cj" | grep -E '^[-+]\{|^unexpected|^check_json' | cut -c1-230; case "$cj" in *"check_json: ok"*) ;; *) step_fail check-json;; esac
   # a program three times on one fresh disk cache: the third run compiles nothing and runs no initializer
   # (std's code is recorded and linked like the program's, its statics' values come from the cache)
-  cw=$(bash libs/relax/compiler/tests/cache_warm_statics/run.sh "$jit" 2>&1); echo "$cw" | grep -E '^cache_warm_statics' | cut -c1-230; case "$cw" in *"cache_warm_statics: ok"*) ;; *) step_fail cache-warm-statics;; esac
+  cw=$(bash libs/relax/compiler/tests/cache_warm_statics/run.sh "$jit" 2>&1); printf '%s\n' "$cw" > "$log/cache-warm-statics"; echo "$cw" | grep -E '^cache_warm_statics' | cut -c1-230; case "$cw" in *"cache_warm_statics: ok"*) ;; *) step_fail cache-warm-statics;; esac
   # a build script of a workspace mounted from a git store, as a devhub overlay's is: its child run inherits
   # the mount's std, a path on no disk, with the mount table
-  mm=$(bash libs/relax/compiler/tests/mounted_build_script/run.sh "$jit" 2>&1); case "$mm" in *"mounted_build_script: ok"*) echo "$mm" | grep -E '^mounted_build_script';; *) echo "$mm" | tail -9 | cut -c1-230; step_fail mounted-build-script;; esac
+  mm=$(bash libs/relax/compiler/tests/mounted_build_script/run.sh "$jit" 2>&1); printf '%s\n' "$mm" > "$log/mounted-build-script"; case "$mm" in *"mounted_build_script: ok"*) echo "$mm" | grep -E '^mounted_build_script';; *) echo "$mm" | tail -9 | cut -c1-230; step_fail mounted-build-script;; esac
   # (its whole output kept in the run's logs, a failing case's last session lines with it; here every case's
   # messages, an exit or a missing run as well as an edit's)
   python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" > "$log/live-cases" 2>&1 || step_fail live-cases; grep -aE '^(FAIL|XPASS|live cases)|^         [^|]' "$log/live-cases" | cut -c1-230
@@ -191,9 +191,16 @@ step_checks() {
   python3 libs/relax/compiler/tests/live_invalid/run.py --makepad "$jit" > "$log/live-invalid" 2>&1 || { step_fail live-invalid; grep -aE '^(FAIL|  )' "$log/live-invalid" | head -40 | cut -c1-230; echo "GATEOUT live-invalid :: live-invalid"; }; grep -aE '^live invalid' "$log/live-invalid" | cut -c1-230
   # an added item beside Self::Variant patches; a layout edit names the frame that needs a restart
   python3 libs/relax/compiler/tests/live_selfvariant/run.py --makepad "$jit" > "$log/live-selfvariant" 2>&1 || { step_fail live-selfvariant; grep -aE '^FAIL' "$log/live-selfvariant"; echo "GATEOUT live-selfvariant :: live-selfvariant"; }; grep -aE '^live selfvariant' "$log/live-selfvariant"
-  # the real-time case beside two more copies of itself: their compiles stay off its thread's cores
+}
+# the real-time case beside two more copies of itself: their compiles stay off its thread's cores. Its verdict is the
+# real-time thread's longest call, a time: only a box of its own says it (STEPS_T). On a shared pool box, beside
+# interactive sessions that box admits past its cores, all three copies missed their v1 output once (30 of 16 cores
+# reserved, 11-22). Its single copy stays in step_checks' live cases, the shared box's smoke of it.
+step_rt_lock_copies() {
+  local jit=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
+  # (its whole output kept in the run's logs, as every step's is: a failed gate keeps $log, keep_logs.sh)
   # (its failure names the copies that failed and each one's longest call: `rt-lock-copies[1:5289us,3:5056us]`)
-  rl=$(python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 2>&1) || step_fail rt-lock-copies "rt-lock-copies[$(echo "$rl" | sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' | paste -sd, -)]"; echo "$rl" | grep -E '^(FAIL|XPASS|live cases)|^         [^|]|copy [0-9]' | cut -c1-230
+  python3 libs/relax/compiler/tests/live/run_cases.py --makepad "$jit" --only rt_lock --copies 3 > "$log/rt-lock-copies" 2>&1 || { step_fail rt-lock-copies "rt-lock-copies[$(sed -nE -e 's/^ *copy ([0-9]+): .*stall ([0-9]+) us.*/\1:\2us/p' -e t -e 's/^ *copy ([0-9]+): .*/\1/p' "$log/rt-lock-copies" | paste -sd, -)]"; echo "GATEOUT rt-lock-copies :: rt-lock-copies"; }; grep -aE '^(FAIL|XPASS|live cases)|^         [^|]|copy [0-9]' "$log/rt-lock-copies" | cut -c1-230
 }
 step_check_stage() { as_step check_pkg stage makepad-stage apps/commercial; }
 present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh home; 1 when the app reports `present`
@@ -325,10 +332,10 @@ step_fuzz() { # SAFE3: the tier fuzzer (codegen/tests/fuzz_tiers.rs, +checkra fa
 }
 step_zone() { # THE memory leg: settle_stress.sh (MEMSAFE: settles + settle rebuilds under ZAP + JOB_CHECK); zone_swap.sh on trees before rc-memb
   if [ -x tools/run/fixture/settle_stress.sh ]; then
-    zs=$(PACKAGES=makepad-app-calculator WAIT=150 tools/run/fixture/settle_stress.sh 2>&1 | tail -1)
+    zs=$(PACKAGES=makepad-app-calculator WAIT=150 tools/run/fixture/settle_stress.sh 2>&1 | tee "$log/settle-stress" | tail -1)
     echo "settle_stress: $zs"; echo "$zs" | grep -q FAIL && step_fail settle_stress
   else
-    zs=$(tools/run/fixture/zone_swap.sh 2>&1 | tail -1)
+    zs=$(tools/run/fixture/zone_swap.sh 2>&1 | tee "$log/zone-swap" | tail -1)
     echo "zone_swap: $zs"; echo "$zs" | grep -q FAIL && step_fail zone_swap
   fi
 }
@@ -347,48 +354,49 @@ step_warm_app_edit() { # JITCOLD2: a new item in an app file recompiles what nam
   # MAX 480 (the script's default 400): the warm first-compile count grew with the app (observed
   # 400-405 across unrelated branches on 2026-10-30)
   [ -d apps/commercial/sandbox ] || { echo "warm_after_app_edit: skipped (no apps/commercial)"; return 0; }
-  wa=$(WAIT=300 MAX=480 STEPS="item graph" tools/run/fixture/warm_after_app_edit.sh 2>&1 | tail -1)
+  wa=$(WAIT=300 MAX=480 STEPS="item graph" tools/run/fixture/warm_after_app_edit.sh 2>&1 | tee "$log/warm-after-app-edit" | tail -1)
   said "warm_after_app_edit: OK" 600 "$wa" || step_fail warm_after_app_edit
   sum="$sum warm_app_edit:$(echo "$wa" | sed -n 's/.*\[item\][^]]*compiled \([0-9]*\) first.*/\1/p')"
 }
 step_warm_zero() { # JITLOOP-B: after one normal session the next Calculator launch shows no JIT spinner and no UI
   # block >= 100 ms (first compiles of never-run code are reported, not failed); Sandbox + Play stays a lane measurement
-  wz=$(WAIT=200 tools/run/fixture/warm_zero.sh 2>&1 | tail -1)
+  wz=$(WAIT=200 tools/run/fixture/warm_zero.sh 2>&1 | tee "$log/warm-zero" | tail -1)
   said "warm_zero: OK" 400 "$wz" || step_fail warm_zero
   sum="$sum warm_zero:$(echo "$wz" | sed -n 's/.*warm: spinner \([0-9]*\), UI blocked max \([0-9]*\) ms.*/spinner\1.max\2ms/p')"
 }
 step_inspect_cold() { # JITDEADLOCK: inspect static/eval/locals in a loop during a cold Calculator start answer or bail,
   # and the app still presents with no long UI block (an inspect `static` during a cold start froze the app)
-  ic=$(CLIENTS=1 ROUNDS=1 WAIT=150 tools/run/fixture/inspect_cold.sh 2>&1 | tail -3)
+  ic=$(CLIENTS=1 ROUNDS=1 WAIT=150 tools/run/fixture/inspect_cold.sh 2>&1 | tee "$log/inspect-cold" | tail -3)
   said "inspect_cold: OK" 400 "$ic" || step_fail inspect_cold
 }
 step_warm_hal() { # JITCOLD: a body-only HAL edit (a provided crate: the loader rebuilds) keeps the stored builds
-  wh=$(WAIT=200 BUILD="cargo build --profile host -p makepad-run -p makepad-remote --bin makepad --bin makepad-launcher --bin makepad-remote -j8" tools/run/fixture/warm_after_hal.sh 2>&1 | tail -1)
+  wh=$(WAIT=200 BUILD="cargo build --profile host -p makepad-run -p makepad-remote --bin makepad --bin makepad-launcher --bin makepad-remote -j8" tools/run/fixture/warm_after_hal.sh 2>&1 | tee "$log/warm-after-hal" | tail -1)
   said "warm_after_hal: OK" 400 "$wh" || step_fail warm_after_hal
 }
 step_relaunch() { # JITRELAUNCH: `session relaunch` 5x in place: the app stays alive and shows a new first frame
   # after every relaunch, with the window kept, state handed over, and no crash or fault line
-  rl=$(WAIT=200 tools/run/fixture/relaunch.sh 2>&1 | tail -1)
+  rl=$(WAIT=200 tools/run/fixture/relaunch.sh 2>&1 | tee "$log/relaunch" | tail -1)
   said "relaunch: OK" 400 "$rl" || step_fail relaunch
 }
 step_boundary() { # JITPROV: the smoke apps and the WM reach provided crates only through their ops (`makepad check --boundary
   # all`: every body a run of the app compiles, from its main; a provided crate's static or rustc-laid field read from
   # JIT-compiled code is a violation, caught here instead of at a user's first start)
-  bd=$(RUNS=0 SWEEP_OUT="$log/sweep" bash tools/run/fixture/provided_sweep.sh 2>&1)
+  bd=$(RUNS=0 SWEEP_OUT="$log/sweep" bash tools/run/fixture/provided_sweep.sh 2>&1); printf '%s\n' "$bd" > "$log/boundary"
   echo "$bd" | grep -E "^audit |^provided_sweep" | cut -c1-200
   echo "$bd" | grep -q "^provided_sweep: ok" || { step_fail boundary; echo "$bd" | grep -A1 "^violation" | head -20 | cut -c1-300; }
 }
 # full-a + full-b + full-t = full; the jitlegs run A and B on pool boxes, each building, balanced on the measured step
 # times (a pool box, 2026-10-30: A ~460 s, B ~370 s with the build; full in series ~930 s; T took ~160 s of A's and
 # ~160 s of B's, 11-05)
-STEPS_FULL="step_x64_tests step_fuzz step_checks step_boundary step_present_calc step_present_stage step_warm_zero step_warm_hal step_warm_app_edit step_inspect_cold step_relaunch step_diff step_jit_suites step_zone"
+STEPS_FULL="step_x64_tests step_fuzz step_checks step_boundary step_present_calc step_present_stage step_warm_zero step_warm_hal step_warm_app_edit step_inspect_cold step_relaunch step_rt_lock_copies step_diff step_jit_suites step_zone"
 STEPS_A="step_x64_tests step_fuzz step_checks step_present_calc step_present_stage"
 STEPS_B="step_boundary step_diff step_jit_suites step_zone"
-# the verdicts that are times (a JIT spinner, first compiles in a frame, UI blocked ms, first frames): only a box of their
-# own says them. Beside 8 other leases (32-44 of a 32-core pool box's cores granted) full-a's warm_after_app_edit failed with every
+# the verdicts that are times (a JIT spinner, first compiles in a frame, UI blocked ms, first frames, a real-time thread's
+# longest call): only a box of their own says them.
+# Beside 8 other leases (32-44 of a 32-core pool box's cores granted) full-a's warm_after_app_edit failed with every
 # session twice as slow, and passed 3 times on quiet boxes (11-05). The jitlegs `warm` leg runs them timed: a bench
 # box, exclusive.
-STEPS_T="step_warm_app_edit step_warm_zero step_warm_hal step_inspect_cold step_relaunch"
+STEPS_T="step_warm_app_edit step_warm_zero step_warm_hal step_inspect_cold step_relaunch step_rt_lock_copies"
 timed() { # timed <step fn>: runs it and prints "STEP <name> <s> s [start-end]" (the gate's wall-time breakdown)
   t=$(date +%s); t0=$(date +%T); "$1"; r=$?; echo "STEP ${1#step_} $(( $(date +%s) - t )) s [$t0-$(date +%T)]"; return $r
 }
@@ -407,7 +415,7 @@ step_warm_strict() {
   if proven "$WARM_STRICT_UNIT"; then echo "warm strict: proven"; unit_line proven "$WARM_STRICT_UNIT"; return 0; fi
   local bin=${MAKEPAD_LOADER:-$T/host/makepad}
   [ -x "$bin" ] || { echo "warm strict: no JIT binary at $bin"; fail="$fail warm-strict"; unit_line fail "$WARM_STRICT_UNIT"; return 1; }
-  out=$(bash libs/relax/compiler/tests/cache_warm_iter_end/run.sh "$bin" 2>&1); code=$?
+  out=$(bash libs/relax/compiler/tests/cache_warm_iter_end/run.sh "$bin" 2>&1); code=$?; printf '%s\n' "$out" > "$log/warm-strict"
   echo "$out" | tail -3 | cut -c1-400
   if [ "$code" = 0 ]; then unit_line ok "$WARM_STRICT_UNIT"; else fail="$fail warm-strict"; unit_line fail "$WARM_STRICT_UNIT"; return 1; fi
 }

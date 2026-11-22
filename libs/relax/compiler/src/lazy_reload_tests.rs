@@ -905,6 +905,11 @@ fn specv_twin_calls_reach_bases_only_from_code_that_needs_no_check() {
     assert_eq!(u.twin_link_target(pair_call, twin_bump, |_| true), twin_bump, "code without its disjoint-index check keeps the twin");
     assert_eq!(u.twin_link_target(twin_mid, twin_bump, |_| true), twin_bump, "a twin's calls stay twin calls");
     assert_eq!(u.twin_link_target(pair_locals, twin_mid, |_| true), mid, "a clean caller that needs no check calls the base");
+    // the kept calls say which clause kept them (inspect: the exit line, why-tier of the twin)
+    use crate::jit::TwinKept;
+    assert_eq!(u.twin_kept(pair_call, bump, |_| true), Some(TwinKept::CallerChecks), "kept: the caller needs a disjoint-index check");
+    assert_eq!(u.twin_kept(twin_mid, bump, |_| true), Some(TwinKept::CallerTwin), "kept: the caller is a twin");
+    assert_eq!(u.twin_kept(pair_locals, mid, |_| false), Some(TwinKept::BaseNoCode), "kept: the base (it never ran) has no code and no entry");
     // the image written now: the bases' own entries, then the startup slots (the callers' unverified
     // code); a twin call it sends to the base is one TWIN_RETARGETS
     let retargets = crate::owner::call(crate::owner::Class::Program, || {
@@ -3161,7 +3166,8 @@ fn a_live_edit_reaches_both_crates_of_a_lib_test_root() {
 /// third edit on, an edit also builds again the once shim of the version it replaces (the edit
 /// that made that version built it with the body inline; its copy would run the old body): an
 /// edit installs exactly make, the code holding a copy of make and that shim, however many came
-/// before.
+/// before. A boxed closure a fn makes and drops: an edit that keeps a version of it holds that
+/// version for a restart only once the fn ran it (a trait object of it was made).
 #[test]
 fn stored_closure_follows_edits_with_flat_work() {
     const CHILD: &str = "RELAX_STORED_CLOSURE_TEST";
@@ -3174,7 +3180,7 @@ fn stored_closure_follows_edits_with_flat_work() {
         return;
     }
     use crate::jit::{FnKey, Unit};
-    use crate::reload::{apply, Edit, Rung};
+    use crate::reload::{apply, Edit, Rung, HELD};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
     std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-stored-closure-{}", std::process::id()));
@@ -3289,6 +3295,72 @@ pub fn value(out: &mut u32) {{
     assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
     assert_eq!(run(), 22, "an edit after the rollback reaches the stored box");
     assert_eq!(u.forward_of(previous), Some((first, false)), "edit 5's closure forwards to the cell");
+    // the lineage is paired by the code it runs, as the parent's two texts align: a closure of the
+    // same shape above the box (`z`, whose place a pairing by order would give the box), the box's
+    // body changed beside it, the two swapped, `z` deleted, then a new closure and a changed body
+    // in one gap (which became which is not known: the box keeps its code and waits for a
+    // restart), then `z` deleted again: the box's kept version and that text are one to one (the
+    // box follows; z's old closure has no place, which says nothing). Then the box's text twice:
+    // in a plain block the first one is the box (the same text is the same code), in a block that
+    // declares items it pairs with neither (a name the block binds can make it other code). Each
+    // edit installs at most two forwarders per lineage (its cell and its previous version).
+    files.push(o.files[0]);
+    // A boxed closure `w` in make, which runs again only when value calls it: an edit that keeps
+    // a boxed closure w that a fn of its own makes and drops (make's closures are the z steps'):
+    // the version side ran is held when an edit keeps it; the one only a patch built, which never
+    // ran, made no trait object and holds nothing back (a kept line, no held one)
+    let with_w = |w: &str, calls: bool| {
+        let t = format!("{}fn side() -> u32 {{\n    let k = 3;\n    let w: Box<dyn Fn(u32) -> u32> = Box::new({w});\n    w(0) + k\n}}\n", src(7));
+        if calls { t.replace("        if h.borrow().is_none()", "        let _ = side();\n        if h.borrow().is_none()") } else { t }
+    };
+    let w_steps = [
+        ("side added, and value calls it", with_w("move |x: u32| x + 50", true), 0),
+        ("w's captures changed and value stops calling side: the version side ran is kept", with_w("move |x: u32| x * k + 50", false), 1),
+        ("w's captures changed back: the version side never ran is kept, the one it ran takes the new code", with_w("move |x: u32| x + 51", false), 0),
+        ("side deleted, value as it was: the version the box side made runs is kept", src(7), 1),
+    ];
+    for (what, text, held) in w_steps {
+        let o = unsafe { apply(up, vec![Edit { file: *files.last().unwrap(), path: app.clone(), src: text.into_bytes() }]) };
+        assert_eq!(o.rung, Rung::Patch, "{what}: {:?}", o.lines);
+        files.push(o.files[0]);
+        assert_eq!(run(), 22, "{what}: the stored box's value");
+        let lines: Vec<&String> = o.lines.iter().filter(|l| l.starts_with(HELD)).collect();
+        assert_eq!(lines.len(), held, "{what}: held lines: {:?}", o.lines);
+        if what.contains("is kept") {
+            let why = if what.contains("deleted") { "the new text has no closure at its place" } else { "its captures or signature changed" };
+            let kept = if held > 0 { lines.iter().all(|l| l.contains(why)) } else { o.lines.iter().any(|l| l.starts_with("kept: closure") && l.contains(why)) };
+            assert!(kept, "{what}: w's old version is kept ({why}): {:?}", o.lines);
+        }
+    }
+    let z = "    let z = move |x: u32| x * k + 100;\n    let _ = z(0);\n";
+    let with = |body: String| src(7).replace("    Box::new(move |x| x * k + 7)\n", &body);
+    let twice = "    let b: Box<dyn Fn(u32) -> u32> = Box::new(move |x| x * k + 9);\n    let _ = { let c = move |x| x * k + 9; c(0) };\n";
+    let steps = [
+        ("z inserted above the box", with(format!("{z}    Box::new(move |x| x * k + 7)\n")), 22, None),
+        ("the box's body changed below z", with(format!("{z}    Box::new(move |x| x * k + 8)\n")), 23, None),
+        ("the box and z swapped", with(format!("    let b: Box<dyn Fn(u32) -> u32> = Box::new(move |x| x * k + 8);\n{z}    b\n")), 23, None),
+        ("z deleted", with("    Box::new(move |x| x * k + 8)\n".to_string()), 23, None),
+        ("z inserted and the box's body changed in one gap", with(format!("{z}    Box::new(move |x| x * k + 9)\n")), 23, Some("how many closures stand between its unchanged neighbours")),
+        ("z deleted: the box's kept version and the text one to one again", with("    Box::new(move |x| x * k + 9)\n".to_string()), 24, None),
+        ("the box's text again in a plain block", with(format!("{twice}    b\n")), 24, None),
+        ("the box's text again in a block that declares items", with(format!("{}    b\n", twice.replace("{ let c", "{ use std::ops::Add; let c").replace("c(0) }", "c(0).add(0) }"))), 24, Some("occurs more than once in a block that declares items")),
+    ];
+    for (what, text, want, held) in steps {
+        let (before, cell) = (u.forwards.len(), u.forward_of(first));
+        let o = unsafe { apply(up, vec![Edit { file: *files.last().unwrap(), path: app.clone(), src: text.into_bytes() }]) };
+        assert_eq!(o.rung, Rung::Patch, "{what}: {:?}", o.lines);
+        files.push(o.files[0]);
+        assert_eq!(run(), want, "{what}: the stored box's value");
+        let lines: Vec<&String> = o.lines.iter().filter(|l| l.starts_with(HELD)).collect();
+        if let Some(why) = held {
+            assert!(lines.len() == 1 && lines[0].contains(why), "{what}: one held line, for the box: {:?}", o.lines);
+            assert_eq!(u.forward_of(first), cell, "{what}: the box's cell jumps to the code the box ran");
+        } else {
+            assert!(lines.is_empty(), "{what}: nothing waits for a restart: {:?}", o.lines);
+            assert!(matches!(u.forward_of(first), Some((t, true)) if Some(t) != cell.map(|c| c.0)), "{what}: the box's cell jumps to its new version: {:?} (was {cell:?})", u.forward_of(first));
+        }
+        assert!(u.forwards.len() - before <= 4, "{what}: {} forwarders installed", u.forwards.len() - before);
+    }
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -3355,8 +3427,15 @@ pub fn value(out: &mut u32) {{
     };
     // 16 from the stored closure, 0 + 2 + 4 summed
     assert_eq!(run(), 1606);
-    let file = u.prog.def(value).file;
-    let edited = src("let j = 4;\n    Box::new(move |x| x * k + j)", "let j = 1;\n    (0..3u32).map(|x| x * k + j).sum()");
+    // a closure of the box's shape put above it is not the box's new version: the box runs on
+    let z = "let z = move |x: u32| x * k + 9;\n    let _ = z(0);\n    ";
+    let above = src(&format!("{z}Box::new(move |x| x * k + 1)"), "(0..3u32).map(|x| x * k).sum()");
+    let o = unsafe { apply(up, vec![Edit { file: u.prog.def(value).file, path: app.clone(), src: above.into_bytes() }]) };
+    assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
+    assert!(!o.lines.iter().any(|l| l.starts_with(HELD)), "a closure inserted above the box holds nothing back: {:?}", o.lines);
+    assert_eq!(run(), 1606, "the stored box after a closure of its shape was put above it");
+    let file = o.files[0];
+    let edited = src(&format!("{z}let j = 4;\n    Box::new(move |x| x * k + j)"), "let j = 1;\n    (0..3u32).map(|x| x * k + j).sum()");
     let o = unsafe { apply(up, vec![Edit { file, path: app.clone(), src: edited.into_bytes() }]) };
     assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
     let held: Vec<&String> = o.lines.iter().filter(|l| l.starts_with(HELD)).collect();
@@ -3845,7 +3924,10 @@ pub fn start(p: *mut u64) {
 /// install. Edit 1 changes the closure's captures, edit 2 takes `S` out of the text; a field
 /// added to `S` is refused naming the instance and the closure. The instance's O3 code, built
 /// before edit 1 with the closure inline (no build takes in a kept closure's body), is then the
-/// frame of a second wait: refused naming the copy. Both second calls read 5. (O1 inlines nothing
+/// frame of a second wait: refused naming the copy. Both second calls read 5. Edit 1 also changes
+/// the captures of a closure the frame boxes after its waits (and of the two written inside it):
+/// held for a restart only once the old code makes that box (`late_held`, the live loop's look),
+/// and the box runs the old text, its inner closures included. (O1 inlines nothing
 /// into `pump` and no closure anywhere, so its first code calls the closure; O3 inlines as a
 /// session does.)
 #[test]
@@ -3861,12 +3943,17 @@ pub fn pump<F: Fn() -> u64>(f: &F, a: &[AtomicU64; 4], n: u64) -> u64 {
     gate(a, n);
     first * 0 + f()
 }
+static mut LATE_BOX: Option<Box<dyn Fn() -> u64>> = None;
 pub fn worker() {
     let a = flags();
     let k = 0u64;
     let c = move || { let s = S { n: 5 }; read(&s) + k };
+    let late = move || { let mid = move || { let inner = move || 11 + k; inner() + 10 }; mid() + 100 };
     let x = pump(&c, a, 1);
     a[2].store(x + pump(&c, a, 2), Ordering::SeqCst);
+    let b: Box<dyn Fn() -> u64> = Box::new(late);
+    unsafe { LATE_BOX = Some(b); }
+    a[1].store(unsafe { (*std::ptr::addr_of!(LATE_BOX)).as_ref().unwrap()() }, Ordering::SeqCst);
     a[3].store(1, Ordering::SeqCst);
 }
 pub fn start(p: *mut u64) {
@@ -3898,8 +3985,11 @@ pub fn start(p: *mut u64) {
     let o3 = rig.unit.fns[pumps[0] as usize].code;
     let copied = rig.unit.code.read().unwrap().inlined_at(o3).is_some_and(|l| l.contains(&old[0]));
     assert!(copied, "the instance's O3 code holds a copy of the closure");
-    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }")]);
+    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }"), ("11 + k;", "12 + k + j;")]);
     assert_eq!(o.rung, crate::reload::Rung::Patch, "the captures edit applies: {:?}", o.lines);
+    let late_at = format!("lib.rs:{}:", lib.lines().position(|l| l.contains("let late = move ||")).unwrap() + 1);
+    let held_late = |lines: &[String]| lines.iter().any(|l| l.starts_with(crate::reload::HELD) && l.contains(&late_at) && l.contains("its captures or signature changed"));
+    assert!(!held_late(&o.lines), "the frame boxes the closure only later: no trait object of it to hold yet ({late_at}): {:?}", o.lines);
     let o = rig.edit("lib.rs", &[("{ let s = S { n: 5 }; read(&s) + k + j }", "5u64 + k + j")]);
     assert_eq!(o.rung, crate::reload::Rung::Patch, "the closure without S applies: {:?}", o.lines);
     let o = rig.edit("lib.rs", &[("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
@@ -3912,7 +4002,10 @@ pub fn start(p: *mut u64) {
     let tiered = refused_with(&o, &["struct `S` changed its layout", "pump", "holds a copy of", &name, "patch gen 1 kept"]);
     rig.flags[0].store(2, Ordering::SeqCst);
     rig.wait(3);
+    let late: Vec<String> = unsafe { crate::reload::late_held(rig.up) }.into_iter().map(|x| x.1).collect();
     assert!(refused.0, "a frame of an instance over the closure edit 1 kept refuses the layout patch, naming it and the closure ({name}): {}", refused.1);
+    assert!(held_late(&late) && late.len() == 1, "the old frame's box of the closure edit 1 kept, made after the patch, holds it for a restart then ({late_at}): {late:?}");
+    assert_eq!(rig.flag(1), 121, "the box runs the text the old frame made it with, the closures written inside it too (their captures changed: a new one would read past the old captures)");
     assert!(kept, "the edits leave the instance's O3 code in place");
     assert!(tiered.0, "a frame in the instance's O3 code, which holds a copy of the closure, refuses it naming the copy ({name}): {}", tiered.1);
     assert_eq!(rig.flag(2), 10, "the second calls, by the code the closure was made with");
@@ -3921,30 +4014,54 @@ pub fn start(p: *mut u64) {
 /// T3c T4: a closure an edit kept on its old code is stored as a trait object, and no thread
 /// runs it. Edit 1 changes its captures, edit 2 takes `S` out of the text; a field added to `S`
 /// is refused naming edit 1 (a stored value runs that code at its next call), and the call
-/// made after reads 5.
+/// made after reads 5. Two more are stored and never called before edit 1 (no code of theirs
+/// exists, as a callback's that has not fired): edit 1 changes the first one's body, which its
+/// stored value then runs, and the second one's captures, which holds it for a restart (its
+/// stored value builds the old text at its first call); an edit of another fn of the file says
+/// that one again (a patch of the file that held nothing back would end its wait for a restart).
 #[test]
 fn a_stored_kept_closure_blocks_a_layout_patch() {
     isolated_test!(a_stored_kept_closure_blocks_a_layout_patch);
     let lib = format!("{KEPT_FLAGS}{}", r#"static mut STORED: Option<Box<dyn Fn() -> u64>> = None;
+static mut UNRUN: Option<Box<dyn Fn() -> u64>> = None;
+static mut UNRUN_KEPT: Option<Box<dyn Fn() -> u64>> = None;
 pub fn start(_p: *mut u64) {
     let k = 0u64;
     let c: Box<dyn Fn() -> u64> = Box::new(move || { let s = S { n: 5 }; read(&s) + k });
     unsafe { STORED = Some(c); }
+    let d: Box<dyn Fn() -> u64> = Box::new(move || 7 + k);
+    let e: Box<dyn Fn() -> u64> = Box::new(move || 9 + k);
+    unsafe { UNRUN = Some(d); UNRUN_KEPT = Some(e); }
 }
 pub fn later(p: *mut u64) {
     let a = unsafe { &*(p as *const [AtomicU64; 4]) };
     a[2].store(unsafe { (*std::ptr::addr_of!(STORED)).as_ref().unwrap()() }, Ordering::SeqCst);
 }
+pub fn unrun(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    a[1].store(unsafe { (*std::ptr::addr_of!(UNRUN)).as_ref().unwrap()() }, Ordering::SeqCst);
+    a[3].store(unsafe { (*std::ptr::addr_of!(UNRUN_KEPT)).as_ref().unwrap()() }, Ordering::SeqCst);
+}
 "#);
-    let mut rig = KeptRig::new("stored", &[("lib.rs", &lib)], &["start", "later"]);
+    let unrun_kept_at = format!("lib.rs:{}:", lib.lines().position(|l| l.contains("move || 9 + k")).unwrap() + 1);
+    let mut rig = KeptRig::new("stored", &[("lib.rs", &lib)], &["start", "later", "unrun"]);
     rig.call("start");
     rig.call("later");
     assert_eq!(rig.flag(2), 5, "the stored closure runs");
     let old = rig.closures("start");
     assert_eq!(old.len(), 1, "the stored closure has code");
     let name = rig.shown(old[0]);
-    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }")]);
+    let o = rig.edit("lib.rs", &[("let k = 0u64;", "let k = 0u64;\n    let j = 0u64;"), ("read(&s) + k }", "read(&s) + k + j }"), ("7 + k", "8 + k"), ("9 + k", "10 + k + j")]);
     assert_eq!(o.rung, crate::reload::Rung::Patch, "the captures edit applies: {:?}", o.lines);
+    let unrun_held = o.lines.iter().any(|l| l.starts_with(crate::reload::HELD) && l.contains(&unrun_kept_at) && l.contains("its captures or signature changed"));
+    assert!(unrun_held, "a stored closure that never ran, its captures changed, is held for a restart ({unrun_kept_at}): {:?}", o.lines);
+    rig.call("unrun");
+    assert_eq!(rig.flag(1), 8, "a stored closure that never ran, its body changed, runs the new body");
+    assert_eq!(rig.flag(3), 9, "the held one runs the text it was stored with");
+    let o = rig.edit("lib.rs", &[("pub fn unrun(p: *mut u64) {", "pub fn unrun(p: *mut u64) {\n    let _ = 0u64;")]);
+    assert_eq!(o.rung, crate::reload::Rung::Patch, "the edit of another fn applies: {:?}", o.lines);
+    let still_held = o.lines.iter().any(|l| l.starts_with(crate::reload::HELD) && l.contains(&unrun_kept_at));
+    assert!(still_held, "a patch of another fn of the file says the held closure again, or the file's wait for a restart would end ({unrun_kept_at}): {:?}", o.lines);
     let o = rig.edit("lib.rs", &[("{ let s = S { n: 5 }; read(&s) + k + j }", "5u64 + k + j")]);
     assert_eq!(o.rung, crate::reload::Rung::Patch, "the closure without S applies: {:?}", o.lines);
     let o = rig.edit("lib.rs", &[("pub struct S { pub n: u64 }", "pub struct S { pub m: u64, pub n: u64 }")]);
@@ -4011,11 +4128,19 @@ pub fn later(p: *mut u64) {
     rig.flags[3].store(0, std::sync::atomic::Ordering::SeqCst);
     rig.call("later");
     let layout = (rig.flag(2), rig.flag(3));
+    // a third closure of their shape between them: each stored one stays itself
+    let edit3 = rig.edit("lib.rs", &[("read(&s) + k + 1 };\n    let own", "read(&s) + k + 1 };\n    let _mid = move || { let s = S { m: 0, n: 6 }; read(&s) + k + 1 };\n    let own")]);
+    rig.flags[2].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.flags[3].store(0, std::sync::atomic::Ordering::SeqCst);
+    rig.call("later");
+    let inserted = (rig.flag(2), rig.flag(3));
     assert_eq!((pumps.len(), copies.len(), only_code, tiered), (2, 2, 1, (5, 7)), "both instances of pump have O3 code holding their closure's body, one closure has no code of its own");
     assert_eq!(edit1.rung, crate::reload::Rung::Patch, "the bodies' edit applies: {:?}", edit1.lines);
     assert_eq!(rebound, (6, 8), "the calls through pump's hosts run the new bodies (the one only inline, the one with code): {:?}", edit1.lines);
     assert_eq!(edit2.rung, crate::reload::Rung::Patch, "the field applies: {:?}", edit2.lines);
     assert_eq!(layout, (6, 8), "the calls after the field, by the new bodies in the new layout");
+    assert_eq!(edit3.rung, crate::reload::Rung::Patch, "the closure between them applies: {:?}", edit3.lines);
+    assert_eq!(inserted, (6, 8), "after a closure of their shape went between them, each stored closure runs its own body");
 }
 
 /// A C ABI body's call in tail position became a sibling call (a jump that frees its frame first)

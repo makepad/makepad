@@ -1102,6 +1102,12 @@ impl Program {
         self.syms.str(self.defs[d.0 as usize].name)
     }
 
+    /// File `file`'s body blocks that hold items (directly or in a block below them), as its
+    /// parse indexed them: what gives a block its anonymous module.
+    pub fn body_blocks(&self, file: u32) -> Option<&BodyBlocks> {
+        self.file_blocks.get(file as usize)
+    }
+
     pub fn prim_def(&self, p: Prim) -> DefId {
         for i in 0..PRIMS.len() {
             if PRIMS[i].1 == p {

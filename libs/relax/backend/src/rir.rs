@@ -1495,7 +1495,9 @@ pub struct Func {
     pub copy_ver: Option<(Sym, u64)>,
     /// A live session: the size of the guards of the copies this body inlined (`opt::inline_site`):
     /// code only a patch runs, which a caller's inliner prices the body without, so a live session
-    /// inlines what a run without patches does.
+    /// inlines what a run without patches does. Every session: the made cells' sets of the trait
+    /// objects it makes (the compiler's lowering; a load and a branch, the store once), priced out
+    /// alike: a body inlines as it would without them.
     pub guard_size: GuardSize,
     /// A live session's root build split after its first inlining round (`opt::split_patched_path`):
     /// its copy-version compares are exits, each leaving for the patched path (a copy of the rest of
@@ -1544,24 +1546,29 @@ impl FirstSeen {
     }
 }
 
-/// The guards' share of a body (`Func::guard_size`): their compares at the sites (the check and
-/// slow blocks they branch to are found from the slow calls: `opt::guard_blocks`).
+/// The share of a body its callers' inliner prices it without (`Func::guard_size`): the guards'
+/// compares at the sites (the check and slow blocks they branch to are found from the slow calls:
+/// `opt::guard_blocks`), and the made cells' sets with their blocks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct GuardSize {
     pub insts: u32,
     /// their rustc inline cost (`opt::rustc_inline_cost`; the sites' branches included)
     pub cost: u32,
+    /// blocks no slow call tells: a made cell's set and the join after it
+    pub blocks: u32,
 }
 
 impl GuardSize {
     pub fn add(&mut self, o: GuardSize) {
         self.insts += o.insts;
         self.cost += o.cost;
+        self.blocks += o.blocks;
     }
 
     pub fn sub(&mut self, o: GuardSize) {
         self.insts = self.insts.saturating_sub(o.insts);
         self.cost = self.cost.saturating_sub(o.cost);
+        self.blocks = self.blocks.saturating_sub(o.blocks);
     }
 }
 

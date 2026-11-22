@@ -1,8 +1,13 @@
 // Fields of a `&mut` parameter that a loop loads and stores each iteration (a cursor index, a bit
 // buffer) are kept in registers for the loop and written back on every way out: the normal exit,
-// each early exit, the panic that unwinds out of the loop. Output matches rustc.
+// each early exit, the panic that unwinds out of the loop, and before each call in the loop (the
+// call may unwind). A relaxed atomic load in the loop (a live session's patch guard reads its
+// flags so) leaves them in registers. Output matches rustc.
 use std::hint::black_box;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static STOP: AtomicU32 = AtomicU32::new(0);
 
 struct Cursor<'a> {
     chars: &'a [u32],
@@ -45,6 +50,26 @@ impl<'a> Cursor<'a> {
             self.index += 1;
         }
     }
+    // a call in the loop that may unwind: the index is current when it does
+    fn feed(&mut self, sink: fn(u32)) {
+        loop {
+            let c = self.peek();
+            if c == 0 {
+                return;
+            }
+            self.index += 1;
+            sink(c);
+        }
+    }
+    // a relaxed load of a flag each iteration, the index carried in a register past it
+    fn until_stopped(&mut self, n: usize) {
+        for _ in 0..n {
+            if STOP.load(Ordering::Relaxed) != 0 {
+                return;
+            }
+            self.index += 1;
+        }
+    }
     // an access through a pointer based on the parameter: no promotion, still right
     fn through_pointer(&mut self, n: usize) {
         let p: *mut usize = &mut self.index;
@@ -67,6 +92,16 @@ fn accumulate(p: &mut Pair, xs: &[f32]) {
         p.a += *x * 0.5;
         p.n += 1;
     }
+}
+
+#[inline(never)]
+fn sink_quiet(c: u32) {
+    black_box(c);
+}
+
+#[inline(never)]
+fn sink_nine(c: u32) {
+    assert!(c != 9, "fed a nine");
 }
 
 fn run() {
@@ -98,7 +133,21 @@ fn run() {
         accumulate(&mut p, &[1.0, 2.0]);
         total += p.n as u64;
     }
+    for round in 0..3000 {
+        let mut c = Cursor { chars: &text, index: black_box(round % 5), seen: 0, wide: 0 };
+        c.feed(sink_quiet);
+        c.until_stopped(black_box(7));
+        total += c.index as u64;
+    }
     println!("{}", total);
+    // the same loops once more, now that they are optimised: the unwind and the flag
+    let mut c = Cursor { chars: &text, index: 0, seen: 0, wide: 0 };
+    let r = catch_unwind(AssertUnwindSafe(|| c.feed(sink_nine)));
+    println!("{} {}", r.is_err(), c.index);
+    c.until_stopped(black_box(4));
+    STOP.store(1, Ordering::Relaxed);
+    c.until_stopped(black_box(4));
+    println!("{}", c.index);
 }
 
 #[test]

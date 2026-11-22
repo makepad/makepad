@@ -29,7 +29,10 @@ GPU work in flight at a run's end (a compute job of about a second) leaves the n
 process and window with a GPU that does its work right, and the ended run's read unanswered.
 Then ROUNDS more relaunches: what a run's end leaves in the process's statics
 (RELAX_LEFTOVERS: a heap that went stays unmapped, so a word still pointing there is a fault
-too) must be a row of process_statics.tsv, and threads and resident memory must not grow.
+too) must be a row of process_statics.tsv, and threads and owned memory must not grow: on Linux
+what the allocators handed out plus the anonymous memory outside their mappings (`memory`'s owned
+nodes, from glibc's mapping names), each part too, so a drop in one cannot hide a rise in another;
+elsewhere the resident size.
 A restarted run whose app check finds an error (a derive's bound, which no lazy compile reaches)
 ends in place: the same process and window, no fault, its end without the program's grace, no app
 code running and the restart pending; the edit's outcome a refusal, never the restart's failure nor
@@ -54,7 +57,9 @@ os.environ.setdefault("RELAX_STD", os.path.abspath("libs/relax/compiler/std"))
 visible = "--visible" in sys.argv
 ROUNDS = 8
 CHECK_ROUNDS = 3
-# resident memory comes and goes by tens of MB with the driver's; a leak of a run's worth does not
+# a leak of a run's worth grows the last rounds past the first by more than this per round; owned
+# memory moves by a few MB from round to round (resident memory by tens: allocators keep freed
+# pages, the driver's come and go)
 ROUND_GROWTH_KB = 4 * 1024
 
 ROOT = os.path.abspath(os.path.join(HERE, "../../.."))
@@ -107,6 +112,8 @@ env["RELAX_STALE_PARK"] = "1"
 # where a quit that does not end stops (the term stage prints it)
 env["RELAX_QUIT_TRACE"] = "1"
 env["RELAX_LEFTOVERS"] = leftovers_file
+# glibc names its mappings (2.39 on): `memory` splits malloc's from the rest, its owned nodes
+env["GLIBC_TUNABLES"] = ":".join(x for x in (os.environ.get("GLIBC_TUNABLES"), "glibc.mem.decorate_maps=1") if x)
 env["RELAX_TEST_HOT_BUILD_ERROR"] = "hot_fail_target"
 env["MAKEPAD_HOME"] = os.path.join(tmp, "makepad")
 def owned():
@@ -138,8 +145,9 @@ out, err = [], []
 def pump(f, acc):
     for line in f:
         acc.append((time.time(), line.rstrip("\n")))
-for f, acc in ((p.stdout, out), (p.stderr, err)):
-    threading.Thread(target=pump, args=(f, acc), daemon=True).start()
+pumps = [threading.Thread(target=pump, args=(f, acc), daemon=True) for f, acc in ((p.stdout, out), (p.stderr, err))]
+for t in pumps:
+    t.start()
 
 def wait(pred, secs):
     t = time.time()
@@ -195,18 +203,48 @@ def threads(pid):
     return max(len(rows) - 1, 0)
 
 def thread_names(pid):
-    """Each thread's name (Linux): a thread count that grew says which."""
+    """Each thread's name: a thread count that grew says which (Linux: /proc; elsewhere the app's
+    own list, `inspect threads`)."""
+    if not os.path.isdir("/proc/%d/task" % pid):
+        # (the OS's threads: the registry's rows of gone and ended ones come after them)
+        rows = re.findall(r'\{"id":"[^"]*","name":"((?:[^"\\]|\\.)*)","role":"[^"]*","state":"([^"]*)"', ask(pid, ["threads"]))
+        return [n for n, state in rows if state not in ("gone", "ended")]
     names = []
-    for t in (os.listdir("/proc/%d/task" % pid) if os.path.isdir("/proc/%d/task" % pid) else []):
+    for t in os.listdir("/proc/%d/task" % pid):
         try:
             names.append(open("/proc/%d/task/%s/comm" % (pid, t)).read().strip())
         except OSError:
             pass
     return names
 
+def settled_threads(pid, secs=1.0):
+    """The thread count once what a run's start or end, or a remote call, has running is over: the
+    lowest of the samples over `secs` (a thread being started or joined, or answering a call, is in
+    some samples; a thread that stays is in every one), with the names at that sample."""
+    low, names = None, []
+    end = time.time() + secs
+    while True:
+        n = threads(pid)
+        if low is None or n < low:
+            low, names = n, thread_names(pid)
+        if time.time() >= end:
+            return low, names
+        time.sleep(0.05)
+
+def outside_pool(n, names):
+    """`n` threads less the ones others size among `names`: the JIT's compile pool (its workers
+    are as many as a section's peak of tasks in flight, kept until it retires them, so the pool
+    after a restart's compile is as large as that compile was wide), and on macOS the system's
+    unnamed dispatch workers (made and retired by the OS; Linux names every thread)."""
+    return n - sum(1 for x in names if x.startswith("run-jit-") or not x)
+
 def grown(before, after):
+    """What changed in the threads, by name with its numbers left out (a run's main and pool
+    threads are named by number, and a new run's replace the last run's)."""
     from collections import Counter
-    return ", ".join("%s +%d" % (k, v) for k, v in sorted((Counter(after) - Counter(before)).items())) or "none named"
+    norm = lambda names: Counter(re.sub(r"\d+", "#", n) for n in names)
+    a, b = norm(before), norm(after)
+    return ", ".join(["%s +%d" % kv for kv in sorted((b - a).items())] + ["%s -%d" % kv for kv in sorted((a - b).items())]) or "none named"
 
 def wrong(lines):
     return next((l.strip()[:240] for _, l in lines if any(b in l for b in BAD)), None)
@@ -252,6 +290,32 @@ def ask(pid, words):
 
 def resident(pid):
     return int(subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True).stdout.strip() or 0)
+
+def owned_mb(pid):
+    """`memory`'s owned figure and the parts the rounds judge, MB: the total, malloc in use, Relax's
+    arenas live, the domain heaps in use, and each node of the anonymous memory outside every
+    allocator's mappings (a part under 1 MB is left out: none then). Empty where `memory` has no
+    owned figure (not Linux, or a glibc that does not name its mappings)."""
+    parts = {}
+    for line in ask(pid, ["memory", "n=400"]).splitlines():
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(j, dict):
+            continue
+        # (the total is the totals line's; the tree lists the nodes of 1 MB or more)
+        if "owned_mb" in j:
+            parts["owned"] = float(j["owned_mb"])
+        k = j.get("node", "")
+        if k in ("owned/malloc in use", "owned/Relax arenas live", "owned/domain heaps in use") or k.startswith("owned/outside allocators/"):
+            parts[k] = float(j["mb"])
+    return parts
+
+def grew(series):
+    """The rounds' formula: the least of the last three past the least of the first three by more
+    than the bar."""
+    return len(series) > 2 and min(series[-3:]) > min(series[:3]) + ROUND_GROWTH_KB * ROUNDS
 
 def demangled(name):
     """`_ZN14relax_compiler3jit4UNIT17h0123456789abcdefE` -> relax_compiler::jit::UNIT"""
@@ -309,8 +373,7 @@ if started and pid is None:
     fails.append("no-app-process")
 if not fails:
     time.sleep(2.0)
-    threads0 = threads(pid)
-    names0 = thread_names(pid)
+    threads0, names0 = settled_threads(pid)
     windows0 = windows(pid)
     procs0 = len(descendants(p.pid)[0])
     before = tick_of(ticks()[-1][1])
@@ -369,14 +432,16 @@ if not fails:
         fails.append("no-restart-present-logged")
     pid1 = app_pid()
     procs1 = len(descendants(p.pid)[0])
-    threads1 = threads(pid1) if pid1 else 0
+    threads1, names1 = settled_threads(pid1) if pid1 else (0, [])
     if pid1 != pid:
         fails.append("pid-changed(%s->%s)" % (pid, pid1))
     if procs1 != procs0:
         fails.append("processes(%d->%d)" % (procs0, procs1))
-    if threads1 > threads0 + 2:
+    # (the first restart against the start: what grew once, not counted the pool, whose size is
+    # the width of the last compile; the rounds below catch what grows with each restart)
+    if outside_pool(threads1, names1) > outside_pool(threads0, names0) + 2:
         fails.append("threads(%d->%d)" % (threads0, threads1))
-        print("restart_in_place: threads grew: %s" % grown(names0, thread_names(pid1)))
+        print("restart_in_place: threads grew: %s" % grown(names0, names1))
     if not any("relax: run end:" in l for _, l in err[n_err:]):
         fails.append("no-run-end")
     windows1 = windows(pid1) if pid1 else None
@@ -602,7 +667,7 @@ if not fails:
 # rounds of relaunches: nothing grows, nothing of a run stays in the process's statics
 if not fails:
     time.sleep(1.0)
-    rss, nthreads = [], []
+    rss, nthreads, owned_rounds = [], [], []
     for round in range(ROUNDS):
         n_out, n_err = len(out), len(err)
         ask(pid, ["session", "relaunch"])
@@ -612,11 +677,30 @@ if not fails:
             break
         time.sleep(0.5)
         rss.append(resident(pid))
-        nthreads.append(threads(pid))
-    print("restart_in_place: rounds: resident MB %s; threads %s" % ([r >> 10 for r in rss], nthreads))
-    if nthreads and max(nthreads) > threads0 + 2:
+        # (owned nodes are Linux's)
+        owned_rounds.append(owned_mb(pid) if sys.platform.startswith("linux") else {})
+        n, names_r = settled_threads(pid)
+        nthreads.append(outside_pool(n, names_r))
+        names_first = names_first if nthreads[1:] else names_r
+    print("restart_in_place: rounds: resident MB %s; threads outside the compile pool %s" % ([r >> 10 for r in rss], nthreads))
+    if nthreads:
+        # (the threads a process starts once, at its first run end or remote call, and keeps)
+        print("restart_in_place: rounds: threads since the start: %s" % grown(names0, names_r))
+    # (each round against the first: the same restart each time, its compile as wide)
+    if len(nthreads) > 1 and max(nthreads[1:]) > nthreads[0] + 2:
         fails.append("threads-grew")
-    if len(rss) > 2 and min(rss[-3:]) > min(rss[:3]) + ROUND_GROWTH_KB * ROUNDS:
+        print("restart_in_place: rounds: threads grew: %s" % grown(names_first, names_r))
+    if owned_rounds and all("owned" in o for o in owned_rounds):
+        # (a node a round lacks held nothing then)
+        keys = sorted(set(k for o in owned_rounds for k in o), key=lambda k: (k != "owned", k))
+        series = {k: [o.get(k, 0.0) for o in owned_rounds] for k in keys}
+        print("restart_in_place: rounds: owned MB %s" % series["owned"])
+        up = [k for k in keys if grew([x * 1024 for x in series[k]])]
+        if up:
+            fails.append("owned-grew")
+            for k in up:
+                print("restart_in_place: rounds: %s grew: %s MB" % (k, series[k]))
+    elif grew(rss):
         fails.append("resident-grew")
     # (RELAX_LEFTOVERS is Linux's: run_end::leftovers)
     left = leftovers(leftovers_file) if sys.platform.startswith("linux") else []
@@ -643,7 +727,7 @@ if not fails:
         return found
     ledger0 = ledger()
     n_check = len(err)
-    check_threads = []
+    check_threads, check_names = [], []
     for round in range(CHECK_ROUNDS):
         n_out, n_err = len(out), len(err)
         before = tick_of(ticks()[-1][1])
@@ -683,14 +767,18 @@ if not fails:
             break
         if restored()[-1] < before:
             fails.append("check-%d-state-lost(%d<%d)" % (round, restored()[-1], before))
-        check_threads.append(threads(pid))
+        n, names_c = settled_threads(pid)
+        check_threads.append(outside_pool(n, names_c))
+        check_names.append(names_c)
     found = ledger()
-    print("restart_in_place: check: threads %s; ledger %s" % (check_threads, sorted(set(found))))
+    print("restart_in_place: check: threads outside the compile pool %s; ledger %s" % (check_threads, sorted(set(found))))
     if found.count("restart_failed") > ledger0.count("restart_failed") or any("verdict: jit-error" in l for _, l in err[n_check:]):
         fails.append("check-jit-error")
-    if check_threads and max(check_threads) > threads0 + 2:
+    # (each round against the first: a thread a failed check starts once is up from then on, and
+    # every later round must end its run's threads; one thread more is a once-started one's room)
+    if len(check_threads) > 1 and max(check_threads[1:]) > check_threads[0] + 1:
         fails.append("check-threads-grew")
-        print("restart_in_place: check: threads grew: %s" % grown(names0, thread_names(pid)))
+        print("restart_in_place: check: threads grew: %s" % grown(check_names[0], check_names[-1]))
     stayed("check", n_check)
 # a relaunch after the next run's boot, before the app's first event is through (where the app says
 # it restarts with its state): the run after it comes up with the state the run was started with
@@ -760,6 +848,11 @@ if not fails:
             stuck(pid)
         else:
             print("restart_in_place: term: the paused app quit %.1f s after SIGTERM" % (time.time() - t_term))
+            # what the app said before it ended is in `err` once the pumps have read its pipes to
+            # their end: the exit can be seen first (a pump slowed after the SIGTERM missed the
+            # line every time)
+            for t in pumps:
+                t.join(10)
             if not any("the paused program goes on so that it can quit" in l for _, l in err[n_err:]):
                 fails.append("term-not-resumed")
 stop()

@@ -1019,15 +1019,15 @@ pub(crate) fn resolve_package(
 /// `flight`: a `makepad check` (it records its stores as its last step, then ends): when no graph
 /// of these crates is stored and another check is making their first load, this one waits for
 /// that load's stores and restores from them (FrontImages::follow_first_load).
+/// The collected image of these crates, or why it did not restore (restore_collected's check).
 fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::Session>, pre: &[crate::preload::PreCrate], flight: bool)
-    -> Option<(crate::program::Program, crate::tcx::Tcx, Option<crate::cache::CollectedCache>)> {
+    -> Result<(crate::program::Program, crate::tcx::Tcx, Option<crate::cache::CollectedCache>), String> {
     match images.restore_collected(sess, pre) {
-        Ok(restored) => Some(restored),
         Err(_) if flight && images.follow_first_load(pre) => {
             verbose!("relax: another check made the first load of these crates: restoring from its stores");
-            images.restore_collected(sess, pre).ok()
+            images.restore_collected(sess, pre)
         }
-        Err(_) => None,
+        restored => restored,
     }
 }
 
@@ -1766,18 +1766,26 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut verification_graph = None;
     let mut collected_tcx = None;
     let mut collected_definitions = None;
-    let restored = if check && !check_restore { None } else {
-        front_images.as_ref().and_then(|images| warm_front(images, sess, &pre, check_restore))
+    let restored = match &front_images {
+        _ if check && !check_restore => Err("a check of these crates parses them all".to_string()),
+        Some(images) => warm_front(images, sess, &pre, check_restore),
+        None => Err("this run keeps no front images".to_string()),
     };
     let restored = if verify_collected {
-        verification_graph = restored.filter(|(p, _, _)| p.crates.len() == pre.len());
-        if let Some((saved, _, _)) = &verification_graph { prog.seed_collected_symbols(saved); }
-        else {
-            eprintln!("relax collected: verification requires a current complete image; run once without RELAX_COLLECTED_VERIFY first");
+        // (why there is none: the check that refused it, said on every run)
+        let why = match &restored {
+            Ok((p, _, _)) if p.crates.len() == pre.len() => None,
+            Ok((p, _, _)) => Some(format!("{} of its {} crates are current", p.crates.len(), pre.len())),
+            Err(why) => Some(why.clone()),
+        };
+        if let Some(why) = why {
+            eprintln!("relax collected: verification requires a current complete image (not restored: {why}); run once without RELAX_COLLECTED_VERIFY first");
             return 1;
         }
+        verification_graph = restored.ok();
+        if let Some((saved, _, _)) = &verification_graph { prog.seed_collected_symbols(saved); }
         None
-    } else { restored };
+    } else { restored.ok() };
     let restored_crates = restored.as_ref().map_or(0, |(p, _, _)| p.crates.len());
     // std came from the collected image, so this load makes no std parses for the proc-macro
     // world: it parses its own instead of waiting for them (share_std_begin at the graph's

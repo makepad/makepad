@@ -286,7 +286,11 @@ pub struct Options {
     pub sandbox_fuel: bool,
     /// `RELAX_SPEC`; default `true`.
     pub spec: bool,
-    /// `RELAX_O3`; default `true`.
+    /// `RELAX_O3`; default `true`. `RELAX_O3=0` turns tier-up off entirely: no count stubs and no
+    /// O3 queue, so neither the O3 builds nor the O2 builds of slow baseline code that come with it.
+    /// In bench_rt's runs its code was baseline or O1, never O2, and which functions got O1 differed
+    /// from one cold cache to the next (one kernel 1.7 ms against 27): no stand-in for O2 code in an
+    /// A/B, and a spread of its own.
     pub tier1: bool,
     /// `RELAX_TYCK_AHEAD`; default `true`.
     pub tyck_ahead: bool,

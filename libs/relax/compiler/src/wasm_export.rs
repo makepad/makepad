@@ -946,6 +946,8 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
                 "memset" => HostBind::Builtin(Builtin::Memset),
                 "catch_panic" => HostBind::Builtin(Builtin::CatchPanic),
                 "panicking" if abort => HostBind::Builtin(Builtin::Nop),
+                // (a vtable's first trait object tells the live loop: no patch reaches a module)
+                "made_late" => HostBind::Builtin(Builtin::Nop),
                 "rethrow" if abort => HostBind::Trap,
                 n => HostBind::Import("r".into(), n.to_string()),
             },
@@ -1011,6 +1013,9 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             Some(SymKind::Site(i)) => i as u64,
             Some(SymKind::Rt("tls_base")) => tls,
             Some(SymKind::Rt("web_memory_base")) => 0,
+            // a vtable's made cell (syms.rs made_cell): a byte of the module's own, which nothing
+            // outside it reads
+            Some(SymKind::Made(_)) => m.place(1, 1),
             _ => {
                 n_unlinked += 1;
                 if stats_on() {
@@ -1419,7 +1424,7 @@ fn single_thread(name: &str) -> Option<HostBind> {
         n if n.starts_with("__relax_domain_") || n == "__relax_thread_spawn" => HostBind::Trap,
         // Linux std's only syscall is futex wait/wake (std sys/linux.rs): a no-op returning 0, as
         // macOS's __ulock_*
-        "syscall" | "__relax_wait_enter" | "__relax_wait_leave" | "__relax_wait_interrupted" | "__relax_wake" | "__ulock_wake" | "__ulock_wait" | "pthread_threadid_np" | "sched_yield" | "__relax_key_delete" | "__relax_catch_caught" => HostBind::Builtin(Builtin::Nop),
+        "syscall" | "__relax_wait_enter" | "__relax_wait_leave" | "__relax_wait_interrupted" | "__relax_wake" | "__ulock_wake" | "__ulock_wait" | "pthread_threadid_np" | "sched_yield" | "__relax_key_delete" => HostBind::Builtin(Builtin::Nop),
         // the one thread: id 1 (0 is a lock's "no owner": a reentrant lock would think it holds
         // itself), the main thread (gettid == getpid)
         "pthread_self" | "pthread_main_np" | "gettid" | "getpid" => HostBind::Builtin(Builtin::One),
@@ -1738,6 +1743,7 @@ pub(crate) fn prepare_shipping(u: &Unit, f: &mut Func) {
                 Inst::Call(Callee::Host(s) | Callee::CHost(s, _), _, _) => match u.syms.kind(s.id) {
                     Some(SymKind::Foreign(n)) if single => single_thread(&n),
                     Some(SymKind::Rt("panicking")) if abort => Some(HostBind::Builtin(Builtin::Nop)),
+                    Some(SymKind::Rt("made_late")) => Some(HostBind::Builtin(Builtin::Nop)),
                     Some(SymKind::Rt("rethrow")) if abort => Some(HostBind::Trap),
                     _ => None,
                 },

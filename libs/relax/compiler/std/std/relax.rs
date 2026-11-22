@@ -296,6 +296,13 @@ pub fn restart_requested() -> bool {
     unsafe { __relax_restart_requested() != 0 }
 }
 
+/// The due restart was asked for without asking the app (`session relaunch anyway=1`). The app
+/// restarts at its next safe point without a postponement, as when the person takes the window
+/// caption's restart, and its state is still carried over.
+pub fn restart_anyway() -> bool {
+    unsafe { __relax_restart_requested() == 2 }
+}
+
 /// Why the restart is due (the edit and the reason it could not apply in place).
 pub fn restart_reason() -> String {
     unsafe {
@@ -316,6 +323,11 @@ pub struct Patched {
     /// item as changed. What the program built from code at run time (makepad's `script_mod!`
     /// designs, evaluated once) it builds again when that code is among them.
     pub items: Option<crate::vec::Vec<String>>,
+    /// The files the program read that a save changed and that are no compiled input (a level, a
+    /// kit, a shader file it loads at run time), absolute and normalized as the program's file
+    /// calls reach Relax: told with the save's patch, or alone when it changed no code. A hint:
+    /// the program compares what it holds and takes in what differs.
+    pub resources: crate::vec::Vec<String>,
 }
 
 /// What live patches changed since `*seen` (start it at 0; the call advances it).
@@ -332,7 +344,8 @@ pub fn patched(seen: &mut u64) -> Patched {
         }
         String::from_utf8_lossy(&v).into_owned()
     };
-    // "<count> <1 when every item>", a path per line, a tab and an item name per line
+    // "<count> <1 when every item>", a path per line, a tab and an item name per line, a record
+    // separator (0x1e) and a resource's path per line (none from a Relax before resources)
     let mut lines = text.lines();
     let mut every = false;
     if let Some((n, all)) = lines.next().and_then(|l| l.split_once(' ')) {
@@ -341,13 +354,17 @@ pub fn patched(seen: &mut u64) -> Patched {
     }
     let mut files = crate::vec::Vec::new();
     let mut items = crate::vec::Vec::new();
+    let mut resources = crate::vec::Vec::new();
     for line in lines {
-        match line.strip_prefix('\t') {
-            Some(item) => items.push(String::from(item)),
-            None => files.push(String::from(line)),
+        if let Some(item) = line.strip_prefix('\t') {
+            items.push(String::from(item));
+        } else if let Some(path) = line.strip_prefix('\u{1e}') {
+            resources.push(String::from(path));
+        } else {
+            files.push(String::from(line));
         }
     }
-    Patched { files, items: (!every).then_some(items) }
+    Patched { files, items: (!every).then_some(items), resources }
 }
 
 /// Restarts the program with `state`, which its fresh run reads with `restored_state`: the

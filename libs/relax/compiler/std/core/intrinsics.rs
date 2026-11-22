@@ -304,8 +304,10 @@ pub mod intrinsics_rt {
         pub fn abort() -> !;
         /// Runs `f(data)` under a recovery point; true if it panicked or faulted (live: the
         /// panic was reported and the stack reset here; AOT: panics abort). std::thread uses it
-        /// so a panicking thread ends and join() returns Err (Rt::thread_run).
-        pub fn catch_panic(f: fn(*mut u8), data: *mut u8) -> bool;
+        /// so a panicking thread ends and join() returns Err (Rt::thread_run). `caught`: the
+        /// program's catch_unwind, which handles the panic (no runtime report after std's
+        /// message); std's own boundaries (thread start, the test harness) pass false.
+        pub fn catch_panic(f: fn(*mut u8), data: *mut u8, caught: bool) -> bool;
         /// (argc, argv) as the process received them (Rt::args; `makepad run` passes the program's
         /// own arguments).
         pub fn args() -> (usize, *const *const crate::ffi::c_char);

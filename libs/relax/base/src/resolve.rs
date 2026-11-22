@@ -1773,8 +1773,12 @@ pub struct Profile {
 }
 
 /// The profile `name` of the workspace that the start folder `dir` belongs to (find_root).
+/// A folder with no Cargo.toml in or above it (a unit graph given as a file, `--units`) has cargo's
+/// own profiles, as the config files and the environment set them: no manifest tables, no members.
 pub fn profile(dir: &str, name: &str) -> Result<Profile, String> {
-    let root = find_root(dir)?;
+    let mut up = Some(normalize(dir));
+    let manifest_above = std::iter::from_fn(|| { let d = up.take()?; up = parent(&d); Some(d) }).any(|d| crate::vfs::is_file(format!("{d}/Cargo.toml")));
+    let root = if manifest_above { find_root(dir)? } else { normalize(dir) };
     let manifest = format!("{}/Cargo.toml", root);
     // the `[profile]` tables, the highest precedence first: the config files', then the manifest's
     let mut files: Vec<(String, TomlTable)> = Vec::new();
@@ -1783,8 +1787,10 @@ pub fn profile(dir: &str, name: &str) -> Result<Profile, String> {
             files.push((path, p.clone()));
         }
     }
-    if let Some(p) = table(&read_toml(&manifest)?, "profile") {
-        files.push((manifest, p.clone()));
+    if manifest_above {
+        if let Some(p) = table(&read_toml(&manifest)?, "profile") {
+            files.push((manifest, p.clone()));
+        }
     }
     let env = |p: &str, key: &str| {
         let var = format!("CARGO_PROFILE_{}_{}", p.to_uppercase().replace('-', "_"), key);

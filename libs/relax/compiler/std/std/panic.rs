@@ -252,21 +252,20 @@ pub(crate) fn prepare_payload() {
 
 /// Runs `f`; Err(payload) if it panicked, with real std's payload (see record_payload).
 pub fn catch_unwind<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R, Box<dyn Any + Send + 'static>> {
-    // the panic this catches is the program's to handle: the runtime adds no report to std's message
-    #[cfg(not(relax_web))]
-    {
-        extern "C" { fn __relax_catch_caught(); }
-        unsafe { __relax_catch_caught() };
-    }
-    catch_boundary(f)
+    // Native std marks the panic as the program's to handle. Web std uses the ordinary boundary.
+    catch_inner(f, cfg!(not(relax_web)))
 }
 
 /// catch_unwind for std's own boundaries, where a panic ends what runs (the test harness: it
 /// fails the test): the runtime reports it after std's message.
 pub(crate) fn catch_boundary<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R, Box<dyn Any + Send + 'static>> {
+    catch_inner(f, false)
+}
+
+fn catch_inner<F: FnOnce() -> R + UnwindSafe, R>(f: F, caught: bool) -> Result<R, Box<dyn Any + Send + 'static>> {
     let mut slot: (Option<F>, Option<R>) = (Some(f), None);
     prepare_payload();
-    let panicked = sys::rt::catch_panic(run_slot::<F, R>, &mut slot as *mut (Option<F>, Option<R>) as *mut u8);
+    let panicked = sys::rt::catch_panic(run_slot::<F, R>, &mut slot as *mut (Option<F>, Option<R>) as *mut u8, caught);
     if panicked {
         return Err(take_payload());
     }

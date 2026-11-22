@@ -1136,32 +1136,56 @@ mod imp {
     const SET_UP_FRAME: u64 = 4096;
     const TRAMP_CALL: u64 = 128;
 
-    /// The address this handler returns to, in the trampoline that called it: its frame record's
-    /// (Apple arm64 keeps one in every function that calls another).
-    #[inline(always)]
-    unsafe fn handler_return() -> u64 {
-        let fp: u64;
-        std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
-        *((fp + 8) as *const u64)
+    /// The frame record of the handler this is written in (Apple arm64 keeps one in every function
+    /// that calls another, and so does the JIT in every function). A macro, not a fn: x29 is the
+    /// frame of the function the asm is in, and `#[inline(always)]` does not promise which one
+    /// that is (the JIT's first tier inlines nothing: a fn of its own read its own frame).
+    macro_rules! handler_frame {
+        () => {{
+            let fp: u64;
+            std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+            fp
+        }};
     }
 
     /// The delivery under this one, when it is one of this handler's the kernel only set up: its
     /// mcontext and ucontext, and its signal. Darwin takes the lowest-numbered pending signal
     /// first, so a run's end kick (SIGEMT, 7) pending as a fetch of the ended code faults (SIGBUS,
     /// 10) is set up first, and the SIGBUS comes in at that trampoline's entry. The kernel gave the
-    /// trampoline its arguments, x0 the handler, x2 the signal, x4 the ucontext on the stack it set
-    /// up, and a pc just before the trampoline's call of the handler, whose return is `ret` (the same
-    /// trampoline calls this delivery's handler).
-    unsafe fn not_begun_under(mc: *mut u8, ret: u64) -> Option<(*mut u8, *mut u8, i32)> {
+    /// trampoline its arguments, x2 the signal (one this handler is installed for), x3 the siginfo
+    /// and x4 the ucontext on the stack it set up, and a pc just before the trampoline's call of
+    /// the handler: the same trampoline called this delivery's handler, so a return in the frame
+    /// records from the handler's (`fp`) up to this delivery's own set-up frame (`own_uc`) is just
+    /// past that pc. It is the handler's own return when the kernel calls the handler; a host
+    /// that forwards the program's signals to it (the JIT's progsig.rs: the kernel calls its
+    /// trampoline, x0, which calls this handler) keeps its frames between.
+    unsafe fn not_begun_under(mc: *mut u8, fp: u64, own_uc: *mut u8) -> Option<(*mut u8, *mut u8, i32)> {
         let x = |i: usize| *(mc.add(SS + 8 * i) as *const u64);
         let (pc, sp) = (*(mc.add(SS_PC) as *const u64), *(mc.add(SS_SP) as *const u64));
         let set_up = |a: u64| a & 7 == 0 && a >= sp && a - sp < SET_UP_FRAME;
-        if x(0) != on_signal as *const () as u64 || !(1..32).contains(&x(2)) || pc >= ret || ret - pc > TRAMP_CALL || !set_up(x(4)) {
+        if !OUR_SIGNALS.contains(&(x(2) as i32)) || !set_up(x(3)) || !set_up(x(4)) || !trampoline_call_after(pc, fp, own_uc as u64) {
             return None;
         }
         let uc = x(4) as *mut u8;
         let umc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
         set_up(umc as u64).then_some((umc, uc, x(2) as i32))
+    }
+
+    /// Whether a return address in the frame records from `fp` up to `top` (each record above the
+    /// last and below `top`: the handler's frames below its delivery's set-up frame) lies just past
+    /// `pc`, within a trampoline's call of its handler. (arm64e system code signs its returns: the
+    /// pointer authentication bits go.)
+    unsafe fn trampoline_call_after(pc: u64, mut fp: u64, top: u64) -> bool {
+        let mut below = 0;
+        while fp & 7 == 0 && fp > below && fp.saturating_add(16) <= top {
+            let ret = *((fp + 8) as *const u64) & 0x0000_ffff_ffff_ffff;
+            if ret > pc && ret - pc <= TRAMP_CALL {
+                return true;
+            }
+            below = fp;
+            fp = *(fp as *const u64);
+        }
+        false
     }
 
     /// This delivery leaves for a recovery point over one that never ran: the thread goes on as
@@ -1340,7 +1364,7 @@ mod imp {
             let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
             let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
             // over a delivery of ours that has not begun, the fault is in what that one interrupted
-            let under = not_begun_under(mc, handler_return());
+            let under = not_begun_under(mc, handler_frame!(), uc);
             let at = under.map_or(mc, |u| u.0);
             let at = |off: usize| -> u64 { *(at.add(off) as *const u64) };
             let f = Fault { kind: kind(sig), sig, pc: at(SS_PC), sp: at(SS_SP), fp: at(SS_FP), addr: *(info.add(SI_ADDR) as *const u64), lr: at(SS + 240) };
@@ -1690,12 +1714,17 @@ pub fn watchdog_signal() -> i32 { SIG_WATCHDOG }
 /// default action (it ends the process), and nothing when the program ignores it.
 #[cfg(unix)]
 unsafe fn not_a_kick(sig: i32, info: *mut u8, uc: *mut u8) {
+    // a kick of a thread that ended first, handed to this one (Darwin): nothing to do here
+    if crate::os::thread::take_moved_kick() {
+        return;
+    }
     if imp::chain(sig, info, uc) || imp::chained_handler(sig) == 1 {
         return;
     }
     extern "C" {
         fn raise(sig: i32) -> i32;
     }
+    crate::jit::raw_not_a_kick(sig);
     imp::default_action(sig);
     // (blocked while this handler runs: it is delivered as the handler returns, by default)
     raise(sig);

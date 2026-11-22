@@ -603,7 +603,7 @@ fn unwinding() {
     f.i(Inst::Store(Mem::Int(8, false), p, 0, k));
     f.term(Term::Resume);
     let middle = f.done();
-    // f2(p, x): catch_panic(f3, p) with f3 = |p| f1(p, x?) -- f3(p) calls f1(p, 0)
+    // f2(p) calls f1(p, 0), which unwinds.
     let mut f = B::new(&[Cls::I], &[]);
     let p = f.p(0);
     let z = f.iconst(0);
@@ -611,12 +611,14 @@ fn unwinding() {
     f.i(Inst::Call(Callee::Fn(1), vec![p, z], vec![r]));
     f.term(Term::Ret(vec![]));
     let inner = f.done();
+    // f3(p) catches the panic from f2(p).
     let mut f = B::new(&[Cls::I], &[Cls::I]);
     let p = f.p(0);
     let fp = f.v(Cls::I);
     f.i(Inst::FnAddr(fp, 2));
+    let caught = f.iconst(1);
     let r = f.v(Cls::I);
-    f.i(Inst::Call(Callee::Host(Sym::new(3)), vec![fp, p], vec![r]));
+    f.i(Inst::Call(Callee::Host(Sym::new(3)), vec![fp, p, caught], vec![r]));
     f.term(Term::Ret(vec![r]));
     let catcher = f.done();
     let fs = [thrower, middle, inner, catcher];

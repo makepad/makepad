@@ -1147,7 +1147,7 @@ fn retry(crashed: bool, keyed: bool) -> Result<(), String> {
     if crashed {
         return relax_compiler::reload::restart_run("restart after the app crashed");
     }
-    relax_compiler::reload::relaunch_pending(if keyed { "the R key in the run window" } else { "a click on the run window's Restart" }).map(|_| ())
+    relax_compiler::reload::relaunch_pending(if keyed { "the R key in the run window" } else { "a click on the run window's Restart" }, false).map(|_| ())
 }
 
 /// A build that failed before the app started compiles again (true: no app runs, nothing of it to
@@ -1277,7 +1277,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
             // the waiting edits stay noted until a run loads them (`domain_loaded`, or the new
             // process): the app may postpone the restart (unsaved work), a rebuild may come first
             Work::Relaunch(who) => {
-                if let Err(e) = relax_compiler::reload::relaunch_pending(&who) {
+                if let Err(e) = relax_compiler::reload::relaunch_pending(&who, false) {
                     post(Update::Message(e));
                 }
                 post(Update::Relaunched);

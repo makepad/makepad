@@ -212,9 +212,10 @@ fn slot_crate(u: &Unit, id: u32) -> Option<u32> {
     }
 }
 
-/// `len` bytes of code memory in group `g`'s chunks (a new chunk from the code window when the
-/// group's last one is full). Err: the group was invalidated (nothing installs into it again).
-pub(crate) fn alloc(u: &Unit, g: Group, len: u64, chunk: impl FnOnce(u64, u64) -> u64) -> Result<u64, String> {
+/// `len` bytes of code memory in group `g`'s chunks, starting on an `align` boundary (a power of
+/// two, at least 16; a new chunk from the code window when the group's last one is full). Err: the
+/// group was invalidated (nothing installs into it again).
+pub(crate) fn alloc(u: &Unit, g: Group, len: u64, align: u64, chunk: impl FnOnce(u64, u64) -> u64) -> Result<u64, String> {
     let mut map = u.code_groups.lock().unwrap_or_else(|e| e.into_inner());
     let _k = crate::zone_alloc::kept();
     let CodeGroups { groups, arenas } = &mut *map;
@@ -231,7 +232,7 @@ pub(crate) fn alloc(u: &Unit, g: Group, len: u64, chunk: impl FnOnce(u64, u64) -
     let size = |chunks: u64| (need.max(chunks.clamp(page, MODULE_CHUNK_MAX)) + page - 1) / page * page;
     let at = match g {
         Group::Module { .. } => {
-            if e.next + need > e.end {
+            if align_up(e.next, align) + need > e.end {
                 let size = size(e.chunks.iter().map(|c| c.1 - c.0).sum());
                 let at = chunk(size, page);
                 CHUNK_BYTES.fetch_add(size, Ordering::Relaxed);
@@ -239,8 +240,8 @@ pub(crate) fn alloc(u: &Unit, g: Group, len: u64, chunk: impl FnOnce(u64, u64) -
                 e.next = at;
                 e.end = at + size;
             }
-            let at = e.next;
-            e.next += need;
+            let at = align_up(e.next, align);
+            e.next = at + need;
             at
         }
         Group::Patch { gen, .. } => {
@@ -248,7 +249,7 @@ pub(crate) fn alloc(u: &Unit, g: Group, len: u64, chunk: impl FnOnce(u64, u64) -
                 ARENAS.fetch_add(1, Ordering::Relaxed);
                 Arena::default()
             });
-            if a.next + need > a.end {
+            if align_up(a.next, align) + need > a.end {
                 let size = size(a.chunks.iter().map(|c| c.hi - c.lo).sum());
                 let at = chunk(size, page);
                 CHUNK_BYTES.fetch_add(size, Ordering::Relaxed);
@@ -256,8 +257,8 @@ pub(crate) fn alloc(u: &Unit, g: Group, len: u64, chunk: impl FnOnce(u64, u64) -
                 a.next = at;
                 a.end = at + size;
             }
-            let at = a.next;
-            a.next += need;
+            let at = align_up(a.next, align);
+            a.next = at + need;
             a.chunks.last_mut().expect("an arena chunk").live += 1;
             e.ranges.push((at, at + need));
             at
@@ -266,6 +267,10 @@ pub(crate) fn alloc(u: &Unit, g: Group, len: u64, chunk: impl FnOnce(u64, u64) -
     e.code_bytes += len;
     GROUP_CODE_BYTES.fetch_add(len, Ordering::Relaxed);
     Ok(at)
+}
+
+fn align_up(at: u64, align: u64) -> u64 {
+    (at + align - 1) & !(align - 1)
 }
 
 /// Records an install into group `g` (after the slot took the code: its version is known).

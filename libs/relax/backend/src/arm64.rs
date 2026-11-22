@@ -5774,7 +5774,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
             cfg.int_caller.push(X8);
         }
     }
-    let (split, mut al0) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
+    let (split, mut al0, _) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
     if split.is_some() {
         f.verify_after("split_loops")?;

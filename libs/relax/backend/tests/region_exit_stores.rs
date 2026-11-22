@@ -145,7 +145,7 @@ fn cold_read_stores_on_the_way_out() {
             assert_eq!(run(n, seed), reference(n, seed), "freq {} n {} seed {}", fr.is_some(), n, seed);
         }
     }
-    let (g, al) = allocate_split(&options(), &f, &reg_config(), true, Some(&freq));
+    let (g, al, _) = allocate_split(&options(), &f, &reg_config(), true, Some(&freq));
     let h = g.as_ref().unwrap_or(&f);
     // the loop body (d & 3) and the bursts' block (the allocated function may add and reorder blocks)
     let body = h.blocks.iter().position(|b| b.insts.iter().any(|i| matches!(i, Inst::IBinI(IOp::And, _, _, _, 3)))).unwrap();
@@ -244,7 +244,7 @@ fn join_stores_before_the_branch() {
             assert_eq!(run(n, seed), reference_join(n, seed), "freq {} n {} seed {}", fr.is_some(), n, seed);
         }
     }
-    let (g, al) = allocate_split(&options(), &f, &reg_config(), true, Some(&freq));
+    let (g, al, _) = allocate_split(&options(), &f, &reg_config(), true, Some(&freq));
     let h = g.as_ref().unwrap_or(&f);
     // the loop body (d & 3) and the region's cold block (d & 4)
     let body = h.blocks.iter().position(|b| b.insts.iter().any(|i| matches!(i, Inst::IBinI(IOp::And, _, _, _, 3)))).unwrap();

@@ -57,8 +57,21 @@ static LOADED: std::sync::OnceLock<Option<(u64, u64, std::time::SystemTime)>> = 
 /// a change of what it is built from. Its restart then goes into that file, built first so cargo
 /// finds it current ([`route`], [`relaunch`]); a restart of the run alone would keep the replaced
 /// code. False while the path, or the file it held at startup, is unknown. One `stat`.
-fn loader_replaced() -> bool {
+pub fn loader_replaced() -> bool {
     loader().is_some_and(|p| replaced(LOADED.get().copied().flatten(), &p))
+}
+
+/// Whether this process can rebuild its loader in place ([`command`]): never a loader outside a
+/// cargo target directory (a copy a deployment replaces under a run, a JIT picked by its inputs'
+/// content). Its restart into a replaced file then goes into the file as it is ([`route_of`]).
+/// Asked once the runner named the package (a few `stat`s), then kept: the loader's path stays.
+fn loader_buildable() -> bool {
+    static BUILDABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(buildable) = BUILDABLE.get() { return *buildable; }
+    // (with no package named yet nothing is known, and off unix no restart goes into another file:
+    // the route stays build-first, as it was)
+    if !cfg!(unix) || PACKAGE.lock().unwrap_or_else(|e| e.into_inner()).is_none() { return true; }
+    *BUILDABLE.get_or_init(|| command(Priority::Background).is_ok())
 }
 
 /// `path` holds another file than the one whose identity was `loaded`.
@@ -364,8 +377,11 @@ pub fn update_message() -> Option<std::sync::Arc<str>> {
 /// The ring button and `session relaunch` both arrive here. A source-check offer starts the
 /// existing background build; a build already running finishes before requesting a safe point.
 pub(super) fn relaunch() -> Option<Result<String, String>> {
-    // (looked at before the state's lock: a stat, which the ring's thread need not wait behind)
+    // (looked at before the state's lock: a stat, and the first time a few more, which the ring's
+    // thread need not wait behind)
     let replaced = loader_replaced();
+    #[cfg(unix)]
+    let (buildable, loader_path) = (!replaced || loader_buildable(), loader());
     let (phase, why, paths) = {
         let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if st.phase == Phase::Idle && st.provided.is_none() && !st.offered && !replaced { return None; }
@@ -375,6 +391,18 @@ pub(super) fn relaunch() -> Option<Result<String, String>> {
             // a build nobody waited for: it goes on at the person's priority now
             end_low_cargo(&mut st);
             return Some(Ok(format!("rebuild {tool}, then restart with the program's state", tool = crate::tool_name())));
+        }
+        // a replaced loader nothing here can build (a deployment's copy, outside any cargo target
+        // directory): the restart goes into the file at its path as it is, as into a rebuilt one
+        #[cfg(unix)]
+        if matches!(st.phase, Phase::Idle | Phase::Failed)
+            && route_of(st.phase, st.cannot_build, st.offered || st.provided.is_some(), || replaced, || buildable) == Route::Built
+        {
+            if let Some(loader) = loader_path {
+                let stamps = stamps(&st.paths);
+                *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handover { loader, stamps });
+                st.phase = Phase::Restarting;
+            }
         }
         (st.phase, st.why.clone(), st.paths.clone())
     };
@@ -479,18 +507,21 @@ pub fn route() -> Route {
         let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         (st.phase, st.cannot_build, st.offered || st.provided.is_some())
     };
-    route_of(phase, cannot_build, offered, loader_replaced)
+    route_of(phase, cannot_build, offered, loader_replaced, loader_buildable)
 }
 
 /// [`route`] of a `phase`: `offered`, an update of the JIT's inputs waits for the restart;
-/// `replaced`, whether a build replaced the loader file ([`loader_replaced`]), asked only where it
-/// decides the route.
-fn route_of(phase: Phase, cannot_build: bool, offered: bool, replaced: impl Fn() -> bool) -> Route {
+/// `replaced`, whether a build replaced the loader file ([`loader_replaced`]); `buildable`, whether
+/// this process can build its loader ([`loader_buildable`]); each asked only where it decides the
+/// route. A replaced loader is built first (cargo finds it current, then the restart goes into
+/// it); one nothing can build is gone into as it is (a deployment's copy the run started from).
+fn route_of(phase: Phase, cannot_build: bool, offered: bool, replaced: impl Fn() -> bool, buildable: impl Fn() -> bool) -> Route {
     match phase {
         Phase::Building => Route::Building,
         Phase::Restarting => Route::Built,
         Phase::Idle | Phase::Failed if cannot_build => Route::CannotBuild,
-        Phase::Idle | Phase::Failed if offered || replaced() => Route::BuildFirst,
+        Phase::Idle | Phase::Failed if offered => Route::BuildFirst,
+        Phase::Idle | Phase::Failed if replaced() => if buildable() { Route::BuildFirst } else { Route::Built },
         Phase::Idle | Phase::Failed => Route::Plain,
     }
 }
@@ -1074,18 +1105,22 @@ mod tests {
         std::fs::write(&loader, "#!/bin/sh\necho the replaced loader\n").unwrap();
         let started = identity(&loader);
         assert!(!replaced(started, &loader) && !replaced(None, &loader), "the file the run started from, or an unknown start: nothing replaced");
-        assert_eq!(route_of(Phase::Idle, false, false, || replaced(started, &loader)), Route::Plain, "nothing replaced, nothing offered: the run alone restarts");
+        assert_eq!(route_of(Phase::Idle, false, false, || replaced(started, &loader), || panic!("not asked")), Route::Plain, "nothing replaced, nothing offered: the run alone restarts");
         let built = dir.join("loader.new");
         std::fs::write(&built, "#!/bin/sh\necho \"loader got [${RELAX_RUN_NATIVE-}] [${RELAX_BIN_NATIVE_RECEIPT-}] [${RELAX_TEST_RESTART_KEPT-}]\"\n").unwrap();
         std::fs::set_permissions(&built, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::rename(&built, &loader).unwrap();
         assert!(replaced(started, &loader), "a build put a new file at the loader's path");
         for phase in [Phase::Idle, Phase::Failed] {
-            assert_eq!(route_of(phase, false, false, || replaced(started, &loader)), Route::BuildFirst, "a replaced loader: the click builds first, then restarts into it ({phase:?})");
-            assert_eq!(route_of(phase, true, false, || panic!("not asked")), Route::CannotBuild, "a process that cannot build stays on its loader ({phase:?})");
+            assert_eq!(route_of(phase, false, false, || replaced(started, &loader), || true), Route::BuildFirst, "a replaced loader: the click builds first, then restarts into it ({phase:?})");
+            // the jitlegs relaunch gate's `swap` case: a run from a copy outside any cargo target
+            // directory, the copy replaced under it, found nothing to restart into (11-22)
+            assert_eq!(route_of(phase, false, false, || replaced(started, &loader), || false), Route::Built, "a replaced loader nothing can build: the restart goes into the file as it is, nothing built ({phase:?})");
+            assert_eq!(route_of(phase, false, true, || panic!("not asked"), || panic!("not asked")), Route::BuildFirst, "an offered update builds first, the loader's file aside ({phase:?})");
+            assert_eq!(route_of(phase, true, false, || panic!("not asked"), || panic!("not asked")), Route::CannotBuild, "a process that cannot build stays on its loader ({phase:?})");
         }
-        assert_eq!(route_of(Phase::Building, false, false, || panic!("not asked")), Route::Building);
-        assert_eq!(route_of(Phase::Restarting, false, false, || panic!("not asked")), Route::Built);
+        assert_eq!(route_of(Phase::Building, false, false, || panic!("not asked"), || panic!("not asked")), Route::Building);
+        assert_eq!(route_of(Phase::Restarting, false, false, || panic!("not asked"), || panic!("not asked")), Route::Built);
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "reload::host::tests::the_next_run_takes_none_of_the_run_s_native_builds", "--nocapture"])
             .env(CHILD, &dir));

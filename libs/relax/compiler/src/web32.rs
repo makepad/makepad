@@ -280,10 +280,10 @@ pub fn w32_panic_impl(msg: u64, len: u64, file: u64, file_len: u64, line: u64, c
 }
 
 rt_fn! {
-pub fn w32_catch_panic(f: u64, data: u64) -> u64 {
+pub fn w32_catch_panic(f: u64, data: u64, caught: u64) -> u64 {
     // an unwind skips the frames' returns: the shadow stack is put back at the recovery point
     let s = ss_save();
-    let r = crate::jit::rt_catch_panic(native(f), data);
+    let r = crate::jit::rt_catch_panic(native(f), data, caught);
     ss_restore(s);
     r
 }

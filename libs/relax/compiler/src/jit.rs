@@ -26,7 +26,7 @@ use relax_backend::x64;
 use crate::os;
 use crate::owner;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum FnKey {
@@ -241,9 +241,10 @@ pub struct Rt {
     /// `thread_run(entry: fn(*mut u8), arg) -> u64`: runs `entry(arg)` under a recovery point
     /// on the calling thread; 0 = returned, 1 = panicked/faulted (report printed)
     pub thread_run: u64,
-    /// `catch_panic(f: fn(*mut u8), data) -> u64` (core::intrinsics_rt::catch_panic): runs
-    /// `f(data)` under a recovery point on this thread (nested in any outer one); 1 = it
-    /// panicked or faulted (report printed, the stack reset to here), 0 = returned
+    /// `catch_panic(f: fn(*mut u8), data, caught: bool) -> u64` (core::intrinsics_rt::
+    /// catch_panic): runs `f(data)` under a recovery point on this thread (nested in any outer
+    /// one); `caught`: std's catch_unwind, whose panic the program handles (rt_catch_panic);
+    /// 1 = it panicked or faulted (the stack reset to here), 0 = returned
     pub catch_panic: u64,
     /// `args() -> (argc, argv)`: the program's C argv (NUL-terminated strings, argv[argc] = null)
     pub args: u64,
@@ -1652,6 +1653,21 @@ fn raw_report_frames(f: &os::fault::Fault, raw: &[u64], scanned: bool) {
     }
 }
 
+/// The watchdog's signal reached a thread with no kick counted for it, and the program has no
+/// handler of its own for it: the process ends by its default action. Said first, with what the
+/// kick count knows (os::thread::kick_counts), and the program's disposition (signal context).
+#[cfg(unix)]
+pub(crate) fn raw_not_a_kick(sig: i32) {
+    let (pending, freed, ended, on_the_way) = os::thread::kick_counts();
+    let mut name = [0u8; 64];
+    let n = os::thread::own_name(&mut name);
+    let mut l = RawLine::new();
+    l.put(b"relax: signal ").dec(sig as u64).put(b", the JIT's kick signal, reached thread `").put(&name[..n.min(64)]).put(b"` (").hex(os::thread::current()).put(b") with no kick counted for it: the process ends by it. Kicks counted on threads now ").dec(pending);
+    l.put(b", entries given back with kicks counted ").dec(freed).put(b", kicks counted on threads that ended ").dec(ended).put(b", kicks sent and not taken ").dec(on_the_way);
+    l.flush();
+    raw_no_handler(sig);
+}
+
 /// os/fault.rs `fatal_signal`'s report (from a signal handler: no allocation, no lock): the
 /// signal, the thread and what it was doing, the stack the fault came on and its room (`alt`: the
 /// thread's signal stack), the frames.
@@ -2397,8 +2413,16 @@ pub unsafe fn prelink_startup(up: *mut Unit) -> usize {
             let mut arm = Vec::with_capacity(slots.len());
             let up: *mut Unit = u;
             let mut verdicts = Vec::new();
+            let mut twins = Vec::new();
             for s in slots {
+                if matches!((&*up).fns[s.id as usize].key, FnKey::Plain(_)) {
+                    twins.push((s.id, s.o3));
+                }
                 install_prelinked_slot(up, s, gandalf, &mut notes, &mut arm, &mut verdicts);
+            }
+            // (after the whole image: a twin's base may be in it, later than the twin)
+            for (t, o3) in twins {
+                twin_stored(up, t, o3);
             }
             (&mut *up).arm_counters(&arm);
             // (a call reaches each through its count stub: startup_set_called reads which were called)
@@ -3610,7 +3634,7 @@ fn set_tls_block(b: *mut u8) {
 /// This thread's thread-local block (allocated on first use).
 #[inline]
 pub fn tls_block() -> u64 {
-    let b = TLS_BLOCK_COPY.with(|c| c.get());
+    let b = TLS_BLOCK_COPY.try_with(|c| c.get()).unwrap_or(0);
     if b != 0 {
         return b;
     }
@@ -3620,7 +3644,7 @@ pub fn tls_block() -> u64 {
 /// This thread's thread-local block, 0 when it has none (it never ran JIT code): nothing is
 /// allocated.
 pub fn tls_block_if_any() -> u64 {
-    let b = TLS_BLOCK_COPY.with(|c| c.get());
+    let b = TLS_BLOCK_COPY.try_with(|c| c.get()).unwrap_or(0);
     if b != 0 {
         return b;
     }
@@ -3963,6 +3987,14 @@ fn raise_with(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret:
             crate::inspect::events::on_panic(&at, regs);
         }
     }
+    // the run ended meanwhile (a parked panic resumed as a restart, or another thread's end): its
+    // frames' cleanups are code of the ended run, which never runs again, and their unwind
+    // trailers are gone with it. The thread leaves the run from here, holding nothing.
+    if crate::domain::current_is_ending() {
+        CLEANING.with(|c| c.set(0));
+        UNWINDING.with(|c| c.set(false));
+        unsafe { leave_ended_run() }
+    }
     PANIC.with(|p| *p.borrow_mut() = Some(info));
     FMT.with(|f| {
         let mut v = f.borrow_mut();
@@ -4022,17 +4054,21 @@ pub(crate) fn host_boundary<R>(entry: &'static str, f: impl FnOnce() -> R) -> R 
     }
 }
 
-/// The frame pointer of this native frame (frame pointers are kept on every target Relax runs on).
-#[inline(always)]
-fn own_frame_pointer() -> u64 {
-    let fp: u64;
-    #[cfg(target_arch = "x86_64")]
-    unsafe { std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags)) };
-    #[cfg(target_arch = "aarch64")]
-    unsafe { std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags)) };
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    { fp = 0; }
-    fp
+/// The frame pointer of the function this is written in (frame pointers are kept on every target
+/// Relax runs on). A macro, not a fn: the register is the frame of the function the asm is in,
+/// and `#[inline(always)]` does not promise which one that is (the JIT's first tier inlines
+/// nothing): a fn of its own gave its own frame, popped by the time its caller used it.
+macro_rules! own_frame_pointer {
+    () => {{
+        let fp: u64;
+        #[cfg(target_arch = "x86_64")]
+        unsafe { std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags)) };
+        #[cfg(target_arch = "aarch64")]
+        unsafe { std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags)) };
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        { fp = 0; }
+        fp
+    }};
 }
 
 /// A native panic reached a runtime entry JIT code called (rt_fn!, rt_abi.rs). It must not unwind
@@ -4059,7 +4095,7 @@ pub(crate) fn rt_boundary_panic(entry: &str, p: Box<dyn std::any::Any + Send>) -
     eprintln!("relax: {}", message);
     crate::inspect::flightrec::event("rt.boundary", &message, 0, 0);
     drop(p);
-    let fp = own_frame_pointer();
+    let fp = own_frame_pointer!();
     let ret = if fp == 0 { 0 } else { unsafe { *((fp + 8) as *const u64) } };
     raise_with("panic", message, 0, 0, fp, ret, std::ptr::null())
 }
@@ -4969,19 +5005,6 @@ pub(crate) fn rt_thread_run(entry: u64, arg: u64) -> u64 {
 }
 }
 
-thread_local! {
-    /// The next recovery point this thread enters is std's catch_unwind (relax_catch_caught).
-    static CATCH_CAUGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// `__relax_catch_caught`, which std's catch_unwind calls just before its recovery point: the
-/// panic that point catches goes back to the program, which handles it, and no report follows
-/// std's message (rustc prints only that). A panic that ends a thread or a test keeps its
-/// `report:` line, which a log's readers (land_gate.sh's test_failures, jit_misses) count.
-pub extern "C" fn relax_catch_caught() {
-    let _ = CATCH_CAUGHT.try_with(|c| c.set(true));
-}
-
 /// What a recovery point (rt_catch_panic) does with a panic that unwinds to it.
 #[derive(Clone, Copy, PartialEq)]
 enum Catch {
@@ -4994,9 +5017,22 @@ enum Catch {
     Retry,
 }
 
+/// A recovery point on its rt_catch_panic frame, linked to the enclosing point.
+struct Recovery {
+    prev: *const Recovery,
+    catch: Catch,
+}
+
 thread_local! {
-    /// The recovery points this thread runs inside (rt_catch_panic), innermost last.
-    static RECOVERY: std::cell::RefCell<Vec<Catch>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The innermost recovery point on this thread, or null outside a catch.
+    static RECOVERY: std::cell::Cell<*const Recovery> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+impl Drop for Recovery {
+    fn drop(&mut self) {
+        // Restoring the saved head after the call also unlinks any inner frames a leave skipped.
+        let _ = RECOVERY.try_with(|head| head.set(self.prev));
+    }
 }
 
 /// Whether a panic raised on this thread now goes back to the program, which handles it: the
@@ -5007,41 +5043,38 @@ thread_local! {
 /// (a thread's start, the test harness), none does (a program's main, a callback the host runs),
 /// or a retry boundary does (it rethrows unless asked to retry).
 pub(crate) fn panic_caught_here() -> bool {
-    RECOVERY.try_with(|r| r.borrow().last() == Some(&Catch::Program)).unwrap_or(false)
-}
-
-/// The thread is inside a recovery point (`RECOVERY`) until this drops.
-struct InRecovery;
-impl InRecovery {
-    fn enter(catch: Catch) -> InRecovery {
-        // (the thread's list outlives the program heap's resets)
-        let _k = crate::zone_alloc::kept();
-        let _ = RECOVERY.try_with(|r| r.borrow_mut().push(catch));
-        InRecovery
-    }
-}
-impl Drop for InRecovery {
-    fn drop(&mut self) {
-        let _ = RECOVERY.try_with(|r| r.borrow_mut().pop());
-    }
+    RECOVERY.try_with(|head| {
+        let p = head.get();
+        // The enclosing rt_catch_panic frame keeps this record alive during the nested call.
+        !p.is_null() && unsafe { (*p).catch == Catch::Program }
+    }).unwrap_or(false)
 }
 
 rt_fn! {
 /// core::intrinsics_rt::catch_panic: `f(data)` under a recovery point (std::panic::
 /// catch_unwind, std::thread's start routine). The panic message itself was printed by
-/// std's hook; the report adds where it happened.
-pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
+/// std's hook; the report adds where it happened. `caught` (a bool) is set by std's
+/// catch_unwind: the panic goes back to the program, which handles it, and no report follows
+/// std's message (rustc prints only that). A panic that ends a thread or a test (std's own
+/// boundaries pass false) keeps its `report:` line, which a log's readers (land_gate.sh's
+/// test_failures, jit_misses) count.
+pub(crate) fn rt_catch_panic(f: u64, data: u64, caught: u64) -> u64 {
     ensure_altstack();
-    let caught = CATCH_CAUGHT.try_with(|c| c.replace(false)).unwrap_or(false);
+    // a bool argument: its low byte
+    let caught = caught as u8 != 0;
     let u = cur_unit();
     let retry = crate::inspect::events::take_retry_next();
-    let recovery = InRecovery::enter(match (caught, retry) {
+    let catch = match (caught, retry) {
         (false, _) => Catch::Ends,
         (true, false) => Catch::Program,
         (true, true) => Catch::Retry,
-    });
-    let r = unsafe { call_jit_nested(u, f, data) };
-    drop(recovery);
+    };
+    let r = {
+        let prev = RECOVERY.try_with(|head| head.get()).unwrap_or(std::ptr::null());
+        let recovery = Recovery { prev, catch };
+        let _ = RECOVERY.try_with(|head| head.set(&recovery));
+        unsafe { call_jit_nested(u, f, data) }
+    };
     match r {
         Ok(_) => 0,
         // `process::exit` in an app domain (domain.rs exit_current) is no panic: catch_unwind
@@ -5587,7 +5620,7 @@ pub(crate) fn watchdog_at_wait(leave_wait: impl FnOnce()) {
 /// chain from here, from the first return address into JIT code on (the JIT frame is the pc).
 #[inline(never)]
 unsafe fn record_hang_here() {
-    let fp = own_frame_pointer();
+    let fp = own_frame_pointer!();
     let here = &fp as *const u64 as u64;
     let _ = FAULT_REC.try_with(|r| {
         let r = &mut *r.get();
@@ -6291,6 +6324,7 @@ impl Unit {
         // function of this run was lowered (the cache links them by name)
         let _ = u.syms.intern(crate::syms::SymKind::Rt("divrem128"), crate::lower::divrem128_addr());
         let _ = u.syms.intern(crate::syms::SymKind::Rt("cannot_unwind"), crate::lower::cannot_unwind_addr());
+        let _ = u.syms.intern(crate::syms::SymKind::Rt("made_late"), crate::lower::made_late_addr());
         for (name, addr) in ["wide_f32", "wide_f64"].into_iter().zip(crate::lower::wide_float_addrs()) {
             let _ = u.syms.intern(crate::syms::SymKind::Rt(name), addr);
         }
@@ -6496,7 +6530,7 @@ impl Unit {
     }
 
     pub(crate) fn emit_linked(&self, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Result<u64, String> {
-        let at = self.code_bump(WIN_CODE, code.len() as u64, 16);
+        let at = self.code_bump(WIN_CODE, code.len() as u64, code_start_align());
         let mut c = code.to_vec();
         self.link_code(&mut c, at, relocs)?;
         unsafe { os::mem::write_code(at, &c) };
@@ -6513,15 +6547,18 @@ impl Unit {
             return self.emit_linked(code, relocs);
         }
         let need = (code.len() as u64 + 15) & !15;
+        let align = hot_align();
         let at = {
             let mut h = self.hot_code.lock().unwrap_or_else(|e| e.into_inner());
-            if h.0 + need > h.1 {
+            let mut at = (h.0 + align - 1) & !(align - 1);
+            if at + need > h.1 {
                 let size = need.max(HOT_CHUNK);
-                let c = self.code_bump(WIN_HOT, size, 64);
+                let c = self.code_bump(WIN_HOT, size, align.max(64));
                 *h = (c, c + size);
+                at = c;
             }
-            let at = h.0;
-            h.0 += need;
+            HOT_PAD.fetch_add(at - h.0, Ordering::Relaxed);
+            h.0 = at + need;
             at
         };
         let mut c = code.to_vec();
@@ -6535,7 +6572,7 @@ impl Unit {
     pub(crate) fn emit_grouped(&self, g: Option<crate::invalid::Group>, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Result<u64, String> {
         let Some(g) = g else { return self.emit_linked(code, relocs) };
         // a chunk is page-aligned and page-sized: no other code shares its pages
-        let at = crate::invalid::alloc(self, g, code.len() as u64, |size, page| self.code_bump(WIN_GROUPS, size, page))?;
+        let at = crate::invalid::alloc(self, g, code.len() as u64, code_start_align(), |size, page| self.code_bump(WIN_GROUPS, size, page))?;
         let mut c = code.to_vec();
         self.link_code(&mut c, at, relocs)?;
         unsafe { os::mem::write_code(at, &c) };
@@ -6655,10 +6692,10 @@ impl Unit {
         at
     }
 
-    /// A block of `len` bytes of code memory, 16-byte aligned, not written (the startup image:
-    /// cache.rs prelink links its code for this address and writes it whole).
+    /// A block of `len` bytes of code memory, aligned for O3 code (hot_align), not written (the
+    /// startup image: cache.rs prelink links its code for this address and writes it whole).
     pub(crate) fn code_block(&self, len: u64) -> u64 {
-        let at = self.code_bump(WIN_GLUE, len, 16);
+        let at = self.code_bump(WIN_GLUE, len, hot_align());
         // filled whole right away (the startup image's code)
         os::mem::prefault(at, len as usize);
         at
@@ -6950,7 +6987,7 @@ impl Unit {
         } else {
             String::new()
         };
-        format!("code window {:.1} of {:.0} MB used: {}, alignment {:.1} MB{}", mb(used), mb(self.exec_size), by.join(", "), mb(used.saturating_sub(counted)), lean)
+        format!("code window {:.1} of {:.0} MB used: {}, alignment {:.1} MB (O3 chunks: {:.1} KB to start O3 code at {} bytes){}", mb(used), mb(self.exec_size), by.join(", "), mb(used.saturating_sub(counted)), HOT_PAD.load(Ordering::Relaxed) as f64 / 1024.0, hot_align(), lean)
     }
 
     /// What the slots' first code has taken of the code window: their code (`first_code`), their
@@ -7674,6 +7711,41 @@ impl Unit {
         })
     }
 
+    /// The slot `instance` resolves to for a value of type `t` (the closure itself, a reference
+    /// or pointer to it, or a `Pin` of one: a call's receiver, a vtable's or a fn pointer's
+    /// source): a closure's is the one its type names (closure_fn_id), as the code that made the
+    /// value names it. A live edit retargets the closure's def to the new text (commit_version),
+    /// so the def (instance_fn_id) names the closure as written now; code built from an earlier
+    /// version after the patch (a kept closure that never ran, a generic instance over an old
+    /// closure type) holds values of that version's closures, whose captures and body are the
+    /// old ones. An `async fn`'s body stays with the def: the fn's own slot makes it, which
+    /// follows the def to the current text (and a caller's view of its type may name an older
+    /// version, Instance::resolve_closure).
+    pub fn instance_fn_id_for(&self, instance: Instance, t: TyId) -> u32 {
+        if let InstanceKind::Item(d) = instance.def {
+            if self.prog.def(d).kind == DefKind::Closure {
+                let c = self.closure_in(t).filter(|&c| matches!(self.tcx.tys.kind(c), TyKind::Closure(_, ce, _) if ce & crate::tcx::ASYNC_FN_BODY == 0));
+                if let Some(id) = c.and_then(|c| self.closure_fn_id(c)) {
+                    return id;
+                }
+            }
+        }
+        self.instance_fn_id(instance)
+    }
+
+    /// The closure type `t` is, or refers to (through references, pointers and a `Pin`).
+    fn closure_in(&self, mut t: TyId) -> Option<TyId> {
+        let pin = self.tcx.lang_items.get(LangItem::Pin);
+        loop {
+            match self.tcx.tys.kind(t) {
+                TyKind::Closure(..) => return Some(t),
+                TyKind::Ref(_, inner, _) | TyKind::Ptr(_, inner) => t = *inner,
+                TyKind::Adt(d, args, _) if Some(*d) == pin => t = *self.tcx.tys.list(*args).first()?,
+                _ => return None,
+            }
+        }
+    }
+
     /// The function of a closure type (its body is lowered from the owner instance's).
     pub fn closure_fn_id(&self, t: TyId) -> Option<u32> {
         if let TyKind::Closure(file, ce, crate::types::ClosureArgs { parent_args: owner, .. }) = self.tcx.tys.kind(t).clone() {
@@ -7779,7 +7851,7 @@ impl Unit {
                 }
                 let args = Instance::new_raw(method, args).compact_args(&self.tcx);
                 let instance = Instance::expect_resolve_for_vtable(&self.tcx, &self.prog, method, &args);
-                let id = self.instance_fn_id(instance);
+                let id = self.instance_fn_id_for(instance, src);
                 words.push(self.entry(id));
                 wsyms.push(Some(self.syms.intern(crate::syms::SymKind::Thunk(id), self.entry(id))));
             }
@@ -9999,24 +10071,11 @@ impl Unit {
         self.fn_map.get(&FnKey::Plain(id))
     }
 
-    /// SPEC-V: whether code of slot `caller` lowered before its verdict (its aliasing-prone calls going
-    /// to twins, no run-time disjoint-index checks) may call the twins' bases instead: the bases are
-    /// built with `noalias`, so only when that code passes them no aliased `&mut`. That holds when the
-    /// caller's verdict is clean and asks for no run-time disjoint-index checks: index borrows the
-    /// checker accepted only with such a check may overlap in code that lacks it. Never a twin: its
-    /// callers may pass it aliased arguments, which its calls pass on, so its calls stay twin calls.
-    /// (A verdict that asks for the checks is never stored: on a warm launch such a body is not clean
-    /// until this run's checker has it, and then its checks are known.)
-    /// Used where that code is linked (twin_link_target) and where the image is written (build_image).
-    pub(crate) fn unverified_code_calls_bases(&self, caller: u32) -> bool {
-        !matches!(self.fns[caller as usize].key, FnKey::Plain(_)) && self.verdict_clean(caller) && self.disjoint_checks(caller).is_none()
-    }
-
     /// SPEC-V: where linked (cached) code of slot `caller` sends its call / reference to slot `target`.
     /// A twin exists for callers whose aliasing is not known yet; cached code lowered in an earlier run
     /// before its verdict still names twins. When the caller's own body is verified clean now (a warm
     /// launch knows the stored verdict before the first link) without run-time disjoint-index checks
-    /// (unverified_code_calls_bases), its calls go to the twin's base: the verified body, sound for a
+    /// (twin_caller_kept), its calls go to the twin's base: the verified body, sound for a
     /// caller that passes no aliased `&mut` (the image does the same when it is written: build_image).
     /// Without it every warm launch
     /// ran the race's draw path (draw_view .. set_uniform, find_appendable_drawcall) as twins built at
@@ -10024,21 +10083,56 @@ impl Unit {
     /// RELAX_OPT=-twinlink keeps the twins (A/B).
     /// `stored`: whether the base (no code yet) has a stored code entry: its first call links that
     /// entry, as the twin's would (a base that never ran anywhere would compile on the program
-    /// thread instead: the twin it is). The bases of hot twins get that entry in the background
-    /// (twin_base_build), so the next launch's callers call them.
+    /// thread instead: the twin it is). The bases of twins that get code (a fresh O3 build, a link
+    /// of the twin's stored code: twin_stored) get that entry in the background (twin_base_build),
+    /// so the next launch's callers call them.
     pub(crate) fn twin_link_target(&self, caller: u32, target: u32, stored: impl FnOnce(u32) -> bool) -> u32 {
         let n = self.fns.len();
         if target as usize >= n || caller as usize >= n { return target }
         let FnKey::Plain(base) = self.fns[target as usize].key else { return target };
-        if (base as usize) < self.fns.len() && self.unverified_code_calls_bases(caller) && !matches!(self.verdict_state(base), Verdict::Failed(_))
-            && self.fns[base as usize].build_err.is_none()
-            && (self.fns[base as usize].compiled || stored(base))
-            && !relax_backend::stats::opt_off(&self.prog.session.options, "-twinlink") {
-            TWIN_RETARGETS.fetch_add(1, Ordering::Relaxed);
-            base
-        } else {
-            target
+        match self.twin_kept(caller, base, stored) {
+            None => {
+                TWIN_RETARGETS.fetch_add(1, Ordering::Relaxed);
+                base
+            }
+            Some(why) => {
+                note_twin_kept(self, caller, target, why);
+                target
+            }
         }
+    }
+
+    /// SPEC-V: why linked code of `caller` keeps its call to the twin of `base` a twin call: the
+    /// first clause of the retarget rule (twin_link_target) that fails, in the rule's order. None:
+    /// the call goes to the base.
+    pub(crate) fn twin_kept(&self, caller: u32, base: u32, stored: impl FnOnce(u32) -> bool) -> Option<TwinKept> {
+        if let Some(why) = self.twin_caller_kept(caller) { return Some(why); }
+        if base as usize >= self.fns.len() { return Some(TwinKept::BaseNoCode); }
+        if matches!(self.verdict_state(base), Verdict::Failed(_)) || self.fns[base as usize].build_err.is_some() { return Some(TwinKept::BaseFailed); }
+        if !self.fns[base as usize].compiled && !stored(base) { return Some(TwinKept::BaseNoCode); }
+        if relax_backend::stats::opt_off(&self.prog.session.options, "-twinlink") { return Some(TwinKept::Off); }
+        None
+    }
+
+    /// SPEC-V: why code of slot `caller` lowered before its verdict (its aliasing-prone calls going
+    /// to twins, no run-time disjoint-index checks) may not call the twins' bases instead (None: it
+    /// may, `twin_kept`'s caller clauses in their order): the bases are
+    /// built with `noalias`, so only when that code passes them no aliased `&mut`. That holds when the
+    /// caller's verdict is clean and asks for no run-time disjoint-index checks: index borrows the
+    /// checker accepted only with such a check may overlap in code that lacks it. Never a twin: its
+    /// callers may pass it aliased arguments, which its calls pass on, so its calls stay twin calls.
+    /// (A verdict that asks for the checks is never stored: on a warm launch such a body is not clean
+    /// until this run's checker has it, and then its checks are known.)
+    /// Used where that code is linked (twin_link_target) and where the image is written (build_image).
+    pub(crate) fn twin_caller_kept(&self, caller: u32) -> Option<TwinKept> {
+        if matches!(self.fns[caller as usize].key, FnKey::Plain(_)) { return Some(TwinKept::CallerTwin); }
+        match self.verdict_state(caller) {
+            Verdict::Clean => {}
+            Verdict::Pending => return Some(TwinKept::CallerPending),
+            Verdict::Unverifiable(_) => return Some(TwinKept::CallerUnverifiable),
+            Verdict::Failed(_) => return Some(TwinKept::CallerFailed),
+        }
+        self.disjoint_checks(caller).is_some().then_some(TwinKept::CallerChecks)
     }
 
     /// SPEC-V: whether slot `id` may get O3 code. Verified code does; so does unverified code (twins,
@@ -10625,10 +10719,28 @@ thread_local! {
 }
 
 /// std::relax::realtime_thread: the calling thread counts as real-time from now on (as one
-/// RELAX_RT_THREADS names, or one with a real-time policy).
+/// RELAX_RT_THREADS names, or one with a real-time policy), and as a thread that holds a core
+/// against a deadline in the CPU budget (its placement of builds: `fast_room`).
 pub(crate) extern "C" fn __relax_realtime_thread() {
     RT_THREAD.with(|t| t.set(true));
+    makepad_cpu_budget::set_thread_deadline(true);
     realtime_live(None);
+}
+
+/// The calling thread's Background work is behind while it lives (`set_thread_work`), and the kind
+/// it had again after.
+struct WorkBehind(u8);
+impl WorkBehind {
+    fn on() -> WorkBehind {
+        let was = makepad_cpu_budget::thread_work();
+        makepad_cpu_budget::set_thread_work(makepad_cpu_budget::WORK_BEHIND);
+        WorkBehind(was)
+    }
+}
+impl Drop for WorkBehind {
+    fn drop(&mut self) {
+        makepad_cpu_budget::set_thread_work(self.0);
+    }
 }
 
 /// A real-time thread is live in this process: from then on the queue's tier-up builds run at the
@@ -10670,6 +10782,12 @@ pub(crate) fn rt_named(name: &str) -> bool {
 /// The calling thread runs under a real-time policy, marked itself (std::relax::realtime_thread),
 /// or RELAX_RT_THREADS=name,.. names it. Asked at each lazy compile, not cached: a thread's
 /// policy and name are set after it starts.
+/// is_realtime_thread for a runtime entry that must not panic: a thread past its locals'
+/// teardown counts as one.
+pub(crate) fn realtime_thread_entry() -> bool {
+    RT_THREAD.try_with(|t| t.get()).unwrap_or(true) || os::thread::realtime() || !rt_names().is_empty() && rt_named(&os::thread::name(os::thread::current()))
+}
+
 pub fn is_realtime_thread() -> bool {
     if RT_THREAD.with(|t| t.get()) || os::thread::realtime() {
         return true;
@@ -11293,6 +11411,7 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
         if let Some(inl) = &t1 {
             cached_tier1(up, id, inl, &kept);
         }
+        twin_stored(up, id, t1.is_some());
         if (&mut *up).cache.as_mut().is_some_and(|c| std::mem::take(&mut c.last_o2)) {
             o2_cached(up, id);
         }
@@ -13216,7 +13335,8 @@ fn drain_slow_base() {
 /// repeat until one has nothing to build ("final": time to final performance, `--verbose`). No
 /// timer runs afterwards; the first O3 worker's idle poll only reads counters. Phase changes:
 /// SETTLE_NEW_CODE first compiles since the settle or a live patch re-arm every final slot (a new
-/// window, then a sweep), and so does SETTLE_REARM_NS of program time; a final slot's own loop that
+/// window, then a sweep), and so does SETTLE_REARM_NS of program time for the slots this run made
+/// final (a decision an earlier run stored stays: STORED_FINAL); a final slot's own loop that
 /// reaches the O3 threshold's rate re-arms that slot at once (rt_loop_hot). Nothing here is stored:
 /// a warm start links the O2 entries and settles again, without builds.
 /// RELAX_SETTLE_DIV=<n>: the running bar (default 256).
@@ -13301,9 +13421,10 @@ fn settle_tier_tick() {
             st.epoch += 1;
             drop(st);
             if FINAL_SLOTS.load(Ordering::Relaxed) != 0 {
-                let n = owner::publish(|| unsafe { settle_rearm_all(up) });
+                let periodic = why == "periodic";
+                let (n, kept) = owner::publish(|| unsafe { settle_rearm_all(up, periodic) });
                 if settle_trace() {
-                    eprintln!("relax settle-tier: re-armed {} final slots ({}) at t={:.1} s", n, why, wall_ns() as f64 / 1e9);
+                    eprintln!("relax settle-tier: re-armed {} final slots ({}) at t={:.1} s, {} final by a stored verdict kept", n, why, wall_ns() as f64 / 1e9, kept);
                 }
             }
         }
@@ -13439,22 +13560,20 @@ unsafe fn settle_final(u: &Unit, id: u32) -> bool {
 /// so each launch queued the backlogs of all before it, and the compiler's test children waited
 /// behind them for their own builds, 11-07.) Baseline code without a parked verdict counts on: it
 /// gets its O2 build by running (base_running, the settle sweep), and that install applies the
-/// verdict. Final code counts again when the settled state re-arms (settle_tier_tick), and without
-/// a parked verdict when one of its loops turns hot (rt_loop_hot). Unit lock held.
+/// verdict. Final code counts again when the settled state re-arms for a patch or new code
+/// (settle_tier_tick; its periodic look leaves it final: STORED_FINAL), and without a parked
+/// verdict when one of its loops turns hot (rt_loop_hot). Unit lock held.
 unsafe fn stored_tier_verdict(u: &Unit, id: u32, v: crate::cache::TierVerdict, base: bool) {
     use crate::cache::TierVerdict;
-    match v {
-        TierVerdict::Parked => {
-            let w5 = &*tier_rec(&u.slots, id).add(5);
-            w5.fetch_or(STORED_PARKED, Ordering::Relaxed);
-            if !settle_final(u, id) {
-                w5.fetch_and(!STORED_PARKED, Ordering::Relaxed);
-            }
-        }
-        TierVerdict::None if !base => {
-            settle_final(u, id);
-        }
-        _ => {}
+    let marks = match v {
+        TierVerdict::Parked => STORED_PARKED | STORED_FINAL,
+        TierVerdict::None if !base => STORED_FINAL,
+        _ => return,
+    };
+    let w5 = &*tier_rec(&u.slots, id).add(5);
+    w5.fetch_or(marks, Ordering::Relaxed);
+    if !settle_final(u, id) {
+        w5.fetch_and(!marks, Ordering::Relaxed);
     }
 }
 
@@ -13468,7 +13587,7 @@ unsafe fn settle_unfinal(u: &Unit, id: u32, threshold: u64) -> bool {
     }
     let (now, wall) = tier_clocks();
     tier_count_fresh(rec, threshold, now, wall);
-    (*rec.add(5)).fetch_and(!STORED_PARKED, Ordering::Relaxed);
+    (*rec.add(5)).fetch_and(!(STORED_PARKED | STORED_FINAL), Ordering::Relaxed);
     FINAL_SLOTS.fetch_sub(1, Ordering::Relaxed);
     let code = (*rec.add(1)).load(Ordering::Relaxed);
     let stub = (*rec.add(2)).load(Ordering::Relaxed);
@@ -13476,14 +13595,22 @@ unsafe fn settle_unfinal(u: &Unit, id: u32, threshold: u64) -> bool {
     true
 }
 
-/// Every final slot counts again (owner, unit lock): the number re-armed.
-unsafe fn settle_rearm_all(up: *mut Unit) -> u64 {
+/// Every final slot counts again (owner, unit lock), but for the periodic look (`periodic`) one
+/// final by a verdict an earlier run stored (STORED_FINAL): time alone does not reopen a stored
+/// decision, which made a warm session re-decide its tiers at the same second every launch and
+/// build a few dozen O3s with their cascades then (a heard run's sound fell to x0.91). The numbers
+/// re-armed and kept.
+unsafe fn settle_rearm_all(up: *mut Unit, periodic: bool) -> (u64, u64) {
     let u = &mut *up;
-    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return 0 };
-    let mut n = 0;
+    let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) else { return (0, 0) };
+    let (mut n, mut kept) = (0, 0);
     for id in 0..u.fns.len() as u32 {
         let rec = tier_rec(&u.slots, id);
         if (*rec.add(3)).load(Ordering::Acquire) != T_FINAL {
+            continue;
+        }
+        if periodic && (*rec.add(5)).load(Ordering::Relaxed) & STORED_FINAL != 0 {
+            kept += 1;
             continue;
         }
         if !settle_unfinal(u, id, threshold) {
@@ -13497,7 +13624,7 @@ unsafe fn settle_rearm_all(up: *mut Unit) -> u64 {
             u.rearm_counter(id, word);
         }
     }
-    n
+    (n, kept)
 }
 
 /// The startup released its workers (after the first present): the baseline slots sampled so far
@@ -13518,6 +13645,15 @@ unsafe fn release_base(up: *mut Unit) {
 /// Queues baseline slot `id` for its O2 build (once; not glue or sandbox twins, as o2_hot).
 /// True: queued now.
 unsafe fn o2_base(up: *mut Unit, id: u32) -> bool {
+    o2_base_as(up, id, queue::O2Kind::Base)
+}
+
+/// `o2_base` of a twin's base (`queue::O2Kind::TwinBase`: nothing calls it until it links).
+unsafe fn o2_twin_base(up: *mut Unit, id: u32) -> bool {
+    o2_base_as(up, id, queue::O2Kind::TwinBase)
+}
+
+unsafe fn o2_base_as(up: *mut Unit, id: u32, kind: queue::O2Kind) -> bool {
     let u = &*up;
     if (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) | FnKey::Ctfe(_)) || u.cache.is_none() {
         return false;
@@ -13530,7 +13666,7 @@ unsafe fn o2_base(up: *mut Unit, id: u32) -> bool {
     }
     u.fns[id as usize].hot_hint.store(true, Ordering::Relaxed);
     crate::inspect::tierlog::note(id, crate::inspect::tierlog::ev::O2_QUEUED, 0, 0, 0);
-    queue::o2(up as usize, id, queue::O2Kind::Base, wall_ns());
+    queue::o2(up as usize, id, kind, wall_ns());
     true
 }
 
@@ -18499,15 +18635,35 @@ static SAMPLER: std::sync::Once = std::sync::Once::new();
 
 /// The CPU sampler runs for a profile (RELAX_PROFILE) and for a wasm export's run (its
 /// samples pick the shipping O3 set: wasm_export::sampled_hot).
+/// Both settings are read once per process, so concurrent first readers cache the same answer.
+#[inline]
 fn sampling_on() -> bool {
-    profile_path().is_some() || crate::wasm_export::enabled()
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    const OFF: u8 = 1;
+    const ON: u8 = 2;
+    match STATE.load(Ordering::Relaxed) {
+        OFF => false,
+        ON => true,
+        _ => {
+            let on = profile_path().is_some() || crate::wasm_export::enabled();
+            STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
+            on
+        }
+    }
 }
 
+#[inline]
 fn sampler_enter(exec_base: u64, exec_size: u64) {
+    // A catch inside an export can be the process's first entry here.
     progress_start();
     if !sampling_on() {
         return;
     }
+    sampler_register(exec_base, exec_size);
+}
+
+#[inline(never)]
+fn sampler_register(exec_base: u64, exec_size: u64) {
     EXEC_LO.store(exec_base, Ordering::Relaxed);
     EXEC_HI.store(exec_base + exec_size, Ordering::Relaxed);
     let me = os::thread::current();
@@ -18529,10 +18685,16 @@ fn sampler_enter(exec_base: u64, exec_size: u64) {
     });
 }
 
+#[inline]
 fn sampler_leave() {
     if !sampling_on() {
         return;
     }
+    sampler_unregister();
+}
+
+#[inline(never)]
+fn sampler_unregister() {
     let me = os::thread::current();
     let mut g = SAMPLED.lock().unwrap();
     if let Some(k) = g.iter().position(|x| x.0 == me) {
@@ -18888,7 +19050,17 @@ static PROGRESS: std::sync::Once = std::sync::Once::new();
 
 /// RELAX_O3_PROGRESS: a thread writes the progress file (o3_progress_write) from the first
 /// JIT call on.
+#[inline]
 fn progress_start() {
+    if PROGRESS.is_completed() {
+        return;
+    }
+    progress_start_once();
+}
+
+#[cold]
+#[inline(never)]
+fn progress_start_once() {
     PROGRESS.call_once(|| {
         if std::env::var_os("RELAX_O3_PROGRESS").is_none_or(|v| v.is_empty()) {
             return;
@@ -21285,36 +21457,97 @@ unsafe fn borrow_build_enqueue(up: *mut Unit, id: u32) {
 const PREBUILD_MAX: usize = 256;
 /// SPEC-V: calls of linked code sent to a twin's base instead of the twin (twin_link_target)
 pub(crate) static TWIN_RETARGETS: AtomicU64 = AtomicU64::new(0);
+
+/// SPEC-V (inspect): why linked code's call to a twin stays a twin call, the first clause of the
+/// retarget rule that fails (Unit::twin_kept), in its order
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TwinKept { CallerTwin, CallerPending, CallerUnverifiable, CallerFailed, CallerChecks, BaseFailed, BaseNoCode, Off }
+pub(crate) const TWIN_KEPT_NAMES: [&str; 8] = ["caller is a twin", "caller pending", "caller unverifiable", "caller failed", "caller needs disjoint-index checks", "base failed", "base has no code and no entry", "-twinlink"];
+/// Twin calls kept, by clause: [0] at the lazy link of stored code (twin_link_target), [1] in the
+/// startup image this run wrote (build_image: "base has no code" there is a base not in the image)
+pub(crate) static TWIN_KEPT: [[AtomicU64; 8]; 2] = [const { [const { AtomicU64::new(0) }; 8] }; 2];
+/// The lazy link's kept twin calls, (unit, caller, twin) -> clause at the link: why-tier of the twin
+static TWIN_KEPT_AT: std::sync::LazyLock<relax_session::sync::Mutex<HashMap<(usize, u32, u32), TwinKept>>> = std::sync::LazyLock::new(Default::default);
+
+fn note_twin_kept(u: &Unit, caller: u32, twin: u32, why: TwinKept) {
+    TWIN_KEPT[0][why as usize].fetch_add(1, Ordering::Relaxed);
+    let new = crate::zone_alloc::kept_with(|| TWIN_KEPT_AT.lock().unwrap_or_else(|e| e.into_inner()).insert((u as *const Unit as usize, caller, twin), why).is_none());
+    if new && specv_trace() {
+        eprintln!("specv @{:.3} linked #{} {} keeps its call to twin #{} {}: {}", wall_ns() as f64 / 1e9, caller, short_name(&u.fns[caller as usize].name), twin, short_name(&u.fns[twin as usize].name), TWIN_KEPT_NAMES[why as usize]);
+    }
+}
+
+/// The exit line's part: twin calls kept, by clause (`TWIN_KEPT`), at the link and in the image.
+pub(crate) fn twin_kept_summary() -> Option<String> {
+    let part = |i: usize| {
+        let n: Vec<u64> = TWIN_KEPT[i].iter().map(|c| c.load(Ordering::Relaxed)).collect();
+        let total: u64 = n.iter().sum();
+        (total, n.iter().zip(TWIN_KEPT_NAMES).filter(|x| *x.0 > 0).map(|(c, w)| format!("{w} {c}")).collect::<Vec<_>>().join(", "))
+    };
+    let ((l, ls), (i, is)) = (part(0), part(1));
+    (l + i > 0).then(|| format!("twin calls kept as twin calls: {l} at links ({ls}), {i} in the image written ({is})"))
+}
 /// callees built ahead of a replacement's install (inspect stats)
 pub(crate) static SPECV_PREBUILT: AtomicU64 = AtomicU64::new(0);
 
-/// SPEC-V: bases of hot twins given their own build (twin_base_build)
+/// SPEC-V: bases of twins given their own build (twin_base_build), and of those the ones asked for
+/// at a link of the twin's stored code (twin_stored)
 pub(crate) static TWIN_BASE_BUILDS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static TWIN_BASE_STORED: AtomicU64 = AtomicU64::new(0);
 
-/// SPEC-V: twin `t` reached O3 and its base has no code: the base gets its own (verified) build in
-/// the background, so it has a code entry. A hot twin whose base never ran is called by linked code
+/// SPEC-V: twin `t` got code and its base has none: the base gets its own (verified) build in the
+/// background, so it has a code entry. A twin whose base never ran is called by linked code
 /// (startup image, cache entries lowered before the caller's verdict) that no relowering here
 /// reaches; with the base's entry the next launch's image and links send those calls to the base
-/// (build_image, twin_link_target) instead of running the twin and building it at O3 again (twins
-/// are never cached). Owner thread.
-unsafe fn twin_base_build(up: *mut Unit, t: u32) {
+/// (build_image, twin_link_target) instead of running the twin. `hot`: the twin proved the body
+/// hot (its O3 build, or stored O3 code): the base is built at O3 too, after its O2 build gives it
+/// code, so the next launch links O3 code for it instead of building it. True: asked for now.
+/// Owner thread.
+unsafe fn twin_base_build(up: *mut Unit, t: u32, hot: bool) -> bool {
     let u = &*up;
-    let FnKey::Plain(b) = u.fns[t as usize].key else { return };
+    let FnKey::Plain(b) = u.fns[t as usize].key else { return false };
     if (b as usize) >= u.fns.len() || relax_backend::stats::opt_off(&u.prog.session.options, "-twinlink") {
-        return;
+        return false;
     }
     let f = &u.fns[b as usize];
     if f.compiled || f.build_err.is_some() || !matches!(f.key, FnKey::Inst(..) | FnKey::Closure(..)) || matches!(u.verdict_state(b), Verdict::Failed(_)) {
-        return;
+        return false;
     }
     TWIN_BASE_BUILDS.fetch_add(1, Ordering::Relaxed);
     if specv_trace() {
-        eprintln!("specv @{:.3} #{} {}: base of hot twin #{} built in the background", wall_ns() as f64 / 1e9, b, short_name(&u.fns[b as usize].name), t);
+        eprintln!("specv @{:.3} #{} {}: base of {}twin #{} built in the background", wall_ns() as f64 / 1e9, b, short_name(&u.fns[b as usize].name), if hot { "hot " } else { "" }, t);
     }
-    // the twin proved the body hot, and twins are never cached: the base is built at O3 too (after
-    // its O2 build gives it code), so the next launch links O3 code for it instead of building it
-    crate::zone_alloc::kept_with(|| TWIN_O3_BASES.lock().unwrap_or_else(|e| e.into_inner()).push((up as usize, b)));
-    o2_base(up, b);
+    if hot {
+        crate::zone_alloc::kept_with(|| TWIN_O3_BASES.lock().unwrap_or_else(|e| e.into_inner()).push((up as usize, b)));
+    }
+    o2_twin_base(up, b);
+    true
+}
+
+/// SPEC-V: twin `t`'s stored code is linked (startup image, disk cache, speculative link; `o3`: O3
+/// code): its base is asked for as a fresh O3 build's install asks (twin_base_build), unless it has
+/// code or a stored entry (clean callers' links then go to it: twin_link_target). Twins are cached,
+/// so a store whose first session ended before the base had an entry linked the twin on every
+/// later launch and never asked again: the callers' links kept their twin calls ("base has no code
+/// and no entry"), and the twins' own calls stay twin calls ("caller is a twin"), session after
+/// session. With the base's entry the next launch's links of those callers call the base, and the
+/// base's code calls bases. Stored O3 code proves the body hot (the base gets O3 too); below O3
+/// the base gets an O2 build, O3 only by its own heat. Owner thread.
+unsafe fn twin_stored(up: *mut Unit, t: u32, o3: bool) {
+    let u = &mut *up;
+    let FnKey::Plain(b) = u.fns[t as usize].key else { return };
+    if (b as usize) >= u.fns.len() || u.fns[b as usize].compiled {
+        return;
+    }
+    let mut c = u.cache.take();
+    let stored = c.as_mut().is_some_and(|c| c.has_stored_entry(u, b));
+    u.cache = c;
+    if stored {
+        return;
+    }
+    if twin_base_build(up, t, o3) {
+        TWIN_BASE_STORED.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// SPEC-V: base `b` takes its twin `t`'s heat: the twin ran in its place (the same body), so the
@@ -21364,6 +21597,10 @@ unsafe fn prebuild_callees(up: *mut Unit, relocs: &[relax_backend::rir::RelocAt]
     if !past_startup() {
         return;
     }
+    // builds ahead of the install: nothing calls them before it, so they run behind (on Apple
+    // silicon off the performance cores while the person's work runs), and the O3 job's own kind
+    // comes back for its install
+    let _behind = WorkBehind::on();
     let calls = |relocs: &[relax_backend::rir::RelocAt]| -> Vec<u32> {
         let mut v: Vec<u32> = relocs.iter().filter_map(|r| match r.target { relax_backend::rir::Reloc::Call(c) => Some(c), _ => None }).collect();
         v.sort_unstable();
@@ -21596,7 +21833,7 @@ unsafe fn relower_twin_callers(up: *mut Unit, tc: &TwinCallers) {
     }
     for &c in &tc.below {
         O2_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).remove(&(key, c));
-        o2_base(up, c);
+        o2_twin_base(up, c);
     }
     let u = &*up;
     if !tc.unverified.is_empty() {
@@ -21658,8 +21895,13 @@ unsafe fn prioritize_verdicts(up: *mut Unit, ids: &[u32]) {
 
 /// Tier record word 5: final by a parked verdict an earlier run stored for the slot's code
 /// (stored_tier_verdict): its loops do not count it again (rt_loop_hot), the settled state's
-/// re-arm does (settle_rearm_all)
+/// re-arm for a patch or new code does (settle_rearm_all)
 const STORED_PARKED: u64 = 1 << 60;
+/// Tier record word 5: final by the verdict an earlier run stored for the slot's code, parked or
+/// never hot (stored_tier_verdict): the settled state's periodic look leaves it final
+/// (settle_rearm_all); a patch, new code reached and, unless parked, its own loop turning hot
+/// count it again
+const STORED_FINAL: u64 = 1 << 56;
 /// Tier record word 5: the counted code bytes (below the flag bits)
 const CODE_BYTES: u64 = (1 << 48) - 1;
 /// Tier record word 5: the slot's O3 entry, queued by its calls, left at its pick to count again
@@ -22284,6 +22526,15 @@ fn tier_explain_at(u: &Unit, id: u32, place: Option<(queue::TierEntry, usize, us
                 _ => vstate(id).to_string(),
             }, left.len(),
             left.iter().take(6).map(|&c| format!("#{} {} {}{}", c, short_name(&u.fns[c as usize].name), vstate(c), if u.fns[c as usize].unverified.load(Ordering::Relaxed) { " flagged" } else { "" })).collect::<Vec<_>>().join(", "), kept)));
+    }
+    if let FnKey::Plain(_) = f.key {
+        // the linked code that kept its call to this twin, the clause at its link and its verdict now
+        let key = u as *const Unit as usize;
+        let mut kept: Vec<(u32, TwinKept)> = TWIN_KEPT_AT.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|x| x.0.0 == key && x.0.2 == id).map(|x| (x.0.1, *x.1)).collect();
+        kept.sort_by_key(|x| x.0);
+        if !kept.is_empty() {
+            rows.push(("twin calls kept".into(), format!("{} linked caller(s): {}", kept.len(), kept.iter().take(12).map(|&(c, why)| format!("#{} {} ({}; now {})", c, short_name(&u.fns[c as usize].name), TWIN_KEPT_NAMES[why as usize], u.twin_caller_kept(c).map_or("clean, no checks", |w| TWIN_KEPT_NAMES[w as usize]))).collect::<Vec<_>>().join(", "))));
+        }
     }
     if !allowed || awaiting {
         rows.push(("verdict".into(), format!("O3 {}; {}", if allowed { "allowed" } else { "not allowed" }, match u.verdict_state(id) { Verdict::Clean => "clean".to_string(), Verdict::Failed(e) => format!("failed, {} events", e.len()), Verdict::Pending => "pending".to_string(), Verdict::Unverifiable(w) => format!("unverifiable: {}", w) })));
@@ -24297,16 +24548,24 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // (CAND_TAKE candidates per take: a publish is bounded by its item count)
     let (mut preps, mut gave): (Vec<(u32, Prep)>, Vec<(u32, Vec<u32>)>) = (Vec::new(), Vec::new());
     for chunk in ids.chunks(CAND_TAKE) {
-        match owner::publish_or_bail(|| {
-            let (p, g) = o3_candidates_begin(up, chunk);
-            (p, g, owner::take_needs())
-        }) {
-            Ok((p, g, n)) => {
-                preps.extend(p);
-                gave.extend(g);
-                needs.extend(n);
+        // (a take that stopped for a program request: the rest in the next)
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            match owner::publish_or_bail(|| {
+                let (p, g, looked) = o3_candidates_begin(up, rest);
+                (p, g, looked, owner::take_needs())
+            }) {
+                Ok((p, g, looked, n)) => {
+                    preps.extend(p);
+                    gave.extend(g);
+                    needs.extend(n);
+                    rest = &rest[looked..];
+                }
+                Err(_) => {
+                    gave.extend(rest.iter().map(|x| (x.0, Vec::new())));
+                    rest = &[];
+                }
             }
-            Err(_) => gave.extend(chunk.iter().map(|x| (x.0, Vec::new()))),
         }
     }
     {
@@ -24994,7 +25253,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                         u.retier(c);
                     }
                     relower_twin_callers(up, &tc);
-                    twin_base_build(up, id);
+                    twin_base_build(up, id, true);
                 }
                 o3_owner(5, tt);
                 bail_done(up, id);
@@ -26212,9 +26471,12 @@ pub static TIER1_SNAP_OFF: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0
 
 /// An O3 build's inline candidates (`ids`, their bodies checked and lowered ahead): the fronts of
 /// their O1 builds, deferring the optimisation (a publish; o2_begin's pattern). Returns the
-/// preparations, and the slots left out with the fronts they bailed on: they needed a front the
-/// take may not run (rule I-PURE), or the process ends on another thread.
-unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u32, Prep)>, Vec<(u32, Vec<u32>)>) {
+/// preparations, the slots left out with the fronts they bailed on (they needed a front the take
+/// may not run, rule I-PURE, or the process ends on another thread), and how many of `ids` it
+/// looked at: a background take stops between candidates once a program request waits (the
+/// main thread's frame among them: a take of many candidates held the owner 13.4 ms while the UI
+/// waited, 11-22), and the caller takes the rest in its next publish, after the owner served it.
+unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u32, Prep)>, Vec<(u32, Vec<u32>)>, usize) {
     let mut preps = Vec::new();
     let mut gave = Vec::new();
     let _kept = KeptCopies;
@@ -26233,7 +26495,12 @@ unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u3
     impl Drop for Renote {
         fn drop(&mut self) { owner::note_needs(std::mem::take(&mut self.0)); }
     }
-    for &(c, mode) in ids {
+    let mut looked = ids.len();
+    for (i, &(c, mode)) in ids.iter().enumerate() {
+        if i > 0 && owner::bailing() && owner::program_waiting() {
+            looked = i;
+            break;
+        }
         let _renote = Renote(owner::take_needs());
         let outcome = Outcome(cpu_ns(), std::cell::Cell::new(10));
         let preps0 = O3_OWNER[20].load(Ordering::Relaxed);
@@ -26323,7 +26590,7 @@ unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u3
             _ => cand_skip(12),
         }
     }
-    (preps, gave)
+    (preps, gave, looked)
 }
 
 /// (instrument) what o3_candidates_begin / o3_candidates_finish did with each candidate: begin left
@@ -26810,10 +27077,30 @@ unsafe fn build_off_owner(up: *mut Unit, ids: &[(u32, RirMode)]) {
     // a build whose preparation needed fronts (its inline candidates') is tried again after this
     // thread made them (take_prefronted's rounds), not left to the caller's take on the owner
     for _ in 0..PREFRONT_ROUNDS {
-        let Ok((preps, gave, needs)) = owner::publish_or_bail(|| {
-            let (p, g) = o3_candidates_begin(up, &todo);
-            (p, g, owner::take_needs())
-        }) else { return };
+        // the take, CAND_TAKE candidates a publish as the snapshot's (a publish is bounded by its
+        // item count), and each stops for a program request (o3_candidates_begin): what it
+        // prepared before a bail is still built
+        let (mut preps, mut gave, mut needs) = (Vec::new(), Vec::new(), Vec::new());
+        let mut rest = &todo[..];
+        let mut bailed = false;
+        while !rest.is_empty() {
+            let piece = &rest[..rest.len().min(CAND_TAKE)];
+            match owner::publish_or_bail(|| {
+                let (p, g, looked) = o3_candidates_begin(up, piece);
+                (p, g, looked, owner::take_needs())
+            }) {
+                Ok((p, g, looked, n)) => {
+                    preps.extend(p);
+                    gave.extend(g);
+                    needs.extend(n);
+                    rest = &rest[looked..];
+                }
+                Err(_) => {
+                    bailed = true;
+                    break;
+                }
+            }
+        }
         if !preps.is_empty() {
             let mut done: Vec<Deferred> = Vec::new();
             for (c, prep) in preps {
@@ -26822,8 +27109,11 @@ unsafe fn build_off_owner(up: *mut Unit, ids: &[(u32, RirMode)]) {
             }
             owner::publish(|| o3_candidates_finish(up, epoch0, done));
         }
+        if bailed {
+            return;
+        }
         todo.retain(|x| gave.iter().any(|g| g.0 == x.0));
-        if todo.is_empty() || needs.is_empty() || needs.iter().any(|s| fronted.contains(s)) {
+        if todo.is_empty() || needs.is_empty() || needs.iter().any(|s: &u32| fronted.contains(s)) {
             return;
         }
         for s in needs {
@@ -27603,7 +27893,6 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_domain_id" => Some(crate::domain::relax_domain_id as *const () as usize),
         b"__relax_thread_spawn" => Some(crate::domain_threads::spawn as *const () as usize),
         b"__relax_domain_name" => Some(crate::domain::relax_domain_name as *const () as usize),
-        b"__relax_catch_caught" => Some(relax_catch_caught as *const () as usize),
         b"__relax_test_inherit" => Some(crate::harness::reach::inherit as *const () as usize),
         b"__relax_test_adopt" => Some(crate::harness::reach::adopt as *const () as usize),
         b"__relax_test_cancel" => Some(crate::harness::reach::cancel as *const () as usize),
@@ -28246,6 +28535,7 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
                 if let Some(inl) = &t1 {
                     cached_tier1(up, id, inl, &kept);
                 }
+                twin_stored(up, id, t1.is_some());
                 let u = &mut *up;
                 // a seeded slot (spec_seed: the previous run's manifest -- code that ran there)
                 // is installed now, as its first call would: that call then finds it ready instead
@@ -30773,6 +31063,26 @@ const WIN_NAMES: [&str; WIN_KINDS] = ["slot code", "O3 chunks", "group pages", "
 
 /// the size of one O3 code chunk (`Unit::emit_hot`)
 const HOT_CHUNK: u64 = 1 << 20;
+
+/// Where O3 code starts: on a line of the CPU's instruction fetch, so a body's loops lie where its
+/// own layout put them, not where the code placed before it left them. Placed 16-aligned, the
+/// same O3 body ran at two speeds from launch to launch (its install order differs): on a Zen 4
+/// part a 25-byte loop over a 64-byte line ran at IPC 4.5, inside one at 7.7 (zz kernels of
+/// relax-bench-rt, 0.73 vs 1.27 ms). x64: 64-byte lines (the op cache's and the uop cache's fetch
+/// windows); other targets 16, as before. RELAX_OPT=-hotalign: 16.
+pub(crate) fn hot_align() -> u64 {
+    static A: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *A.get_or_init(|| if cfg!(target_arch = "x86_64") && !relax_backend::stats::opt_env_off("-hotalign") { 64 } else { 16 })
+}
+
+/// The start alignment of the code this thread installs now: O3 code's (`hot_align`), 16 for the
+/// rest (most bodies are lower-tier code that runs cold: a line each would only grow the code window).
+fn code_start_align() -> u64 {
+    if code_as_now().is_some_and(|k| matches!(k.tier, tier::O3 | tier::INSTRUMENTED_O3)) { hot_align() } else { 16 }
+}
+
+/// Bytes the O3 chunks skipped to start O3 code at `hot_align` (`Unit::window_line`)
+static HOT_PAD: AtomicU64 = AtomicU64::new(0);
 
 fn bump(next: &AtomicU64, size: u64, align: u64, end: u64, full: &str) -> u64 {
     let a = align.max(1);
@@ -35831,8 +36141,11 @@ pub(crate) unsafe fn reset_statics() {
     reset(&TWINS_RAN, AtomicU64::new(0));
     reset(&LAZY_FRONTS, AtomicU64::new(0));
     reset(&TWIN_RETARGETS, AtomicU64::new(0));
+    reset(&TWIN_KEPT, [const { [const { AtomicU64::new(0) }; 8] }; 2]);
+    reset(&TWIN_KEPT_AT, std::sync::LazyLock::new(Default::default));
     reset(&SPECV_PREBUILT, AtomicU64::new(0));
     reset(&TWIN_BASE_BUILDS, AtomicU64::new(0));
+    reset(&TWIN_BASE_STORED, AtomicU64::new(0));
     reset(&TWIN_O3_BASES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&TWIN_USERS, std::sync::LazyLock::new(Default::default));
     reset(&O3_BUILD_NOTES, std::sync::LazyLock::new(Default::default));
@@ -35923,6 +36236,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&MAIN_LOWER_WHY, [const { AtomicU64::new(0) }; 14]);
     reset(&CODE_GROWTH, [const { AtomicU64::new(0) }; 5]);
     reset(&CODE_INSTALLS, [const { AtomicU64::new(0) }; 5]);
+    reset(&HOT_PAD, AtomicU64::new(0));
     reset(&CACHE_AHEAD, std::sync::atomic::AtomicU64::new(0));
     #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
     reset(&NC_WINDOWS, relax_session::sync::Mutex::new(Vec::new()));

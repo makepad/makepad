@@ -638,6 +638,7 @@ relax_compiler::jit::front_holders::TID	rows freed by guard or TLS drop, diagnos
 relax_compiler::jit::front_holders::UNLISTED	count of a table overflow
 relax_compiler::jit::front_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::history::EMPTY	empty constant returned when a slot has no history (jit.rs:198)
+relax_compiler::jit::hot_align::A	env RELAX_OPT read once, nothing sets it
 relax_compiler::jit::install_ice_hook::DONE	one-shot hook install
 relax_compiler::jit::interp_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::rt_names::NAMES	env RELAX_RT_THREADS read once, nothing sets it
@@ -666,6 +667,7 @@ relax_compiler::jit::reloc_sig_on::ON	env RELAX_MAIN_COMPILE_LOG read once, noth
 relax_compiler::jit::rt_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::rt_wait_ns::NS	env
 relax_compiler::jit::sample_periods::PERIODS	env
+relax_compiler::jit::sampling_on::STATE	memo of two process memos read once (profile_path::P, wasm_export::enabled::ON): every run gets the same answer
 relax_compiler::jit::sample_trace::T	env RELAX_O2_TRACE read once, nothing sets it
 relax_compiler::jit::sampler_thread::T0	clock epoch of sampler log lines (jit.rs:15363)
 relax_compiler::jit::settle_div::D	env RELAX_CODE_SIG_DIR read once, nothing sets it
@@ -739,6 +741,8 @@ relax_compiler::os::proc::imp::HOST_LIBRARY	library handle of the host; cfg-off:
 relax_compiler::os::proc::imp::LOADED	dlopen handles of the process; libraries stay loaded (os/proc.rs:506)
 relax_compiler::os::proc::imp::POOL	Android: no in-place restart there
 relax_compiler::os::proc::imp::find::UCRT	library handle; cfg-off: windows
+relax_compiler::os::thread::unix::ENDED_UNTAKEN	kicks still counted on threads of the process when they ended, which the line for a stray watchdog signal says (the kick table's, kicks::FIRST)
+relax_compiler::os::thread::unix::ON_THE_WAY	kicks sent and not yet taken in the process: one sent at a run's end to a thread that ended may reach another thread after the next run started (Darwin), and is told from a stray signal only while it is counted
 relax_compiler::os::thread::unix::kicks::FIRST	the watchdog's kick table of the process (an ending thread clears its entries)
 relax_compiler::os::thread::unix::names::TABLE	thread names by id
 relax_compiler::os::tls::fixed::BASE	offset of the reserve from the thread pointer, a fact of this binary (os/tls.rs:112)
@@ -788,6 +792,7 @@ relax_compiler::reload::host::PACKAGE	facts of the loader binary, which stays
 relax_compiler::reload::host::STATE	the JIT's own update: the build under way and what waits belong to the process, which that update execs
 relax_compiler::reload::host::RESTART_AFTER_BUILD	the build belongs to the process and ends in an exec
 relax_compiler::reload::host::loader::LOADER	path of this binary, env set only at runner start (runner/src/lib.rs:148); "what this process runs" (reload_host.rs:40)
+relax_compiler::reload::host::loader_buildable::BUILDABLE	whether the loader can be built where it is (its cargo target directory, package, manifest): facts of its path, which stays; a file replaced at the path is gone into by an exec
 relax_compiler::reload::inputs::add_runner::RUNNER	facts of the loader binary, which stays
 relax_compiler::reload::live_log::LOCK	lock
 relax_compiler::reload::live_trace::ON	env RELAX_RELOAD_TRACE read once, nothing sets it

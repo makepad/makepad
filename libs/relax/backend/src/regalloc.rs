@@ -4230,11 +4230,13 @@ fn ra_stat(i: usize, v: u64) {
 /// live), so the allocator can give the loop piece a register while the rest stays in memory
 /// (LLVM's region splitting around loops, done as renaming before a second allocation). Loops are
 /// split innermost first; pieces that still spill share the original's slot (the copies between
-/// them are then no-ops). Returns the function the allocation is for when it differs from `f`.
+/// them are then no-ops). Returns the function the allocation is for when it differs from `f`,
+/// with its block frequencies when `freq` was given (the made blocks run about as often as the
+/// block they stand for): the emitter's loop alignment reads them by the returned function's blocks.
 /// `freq`: measured block frequencies of `f` (see block_weights), if any.
-pub fn allocate_split(options: &relax_session::Options, f: &Func, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>) -> (Option<Func>, Alloc) {
+pub fn allocate_split(options: &relax_session::Options, f: &Func, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>) -> (Option<Func>, Alloc, Option<Vec<f32>>) {
     let t0 = crate::stats::pass_clock();
-    let (g, al) = allocate_split_inner(options, f, cfg, thorough, freq, t0);
+    let (g, al, gfreq) = allocate_split_inner(options, f, cfg, thorough, freq, t0);
     if t0 != 0 {
         ra_stat(3, f.vregs.len() as u64);
         ra_stat(4, f.blocks.len() as u64);
@@ -4243,10 +4245,11 @@ pub fn allocate_split(options: &relax_session::Options, f: &Func, cfg: &RegConfi
         ra_stat(6, h.blocks.len() as u64);
         ra_stat(7, al.loc.iter().filter(|l| matches!(l, Loc::Stack(_))).count() as u64);
     }
-    (g, al)
+    (g, al, gfreq)
 }
 
-fn allocate_split_inner(options: &relax_session::Options, f: &Func, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>, t0: u64) -> (Option<Func>, Alloc) {
+/// (the split function's frequencies are None when nothing was split)
+fn allocate_split_inner(options: &relax_session::Options, f: &Func, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>, t0: u64) -> (Option<Func>, Alloc, Option<Vec<f32>>) {
     let al = if !thorough && f.baseline && !options.no_quick_ra { allocate_baseline(options, f, cfg) } else { allocate_with(options, f, cfg, thorough, freq) };
     let t1 = crate::stats::pass_clock();
     if t0 != 0 {
@@ -4257,7 +4260,7 @@ fn allocate_split_inner(options: &relax_session::Options, f: &Func, cfg: &RegCon
     // Quick allocation is complete. Avoid the spill vector and loop-splitting
     // setup (including its copied frequencies) for every O1 function.
     if !thorough {
-        return (None, al);
+        return (None, al, None);
     }
     if let (true, Some(fr)) = (thorough && split_on(options), freq) {
         // spilled values that are not recomputed instead
@@ -4273,11 +4276,12 @@ fn allocate_split_inner(options: &relax_session::Options, f: &Func, cfg: &RegCon
                     let sp: Vec<String> = (0..f.vregs.len()).filter(|v| cand[*v]).map(|v| format!("v{}{}", v, match al2.loc[v] { Loc::Reg(r) => format!("=r{}", r), Loc::Stack(_) => "=S".to_string(), _ => "=-".to_string() })).collect();
                     eprintln!("cold-split {}: first-pass spills now: {}", f.name, sp.join(" "));
                 }
-                let (h, al3) = allocate_split_loops(options, &g, al2, cfg, thorough, freq);
+                // (the cold split adds no blocks: g has f's frequencies)
+                let (h, al3, hfreq) = allocate_split_loops(options, &g, al2, cfg, thorough, freq);
                 if t0 != 0 {
                     ra_stat(2, crate::stats::pass_clock() - t2);
                 }
-                return (Some(h.unwrap_or(g)), al3);
+                return (Some(h.unwrap_or(g)), al3, hfreq.or_else(|| freq.map(|x| x.to_vec())));
             }
         }
     }
@@ -4471,9 +4475,11 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
     }
 }
 
-fn allocate_split_loops(options: &relax_session::Options, f: &Func, al: Alloc, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>) -> (Option<Func>, Alloc) {
-    let (h, al, _, _) = allocate_split_loops_inner(options, f, al, cfg, thorough, freq);
-    (h, al)
+/// (with the split function's frequencies: None when nothing was split)
+fn allocate_split_loops(options: &relax_session::Options, f: &Func, al: Alloc, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>) -> (Option<Func>, Alloc, Option<Vec<f32>>) {
+    let (h, al, _, gf) = allocate_split_loops_inner(options, f, al, cfg, thorough, freq);
+    let gf = if h.is_some() { gf } else { None };
+    (h, al, gf)
 }
 
 fn allocate_split_loops_inner(options: &relax_session::Options, f: &Func, al: Alloc, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>) -> (Option<Func>, Alloc, Vec<bool>, Option<Vec<f32>>) {

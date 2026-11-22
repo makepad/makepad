@@ -210,7 +210,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("hold", "[files=<path>=<blob id or ->, one a line> | take dir=<dir> files=... | off]", "hold back a landing (devhub's show, until its tip is proven): while a file says what the landing wrote (its git blob id, - when it removes the file) its change waits; every other save applies at once; take: the held files move to a proven tip's text (<dir>/<path>, of that blob id; -: gone), the rest stays held; off: the landing goes in; no words: how many files are held"),
     ("inputs", "[match=<path substring>] [of=<paths, one per line>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded; of= answers only which of those paths are inputs, which others lie in no package of the graph (`outside`), and which others the program opened, probed or listed the folder of (`read`)"),
     ("test-results", "[group=<n>]", "the latest completed live test run: group and test count, then each test's name, status and whether it ran for that edit; group= refuses the results of another edit"),
-    ("session", "relaunch [process=1]", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames); process=1: again on the binary it runs, nothing rebuilt (macOS: as a new process behind the run's parent, which keeps the run pid; Linux: in place)"),
+    ("session", "relaunch [process=1] [anyway=1]", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames); process=1: again on the binary it runs, nothing rebuilt (macOS: as a new process behind the run's parent, which keeps the run pid; Linux: in place); anyway=1: the app is not asked whether it can restart now (its can_restart and unsaved work, which otherwise postpone it), as with the window caption's restart; its state is still carried over"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("capture", "[why=<text>]", "capture the JIT's state and flight recording; answers the likely cause and report path"),
     ("why-slow", "[s=3]", "where the time goes: ranked findings -- the main thread's CPU split (program / compiles / Relax runtime / system), its hot fns, the owner's service, other busy threads"),
@@ -329,17 +329,21 @@ fn dispatch_command(req: &Req, out: &mut Out) {
     }
     match req.cmd.as_str() {
         "session" => match req.pos.first().map(String::as_str) {
-            Some("relaunch") => match if matches!(req.get("process"), Some("1" | "true")) {
-                crate::reload::relaunch_process(&crate::reload::inspect_asker())
-            } else {
-                crate::reload::relaunch_pending(&crate::reload::inspect_asker())
-            } {
-                // the waiting edits stay noted until a run loads them (the app may postpone it)
-                Ok(how) => {
-                    out.line(&format!("{{\"relaunch\":\"queued\",\"as\":\"{}\",\"pid\":{}}}", how, std::process::id()))
+            Some("relaunch") => {
+                let anyway = matches!(req.get("anyway"), Some("1" | "true"));
+                let asked = if matches!(req.get("process"), Some("1" | "true")) {
+                    crate::reload::relaunch_process(&crate::reload::inspect_asker(), anyway)
+                } else {
+                    crate::reload::relaunch_pending(&crate::reload::inspect_asker(), anyway)
+                };
+                match asked {
+                    // the waiting edits stay noted until a run loads them (the app may postpone it)
+                    Ok(how) => {
+                        out.line(&format!("{{\"relaunch\":\"queued\",\"as\":\"{}\",\"pid\":{}}}", how, std::process::id()))
+                    }
+                    Err(e) => out.err(&e),
                 }
-                Err(e) => out.err(&e),
-            },
+            }
             None | Some("pending") => {
                 // and what each one is, oldest first (devhub's shows say the first beside the sha
                 // the show is listed at, which it does not wholly run)
@@ -447,6 +451,11 @@ fn dispatch_command(req: &Req, out: &mut Out) {
                     }
                     for path in crate::reload::read_by_program(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a)), &ends_with_rel) {
                         out.line(&format!("{{\"read\":{}}}", json_str(path)));
+                    }
+                    // a read file the program was told changed: the count it was told at, and
+                    // whether it read the file again since (devhub live's verdict of a resource)
+                    for (path, n, again) in crate::reload::told_resources(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a)), &ends_with_rel) {
+                        out.line(&format!("{{\"told\":{},\"at\":{n},\"again\":{again}}}", json_str(path)));
                     }
                     for path in paths {
                         if out.cancelled() { break; }
@@ -1219,6 +1228,13 @@ fn cmd_threads(out: &mut Out) {
         if instrument::held_now(t.os_id) {
             wait.push_str(",\"held\":true");
         }
+        // where the OS tells them: the priority it runs at now and its CPU by core type
+        if let Some(pri) = t.pri {
+            wait.push_str(&format!(",\"pri\":{pri}"));
+        }
+        if let Some([p, e]) = threads::core_ns(t.os_id) {
+            wait.push_str(&format!(",\"p_ms\":{},\"e_ms\":{}", p / 1_000_000, e / 1_000_000));
+        }
         out.line(&format!(
             "{{\"id\":\"{}\",\"name\":{},\"role\":\"{}\",\"state\":\"{}\",\"cpu_ms\":{}{}}}",
             tid_label(t.os_id),
@@ -1506,13 +1522,17 @@ fn cmd_live(req: &Req, out: &mut Out) {
 /// `loaded_heads`, each repository its sources are in (worktree and commit, the workspace's own
 /// first, whose commit is the sha); the oldest edit waiting for a restart (`pending_since_ms`,
 /// `pending_why`). A run outside git, or one that read its sources during a git operation, has no
-/// loaded_sha.
+/// loaded_sha. `inputs_changed`: what the JIT itself is built from changed since the binary it runs
+/// (its update waits for a restart: reload_host inputs_changed); `loader_replaced`: a build put
+/// another file at the loader's path, which a rebuild for sources this run does not use does too
+/// (a tool linked into the binary): alone, nothing the run runs is older than its tree.
 fn runs_what() -> String {
     let h = crate::reload::loaded_heads();
     let sha = h.as_ref().and_then(|(v, _)| v.first()).map_or("null".to_string(), |(_, s)| json_str(s));
     let all = h.as_ref().map_or(String::new(), |(v, _)| v.iter().map(|(r, s)| format!("[{},{}]", json_str(r), json_str(s))).collect::<Vec<_>>().join(","));
     let (since, why) = crate::reload::restart_pending_since().unwrap_or((0, String::new()));
-    format!("\"loaded_sha\":{sha},\"loaded_ms\":{},\"loaded_heads\":[{all}],\"pending_since_ms\":{since},\"pending_why\":{}", h.as_ref().map_or(0, |(_, t)| *t), json_str(&why))
+    format!("\"loaded_sha\":{sha},\"loaded_ms\":{},\"loaded_heads\":[{all}],\"pending_since_ms\":{since},\"pending_why\":{},\"inputs_changed\":{},\"loader_replaced\":{}", h.as_ref().map_or(0, |(_, t)| *t), json_str(&why),
+        crate::reload::host::inputs_changed(), crate::reload::host::loader_replaced())
 }
 
 /// The `jit` answer from two looks `ms` apart.
@@ -2131,7 +2151,7 @@ mod tests {
             let mut words = command.split_whitespace();
             assert!(makepad_remote::params::jit(words.next().unwrap(), words.next().unwrap_or("")).is_some(), "missing JIT schema: {command}");
         }
-        for line in ["timeline start max_s=1", "heap top host=1 by=live n=2", "jit queue n=2", "prof view=tree focus=main min=1", "writes W1 n=2"] {
+        for line in ["timeline start max_s=1", "heap top host=1 by=live n=2", "jit queue n=2", "prof view=tree focus=main min=1", "writes W1 n=2", "session relaunch process=1 anyway=1"] {
             let req = super::Req::parse(line);
             assert!(req.validate_params(makepad_remote::params::jit(&req.cmd, req.pos.first().map(String::as_str).unwrap_or("")).unwrap()).is_ok(), "{line}");
         }

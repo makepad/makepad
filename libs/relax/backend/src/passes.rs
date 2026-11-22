@@ -8263,6 +8263,9 @@ pub fn rotate_loops(f: &mut Func) {
     }
     // the loops as they are before any rotation (a rotated latch changes the flow)
     let loops = natural_loops(f).1;
+    // the blocks' counts as they came (a counted build's): a header's copy runs at most as often
+    // as its latch and its header's iterations
+    let counts: Vec<f32> = f.blocks.iter().map(|b| b.count).collect();
     // latches ending in a branch whose false edge goes to the header get a new block with the
     // header's copy there (laid out after the latch below)
     let mut added = false;
@@ -8363,9 +8366,11 @@ pub fn rotate_loops(f: &mut Func) {
             Term::Branch(c, t, e) => Term::Branch(look(c), t, e),
             t => t,
         };
+        let lc = counts[l];
         if branch_latch {
             let nb = f.blocks.len() as u32;
-            f.blocks.push(Block { insts, pos: hb.pos.clone(), term, term_pos: hb.term_pos, count: hb.count });
+            let count = if counts[h] >= 0.0 && lc >= 0.0 { counts[h].min(lc) } else { hb.count };
+            f.blocks.push(Block { insts, pos: hb.pos.clone(), term, term_pos: hb.term_pos, count });
             made.push((l as u32, h as u32));
             if let Term::Branch(_, ref mut t, ref mut e) = f.blocks[l].term {
                 if true_edge {
@@ -8380,6 +8385,17 @@ pub fn rotate_loops(f: &mut Func) {
             f.blocks[l].pos.extend(hb.pos.iter().copied());
             f.blocks[l].term = term;
             f.blocks[l].term_pos = hb.term_pos;
+        }
+        // the header now runs on entry (and on the edges into it not rotated), its copy each
+        // iteration: the latch's count leaves the header's (LLVM LoopRotate moves the header's
+        // weight the same way). A header that kept its loop's count looked as hot as the loop to
+        // a counted build's layout and loop alignment (x64 loop_heads): its fall-in kept the
+        // rotated loop's head from its padding, and the head landed wherever the code before it
+        // ended (zz_position_loop of relax-bench-rt: 0.73 or 1.27 ms by where its O3 code sat).
+        // (A branch latch sends back at most its count: the header's count may come out low,
+        // never high.) RELAX_OPT=-rotcount: the header keeps its count.
+        if f.blocks[h].count >= 0.0 && lc >= 0.0 && !crate::stats::opt_env_off("-rotcount") {
+            f.blocks[h].count = (f.blocks[h].count - lc).max(0.0);
         }
     }
     // the header copies follow their latches (a branch's false target is laid out next)

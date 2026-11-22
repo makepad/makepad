@@ -1649,8 +1649,8 @@ pub(crate) fn call_in_arena(f: u64, arg: u64) {
         return;
     }
     let s = save();
-    let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
-    g(arena_fn(f), m(arg));
+    let g: rt_fn_ty!(fn(u64, u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
+    g(arena_fn(f), m(arg), 0);
     restore(s);
 }
 
@@ -2108,11 +2108,11 @@ fn sb_fmt_pop() -> jit::StrRet {
 
 rt_fn! {
 /// catch_unwind inside a module: the target and data are masked; the shadow stack comes back.
-fn sb_catch_panic(f: u64, data: u64) -> u64 {
+fn sb_catch_panic(f: u64, data: u64, caught: u64) -> u64 {
     let s = save();
     let fm = arena_fn(f);
-    let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
-    let r = g(fm, m(data));
+    let g: rt_fn_ty!(fn(u64, u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
+    let r = g(fm, m(data), caught);
     restore(s);
     r
 }
@@ -2151,7 +2151,7 @@ leaf fn sb_nc_fn(at: u64) -> u64 {
 /// replaced by an arena-checked version.
 fn rt_policy(name: &str) -> Option<Option<(&'static str, u64)>> {
     Some(match name {
-        "fmt_int" | "fmt_float" | "fmt_push" | "fmt_print" | "panicking" | "rethrow" | "fmod" | "fmodf" | "null" | "panic_site" | "panic_bounds" | "panic_impl" | "resume" | "land" | "divrem128" | "wide_f32" | "wide_f64" => None,
+        "fmt_int" | "fmt_float" | "fmt_push" | "fmt_print" | "panicking" | "rethrow" | "fmod" | "fmodf" | "null" | "panic_site" | "panic_bounds" | "panic_impl" | "resume" | "land" | "divrem128" | "wide_f32" | "wide_f64" | "made_late" => None,
         "fmt_str" => Some(("sb_fmt_str", sb_fmt_str as *const () as u64)),
         "fmt_pop" => Some(("sb_fmt_pop", sb_fmt_pop as *const () as u64)),
         "str_eq" => Some(("sb_str_eq", sb_str_eq as *const () as u64)),
@@ -2229,8 +2229,6 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
         "pthread_getname_np" => Some(("sb_getname_np", sb_getname_np as *const () as u64)),
         "getpid" => Some(("sb_getpid", sb_getpid as *const () as u64)),
         "abort" => Some(("abort", 0)),
-        // std's catch_unwind names its recovery point (jit.rs relax_catch_caught: a thread-local flag)
-        "relax_catch_caught" => None,
         _ => return None,
     })
 }
@@ -2384,6 +2382,17 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                             emit(Inst::Addr(d, thunk_sym(up, t)?.plus(sym.off)), &mut insts, &mut pos);
                         }
                         Some(SymKind::Site(_)) | Some(SymKind::Rt("null")) => emit(Inst::Addr(d, sym), &mut insts, &mut pos),
+                        // a vtable's made cell (syms.rs made_cell) is the host's, out of the
+                        // window: a twin that can make the trait object counts as making it (set
+                        // as it is built), and its code reads a set cell of its own (a byte 1 in
+                        // the data image), so it never stores to one
+                        Some(SymKind::Made(v)) => {
+                            u.syms.set_made(Sym::new(v));
+                            let one = u.lit_sym(&[1]);
+                            let o = f.vreg(Cls::I);
+                            emit(Inst::Addr(o, place_sym(up, one.id)?), &mut insts, &mut pos);
+                            emit(Inst::IBin(IOp::Add, U64, d, ar, o), &mut insts, &mut pos);
+                        }
                         // std's "makepad inspect records" flag (sync/raw.rs): never for twins, a
                         // word of the thread's that stays zero (its thread block's first)
                         Some(SymKind::Foreign(n)) if n == "__relax_recording" => {

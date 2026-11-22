@@ -7,7 +7,7 @@ main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
 work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [tests.linux]
-date = "2026-11-20"
-digest = "2e9c54e6081dc98e0770cc6f9d207b5e1beaa2a7d9af50fee1adae58c89a3fe2"
-main = "04df76375c13cb26181ca1f25d61b73a3344a1fb"
-work = "8f0c688cbdccf91e5fae8ed43c5c22b9ac4345ca"
+date = "2026-11-22"
+digest = "a57093cf7e368f6ea2cb447bb39dd2201e473cb8dc2a68001e20eb14cd7466d2"
+main = "756c1cd5a82ab87c3ce06d6606a396d19f275e2e"
+work = "58ed8e1cd52d9bdbb999645fb158057ab9e1eca1"

@@ -95,7 +95,7 @@ fn r11_reloads(code: &[u8]) -> Vec<(usize, usize, i32)> {
 #[test]
 fn the_second_load_through_a_spilled_base_reads_r11_again() {
     let (f, p) = build();
-    let (g, al) = allocate_split(&options(), &f, &relax_backend::x64::reg_config(&relax_session::Options::default()), true, None);
+    let (g, al, _) = allocate_split(&options(), &f, &relax_backend::x64::reg_config(&relax_session::Options::default()), true, None);
     let _ = g;
     assert!(matches!(al.loc[p.0 as usize], Loc::Stack(_)), "the fixture needs the base spilled: {:?}", al.loc[p.0 as usize]);
     let code = compile(&f);

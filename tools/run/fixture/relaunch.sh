@@ -14,7 +14,8 @@
 #   wm (Linux): the app is a client of a hidden WM of this tree (the WM backend's frame pacing).
 # Frames are counted ("first frame at" lines), never timed. Run from the workspace root; the JIT
 # runs through `cargo run --profile host`. PACKAGE (default makepad-app-calculator), WAIT (s for
-# the cold first frame, default 200). Prints "relaunch: OK ..." or "relaunch: FAIL ...".
+# the cold first frame, default 200). Prints "relaunch: OK ..." or "relaunch: FAIL ..."; a failure's
+# logs go to the lease's keep dir too (keep_logs.sh), which outlives the lease's scratch.
 ROOT=$(pwd)
 # the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
@@ -150,4 +151,5 @@ run_case in-place
 [ -n "$L" ] && run_case asked
 [ -n "$L" ] && run_case swap
 [ "$(uname)" = Linux ] && wm_case
-if [ -z "$fails" ]; then echo "relaunch: OK$sum"; rm -rf "$dir"; else echo "relaunch: FAIL$fails (logs in $dir)"; exit 1; fi
+# a failure's logs outlive the lease's scratch, which takes $dir (keep_logs.sh: the lease's holder copies them)
+if [ -z "$fails" ]; then echo "relaunch: OK$sum"; rm -rf "$dir"; else bash "$(dirname "$0")/keep_logs.sh" "$dir"; echo "relaunch: FAIL$fails (logs in $dir)"; exit 1; fi

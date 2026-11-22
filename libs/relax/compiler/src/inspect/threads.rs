@@ -30,6 +30,9 @@ pub struct Thread {
     pub state: &'static str,
     /// user + system CPU time
     pub cpu_ns: u64,
+    /// macOS: the scheduling priority it runs at now, which its QoS sets (31 default, 20
+    /// utility, 4 background, 37 user initiated, 47 user interactive); None elsewhere
+    pub pri: Option<i32>,
     /// the stack's [lo, hi) when known (0, 0 otherwise)
     pub stack: (u64, u64),
     /// Linux: the syscall it blocks in (`/proc/.../syscall`): number, first argument (a futex
@@ -48,6 +51,7 @@ impl Clone for Thread {
             name: self.name.clone(),
             state: self.state,
             cpu_ns: self.cpu_ns,
+            pri: self.pri,
             stack: self.stack,
             syscall: self.syscall,
             #[cfg(target_vendor = "apple")]
@@ -81,6 +85,20 @@ impl Raw {
 }
 
 pub use imp::{each_thread, list, regs_now, tid_of_handle};
+
+/// A thread's CPU time on the performance and the efficiency cores (ns), where the OS splits it
+/// (macOS on Apple silicon); None elsewhere, or once the thread ended.
+pub fn core_ns(os_id: u64) -> Option<[u64; 2]> {
+    #[cfg(target_os = "macos")]
+    {
+        imp::core_ns(os_id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = os_id;
+        None
+    }
+}
 
 /// The kernel function a thread in uninterruptible sleep waits in (Linux: its `wchan`), for the
 /// reports: its user stack ends at the system call, and only this names what it waits behind
@@ -399,9 +417,10 @@ mod imp {
             // the handle the rest of Relax names threads by comes from libpthread
             let os_id = ident(port).0;
             let handle = unsafe { pthread_from_mach_thread_np(port) } as u64;
-            let (mut name, mut state, mut cpu_ns) = (String::new(), "?", 0u64);
+            let (mut name, mut state, mut cpu_ns, mut pri) = (String::new(), "?", 0u64, None);
             if let Some(ext) = extended(port) {
                 cpu_ns = ext_cpu_ns(&ext);
+                pri = Some(ext[9] as i32);
                 state = match ext[6] {
                     1 => "running",
                     2 => "stopped",
@@ -419,7 +438,7 @@ mod imp {
             } else {
                 (0, 0)
             };
-            out.push(Thread { os_id, handle, name, state, cpu_ns, stack, syscall: None, port });
+            out.push(Thread { os_id, handle, name, state, cpu_ns, pri, stack, syscall: None, port });
         }
         unsafe { vm_deallocate(task(), ports as usize, count as usize * 4) };
         out
@@ -431,6 +450,34 @@ mod imp {
         let mut ext = [0u32; 28];
         let mut n = 28u32;
         (unsafe { thread_info(port, THREAD_EXTENDED_INFO, ext.as_mut_ptr(), &mut n) } == 0).then_some(ext)
+    }
+
+    /// A thread's CPU on the performance and the efficiency cores, ns: PROC_PIDTHREADCOUNTS gives
+    /// per performance level (0 the performance cores, then the efficiency cores) its
+    /// instructions, cycles, user and system time (mach units) and energy. None on a chip with
+    /// one level, an OS without the call, or a thread that ended.
+    #[cfg(target_os = "macos")]
+    pub fn core_ns(os_id: u64) -> Option<[u64; 2]> {
+        extern "C" {
+            fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
+            fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+        }
+        const PROC_PIDTHREADCOUNTS: i32 = 34;
+        const LEVEL: usize = 40;
+        let mut tb = [0u32; 2];
+        if unsafe { mach_timebase_info(&mut tb) } != 0 || tb[1] == 0 {
+            return None;
+        }
+        let mut buf = [0u8; 8 + 4 * LEVEL];
+        let n = unsafe { proc_pidinfo(std::process::id() as i32, PROC_PIDTHREADCOUNTS, os_id, buf.as_mut_ptr(), buf.len() as i32) };
+        let levels = (u16::from_ne_bytes([buf[0], buf[1]]) as usize).min(4);
+        if n < (8 + 2 * LEVEL) as i32 || levels < 2 {
+            return None;
+        }
+        let at = |o: usize| u64::from_ne_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3], buf[o + 4], buf[o + 5], buf[o + 6], buf[o + 7]]);
+        let time = |level: usize| at(8 + level * LEVEL + 16) + at(8 + level * LEVEL + 24);
+        let ns = |t: u64| (t as u128 * tb[0] as u128 / tb[1] as u128) as u64;
+        Some([ns(time(0)), ns((1..levels).map(time).sum())])
     }
 
     fn ext_cpu_ns(ext: &[u32; 28]) -> u64 {
@@ -655,7 +702,7 @@ mod imp {
             let num = |k: usize| f.get(k).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
             let cpu_ns = (num(11) + num(12)) * tick_ns;
             let syscall = read_syscall(tid);
-            out.push(Thread { os_id: tid, handle: 0, name, state, cpu_ns, stack: (0, 0), syscall });
+            out.push(Thread { os_id: tid, handle: 0, name, state, cpu_ns, pri: None, stack: (0, 0), syscall });
         }
         out.sort_by_key(|t| t.os_id);
         out
@@ -1327,7 +1374,7 @@ mod imp {
                 let tid = e.th32ThreadID as u64;
                 let (name, cpu_ns) = name_and_cpu(tid);
                 // the run state is not known without NtQuerySystemInformation: "?"
-                out.push(Thread { os_id: tid, handle: tid, name, state: "?", cpu_ns, stack: (0, 0), syscall: None });
+                out.push(Thread { os_id: tid, handle: tid, name, state: "?", cpu_ns, pri: None, stack: (0, 0), syscall: None });
             }
             e.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
             more = unsafe { Thread32Next(snap, &mut e) }.is_ok();

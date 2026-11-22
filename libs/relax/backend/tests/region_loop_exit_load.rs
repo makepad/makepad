@@ -166,7 +166,7 @@ fn inner_latch_never_loads_for_the_exit() {
                 assert_eq!(run(n, seed), reference(n, seed), "outer {} freq {} n {} seed {}", outer, fr.is_some(), n, seed);
             }
         }
-        let (g, al) = allocate_split(&options(), &f, &reg_config(), true, Some(&freq));
+        let (g, al, _) = allocate_split(&options(), &f, &reg_config(), true, Some(&freq));
         let h = g.as_ref().unwrap_or(&f);
         // by their code (the allocated function may add and reorder blocks): o, the inner latch
         // (i < n), the burst block and the inner loop's exit (j += 1)

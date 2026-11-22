@@ -70,7 +70,7 @@ impl Cache {
         // base's code is in the image too (a twin's key is its base's key behind tag 4): the code is
         // the caller's earlier (unverified) lowering, sound to call verified code once the caller's
         // own verdict is clean and asks for no run-time disjoint-index checks, and never from a twin
-        // (Unit::unverified_code_calls_bases). Later warm launches then never run the cold launch's twins (the race's
+        // (Unit::twin_caller_kept). Later warm launches then never run the cold launch's twins (the race's
         // draw path: draw_view .. set_uniform), at no link cost (twin_link_target for the lazy path).
         crate::run::yield_section("image twins");
         let twinlink = !relax_backend::stats::opt_off(&u.prog.session.options, "-twinlink");
@@ -110,8 +110,14 @@ impl Cache {
             let sum = if pend.contains_key(k) { crate::store::sum64(payload) } else { let Some(s) = self.entry_sum(*k) else { continue }; s };
             let Some(bytes) = self.slot_bytes_known(*id) else { continue };
             let mut cr: Vec<u32> = crates.clone();
-            let clean = twinlink && u.unverified_code_calls_bases(*id);
-            let retarget = |t: &[u8]| -> bool { clean && t.first().copied().and_then(KeyKind::of) == Some(KeyKind::Twin) && in_image.contains(&t[1..]) };
+            // (a twin call kept counts the first failing clause: crate::jit::twin_kept_summary)
+            let caller_kept = if twinlink { u.twin_caller_kept(*id) } else { Some(crate::jit::TwinKept::Off) };
+            let retarget = |t: &[u8]| -> bool {
+                if t.first().copied().and_then(KeyKind::of) != Some(KeyKind::Twin) { return false; }
+                let why = caller_kept.or_else(|| (!in_image.contains(&t[1..])).then_some(crate::jit::TwinKept::BaseNoCode));
+                if let Some(why) = why { crate::jit::TWIN_KEPT[1][why as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                why.is_none()
+            };
             if image_slot(tab, slots, blob, *k, sum, bytes, payload, &mut cr, &self.crate_by_ident, &retarget).is_some() {
                 n += 1;
                 set_bit(&mut placed, *id);
@@ -1871,8 +1877,8 @@ impl Linker {
     }
 
     /// Places the code of resolved slots `keep` (that still have no code) in one block of code
-    /// memory, each 16-byte aligned without its unwind trailer, links it there in one pass and
-    /// writes the block with one write.
+    /// memory, each 16-byte aligned (O3 code on a fetch line: jit::hot_align) without its unwind
+    /// trailer, links it there in one pass and writes the block with one write.
     fn img_place(&mut self, u: &mut Unit, im: &mut Img, keep: Vec<(usize, u32)>) -> Vec<PrelinkedSlot> {
         let mut out = Vec::new();
         let mut layout = Vec::with_capacity(keep.len());
@@ -1895,7 +1901,9 @@ impl Linker {
                 if (hot_first && (im.slots[e.0].tier == super::TIER_O3) != pass) || (!hot_first && !pass) {
                     continue;
                 }
-                e.2 = (total + 15) & !15;
+                // O3 code starts on a fetch line (jit::hot_align), the rest 16-aligned
+                let a = if im.slots[e.0].tier == super::TIER_O3 { crate::jit::hot_align() as usize } else { 16 };
+                e.2 = (total + a - 1) & !(a - 1);
                 total = e.2 + e.3;
             }
         }

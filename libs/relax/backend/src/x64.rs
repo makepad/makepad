@@ -1245,11 +1245,24 @@ struct Gen<'a> {
     align_loops: bool,
     freq: Option<Vec<f32>>,
     /// per forward jump (fwd_at): loop-head paddings emitted before it; per block: before its start
-    /// (a padding may grow by up to 15 bytes in the second pass: short_fwd's bound counts them)
+    /// (a padding may grow by up to 15 bytes in the second pass, a fitted loop's by up to
+    /// LOOP_LINE - 1: short_fwd's bound counts them, `pad_room`)
     fwd_pads: Vec<u32>,
     block_pads: Vec<u32>,
     pads_n: u32,
+    /// fit small hot loops into one fetch line (`fit_lens`; O3 code starts on a line: the
+    /// compiler's jit::hot_align)
+    loop_fit: bool,
+    /// the second pass: per block, the length of the innermost loop it heads when that fits a
+    /// line (0: none); per padding (in order), the bytes it may take
+    fit_len: Vec<u32>,
+    pad_room: Vec<u32>,
 }
+
+/// The fetch line a small hot loop is kept inside: 64 bytes (the op cache's and the uop
+/// cache's windows; O3 code starts on one). A 25-byte loop over a line ran at IPC 4.5 on a Zen 4
+/// part, inside one at 7.7.
+const LOOP_LINE: usize = 64;
 
 impl<'a> Gen<'a> {
     /// Saves (or restores) a caller-saved register's value around a call: 16 bytes for a vector.
@@ -1853,13 +1866,21 @@ impl<'a> Gen<'a> {
         }
         self.thru_blocks(&reach);
         let align = self.loop_heads(&reach);
+        self.fit_len = self.fit_lens(&align, &reach);
+        self.pad_room = (0..nb).filter(|&b| reach[b] && align.get(b) == Some(&true)).map(|b| if self.fit_len[b] > 0 { LOOP_LINE as u32 - 1 } else { 15 }).collect();
         self.block_pads = vec![0; nb];
         for bi in 0..nb {
             if !reach[bi] {
                 continue;
             }
             if align.get(bi) == Some(&true) {
-                let pad = (16 - self.a.pos() % 16) % 16;
+                let p = self.a.pos();
+                let mut pad = (16 - p % 16) % 16;
+                // a small hot loop that would cross a fetch line starts on the next one
+                let l = self.fit_len[bi] as usize;
+                if l > 0 && (p + pad) % LOOP_LINE + l > LOOP_LINE {
+                    pad = (LOOP_LINE - p % LOOP_LINE) % LOOP_LINE;
+                }
                 self.a.nops(pad);
                 self.pads_n += 1;
             }
@@ -3043,8 +3064,9 @@ impl<'a> Gen<'a> {
     fn loop_heads(&self, reach: &[bool]) -> Vec<bool> {
         let nb = self.f.blocks.len();
         let mut a = vec![false; nb];
-        // (no frequencies, e.g. after the allocator split loops: no padding -- aligning every head
-        // of every loop, cold ones included, cost reconcile 3.5% of its bytes in nops)
+        // (no frequencies, as in builds below O3: no padding -- aligning every head of every loop,
+        // cold ones included, cost reconcile 3.5% of its bytes in nops; the allocator's loop split
+        // hands on frequencies for its blocks)
         if !self.align_loops || self.freq.is_none() {
             return a;
         }
@@ -3078,6 +3100,41 @@ impl<'a> Gen<'a> {
             }
         }
         a
+    }
+
+    /// The second pass: per loop head `align` picked, the bytes from its start to the end of its
+    /// last latch in the first pass, when that is at most a fetch line and the loop is innermost
+    /// (no other aligned head between: an inner padding may grow in this pass, the code around it
+    /// only shrinks, so the first pass's length bounds this pass's); 0 otherwise. The first pass
+    /// knows no lengths yet: its paddings are the 16-byte ones.
+    fn fit_lens(&self, align: &[bool], reach: &[bool]) -> Vec<u32> {
+        let nb = self.f.blocks.len();
+        let mut out = vec![0u32; nb];
+        let Some(h) = self.fwd_hint.as_ref().filter(|_| self.loop_fit) else { return out };
+        let mut latch = vec![usize::MAX; nb];
+        for bj in 0..nb {
+            if !reach[bj] {
+                continue;
+            }
+            for s in self.f.blocks[bj].term.succs() {
+                let t = self.thru(s) as usize;
+                if t <= bj && align.get(t) == Some(&true) && (latch[t] == usize::MAX || latch[t] < bj) {
+                    latch[t] = bj;
+                }
+            }
+        }
+        for t in 0..nb {
+            let l = latch[t];
+            if l == usize::MAX || (t + 1..=l).any(|b| align.get(b) == Some(&true)) {
+                continue;
+            }
+            let start = h.1.get(t).copied().unwrap_or(usize::MAX);
+            let end = self.next_block.get(l).and_then(|&n| h.1.get(n as usize)).copied().unwrap_or(usize::MAX);
+            if start != usize::MAX && end != usize::MAX && end > start && end - start <= LOOP_LINE {
+                out[t] = (end - start) as u32;
+            }
+        }
+        out
     }
 
     fn thru(&self, b: u32) -> u32 {
@@ -3131,7 +3188,10 @@ impl<'a> Gen<'a> {
         self.fwd_pads.push(self.pads_n);
         let Some(h) = &self.fwd_hint else { return false };
         match (h.0.get(k), h.1.get(target as usize), h.2.get(k), h.3.get(target as usize)) {
-            (Some(&c1), Some(&t1), Some(&p1), Some(&pt)) if t1 != usize::MAX && t1 > c1 => t1 - c1 - 2 + 15 * pt.saturating_sub(p1) as usize <= 127,
+            (Some(&c1), Some(&t1), Some(&p1), Some(&pt)) if t1 != usize::MAX && t1 > c1 => {
+                let room: usize = self.pad_room.get(p1 as usize..(pt as usize).max(p1 as usize)).map_or(15 * pt.saturating_sub(p1) as usize, |r| r.iter().map(|&x| x as usize).sum());
+                t1 - c1 - 2 + room <= 127
+            }
             _ => false,
         }
     }
@@ -6897,8 +6957,11 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     }
     let _cost_ra = crate::probe::phase(9);
     let t_ra = crate::stats::pass_clock();
-    let (split, al) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
+    let (split, al, split_freq) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
+    // the loop split's made blocks have frequencies too: its loop heads are aligned as any other's
+    // (RELAX_OPT=-splitfreq: a split function gets none, its heads no padding; A/B)
+    let freq = if split.is_none() { freq } else if crate::stats::opt_off(options, "-splitfreq") { None } else { split_freq.as_deref() };
     if split.is_some() {
         f.verify_after("split_loops")?;
     }
@@ -7022,6 +7085,9 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         fwd_pads: Vec::new(),
         block_pads: Vec::new(),
         pads_n: 0,
+        loop_fit: env.opt_regs && !crate::stats::opt_off(options, "-loopfit") && !crate::stats::opt_off(options, "-hotalign"),
+        fit_len: Vec::new(),
+        pad_room: Vec::new(),
     };
     // read only at integer casts: a function without one needs no table
     g.zero_above = if g.f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Conv(Conv::IntToInt(_), ..)))) {

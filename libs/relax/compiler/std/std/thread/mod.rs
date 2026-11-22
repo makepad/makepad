@@ -393,7 +393,7 @@ fn thread_start<F: FnOnce() -> T, T>(arg: *mut u8) {
         }
     }
     set_current(start.thread.clone());
-    let panicked = sys::rt::catch_panic(run_main::<F, T>, &mut *start as *mut ThreadStart<F, T> as *mut u8);
+    let panicked = sys::rt::catch_panic(run_main::<F, T>, &mut *start as *mut ThreadStart<F, T> as *mut u8, false);
     if panicked {
         let payload: Box<dyn Any + Send> = crate::panic::take_payload();
         unsafe { *start.packet.result.get() = Some(Err(payload)) };
