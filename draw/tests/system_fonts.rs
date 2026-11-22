@@ -100,22 +100,34 @@ fn makepad_font_core_prewarm() {
     });
 }
 
+/// The `Cx`'s asynchronous loads of kind "font" (`Cx::pending_async_loads`).
+fn font_loads(cx: &Cx) -> usize {
+    cx.pending_async_loads().iter().filter(|(kind, _)| *kind == "font").map(|(_, n)| n).sum()
+}
+
 #[test]
 fn a_system_family_member_resolves_in_the_background() {
     let mut cx = new_cx(FontSet::Latin);
     let ui = draw_text(&mut cx, "system-ui");
+    // Until a draw (or the signal its answer raises) takes it in, the lookup
+    // is a load in flight: a step that waits for loads draws its face in the
+    // same frame however slowly the pool runs.
+    assert_eq!(font_loads(&cx), 1, "{:?}", cx.pending_async_loads());
     let laidout = layout_settled(&mut cx, &ui, "Hello");
     let names = faces(&laidout);
     println!("system-ui bold: {names:?}");
     assert!(names.iter().all(|name| name != "?"), "{names:?}");
+    assert_eq!(font_loads(&cx), 0, "drawn with its answer, it is no load: {:?}", cx.pending_async_loads());
 
     // A family not installed anywhere: the member is left out, the family
     // draws with IBM Plex.
     let missing = draw_text(&mut cx, "No Such Family 7f3a");
+    assert_eq!(font_loads(&cx), 1, "{:?}", cx.pending_async_loads());
     let laidout = layout_settled(&mut cx, &missing, "Hello");
     let names = faces(&laidout);
     println!("missing family: {names:?}");
     assert!(names.iter().all(|name| name.starts_with("IBM Plex")), "{names:?}");
+    assert_eq!(font_loads(&cx), 0, "{:?}", cx.pending_async_loads());
 }
 
 #[test]

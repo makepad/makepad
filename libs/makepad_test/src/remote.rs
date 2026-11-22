@@ -147,6 +147,10 @@ pub(crate) struct AppCpu {
     /// not asked): CPU they wanted and a loaded box did not give them. Not its UI thread's (its CPU
     /// says its work), nor its serving threads' or the runtime's (under the JIT, its compiles).
     pub(crate) waited: Duration,
+    /// At a look (`waited`), how many of its threads (not its serving ones) wait in the kernel
+    /// uninterruptibly: on the disk (a file's sync, a read) or on a page it reads in. Zero when not
+    /// asked, and on Windows.
+    pub(crate) io_threads: u32,
 }
 
 /// Why the app would still change if time moved on (`settled`), as the idle rule reads it.
@@ -225,7 +229,8 @@ impl RemoteClient {
     /// on it, and its whole process's but what
     /// serving remote peers ran (its serving threads, and its UI thread answering their asks) and
     /// what the runtime's own threads ran; and its process's major page faults. With `waited`,
-    /// what its other threads waited for a core too: a file or two a thread, for a look only.
+    /// what its other threads waited for a core too, and how many wait on the disk now: a file or
+    /// two a thread, for a look only.
     pub(crate) fn cpu(&self, waited: bool) -> TestResult<AppCpu> {
         let params: &[(&str, &str)] = if waited { &[("waited", "1")] } else { &[] };
         let json = self.get_json("uicounts", params)?;
@@ -235,8 +240,11 @@ impl RemoteClient {
                 .ok_or_else(|| TestError::new(format!("app remote uicounts: no {key}: {json:?}")))
         };
         let faults = json_f64(json.key("faults")).ok_or_else(|| TestError::new(format!("app remote uicounts: no faults: {json:?}")))? as u64;
-        let waited = if waited { ns("waited_ns")? } else { Duration::ZERO };
-        Ok(AppCpu { main: ns("cpu_ns")?.saturating_sub(ns("answered_ns")?), own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults, waited })
+        let (waited, io_threads) = match waited {
+            true => (ns("waited_ns")?, json_f64(json.key("io_threads")).ok_or_else(|| TestError::new(format!("app remote uicounts: no io_threads: {json:?}")))? as u32),
+            false => (Duration::ZERO, 0),
+        };
+        Ok(AppCpu { main: ns("cpu_ns")?.saturating_sub(ns("answered_ns")?), own: ns("process_cpu_ns")?.saturating_sub(ns("served_cpu_ns")?).saturating_sub(ns("runtime_cpu_ns")?), faults, waited, io_threads })
     }
 
     /// Under the JIT, the program waits for code it is about to run: a request of it queued on the

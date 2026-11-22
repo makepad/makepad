@@ -287,6 +287,11 @@ impl<'a> CxDraw<'a> {
         self.pass_stack.last().unwrap().pass_id
     }
 
+    /// Asks [`Cx::draw_shader_ready_in`] between beginning and ending the current pass.
+    pub fn draw_shader_ready_here(&self, shader: crate::makepad_platform::DrawShaderId) -> bool {
+        self.cx.draw_shader_ready_in(shader, self.current_pass_id())
+    }
+
     pub fn current_pass_size(&self) -> Vec2d {
         self.cx
             .get_pass_rect(

@@ -1072,6 +1072,7 @@ impl MeshView {
                 dynamic: true,
                 depth_order: 0.0,
                 custom_material: None,
+                layer_materials: Vec::new(),
                 part_poses: Vec::new(),
                 lamps: Default::default(),
             });
@@ -1554,6 +1555,7 @@ impl MeshView {
                         dynamic: true,
                         depth_order: 0.0,
                         custom_material: None,
+                        layer_materials: Vec::new(),
                         part_poses: Vec::new(),
                         lamps: Default::default(),
                     });
@@ -1577,6 +1579,7 @@ impl MeshView {
                         dynamic: true,
                         depth_order: 0.0,
                         custom_material: None,
+                        layer_materials: Vec::new(),
                         part_poses: Vec::new(),
                         lamps: Default::default(),
                     });

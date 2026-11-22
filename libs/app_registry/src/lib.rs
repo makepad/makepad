@@ -94,7 +94,7 @@ mod launch;
 pub mod child_env;
 pub mod machine;
 
-pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
+pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, ChildMode, LaunchEvent, LaunchKind, ProcessOutput, Runner};
 
 impl AppEntry {
     /// What the checkout helpers need to know about it.
@@ -308,16 +308,38 @@ fn bundle_sibling(dir: &Path, bin: &str) -> Option<PathBuf> {
 }
 
 /// The binary that starts `app` without compiling anything: a sibling of the
-/// running executable, else the checkout's release build (`root`). None: not built.
+/// running executable, else the checkout's release build (`root`) under this process's
+/// `CARGO_TARGET_DIR`, where a launcher whose cargo keeps that variable builds it (Code's runs).
+/// A registry launch's is [`launched_binary`]. None: not built.
 pub fn built_binary(app: &AppTarget, root: Option<&Path>) -> Option<PathBuf> {
+    built_under(app, root, std::env::var_os("CARGO_TARGET_DIR").as_deref())
+}
+
+fn built_under(app: &AppTarget, root: Option<&Path>, target_dir: Option<&OsStr>) -> Option<PathBuf> {
     // Beside the running executable first: whatever target directory this
     // build used, its sibling binaries are right there.
     if let Some(path) = installed_binary(app.bin) {
         return Some(path);
     }
-    let root = root?;
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR");
-    Some(checkout_binary(app, root, target_dir.as_deref())).filter(|path| path.is_file())
+    Some(checkout_binary(app, root?, target_dir)).filter(|path| path.is_file())
+}
+
+/// The binary a registry launch of `app` ([`AppLaunch`]) starts with nothing left to compile: an
+/// installed app's compiled sibling, else, from a checkout with its sources, the release build in
+/// the checkout's own `target/`, which the launch's `cargo run` builds and runs (its cargo never
+/// sees the launcher's `CARGO_TARGET_DIR`, [`child_env::scrub_lane`]), else the binary it starts
+/// as it is ([`launch_argv`]: under `target_dir`, the launcher's `CARGO_TARGET_DIR`). A lane's
+/// WM looked in its lane's target dir: it found no app built and warmed none, and its Quick Look
+/// refused every app as not built, while its launches built them in the checkout's `target/`
+/// (11-22). None: not built.
+pub fn launched_binary(app: &AppTarget, root: Option<&Path>, target_dir: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(sibling) = bundled_sibling(app.bin) {
+        return Some(sibling);
+    }
+    match root {
+        Some(root) if has_sources(app, root) => Some(checkout_binary(app, root, None)).filter(|path| path.is_file()),
+        _ => built_under(app, root, target_dir),
+    }
 }
 
 /// The cargo to launch with: the one the environment names. The one running us (`CARGO`),

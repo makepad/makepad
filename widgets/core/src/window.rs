@@ -115,6 +115,16 @@ pub fn resolve_chrome(declared: WindowChrome, has_drag_region: bool, host: Optio
     }
 }
 
+/// Whether a window under the WM, its chrome `chrome` and its own window controls shown now
+/// (`controls`), leaves its window buttons to the WM: it shows none of its own (chromeless, or
+/// in full screen with no caption, or a title-only caption there) and has no app-drawn chrome
+/// with buttons of its own. The WM then gives a full-screen window its plain caption at the top
+/// edge, which is the only way out of it by the mouse; a picture-only full-screen window had no
+/// way out but keys (11-21).
+pub fn leaves_buttons_to_wm(chrome: ResolvedChrome, controls: bool) -> bool {
+    !controls && chrome != ResolvedChrome::Custom
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
@@ -541,6 +551,8 @@ pub struct Window {
     /// once per apply: the sync that shows or hides it runs on every draw.
     #[rust]
     caption_window_gap: Option<WidgetRef>,
+    #[rust]
+    caption_controls: CaptionControls,
     /// Whether this widget should create its native surface during initial
     /// construction. The stable window id and widget tree still exist when
     /// false, so the owner can explicitly create the surface later.
@@ -685,6 +697,10 @@ pub struct Window {
     /// Used to only emit a platform op when the resolved value actually changes.
     #[rust]
     system_bar_dark_icons: Option<bool>,
+    /// What the WM was last told of the window's buttons (`leaves_buttons_to_wm`): told
+    /// again only when it changes.
+    #[rust]
+    wm_buttons_said: Option<bool>,
     /// Cached `(caption_bar visible, caption rect, buttons rect, caption bar area)` for
     /// `WindowDragQuery`. It is refreshed only after layout finishes, so a synchronous native
     /// hit-test between configure and redraw cannot preserve rectangles from the previous
@@ -867,6 +883,34 @@ pub struct DrawSsaaResolve {
 
 /// The space between an `Overlay` caption label's title and anything else in the caption bar.
 const CAPTION_TITLE_SPACING: f64 = 6.0;
+
+#[derive(Default)]
+struct CaptionControls {
+    children: Vec<LiveId>,
+    positions: [Option<usize>; 3],
+    missing: Option<WidgetRef>,
+}
+
+impl CaptionControls {
+    fn resolve(&mut self, bar: &WidgetRef) -> [WidgetRef; 3] {
+        let names = [id!(voice_wave), id!(windows_buttons), id!(web_fullscreen)];
+        let Some(view) = bar.borrow::<View>() else { return names.map(|name| bar.child(name)) };
+        // Keep positions, so replacing a widget at the same position takes
+        // effect immediately. Reordering or renaming children rebuilds them.
+        if self.children.iter().copied().ne(view.children.iter().map(|(id, _)| *id)) {
+            self.children.clear();
+            self.children.extend(view.children.iter().map(|(id, _)| *id));
+            self.positions = names.map(|name| self.children.iter().position(|id| *id == name));
+        }
+        std::array::from_fn(|i| match self.positions[i] {
+            Some(at) if !view.children[at].1.is_empty() => view.children[at].1.clone(),
+            // child() also handles a later match behind an unfilled slot.
+            Some(_) => bar.child(names[i]),
+            // Only the caption reads this handle's visibility and area.
+            None => self.missing.get_or_insert_with(WidgetRef::empty).clone(),
+        })
+    }
+}
 
 /// How an `Overlay` caption label's title was last laid out, so we only redo that after something changes.
 #[derive(Clone, Debug, PartialEq)]
@@ -1279,6 +1323,14 @@ impl Window {
                     ResolvedChrome::Custom | ResolvedChrome::None => false,
                 };
             let controls = stock && !fullscreen;
+            if wm {
+                let leaves = leaves_buttons_to_wm(chrome, controls);
+                if self.wm_buttons_said != Some(leaves) {
+                    self.wm_buttons_said = Some(leaves);
+                    let id = self.window.window_id();
+                    cx.push_unique_platform_op(if leaves { CxOsOp::ShowWindowButtons(id) } else { CxOsOp::HideWindowButtons(id) });
+                }
+            }
             self.view(cx, ids!(caption_bar)).set_visible(cx, stock);
             self.view(cx, ids!(windows_buttons)).set_visible(cx, controls && chrome == ResolvedChrome::Buttons);
             self.hosted_mac_controls = controls && chrome == ResolvedChrome::Lights;
@@ -1494,7 +1546,7 @@ impl Window {
     /// between buttons, the title, a logo and status text all drag like the
     /// empty bar. With `text`, text and icons count too: what the title must not be
     /// drawn over.
-    fn caption_app_rects(&mut self, cx: &mut Cx, text: bool) -> Vec<Rect> {
+    fn caption_app_rects(cx: &mut Cx, caption_bar: &WidgetRef, caption_label: &WidgetRef, text: bool) -> Vec<Rect> {
         // `clip`: the visible part of the clipping views above (a scrolled toolbar's
         // controls out of its view are neither controls nor obstacles there).
         fn collect(cx: &mut Cx, children: Vec<WidgetRef>, rects: &mut Vec<Rect>, text: bool, clip: Option<(Vec2d, Vec2d)>) {
@@ -1539,10 +1591,7 @@ impl Window {
         let mut rects = Vec::new();
         let stock_bar = |id: LiveId| matches!(id, id!(caption_label) | id!(voice_wave) | id!(jit_ring_gap) | id!(windows_buttons) | id!(web_fullscreen));
         let stock_label = |id: LiveId| matches!(id, id!(caption_icon) | id!(label));
-        // Both are direct children, which are much cheaper to get than searching the widget tree.
-        let caption_bar = self.view.child(id!(caption_bar));
-        let caption_label = caption_bar.child(id!(caption_label));
-        for (view, stock) in [(&caption_bar, &stock_bar as &dyn Fn(LiveId) -> bool), (&caption_label, &stock_label)] {
+        for (view, stock) in [(caption_bar, &stock_bar as &dyn Fn(LiveId) -> bool), (caption_label, &stock_label)] {
             let children: Vec<WidgetRef> = match view.borrow::<View>() {
                 Some(view) => view.children.iter().filter(|(id, _)| !stock(*id)).map(|(_, c)| c.clone()).collect(),
                 None => continue,
@@ -1614,9 +1663,10 @@ impl Window {
                 return; // No area info yet (first frame)
             }
             // The title goes in the widest gap between everything else in the bar.
-            let mut obstacles = self.caption_app_rects(cx, true);
-            let windows_buttons = caption_bar.child(id!(windows_buttons));
-            for widget in [caption_bar.child(id!(voice_wave)), windows_buttons.clone(), caption_bar.child(id!(web_fullscreen))] {
+            let mut obstacles = Self::caption_app_rects(cx, &caption_bar, &caption_label, true);
+            let controls = self.caption_controls.resolve(&caption_bar);
+            let windows_buttons = &controls[1];
+            for widget in &controls {
                 if widget.visible() {
                     obstacles.push(widget.area().rect(cx));
                 }
@@ -3472,7 +3522,11 @@ impl Widget for Window {
                     // Controls the app hangs in the caption bar (its own keys beside the
                     // title) are the client's: a press on them is a click, not a window
                     // drag. The bar's empty space stays the window manager's.
-                    let over_app_control = visible && self.caption_app_rects(cx, false).iter().any(|r| r.contains(dq.abs));
+                    let over_app_control = visible && {
+                        let bar = self.view.child(id!(caption_bar));
+                        let label = bar.child(id!(caption_label));
+                        Self::caption_app_rects(cx, &bar, &label, false).iter().any(|r| r.contains(dq.abs))
+                    };
                     match classify_window_drag_query(
                         visible,
                         caption_rect,
@@ -3688,5 +3742,12 @@ mod chrome_tests {
         // Amp's skins: their own chrome, declared or by their drag region.
         assert_eq!(resolve_chrome(WindowChrome::Custom, false, Some(S::Macos)), ResolvedChrome::Custom);
         assert_eq!(resolve_chrome(WindowChrome::Follow, true, Some(S::Macos)), ResolvedChrome::Custom);
+        // Under the WM a window that shows no window buttons of its own leaves them to the WM:
+        // a chromeless one, or a stock caption in full screen; an app-drawn chrome keeps its own.
+        assert!(leaves_buttons_to_wm(ResolvedChrome::None, false), "a chromeless window: the WM's");
+        assert!(leaves_buttons_to_wm(ResolvedChrome::Lights, false), "a stock caption gone in full screen");
+        assert!(!leaves_buttons_to_wm(ResolvedChrome::Lights, true), "its own lights");
+        assert!(!leaves_buttons_to_wm(ResolvedChrome::Buttons, true), "its own buttons");
+        assert!(!leaves_buttons_to_wm(ResolvedChrome::Custom, false), "an app-drawn chrome with its own buttons");
     }
 }

@@ -1349,20 +1349,28 @@ pub fn run_current_package_test<F, R>(
 /// the UI thread runs answering an ask (this wait's own looks included) the app counts as served;
 /// what the closure's asks set off beyond their answers (the frame an input brings) is left out with
 /// the closure's time, so the share is the app's while the wait left it alone: what it ran outside
-/// the wait's closure, over the time outside it. Two stalls run no CPU either and are no idle app,
-/// and the verdict names them: a look whose process took major page faults at a swapping rate
+/// the wait's closure, over the time outside it. Three stalls run no CPU either and are no idle
+/// app, and the verdict names them: a look whose process took major page faults at a swapping rate
 /// ([`SWAP_FAULTS_PER_S`]) waited on memory (a thread that waits for its page runs no CPU; one fault
-/// in 10 s read as "waiting on memory", 11-10), and one with only the app pool's
-/// queued jobs pending, none of them taken since the last look, is a starved pool (its jobs wait
-/// for a CPU permit the process's budget does not grant). Such a stretch ends the wait as soon.
+/// in 10 s read as "waiting on memory", 11-10), one that found threads of it waiting in the kernel
+/// uninterruptibly (`AppCpu::io_threads`: a file's sync, a read) waited on the disk (a store's
+/// syncs on a loaded box ran no CPU for seconds and read as "sat idle", 11-21), and one with only
+/// the app pool's queued jobs pending, none of them taken since the last look, is a starved pool
+/// (its jobs wait for a CPU permit the process's budget does not grant). Such a stretch ends the
+/// wait as soon.
 /// (A test unit at 29.8 GB beside another suite on a swapping box read as "sat idle", with 7,324
 /// Background jobs queued, 11-10.) A starve counts from the second look that finds the jobs queued,
 /// none taken (a job queued since the look before has waited for nothing yet). The verdict names
-/// either stall only while it lasts to the wait's end: an app whose jobs got their permits, or
-/// whose faults stopped, with nothing pending since, is an idle app, and the verdict says the stall
-/// before as a clause. (On a loaded box a counter's wait read as a starved pool for one look in 10
-/// that found its font scan still queued for a permit, and as "waiting on memory (swapping)" for
-/// one look's 89 page faults with no memory pressure on the box, 11-12.) And a test may run what
+/// a stall only while it lasts to the wait's end: an app whose jobs got their permits, or whose
+/// faults or disk waits stopped, with nothing pending since, is an idle app, and the verdict says
+/// the stall before as a clause. (On a loaded box a counter's wait read as a starved pool for one
+/// look in 10 that found its font scan still queued for a permit, and as "waiting on memory
+/// (swapping)" for one look's 89 page faults with no memory pressure on the box, 11-12.) And a
+/// memory or disk wait is the verdict only when it is why the app ran nothing, every look of the
+/// idle stretch finding it: one that began after the app had sat idle with nothing pending is a
+/// clause too. (An app idle 9.3 s took 80 major page faults in the wait's last look, on a box at
+/// 1.2% memory pressure, and read as "waiting on memory (swapping)" for 1.0 of the 10.3 s, 11-22.)
+/// And a test may run what
 /// the app waits on in its own process (an AI hub on loopback with its GPU device): what the test
 /// process runs beside the thread driving the test ([`beside_cpu`]) is progress the app waits for,
 /// and while it runs at the idle share the app is not idle. (A grown part's refine on a cold cache:
@@ -1398,6 +1406,11 @@ struct Budget {
     faults: u64,
     memory: (Duration, u64),
     paged: (Duration, u64),
+    /// Of the idle stretch, the disk wait that lasts to the last look (how long its looks found
+    /// threads of it waiting in the kernel uninterruptibly, and the most at once), and the disk
+    /// waits before it, which ended.
+    disk: (Duration, u32),
+    disked: (Duration, u32),
     /// The jobs the app pool's workers had taken at the last look, and whether it found jobs queued.
     taken: u64,
     queued: bool,
@@ -1456,7 +1469,7 @@ impl Budget {
 
     /// A wait's budget from the app's CPU `cpu` and the test process's `beside` it at `now`.
     fn at(limit: Duration, idle_limit: Duration, cpu: crate::remote::AppCpu, now: Instant, beside: Duration) -> Budget {
-        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO), pending: (Duration::ZERO, Vec::new()), started: Started::default() }
+        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), disk: (Duration::ZERO, 0), disked: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO), pending: (Duration::ZERO, Vec::new()), started: Started::default() }
     }
 
     /// The wait asked the app from `since` (its closure ran): its CPU before and after.
@@ -1528,6 +1541,13 @@ impl Budget {
                 let (waited, n) = std::mem::take(&mut self.memory);
                 self.paged = (self.paged.0 + waited, self.paged.1 + n);
             }
+            if cpu.io_threads > 0 {
+                self.disk = (self.disk.0 + over, self.disk.1.max(cpu.io_threads));
+            } else {
+                // no thread of it waits on the disk now: that wait ended
+                let (waited, n) = std::mem::take(&mut self.disk);
+                self.disked = (self.disked.0 + waited, self.disked.1.max(n));
+            }
             if queue && self.queued {
                 // the jobs the last look found queued are there still, none taken: they waited the
                 // whole look for a permit (a job queued since has waited for nothing yet)
@@ -1539,6 +1559,7 @@ impl Budget {
             }
         } else {
             (self.idle, self.ticked, self.memory, self.paged, self.starved, self.granted) = (Duration::ZERO, (Duration::ZERO, Duration::ZERO), (Duration::ZERO, 0), (Duration::ZERO, 0), (Duration::ZERO, [0; 3]), Duration::ZERO);
+            (self.disk, self.disked) = ((Duration::ZERO, 0), (Duration::ZERO, 0));
         }
         self.last = (now, cpu.own, cpu.main, cpu.waited);
         self.faults = cpu.faults;
@@ -1561,14 +1582,22 @@ impl Budget {
             Duration::ZERO => String::new(),
             busy => format!("; before that the test process's own threads (a service the test runs in it, as a hub) were busy for {:.1} s, which the wait counted as progress", busy.as_secs_f64()),
         };
-        Ok(Some(match (self.memory, self.starved) {
-            ((waited, n), _) if n > 0 => format!(
+        // a memory or disk wait is why the app ran nothing only when every look of the idle
+        // stretch found it, to the last
+        let covers = |waited: Duration| waited == self.idle;
+        Ok(Some(match (self.memory, self.disk, self.starved) {
+            ((waited, n), _, _) if n > 0 && covers(waited) => format!(
                 "it was waiting on memory (swapping) for {:.1} of the {idle:.1} s it ran nothing (budget {budget:.0} s): {n} major page faults, {:.0} a second while it waited{} (its main thread ran {main:.1} s of CPU){beside}",
                 waited.as_secs_f64(),
                 n as f64 / waited.as_secs_f64(),
-                memory_pressure().map_or(String::new(), |p| format!("; the box's memory pressure: tasks waited on memory {p:.1}% of the last 10 s"))
+                pressure("memory").map_or(String::new(), |p| format!("; the box's memory pressure: tasks waited on memory {p:.1}% of the last 10 s"))
             ),
-            (_, (starved, queued)) if starved > Duration::ZERO => {
+            (_, (waited, n), _) if n > 0 && covers(waited) => format!(
+                "it was waiting on the disk for {:.1} of the {idle:.1} s it ran nothing (budget {budget:.0} s): up to {n} of its threads at a time waited in the kernel uninterruptibly (a file's sync, a read){} (its main thread ran {main:.1} s of CPU){beside}",
+                waited.as_secs_f64(),
+                pressure("io").map_or(String::new(), |p| format!("; the box's I/O pressure: tasks waited on the disk {p:.1}% of the last 10 s"))
+            ),
+            (_, _, (starved, queued)) if starved > Duration::ZERO => {
                 let classes: Vec<String> = ["Interactive", "Visible", "Background"].iter().zip(queued).filter(|(_, n)| *n > 0).map(|(class, n)| format!("{n} jobs queued at {class}")).collect();
                 let slots = match self.slots.is_empty() {
                     true => "; no slot of the process's CPU budget was held at the last look".to_string(),
@@ -1581,7 +1610,7 @@ impl Budget {
                 )
             }
             _ => format!(
-                "it sat idle for {idle:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{}{}{} (its main thread ran {main:.1} s of CPU){beside}",
+                "it sat idle for {idle:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{}{}{}{}{}{} (its main thread ran {main:.1} s of CPU){beside}",
                 if running > 0 { format!(" ({running} pool jobs on its workers ran no CPU)") } else { String::new() },
                 match self.ticked {
                     (Duration::ZERO, _) => String::new(),
@@ -1593,17 +1622,29 @@ impl Budget {
                 },
                 match self.paged {
                     (_, 0) => String::new(),
-                    (waited, n) => format!("; for {:.1} s of it it waited on memory ({n} major page faults), none since", waited.as_secs_f64()),
+                    (waited, n) => format!("; for {:.1} s of it it waited on memory ({n} major page faults), {}", waited.as_secs_f64(), if self.memory.1 == 0 { "none since" } else { "which stopped" }),
+                },
+                match self.memory {
+                    (_, 0) => String::new(),
+                    (waited, n) => format!("; for the last {:.1} s of it it took {n} major page faults ({:.0} a second), which began after it had run nothing for {:.1} s", waited.as_secs_f64(), n as f64 / waited.as_secs_f64(), idle - waited.as_secs_f64()),
+                },
+                match self.disked {
+                    (_, 0) => String::new(),
+                    (waited, n) => format!("; for {:.1} s of it up to {n} of its threads waited on the disk, {}", waited.as_secs_f64(), if self.disk.1 == 0 { "none since" } else { "which ended" }),
+                },
+                match self.disk {
+                    (_, 0) => String::new(),
+                    (waited, n) => format!("; for the last {:.1} s of it up to {n} of its threads waited on the disk, which began after it had run nothing for {:.1} s", waited.as_secs_f64(), idle - waited.as_secs_f64()),
                 }
             ),
         }))
     }
 }
 
-/// The box's memory pressure where the OS says it (Linux PSI): the share of the last 10 s in which
-/// some task waited on memory, in percent.
-fn memory_pressure() -> Option<f64> {
-    let text = fs::read_to_string("/proc/pressure/memory").ok()?;
+/// The box's pressure on `resource` (`memory`, `io`) where the OS says it (Linux PSI): the share of
+/// the last 10 s in which some task waited on it, in percent.
+fn pressure(resource: &str) -> Option<f64> {
+    let text = fs::read_to_string(format!("/proc/pressure/{resource}")).ok()?;
     let some = text.lines().find(|line| line.starts_with("some "))?;
     some.split_whitespace().find_map(|field| field.strip_prefix("avg10="))?.parse().ok()
 }
@@ -1834,7 +1875,7 @@ mod tests {
         let secs = Duration::from_secs_f64;
         // its other threads' CPU, its main thread's and what they waited for a core, a second
         let wait = |other: f64, main: f64, waited: f64| -> Option<(u64, String)> {
-            let (t0, cpu) = (Instant::now(), |m: f64, own: f64, waited: f64| AppCpu { main: secs(m), own: secs(own), faults: 0, waited: secs(waited) });
+            let (t0, cpu) = (Instant::now(), |m: f64, own: f64, waited: f64| AppCpu { main: secs(m), own: secs(own), faults: 0, waited: secs(waited), io_threads: 0 });
             let mut budget = Budget::at(secs(300.0), secs(10.0), cpu(0.0, 0.0, 0.0), t0, Duration::ZERO);
             (1..=60u64).find_map(|look| {
                 let n = look as f64;
@@ -1863,7 +1904,7 @@ mod tests {
     fn a_pending_app_that_runs_nothing_fails_within_the_budget() {
         let secs = Duration::from_secs_f64;
         let wait = |main: f64| -> Option<(u64, String)> {
-            let (t0, cpu) = (Instant::now(), |m: f64| AppCpu { main: secs(m), own: secs(m), faults: 0, waited: Duration::ZERO });
+            let (t0, cpu) = (Instant::now(), |m: f64| AppCpu { main: secs(m), own: secs(m), faults: 0, waited: Duration::ZERO, io_threads: 0 });
             let mut budget = Budget::at(secs(30.0), secs(10.0), cpu(0.0), t0, Duration::ZERO);
             (1..=120u64).find_map(|look| {
                 let pending = || vec!["loads (build: 1)".to_string()];
@@ -1886,16 +1927,18 @@ mod tests {
     /// queued font scan, and as "waiting on memory (swapping)" for one look's 89 page faults with
     /// no memory pressure on the box, of 11 s it sat idle, 11-12.) A starve names who held the CPU
     /// budget's slots at its last look, a JIT build among them (strength_here's 19 Background jobs
-    /// none granted for 10.1 s told no more, 11-13).
+    /// none granted for 10.1 s told no more, 11-13). A memory or disk wait is the verdict only when
+    /// every look of the idle stretch found it: one that began after the app sat idle is a clause
+    /// (80 page faults in the last look of 10.3 s read as "waiting on memory", 11-22).
     #[test]
     fn a_stall_is_the_verdict_only_while_it_lasts() {
-        // the app runs nothing; `look(n)` is its Background jobs queued then, taken so far, and its
-        // major page faults so far
-        let wait = |look: &dyn Fn(u64) -> (u64, u64, u64)| -> (u64, String) {
-            let (t0, cpu) = (Instant::now(), |faults: u64| AppCpu { main: Duration::ZERO, own: Duration::ZERO, faults, waited: Duration::ZERO });
-            let mut budget = Budget::at(Duration::from_secs(300), Duration::from_secs(10), cpu(0), t0, Duration::ZERO);
+        // the app runs nothing; `look(n)` is its Background jobs queued then, taken so far, its
+        // major page faults so far, and its threads waiting on the disk then
+        let wait = |look: &dyn Fn(u64) -> (u64, u64, u64, u32)| -> (u64, String) {
+            let (t0, cpu) = (Instant::now(), |faults: u64, io_threads: u32| AppCpu { main: Duration::ZERO, own: Duration::ZERO, faults, waited: Duration::ZERO, io_threads });
+            let mut budget = Budget::at(Duration::from_secs(300), Duration::from_secs(10), cpu(0, 0), t0, Duration::ZERO);
             (1..=60u64).find_map(|n| {
-                let (queued, taken, faults) = look(n);
+                let (queued, taken, faults, io_threads) = look(n);
                 // while jobs wait, a JIT build has held its slot since the wait began
                 let slots = || match queued {
                     0 => Vec::new(),
@@ -1903,20 +1946,28 @@ mod tests {
                 };
                 let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: queued == 0, only_pool: queued > 0, pool: Some(([0, 0, queued], 0, taken)), slots: slots(), pending: Vec::new() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
-                budget.judge(cpu(faults), t0 + Duration::from_secs(n), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (n, why))
+                budget.judge(cpu(faults, io_threads), t0 + Duration::from_secs(n), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (n, why))
             }).expect("the wait ends")
         };
-        let (n, why) = wait(&|n| if n == 1 { (1, 0, 0) } else { (0, 1, 0) });
+        let (n, why) = wait(&|n| if n == 1 { (1, 0, 0, 0) } else { (0, 1, 0, 0) });
         assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && !why.contains("permit"), "a job seen queued once was not starved: {n}: {why}");
-        let (n, why) = wait(&|n| if n <= 3 { (1, 0, 0) } else { (0, 1, 0) });
+        let (n, why) = wait(&|n| if n <= 3 { (1, 0, 0, 0) } else { (0, 1, 0, 0) });
         assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("for 2.0 s of it its pool's jobs waited for a CPU permit, granted since"), "a starve that ended is not the verdict: {n}: {why}");
-        let (n, why) = wait(&|_| (1, 0, 0));
+        let (n, why) = wait(&|_| (1, 0, 0, 0));
         assert!(n == 10 && why.starts_with("its pool was starved: 1 jobs queued at Background, none granted for 9.0 s of the 10.0 s"), "a starve to the end is: {n}: {why}");
         assert!(why.contains("; the process's CPU budget slots at the last look: 1x background jit \"another compile job\" held 10.0 s"), "a starve names who held the slots: {why}");
-        let (n, why) = wait(&|n| (0, 0, if n >= 2 { 89 } else { 0 }));
+        let (n, why) = wait(&|n| (0, 0, if n >= 2 { 89 } else { 0 }, 0));
         assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("for 1.0 s of it it waited on memory (89 major page faults), none since"), "a burst of page faults that stopped is not the verdict: {n}: {why}");
-        let (n, why) = wait(&|n| (0, 0, 100 * n));
+        let (n, why) = wait(&|n| (0, 0, 100 * n, 0));
         assert!(n == 10 && why.starts_with("it was waiting on memory (swapping) for 10.0 of the 10.0 s"), "a memory wait to the end is: {n}: {why}");
+        let (n, why) = wait(&|n| (0, 0, if n >= 10 { 80 } else { 0 }, 0));
+        assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("; for the last 1.0 s of it it took 80 major page faults (80 a second), which began after it had run nothing for 9.0 s"), "page faults that began after the app sat idle are not the verdict: {n}: {why}");
+        let (n, why) = wait(&|_| (0, 0, 0, 2));
+        assert!(n == 10 && why.starts_with("it was waiting on the disk for 10.0 of the 10.0 s") && why.contains("up to 2 of its threads at a time waited in the kernel uninterruptibly"), "a disk wait to the end is: {n}: {why}");
+        let (n, why) = wait(&|n| (0, 0, 0, u32::from(n <= 3)));
+        assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("; for 3.0 s of it up to 1 of its threads waited on the disk, none since"), "a disk wait that ended is not the verdict: {n}: {why}");
+        let (n, why) = wait(&|n| (0, 0, 0, u32::from(n >= 9)));
+        assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("; for the last 2.0 s of it up to 1 of its threads waited on the disk, which began after it had run nothing for 8.0 s"), "a disk wait that began after the app sat idle is not: {n}: {why}");
     }
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::MouseButton;

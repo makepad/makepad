@@ -9,15 +9,24 @@
 //! hook redraws). After the first frame the index of installed fonts is
 //! built in the background ([`makepad_font_core::system_fonts::prewarm`]),
 //! so neither a by-name lookup nor the OS fallback waits for the scan.
+//!
+//! Both are the `Cx`'s asynchronous loads of kind "font"
+//! ([`Cx::pending_async_loads`]): a frame drawn before they land draws the
+//! text without them, so a step that waits for loads draws them in the same
+//! frame however slowly the pool runs.
 
 use {
-    crate::makepad_platform::{
-        log,
-        thread::{Class, TaskHandle, TaskPool},
-        Cx,
+    crate::{
+        makepad_platform::{
+            log,
+            thread::{Class, TaskHandle, TaskPool},
+            Cx,
+        },
+        text::fonts::Fonts,
     },
     fxhash::FxHashMap,
     makepad_font_core::system_fonts::{self, SystemFont},
+    std::{cell::RefCell, rc::Rc},
 };
 
 /// A system face as a font chain member asks for it.
@@ -77,19 +86,7 @@ impl SystemFaces {
                 self.entries.entry(key.clone()).or_insert(entry)
             }
         };
-        if let Entry::Pending(task) = entry {
-            match task.try_take() {
-                None => return SystemFaceState::Pending,
-                Some(result) => {
-                    let found = result.ok().flatten();
-                    match &found {
-                        Some(font) => log!("text: system font {:?} is {}#{}", key.name, font.path.display(), font.index),
-                        None => log!("text: system font {:?} is not installed here; its family draws without it", key.name),
-                    }
-                    *entry = Entry::Done(found);
-                }
-            }
-        }
+        land(key, entry);
         match entry {
             Entry::Done(Some(font)) => SystemFaceState::Found(font.clone()),
             Entry::Done(None) => SystemFaceState::Missing,
@@ -119,20 +116,65 @@ impl SystemFaces {
     /// a whole redraw at a moment the background scan sets lands in the
     /// middle of its work (an offscreen render's one draw drawn twice under
     /// load, 11-11).
+    /// A finished lookup is taken in here, where its redraw is asked: until
+    /// then it is in flight ([`Self::in_flight`]), and a step that waits for
+    /// loads would wait for a draw that only the step can give.
     pub fn has_news(&mut self, index_waited: bool) -> bool {
-        let lookup_done = self.entries.values().any(|entry| matches!(entry, Entry::Pending(task) if task.is_finished()));
+        let mut lookup_done = false;
+        for (key, entry) in &mut self.entries {
+            lookup_done |= land(key, entry);
+        }
         let prewarm_done = self.prewarm.as_ref().is_some_and(|task| task.is_finished());
         if prewarm_done {
             self.prewarm = None;
         }
         lookup_done || (prewarm_done && index_waited)
     }
+
+    /// The lookups no draw or signal has taken in yet, and the index build
+    /// while a glyph waits for it (`index_waited`): what will change the text
+    /// once it lands. The build alone changes nothing drawn.
+    pub fn in_flight(&self, index_waited: bool) -> usize {
+        let lookups = self.entries.values().filter(|entry| matches!(entry, Entry::Pending(_))).count();
+        lookups + usize::from(index_waited && self.prewarm.is_some())
+    }
+}
+
+/// Takes a finished lookup's answer into `entry`: true when it did.
+fn land(key: &SystemFaceKey, entry: &mut Entry) -> bool {
+    let Entry::Pending(task) = entry else { return false };
+    let Some(result) = task.try_take() else { return false };
+    let found = result.ok().flatten();
+    match &found {
+        Some(font) => log!("text: system font {:?} is {}#{}", key.name, font.path.display(), font.index),
+        None => log!("text: system font {:?} is not installed here; its family draws without it", key.name),
+    }
+    *entry = Entry::Done(found);
+    true
+}
+
+/// The `Cx`'s [`SystemFaces`], made the first time with its probe of kind
+/// "font" ([`Cx::register_async_load_probe`]).
+fn faces(cx: &mut Cx) -> &mut SystemFaces {
+    if !cx.has_global::<SystemFaces>() {
+        cx.register_async_load_probe("font", pending_font_loads);
+    }
+    cx.global::<SystemFaces>()
+}
+
+/// [`SystemFaces::in_flight`] on the `Cx`'s global (fonts borrowed elsewhere
+/// count as waited for, as the signal hook takes them).
+fn pending_font_loads(cx: &Cx) -> usize {
+    let index_waited = cx
+        .get_global_ref::<Rc<RefCell<Fonts>>>()
+        .is_some_and(|fonts| fonts.try_borrow().map_or(true, |fonts| fonts.system_index_waited()));
+    cx.get_global_ref::<SystemFaces>().map_or(0, |faces| faces.in_flight(index_waited))
 }
 
 /// [`SystemFaces::state`] on the `Cx`'s global.
 pub(crate) fn lookup(cx: &mut Cx, key: &SystemFaceKey) -> SystemFaceState {
     let pool = cx.task_pool();
-    cx.global::<SystemFaces>().state(&pool, key)
+    faces(cx).state(&pool, key)
 }
 
 /// [`SystemFaces::start_prewarm`] on the `Cx`'s global.
@@ -141,7 +183,7 @@ pub(crate) fn start_prewarm(cx: &mut Cx) {
         return;
     }
     let pool = cx.task_pool();
-    cx.global::<SystemFaces>().start_prewarm(&pool);
+    faces(cx).start_prewarm(&pool);
 }
 
 /// [`SystemFaces::has_news`] on the `Cx`'s global (false before any lookup);

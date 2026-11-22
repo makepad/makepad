@@ -167,6 +167,15 @@
     "menu": "other"
   },
   {
+    "id": "fab",
+    "title": "Fab",
+    "package": "makepad-fab",
+    "binary": "makepad-fab",
+    "workspace": "makepad/apps/apps/fab/app",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "fabric",
     "title": "Fabric",
     "package": "makepad-app-fabric",

@@ -522,7 +522,7 @@ pub fn window_intercept(
     window_view: &mut View,
     window_id: WindowId,
 ) -> bool {
-    if cx.in_makepad_studio() && !cx.global::<AiSlotRequests>().feedback_enabled {
+    if cx.in_host() && !cx.global::<AiSlotRequests>().feedback_enabled {
         return false;
     }
     match event {

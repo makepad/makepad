@@ -131,7 +131,7 @@
   },
   {
     "id": "fab", "label": "Fab", "package": "makepad-fab",
-    "dir": "apps/commercial/fab/app", "bin": "makepad-fab", "manifest": null, "args": [],
+    "dir": "apps/apps/fab/app", "bin": "makepad-fab", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {

@@ -241,13 +241,13 @@ fn child_by_path_in(
 /// The body of [`WidgetNode::child`], shared by every widget type.
 #[inline(never)]
 fn child_in(id: LiveId, children: &mut dyn FnMut(&mut dyn FnMut(LiveId, WidgetRef))) -> WidgetRef {
-    let mut found = WidgetRef::empty();
+    let mut found: Option<WidgetRef> = None;
     children(&mut |name, child| {
-        if found.is_empty() && name == id {
-            found = child;
+        if name == id && found.as_ref().is_none_or(WidgetRef::is_empty) {
+            found = Some(child);
         }
     });
-    found
+    found.unwrap_or_else(WidgetRef::empty)
 }
 
 /// The body of [`WidgetNode::find_interactive_widget_from_point`], shared by

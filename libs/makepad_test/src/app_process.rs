@@ -1095,21 +1095,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// (A script, not this test's own binary run again: under the JIT that binary is a JIT start of
+    /// the whole test binary, which passed the native launch's deadline before it exited in a full
+    /// run beside other packages, 11-22.)
+    #[cfg(unix)]
     #[test]
     fn early_exit_before_the_listening_line_is_an_error_with_stderr() {
-        const CHILD_MODE: &str = "MAKEPAD_TEST_EARLY_EXIT_CHILD";
-        if std::env::var_os(CHILD_MODE).is_some() {
-            eprintln!("boom");
-            std::process::exit(3);
-        }
         let dir = scratch_dir("early-exit");
         let spec = fake_app_spec(dir.clone());
-        let executable = std::env::current_exe().unwrap();
-        let mut command = Command::new(&executable);
-        command
-            .args(["--exact", "app_process::tests::early_exit_before_the_listening_line_is_an_error_with_stderr", "--nocapture"])
-            .env(CHILD_MODE, "1");
-        let err = launch_error(launch_command(&spec, &executable, command, false));
+        let script = write_script(&dir, "early-exit.sh", "#!/bin/sh\necho boom >&2\nexit 3\n");
+        let err = launch_error(launch_command(&spec, &script, Command::new(&script), false));
         assert!(err.message().contains("exited"), "{}", err.message());
         assert!(err.message().contains("boom"), "{}", err.message());
         let _ = fs::remove_dir_all(&dir);
