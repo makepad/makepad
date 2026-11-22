@@ -1,6 +1,7 @@
 //! Off-thread prepared model payloads and their uploaded/loaded GPU forms.
 
 use super::*;
+use crate::material_surface::{ImageBudget, ImageSize, MapPlan, SurfacePlan};
 pub use crate::material_surface::{TextureCharge, TextureSlot};
 
 /// Decode generated PNG pixels with limits enforced by the decoder before
@@ -28,36 +29,58 @@ pub fn decode_generated_png(bytes: &[u8], dimension: usize, byte_limit: usize) -
 /// [`decode_generated_png`] that DEGRADES past the pixel budget: an image
 /// too large for what is left is decoded at its own size and box-halved
 /// until it fits (logged), instead of failing the whole model.
-pub fn decode_generated_png_within(bytes: &[u8], dimension: usize, byte_limit: usize) -> Result<ImageBuffer, String> {
-    match decode_generated_png(bytes, dimension, byte_limit) {
-        Err(e) if e.contains("budget") => {
-            let mut image = decode_generated_png(bytes, dimension, dimension * dimension * 4)?;
-            let (w0, h0) = (image.width, image.height);
-            while image.data.len() * 4 > byte_limit.max(4) && (image.width > 1 || image.height > 1) {
-                let (w, h) = (image.width, image.height);
-                let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-                let mut data = Vec::with_capacity(nw * nh);
-                for y in 0..nh {
-                    for x in 0..nw {
-                        let mut sum = [0u32; 4];
-                        for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                            let p = image.data[(y * 2 + dy).min(h - 1) * w + (x * 2 + dx).min(w - 1)];
-                            for (i, s) in sum.iter_mut().enumerate() {
-                                *s += (p >> (i * 8)) & 255;
-                            }
-                        }
-                        data.push(sum.iter().enumerate().fold(0u32, |acc, (i, s)| acc | (((s + 2) / 4) << (i * 8))));
-                    }
-                }
-                image.data = data;
-                image.width = nw;
-                image.height = nh;
-            }
-            log!("generated texture {w0}x{h0} over the prepare budget: downscaled to {}x{}", image.width, image.height);
-            Ok(image)
+pub fn decode_generated_png_within(bytes: &[u8], dimension: usize, byte_limit: usize, what: &str) -> Result<ImageBuffer, String> {
+    let mut image = decode_generated_png(bytes, dimension, usize::MAX)?;
+    let (w0, h0) = (image.width, image.height);
+    let level = ImageSize(w0, h0).fit(0, byte_limit, false);
+    halve_image(&mut image, level);
+    if level > 0 {
+        let (w, h) = (image.width, image.height);
+        let mut key = live_id!(generated_texture_reduced).str_append(what);
+        for size in [w0, h0, w, h] { key = key.bytes_append(&size.to_le_bytes()); }
+        if first_report(key.0) {
+            let factor = 1usize << level;
+            log!("generated {what} {w0}x{h0} over the prepare budget: reduced to {w}x{h} (1/{factor} per side)");
         }
-        other => other,
     }
+    Ok(image)
+}
+
+fn halve_image(image: &mut ImageBuffer, levels: usize) {
+    for _ in 0..levels {
+        let (w, h) = (image.width, image.height);
+        if (w, h) == (1, 1) { break; }
+        let ImageSize(nw, nh) = ImageSize(w, h).at(1);
+        let mut data = Vec::with_capacity(nw * nh);
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut sum = [0u32; 4];
+                for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    let p = image.data[(y * 2 + dy).min(h - 1) * w + (x * 2 + dx).min(w - 1)];
+                    for (i, s) in sum.iter_mut().enumerate() { *s += (p >> (i * 8)) & 255; }
+                }
+                data.push(sum.iter().enumerate().fold(0u32, |acc, (i, s)| acc | (((s + 2) / 4) << (i * 8))));
+            }
+        }
+        image.data = data;
+        image.width = nw;
+        image.height = nh;
+    }
+}
+
+pub(crate) fn decode_model_image(bytes: &[u8], dimension: usize, level: usize) -> Result<ImageBuffer, String> {
+    let mut image = decode_generated_png(bytes, dimension, usize::MAX)?;
+    halve_image(&mut image, level);
+    Ok(image)
+}
+
+pub(crate) fn decode_pixels_within(bytes: &[u8], dimension: usize, level: usize, remaining: usize) -> Result<ImageBuffer, String> {
+    let mut image = decode_generated_png(bytes, dimension, usize::MAX)?;
+    if !crate::texture_pack::is_ktx2(bytes) {
+        let level = ImageSize(image.width, image.height).fit(level, remaining, false);
+        halve_image(&mut image, level);
+    }
+    Ok(image)
 }
 
 /// Upload a prepared generated atlas with repeat addressing and one level.
@@ -127,6 +150,29 @@ pub struct PreparedStaticPreview {
     pub(super) sky: Option<PreparedSky>,
     pub(super) liquids: std::sync::Arc<Vec<crate::model::LiquidSurface>>,
     pub(super) min: Vec3f, pub(super) max: Vec3f, pub(super) prelit: bool,
+}
+
+/// A model's draw layers can bind the same atlas many times. Keep its plan, charge and
+/// prepared pixels together so repeated bindings spend the model's budget just once.
+struct LayerMap {
+    plan: MapPlan,
+    texture: std::cell::OnceCell<std::sync::Arc<crate::material_surface::PreparedTexture>>,
+}
+
+impl LayerMap {
+    fn prepare(&self, bytes: Option<&[u8]>, level: usize, remaining: &mut usize) -> Result<std::sync::Arc<crate::material_surface::PreparedTexture>, String> {
+        if let Some(texture) = self.texture.get() { return Ok(texture.clone()); }
+        let texture = self.plan.prepare(bytes, level, remaining)?;
+        let _ = self.texture.set(texture.clone());
+        Ok(texture)
+    }
+}
+
+struct LayerImages {
+    base: std::rc::Rc<LayerMap>,
+    detail: std::rc::Rc<LayerMap>,
+    orm: std::rc::Rc<LayerMap>,
+    surface: Option<SurfacePlan>,
 }
 
 impl PreparedStaticPreview {
@@ -209,10 +255,14 @@ impl PreparedStaticPreview {
     /// All parsing, bounded image decoding and collision extraction is worker
     /// work. The corresponding upload only consumes validated vectors.
     pub fn prepare(model: StaticModel) -> Result<Self, String> { Self::prepare_with_sidecars(model,None,None) }
-    pub fn prepare_with_sidecars(mut model:StaticModel,ao_png:Option<&[u8]>,sdf_bytes:Option<&[u8]>)->Result<Self,String>{
-        let _preparing=crate::material_surface::Preparing::begin();
-        let ao=ao_png.map(|bytes|decode_generated_png(bytes,4096,usize::MAX)).transpose()?;
-        let sdf=sdf_bytes.and_then(|bytes|crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes).map(|v|v.0));
+    pub fn prepare_with_sidecars(model: StaticModel, ao_png: Option<&[u8]>, sdf_bytes: Option<&[u8]>) -> Result<Self, String> {
+        Self::prepare_with_budget(model, ao_png, sdf_bytes, 128 * 1024 * 1024)
+    }
+
+    pub(super) fn prepare_with_budget(mut model: StaticModel, ao_png: Option<&[u8]>, sdf_bytes: Option<&[u8]>, budget: usize) -> Result<Self, String> {
+        use crate::material_surface::{PixelSemantic, TextureWork, image_content_hash, texture_work};
+        let _preparing = crate::material_surface::Preparing::begin();
+        let sdf = sdf_bytes.and_then(|bytes| crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes).map(|v| v.0));
         if model.texture_uri.is_some() && model.texture_png.is_none() { return Err("model references an external texture without supplied pixels".into()); }
         let stride = crate::model::MODEL_VERTEX_FLOATS;
         let check = |vertices: &[f32], indices: &[u32]| -> Result<(),String> {
@@ -221,15 +271,71 @@ impl PreparedStaticPreview {
             Ok(())
         };
         check(&model.vertices,&model.indices)?;
+        let mut inventory = ImageBudget::default();
+        let mut shared = std::collections::HashMap::new();
+        let mut geometry = sdf.as_ref().map_or(0, |s| s.pixels.len());
+        let mut plan_layer = |vertices: &[f32], indices: &[u32], base: Option<&[u8]>, detail: Option<&[u8]>, pbr: &crate::model::PbrMaterial| -> Result<LayerImages, String> {
+            geometry += (vertices.len() + indices.len()) * 4;
+            let mut map = |bytes: Option<&[u8]>, fallback, semantic: PixelSemantic, store| -> Result<std::rc::Rc<LayerMap>, String> {
+                let ktx = bytes.is_some_and(crate::texture_pack::is_ktx2);
+                let hash = bytes.map_or(0, |b| crate::texture_pack::content_id(b)
+                    .unwrap_or_else(|| texture_work(TextureWork::Hash, || image_content_hash(b))));
+                let key = (hash, bytes.map_or(0, <[u8]>::len), ktx, bytes.is_none().then_some(fallback), semantic as u8, store);
+                let entry = match shared.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => e.insert(std::rc::Rc::new(LayerMap {
+                        plan: MapPlan::with_hash(bytes, hash, fallback, semantic, store, &mut inventory)?,
+                        texture: Default::default(),
+                    })),
+                };
+                Ok(entry.clone())
+            };
+            let surface = pbr.surface.as_deref();
+            let base = map(base, 0xffff_ffff, surface.map_or(PixelSemantic::Color, |s| s.base_semantic()), !surface.is_some_and(|s| s.msdf.is_some()))?;
+            let detail = map(detail, 0xff80_8080, PixelSemantic::Color, true)?;
+            let orm = map(pbr.orm_png.as_deref(), 0xffff_ffff, PixelSemantic::Data, true)?;
+            Ok(LayerImages { base, detail, orm, surface: surface.map(|s| SurfacePlan::new(s, &mut inventory)).transpose()? })
+        };
+        let merged = if model.draw_layers.is_empty() {
+            Some(plan_layer(&model.vertices, &model.indices, model.texture_png.as_deref(), model.detail_png.as_deref(), &model.pbr)?)
+        } else { None };
+        let mut plan_draws = |layers: &[crate::model::StaticDrawLayer]| {
+            layers.iter().map(|l| plan_layer(&l.vertices, &l.indices, l.texture_png.as_deref(), l.detail_png.as_deref(), &l.pbr)).collect::<Result<Vec<_>, String>>()
+        };
+        let draws = plan_draws(&model.draw_layers)?;
+        let mut animated = model.anim_parts.iter().map(|p| plan_draws(&p.layers)).collect::<Result<Vec<_>, _>>()?;
+        let driven = model.driven_parts.iter().map(|p| plan_draws(&p.layers)).collect::<Result<Vec<_>, _>>()?;
+        for (part, plans) in model.anim_parts.iter().zip(&mut animated) {
+            if plans.is_empty() { plans.push(plan_layer(&part.vertices, &part.indices, None, None, &Default::default())?); }
+        }
+        drop(shared); // each binding now holds its plan until its layer is prepared
+        if let Some(sky) = &model.sky {
+            geometry += (sky.vertices.len() + sky.indices.len()) * 4;
+            for bytes in sky.images.iter().take(2) { inventory.pixels(bytes, 4096)?; }
+            inventory.fixed += 4 * (2usize.saturating_sub(sky.images.len()));
+        }
+        if let Some(bytes) = ao_png {
+            inventory.pixels(bytes, 4096)?;
+            geometry += model.indices.len() * (stride + 1) * 4; // bake stream
+        }
+        inventory.fixed = inventory.fixed.saturating_add(geometry);
+        let level = inventory.level(budget);
+        let mut remaining = budget.saturating_sub(geometry);
+        let mut pixels = |bytes: &[u8]| -> Result<ImageBuffer, String> {
+            let image = decode_pixels_within(bytes, 4096, level, remaining)?;
+            remaining = remaining.saturating_sub(image.data.len() * 4);
+            Ok(image)
+        };
+        let ao = ao_png.map(&mut pixels).transpose()?;
         // Empty geometry is a valid distance level; its upload has no draw indices.
         let positions:Vec<Vec3f> = model.vertices.chunks_exact(stride).map(|v|vec3f(v[0],v[1],v[2])).collect();
         let mesh_indices = std::sync::Arc::new(model.indices.clone());
-        let lm_source=ao.as_ref().map(|image|std::sync::Arc::new(crate::lightmap::LmMeshSource{
-            caster:crate::ao::MeshRaycaster::new(positions.clone(),model.indices.clone(),model.min,model.max),
-            ao_uv:model.vertices.chunks_exact(stride).map(|v|crate::model::unpack_ao_uv(v[6])).collect(),
-            albedo:model.vertices.chunks_exact(stride).map(|v|{let b=v[5].to_bits();vec3f((b&255)as f32/255.0,((b>>8)&255)as f32/255.0,((b>>16)&255)as f32/255.0)}).collect(),
-            ao_w:image.width,ao_h:image.height,
-        }));
+        let lm_source=ao.as_ref().map(|image|std::sync::Arc::new(crate::lightmap::LmMeshSource::new(
+            crate::ao::MeshRaycaster::new(positions.clone(),model.indices.clone(),model.min,model.max),
+            model.vertices.chunks_exact(stride).map(|v|crate::model::unpack_ao_uv(v[6])).collect(),
+            model.vertices.chunks_exact(stride).map(|v|{let b=v[5].to_bits();vec3f((b&255)as f32/255.0,((b>>8)&255)as f32/255.0,((b>>16)&255)as f32/255.0)}).collect(),
+            image.width,image.height,
+        )));
         let bake_stream=ao.as_ref().map(|_|{
             let mut vertices=Vec::with_capacity(model.indices.len()*stride);let mut indices=Vec::with_capacity(model.indices.len());
             for tri in model.indices.chunks_exact(3){let a=positions[tri[0]as usize];let b=positions[tri[1]as usize];let c=positions[tri[2]as usize];
@@ -239,93 +345,56 @@ impl PreparedStaticPreview {
             }(indices,vertices)
         });
         let occluder_parts = model.collider_parts();
-        let remaining = std::cell::Cell::new(128usize*1024*1024);
-        // Many layers of one model share an image (a map's 28 meshes use
-        // ONE atlas): decode, mip and charge each distinct image once, and
-        // share the prepared pixels (upload dedupes them too).
-        let shared = std::cell::RefCell::new(std::collections::HashMap::<(u64,usize,u32,u8),std::sync::Arc<crate::material_surface::PreparedTexture>>::new());
-        // `store`: the image may be kept in the store's block form (not an MSDF, whose distances need exact texels).
-        let image = |bytes:Option<&[u8]>,fallback:u32,semantic:crate::material_surface::PixelSemantic,store:bool| -> Result<std::sync::Arc<crate::material_surface::PreparedTexture>,String> {
-            // The same image as colour and as a masked cutout mips differently.
-            let kind=semantic as u8;
-            // The load-ready form: pre-mipped UASTC (KTX2) in the GLB, keyed by
-            // its builder-assigned id and remapped to the device format (no
-            // decode, mips or hashing).
-            if let Some(bytes)=bytes.filter(|b|crate::texture_pack::is_ktx2(b)) {
-                let key=(crate::texture_pack::content_id(bytes).unwrap_or(0),bytes.len(),1,kind);
-                if let Some(texture)=shared.borrow().get(&key){return Ok(texture.clone());}
-                let texture=crate::material_surface::remapped_ktx2(bytes).expect("KTX2 bytes")?;
-                remaining.set(remaining.get().saturating_sub(texture.bytes()));
-                shared.borrow_mut().insert(key,texture.clone());
-                return Ok(texture);
-            }
-            let key=match bytes {
-                Some(bytes)=>(crate::material_surface::texture_work(crate::material_surface::TextureWork::Hash,||crate::material_surface::image_content_hash(bytes)),bytes.len(),0,kind),
-                None=>(0,0,fallback,kind),
-            };
-            if let Some(texture)=shared.borrow().get(&key){return Ok(texture.clone());}
-            // PNG images (a level's material images, content published before
-            // the load-ready form) decode and mip here, once per load for all
-            // the models that use them.
-            let prepare=||{
-                let decoded=if let Some(bytes)=bytes {
-                    let image=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||decode_generated_png_within(bytes,4096,remaining.get()))?;
-                    remaining.set(remaining.get().saturating_sub(image.data.len()*4)); image
-                } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
-                Ok(crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::material_surface::PreparedTexture::prepare(decoded,semantic)))
-            };
-            let texture=match bytes {
-                Some(bytes) if store=>{
-                    let texture=crate::material_surface::prepared_once((key.0,key.1,key.3),||{
-                        let texture=crate::material_surface::stored_device_texture(bytes,semantic,false,prepare)?;
-                        if texture.compressed.is_some() { remaining.set(remaining.get().saturating_sub(texture.bytes())); }
-                        Ok(texture)
-                    })?;
-                    // The memo may hold an out-of-scope decode of the same image.
-                    let stored=crate::material_surface::owe_unstored(bytes,semantic,false,&texture);
-                    if texture.stored.is_none() && stored.is_some() {
-                        let mut texture=std::sync::Arc::unwrap_or_clone(texture);
-                        texture.stored=stored;
-                        std::sync::Arc::new(texture)
-                    } else { texture }
-                }
-                Some(_)=>crate::material_surface::prepared_once((key.0,key.1,key.3),prepare)?,
-                None=>std::sync::Arc::new(prepare()?),
-            };
-            shared.borrow_mut().insert(key,texture.clone());
-            Ok(texture)
-        };
-        let layer = |vertices:Vec<f32>,indices:Vec<u32>,png:Option<Vec<u8>>,detail:Option<Vec<u8>>,detail_scale:[f32;2],mut pbr:crate::model::PbrMaterial| -> Result<PreparedStaticLayer,String> {
+        let layer = |name: std::sync::Arc<str>, vertices: Vec<f32>, indices: Vec<u32>, png: Option<Vec<u8>>,
+                     detail: Option<Vec<u8>>, detail_scale: [f32; 2], mut pbr: crate::model::PbrMaterial, plan: LayerImages, remaining: &mut usize| -> Result<PreparedStaticLayer, String> {
             check(&vertices,&indices)?;
-            // An alpha-tested layer keeps its cutout coverage down the mips.
             let msdf=pbr.surface.as_ref().is_some_and(|s|s.msdf.is_some());
-            let semantic=pbr.surface.as_ref().map_or(crate::material_surface::PixelSemantic::Color, |s|s.base_semantic());
-            let texture=image(png.as_deref(),0xffff_ffff,semantic,!msdf)?;
-            let detail_on=detail.is_some();let detail=image(detail.as_deref(),0xff80_8080,crate::material_surface::PixelSemantic::Color,true)?;
-            let orm_on=pbr.orm_png.is_some();let orm=image(pbr.orm_png.as_deref(),0xffff_ffff,crate::material_surface::PixelSemantic::Data,true)?;
-            let surface=pbr.surface.as_ref().map(|surface|{let mut budget=remaining.get();let prepared=crate::material_surface::PreparedSurface::prepare(surface.as_ref().clone(),&mut budget)?;remaining.set(budget);Ok::<_,String>(prepared)}).transpose()?;
+            let texture = plan.base.prepare(png.as_deref(), level, remaining)?;
+            let detail_on = detail.is_some();
+            let detail = plan.detail.prepare(detail.as_deref(), level, remaining)?;
+            let orm_on = pbr.orm_png.is_some();
+            let orm = plan.orm.prepare(pbr.orm_png.as_deref(), level, remaining)?;
+            let surface = plan.surface.zip(pbr.surface.as_deref()).map(|(plan, surface)| plan.prepare(surface.clone(), remaining, level)).transpose()?;
             pbr.orm_png=None;
             let cutout=msdf || texture.cutout();
-            Ok(PreparedStaticLayer { vertices,indices,texture,detail,detail_scale:if detail_on{detail_scale}else{[0.0,0.0]},orm,orm_on,surface,pbr,cutout })
+            Ok(PreparedStaticLayer { name, vertices,indices,texture,detail,detail_scale:if detail_on{detail_scale}else{[0.0,0.0]},orm,orm_on,surface,pbr,cutout })
         };
-        let mut layers=std::mem::take(&mut model.draw_layers).into_iter();
-        let main = if let Some(first)=layers.next(){ layer(first.vertices,first.indices,first.texture_png,first.detail_png,first.detail_scale,first.pbr)? }
-            else {layer(std::mem::take(&mut model.vertices),std::mem::take(&mut model.indices),model.texture_png.take(),model.detail_png.take(),model.detail_scale,model.pbr.clone())?};
+        let split_layer = |(value, plan): (crate::model::StaticDrawLayer, LayerImages), remaining: &mut usize| {
+            layer(value.name, value.vertices, value.indices, value.texture_png, value.detail_png, value.detail_scale, value.pbr, plan, remaining)
+        };
+        let mut layers=std::mem::take(&mut model.draw_layers).into_iter().zip(draws);
+        let main = if let Some(first) = layers.next() {
+            split_layer(first, &mut remaining)?
+        } else {
+            layer(
+                model.material_name.clone(),
+                std::mem::take(&mut model.vertices),
+                std::mem::take(&mut model.indices),
+                model.texture_png.take(),
+                model.detail_png.take(),
+                model.detail_scale,
+                model.pbr.clone(), merged.expect("merged layer plan"), &mut remaining,
+            )?
+        };
         let mut extra=Vec::new();
-        for value in layers {extra.push(layer(value.vertices,value.indices,value.texture_png,value.detail_png,value.detail_scale,value.pbr)?);}
+        for value in layers {extra.push(split_layer(value, &mut remaining)?);}
         let mut anim_parts=Vec::new();
-        for mut def in std::mem::take(&mut model.anim_parts) {
+        for (mut def, plans) in std::mem::take(&mut model.anim_parts).into_iter().zip(animated) {
             let collider=std::sync::Arc::new(def.collider_boxes());
             let mut draws=Vec::new();
-            for value in std::mem::take(&mut def.layers) {draws.push(layer(value.vertices,value.indices,value.texture_png,value.detail_png,value.detail_scale,value.pbr)?);}
-            if draws.is_empty(){draws.push(layer(std::mem::take(&mut def.vertices),std::mem::take(&mut def.indices),None,None,[0.0,0.0],Default::default())?);}
+            if def.layers.is_empty() {
+                draws.push(layer(Default::default(), std::mem::take(&mut def.vertices), std::mem::take(&mut def.indices),
+                    None, None, [0.0, 0.0], Default::default(), plans.into_iter().next().expect("animated layer plan"), &mut remaining)?);
+            } else {
+                for value in std::mem::take(&mut def.layers).into_iter().zip(plans) { draws.push(split_layer(value, &mut remaining)?); }
+            }
             def.vertices.clear();
             anim_parts.push(PreparedAnimPreview{def:std::sync::Arc::new(def),draws,collider});
         }
         let mut driven_parts=Vec::new();
-        for mut def in std::mem::take(&mut model.driven_parts) {
+        for (mut def, plans) in std::mem::take(&mut model.driven_parts).into_iter().zip(driven) {
             let mut draws=Vec::new();
-            for value in std::mem::take(&mut def.layers){draws.push(layer(value.vertices,value.indices,value.texture_png,value.detail_png,value.detail_scale,value.pbr)?);}
+            for value in std::mem::take(&mut def.layers).into_iter().zip(plans) { draws.push(split_layer(value, &mut remaining)?); }
             driven_parts.push(PreparedDrivenPreview{def:std::sync::Arc::new(def),draws});
         }
         let sky=if let Some(mut part)=model.sky.take(){
@@ -334,9 +403,12 @@ impl PreparedStaticPreview {
             let mesh_indices=std::sync::Arc::new(part.indices.clone());
             // Sky images stay single-level (their wrap seam would pick a
             // tiny mip), decoded directly within the same budget.
-            let sky_image=|bytes:Option<&[u8]>,fallback:u32|->Result<ImageBuffer,String>{
-                if let Some(bytes)=bytes { let image=decode_generated_png_within(bytes,4096,remaining.get())?; remaining.set(remaining.get().saturating_sub(image.data.len()*4)); Ok(image) }
-                else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];Ok(image) }
+            let mut sky_image=|bytes:Option<&[u8]>,fallback:u32|->Result<ImageBuffer,String>{
+                if let Some(bytes) = bytes {
+                    let image = decode_pixels_within(bytes, 4096, level, remaining)?;
+                    remaining = remaining.saturating_sub(image.data.len() * 4);
+                    Ok(image)
+                } else { remaining = remaining.saturating_sub(4); let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];Ok(image) }
             };
             let tex0=sky_image(part.images.first().map(Vec::as_slice),0xffff_ffff)?;
             let tex1=sky_image(part.images.get(1).map(Vec::as_slice),0)?;
@@ -399,6 +471,7 @@ impl PreparedStaticPreview {
 }
 #[derive(Clone)]
 pub(super) struct PreparedStaticLayer {
+    pub(super) name: std::sync::Arc<str>,
     pub(super) vertices:Vec<f32>,pub(super) indices:Vec<u32>,pub(super) texture:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) detail:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) detail_scale:[f32;2],
     pub(super) orm:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) orm_on:bool,pub(super) surface:Option<crate::material_surface::PreparedSurface>,pub(super) pbr:crate::model::PbrMaterial,
     /// The base texture can fail the alpha test (found on the worker; opaque.rs).

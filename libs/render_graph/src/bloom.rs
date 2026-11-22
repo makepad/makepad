@@ -205,6 +205,7 @@ pub struct BloomPass {
     draw_up: Option<Box<DrawBloomUp>>,
     draw_adapt: Option<Box<DrawExposureAdapt>>,
     last_time: Option<f64>,
+    scene_time: Option<f32>,
     levels: usize,
     /// The first level's brightness threshold (0 = none: the whole image
     /// feeds the pyramid): a soft knee on the largest channel.
@@ -222,8 +223,17 @@ pub struct BloomPass {
 }
 
 impl BloomPass {
-    fn stage(cx: &mut Cx, name: &str) -> Stage {
+    /// A retained level can repaint without being recorded again.
+    pub fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        for stage in self.down.iter().chain(&self.up).chain(&self.adapt) {
+            stage.pass.set_own_time(cx, time);
+        }
+    }
+
+    fn stage(cx: &mut Cx, name: &str, time: Option<f32>) -> Stage {
         let pass = DrawPass::new_with_name(cx, name);
+        if time.is_some() { pass.set_own_time(cx, time); }
         pass.set_gpu_timing_enabled(cx, std::env::var_os("TMP_POST_TIMING").is_some());
         Stage { pass, list: DrawList::new(cx) }
     }
@@ -236,15 +246,15 @@ impl BloomPass {
     /// False while the script VM is held elsewhere (try again next frame).
     fn ensure(&mut self, cx: &mut Cx, levels: usize) -> bool {
         while self.down.len() < levels {
-            self.down.push(Self::stage(cx, "bloom down"));
+            self.down.push(Self::stage(cx, "bloom down", self.scene_time));
             self.down_tex.push(Self::rgba16f(cx));
         }
         while self.up.len() + 1 < levels {
-            self.up.push(Self::stage(cx, "bloom up"));
+            self.up.push(Self::stage(cx, "bloom up", self.scene_time));
             self.up_tex.push(Self::rgba16f(cx));
         }
         if self.adapt.is_none() {
-            self.adapt = Some(Self::stage(cx, "exposure adapt"));
+            self.adapt = Some(Self::stage(cx, "exposure adapt", self.scene_time));
         }
         for t in &mut self.exposure_tex {
             if t.is_none() {
@@ -302,9 +312,13 @@ impl BloomPass {
         (self.exposure_tex[self.flip].as_ref(), self.valid_frames > 1)
     }
 
-    /// Record the chain for one frame. `scene` is the host's HDR scene
-    /// target of logical `size`; `parent` is the pass that composites it.
-    pub fn run(&mut self, cx: &mut Cx2d, size: DVec2, scene: &Texture, parent: DrawPassId) {
+    /// Elapsed frame-clock seconds since the chain last recorded.
+    pub fn frame_clock_dt(&self, cx: &CxDraw) -> f32 {
+        self.last_time.map_or(0.0, |t| (cx.time() - t).clamp(0.0, 0.5)) as f32
+    }
+
+    /// Record with the owner's elapsed seconds. A deferred recording consumes no time.
+    pub fn run(&mut self, cx: &mut Cx2d, size: DVec2, scene: &Texture, parent: DrawPassId, dt: f32) -> bool {
         let dpi = cx.current_dpi_factor();
         let px = size * dpi;
         let mut levels = 1usize;
@@ -312,14 +326,11 @@ impl BloomPass {
             levels += 1;
         }
         if !self.ensure(cx.cx, levels) {
-            return;
+            return false;
         }
         if levels != self.levels {
             self.levels = levels;
         }
-        let now = cx.time();
-        let dt = self.last_time.map_or(0.0, |t| (now - t).clamp(0.0, 0.5)) as f32;
-        self.last_time = Some(now);
 
         // The chain order, deepest first: down0 .. down[n-1], up[n-2] .. up0,
         // adapt, then the host's composite pass.
@@ -403,7 +414,7 @@ impl BloomPass {
         let mut total = 0.0;
         let mut any = false;
         for s in self.down.iter().chain(self.up.iter()).chain(self.adapt.iter()) {
-            if let Some(ms) = s.pass.take_gpu_times_ms(cx.cx).last() {
+            if let Some(ms) = s.pass.gpu_times_ms(cx.cx).last() {
                 total += ms;
                 any = true;
             }
@@ -411,5 +422,8 @@ impl BloomPass {
         if any {
             self.gpu_ms = total;
         }
+        // A deferred recording leaves the whole interval for the next exposure update.
+        self.last_time = Some(cx.time());
+        true
     }
 }

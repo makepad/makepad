@@ -160,7 +160,10 @@ script_mod! {
                 let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
                 sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
             }
-            let sun_all = mix(1.0, self.csm_vis(pos, self.v_csm_n, self.v_csm.w), self.csm_p.x)
+            var sun_all = 1.0
+            if self.csm_p.x >= 0.5 {
+                sun_all = self.csm_vis(pos, self.v_csm_n, self.v_csm.w)
+            }
             var local = self.v_dl
             if self.cluster_on > 0.5 { local = vec3(0.0, 0.0, 0.0) }
             let sun_lit = self.sun_filled(sun_all, local)

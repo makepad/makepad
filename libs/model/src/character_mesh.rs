@@ -112,6 +112,25 @@ impl Part {
     }
     /// An unskinned object (every vertex unbound).
     pub fn export_static(&self, limits: &crate::Limits) -> Result<(Operation, Vec<Operation>)> { self.export_with(None, limits) }
+    /// Split after smoothing, so corners sharing a vertex across the cut keep
+    /// exactly the same normal. Each export compacts its own vertices and paint.
+    pub fn export_split(mut self, name: &str, selected: &[bool], limits: &crate::Limits) -> Result<[(Operation, Vec<Operation>); 2]> {
+        assert_eq!(self.polys.len(), selected.len());
+        let mut normals = self.corner_normals().into_iter();
+        let mut groups = [(Vec::new(), Vec::new()), (Vec::new(), Vec::new())];
+        for (poly, &second) in self.polys.drain(..).zip(selected) {
+            let (faces, corners) = &mut groups[usize::from(second)];
+            corners.extend(normals.by_ref().take(poly.vertices.len()));
+            faces.push(poly);
+        }
+        drop(normals);
+        let [(first, first_normals), (second, second_normals)] = groups;
+        self.polys = first;
+        let first = self.export_with(Some(first_normals), limits)?;
+        self.name = name.into();
+        self.polys = second;
+        Ok([first, self.export_with(Some(second_normals), limits)?])
+    }
     /// The editable mesh plus the vertex-paint ops that carry `colors`.
     fn export_with(&self, normals: Option<Vec<[f64; 3]>>, limits: &crate::Limits) -> Result<(Operation, Vec<Operation>)> {
         if self.polys.is_empty() { return Err(Error::Invalid("character part has no faces")); }

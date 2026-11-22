@@ -546,10 +546,16 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             }
             ProgramOp::Joint { name, parent, translation } => {
                 run.flush(&names)?;
-                let mut skeleton = run.doc.skeleton().cloned().ok_or_else(|| fail(index, format!("joint '{name}' needs a skeleton first (rig_humanoid, character or soft_body)")))?;
-                if skeleton.joints.iter().any(|j| j.name == *name) { return Err(fail(index, format!("joint '{name}' already exists"))); }
-                let p = skeleton.joints.iter().position(|j| j.name == *parent).ok_or_else(|| fail(index, format!("joint '{name}': unknown parent joint '{parent}'")))?;
-                skeleton.joints.push(crate::Joint { name: name.clone(), parent: Some(p as u32), translation: *translation });
+                let (mut skeleton, parent) = if parent.is_empty() {
+                    if run.doc.skeleton().is_some() { return Err(fail(index, "joint(name, parent, vec3 offset): this model already has a skeleton, so name its parent".into())); }
+                    (crate::Skeleton { joints: Vec::new() }, None)
+                } else {
+                    let skeleton = run.doc.skeleton().cloned().ok_or_else(|| fail(index, format!("joint '{name}' needs a skeleton first (rig_humanoid, character or soft_body)")))?;
+                    if skeleton.joints.iter().any(|j| j.name == *name) { return Err(fail(index, format!("joint '{name}' already exists"))); }
+                    let p = skeleton.joints.iter().position(|j| j.name == *parent).ok_or_else(|| fail(index, format!("joint '{name}': unknown parent joint '{parent}'")))?;
+                    (skeleton, Some(p as u32))
+                };
+                skeleton.joints.push(crate::Joint { name: name.clone(), parent, translation: *translation });
                 run.pending.push((index, Operation::SetSkeleton { skeleton }));
             }
             ProgramOp::Rig { joints, op } => {

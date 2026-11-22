@@ -100,6 +100,13 @@ pub struct Entity {
     pub glow: f32,
     pub shape: Shape,
     pub hidden: bool,
+    /// A hidden solid whose faces ARE the drawn surface: another mesh draws
+    /// exactly this shape (a level brush, a floor slab of a merged surface).
+    /// Its top then counts as ground and as a shadow receiver like a visible
+    /// static's. False (the default) is a collider that only approximates
+    /// what is drawn, whose top may be an invisible lid. The creator knows
+    /// which it made; nothing here infers it from the shape.
+    pub faces_drawn: bool,
     pub alpha_primitive: bool,
     pub suppress_primitive: bool,
     pub bake_skip: bool,
@@ -112,7 +119,7 @@ impl Default for Entity {
             id: 0, kind: BodyKind::default(), pos: Vec3f::default(), half: Vec3f::default(),
             scale: vec3f(1.0, 1.0, 1.0), yaw: 0.0, orient: Quat::default(), forward_axis: None,
             color: Vec4f::default(), color_adjust: ColorAdjust::default(), glow: 0.0,
-            shape: Shape::default(), hidden: false, alpha_primitive: false,
+            shape: Shape::default(), hidden: false, faces_drawn: false, alpha_primitive: false,
             suppress_primitive: false, bake_skip: false, parent: 0, lights: Vec::new(),
         }
     }

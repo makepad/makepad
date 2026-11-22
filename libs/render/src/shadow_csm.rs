@@ -1,4 +1,4 @@
-//! Cascaded shadow-map fitting for the Realtime shadow tier.
+//! Cascaded shadow-map fitting for the Realtime and settled shadow tiers.
 //!
 //! Realtime sun shadows are a classic CSM: per frame, before the main pass,
 //! the sun's depth renders into `CSM_CASCADES` ortho cascades fitted to
@@ -108,6 +108,33 @@ fn quantize_radius(r: f32) -> f32 {
     (steps / RADIUS_STEPS_PER_OCTAVE).exp2()
 }
 
+fn cascade_extents(radius: f32, scale: f32, res: f32) -> (f32, f32) {
+    let radius = quantize_radius(radius.max(0.5 * scale));
+    (radius, radius * (1.0 + 2.0 / res))
+}
+
+/// The four rings share a grid of one eighth of the second ring's padded diameter.
+/// At Low, a half-cell offset along one axis leaves about 2 m of the near ring
+/// around the eye. The second ring gives about 2.7× fewer grid crossings
+/// over the same travel than snapping on the near ring.
+pub(crate) fn settled_cell(range: f32, res: f32) -> f32 {
+    let base = range * FAR_REACH;
+    let (_, extent) = cascade_extents(base * split_fractions(base)[1] * 0.5, range_scale(range), res);
+    2.0 * extent / 8.0
+}
+
+/// The fit uses the supplied view in Realtime. Settled rings share one snapped
+/// eye in world coordinates and ignore the camera axes, including on a flat stage.
+pub(crate) fn cascade_camera(
+    view: Option<&CsmView>,
+    eye: Vec3f,
+    settled_cell: Option<f32>,
+) -> (Option<&CsmView>, Vec3f) {
+    let Some(cell) = settled_cell else { return (view, eye) };
+    let snap = |x: f32| (x / cell + 0.5).floor() * cell;
+    (None, v3(snap(eye.x), snap(eye.y), snap(eye.z)))
+}
+
 /// The direction the cascades' light basis takes for a key toward `centre`: `centre` snapped
 /// to the basis's angular grid (`SUN_STEP_RAD`), so a moving sun re-rasterizes once a step,
 /// not every frame. With `disc` (a still recording's point of the key's disc and the cosine of
@@ -180,6 +207,8 @@ pub struct CsmFrame {
     pub cascades: [CsmCascade; CSM_CASCADES],
     /// False for the off-tier binding (fallback texture, `csm_vis` = 1).
     pub on: bool,
+    /// True when the active binding contains settled static casters.
+    pub settled: bool,
     /// The filter's rotation seed (`csm_p.z`): 0 is the stable pattern; a
     /// host averaging several recordings of a still view turns it per
     /// recording, so the penumbra's sampling noise averages out.
@@ -285,8 +314,7 @@ fn fit_cascade(
     // edge. The snap quantum must be the FINAL map texel (2*ex/res, pad
     // included) — snapping by any other stride leaves sub-texel phase
     // drift, exactly the shimmer the snap exists to kill.
-    let radius = quantize_radius(radius.max(0.5 * scale));
-    let ex = radius * (1.0 + 2.0 / res);
+    let (radius, ex) = cascade_extents(radius, scale, res);
     let texel = 2.0 * ex / res;
     // Texel snap: quantize the center's right/up coordinates to whole
     // texels of the world grid (column kr, row ku).
@@ -529,7 +557,7 @@ pub fn fit_cascades_reach(
     let base = range * FAR_REACH;
     let reach = if far_reach.is_finite() { far_reach.max(base) } else { base };
     let mut splits = split_fractions(base);
-    if reach > base {
+    if view.is_some() && reach > base {
         for f in splits.iter_mut().take(CSM_CASCADES - 1) { *f *= base / reach; }
         splits[CSM_CASCADES - 1] = 1.0;
     }
@@ -580,8 +608,8 @@ pub fn fit_cascades_reach(
         }
         None => {
             for (i, f1) in splits.iter().enumerate() {
-                let r = reach * f1 * 0.5;
-                frame.cascades[i] = fit_cascade(eye, r, sun_dir, scene_min, scene_max, scale, res);
+                let diameter = if i == CSM_CASCADES - 1 { reach } else { base * f1 };
+                frame.cascades[i] = fit_cascade(eye, diameter * 0.5, sun_dir, scene_min, scene_max, scale, res);
             }
         }
     }
@@ -1091,6 +1119,44 @@ mod tests {
             assert!(n.x.abs() <= 1.0 && n.y.abs() <= 1.0);
             assert!(c.texel_world > last, "cascades must coarsen outward");
             last = c.texel_world;
+        }
+
+        let cell = settled_cell(80.0, 2048.0);
+        assert_eq!(cell, frame.cascades[1].texel_world * 2048.0 / 8.0);
+        let low_cell = settled_cell(40.0, 1024.0);
+        let low_eye = |x| cascade_camera(None, v3(x, 0.0, 0.0), Some(low_cell)).1;
+        assert!((low_cell - 2.09).abs() < 0.005, "Low uses the padded second ring");
+        assert_eq!(low_eye(-low_cell * 0.51).x, -low_cell);
+        assert_eq!(low_eye(-low_cell * 0.49).x, 0.0);
+        assert_eq!(low_eye(low_cell * 0.49).x, 0.0);
+        assert_eq!(low_eye(low_cell * 0.51).x, low_cell);
+        let view = test_view();
+        let (_, centre) = cascade_camera(Some(&view), view.cam, Some(cell));
+        let fit = |view: &CsmView, eye| {
+            let (slice, snapped) = cascade_camera(Some(view), eye, Some(cell));
+            assert!(slice.is_none());
+            fit_cascades(slice, snapped, sun(), v3(-60.0, 0.0, -60.0), v3(60.0, 12.0, 60.0), 80.0, 2048.0).cascades
+        };
+        let rings = fit(&view, centre);
+        let mut turned = view;
+        for p in turned.near_corners.iter_mut().chain(&mut turned.far_corners) {
+            let d = *p - view.cam;
+            *p = view.cam + v3(d.z, d.y, -d.x);
+        }
+        let bits = |c: CsmCascade| {
+            let row = |v: Vec4f| [v.x, v.y, v.z, v.w].map(f32::to_bits);
+            (
+                [c.rx, c.ry, c.rz].map(row),
+                [c.texel_world, c.bias01, c.z_per_world, c.floor].map(f32::to_bits),
+                c.grid.map(f32::to_bits), c.view_hull.map(|p| p.map(f32::to_bits)),
+                c.view_planes.map(row), c.view_hull_n,
+            )
+        };
+        for same in [fit(&view, centre + v3(0.25, -0.25, 0.25) * cell), fit(&turned, centre)] {
+            assert_eq!(same.map(bits), rings.map(bits), "sub-cell translation and rotation keep all four fits bit-identical");
+        }
+        for step in [v3(cell, 0.0, 0.0), v3(0.0, cell, 0.0), v3(0.0, 0.0, cell)] {
+            assert_ne!(fit(&view, centre + step), rings, "crossing a grid cell changes the fit on every axis");
         }
     }
 

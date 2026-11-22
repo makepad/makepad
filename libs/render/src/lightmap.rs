@@ -520,6 +520,7 @@ impl LmLight {
 /// and the chart shape — its "rays" are depth-map compares against the
 /// model's rasterized GPU geometry.
 pub struct LmMeshSource {
+    pub(crate) chart_key: u64,
     /// Triangles + bounds. Positions/indices live inside.
     pub caster: MeshRaycaster,
     /// Per-vertex chart uv into the model's own AO layout, 0..1.
@@ -530,6 +531,33 @@ pub struct LmMeshSource {
     /// scaled by [`LM_MESH_SCALE`].
     pub ao_w: usize,
     pub ao_h: usize,
+}
+
+impl LmMeshSource {
+    pub(crate) fn new(
+        caster: MeshRaycaster,
+        ao_uv: Vec<[f32; 2]>,
+        albedo: Vec<Vec3f>,
+        ao_w: usize,
+        ao_h: usize,
+    ) -> Self {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        let mut chart = DefaultHasher::new();
+        (ao_w, ao_h, caster.positions().len()).hash(&mut chart);
+        for p in caster.positions() {
+            chart.write_u32(p.x.to_bits());
+            chart.write_u32(p.y.to_bits());
+            chart.write_u32(p.z.to_bits());
+        }
+        caster.indices().hash(&mut chart);
+        ao_uv.len().hash(&mut chart);
+        for &[u, v] in &ao_uv {
+            chart.write_u32(u.to_bits());
+            chart.write_u32(v.to_bits());
+        }
+        Self { chart_key: chart.finish(), caster, ao_uv, albedo, ao_w, ao_h }
+    }
 }
 
 /// One placed copy of a model.
@@ -1323,18 +1351,18 @@ mod tests {
             Vec3f { x: 0.0, y: 0.0, z: 8.0 },
         ];
         let indices = vec![0, 1, 2, 0, 2, 3];
-        let source = std::sync::Arc::new(LmMeshSource {
-            caster: crate::ao::MeshRaycaster::new(
+        let source = std::sync::Arc::new(LmMeshSource::new(
+            crate::ao::MeshRaycaster::new(
                 positions,
                 indices,
                 Vec3f { x: 0.0, y: 0.0, z: 0.0 },
                 Vec3f { x: 8.0, y: 0.0, z: 8.0 },
             ),
-            ao_uv: vec![[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]],
-            albedo: Vec::new(),
-            ao_w: 128,
-            ao_h: 128,
-        });
+            vec![[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]],
+            Vec::new(),
+            128,
+            128,
+        ));
         let inst = LmMeshInstance { source, transform: Mat4f::identity() };
         let d = chart_density(&inst, 64, 64);
         assert!((d - 4.0).abs() < 0.05, "density {d}, expected 4.0");

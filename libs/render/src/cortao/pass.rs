@@ -213,6 +213,39 @@ const STAGE_NAMES: [&str; 5] = [
     "ssao resolve",
     "ssao upsample",
 ];
+
+#[derive(Clone, Copy)]
+enum StageColor {
+    R32F,
+    R8,
+    Rgba16F,
+}
+
+struct StageColors<const N: usize>([StageColor; N]);
+
+const PREPASS_COLORS: StageColors<2> = StageColors([StageColor::R32F; 2]);
+const MAIN_COLORS: StageColors<1> = StageColors([StageColor::R8]);
+const FILTER_COLORS: StageColors<1> = StageColors([StageColor::R8]);
+const RESOLVE_COLORS: StageColors<1> = StageColors([StageColor::Rgba16F]);
+const UPSAMPLE_COLORS: StageColors<1> = StageColors([StageColor::R8]);
+
+impl<const N: usize> StageColors<N> {
+    fn formats(&self, size: TextureSize) -> [TextureFormat; N] {
+        self.0.map(|color| {
+            let size = size.clone();
+            match color {
+                StageColor::R32F => TextureFormat::RenderRf32 { size, initial: true },
+                StageColor::R8 => TextureFormat::RenderRu8 { size, initial: true },
+                StageColor::Rgba16F => TextureFormat::RenderRGBAf16 { size, initial: true },
+            }
+        })
+    }
+
+    fn layout(&self) -> PassLayout {
+        PassLayout::offscreen(&self.formats(TextureSize::Auto), None)
+    }
+}
+
 const IDENTITY: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
@@ -252,51 +285,25 @@ impl CortaoTargets {
             width: width as usize,
             height: height as usize,
         };
+        let [packed, normals] = PREPASS_COLORS.formats(atlas_size);
+        let [raw] = MAIN_COLORS.formats(size.clone());
+        let [output] = FILTER_COLORS.formats(size);
         Self {
             full_size,
             half,
             atlas,
             history: None,
             upsampled: half.then(|| {
-                Texture::new_with_format(
-                    cx,
-                    TextureFormat::RenderRu8 {
-                        size: TextureSize::Fixed {
-                            width: full_size[0] as usize,
-                            height: full_size[1] as usize,
-                        },
-                        initial: true,
-                    },
-                )
+                let [upsampled] = UPSAMPLE_COLORS.formats(TextureSize::Fixed {
+                    width: full_size[0] as usize,
+                    height: full_size[1] as usize,
+                });
+                Texture::new_with_format(cx, upsampled)
             }),
-            packed: Texture::new_with_format(
-                cx,
-                TextureFormat::RenderRf32 {
-                    size: atlas_size.clone(),
-                    initial: true,
-                },
-            ),
-            normals: Texture::new_with_format(
-                cx,
-                TextureFormat::RenderRf32 {
-                    size: atlas_size,
-                    initial: true,
-                },
-            ),
-            raw: Texture::new_with_format(
-                cx,
-                TextureFormat::RenderRu8 {
-                    size: size.clone(),
-                    initial: true,
-                },
-            ),
-            output: Texture::new_with_format(
-                cx,
-                TextureFormat::RenderRu8 {
-                    size,
-                    initial: true,
-                },
-            ),
+            packed: Texture::new_with_format(cx, packed),
+            normals: Texture::new_with_format(cx, normals),
+            raw: Texture::new_with_format(cx, raw),
+            output: Texture::new_with_format(cx, output),
         }
     }
 }
@@ -305,6 +312,7 @@ impl CortaoTargets {
 /// so a painted chain stays painted. Parent the depth producer to `first_pass_id`.
 #[derive(Default)]
 pub struct CortaoPass {
+    scene_time: Option<f32>,
     stages: Vec<CortaoStage>,
     targets: Option<CortaoTargets>,
     tap_uniforms: Option<UniformBuffer>,
@@ -339,6 +347,11 @@ pub struct CortaoPass {
 }
 
 impl CortaoPass {
+    pub(crate) fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        for stage in &self.stages { stage.pass.set_own_time(cx, time); }
+    }
+
     /// Prepare draw structs and ask whether their GPU pipelines can draw.
     /// False while the VM is held elsewhere or a pipeline is still compiling.
     pub fn prepare_draws(&mut self, cx: &mut Cx) -> bool {
@@ -358,23 +371,17 @@ impl CortaoPass {
             self.draw_resolve =
                 cx.try_with_vm(|vm| Box::new(DrawCortaoResolve::script_new_with_default(vm)));
         }
-        let ids = [
-            self.draw_prepass
-                .as_ref()
-                .and_then(|d| d.draw_vars.draw_shader_id),
-            self.draw_main.as_ref().and_then(|d| d.draw_vars.draw_shader_id),
-            self.draw_filter
-                .as_ref()
-                .and_then(|d| d.draw_vars.draw_shader_id),
-            self.draw_resolve
-                .as_ref()
-                .and_then(|d| d.draw_vars.draw_shader_id),
+        let stages = [
+            (self.draw_prepass.as_ref().and_then(|d| d.draw_vars.draw_shader_id), PREPASS_COLORS.layout()),
+            (self.draw_main.as_ref().and_then(|d| d.draw_vars.draw_shader_id), MAIN_COLORS.layout()),
+            (self.draw_filter.as_ref().and_then(|d| d.draw_vars.draw_shader_id), FILTER_COLORS.layout()),
+            (self.draw_resolve.as_ref().and_then(|d| d.draw_vars.draw_shader_id), RESOLVE_COLORS.layout()),
         ];
         // Probe every pipeline even when another is pending, to queue them together.
-        self.ready = ids.into_iter().fold(true, |ready, id| {
-            id.is_some_and(|id| cx.draw_shader_ready(id, false)) && ready
+        self.ready = stages.iter().fold(true, |ready, (id, layout)| {
+            id.is_some_and(|id| cx.draw_shader_ready_for(id, layout)) && ready
         });
-        let failed = !self.ready && ids.into_iter().flatten().any(|id| cx.draw_shader_failed(id));
+        let failed = !self.ready && stages.iter().any(|(id, _)| id.is_some_and(|id| cx.draw_shader_failed(id)));
         if failed && !self.pipelines_failed {
             log!("CORTAO: a pipeline of the AO chain failed to build: screen AO is off");
         }
@@ -407,7 +414,7 @@ impl CortaoPass {
 
     fn ensure_stages(&mut self, cx: &mut Cx, count: usize) {
         while self.stages.len() < count {
-            let pass = DrawPass::new_with_name(cx, STAGE_NAMES[self.stages.len()]);
+            let pass = crate::renderer::new_scene_pass(cx, STAGE_NAMES[self.stages.len()], self.scene_time);
             pass.set_gpu_timing_enabled(cx, true);
             self.stages.push(CortaoStage {
                 pass,
@@ -450,12 +457,13 @@ impl CortaoPass {
                 return false;
             }
         }
-        let prepass_ready = cx.draw_shader_ready(id, false);
+        let prepass_ready = cx.draw_shader_ready_for(id, &PREPASS_COLORS.layout());
         let upsample = self
             .draw_upsample
             .as_ref()
             .and_then(|draw| draw.draw_vars.draw_shader_id);
-        let ready = upsample.is_some_and(|id| cx.draw_shader_ready(id, false)) && prepass_ready;
+        let ready = upsample.is_some_and(|id| cx.draw_shader_ready_for(id, &UPSAMPLE_COLORS.layout()))
+            && prepass_ready;
         if !ready && upsample.is_some_and(|id| cx.draw_shader_failed(id)) {
             log!("CORTAO: the half-size upsample's pipeline failed to build; AO runs at full size");
             self.upsample_unfit = true;
@@ -649,13 +657,10 @@ impl CortaoPass {
                 width: width as usize,
                 height: height as usize,
             };
-            let history = || TextureFormat::RenderRGBAf16 {
-                size: size.clone(),
-                initial: true,
-            };
+            let [history] = RESOLVE_COLORS.formats(size);
             targets.history = Some([
-                Texture::new_with_format(cx.cx, history()),
-                Texture::new_with_format(cx.cx, history()),
+                Texture::new_with_format(cx.cx, history.clone()),
+                Texture::new_with_format(cx.cx, history),
             ]);
         }
         if !input.history {
@@ -868,7 +873,7 @@ impl CortaoPass {
         }
 
         for (i, stage) in self.stages.iter().enumerate() {
-            for ms in stage.pass.take_gpu_times_ms(cx.cx) {
+            for ms in stage.pass.gpu_times_ms(cx.cx) {
                 if i == 3 && !input.history {
                     continue;
                 }

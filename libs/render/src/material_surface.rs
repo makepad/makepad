@@ -1,6 +1,103 @@
 //! Portable material pixels prepared on workers, including explicit mip data.
 use makepad_draw::{ImageBuffer, makepad_platform::{CompressedTextureFormat,Cx,HostBuf,Texture,TextureFormat,TextureUpdated,TextureWrap}};
+use makepad_draw::makepad_platform::thread;
 pub use makepad_draw::makepad_platform::CompressedTextureFormat as GpuCompressedFormat;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ImageSize(pub usize, pub usize);
+
+impl ImageSize {
+    pub(crate) fn read(bytes: &[u8], dimension: usize) -> Result<Self, String> {
+        let (w, h) = if crate::texture_pack::is_ktx2(bytes) {
+            let reader = makepad_texcomp::ktx2::Reader::new(bytes)?;
+            (reader.header().width as usize, reader.header().height.max(1) as usize)
+        } else {
+            png_size(bytes).ok_or("generated PNG has no dimensions")?
+        };
+        if w == 0 || h == 0 || w > dimension || h > dimension {
+            return Err("generated PNG exceeds dimension limit".into());
+        }
+        Ok(Self(w, h))
+    }
+
+    pub(crate) fn at(self, level: usize) -> Self {
+        Self((self.0 >> level).max(1), (self.1 >> level).max(1))
+    }
+
+    fn bytes(mut self, mips: bool) -> usize {
+        let mut total = 0usize;
+        loop {
+            total = total.saturating_add(self.0.saturating_mul(self.1).saturating_mul(4));
+            if !mips || self == Self(1, 1) { return total; }
+            self = self.at(1);
+        }
+    }
+
+    pub(crate) fn fit(self, mut level: usize, limit: usize, mips: bool) -> usize {
+        while self.at(level) != Self(1, 1) && self.at(level).bytes(mips) > limit {
+            level += 1;
+        }
+        level
+    }
+}
+
+/// Charges for one worker preparation. Array layers share the first image's dimensions,
+/// including layers filled with a constant. Only actual image sources count in the report.
+#[derive(Default)]
+pub(crate) struct ImageBudget {
+    pub(crate) fixed: usize,
+    images: Vec<(ImageSize, bool, usize)>,
+    count: usize,
+}
+
+impl ImageBudget {
+    fn add(&mut self, size: ImageSize, mips: bool, layers: usize, sources: usize) {
+        self.images.push((size, mips, layers));
+        self.count += sources;
+    }
+
+    /// Each primitive charges its material's payload even when several primitives use one material.
+    pub(crate) fn repeated(&mut self, material: Self, uses: usize) {
+        self.fixed = self.fixed.saturating_add(material.fixed.saturating_mul(uses));
+        self.images.extend(material.images.into_iter().map(|(size, mips, layers)| (size, mips, layers.saturating_mul(uses))));
+        self.count += material.count;
+    }
+
+    pub(crate) fn pixels(&mut self, bytes: &[u8], dimension: usize) -> Result<(), String> {
+        let size = ImageSize::read(bytes, dimension)?;
+        if crate::texture_pack::is_ktx2(bytes) {
+            // Sky and atlas consumers expand just level zero of a load-ready texture.
+            self.fixed = self.fixed.saturating_add(size.bytes(false));
+        } else {
+            self.add(size, false, 1, 1);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn level(&self, budget: usize) -> usize {
+        let cost = |k| self.images.iter().fold(self.fixed, |sum, &(size, mips, copies)| {
+            sum.saturating_add(size.at(k).bytes(mips).saturating_mul(copies))
+        });
+        let total = cost(0);
+        let mut level = 0;
+        if total <= budget { return 0; }
+        while self.images.iter().any(|(s, _, _)| s.at(level) != ImageSize(1, 1)) {
+            level += 1;
+            if cost(level) <= budget { break; }
+        }
+        if level > 0 {
+            let n = self.count;
+            let key = makepad_draw::LiveId::from_str("model_texture_reduction")
+                .bytes_append(&n.to_le_bytes()).bytes_append(&total.to_le_bytes()).bytes_append(&level.to_le_bytes());
+            if makepad_draw::first_report(key.0) {
+                let mib = 1024.0 * 1024.0;
+                let factor = 1usize << level;
+                makepad_draw::log!("model textures {:.2} MiB over the prepare budget {:.2} MiB: {n} images reduced to 1/{factor} per side", total as f64 / mib, budget as f64 / mib);
+            }
+        }
+        level
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialSurface {
@@ -494,26 +591,129 @@ pub(crate) fn work_clock() -> Option<std::time::Instant> {
 pub(crate) fn work_micros(started: Option<std::time::Instant>) -> usize {
     started.map_or(0, |started| started.elapsed().as_micros() as usize)
 }
+/// Source identity and the number of box-halvings actually applied (including a budget backstop).
+type LoadMemoKey = ((u64, usize, u8), usize);
+
 /// Images already prepared this load, by content: every terrain tile of a
 /// level uses the same material images (flight: 552 uses in 64 tiles, 32
 /// distinct), and each tile prepared (decoded and mipped, or remapped) all
 /// of them again. Bounded; it goes when the last preparation in progress
 /// ends ([`Preparing`]). Its chains are shared with what was prepared, so
 /// that frees only images nothing uses any more.
-static REMAPPED: std::sync::Mutex<Vec<((u64, usize, u8), std::sync::Arc<PreparedTexture>)>> = std::sync::Mutex::new(Vec::new());
+static REMAPPED: std::sync::Mutex<Vec<(LoadMemoKey, std::sync::Arc<PreparedTexture>)>> = std::sync::Mutex::new(Vec::new());
 const REMAPPED_BYTES_KEPT: usize = 96 * 1024 * 1024;
+
+fn memoized_texture(key: LoadMemoKey) -> Option<std::sync::Arc<PreparedTexture>> {
+    REMAPPED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| *k == key).map(|(_, t)| t.clone())
+}
 
 /// The texture for content `key` (hash, byte length, kind), prepared by
 /// `prepare` only if this load has not prepared it yet.
 pub fn prepared_once(key: (u64, usize, u8), prepare: impl FnOnce() -> Result<PreparedTexture, String>) -> Result<std::sync::Arc<PreparedTexture>, String> {
-    if let Some(texture) = REMAPPED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| *k == key) {
-        return Ok(texture.1.clone());
-    }
+    prepared_at((key, 0), prepare)
+}
+
+fn prepared_at(key: LoadMemoKey, prepare: impl FnOnce() -> Result<PreparedTexture, String>) -> Result<std::sync::Arc<PreparedTexture>, String> {
+    if let Some(texture) = memoized_texture(key) { return Ok(texture); }
+    let claim = match conversion_turn(key) {
+        Turn::Done(texture) => return Ok(texture),
+        Turn::Convert(claim) => claim,
+    };
+    let converting = Converting::begin(claim);
     let texture = std::sync::Arc::new(prepare()?);
     let mut kept = REMAPPED.lock().unwrap_or_else(|e| e.into_inner());
     if !kept.iter().any(|(k, _)| *k == key) { kept.push((key, texture.clone())); }
     while kept.len() > 1 && kept.iter().map(|(_, t)| t.bytes()).sum::<usize>() > REMAPPED_BYTES_KEPT { kept.remove(0); }
+    drop(kept);
+    converting.done(texture.clone());
     Ok(texture)
+}
+
+/// The images preparations are converting now, so that one which needs an image another is
+/// converting takes that one's result instead of converting it again: a level's terrain tiles
+/// start together and share their material images, and each converted all of them (a 24 KB tile
+/// took 400 ms). `done` holds the result for the waiters still to take it.
+struct Conversion { key: LoadMemoKey, claim: u64, done: Option<std::sync::Arc<PreparedTexture>>, waiters: usize }
+static CONVERSIONS: std::sync::Mutex<Vec<Conversion>> = std::sync::Mutex::new(Vec::new());
+static CONVERTED: std::sync::Condvar = std::sync::Condvar::new();
+static NEXT_CLAIM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+thread_local! {
+    /// Conversions running on this thread: a thread converting one image does not wait for
+    /// another, so no two converters wait on each other.
+    static CONVERTING_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+enum Turn { Done(std::sync::Arc<PreparedTexture>), Convert(Option<u64>) }
+
+/// Whether this thread converts `key` (with the claim others wait on, or none) or takes the
+/// result of the preparation converting it. Only a pool job waits, on its worker and without its
+/// CPU permit ([`thread::without_permit`]); the UI thread, or a thread already converting an
+/// image, converts it itself as before.
+fn conversion_turn(key: LoadMemoKey) -> Turn {
+    let may_wait = CONVERTING_HERE.with(|c| c.get()) == 0 && thread::current_class().is_some();
+    loop {
+        let claim = {
+            let mut list = CONVERSIONS.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(at) = list.iter().position(|c| c.key == key) else {
+                // A conversion that ended between the memo check and this lock left its image there.
+                if let Some(texture) = memoized_texture(key) { return Turn::Done(texture); }
+                let claim = NEXT_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                list.push(Conversion { key, claim, done: None, waiters: 0 });
+                return Turn::Convert(Some(claim));
+            };
+            if let Some(texture) = list[at].done.clone() { return Turn::Done(texture); }
+            if !may_wait { return Turn::Convert(None); }
+            list[at].waiters += 1;
+            list[at].claim
+        };
+        if let Some(texture) = thread::without_permit(|| converted(claim)) { return Turn::Done(texture); }
+    }
+}
+
+/// The image conversion `claim` made, once it ends; none when it failed, and its waiters
+/// convert the image themselves.
+fn converted(claim: u64) -> Option<std::sync::Arc<PreparedTexture>> {
+    let mut list = CONVERSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let at = list.iter().position(|c| c.claim == claim)?;
+        if let Some(texture) = list[at].done.clone() {
+            list[at].waiters -= 1;
+            if list[at].waiters == 0 { list.remove(at); }
+            return Some(texture);
+        }
+        list = CONVERTED.wait(list).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+/// One conversion on this thread. Its claim's waiters get the result ([`Converting::done`]);
+/// a conversion that fails or unwinds wakes them to convert the image themselves.
+struct Converting(Option<u64>);
+impl Converting {
+    fn begin(claim: Option<u64>) -> Self {
+        CONVERTING_HERE.with(|c| c.set(c.get() + 1));
+        Self(claim)
+    }
+    fn done(mut self, texture: std::sync::Arc<PreparedTexture>) {
+        if let Some(claim) = self.0.take() { finish_conversion(claim, Some(texture)); }
+    }
+}
+impl Drop for Converting {
+    fn drop(&mut self) {
+        CONVERTING_HERE.with(|c| c.set(c.get() - 1));
+        if let Some(claim) = self.0.take() { finish_conversion(claim, None); }
+    }
+}
+
+fn finish_conversion(claim: u64, texture: Option<std::sync::Arc<PreparedTexture>>) {
+    let mut list = CONVERSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = list.iter().position(|c| c.claim == claim) {
+        match texture {
+            Some(texture) if list[at].waiters > 0 => list[at].done = Some(texture),
+            _ => { list.remove(at); }
+        }
+    }
+    drop(list);
+    CONVERTED.notify_all();
 }
 
 /// `bytes` (a load-ready KTX2) as this device's texture, remapped once per
@@ -694,7 +894,7 @@ pub fn take_owed_texture_encodes() -> Vec<StoreBasis> {
 
 /// Width and height from a PNG's header, without decoding it.
 fn png_size(bytes: &[u8]) -> Option<(usize, usize)> {
-    if bytes.get(12..16)? != b"IHDR" { return None; }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR") { return None; }
     let read = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize);
     Some((read(16)?, read(20)?))
 }
@@ -704,83 +904,164 @@ fn stored_form_key(source: &[u8], semantic: PixelSemantic, bc5: bool) -> u64 {
     basis_texture_key(source, semantic) ^ (bc5 as u64) << 63
 }
 
-/// Under [`storing_device_textures`]: the stored form of PNG `source` in this
-/// device's block format when the store has one, else `make()` (decode and
-/// mips) with its encode owed. `bc5` stores X and Y only (a normal map whose
-/// alpha carries nothing); otherwise UASTC. Outside that scope, `make()`.
-pub(crate) fn stored_device_texture(source: &[u8], semantic: PixelSemantic, bc5: bool, make: impl FnOnce() -> Result<PreparedTexture, String>) -> Result<PreparedTexture, String> {
-    let Some(store) = storing_store(source) else { return make() };
-    let key = stored_form_key(source, semantic, bc5);
-    if let Some(bytes) = store.get_basis(key) {
-        match texture_work(TextureWork::Remap, || crate::texture_pack::texture_from_ktx2(&bytes)) {
-            Some(Ok(mut texture)) => { texture.hash = key; texture.stored = Some(key); return Ok(texture); }
-            Some(Err(error)) => makepad_draw::log!("stored texture {key:016x} is unusable ({error}): its source is decoded"),
-            None => makepad_draw::log!("stored texture {key:016x} is not KTX2: its source is decoded"),
+/// Read only level descriptions when budgeting a device texture. A device without the
+/// matching block format expands every supplied level to RGBA.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DeviceLayout {
+    size: ImageSize,
+    levels: usize,
+    format: Option<GpuCompressedFormat>,
+    bytes: usize,
+}
+
+impl DeviceLayout {
+    fn read(bytes: &[u8]) -> Result<Self, String> {
+        let (levels, format) = if let Ok(view) = makepad_texcomp::rgtc::Bc5View::parse(bytes) {
+            (view.levels, bc5_normal_maps().then_some(GpuCompressedFormat::Bc5))
+        } else {
+            let target = compressed_texture_target();
+            if target == Some(GpuCompressedFormat::Bc5) { return Err("UASTC cannot be remapped to BC5".into()); }
+            (makepad_texcomp::basis::UastcView::parse(bytes)?.levels, target)
+        };
+        let &(w, h, _) = levels.first().ok_or("empty texture")?;
+        let bytes = levels.iter().fold(0usize, |n, &(w, h, blocks)| {
+            n.saturating_add(if format.is_some() { blocks.len() } else { ImageSize(w as usize, h as usize).bytes(false) })
+        });
+        Ok(Self { size: ImageSize(w as usize, h as usize), levels: levels.len(), format, bytes })
+    }
+}
+
+enum StoredForm { Encoded(Vec<u8>), Prepared(std::sync::Arc<PreparedTexture>) }
+
+struct StoredMap {
+    memo: (u64, usize, u8),
+    layout: DeviceLayout,
+    form: StoredForm,
+}
+
+impl StoredMap {
+    fn lookup(store: &dyn PreparedTextureStore, key: u64, source_len: usize, target: ImageSize) -> Option<Self> {
+        let memo = (key, source_len, u8::MAX - 1);
+        if let Some(t) = memoized_texture((memo, 0)) {
+            let layout = DeviceLayout { size: ImageSize(t.width, t.height), levels: t.max_level + 1,
+                format: t.compressed.as_ref().map(|(f, _)| *f), bytes: t.bytes() };
+            if layout.size == target { return Some(Self { memo, layout, form: StoredForm::Prepared(t) }); }
+        }
+        let bytes = store.get_basis(key)?;
+        match DeviceLayout::read(&bytes) {
+            Ok(layout) if layout.size == target => Some(Self { memo, layout, form: StoredForm::Encoded(bytes) }),
+            _ => { makepad_draw::log!("stored texture {key:016x} is unusable: its source is decoded"); None }
         }
     }
-    let mut texture = make()?;
-    owe(key, &texture, bc5);
-    texture.stored = Some(key);
-    Ok(texture)
-}
 
-/// The store, when PNG `source` is in [`storing_device_textures`]'s reach: in scope, with a
-/// compression target, and large enough to compress.
-fn storing_store(source: &[u8]) -> Option<&'static dyn PreparedTextureStore> {
-    let large = png_size(source).is_some_and(|(w, h)| w * h >= COMPRESS_MIN_TEXELS);
-    prepared_texture_store().filter(|_| large && compressed_texture_target().is_some() && STORING.with(|s| s.get()))
-}
-
-/// After a load's shared memo ([`prepared_once`]) answered for PNG `source`: owe its stored
-/// form when `texture` has none. The memo is shared with preparations outside the scope, so
-/// whichever decoded the image first decides what the memo holds; without this, an image an
-/// out-of-scope model decoded first was never stored, on the launches where it won the race.
-/// Returns the stored-form key when the image is in reach, including a form already stored or owed.
-pub(crate) fn owe_unstored(source: &[u8], semantic: PixelSemantic, bc5: bool, texture: &PreparedTexture) -> Option<u64> {
-    storing_store(source)?;
-    let key = stored_form_key(source, semantic, bc5);
-    if texture.compressed.is_none() {
-        owe(key, texture, bc5);
+    fn prepare(&self) -> Result<std::sync::Arc<PreparedTexture>, String> {
+        match &self.form {
+            StoredForm::Prepared(texture) => Ok(texture.clone()),
+            StoredForm::Encoded(bytes) => prepared_once(self.memo, || {
+                let mut texture = texture_work(TextureWork::Remap, || crate::texture_pack::texture_from_ktx2(bytes))
+                    .ok_or("stored texture is not KTX2")??;
+                texture.hash = self.memo.0;
+                texture.stored = Some(self.memo.0);
+                Ok(texture)
+            }),
+        }
     }
-    Some(key)
+}
+
+struct PngMap {
+    size: ImageSize,
+    memo: (u64, usize, u8),
+    store_key: Option<u64>,
+    stored: Option<StoredMap>,
+}
+
+impl PngMap {
+    fn new(bytes: &[u8], size: ImageSize, hash: u64, semantic: PixelSemantic, store_size: Option<ImageSize>, bc5: bool) -> Self {
+        let mut store_key = None;
+        let mut stored = None;
+        if let Some(target) = store_size.filter(|_| size.0 * size.1 >= COMPRESS_MIN_TEXELS && STORING.with(|s| s.get()) && compressed_texture_target().is_some()) {
+            if let Some(store) = prepared_texture_store() {
+                let mut key = stored_form_key(bytes, semantic, bc5);
+                if target != size {
+                    // A terrain array resampled to another layer's dimensions has its own stored form.
+                    key = makepad_draw::LiveId(key).str_append("splat_size")
+                        .bytes_append(&(target.0 as u32).to_le_bytes()).bytes_append(&(target.1 as u32).to_le_bytes()).0;
+                }
+                store_key = Some(key);
+                stored = StoredMap::lookup(store, key, bytes.len(), target);
+            }
+        }
+        Self { size, memo: (hash, bytes.len(), semantic as u8), store_key, stored }
+    }
+
+    fn decoded(&self, bytes: &[u8], semantic: PixelSemantic, level: usize) -> Result<std::sync::Arc<PreparedTexture>, String> {
+        prepared_at((self.memo, level), || texture_work(TextureWork::DecodeMip, || {
+            Ok(PreparedTexture::prepare(crate::renderer::decode_model_image(bytes, 4096, level)?, semantic))
+        }))
+    }
+}
+
+pub(crate) struct MapPlan {
+    kind: MapSource,
+    semantic: PixelSemantic,
+}
+
+enum MapSource { Solid(u32), Ktx2, Png(PngMap) }
+
+impl MapPlan {
+    pub(crate) fn new(source: Option<&[u8]>, fallback: u32, semantic: PixelSemantic, store: bool, budget: &mut ImageBudget) -> Result<Self, String> {
+        let hash = source.filter(|b| !crate::texture_pack::is_ktx2(b)).map_or(0, |b| texture_work(TextureWork::Hash, || image_content_hash(b)));
+        Self::with_hash(source, hash, fallback, semantic, store, budget)
+    }
+
+    pub(crate) fn with_hash(source: Option<&[u8]>, hash: u64, fallback: u32, semantic: PixelSemantic, store: bool, budget: &mut ImageBudget) -> Result<Self, String> {
+        let kind = match source {
+            None => { budget.fixed = budget.fixed.saturating_add(4); MapSource::Solid(fallback) }
+            Some(b) if crate::texture_pack::is_ktx2(b) => {
+                let bytes = DeviceLayout::read(b)?.bytes;
+                budget.fixed = budget.fixed.saturating_add(bytes);
+                MapSource::Ktx2
+            }
+            Some(b) => {
+                let size = ImageSize::read(b, 4096)?;
+                let png = PngMap::new(b, size, hash, semantic, store.then_some(size), matches!(semantic, PixelSemantic::Normal));
+                if let Some(hit) = &png.stored { budget.fixed = budget.fixed.saturating_add(hit.layout.bytes); }
+                else { budget.add(png.size, true, 1, 1); }
+                MapSource::Png(png)
+            }
+        };
+        Ok(Self { kind, semantic })
+    }
+
+    pub(crate) fn prepare(&self, source: Option<&[u8]>, level: usize, remaining: &mut usize) -> Result<std::sync::Arc<PreparedTexture>, String> {
+        let texture = match &self.kind {
+            MapSource::Solid(color) => {
+                let mut image = ImageBuffer::default();
+                image.width = 1; image.height = 1; image.data = vec![*color];
+                std::sync::Arc::new(PreparedTexture::prepare(image, self.semantic))
+            }
+            MapSource::Ktx2 => remapped_ktx2(source.expect("planned KTX2")).expect("KTX2 bytes")?,
+            MapSource::Png(png) => {
+                if let Some(hit) = &png.stored { hit.prepare()? } else {
+                    let level = png.size.fit(level, *remaining, true);
+                    let mut texture = png.decoded(source.expect("planned PNG"), self.semantic, level)?;
+                    if let Some(key) = png.store_key.filter(|_| level == 0) {
+                        owe(key, &texture, matches!(self.semantic, PixelSemantic::Normal));
+                        std::sync::Arc::make_mut(&mut texture).stored = Some(key);
+                    }
+                    texture
+                }
+            }
+        };
+        *remaining = remaining.saturating_sub(texture.bytes());
+        Ok(texture)
+    }
 }
 
 /// Queue the stored form of `texture` under `key`, once per process however many models name it.
 fn owe(key: u64, texture: &PreparedTexture, bc5: bool) {
     let mut owed = OWED.lock().unwrap_or_else(|e| e.into_inner());
     if owed.1.get_or_insert_with(Default::default).insert(key) { owed.0.push(StoreBasis::new(key, texture, bc5)); }
-}
-
-/// Under [`storing_device_textures`]: a terrain paint's layers of one kind
-/// from their stored forms, when every layer has one and they agree in size,
-/// levels and format (one array takes one format). `Err` lists the layers
-/// the store lacks (their keys), for the decode that follows to owe.
-fn stored_splat_layers(sources: &[Option<Vec<u8>>], semantic: PixelSemantic, remaining: &mut usize) -> Result<Vec<std::sync::Arc<PreparedTexture>>, Vec<Option<u64>>> {
-    let in_scope = STORING.with(|s| s.get()) && compressed_texture_target().is_some();
-    let Some(store) = prepared_texture_store().filter(|_| in_scope) else { return Err(Vec::new()) };
-    let large = |bytes: &[u8]| png_size(bytes).is_some_and(|(w, h)| w * h >= COMPRESS_MIN_TEXELS);
-    // Layers with no image (a flat colour) or a small one keep the whole kind uncompressed.
-    if sources.iter().any(|source| !source.as_deref().is_some_and(large)) { return Err(Vec::new()); }
-    let mut layers = Vec::with_capacity(sources.len());
-    let mut missing = Vec::new();
-    for bytes in sources.iter().flatten() {
-        // Layer images carry height or roughness in alpha: UASTC, never BC5.
-        let key = stored_form_key(bytes, semantic, false);
-        let found = prepared_once((key, bytes.len(), u8::MAX - 1), || {
-            let stored = store.get_basis(key).ok_or_else(String::new)?;
-            let mut texture = texture_work(TextureWork::Remap, || crate::texture_pack::texture_from_ktx2(&stored)).ok_or_else(String::new)??;
-            texture.hash = key;
-            texture.stored = Some(key);
-            Ok(texture)
-        });
-        match found { Ok(texture) => { layers.push(texture); missing.push(None); } Err(_) => missing.push(Some(key)) }
-    }
-    let first = layers.first().map(|t| (t.width, t.height, t.max_level, t.compressed.as_ref().map(|(f, _)| *f)));
-    let agree = first.is_some_and(|first| first.3.is_some() && layers.iter().all(|t| (t.width, t.height, t.max_level, t.compressed.as_ref().map(|(f, _)| *f)) == first));
-    if layers.len() != sources.len() || !agree { return Err(missing); }
-    let bytes = layers.iter().map(|t| t.bytes()).sum::<usize>();
-    *remaining = remaining.checked_sub(bytes).ok_or_else(|| vec![None])?;
-    Ok(layers)
 }
 
 /// Level 0's alpha distribution: from the RGBA chain, or decoded from its
@@ -1146,62 +1427,111 @@ pub struct UploadedSplat {
     pub band: [[f32; 4]; 3],
 }
 
-/// One kind's layers at a common size: the first texture's (a layer
-/// of another size is resampled to it, nearest).
-fn splat_kind(sources: Vec<Option<Vec<u8>>>, fill: &dyn Fn(usize) -> u32, semantic: PixelSemantic, remaining: &mut usize) -> Result<Vec<std::sync::Arc<PreparedTexture>>, String> {
-    let missing = match stored_splat_layers(&sources, semantic, remaining) { Ok(layers) => return Ok(layers), Err(missing) => missing };
-    let decode = |bytes: &[u8], budget: usize| -> Result<ImageBuffer, String> {
-        if crate::texture_pack::is_ktx2(bytes) { return Err("terrain paint layers are PNG images".into()); }
-        texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(bytes, 4096, budget))
-    };
-    let mut prepared: Vec<Option<std::sync::Arc<PreparedTexture>>> = Vec::new();
-    for bytes in &sources {
-        prepared.push(match bytes {
-            Some(bytes) => {
-                let hash = texture_work(TextureWork::Hash, || image_content_hash(bytes));
-                let budget = *remaining;
-                Some(prepared_once((hash, bytes.len(), semantic as u8), || { let image = decode(bytes, budget)?; Ok(texture_work(TextureWork::DecodeMip, || PreparedTexture::prepare(image, semantic))) })?)
-            }
-            None => None,
-        });
+struct SplatKindPlan {
+    maps: Vec<Option<PngMap>>,
+    size: ImageSize,
+    stored: bool,
+}
+
+impl SplatKindPlan {
+    fn new(sources: &[Option<&[u8]>], semantic: PixelSemantic, budget: &mut ImageBudget) -> Result<Self, String> {
+        let sizes = sources.iter().map(|source| source.map(|b| {
+            if crate::texture_pack::is_ktx2(b) { return Err("terrain paint layers are PNG images".into()); }
+            ImageSize::read(b, 4096)
+        }).transpose()).collect::<Result<Vec<_>, _>>()?;
+        // A missing or small source keeps this whole array in RGBA.
+        let size = sizes.iter().flatten().copied().next().unwrap_or(ImageSize(1, 1));
+        let store = sizes.iter().all(|s| s.is_some_and(|s| s.0 * s.1 >= COMPRESS_MIN_TEXELS));
+        let maps: Vec<_> = sources.iter().zip(sizes).map(|(source, dims)| source.zip(dims).map(|(b, dims)| {
+            let hash = texture_work(TextureWork::Hash, || image_content_hash(b));
+            PngMap::new(b, dims, hash, semantic, store.then_some(size), false)
+        })).collect();
+        let first = maps.iter().flatten().next();
+        let layout = first.and_then(|m| m.stored.as_ref()).map(|s| s.layout);
+        let stored = layout.is_some_and(|l| l.format.is_some() && maps.iter().all(|m| {
+            m.as_ref().and_then(|m| m.stored.as_ref()).is_some_and(|s| s.layout == l)
+        }));
+        if stored {
+            budget.fixed = budget.fixed.saturating_add(layout.unwrap().bytes.saturating_mul(maps.len()));
+        } else if first.is_some() {
+            budget.add(size, true, maps.len(), maps.iter().flatten().count());
+        } else {
+            budget.fixed = budget.fixed.saturating_add(4 * maps.len());
+        }
+        Ok(Self { maps, size, stored })
     }
-    let (w, h) = prepared.iter().flatten().next().map_or((1, 1), |t| (t.width, t.height));
-    let mut out = Vec::with_capacity(sources.len());
-    for (i, (bytes, texture)) in sources.iter().zip(prepared).enumerate() {
-        let texture = match (bytes, texture) {
-            (_, Some(t)) if t.width == w && t.height == h => t,
-            (Some(bytes), _) => {
-                let image = decode(bytes, *remaining)?;
-                let mut out = ImageBuffer::default();
-                out.width = w;
-                out.height = h;
-                out.data = (0..w * h).map(|k| image.data[(k / w) * image.height / h * image.width + (k % w) * image.width / w]).collect();
-                std::sync::Arc::new(PreparedTexture::prepare(out, semantic))
-            }
-            (None, _) => {
+
+    fn prepare<'a>(&self, sources: impl Iterator<Item = Option<&'a [u8]>>, fill: impl Fn(usize) -> u32, semantic: PixelSemantic, remaining: &mut usize, level: usize) -> Result<Vec<std::sync::Arc<PreparedTexture>>, String> {
+        let level = self.size.fit(level, *remaining / self.maps.len(), true);
+        let ImageSize(w, h) = self.size.at(level);
+        let mut layers = Vec::with_capacity(self.maps.len());
+        for (i, (map, bytes)) in self.maps.iter().zip(sources).enumerate() {
+            let texture = if let Some(map) = map {
+                if self.stored {
+                    map.stored.as_ref().expect("complete stored array").prepare()?
+                } else {
+                    let bytes = bytes.expect("planned terrain PNG");
+                    let texture = if map.size.at(level) == ImageSize(w, h) {
+                        map.decoded(bytes, semantic, level)?
+                    } else {
+                        let image = crate::renderer::decode_model_image(bytes, 4096, level)?;
+                        let mut out = ImageBuffer::default();
+                        out.width = w; out.height = h;
+                        out.data = (0..w * h).map(|k| image.data[(k / w) * image.height / h * image.width + (k % w) * image.width / w]).collect();
+                        std::sync::Arc::new(PreparedTexture::prepare(out, semantic))
+                    };
+                    if let Some(key) = map.store_key.filter(|_| level == 0 && map.stored.is_none()) {
+                        owe(key, &texture, false);
+                    }
+                    texture
+                }
+            } else {
                 let mut image = ImageBuffer::default();
-                image.width = w;
-                image.height = h;
-                image.data = vec![fill(i); w * h];
+                image.width = w; image.height = h; image.data = vec![fill(i); w * h];
                 std::sync::Arc::new(PreparedTexture::prepare(image, semantic))
-            }
-        };
-        *remaining = remaining.checked_sub(texture.bytes()).ok_or("material maps exceed texture byte budget")?;
-        // A layer the store lacks owes its stored form, at the size its kind shares.
-        if let Some(Some(key)) = missing.get(i) { owe(*key, &texture, false); }
-        out.push(texture);
+            };
+            *remaining = remaining.saturating_sub(texture.bytes());
+            layers.push(texture);
+        }
+        Ok(layers)
     }
-    Ok(out)
+}
+
+struct SplatPlan {
+    albedo: SplatKindPlan,
+    normal: SplatKindPlan,
+}
+
+impl SplatPlan {
+    fn new(splat: &SplatSurface, budget: &mut ImageBudget) -> Result<Self, String> {
+        let layers = &splat.layers[..splat.layers.len().min(SPLAT_LAYERS)];
+        if layers.is_empty() { return Err("terrain paint without layers".into()); }
+        let weights = if splat.weights_png.is_empty() && layers.len() == 1 { ImageSize(1, 1) }
+            else { ImageSize::read(&splat.weights_png, 4096)? };
+        budget.fixed = budget.fixed.saturating_add(weights.bytes(true));
+        let albedo = layers.iter().map(|l| l.albedo_png.as_deref()).collect::<Vec<_>>();
+        let normal = layers.iter().map(|l| l.normal_png.as_deref()).collect::<Vec<_>>();
+        Ok(Self { albedo: SplatKindPlan::new(&albedo, PixelSemantic::MaskedColor, budget)?,
+            normal: SplatKindPlan::new(&normal, PixelSemantic::Normal, budget)? })
+    }
 }
 
 impl PreparedSplat {
     pub fn prepare(splat: &SplatSurface, remaining: &mut usize) -> Result<Self, String> {
+        let mut budget = ImageBudget::default();
+        let plan = SplatPlan::new(splat, &mut budget)?;
+        let level = budget.level(*remaining);
+        Self::prepare_planned(splat, &plan, remaining, level)
+    }
+
+    fn prepare_planned(splat: &SplatSurface, plan: &SplatPlan, remaining: &mut usize, level: usize) -> Result<Self, String> {
         let layers = &splat.layers[..splat.layers.len().min(SPLAT_LAYERS)];
-        if layers.is_empty() { return Err("terrain paint without layers".into()); }
         let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-        // A flat-colour layer: its colour at half height.
-        let albedo = splat_kind(layers.iter().map(|l| l.albedo_png.clone()).collect(), &|i| { let c = layers[i].color; 0x8000_0000 | byte(c[0]) << 16 | byte(c[1]) << 8 | byte(c[2]) }, PixelSemantic::MaskedColor, remaining)?;
-        let normal = splat_kind(layers.iter().map(|l| l.normal_png.clone()).collect(), &|_| 0x8080_80ff, PixelSemantic::Normal, remaining)?;
+        let albedo = plan.albedo.prepare(layers.iter().map(|l| l.albedo_png.as_deref()),
+            |i| { let c = layers[i].color; 0x8000_0000 | byte(c[0]) << 16 | byte(c[1]) << 8 | byte(c[2]) },
+            PixelSemantic::MaskedColor, remaining, level)?;
+        let normal = plan.normal.prepare(layers.iter().map(|l| l.normal_png.as_deref()), |_| 0x8080_80ff,
+            PixelSemantic::Normal, remaining, level)?;
         let image = if splat.weights_png.is_empty() && layers.len() == 1 {
             let mut image = ImageBuffer::default();
             image.width = 1;
@@ -1209,10 +1539,13 @@ impl PreparedSplat {
             image.data = vec![0xffff_0000];
             image
         } else {
-            texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(&splat.weights_png, 4096, *remaining))?
+            // The weights say where each layer goes and may stack two RGBA
+            // pages, so they are never reduced: only the dimension bound
+            // applies. The layers above carry the budget's reduction.
+            texture_work(TextureWork::DecodeMip, || crate::renderer::decode_generated_png(&splat.weights_png, 4096, 4096 * 4096 * 4))?
         };
         let weights = PreparedTexture::prepare(image, PixelSemantic::Data);
-        *remaining = remaining.checked_sub(weights.bytes()).ok_or("material maps exceed texture byte budget")?;
+        *remaining = remaining.saturating_sub(weights.bytes());
         let mut params = [[0.0f32; 4]; SPLAT_LAYERS];
         for (p, l) in params.iter_mut().zip(layers) {
             *p = [l.scale, l.roughness, l.metallic, if l.normal_png.is_some() { l.bump } else { 0.0 }];
@@ -1297,42 +1630,43 @@ impl PreparedSplat {
     pub fn bytes(&self) -> usize { self.albedo.iter().chain(&self.normal).map(|t| t.bytes()).sum::<usize>() + self.weights.bytes() }
 }
 
-impl PreparedSurface {
-    pub fn prepare(mut definition:MaterialSurface,remaining:&mut usize)->Result<Self,String>{
-        let _preparing=Preparing::begin();
-        let mut image=|bytes:Option<Vec<u8>>,fallback,semantic|->Result<PreparedTexture,String>{
-            if let Some(texture)=bytes.as_deref().and_then(remapped_ktx2) {
-                let texture=std::sync::Arc::unwrap_or_clone(texture?);
-                *remaining=remaining.checked_sub(texture.bytes()).ok_or("material maps exceed texture byte budget")?;return Ok(texture);
-            }
-            let texture=if let Some(bytes)=bytes{
-                // Once per load for every model that uses the image (a
-                // level's tiles share their material maps).
-                let hash=texture_work(TextureWork::Hash,||image_content_hash(&bytes));
-                let budget=*remaining;
-                // A normal map here keeps X and Y only (the shaders rebuild Z): BC5 when stored.
-                let bc5=matches!(semantic,PixelSemantic::Normal);
-                let texture=prepared_once((hash,bytes.len(),semantic as u8),||stored_device_texture(&bytes,semantic,bc5,||{
-                    let image=texture_work(TextureWork::DecodeMip,||crate::renderer::decode_generated_png(&bytes,4096,budget))?;
-                    Ok(texture_work(TextureWork::DecodeMip,||PreparedTexture::prepare(image,semantic)))
-                }))?;
-                let stored=owe_unstored(&bytes,semantic,bc5,&texture);
-                let mut texture=std::sync::Arc::unwrap_or_clone(texture);
-                if texture.stored.is_none() { texture.stored=stored; }
-                texture
-            }else{
-                let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];PreparedTexture::prepare(image,semantic)};
+pub(crate) struct SurfacePlan {
+    normal: MapPlan,
+    occlusion: MapPlan,
+    emissive: MapPlan,
+    splat: Option<SplatPlan>,
+}
 
-            *remaining=remaining.checked_sub(texture.bytes()).ok_or("material maps exceed texture byte budget")?;Ok(texture)
-        };
-        let normal=image(definition.normal_png.take(),0xff80_80ff,PixelSemantic::Normal)?;
-        // A far stand-in's occlusion slot holds its 16-bit depth atlas
-        // (impostor.rs `ImpostorBake::depth`).
-        let occlusion=image(definition.occlusion_png.take(),0xffff_ffff,if definition.impostor>0.0{PixelSemantic::Data16}else{PixelSemantic::Data})?;
-        let emissive=image(definition.emissive_png.take(),0xffff_ffff,PixelSemantic::Color)?;
-        // The paint's bytes go with its pixels: the definition keeps none.
-        let splat=definition.splat.take().map(|s|PreparedSplat::prepare(&s,remaining)).transpose()?;
-        Ok(Self{definition,normal,occlusion,emissive,splat})
+impl SurfacePlan {
+    pub(crate) fn new(surface: &MaterialSurface, budget: &mut ImageBudget) -> Result<Self, String> {
+        let depth = if surface.impostor > 0.0 { PixelSemantic::Data16 } else { PixelSemantic::Data };
+        Ok(Self {
+            normal: MapPlan::new(surface.normal_png.as_deref(), 0xff80_80ff, PixelSemantic::Normal, true, budget)?,
+            occlusion: MapPlan::new(surface.occlusion_png.as_deref(), 0xffff_ffff, depth, true, budget)?,
+            emissive: MapPlan::new(surface.emissive_png.as_deref(), 0xffff_ffff, PixelSemantic::Color, true, budget)?,
+            splat: surface.splat.as_ref().map(|s| SplatPlan::new(s, budget)).transpose()?,
+        })
+    }
+
+    pub(crate) fn prepare(&self, mut definition: MaterialSurface, remaining: &mut usize, level: usize) -> Result<PreparedSurface, String> {
+        let normal = self.normal.prepare(definition.normal_png.take().as_deref(), level, remaining)?;
+        let occlusion = self.occlusion.prepare(definition.occlusion_png.take().as_deref(), level, remaining)?;
+        let emissive = self.emissive.prepare(definition.emissive_png.take().as_deref(), level, remaining)?;
+        let splat = self.splat.as_ref().zip(definition.splat.take()).map(|(plan, s)| {
+            PreparedSplat::prepare_planned(&s, plan, remaining, level)
+        }).transpose()?;
+        Ok(PreparedSurface { definition, normal: std::sync::Arc::unwrap_or_clone(normal),
+            occlusion: std::sync::Arc::unwrap_or_clone(occlusion), emissive: std::sync::Arc::unwrap_or_clone(emissive), splat })
+    }
+}
+
+impl PreparedSurface {
+    pub fn prepare(definition: MaterialSurface, remaining: &mut usize) -> Result<Self, String> {
+        let _preparing = Preparing::begin();
+        let mut budget = ImageBudget::default();
+        let plan = SurfacePlan::new(&definition, &mut budget)?;
+        let level = budget.level(*remaining);
+        plan.prepare(definition, remaining, level)
     }
     pub fn bytes(&self)->usize{self.normal.bytes()+self.occlusion.bytes()+self.emissive.bytes()+self.splat.as_ref().map_or(0,PreparedSplat::bytes)}
     pub fn upload(self,cx:&mut Cx)->UploadedSurface {UploadedSurface{definition:std::sync::Arc::new(self.definition),normal:self.normal.upload(cx),occlusion:self.occlusion.upload(cx),emissive:self.emissive.upload(cx),splat:self.splat.map(|s|s.upload(cx,&mut Default::default(),&|_|0))}}

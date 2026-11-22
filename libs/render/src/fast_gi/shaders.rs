@@ -461,6 +461,27 @@ script_mod! {
         ..GiVoxels,
         alpha_blend: false
         color_format: @Rgba32F
+        gi_skyline: texture_2d(float)
+        gi_skyline_rect: uniform(vec4(0.0,0.0,1.0,0.0))
+        gi_skyline_size: uniform(vec2(1.0,1.0))
+        // Continue an unresolved voxel ray from its endpoint. The skyline
+        // gives a conservative blocker height even outside the clipmap.
+        sky_march: fn(p:vec3,rd:vec3)->vec2 {
+            let rect=self.gi_skyline_rect
+            let size=self.gi_skyline_size
+            var d=rect.z
+            var t=0.0
+            for i in 0..12 {
+                t=t+d
+                d=d*1.5
+                let q=p+rd*t
+                if self.vox_end_status(q)==0.0 {return vec2(t,0.0)}
+                let texel=clamp(floor((q.xz-rect.xy)/rect.z),vec2(0.0,0.0),size-vec2(1.0,1.0))
+                let height=self.gi_skyline.sample_nearest((texel+vec2(0.5,0.5))/size).x
+                if q.y<height {return vec2(t,0.5)}
+            }
+            return vec2(t,0.25)
+        }
         pack: fn(v:vec3)->float {
             let b=floor(clamp(v,vec3(0.0,0.0,0.0),vec3(1.0,1.0,1.0))*255.0+vec3(0.5,0.5,0.5))
             return b.x+b.y*256.0+b.z*65536.0
@@ -497,11 +518,17 @@ script_mod! {
             let probe=self.place(a.y,(b.xyz+self.gi_home.xyz)*s)
             if col>63.5 {return probe}
             // hits: (t, albedo, normal (negative = backface), emission);
-            // y = -1 left the scene, -2 invalid (including ran-out rays).
+            // y = -1 sky, -2 invalid or unresolved, -3 closed far.
             if probe.w<0.0 {return vec4(0.0,-2.0,0.0,0.0)}
             let rd=self.gi_ray(col,a)
             let hit=self.vox_trace(probe.xyz,rd,self.gi_pass.z,a.y)
-            if hit.w<0.0 || hit.w==0.25 {return vec4(0.0,-2.0,0.0,0.0)}
+            if hit.w<0.0 {return vec4(0.0,-2.0,0.0,0.0)}
+            if hit.w==0.25 {
+                let m=self.sky_march(probe.xyz+rd*hit.x,rd)
+                if m.y==0.0 {return vec4(self.gi_pass.z,-1.0,0.0,0.0)}
+                if m.y==0.5 {return vec4(hit.x+m.x,-3.0,0.0,0.0)}
+                return vec4(0.0,-2.0,0.0,0.0)
+            }
             if hit.w<0.5 {return vec4(self.gi_pass.z,-1.0,0.0,0.0)}
             let v=self.vox_level(hit.y)
             let cell=floor((probe.xyz+rd*(hit.x+v.w*0.01))/v.w)
@@ -579,10 +606,11 @@ script_mod! {
             let ray=min(floor(self.pos.x*64.0),63.0)
             let probe=self.hit_at(64.0,row)
             let hit=self.hit_at(ray,row)
-            // radiance: (rgb, distance); w = -1 backface, -2 invalid
-            // (including ran out); x = -1 left the scene (sky, lit by
-            // the receivers' own ambient).
-            if probe.w<0.0 || hit.y<(-1.5) {return vec4(0.0,0.0,0.0,-2.0)}
+            // radiance: (rgb, distance); w = -1 backface, -2 invalid.
+            // Sky has x = -1 for the receiver's ambient. Closed far has
+            // zero RGB and a positive blocker distance for visibility.
+            if hit.y<(-2.5) && probe.w>=0.0 {return vec4(0.0,0.0,0.0,hit.x)}
+            if probe.w<0.0 || (hit.y<(-1.5) && hit.y>(-2.5)) {return vec4(0.0,0.0,0.0,-2.0)}
             if hit.y<(-0.5) {return vec4(-1.0,0.0,0.0,hit.x)}
             let a=self.batch_a(row)
             let rd=self.gi_ray(ray,a)

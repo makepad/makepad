@@ -360,8 +360,8 @@ struct FogLight { pos: [f32; 4], color: [f32; 4], dir: [f32; 4] }
 
 struct Stage { pass: DrawPass, list: DrawList }
 impl Stage {
-    fn new(cx: &mut Cx, name: &str) -> Self {
-        Self { pass: DrawPass::new_with_name(cx, name), list: DrawList::new(cx) }
+    fn new(cx: &mut Cx, name: &str, time: Option<f32>) -> Self {
+        Self { pass: crate::renderer::new_scene_pass(cx, name, time), list: DrawList::new(cx) }
     }
     fn record(&mut self, cx: &mut Cx2d, size: DVec2, targets: &[&Texture], draw: &mut DrawQuad) {
         self.pass.set_size(cx, size);
@@ -392,6 +392,7 @@ struct Resources {
 /// The self-contained pass chain. `ensure` is called only for enabled HDR frames.
 #[derive(Default)]
 pub struct VolumeFogPass {
+    scene_time: Option<f32>,
     resources: Option<Resources>,
     history: VolumeFogHistory,
     size: DVec2,
@@ -403,6 +404,13 @@ pub struct VolumeFogPass {
 }
 
 impl VolumeFogPass {
+    pub(crate) fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        if let Some(r) = &self.resources {
+            for stage in [&r.march, &r.resolve, &r.apply] { stage.pass.set_own_time(cx, time); }
+        }
+    }
+
     pub fn ensure(&mut self, cx: &mut Cx) -> bool {
         if self.resources.is_some() { return true; }
         let Some((march, resolve, apply)) = cx.try_with_vm(|vm| (
@@ -412,7 +420,7 @@ impl VolumeFogPass {
         )) else { return false; };
         let target = |cx: &mut Cx| Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true });
         self.resources = Some(Resources {
-            march: Stage::new(cx, "volume fog march"), resolve: Stage::new(cx, "volume fog resolve"), apply: Stage::new(cx, "volume fog apply"),
+            march: Stage::new(cx, "volume fog march", self.scene_time), resolve: Stage::new(cx, "volume fog resolve", self.scene_time), apply: Stage::new(cx, "volume fog apply", self.scene_time),
             raw: target(cx), fog: [target(cx), target(cx)], depth: [target(cx), target(cx)], applied: target(cx),
             draw_march: march, draw_resolve: resolve, draw_apply: apply,
         });
@@ -430,7 +438,7 @@ impl VolumeFogPass {
                 s.pass.withdraw(cx);
             }
         }
-        *self = Self::default();
+        *self = Self { scene_time: self.scene_time, ..Self::default() };
     }
 
     pub fn begin_frame(&mut self) { self.output_valid = false; }

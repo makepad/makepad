@@ -198,6 +198,26 @@ fn segment_vertices<'p>(rig: &RigInfo, parts: &'p [Part], side: usize, chain: &s
         .collect()
 }
 
+/// The axis (in the parent's rest frame, as `Pose::set` takes it) that
+/// turns a thumb segment from straight toward the handle's axis. Curling a
+/// thumb toward the palm never meets a handle that runs along the thumb (a
+/// rifle's handguard under the support hand): it stood off the handle, open.
+/// Turning it toward the axis lays it against the handle's side whatever
+/// the handle's direction. `None` when the segment already points at it.
+fn thumb_turn(p: &mut Pose, name: &str, rest_dir: [f64; 3], h: &Handle) -> Option<[f64; 3]> {
+    let ji = crate::character::j(name) as usize;
+    let parent = CHARACTER_JOINTS[ji].1?;
+    p.set(name, [0., 0., 0., 1.]);
+    let (prot, _) = p.global(parent);
+    let (_, at) = p.global(ji);
+    let t = norm(quat_rotate(prot, rest_dir));
+    let rel = sub(at, h.point);
+    let to_axis = sub(mul(h.dir, dot(rel, h.dir)), rel);
+    let w = sub(to_axis, mul(t, dot(to_axis, t)));
+    if length(w) < 1e-6 { return None; }
+    Some(quat_rotate(quat_inverse(prot), norm(cross(t, w))))
+}
+
 /// Close each finger chain onto its handle, joint by joint from the
 /// knuckle: the curl is found by bisection so the segment's own skinned
 /// surface (the real finger geometry, every finger on the joint) just
@@ -218,9 +238,17 @@ fn close_fingers(p: &mut Pose, rig: &RigInfo, parts: &[Part], handles: &[Handle]
             let (a, b) = (rig.rest[crate::character::j(&format!("{chain}_1_{x}")) as usize], rig.rest[crate::character::j(&format!("{chain}_2_{x}")) as usize]);
             let curl = norm(cross(norm(sub(b, a)), n0));
             for seg in ["1", "2"] {
-                let verts = segment_vertices(rig, parts, h.side, chain, seg);
+                let mut verts = segment_vertices(rig, parts, h.side, chain, seg);
+                // The thumb's base sits a palm's thickness off the handle: its
+                // first joint turns until the whole thumb, held straight, meets
+                // it (the tip then closes from there, never from inside).
+                if chain == "thumb" && seg == "1" {
+                    verts.extend(segment_vertices(rig, parts, h.side, chain, "2"));
+                    p.set(&format!("thumb_2_{x}"), [0., 0., 0., 1.]);
+                }
                 if verts.is_empty() { continue; }
                 let name = format!("{chain}_{seg}_{x}");
+                let curl = if chain == "thumb" { thumb_turn(p, &name, sub(b, a), h).unwrap_or(curl) } else { curl };
                 let gap = |p: &mut Pose, deg: f64| -> f64 {
                     p.set(&name, qaxis(curl, deg));
                     let mut best = f64::MAX;
@@ -265,6 +293,35 @@ fn close_fingers(p: &mut Pose, rig: &RigInfo, parts: &[Part], handles: &[Handle]
 
 /// Build the static first-person arms model.
 pub fn build_fps_arms(spec: &CharacterSpec, arms: &FpsArms, limits: &Limits) -> Result<CharacterBuild> {
+    let mesh = posed_arms(spec, arms);
+    let mut operations = Vec::new();
+    let mut late = Vec::new();
+    if let Some(pivot) = mesh.support_pivot {
+        for (op, paint) in mesh.part.export_split("support", &mesh.support_faces, limits)? {
+            operations.push(op);
+            late.extend(paint);
+        }
+        late.push(Operation::Scene(crate::SceneOperation::VehicleWheel {
+            object: "support".into(),
+            wheel: crate::VehicleWheel { connection: "support".into(), pivot, radius: 0.01, width: 0.01, visual: None },
+        }));
+    } else {
+        let (op, paint) = mesh.part.export_static(limits)?;
+        operations.push(op);
+        late.extend(paint);
+    }
+    late.push(Operation::Scene(crate::SceneOperation::Socket(crate::Socket { name: "grip".into(), attachment: crate::Attachment::Object("arms".into()), transform: crate::Transform::default() })));
+    Ok(CharacterBuild { operations, late, early: mesh.mats.ops(limits)?, warnings: spec.warnings.clone(), joints: Vec::new() })
+}
+
+pub(super) struct PosedArms {
+    pub(super) part: Part,
+    pub(super) support_pivot: Option<[f64; 3]>,
+    pub(super) support_faces: Vec<bool>,
+    mats: Mats,
+}
+
+pub(super) fn posed_arms(spec: &CharacterSpec, arms: &FpsArms) -> PosedArms {
     let b = body::Body::new(spec);
     let mut g = Gen { spec, b, mats: Mats { list: Vec::new(), base: spec.material_base }, parts: Vec::new(), sockets: Vec::new() };
     body::build(&mut g);
@@ -278,7 +335,10 @@ pub fn build_fps_arms(spec: &CharacterSpec, arms: &FpsArms, limits: &Limits) -> 
     close_fingers(&mut pose, &rig, &g.parts, &handles);
     let frames: Vec<([f64; 4], [f64; 3])> = (0..rig.rest.len()).map(|i| pose.global(i)).collect();
     let keep: Vec<bool> = CHARACTER_JOINTS.iter().map(|(n, _)| arm_joint(n)).collect();
-    let one_handed = matches!(arms.hold, Hold::One | Hold::Blade);
+    let support_pivot = handles.iter().find(|h| h.side == 0).map(|h| sub(h.point, grip));
+    let one_handed = support_pivot.is_none();
+    let support_joint = CHARACTER_JOINTS.map(|(n, _)| arm_joint(n) && n.ends_with("_l") && n != "upper_arm_l");
+    let mut support_faces = Vec::new();
     let mut part = Part::new("arms");
     for src in &g.parts {
         let mut map = vec![u32::MAX; src.positions.len()];
@@ -312,15 +372,34 @@ pub fn build_fps_arms(spec: &CharacterSpec, arms: &FpsArms, limits: &Limits) -> 
                 let (a, b_, c) = (verts[0], verts[k], verts[k + 1]);
                 if a == b_ || b_ == c || a == c { continue; }
                 part.poly(vec![a, b_, c], vec![uv(0), uv(k), uv(k + 1)], poly.material);
+                if !one_handed && support_faces.len() < part.polys.len() {
+                    let weight: f64 = [0, k, k + 1].into_iter()
+                        .flat_map(|i| &src.weights[poly.vertices[i] as usize])
+                        .filter(|w| support_joint[w.joint as usize]).map(|w| w.weight).sum();
+                    support_faces.push(weight > 1.5);
+                }
             }
         }
     }
     let sides: &[usize] = if one_handed { &[1] } else { &[0, 1] };
-    fps_detail(&mut g, &mut part, &frames, grip, sides);
-    let (op, paint) = part.export_static(limits)?;
-    let mut late = paint;
-    late.push(Operation::Scene(crate::SceneOperation::Socket(crate::Socket { name: "grip".into(), attachment: crate::Attachment::Object("arms".into()), transform: crate::Transform::default() })));
-    Ok(CharacterBuild { operations: vec![op], late, early: g.mats.ops(limits)?, warnings: spec.warnings.clone(), joints: Vec::new() })
+    let left_detail = fps_detail(&mut g, &mut part, &frames, grip, sides);
+    if support_pivot.is_some() {
+        let pos = |name| sub(frames[j(name) as usize].1, grip);
+        let (shoulder, elbow, wrist, knuckles) = (pos("upper_arm_l"), pos("lower_arm_l"), pos("hand_l"), pos("fingers_1_l"));
+        support_faces.resize(part.polys.len(), false);
+        for i in left_detail {
+            let face = &part.polys[i].vertices;
+            let centre = mul(face.iter().fold([0.; 3], |s, &v| add(s, part.positions[v as usize])), 1. / face.len() as f64);
+            let distance_sq = |a, b| {
+                let axis = sub(b, a);
+                let t = (dot(sub(centre, a), axis) / dot(axis, axis).max(f64::MIN_POSITIVE)).clamp(0., 1.);
+                let delta = sub(centre, add(a, mul(axis, t)));
+                dot(delta, delta)
+            };
+            support_faces[i] = distance_sq(elbow, wrist).min(distance_sq(wrist, knuckles)) < distance_sq(shoulder, elbow);
+        }
+    }
+    PosedArms { part, support_pivot, support_faces, mats: g.mats }
 }
 
 // ── first-person detail ───────────────────────────────────────────────────
@@ -362,7 +441,8 @@ fn outer_profile(part: &Part, vmat: &[u32], a: [f64; 3], b: [f64; 3], samples: u
     }).collect()
 }
 
-fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], grip: [f64; 3], sides: &[usize]) {
+/// Returns the faces added on the left, including for a bare hand without glove detail.
+fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], grip: [f64; 3], sides: &[usize]) -> std::ops::Range<usize> {
     let u = g.b.u;
     let pos = |name: &str| sub(frames[j(name) as usize].1, grip);
     let mut vmat = vec![u32::MAX; part.positions.len()];
@@ -377,7 +457,7 @@ fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], gri
         None => (u32::MAX, u32::MAX),
     };
     let w0: W = Vec::new();
-    for &side in sides {
+    let add_side = |part: &mut Part, side| {
         let x = if side == 0 { "l" } else { "r" };
         let (sh, el, wr) = (pos(&format!("upper_arm_{x}")), pos(&format!("lower_arm_{x}")), pos(&format!("hand_{x}")));
         let fore = outer_profile(part, &vmat, el, wr, 24, 0.09 * u);
@@ -385,10 +465,10 @@ fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], gri
         // The sleeve is the commonest outer material over the mid forearm.
         let mut counts: Vec<(u32, usize)> = Vec::new();
         for &(_, m) in &fore[4..14] { if m == u32::MAX { continue; } match counts.iter_mut().find(|c| c.0 == m) { Some(c) => c.1 += 1, None => counts.push((m, 1)) } }
-        let Some(&(sleeve, _)) = counts.iter().max_by_key(|c| c.1) else { continue };
+        let Some(&(sleeve, _)) = counts.iter().max_by_key(|c| c.1) else { return };
         // Where the sleeve ends on the forearm (the cuff).
         let end = (0..fore.len()).rev().find(|&k| fore[k].1 == sleeve && fore[k].0 > 0.).map_or(0.8, |k| k as f64 / 24.);
-        if end < 0.3 { continue; }
+        if end < 0.3 { return; }
         let flen = length(sub(wr, el));
         let ulen = length(sub(el, sh));
         let fd = norm(sub(wr, el));
@@ -408,7 +488,7 @@ fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], gri
         while t < 1. { let d = (t - 1.) * ulen; let blend = smooth01(-0.04 * u, 0.0, d) * 0.5; line.push((lerp3(sh, el, t), norm(lerp3(ud, fd, blend)), radius(&upper, t), d)); t += step / ulen; }
         let mut t = 0.;
         while t <= end - 0.02 { let d = t * flen; let blend = 0.5 + smooth01(0.0, 0.04 * u, d) * 0.5; line.push((lerp3(el, wr, t), norm(lerp3(ud, fd, blend)), radius(&fore, t), d)); t += step / flen; }
-        if line.len() < 4 { continue; }
+        if line.len() < 4 { return; }
         let cuff_d = (end - 0.02) * flen;
         let rings: Vec<Ring> = line.iter().enumerate().map(|(i, &(c, axis, r, d))| {
             // Folds: rings of fabric bunched either side of the elbow and
@@ -443,7 +523,7 @@ fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], gri
             let tab_c = add(sub(c, mul(axis, band * 0.5)), mul(top, rb + 0.0025 * u));
             rounded_box(part, add(tab_c, mul(side_v, 0.012 * u)), [0.016 * u, 0.0025 * u, band * 0.42], [side_v, top, axis], 5., w0.clone(), sleeve, 12);
         }
-        if guard_m == u32::MAX { continue; }
+        if guard_m == u32::MAX { return; }
         // ── the glove ──
         let (i1, i2) = (pos(&format!("index_1_{x}")), pos(&format!("index_2_{x}")));
         let (f1, f2) = (pos(&format!("fingers_1_{x}")), pos(&format!("fingers_2_{x}")));
@@ -490,7 +570,14 @@ fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], gri
         tube(part, &strap, 24, Cap::Open, Cap::Open, &smat, 1., 0., None);
         let sb = norm(sub(back, mul(wax, dot(back, wax))));
         rounded_box(part, add(wc, mul(sb, rw + 0.004 * u)), [0.013 * u, 0.0025 * u, 0.012 * u], [norm(cross(sb, wax)), sb, wax], 5., w0.clone(), strap_m, 12);
+    };
+    let mut left = 0..0;
+    for &side in sides {
+        let start = part.polys.len();
+        add_side(part, side);
+        if side == 0 { left = start..part.polys.len(); }
     }
+    left
 }
 
 #[cfg(test)]

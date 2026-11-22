@@ -423,14 +423,8 @@ script_mod! {
             let top_g = self.lm_top_decode.x
                 + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
             let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-            // Realtime: the per-frame cascades replace the ground path
-            // entirely — characters receive (and cast) through the same
-            // maps as every other surface.
-            let sun_vis = mix(
-                mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g),
-                self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
-                self.csm_p.x
-            )
+            let field = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
+            let sun_vis = self.csm_ground_vis(field, self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w))
             // A character standing in a lamp pool inside a building's shadow
             // gets the same fill the ground under its feet does, or it would
             // read as the one thing in the pool the lamp failed to light —

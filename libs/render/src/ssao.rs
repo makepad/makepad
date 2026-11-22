@@ -906,7 +906,7 @@ impl SsaoPass {
 
         // ---- timing (async, a frame or two behind) ------------------------
         for (i, st) in self.stages.iter().enumerate() {
-            for ms in st.pass.take_gpu_times_ms(cx.cx) {
+            for ms in st.pass.gpu_times_ms(cx.cx) {
                 self.stage_gpu_ms[i] = ms;
                 let m = &mut self.stage_gpu_min_ms[i];
                 if *m <= 0.0 || ms < *m {

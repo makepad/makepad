@@ -39,6 +39,7 @@ fn model(id: &str, x: f32, dynamic: bool, depth_order: f32) -> ModelInstance {
         dynamic,
         depth_order,
         custom_material: None,
+        layer_materials: Vec::new(),
         part_poses: Vec::new(),
         lamps: Default::default(),
     }
@@ -46,28 +47,56 @@ fn model(id: &str, x: f32, dynamic: bool, depth_order: f32) -> ModelInstance {
 
 #[test]
 fn equal_length_static_content_changes_invalidate_placed_scene_caches() {
+    use crate::model::tests::{rooms_and_door_glb, Door};
+
+    let mut cx = Cx::new(Box::new(|_, _| {}));
     let mut renderer = Renderer::default();
+    renderer.set_gpu_lightmap_mode(crate::GpuLightmapMode::OnChange);
+    let mesh = StaticModel::parse_glb(&rooms_and_door_glb(Door::Plain)).unwrap();
+    let ao = Cx::encode_rgba_as_png(1, 1, &[255; 4]).unwrap();
+    let prepared = PreparedStaticPreview::prepare_with_sidecars(mesh, Some(&ao), None).unwrap();
+    let chart_key = prepared.lm_source.as_ref().unwrap().chart_key;
+    renderer.install_static_preview(&mut cx, "kit/lamp", prepared, false).unwrap();
     let original = model("kit/lamp", 1.0, false, 0.0);
-    renderer.set_models(vec![original.clone()]);
+    let kept = model("kit/lamp", 3.0, false, 0.0);
+    renderer.set_models(vec![original.clone(), kept.clone()]);
     let original_rev = renderer.models_rev;
 
     // An identical frame is steady state and keeps delivered remaps.
-    renderer.lm_remaps.push(vec4f(1.0, 1.0, 1.0, 1.0));
-    renderer.set_models(vec![original]);
+    let first_rect = vec4f(0.0, 0.0, 0.5, 0.5);
+    let kept_rect = vec4f(0.5, 0.0, 0.5, 0.5);
+    renderer.lightmap = Some(Texture::new(&mut cx));
+    renderer.lm_remaps = vec![first_rect, kept_rect];
+    renderer.lm_remap_owners = [&original, &kept].map(|copy| Some(LmRemapOwner {
+        chart_key, transform: copy.transform.v.map(f32::to_bits),
+    })).to_vec();
+    renderer.lm_remaps_rev = Some(original_rev);
+    renderer.set_models(vec![original, kept.clone()]);
+    renderer.rekey_lm_remaps();
     assert_eq!(renderer.models_rev, original_rev);
-    assert_eq!(renderer.lm_remaps.len(), 1);
+    assert_eq!(renderer.lm_remaps, [first_rect, kept_rect]);
 
-    // Same count, different transform: this was the length-only hole.
-    renderer.set_models(vec![model("kit/lamp", 2.0, false, 0.0)]);
+    // The kept copy changes slots. The other moves to an unbaked position.
+    renderer.set_models(vec![kept.clone(), model("kit/lamp", 2.0, false, 0.0)]);
     assert_eq!(renderer.models_rev, original_rev.wrapping_add(1));
-    assert!(renderer.lm_remaps.is_empty());
+    let mut fork = renderer.fork_scene_for_review();
+    fork.rekey_lm_remaps();
+    assert_eq!(fork.lm_remaps, [kept_rect, Vec4f::default()], "the fork can draw before the live re-key");
+    renderer.rekey_lm_remaps();
+    assert_eq!(renderer.lm_remaps, [kept_rect, Vec4f::default()]);
     let moved_rev = renderer.models_rev;
+    fork.mirror_review_assets_from(&renderer, true);
+    assert_eq!(fork.lm_remaps_rev, None, "a live re-key changes ownership at the same length");
+    fork.set_models(vec![kept.clone()]);
+    fork.rekey_lm_remaps();
+    fork.mirror_review_assets_from(&renderer, true);
+    assert_eq!(fork.lm_remaps, [kept_rect], "a shorter fork keeps its own slots between live changes");
 
     // Model identity and static depth order are content as well.
-    renderer.set_models(vec![model("kit/lantern", 2.0, false, 0.0)]);
+    renderer.set_models(vec![kept.clone(), model("kit/lantern", 2.0, false, 0.0)]);
     assert_eq!(renderer.models_rev, moved_rev.wrapping_add(1));
     let renamed_rev = renderer.models_rev;
-    renderer.set_models(vec![model("kit/lantern", 2.0, false, 3.0)]);
+    renderer.set_models(vec![kept, model("kit/lantern", 2.0, false, 3.0)]);
     assert_eq!(renderer.models_rev, renamed_rev.wrapping_add(1));
 }
 
@@ -265,8 +294,21 @@ fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
     renderer.set_models(vec![model("town/house", 9.0, false, 0.0)]);
     renderer.set_world_attachments(vec![model("fps/pistol", 9.0, false, 0.0)]);
     renderer.world_attachment_ground.push(5.5);
-    renderer.lm_remaps.push(vec4f(0.5, 0.5, 0.25, 0.25));
-    renderer.lm_ground = Some((Vec4f::default(), Vec4f::default()));
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let atlas = Texture::new(&mut cx);
+    let top = (Texture::new(&mut cx), -2.0, 8.0);
+    let region = vec4f(0.5, 0.5, 0.25, 0.25);
+    let ground = (region, vec4f(-4.0, -4.0, 8.0, 8.0));
+    let owner = LmRemapOwner { chart_key: 42, transform: renderer.placed_models[0].transform.v.map(f32::to_bits) };
+    let set_lighting = |r: &mut Renderer| {
+        r.lightmap = Some(atlas.clone());
+        r.lm_top = Some(top.clone());
+        r.lm_ground = Some(ground);
+        r.lm_remaps = vec![region];
+        r.lm_remap_owners = vec![Some(owner)];
+        r.lm_remaps_rev = Some(r.models_rev);
+    };
+    set_lighting(&mut renderer);
     renderer.receiver_boxes.push((Vec3f::default(), vec3f(1.0, 1.0, 1.0)));
     renderer.occluder_boxes.push((Vec3f::default(), vec3f(1.0, 1.0, 1.0)));
     renderer.shadow_mesh.vertices.push(1.0);
@@ -322,6 +364,9 @@ fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
     assert!(renderer.occluder_boxes.is_empty());
     assert!(renderer.shadow_mesh.is_empty());
     assert!(renderer.lm_remaps.is_empty());
+    assert!(renderer.lm_remap_owners.is_empty());
+    assert!(renderer.lightmap.is_none());
+    assert!(renderer.lm_top.is_none());
     assert_eq!(renderer.lm_ground, None);
     assert!(!renderer.gpu_baker.has_state());
     assert!(renderer.lm_lights.is_empty());
@@ -354,14 +399,63 @@ fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
     assert_eq!(renderer.stage().origin, vec3f(1.0, 2.0, 3.0));
     assert_eq!(renderer.stage().yaw, 0.4);
     assert_eq!(renderer.stage().scale, 0.08);
+
+    renderer.set_models(vec![model("town/house", 9.0, false, 0.0)]);
+    renderer.terrain_revision = 1;
+    let rev = renderer.models_rev;
+    renderer.lm_kick_key = Some((1, rev, 32));
+    set_lighting(&mut renderer);
+    renderer.enter_revised_realm();
+    assert_eq!(renderer.models_rev, rev.wrapping_add(1));
+    assert!(renderer.placed_models.is_empty());
+    assert_eq!(renderer.placed_scene_signature, None);
+    assert_eq!(renderer.terrain_revision, 0);
+    assert_eq!(renderer.lm_kick_key, None);
+    assert_eq!(renderer.lightmap, Some(atlas));
+    assert_eq!(renderer.lm_ground, Some(ground));
+    assert_eq!(renderer.lm_top, Some(top));
+    assert_eq!(renderer.lm_remaps, [region]);
+    assert_eq!(renderer.lm_remap_owners, [Some(owner)]);
+    assert_eq!(renderer.lm_remaps_rev, None);
 }
 
 #[test]
 fn a_review_fork_carries_the_hosts_element_lookup_and_shadow_budget() {
+    use crate::GpuLightmapMode::{OnChange, Realtime};
+
     let mut live = Renderer::default();
     live.set_shadow_budget(7);
     live.set_element_lookup(None, 0x5eed);
-    let fork = live.fork_scene_for_review();
+    let mut fork = live.fork_scene_for_review();
     assert_eq!(fork.shadow_budget(), 7, "the fork keeps the host's silhouette caster budget");
     assert_eq!(fork.gpu_baker.element_lookup_casters(), 0x5eed, "the fork keeps the host's element casters key");
+
+    let tier = |r: &Renderer| (r.gpu_lightmap_mode(), r.clustered_lighting(), r.atlas_borrowed);
+    let borrows = live.gpu_lightmap_mode() == OnChange;
+    assert_eq!(
+        tier(&fork),
+        (live.gpu_lightmap_mode(), !borrows || live.clustered_lighting(), borrows),
+    );
+
+    live.set_gpu_lightmap_mode(Realtime);
+    live.set_clustered_lighting(false);
+    assert!(live.shadows_baked(), "the mixed host still uses a world atlas");
+    assert_eq!(tier(&live.fork_scene_for_review()), (Realtime, true, false));
+    fork.mirror_review_frame_from(&live);
+    assert_eq!(tier(&fork), (Realtime, true, false));
+
+    live.set_gpu_lightmap_mode(OnChange);
+    for clustered in [false, true] {
+        live.set_clustered_lighting(clustered);
+        assert_eq!(tier(&live.fork_scene_for_review()), (OnChange, clustered, true));
+        fork.mirror_review_frame_from(&live);
+        assert_eq!(tier(&fork), (OnChange, clustered, true));
+    }
+    fork.mirror_review_assets_from(&live, false);
+    assert_eq!(tier(&fork), (Realtime, true, false), "a capture in its own light casts its own shadows");
+    fork.mirror_review_assets_from(&live, true);
+    assert_eq!(tier(&fork), (OnChange, true, true), "a capture in the host's light borrows again");
+    live.set_gpu_lightmap_mode(Realtime);
+    fork.mirror_review_frame_from(&live);
+    assert_eq!(tier(&fork), (Realtime, true, false), "the open pane stops borrowing");
 }

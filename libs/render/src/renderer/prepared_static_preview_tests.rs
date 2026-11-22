@@ -6,6 +6,7 @@ fn triangle() -> StaticModel {
         vertices.extend_from_slice(&[p[0], p[1], p[2], 0.0, 0.0, f32::from_bits(0xffff_ffff), 0.0]);
     }
     StaticModel {
+        material_name: Default::default(),
         vertices, indices: vec![0, 1, 2], texture_uri: None, texture_png: None,
         min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
         parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
@@ -125,9 +126,38 @@ fn generated_png_limits_are_checked_before_pixel_decode() {
     assert!(decode_generated_png(&png, 8, 32).is_err());
     assert_eq!(decode_generated_png(&png, 8, 64).unwrap().data.len(), 16);
     let mut model = triangle();
-    model.texture_png = Some(png);
+    model.texture_png = Some(png.clone());
     let prepared = PreparedStaticPreview::prepare(model).unwrap();
     assert_eq!(prepared.main.texture.data.len(), 16+4+1);
+
+    for (budget, side) in [(16, 2), (64, 4), (0, 1)] {
+        let image = decode_generated_png_within(&png, 8, budget, "test").unwrap();
+        assert_eq!((image.width, image.height, image.data.len()), (side, side, side * side), "budget {budget}");
+        assert!(image.data.iter().all(|&pixel| pixel == 0xffff_ffff), "white pixels at budget {budget}");
+    }
+
+    // Keep one load memo open across preparations. At 2048 bytes the old order could
+    // spend 1024 on each of the first two base images, leaving only 1x1 for the rest.
+    let _load = crate::material_surface::Preparing::begin();
+    let layers: Vec<_> = (1..=4).map(|color| {
+        let mesh = triangle();
+        crate::model::StaticDrawLayer {
+            name: Default::default(), vertices: mesh.vertices, indices: mesh.indices, uvs: Vec::new(),
+            texture_png: Some(Cx::encode_rgba_as_png(16, 16, &[color; 16 * 16 * 4]).unwrap()),
+            detail_png: None, detail_scale: [1.0; 2], pbr: Default::default(),
+        }
+    }).collect();
+    let fixed = layers.len() * (3 * crate::model::MODEL_VERTEX_FLOATS + 3) * 4 + 8; // geometry and two shared fallbacks
+    let half = fixed + layers.len() * (64 + 16 + 4 + 1) * 4;
+    let full = half + layers.len() * 256 * 4;
+    for (budget, side) in [(2048, 8), (half - 1, 4), (full, 16), (full - 1, 8)] {
+        let mut model = triangle();
+        model.draw_layers = layers.clone();
+        let prepared = PreparedStaticPreview::prepare_with_budget(model, None, None, budget).unwrap();
+        let sizes: Vec<_> = std::iter::once(&prepared.main).chain(&prepared.extra)
+            .map(|layer| (layer.texture.width, layer.texture.height)).collect();
+        assert_eq!(sizes, vec![(side, side); layers.len()], "every material keeps the largest shared size at budget {budget}");
+    }
 }
 
 #[test]
@@ -202,7 +232,9 @@ fn morph_shadow_casters_share_visible_weights_and_exclude_rest_duplicates() {
     let mut renderer=Renderer::default();
     let uploaded=renderer.upload_static_preview(&mut cx,prepared);
     renderer.install_uploaded_static("morph",uploaded);
-    let instance=ModelInstance{model:"morph".into(),transform:Mat4f::identity(),tint:vec4(1.,1.,1.,1.),color_adjust:vec4(0.,1.,1.,0.),dynamic:false,depth_order:0.,part_poses:Vec::new(),custom_material:None,lamps:Default::default()};
+    let instance=ModelInstance{model:"morph".into(),transform:Mat4f::identity(),tint:vec4(1.,1.,1.,1.),color_adjust:vec4(0.,1.,1.,0.),dynamic:false,depth_order:0.,part_poses:Vec::new(),custom_material:None,
+    layer_materials: Vec::new(),
+    lamps:Default::default()};
     renderer.set_models(vec![instance.clone()]);
     renderer.set_world_attachments(vec![instance]);
     renderer.set_model_clip(ModelTarget::Instance(0),Some("pulse".into()),0.75,false).unwrap();
@@ -240,4 +272,22 @@ fn entity_casters_keep_their_primitive_shape(){
     assert_eq!(movers[1].geometry,id(Shape::Box));
     assert_eq!(movers[2].geometry,id(Shape::Cylinder));
     assert_ne!(id(Shape::Sphere),id(Shape::Box));
+
+    // The baked tier's entity casters need ground under them. A merged brush
+    // surface is drawn over HIDDEN colliders: one whose creator declares its
+    // faces drawn is ground at any thickness, so a player on a thin floor or
+    // a thick platform casts; an undeclared hidden box (a lid) is not, even
+    // a thin wide one, and a jump keeps the platform's top as its ground.
+    let player=Entity{id:4,kind:BodyKind::Mover,pos:vec3f(0.,1.0,0.),half:vec3f(0.5,0.5,0.5),scale:vec3f(1.,1.,1.),..Default::default()};
+    let collider=|half_y:f32,faces_drawn:bool|Entity{id:5,kind:BodyKind::Static,hidden:true,faces_drawn,pos:vec3f(0.,0.5-half_y,0.),half:vec3f(20.,half_y,20.),scale:vec3f(1.,1.,1.),..Default::default()};
+    let casts=|body:&Entity,floor:Entity|{
+        let world=World{entities:vec![body.clone(),floor],..Default::default()};
+        Renderer::shadow_casters(&world,vec3f(0.,5.,5.),4).iter().map(|(e,ground,_)|(e.id,*ground)).collect::<Vec<_>>()
+    };
+    assert_eq!(casts(&player,collider(0.0625,true)),vec![(4,0.5)],"a player on a declared brush floor casts onto its top");
+    assert_eq!(casts(&player,collider(2.0,true)),vec![(4,0.5)],"a player on a declared thick platform casts onto its top");
+    let jumping=Entity{pos:vec3f(0.,2.5,0.),..player.clone()};
+    assert_eq!(casts(&jumping,collider(2.0,true)),vec![(4,0.5)],"mid-jump the platform's top stays the ground");
+    assert!(casts(&player,collider(2.0,false)).is_empty(),"an undeclared tall hidden box is a lid, no ground");
+    assert!(casts(&player,collider(0.0625,false)).is_empty(),"thinness alone declares nothing");
 }

@@ -31,7 +31,6 @@ pub(super) struct ProbeCounts {
 }
 
 impl ProbeCounts {
-    #[cfg(test)]
     pub(super) fn pass(&self) -> Option<&DrawPass> {
         self.gpu.as_ref().map(|gpu| &gpu.pass)
     }
@@ -104,7 +103,7 @@ impl FastGi {
             let draw = cx.try_with_vm(shaders::DrawGiProbeCounts::script_new_with_default)
                 .ok_or(ReadbackError::NotRendered)?;
             self.probe_counts.gpu = Some(CountGpu {
-                pass: DrawPass::new_with_name(cx.cx, "GI probe counts"),
+                pass: crate::renderer::new_scene_pass(cx.cx, "GI probe counts", self.scene_time),
                 list: DrawList::new(cx.cx),
                 draw,
                 texture: Texture::new_with_format(cx.cx, TextureFormat::RenderBGRAu8 {

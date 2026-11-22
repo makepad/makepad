@@ -33,6 +33,7 @@ script_mod! {
         u_previous_ref: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // strength, max ray distance in metres, frame, history valid
         u_ssr: uniform(vec4(0.0, 30.0, 0.0, 0.0))
+        u_ssr_gloss: uniform(0.35)
         ssr_uv: fn(h: vec4) -> vec2 {
             return vec2(h.x / h.w * 0.5 + 0.5, 0.5 - h.y / h.w * 0.5)
         }
@@ -106,7 +107,7 @@ script_mod! {
             let none = vec4(0.0, 0.0, 0.0, 0.0)
             if self.u_ssr.w < 0.5 { return none }
             let surface = self.surface_tex.sample_nearest(self.pos)
-            if surface.w <= 0.5 || surface.z <= 0.35 { return none }
+            if surface.w <= 0.5 || surface.z <= self.u_ssr_gloss { return none }
             let raw = self.depth_tex.sample_nearest(self.pos).x
             if self.background(raw) > 0.5 { return none }
             let p = self.unproject(self.pos, raw)
@@ -173,7 +174,7 @@ script_mod! {
                     let edge_uv = min(min(hit_uv, vec2(1.0, 1.0) - hit_uv), min(old_uv, vec2(1.0, 1.0) - old_uv))
                     let edge = clamp(min(edge_uv.x, edge_uv.y) / 0.08, 0.0, 1.0)
                     let length_fade = clamp(1.0 - length(hit - p) / self.u_ssr.y, 0.0, 1.0)
-                    let rough_fade = clamp((surface.z - 0.35) / 0.65, 0.0, 1.0)
+                    let rough_fade = clamp((surface.z - self.u_ssr_gloss) / (1.0 - self.u_ssr_gloss), 0.0, 1.0)
                     return vec4(self.previous_scene.sample(old_uv).xyz, edge * length_fade * rough_fade)
                 }
                 before = along
@@ -196,21 +197,55 @@ script_mod! {
         history_depth: texture_2d(float)
         depth_tex: texture_2d(float)
         surface_tex: texture_2d(float)
+        ssr_eligible: fn(surface: vec4, background: float) -> bool {
+            return surface.w > 0.5 && surface.z > self.u_ssr_gloss && background < 0.5
+        }
+        ssr_blurred_trace: fn(gloss: float, depth: float) -> vec4 {
+            let center = self.trace_tex.sample_nearest(self.pos)
+            let rough_fade = clamp((gloss - self.u_ssr_gloss) / (1.0 - self.u_ssr_gloss), 0.0, 1.0)
+            let radius = mix(4.0, 0.0, rough_fade)
+            if radius < 0.5 { return center } // All five nearest taps hit the centre.
+            let size = self.trace_tex.size()
+            let step_uv = vec2(radius, radius) / size
+            var sum = vec4(center.xyz * center.w, center.w) * 0.5
+            var weight = 0.5
+            for i in 0..4 {
+                var offset = vec2(step_uv.x, 0.0)
+                if i == 1u { offset = vec2(-step_uv.x, 0.0) }
+                if i == 2u { offset = vec2(0.0, step_uv.y) }
+                if i == 3u { offset = vec2(0.0, -step_uv.y) }
+                let at = self.pos + offset
+                if !self.ssr_inside(at) { continue }
+                // Check the full-resolution receiver that produced this trace texel.
+                let pixel = min(floor(at * size), size - vec2(1.0, 1.0))
+                let uv = (pixel + vec2(0.5, 0.5)) / size
+                let raw = self.depth_tex.sample_nearest(uv).x
+                let surface = self.surface_tex.sample_nearest(uv)
+                if !self.ssr_eligible(surface, self.background(raw)) { continue }
+                let d = self.ssr_distance(self.unproject(uv, raw))
+                if abs(d - depth) / max(depth, 0.001) > 0.1 { continue }
+                let tap = self.trace_tex.sample_nearest(uv)
+                sum = sum + vec4(tap.xyz * tap.w, tap.w) * 0.125
+                weight = weight + 0.125
+            }
+            let filtered = sum / weight
+            return vec4(filtered.xyz / max(filtered.w, 0.000001), filtered.w)
+        }
         fragment: fn() {
             let raw = self.depth_tex.sample_nearest(self.pos).x
             let background = self.background(raw)
             var p = self.ray_origin(self.pos)
             if background < 0.5 { p = self.unproject(self.pos, raw) }
             let surface = self.surface_tex.sample_nearest(self.pos)
-            let eligible = surface.w > 0.5 && surface.z > 0.35 && background < 0.5
+            let eligible = self.ssr_eligible(surface, background)
             let depth = self.ssr_distance(p)
             // Background and reflectivity are separate: an unlit lamp can
             // be a ray HIT even though it is not a reflection receiver.
             var tag = 0.0
             if eligible { tag = 1.0 }
             self.fb1 = vec4(depth, background, tag, 1.0)
-            var value = self.trace_tex.sample_nearest(self.pos)
             if !eligible { self.fb0 = vec4(0.0, 0.0, 0.0, 0.0); return }
+            var value = self.ssr_blurred_trace(surface.z, depth)
             let old = self.u_previous_clip * vec4(p, 1.0)
             if self.u_ssr.w > 0.5 && old.w > 0.000001 {
                 let uv = self.ssr_uv(old)
@@ -241,8 +276,7 @@ script_mod! {
         depth_tex: texture_2d(float)
         surface_tex: texture_2d(float)
         envspec_tex: texture_2d(float)
-        // Premultiplied radiance/confidence; four depth-aware nearest taps
-        // per sample, with the current receiver's depth for ALL five taps.
+        // Upsample premultiplied radiance and confidence at the receiver's depth.
         ssr_upsample: fn(at: vec2, depth: float) -> vec4 {
             if !self.ssr_inside(at) { return vec4(0.0, 0.0, 0.0, 0.0) }
             let size = self.reflection_tex.size()
@@ -274,17 +308,11 @@ script_mod! {
         pixel: fn() -> vec4 {
             let scene = self.scene_tex.sample(self.pos)
             let surface = self.surface_tex.sample_nearest(self.pos)
-            if surface.w <= 0.5 || surface.z <= 0.35 { return scene }
+            if surface.w <= 0.5 || surface.z <= self.u_ssr_gloss { return scene }
             let raw = self.depth_tex.sample_nearest(self.pos).x
             if self.background(raw) > 0.5 { return scene }
             let depth = self.ssr_distance(self.unproject(self.pos, raw))
-            let radius = mix(4.0, 0.0, clamp((surface.z - 0.35) / 0.65, 0.0, 1.0))
-            let step_uv = vec2(radius, radius) / self.reflection_tex.size()
-            var reflection = self.ssr_upsample(self.pos, depth) * 0.5
-            reflection = reflection + self.ssr_upsample(self.pos + vec2(step_uv.x, 0.0), depth) * 0.125
-            reflection = reflection + self.ssr_upsample(self.pos - vec2(step_uv.x, 0.0), depth) * 0.125
-            reflection = reflection + self.ssr_upsample(self.pos + vec2(0.0, step_uv.y), depth) * 0.125
-            reflection = reflection + self.ssr_upsample(self.pos - vec2(0.0, step_uv.y), depth) * 0.125
+            let reflection = self.ssr_upsample(self.pos, depth)
             let c = clamp(reflection.w * self.u_ssr.x, 0.0, 1.0)
             if c <= 0.0 { return scene }
             let env = self.envspec_tex.sample_nearest(self.pos)
@@ -333,8 +361,8 @@ impl SsrHistory {
 
 struct Stage { pass: DrawPass, list: DrawList }
 impl Stage {
-    fn new(cx: &mut Cx, name: &str) -> Self {
-        Self { pass: DrawPass::new_with_name(cx, name), list: DrawList::new(cx) }
+    fn new(cx: &mut Cx, name: &str, time: Option<f32>) -> Self {
+        Self { pass: crate::renderer::new_scene_pass(cx, name, time), list: DrawList::new(cx) }
     }
     fn record(&mut self, cx: &mut Cx2d, size: DVec2, targets: &[&Texture], draw: &mut DrawQuad) {
         self.pass.set_size(cx, size);
@@ -360,9 +388,17 @@ struct Resources {
 }
 #[derive(Default)]
 pub struct SsrPass {
+    scene_time: Option<f32>,
     resources: Option<Resources>, history: SsrHistory, size: DVec2, flip: usize, output_valid: bool,
 }
 impl SsrPass {
+    pub(crate) fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        if let Some(r) = &self.resources {
+            for stage in [&r.trace, &r.resolve, &r.apply] { stage.pass.set_own_time(cx, time); }
+        }
+    }
+
     pub fn ensure(&mut self, cx: &mut Cx) -> bool {
         if self.resources.is_some() { return true; }
         let Some((trace, resolve, apply)) = cx.try_with_vm(|vm| (
@@ -372,7 +408,7 @@ impl SsrPass {
         )) else { return false; };
         let target = |cx: &mut Cx| Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true });
         self.resources = Some(Resources {
-            trace: Stage::new(cx, "reflection trace"), resolve: Stage::new(cx, "reflection resolve"), apply: Stage::new(cx, "reflection apply"),
+            trace: Stage::new(cx, "reflection trace", self.scene_time), resolve: Stage::new(cx, "reflection resolve", self.scene_time), apply: Stage::new(cx, "reflection apply", self.scene_time),
             raw: target(cx), reflection: [target(cx), target(cx)], depth: [target(cx), target(cx)], applied: [target(cx), target(cx)],
             draw_trace: trace, draw_resolve: resolve, draw_apply: apply,
         });
@@ -387,7 +423,7 @@ impl SsrPass {
                 stage.pass.withdraw(cx);
             }
         }
-        *self = Self::default();
+        *self = Self { scene_time: self.scene_time, ..Self::default() };
     }
     pub fn applied(&self) -> Option<&Texture> {
         self.resources.as_ref().filter(|_| self.output_valid).map(|r| &r.applied[self.flip])
@@ -422,6 +458,7 @@ impl SsrPass {
             dv.set_uniform(cx.cx, live_id!(u_previous_ref), &uniforms.previous.reference);
             dv.set_uniform(cx.cx, live_id!(u_depth_map), &depth_map);
             dv.set_uniform(cx.cx, live_id!(u_ssr), &[uniforms.settings.strength, uniforms.settings.max_distance, (uniforms.frame % 4096) as f32, if uniforms.history { 1.0 } else { 0.0 }]);
+            dv.set_uniform(cx.cx, live_id!(u_ssr_gloss), &[frame.gloss_floor]);
         }
         let dv = &mut r.draw_trace.draw_super.draw_vars;
         dv.set_texture(0, frame.depth);
@@ -452,7 +489,7 @@ impl SsrPass {
     }
 }
 pub struct SsrFrame<'a> {
-    pub settings: SsrSettings, pub camera: SsrCamera,
+    pub settings: SsrSettings, pub gloss_floor: f32, pub camera: SsrCamera,
     pub depth: &'a Texture, pub scene: &'a Texture, pub surface: &'a Texture, pub envspec: &'a Texture,
     pub size: DVec2, pub parent: DrawPassId,
 }
@@ -491,5 +528,14 @@ mod tests {
         history.commit(&unsupported);
         assert!(!history.uniforms(settings, first, true).history,
             "losing the capability invalidates retained history");
+
+        let (_, shaders) = include_str!("ssr.rs").split_once("mod.draw.DrawSsrTrace =").unwrap();
+        let (trace, shaders) = shaders.split_once("mod.draw.DrawSsrResolve =").unwrap();
+        let (resolve, shaders) = shaders.split_once("mod.draw.DrawSsrApply =").unwrap();
+        let (apply, _) = shaders.split_once("\n}").unwrap();
+        assert_eq!(apply.matches("self.ssr_upsample(").count(), 1, "full-resolution apply must upsample once");
+        for (name, source) in [("trace", trace), ("resolve", resolve), ("apply", apply)] {
+            assert!(source.contains("self.u_ssr_gloss"), "{name} must read the tier's reflection gloss floor");
+        }
     }
 }

@@ -15,6 +15,7 @@ use crate::skin::{ mat4_mul_point, oct_encode, trs_to_mat4, Accessors, JsonParse
 use makepad_draw::makepad_math::{Mat4f, Quat, Vec3f};
 use makepad_gltf::VisualWheelMotion;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Floats per packed vertex — matches `geom.GameMeshVertex` and the skinned
 /// stream, so both paths feed the same shader.
@@ -69,6 +70,8 @@ pub struct StaticModel {
     /// PNG per tile; the walk viewer and the GPU thumbnailer both draw these
     /// through Renderer so they stay in lockstep.
     pub draw_layers: Vec<StaticDrawLayer>,
+    /// The glTF material name shared by all primitives, or empty. A one-layer draw uses this name.
+    pub material_name: Arc<str>,
     /// Single-layer Q3 / Unreal detail overlay (empty `draw_layers`).
     pub detail_png: Option<Vec<u8>>,
     pub detail_scale: [f32; 2],
@@ -142,6 +145,8 @@ fn liquid_of(node: &Val) -> Option<(String, f32)> {
 /// wrap the GPU shader uses.
 #[derive(Clone)]
 pub struct StaticDrawLayer {
+    /// The glTF material name, empty for an unnamed material or a merged stream.
+    pub name: Arc<str>,
     pub vertices: Vec<f32>,
     pub indices: Vec<u32>,
     pub uvs: Vec<[f32; 2]>,
@@ -1427,11 +1432,18 @@ impl StaticModel {
                 }
             }
         }
+        let materials = json.get("materials").map(Val::arr).unwrap_or_default();
+        let material_names: Vec<Arc<str>> = materials.iter().map(|material| {
+            match material.get("name").and_then(Val::str) {
+                Some(name) if !name.is_empty() => Arc::from(name),
+                _ => Arc::default(),
+            }
+        }).collect();
         let anim_parts = if anim_defs.is_empty() {
             Vec::new()
         } else {
             build_anim_parts(
-                &json, &acc, bin_chunk, node_vals, &rests, &parents, anim_defs, &anim_owner,
+                &json, &acc, bin_chunk, node_vals, &rests, &parents, anim_defs, &anim_owner, &material_names,
             )?
         };
         let driven_parts = if driven_defs.is_empty() {
@@ -1446,6 +1458,7 @@ impl StaticModel {
                 &parents,
                 driven_defs,
                 &driven_owner,
+                &material_names,
             )?
         };
         let sky = if sky_owner.is_empty() {
@@ -1641,13 +1654,20 @@ impl StaticModel {
         // every surface instead of smearing image 0. AO bake un-indexes the
         // whole mesh into one atlas, so that path stays a single layer.
         let draw_layers = if !baked_ao {
-            split_draw_layers(&vertices, &indices, &raw_uv, &prim_spans, &json, bin_chunk)
+            split_draw_layers(&vertices, &indices, &raw_uv, &prim_spans, &json, bin_chunk, &material_names)
         } else {
             Vec::new()
         };
         let (detail_png, detail_scale) = first_detail_layer(&draw_layers, &prim_spans, &json, bin_chunk);
         let prelit = materials_have_lightmap(&json);
         let pbr = model_level_pbr(&prim_spans, &json, bin_chunk);
+        let material_name = prim_spans
+            .first()
+            .and_then(|span| span.material)
+            .filter(|&index| prim_spans.iter().all(|span| span.material == Some(index)))
+            .and_then(|index| material_names.get(index))
+            .cloned()
+            .unwrap_or_default();
 
         Ok(StaticModel {
             vertices,
@@ -1659,6 +1679,7 @@ impl StaticModel {
             parts,
             ground_ao,
             draw_layers,
+            material_name,
             detail_png,
             detail_scale,
             prelit,
@@ -2286,12 +2307,13 @@ impl PartStream {
 
     /// The stream's draw layers, guaranteed non-empty for a drawable stream:
     /// a one-image part still needs a layer to upload and draw through.
-    fn layers(&self, json: &Val, bin: &[u8]) -> Vec<StaticDrawLayer> {
+    fn layers(&self, json: &Val, bin: &[u8], material_names: &[Arc<str>]) -> Vec<StaticDrawLayer> {
         let mut layers =
-            split_draw_layers(&self.vertices, &self.indices, &self.uvs, &self.spans, json, bin);
+            split_draw_layers(&self.vertices, &self.indices, &self.uvs, &self.spans, json, bin, material_names);
         if layers.is_empty() {
             let span = self.spans.first();
             layers.push(StaticDrawLayer {
+                name: Arc::default(),
                 vertices: self.vertices.clone(),
                 indices: self.indices.clone(),
                 uvs: self.uvs.clone(),
@@ -2647,6 +2669,7 @@ fn build_anim_parts(
     parents: &[Option<usize>],
     defs: Vec<AnimNodeDef>,
     owner_of: &[Option<usize>],
+    material_names: &[Arc<str>],
 ) -> Result<Vec<AnimPart>, String> {
     let mut out = Vec::with_capacity(defs.len());
     for (part_index, def) in defs.into_iter().enumerate() {
@@ -2666,7 +2689,7 @@ fn build_anim_parts(
         if !stream.is_drawable() {
             continue;
         }
-        let layers = stream.layers(json, bin);
+        let layers = stream.layers(json, bin, material_names);
         out.push(AnimPart {
             name: def.name,
             states: def.states,
@@ -2699,6 +2722,7 @@ fn build_driven_parts(
     parents: &[Option<usize>],
     defs: Vec<DrivenNodeDef>,
     owner_of: &[Option<usize>],
+    material_names: &[Arc<str>],
 ) -> Result<Vec<DrivenPart>, String> {
     let mut out = Vec::with_capacity(defs.len());
     for (part_index, def) in defs.into_iter().enumerate() {
@@ -2729,7 +2753,7 @@ fn build_driven_parts(
                 def.connection
             ));
         }
-        let layers = stream.layers(json, bin);
+        let layers = stream.layers(json, bin, material_names);
         out.push(DrivenPart {
             connection: def.connection.into(),
             pivot: def.pivot,
@@ -2915,6 +2939,7 @@ fn split_draw_layers(
     prim_spans: &[PrimSpan],
     json: &Val,
     bin: &[u8],
+    material_names: &[Arc<str>],
 ) -> Vec<StaticDrawLayer> {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct LayerKey {
@@ -2964,8 +2989,7 @@ fn split_draw_layers(
             )
         }),
     };
-    let mut by_img: BTreeMap<LayerKey, (Vec<f32>, Vec<u32>, Vec<[f32; 2]>, PrimSpan)> =
-        BTreeMap::new();
+    let mut by_img = BTreeMap::new();
     let has_liquid = prim_spans.iter().any(|s| s.liquid);
     for span in prim_spans {
         if span.v1 <= span.v0 || span.i1 <= span.i0 || span.liquid {
@@ -2976,16 +3000,19 @@ fn split_draw_layers(
         if v_end <= v_start {
             continue;
         }
-        let dest = by_img.entry(key_of(span)).or_insert_with(|| {
-            (Vec::new(), Vec::new(), Vec::new(), span.clone())
-        });
-        let base = (dest.0.len() / MODEL_VERTEX_FLOATS) as u32;
-        dest.0.extend_from_slice(&vertices[v_start..v_end]);
+        let (verts, inds, uvs, first, sole_material) = by_img.entry(key_of(span))
+            .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), span, span.material));
+        // The first span supplies the shading. Only a material shared by every span can name the layer.
+        if span.material != first.material {
+            *sole_material = None;
+        }
+        let base = (verts.len() / MODEL_VERTEX_FLOATS) as u32;
+        verts.extend_from_slice(&vertices[v_start..v_end]);
         if span.v1 <= raw_uv.len() {
-            dest.2.extend_from_slice(&raw_uv[span.v0..span.v1]);
+            uvs.extend_from_slice(&raw_uv[span.v0..span.v1]);
         }
         for &idx in &indices[span.i0.min(indices.len())..span.i1.min(indices.len())] {
-            dest.1.push(idx - span.v0 as u32 + base);
+            inds.push(idx - span.v0 as u32 + base);
         }
     }
     // One layer draws as the merged stream — unless liquids must be left
@@ -2994,11 +3021,12 @@ fn split_draw_layers(
         return Vec::new();
     }
     let mut layers = Vec::with_capacity(by_img.len());
-    for (_key, (verts, inds, uvs, span)) in by_img {
+    for (_key, (verts, inds, uvs, span, sole_material)) in by_img {
         if inds.len() < 3 || verts.len() < MODEL_VERTEX_FLOATS * 3 {
             continue;
         }
         layers.push(StaticDrawLayer {
+            name: sole_material.and_then(|i| material_names.get(i)).cloned().unwrap_or_default(),
             vertices: verts,
             indices: inds,
             uvs,
@@ -3369,6 +3397,7 @@ impl StaticModel {
             parts,
             ground_ao,
             draw_layers: Vec::new(),
+            material_name: Arc::default(),
             detail_png: None,
             detail_scale: [0.0, 0.0],
             prelit: false,
@@ -3392,6 +3421,7 @@ mod sidecar_tests {
 
     fn sample() -> StaticModel {
         StaticModel {
+            material_name: Arc::default(),
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
@@ -4225,8 +4255,8 @@ pub(crate) mod tests {
         for f in positions {
             bin.extend_from_slice(&f.to_le_bytes());
         }
-        let material = |rgb: &str, rough: f32, extra: &str| format!(
-            r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{rgb},1],"roughnessFactor":{rough},"metallicFactor":0}}{extra},"extras":{{"makepadSurface":true}}}}"#);
+        let material = |name: &str, rgb: &str, rough: f32, extra: &str| format!(
+            r#"{{"name":"{name}","pbrMetallicRoughness":{{"baseColorFactor":[{rgb},1],"roughnessFactor":{rough},"metallicFactor":0}}{extra},"extras":{{"makepadSurface":true}}}}"#);
         let json = format!(
             r#"{{"asset":{{"version":"2.0"}},
             "nodes":[{{"mesh":0}}],
@@ -4239,10 +4269,10 @@ pub(crate) mod tests {
             "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
             "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}}],
             "buffers":[{{"byteLength":{}}}]}}"#,
-            material("0.1,0.1,0.1", 0.9, ""),
-            material("0.8,0.8,0.8", 0.9, ""),
-            material("0.1,0.1,0.1", 0.5, ""),
-            material("0.9,0.1,0.1", 0.9, r#","emissiveFactor":[1,0,0]"#),
+            material("Dark trim", "0.1,0.1,0.1", 0.9, ""),
+            material("Light trim", "0.8,0.8,0.8", 0.9, ""),
+            material("Gloss", "0.1,0.1,0.1", 0.5, ""),
+            material("Lamp", "0.9,0.1,0.1", 0.9, r#","emissiveFactor":[1,0,0]"#),
             bin.len()
         );
         let mut json_bytes = json.into_bytes();
@@ -4267,6 +4297,7 @@ pub(crate) mod tests {
         assert!(tris.contains(&2));
         // The merged layer still carries both colours in its vertex tint.
         let merged = m.draw_layers.iter().find(|l| l.indices.len() == 6).unwrap();
+        assert!(merged.name.is_empty(), "a layer containing both trim materials cannot be addressed by name");
         let reds: std::collections::BTreeSet<u32> = merged.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| v[5].to_bits() & 0xff).collect();
         assert_eq!(reds.len(), 2, "two tints in one layer");
     }
@@ -4297,8 +4328,8 @@ pub(crate) mod tests {
               {{"attributes":{{"POSITION":0}},"material":0}},
               {{"attributes":{{"POSITION":0,"COLOR_0":1}},"material":1}}]}}],
             "materials":[
-              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}},
-              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"alphaMode":"MASK","alphaCutoff":0.5,"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}}],
+              {{"name":"Rock","pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}},
+              {{"name":"Moss","pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"alphaMode":"MASK","alphaCutoff":0.5,"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}}],
             "textures":[{{"source":0}}],
             "images":[{{"bufferView":2,"mimeType":"image/png"}}],
             "accessors":[
@@ -4333,6 +4364,8 @@ pub(crate) mod tests {
 
         let m = StaticModel::parse_glb(&glb).unwrap();
         assert_eq!(m.draw_layers.len(), 2);
+        assert_eq!(m.draw_layers[0].name.as_ref(), "Rock");
+        assert_eq!(m.draw_layers[1].name.as_ref(), "Moss");
         let modes: Vec<_> = m.draw_layers.iter().map(|l| l.pbr.surface.as_ref().map(|s| s.alpha_mode)).collect();
         assert_eq!(modes, vec![Some(0), Some(1)], "base first, the MASK overlay after it");
         let alpha = |l: &StaticDrawLayer| l.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| (v[5].to_bits() >> 24) as u8).collect::<Vec<_>>();
@@ -4368,6 +4401,7 @@ pub(crate) mod tests {
     #[test]
     fn collider_parts_keep_structure_and_drop_trim() {
         let model = StaticModel {
+            material_name: Arc::default(),
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
@@ -4408,6 +4442,7 @@ pub(crate) mod tests {
     #[test]
     fn collider_parts_keep_posts_and_drop_hanging_trim() {
         let model = StaticModel {
+            material_name: Arc::default(),
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
@@ -4450,6 +4485,7 @@ pub(crate) mod tests {
             ));
         }
         let model = StaticModel {
+            material_name: Arc::default(),
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,

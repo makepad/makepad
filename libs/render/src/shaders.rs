@@ -1297,9 +1297,66 @@ mod lowered_source_tests {
 }
 
 #[cfg(test)]
+pub(crate) fn test_sky_hook(vm: &mut ScriptVm, kinds: &[crate::custom_sky::SkyKind]) -> crate::custom_sky::SkyHook {
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+    if vm.value(vm.modules(), id!(widgets)).as_object().is_none() {
+        makepad_draw::script_mod(vm);
+        vm.heap_mut().new_module(id!(prelude));
+        script_eval!(vm, {
+            mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw }
+        });
+        vm.heap_mut().new_module(id!(widgets));
+    }
+    let pixel = script_eval!(vm, {
+        use mod.prelude.widgets_internal.*
+        let paint = fn(dir: vec3, base: vec3) -> vec3 {
+            return base + self.params.xyz * (dot(dir, self.sky_sun()) + sin(self.sky_time()))
+        }
+        paint
+    }).as_object().expect("sky function");
+    crate::custom_sky::SkyHook::build(vm, pixel, kinds, Vec4f::default()).expect("compile sky hook")
+}
+
+#[cfg(test)]
 mod shader_registration_tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
+
+    // Count only allocations on the thread taking the two readings. Other renderer tests
+    // can prepare shaders and textures concurrently. The web has its own global allocator.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod allocations {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! { static COUNT: Cell<usize> = const { Cell::new(0) }; }
+
+        pub(super) fn count() -> usize { COUNT.with(Cell::get) }
+
+        fn note() { let _ = COUNT.try_with(|c| c.set(c.get().wrapping_add(1))); }
+
+        struct Counting;
+        #[global_allocator]
+        static ALLOCATOR: Counting = Counting;
+
+        unsafe impl GlobalAlloc for Counting {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                note();
+                unsafe { System.alloc(layout) }
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                note();
+                unsafe { System.alloc_zeroed(layout) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+                note();
+                unsafe { System.realloc(ptr, layout, size) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+    }
 
     #[test]
     fn splat_relief_marches_only_inside_its_uniform_gate() {
@@ -1318,6 +1375,10 @@ mod shader_registration_tests {
             assert_eq!(gated.matches(call).count(), 1, "{call} must be inside the gate");
         }
         assert!(gated.contains("surface_param.x > 0.0 && dist < 20.0"), "visible layer and distance gate");
+        assert!(gated.contains("self.splat_relief_steps"), "the relief gate reads the tier's step ceiling");
+        assert!(gated.lines().any(|line| line.contains("self.splat_relief_trace(") && line.contains(", steps,")), "the gated trace call passes the step count");
+        let signature = source.lines().find(|line| line.contains("splat_relief_trace: fn(")).expect("relief trace signature");
+        assert!(signature.contains("steps: float") && !signature.contains("nv: float"), "the trace takes its step count from the caller");
         assert!(gated.contains("if dist < 8.0"), "self shadow is near-only");
         assert!(source.contains("for i in 0..24") && source.contains("for i in 0..4"), "constant march bounds");
         assert!(source.contains("smoothstep(12.0, 20.0, dist)") && source.contains("smoothstep(0.1391731, 0.2756374, nv)"), "distance and grazing fades");
@@ -1467,6 +1528,66 @@ mod shader_registration_tests {
             assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
             assert!(errors.is_empty(), "env background: {errors}");
             assert_env_background_sources(vm);
+
+            use crate::custom_sky::SkyKind::{Analytic, Environment, Gradient};
+            let mut renderer = crate::Renderer::default();
+            renderer.set_sky_hook(Some(test_sky_hook(vm, &[Gradient, Analytic, Environment])));
+            let frame = vec4(0.0, 1.0, 0.0, 1.0);
+            let params = vec4(0.25, 0.5, 2.0, 3.0);
+            let mut ids = [None; 3];
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let before = allocations::count();
+                drop(std::hint::black_box(Box::new(1u8)));
+                assert!(allocations::count() > before, "the counter must see allocations on this thread");
+            }
+            for expected in [Vec4f::default(), params] {
+                #[cfg(not(target_arch = "wasm32"))]
+                let before = allocations::count();
+                renderer.set_sky_params(expected);
+                #[cfg(not(target_arch = "wasm32"))]
+                assert_eq!(allocations::count(), before, "changing sky params allocated");
+                let mut hook = renderer.set_sky_hook(None).unwrap();
+                for (index, kind) in [Gradient, Analytic, Environment].into_iter().enumerate() {
+                    let vars = match kind {
+                        Gradient => &hook.gradient(vm.cx(), frame).unwrap().cube.draw_vars,
+                        Analytic => &hook.analytic(vm.cx(), frame).unwrap().cube.draw_vars,
+                        Environment => &hook.environment(vm.cx(), frame).unwrap().draw_vars,
+                    };
+                    let id = vars.draw_shader_id.expect("derived sky shader");
+                    let (offset, slots) = vars.uniform_range(vm.cx(), live_id!(params)).expect("the hook reads params");
+                    assert_eq!(&vars.dyn_uniforms[offset..offset + slots], &[expected.x, expected.y, expected.z, expected.w]);
+                    if let Some(previous) = ids[index] {
+                        assert_eq!(id, previous, "{kind:?}: live params keep the shader");
+                        continue;
+                    }
+                    ids[index] = Some(id);
+                    let mapping = &vm.cx().draw_shaders[id.index].mapping;
+                    match kind {
+                        Analytic => assert_eq!(mapping.textures[0].id, live_id!(star_tex)),
+                        Environment => {
+                            assert_eq!(mapping.textures[0].id, live_id!(detail_map));
+                            assert_eq!(mapping.textures[1].id, live_id!(env_tex));
+                        }
+                        Gradient => {}
+                    }
+                    let program = mapping.source.as_object();
+                    for backend in ["metal", "hlsl", "glsl", "wgsl"] {
+                        let result = script_eval!(vm, {mod.shader.test_compile_draw_source(#(program), #(backend), false)});
+                        let source = vm.heap().string_with(result, |_, s| s.to_string()).expect("shader source");
+                        assert!(!source.starts_with("ERRORS:") && source.contains("sky_paint"), "{kind:?} {backend}: {source}");
+                    }
+                }
+                renderer.set_sky_hook(Some(hook));
+            }
+            assert!(vm.take_errors().is_empty(), "sky variants must compile without script errors");
+            let wrong_rgb = script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                let paint = fn(dir: vec3, base: vec3) { return vec4(base, 1.0) }
+                paint
+            }).as_object().expect("sky function");
+            assert!(crate::custom_sky::SkyHook::build(vm, wrong_rgb, &[Gradient], params).is_err(),
+                "a four-channel result must fail during lowering");
         });
     }
 

@@ -8,6 +8,9 @@ impl Renderer {
         self.texture_cache.keys().copied()
     }
 
+    /// Changes to resident model pictures, including a replacement under the same name.
+    pub fn model_asset_revision(&self) -> u64 { self.model_asset_revision }
+
     /// Whether this renderer's content cache holds a texture under `key`.
     pub fn holds_texture(&self, key: u64) -> bool {
         self.texture_cache.contains_key(&key)
@@ -22,6 +25,7 @@ impl Renderer {
         let compressed = prepared.compressed.is_some();
         prepared.retune(cx, texture);
         crate::texture_restore::note(cx, texture, compressed, stored, level, key);
+        self.model_asset_revision = self.model_asset_revision.wrapping_add(1);
         true
     }
 
@@ -196,7 +200,7 @@ impl Renderer {
         } else {
             self.preview_originals.remove(id);
         }
-        self.rebuild_csm_static_casters();
+        self.static_model_changed(id);
         Some(triangles)
     }
 
@@ -245,7 +249,7 @@ impl Renderer {
             let surface=layer.surface.map(|s|crate::material_surface::UploadedSurface{definition:std::sync::Arc::new(s.definition),
                 normal:shared(cx,cache,std::sync::Arc::new(s.normal),first_level),occlusion:shared(cx,cache,std::sync::Arc::new(s.occlusion),first_level),emissive:shared(cx,cache,std::sync::Arc::new(s.emissive),first_level),
                 splat:s.splat.map(|p|p.upload(cx,cache,first_level))});
-            let material=LayerMaterial{surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
+            let material=LayerMaterial{name:layer.name,surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
                 orm:shared(cx,cache,layer.orm,first_level),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
             (std::rc::Rc::new(geometry),shared(cx,cache,layer.texture,first_level),shared(cx,cache,layer.detail,first_level),layer.detail_scale,material)
         };
@@ -296,9 +300,30 @@ impl Renderer {
         if let Some(ao)=ao{self.ao_textures.retain(|(key,_)|key!=id);self.ao_textures.push((id.to_string(),ao));self.model_pack.push((id.to_string(),id.to_string()));}
         self.preview_originals.remove(id);
         self.preview_new.remove(id);
-        self.rebuild_csm_static_casters();
+        self.static_model_changed(id);
         self.prune_texture_cache();
         triangles
+    }
+
+    fn static_model_changed(&mut self, id: &str) {
+        self.model_asset_revision = self.model_asset_revision.wrapping_add(1);
+        let chart = self.static_models.iter().find(|(name, _)| name == id)
+            .filter(|(_, model)| model.morph.is_none())
+            .and_then(|(_, model)| model.lm_source.as_ref())
+            .map(|source| source.chart_key);
+        if self.lm_model_charts.get(id).copied() != chart {
+            if let Some(key) = chart {
+                self.lm_model_charts.insert(id.to_owned(), key);
+            } else {
+                self.lm_model_charts.remove(id);
+            }
+            // An upload can replace a placed chart without changing its name
+            // or transform. An in-flight bake still belongs to the old chart.
+            if self.placed_models.iter().any(|copy| !copy.dynamic && copy.model == id) {
+                self.models_rev = self.models_rev.wrapping_add(1);
+            }
+        }
+        self.rebuild_csm_static_casters();
     }
 
     /// Drop cached textures no loaded model references any more (the cache's
@@ -327,13 +352,13 @@ impl Renderer {
     /// A cleared or unsupported draft restores its resident durable model
     /// without any synchronous network read or GLB/skin parse.
     pub fn restore_static_preview(&mut self, id: &str) {
-        if self.preview_new.remove(id) { self.static_models.retain(|(key, _)| key != id); self.rebuild_csm_static_casters(); }
+        if self.preview_new.remove(id) { self.static_models.retain(|(key, _)| key != id); self.static_model_changed(id); }
         if let Some((original, ao_key)) = self.preview_originals.remove(id) {
             if let Some((_, model)) = self.static_models.iter_mut().find(|(key, _)| key == id) {
                 *model = original;
                 self.restore_walk = true;
                 if let Some(key) = ao_key { self.model_pack.push((id.to_string(), key)); }
-                self.rebuild_csm_static_casters();
+                self.static_model_changed(id);
             }
         }
     }
@@ -506,7 +531,7 @@ impl Renderer {
                 if layer.indices.len() < 3 {
                     continue;
                 }
-                let mat = self.upload_material(cx, &layer.pbr);
+                let mat = self.upload_material(cx, &layer.pbr, layer.name.clone());
                 let tex = match layer.texture_png.as_deref() {
                     Some(bytes) => crate::texture_pack::image_buffer(bytes)
                         .map_err(|e| format!("{id}: layer {i} atlas decode failed: {e:?}"))?
@@ -539,9 +564,10 @@ impl Renderer {
             self.upload_detail(cx, model.detail_png.as_deref(), model.detail_scale)
         };
         let main_material = if multi {
-            self.upload_material(cx, &model.draw_layers[0].pbr)
+            let first = &model.draw_layers[0];
+            self.upload_material(cx, &first.pbr, first.name.clone())
         } else {
-            self.upload_material(cx, &model.pbr)
+            self.upload_material(cx, &model.pbr, model.material_name.clone())
         };
         // Anim parts (doors, lifts). Their layers go through the same upload
         // as the model's own, but a part usually re-uses a texture the level
@@ -594,7 +620,7 @@ impl Renderer {
                         self.upload_detail(cx, layer.detail_png.as_deref(), layer.detail_scale);
                     let g = Geometry::new(cx);
                     g.update(cx, layer.indices.clone(), layer.vertices.clone());
-                    let material=self.upload_material(cx,&layer.pbr);
+                    let material = self.upload_material(cx, &layer.pbr, layer.name.clone());
                     draws.push((std::rc::Rc::new(g), tex, det, dscale,material));
                 }
                 if draws.is_empty() {
@@ -651,7 +677,7 @@ impl Renderer {
                         self.upload_detail(cx, layer.detail_png.as_deref(), layer.detail_scale);
                     let g = Geometry::new(cx);
                     g.update(cx, layer.indices.clone(), layer.vertices.clone());
-                    let material=self.upload_material(cx,&layer.pbr);
+                    let material = self.upload_material(cx, &layer.pbr, layer.name.clone());
                     draws.push((std::rc::Rc::new(g), tex, det, dscale,material));
                 }
                 if !draws.is_empty() {
@@ -791,18 +817,18 @@ impl Renderer {
         // pack-shared layout would make every instance's region the size of
         // the whole pack atlas, mostly empty.
         let lm_source = model_ao_dims.map(|(ao_w, ao_h)| {
-            std::sync::Arc::new(crate::lightmap::LmMeshSource {
-                caster: crate::ao::MeshRaycaster::new(
+            std::sync::Arc::new(crate::lightmap::LmMeshSource::new(
+                crate::ao::MeshRaycaster::new(
                     lm_positions.clone(),
                     lm_indices.clone(),
                     min,
                     max,
                 ),
-                ao_uv: lm_ao_uv,
-                albedo: lm_albedo,
+                lm_ao_uv,
+                lm_albedo,
                 ao_w,
                 ao_h,
-            })
+            ))
         });
         // Only models the light baker will see pay for the flat-normal
         // variant (lm_source holders get regions; everything else casts via
@@ -846,7 +872,7 @@ impl Renderer {
                 bake_geometry,
             },
         ));
-        self.rebuild_csm_static_casters();
+        self.static_model_changed(id);
         Ok(triangles)
     }
 
@@ -891,13 +917,8 @@ impl Renderer {
         self.model_sdf_bytes.remove(id);
         self.model_sdf_tex.remove(id);
         if had {
-            // Any placed instance of this id now points at a stale
-            // lightmap chart region (a re-baked AO mesh may lay its
-            // ao_uv out differently) — force the next scene-identity
-            // check to re-kick the bake rather than trusting the old
-            // remap, the same way `set_models` treats any other
-            // placed-scene-relevant change.
-            self.lm_remaps.clear();
+            self.model_asset_revision = self.model_asset_revision.wrapping_add(1);
+            self.lm_model_charts.remove(id);
             self.placed_scene_signature = None;
             self.models_rev = self.models_rev.wrapping_add(1);
             self.rebuild_csm_static_casters();

@@ -107,6 +107,7 @@ mod tests {
                 vertices.extend_from_slice(&[x + dx, 0.4 + dy, 0.5, 0.0, 0.0, f32::from_bits(0xffff_ffff), 0.0]);
             }
             StaticDrawLayer {
+                name: Default::default(),
                 vertices, indices: vec![0, 1, 2, 0, 2, 3], uvs: vec![[0.0; 2]; 4],
                 texture_png: None, detail_png: None, detail_scale: [1.0; 2],
                 pbr: PbrMaterial { metallic: 0.0, surface: Some(Arc::new(MaterialSurface { emissive, ..Default::default() })), ..Default::default() },
@@ -114,6 +115,7 @@ mod tests {
         };
         let layers = vec![layer(0.4, [9.0, 4.5, 0.0]), layer(2.4, [0.0; 3])];
         let model = StaticModel {
+            material_name: Default::default(),
             vertices: layers.iter().flat_map(|l| l.vertices.iter().copied()).collect(),
             indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
             min: vec3f(0.4, 0.4, 0.5), max: vec3f(2.6, 0.6, 0.5),
@@ -131,7 +133,9 @@ mod tests {
         renderer.set_models(vec![ModelInstance {
             model: "layered-emitter".into(), transform: Mat4f::identity(),
             tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
-            dynamic: false, depth_order: 0.0, part_poses: Vec::new(), custom_material: None, lamps: Default::default(),
+            dynamic: false, depth_order: 0.0, part_poses: Vec::new(), custom_material: None,
+            layer_materials: Vec::new(),
+            lamps: Default::default(),
         }]);
         let snapshot = renderer.gi_snapshot(&mut cx, &World::default(), (Vec3f::default(), vec3f(8.0, 8.0, 8.0)));
         assert_eq!(snapshot.instances.len(), 2, "one GI instance per model draw layer");

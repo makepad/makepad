@@ -97,6 +97,40 @@ fn a_painted_sky_on_a_clock_runs_the_day_cycle() {
     assert!(day.dome_tint.x > day.dome_tint.z, "a pale, warm top tints the day dome");
     let night = analytic_sky_frame(&world, crate::sun::solar_dir(0.0, 52.0), true, true, true).unwrap();
     assert!((night.dome_tint - vec3f(1.0, 1.0, 1.0)).length() < 1.0e-4, "every night is the stock night");
+    use crate::custom_sky::SkyKind::{Analytic, Gradient};
+    use super::frame::DomeDraw;
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let (mut hook, mut gradient, mut analytic) = cx.with_vm(|vm| {
+        let hook = crate::shaders::test_sky_hook(vm, &[Gradient, Analytic]);
+        (hook, DrawSceneSky::script_new_with_default(vm), DrawSceneSkyAnalytic::script_new_with_default(vm))
+    });
+    let stock_gradient = gradient.cube.draw_vars.draw_shader_id.unwrap();
+    let stock_analytic = analytic.cube.draw_vars.draw_shader_id.unwrap();
+    let control = vec4(noon.x, noon.y, noon.z, 1.0);
+    let painted_gradient = hook.gradient(&cx, control).unwrap().cube.draw_vars.draw_shader_id.unwrap();
+    let painted_analytic = hook.analytic(&cx, control).unwrap().cube.draw_vars.draw_shader_id.unwrap();
+    assert_ne!(painted_gradient, stock_gradient);
+    assert_ne!(painted_analytic, stock_analytic);
+    let mut renderer = Renderer::default();
+    renderer.set_sky_hook(Some(hook));
+    for running in [false, true] {
+        let frame = analytic_sky_frame(&world, noon, true, true, running);
+        match renderer.dome_draw(&mut cx, frame.as_ref(), control, &mut gradient, Some(&mut analytic)) {
+            DomeDraw::Gradient(draw) => {
+                assert!(!running, "the clock must switch away from the gradient");
+                assert_eq!(draw.cube.draw_vars.draw_shader_id, Some(painted_gradient), "fixed hour uses the painted gradient");
+            }
+            DomeDraw::Analytic(draw, _, _) => {
+                assert!(running, "the painted fixed hour must stay on the gradient");
+                assert_eq!(draw.cube.draw_vars.draw_shader_id, Some(painted_analytic), "running day uses the painted analytic sky");
+            }
+        }
+    }
+    renderer.set_sky_hook(None);
+    let DomeDraw::Gradient(draw) = renderer.dome_draw(&mut cx, None, control, &mut gradient, None) else {
+        panic!("clearing the hook must restore the gradient");
+    };
+    assert_eq!(draw.cube.draw_vars.draw_shader_id, Some(stock_gradient));
     world.sky = Some(makepad_scene::SkyConfig::default());
     let stock = analytic_sky_frame(&world, noon, true, true, false).unwrap();
     assert_eq!(stock.dome_tint, vec3f(1.0, 1.0, 1.0), "the stock sky is untinted");
@@ -413,7 +447,8 @@ fn a_moon_key_lights_the_scene_while_the_lamps_and_the_sky_follow_the_sun() {
     assert!(rig.dir.dot(moon.dir) > 0.999 && rig.color.x > 0.0, "and lights: {rig:?}");
     assert!(daylight.dot(sun_dir) > 0.9999, "the switches read the sun: {daylight:?}");
     assert_eq!(r.frame_lights[0].color, street_lamp().color, "the photocell is fully on");
-    let sky = r.frame_sky(&world, &crate::world_lights::apply_world_sun(&world, rig), daylight, true).expect("the analytic sky");
+    let (_, frame) = r.frame_sky(&world, &crate::world_lights::apply_world_sun(&world, rig), daylight, true);
+    let sky = frame.expect("the analytic sky");
     assert!(sky.zenith.w > 0.95, "the analytic sky reads night: {}", sky.zenith.w);
     // The moon's own direction says day: what the switches must not read.
     assert_eq!(Renderer::lamp_photocell(moon.dir), 0.0);
@@ -461,7 +496,8 @@ fn the_frames_analytic_sky_puts_its_sun_where_the_light_is_when_the_key_is_the_s
     let frame_sky = |r: &mut Renderer, world: &World| {
         let (sun, daylight) = r.frame_lamps(world, Vec3f::default());
         let rig = crate::world_lights::apply_world_sun(world, r.lane_rig(world, sun));
-        let sky = r.frame_sky(world, &rig, daylight, true).expect("the analytic sky");
+        let (_, frame) = r.frame_sky(world, &rig, daylight, true);
+        let sky = frame.expect("the analytic sky");
         (rig.dir, vec3f(sky.sun_true.x, sky.sun_true.y, sky.sun_true.z), sky.zenith.w)
     };
     let preset = |name: &str| {

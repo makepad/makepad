@@ -46,8 +46,9 @@ pub const CHARACTER_JOINTS: [(&str, Option<usize>); 44] = [
 /// Bumped whenever generated geometry, materials or clips change, so
 /// content-addressed caches of script characters rebuild. 42: portable
 /// transcendentals (`makepad_csg_math::portable`), the same bits on every
-/// platform. 43: the `tread` and `swim` clips.
-pub const CHARACTER_GENERATOR_VERSION: i64 = 43;
+/// platform. 43: the `tread` and `swim` clips. 44: first-person arms close
+/// the thumb onto the handle. 45: the support forearm is a driven part.
+pub const CHARACTER_GENERATOR_VERSION: i64 = 45;
 
 pub fn joint_index(name: &str) -> u32 { CHARACTER_JOINTS.iter().position(|j| j.0 == name).unwrap_or_else(|| panic!("joint {name}")) as u32 }
 pub(crate) fn j(name: &str) -> u32 { joint_index(name) }
@@ -453,10 +454,53 @@ mod tests {
 
     #[test]
     fn arms_stay_small() {
-        for hold in ["rifle", "pistol", "one"] {
+        for hold in ["rifle", "pistol", "one", "blade"] {
             let arms = FpsArms::read(&S::O(vec![("hold", S::T(hold))])).unwrap();
-            let bytes = build(&[crate::ProgramOp::FpsArms(Box::new(armoured()), arms)]).compiled.glb.len();
+            let spec = armoured();
+            let built = build(&[crate::ProgramOp::FpsArms(Box::new(spec.clone()), arms.clone())]);
+            let bytes = built.compiled.glb.len();
             assert!(bytes < 1_500_000, "arms {hold}: {bytes} B");
+            let doc = &built.document;
+            let names: Vec<_> = doc.objects().map(|(name, _)| name).collect();
+            assert_eq!(doc.scene().sockets["grip"].attachment, crate::Attachment::Object("arms".into()));
+            if matches!(arms.hold, Hold::One | Hold::Blade) {
+                assert_eq!(names, ["arms"]);
+                assert!(doc.scene().wheels.is_empty());
+                continue;
+            }
+            assert_eq!(names, ["arms", "support"]);
+            let whole = fps::posed_arms(&spec, &arms);
+            assert_eq!(doc.scene().wheels.len(), 1);
+            let connection = &doc.scene().wheels["support"];
+            assert_eq!(connection.connection, "support");
+            assert_eq!(Some(connection.pivot), whole.support_pivot);
+
+            // Match every exported corner to the unsplit mesh, including both
+            // copies of elbow vertices where the two objects meet.
+            let meshes = [doc.object("arms").unwrap(), doc.object("support").unwrap()];
+            let mut next_face = [0, 0];
+            let mut normals = whole.part.corner_normals().into_iter();
+            for (poly, &support) in whole.part.polys.iter().zip(&whole.support_faces) {
+                let side = usize::from(support);
+                let mesh = meshes[side];
+                let face = &mesh.faces()[next_face[side]];
+                next_face[side] += 1;
+                assert_eq!(face.material, poly.material);
+                let corners = mesh.face_corners(face.id).unwrap();
+                assert_eq!(corners.len(), poly.vertices.len());
+                for (i, corner) in corners.iter().enumerate() {
+                    let v = poly.vertices[i] as usize;
+                    assert_eq!(mesh.vertex(corner.vertex).unwrap().position, whole.part.positions[v]);
+                    assert_eq!(corner.uv, poly.uvs.get(i).copied().unwrap_or_default());
+                    let paint = &doc.surface().vertex_colors[&(names[side].into(), corner.vertex)];
+                    assert_eq!(*paint, whole.part.colors[v].map(|c| c.clamp(0., 1.)));
+                    let expected = normals.next().unwrap();
+                    assert!(corner.normal.unwrap().iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-12),
+                        "{hold} lost an unsplit corner normal");
+                }
+            }
+            assert!(normals.next().is_none());
+            assert_eq!(next_face, meshes.map(|mesh| mesh.faces().len()), "{hold} face partition");
         }
     }
 

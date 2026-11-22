@@ -274,6 +274,7 @@ impl Buddy {
 }
 
 pub(crate) struct LocalShadows {
+    scene_time: Option<f32>,
     pub soft_filter: bool,
     /// Apparent emitter radius in world units for bounded contact-hardening.
     pub source_radius: f32,
@@ -295,7 +296,7 @@ pub(crate) struct LocalShadows {
     /// atlas content is valid at all (cleared on allocation / config).
     generation: u32,
     atlas_valid: bool,
-    /// The last render drew shadowed lamps short of whole (`drew_unready()`).
+    /// The last render drew shadowed lamps short of whole.
     drew_unready: bool,
     statics_hash: u64,
     frames: u64,
@@ -321,6 +322,7 @@ pub(crate) struct LocalShadows {
 impl Default for LocalShadows {
     fn default() -> Self {
         Self {
+            scene_time: None,
             config: LocalShadowConfig::default(),
             soft_filter: false,
             source_radius: 0.4,
@@ -365,6 +367,11 @@ impl Default for LocalShadows {
 const FACE_FLOATS: usize = 20;
 
 impl LocalShadows {
+    pub(crate) fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        if let Some(pass) = &self.pass { pass.set_own_time(cx, time); }
+    }
+
     pub(crate) fn parent_to(&self,cx:&mut Cx,parent:DrawPassId){if let Some(pass)=&self.pass{pass.set_pass_parent(cx,parent);}}
     pub fn config(&self) -> LocalShadowConfig {
         self.config
@@ -779,8 +786,11 @@ impl LocalShadows {
 
     /// Whether every depth draw's pipeline has answered (made, or failed for good).
     fn depth_draws_settled(&self, cx: &Cx) -> bool {
+        let pass = self.pass.as_ref().map(DrawPass::draw_pass_id);
         let settled = |vars: Option<&DrawVars>| {
-            vars.and_then(|v| v.draw_shader_id).is_some_and(|id| cx.draw_shader_ready(id, false) || cx.draw_shader_failed(id))
+            vars.and_then(|v| v.draw_shader_id).is_some_and(|id| {
+                pass.is_some_and(|pass| cx.draw_shader_ready_in(id, pass)) || cx.draw_shader_failed(id)
+            })
         };
         settled(self.rigid.as_ref().map(|d| &d.draw_vars))
             && settled(self.inside.as_ref().map(|d| &d.depth.draw_vars))
@@ -793,10 +803,10 @@ impl LocalShadows {
         !self.faces.is_empty() && !self.depth_draws_settled(cx)
     }
 
-    /// Whether the last render drew shadowed lamps short of whole: faces before their depth
-    /// pipelines were made, or none while the draws could not be made (the VM was held).
-    pub(crate) fn drew_unready(&self) -> bool {
-        self.drew_unready
+    /// The atlas budget selects its resident faces. Every dirty resident face is recorded
+    /// together, so only missing draws or depth pipelines need another recording.
+    pub(crate) fn settled(&self) -> bool {
+        !self.drew_unready
     }
 
     pub fn render(
@@ -811,7 +821,7 @@ impl LocalShadows {
         let start = Cx::monotonic_now();
         self.drew_unready = false;
         if let Some(pass) = &self.pass {
-            for ms in pass.take_gpu_times_ms(cx.cx) {
+            for ms in pass.gpu_times_ms(cx.cx) {
                 self.gpu_ms = crate::gpu_lightmap::ema_ms(self.gpu_ms, ms);
             }
         }
@@ -909,8 +919,7 @@ impl LocalShadows {
             return;
         }
         let pass = self.pass.get_or_insert_with(|| {
-            let pass = DrawPass::new(cx.cx);
-            pass.set_pass_name(cx.cx, "local_shadows");
+            let pass = crate::renderer::new_scene_pass(cx.cx, "local_shadows", self.scene_time);
             pass.set_gpu_timing_enabled(cx.cx, true);
             // Hardware maps sample the atlas DEPTH; the colour is then scratch.
             pass.set_color_scratch(cx.cx, hardware_shadow_maps());
@@ -1443,6 +1452,7 @@ mod tests {
         let live = MoverBox { live: true, ..rigid(crate_box, 10) };
         assert_eq!(frame(&mut s, vec![live], false), 1);
         assert!(frame(&mut s, vec![live], false) >= 1, "a live mover's face never caches");
+        assert!(s.settled(), "selecting a skinned face every frame queues no deferred faces");
         // Generations descend; running out clears the atlas.
         let mut fulls = 0;
         for _ in 0..2 * LOCAL_DEPTH_GENS {
@@ -1601,6 +1611,7 @@ mod tests {
         );
         assert_eq!(s.stats.faces, 2);
         assert_eq!(s.stats.omitted_lights, 1);
+        assert!(s.settled(), "a light outside the atlas budget stays unshadowed");
         // 0 = no shadow record: the shader lights it unshadowed, never black.
         assert_eq!(s.records[1].count, 0);
         assert_eq!(s.records[0].count, 1);

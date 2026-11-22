@@ -292,11 +292,14 @@ impl Renderer {
         sun: &SunLight,
         trigger: crate::gpu_lightmap::BakeTrigger,
     ) {
-        if !self.world_atlas_required() { return; }
+        if self.atlas_borrowed || !self.world_atlas_required() { return; }
+        self.gpu_baker.caster_ready_kick = false;
         let mut meshes = Vec::new();
         let mut mesh_map = Vec::new();
         let mut mesh_geometry = Vec::new();
+        let mut mesh_materials = Vec::new();
         let mut casters_only = Vec::new();
+        let mut extra_layers = Vec::new();
         for (pi, inst) in self.placed_models.iter().enumerate() {
             if inst.dynamic {
                 continue;
@@ -317,11 +320,12 @@ impl Renderer {
                     lo,
                     hi,
                 ) {
-                    casters_only.push(crate::gpu_lightmap::GpuBakeMesh {
-                        geometry: m.geometry.geometry_id(),
-                        transform: inst.transform,
-                        min: lo,
-                        max: hi, cutout: None, msdf: None, band: Default::default() });
+                    let first = casters_only.len();
+                    Self::push_static_caster_layers(
+                        &self.custom_draws, m, inst, (lo, hi), &mut casters_only, None,
+                    );
+                    // Each copy contributes one footprint to the ground field, regardless of layers.
+                    extra_layers.extend(casters_only.drain(first + 1..));
                 }
                 continue;
             };
@@ -372,6 +376,13 @@ impl Renderer {
             // The FLAT-WINDING-normal variant: the gather's backface test
             // must see what the CPU rays saw (lm_source implies it exists).
             let m = &self.static_models[at].1;
+            let material = if inst.layer_materials.is_empty() {
+                inst.material_of("").and_then(|b| Self::caster_for(&self.custom_draws, b))
+                    .map(|caster| caster.material(&m.texture))
+            } else {
+                None
+            };
+            mesh_materials.push(material);
             mesh_geometry.push(
                 m.bake_geometry
                     .as_ref()
@@ -392,30 +403,20 @@ impl Renderer {
             // the shadows of texels (the village measured ~40cm/texel that
             // way). Terrain outside the field renders fully lit — the
             // shaders test the rect rather than clamp-smearing its border.
-            let (mut lo_x, mut lo_z) = (f32::MAX, f32::MAX);
-            let (mut hi_x, mut hi_z) = (f32::MIN, f32::MIN);
-            for (bmin, bmax) in &self.receiver_boxes {
-                lo_x = lo_x.min(bmin.x);
-                lo_z = lo_z.min(bmin.z);
-                hi_x = hi_x.max(bmax.x);
-                hi_z = hi_z.max(bmax.z);
-            }
-            for m in &meshes {
-                let (bmin, bmax) = m.world_bounds();
-                lo_x = lo_x.min(bmin.x);
-                lo_z = lo_z.min(bmin.z);
-                hi_x = hi_x.max(bmax.x);
-                hi_z = hi_z.max(bmax.z);
-            }
-            if lo_x < hi_x && lo_z < hi_z {
-                // Pad so shadows can run past the outermost caster, square so
-                // one origin/cell pair serves both axes.
-                // Pad so shadows can run past the outermost caster; cap so
-                // density never collapses on a sprawling world (chunked
-                // ground regions are the real fix at that scale).
-                let pad = 6.0;
-                let (lo_x, lo_z) = (lo_x - pad, lo_z - pad);
-                let span = ((hi_x - lo_x).max(hi_z - lo_z) + pad).min(240.0);
+            // Every static the bake knows: the boxes that receive, the charted
+            // regions and the caster-only copies (their shadows land on the
+            // ground beside them).
+            let statics = self.receiver_boxes.iter().copied()
+                .chain(meshes.iter().map(|m| m.world_bounds()))
+                .chain(casters_only.iter().map(|m| (m.min, m.max)));
+            if let Some((lo_x, lo_z, span, full)) = ground_field_window(statics) {
+                if full > span {
+                    log!(
+                        "ground light field: the statics span {full:.0} m, past the {GROUND_FIELD_MAX_SPAN:.0} m field; it covers x {lo_x:.0}..{:.0}, z {lo_z:.0}..{:.0} around their footprint-weighted centre, and ground outside it reads sunlit",
+                        lo_x + span,
+                        lo_z + span,
+                    );
+                }
                 let n = ((span * crate::lightmap::LM_PLANAR_TEXELS_PER_UNIT) as usize + 2)
                     .clamp(2, 1025);
                 let cell = span / (n - 1) as f32;
@@ -467,10 +468,7 @@ impl Renderer {
             }
         }
         if meshes.is_empty() && planars.is_empty() {
-            self.lightmap = None;
-            self.lm_remaps.clear();
-            self.lm_ground = None;
-            self.lm_top = None;
+            self.clear_delivered_lightmap();
             return;
         }
         // Clustered lights are evaluated at the receiving fragment. The
@@ -490,16 +488,59 @@ impl Renderer {
         };
         // The snapshot becomes render passes on the next frame
         // (gpu_lightmap.rs); delivery is a texture handle swap, no upload.
+        casters_only.append(&mut extra_layers);
         self.gpu_baker.schedule(crate::gpu_lightmap::GpuBakeJob {
             world_revision: (world.render_rev, self.models_rev),
             scene,
             mesh_geometry,
+            mesh_materials,
             mesh_map,
             casters_only,
             terrain_world,
             trigger,
         });
     }
+}
+
+/// The widest ground light field, in metres: one field for the whole scene
+/// keeps its density (texels per metre) only up to here; chunked ground
+/// regions are the fix at larger scales.
+pub(super) const GROUND_FIELD_MAX_SPAN: f32 = 240.0;
+
+/// The ground light field's square window over the statics' `(min, max)`
+/// boxes: their footprint plus a pad so shadows can run past the outermost
+/// caster, or, wider than [`GROUND_FIELD_MAX_SPAN`], that span centred on the
+/// footprint-weighted centre and kept inside the padded bounds. Returns
+/// `(x0, z0, span, full)`; `full` is the uncapped span, so a caller sees when
+/// the cap bit. None without a footprint.
+pub(super) fn ground_field_window(boxes: impl IntoIterator<Item = (Vec3f, Vec3f)>) -> Option<(f32, f32, f32, f32)> {
+    const PAD: f32 = 6.0;
+    let (mut lo_x, mut lo_z) = (f32::MAX, f32::MAX);
+    let (mut hi_x, mut hi_z) = (f32::MIN, f32::MIN);
+    let (mut wx, mut wz, mut weight) = (0.0f64, 0.0f64, 0.0f64);
+    for (bmin, bmax) in boxes {
+        lo_x = lo_x.min(bmin.x);
+        lo_z = lo_z.min(bmin.z);
+        hi_x = hi_x.max(bmax.x);
+        hi_z = hi_z.max(bmax.z);
+        // A post or a thin wall still counts, as one square metre.
+        let area = (((bmax.x - bmin.x) * (bmax.z - bmin.z)) as f64).max(1.0);
+        wx += area * (bmin.x + bmax.x) as f64 * 0.5;
+        wz += area * (bmin.z + bmax.z) as f64 * 0.5;
+        weight += area;
+    }
+    if !(lo_x < hi_x && lo_z < hi_z) {
+        return None;
+    }
+    let full = (hi_x - lo_x).max(hi_z - lo_z) + 2.0 * PAD;
+    if full <= GROUND_FIELD_MAX_SPAN {
+        return Some((lo_x - PAD, lo_z - PAD, full, full));
+    }
+    let span = GROUND_FIELD_MAX_SPAN;
+    // Centred on the weight, then slid back inside the bounds; along an axis
+    // narrower than the span it starts at the low edge and covers it all.
+    let fit = |centre: f64, lo: f32, hi: f32| (centre as f32 - span * 0.5).min(hi + PAD - span).max(lo - PAD);
+    Some((fit(wx / weight, lo_x, hi_x), fit(wz / weight, lo_z, hi_z), span, full))
 }
 
 /// How many ranks at the end of the authored-light budget fade out, so a

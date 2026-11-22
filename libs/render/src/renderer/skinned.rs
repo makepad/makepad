@@ -21,6 +21,7 @@ impl Renderer {
 
     pub fn install_uploaded_skin_rig(&mut self, rig: u64, uploaded: UploadedSkinRig) {
         if !self.skin_rig_loaded(rig) {
+            self.model_asset_revision = self.model_asset_revision.wrapping_add(1);
             self.skin_lods.insert(rig,uploaded.lods);
             if let Some(morph)=uploaded.morph{self.skin_morphs.insert(rig,morph);}
             if let Some(sdf)=uploaded.sdf{self.skin_prepared_sdf.insert(rig,sdf);}
@@ -312,9 +313,11 @@ impl Renderer {
         // `clip` (variants.rs): a discarding pipeline costs the tile GPU its
         // hidden-surface removal for every character it draws.
         batch.skinned.draw_vars.refresh_after_reload(cx.cx);
-        let stock = batch.skinned.draw_vars.draw_shader_id;
-        let (full, opaque) = self.lane_shaders(cx.cx, variants::ModelLane::SkinnedGpu, stock);
-        let opaque = opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output));
+        let held = batch.skinned.draw_vars.draw_shader_id;
+        let lane = variants::ModelLane::SkinnedGpu;
+        let (full, opaque) = self.lane_shaders(cx.cx, lane, held);
+        let full = self.select_lane_shader(cx.cx, lane, full, held, |id| cx.draw_shader_ready_here(id));
+        let opaque = opaque.filter(|id| cx.draw_shader_ready_here(*id));
         batch.skinned.draw_vars.draw_shader_id = full;
         // The eye, the sun and the fog are uniforms, written once per call:
         // the vertex stage ran out of D3D11 input registers with them on the
@@ -523,8 +526,10 @@ impl Renderer {
                             batch.skinned.fur_layer.x = layer as f32 / shells.max(1) as f32;
                             batch.skinned.draw_vars.draw_shader_id = if layer == 0 && !cuts { opaque.or(full) } else { full };
                             let area = cx.add_instance(&mut batch.skinned.draw_vars);
+                            stats.skinned_draws += opened_draw(&area);
                             batch.skinned.draw_vars.area = cx.update_area_refs(batch.skinned.draw_vars.area, area);
                         }
+                        stats.skinned_triangles += triangles;
                         batch.skinned.draw_vars.draw_shader_id = full;
                         stats.fur_triangles += shells * triangles;
                         batch.skinned.fur_layer.x = 0.0;
@@ -539,6 +544,10 @@ impl Renderer {
                 // No material, no fur: nothing cuts a pixel.
                 batch.skinned.draw_vars.draw_shader_id = opaque.or(full);
                 let new_area = cx.add_instance(&mut batch.skinned.draw_vars);
+                stats.skinned_draws += opened_draw(&new_area);
+                if let Some(geometry) = batch.skinned.draw_vars.geometry_id {
+                    stats.skinned_triangles += cx.cx.geometries[geometry].indices.len() / 3;
+                }
                 batch.skinned.draw_vars.area =
                     cx.update_area_refs(batch.skinned.draw_vars.area, new_area);
                 batch.skinned.draw_vars.draw_shader_id = full;
@@ -596,6 +605,15 @@ impl Renderer {
         sun: &SunLight,
     ) -> Option<ShadowAnchor> {
         character_shadow_anchor(feet, receiver, sun, &self.frame_lights)
+    }
+}
+
+/// A submission's share of `RenderStats::skinned_draws`: one when it opened a
+/// draw item (its instances start the item), none when an open item took it in.
+fn opened_draw(area: &Area) -> u64 {
+    match area {
+        Area::Instance(instance) if instance.instance_offset == 0 => 1,
+        _ => 0,
     }
 }
 

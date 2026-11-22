@@ -9,6 +9,7 @@
 //! host passes the hooks it allows: Sandbox's game.material allows the
 //! albedo `surface` hook only (`HookMask::ALBEDO`).
 use makepad_draw::*;
+use makepad_draw::makepad_platform::makepad_script::makepad_shader::ReturnComponent;
 use makepad_render_material::{self as material, builtin, Builtin, HookMask, HookSet, MaterialDesc, MaterialError, ShadowVariant, VariantPlan};
 use makepad_scene::{BaseKind, Blend};
 use crate::renderer::variants::{self, Features};
@@ -252,10 +253,27 @@ impl Recipe {
     }
 }
 
+/// `MAKEPAD_SHADER_VARIANTS=0`: every material draws its stock shader.
+fn variants_off() -> bool {
+    std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0")
+}
+
+/// What the program's `surface` hook returns as alpha, as proved by the compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceAlpha {
+    NoHook,
+    One,
+    Base,
+    Unproven,
+}
+
 /// A built material: the colour draw, and what its plan derived.
 pub struct CustomMaterial {
     pub draw: DrawSceneCustom,
+    pub surface_alpha: SurfaceAlpha,
     pub plan: VariantPlan,
+    /// The blend the program declares before any layer is bound.
+    pub(crate) blend: Blend,
     /// The colour program, which the feature variants derive from
     /// (renderer/variants.rs), and its stock shader.
     program: Option<ScriptObjectRef>,
@@ -288,6 +306,11 @@ pub struct CustomMaterial {
     /// it was built after.
     recipe: Recipe,
     pub(crate) built_at: u64,
+    /// This frame's decision (`Renderer::prepare_custom_lanes`): its
+    /// variant for the frame's features is built and its pipeline made, so
+    /// its own lane draws the layers that name it. Until then the stock
+    /// lanes draw them, and its lane leaves them.
+    pub(crate) lane_ready: bool,
 }
 
 impl CustomMaterial {
@@ -297,7 +320,9 @@ impl CustomMaterial {
             recipe,
             built_at: vm.cx().reload_generation,
             draw,
+            surface_alpha: SurfaceAlpha::NoHook,
             plan,
+            blend: Blend::Opaque,
             program,
             host_vm: None,
             variants: HashMap::new(),
@@ -309,6 +334,7 @@ impl CustomMaterial {
             warnings: Vec::new(),
             failure: None,
             failure_taken: false,
+            lane_ready: false,
         }
     }
 
@@ -362,12 +388,10 @@ impl CustomMaterial {
     /// busy), or when a variant's layout differs, the stock shader.
     pub(crate) fn shaders(&mut self, cx: &mut Cx, features: Features) -> (Option<DrawShaderId>, Option<DrawShaderId>) {
         let Some(stock) = self.stock else { return (None, None) };
-        if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
+        if variants_off() {
             return (Some(stock), None);
         }
-        // Arbitrary light/lighting hooks can make ambient specular non-additive.
-        // Keep those programs' own reflection until they expose a separable term.
-        let features = Features { clip: true, reflections: features.reflections && !self.plan.builtins.contains(&Builtin::HookedCompose), ..features };
+        let features = self.variant_key(features);
         if !self.variants.contains_key(&features) {
             let Some(program) = self.program.clone() else { return (Some(stock), None) };
             let (lit, opaque) = (self.lit(), self.cuts_no_pixel(cx) && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
@@ -397,6 +421,28 @@ impl CustomMaterial {
             Some((full, no_clip)) => (Some(full), no_clip),
             None => (Some(stock), None),
         }
+    }
+
+    /// The shader [`Self::shaders`] draws `features` through, when it is
+    /// there without building anything: `None` while its variant for them
+    /// is still to be built.
+    pub(crate) fn built_shader(&self, features: Features) -> Option<DrawShaderId> {
+        let stock = self.stock?;
+        if variants_off() {
+            return Some(stock);
+        }
+        match self.variants.get(&self.variant_key(features)) {
+            Some(Some((full, _))) => Some(*full),
+            Some(None) => Some(stock),
+            None => self.program.is_none().then_some(stock),
+        }
+    }
+
+    /// The feature set a variant is built and kept for. Arbitrary
+    /// light/lighting hooks can make ambient specular non-additive: those
+    /// programs keep their own reflection until they expose a separable term.
+    fn variant_key(&self, features: Features) -> Features {
+        Features { clip: true, reflections: features.reflections && !self.plan.builtins.contains(&Builtin::HookedCompose), ..features }
     }
 
     /// The material built again from its recipe in the VM that owns its
@@ -494,6 +540,21 @@ impl DrawSceneCustom {
             Ok(draw) => draw,
             Err(e) => return Err(material::diagnose(vm, obj, hooks).err().unwrap_or(e)),
         };
+        let surface_alpha = if hooks.has(material::Hook::Surface) {
+            let alpha = draw.draw_vars.draw_shader_id.and_then(|shader| {
+                let facts = vm.cx().draw_shader_return_facts(shader, live_id!(surface))?;
+                (facts.len == 4).then_some(facts.components[3])
+            });
+            match alpha {
+                Some(ReturnComponent::Const(1.0)) => SurfaceAlpha::One,
+                Some(ReturnComponent::Param { name, component: 3 }) if name == live_id!(base) => {
+                    SurfaceAlpha::Base
+                }
+                _ => SurfaceAlpha::Unproven,
+            }
+        } else {
+            SurfaceAlpha::NoHook
+        };
         draw.set_params(vm.cx(), params);
         let cutoff = match desc.blend {
             Blend::Mask { cutoff } => cutoff,
@@ -529,7 +590,16 @@ impl DrawSceneCustom {
         let program = vm.new_object_ref(obj);
         let keep = hooks.iter().map(|(_, f)| f).chain(helpers.iter().map(|(_, f)| *f)).map(|f| vm.new_object_ref(f)).collect();
         let recipe = Recipe::Hooks { desc: *desc, hooks: hooks.clone(), mask, params, helpers: helpers.to_vec(), _keep: keep };
-        Ok(CustomMaterial { ibl, shadow, cutoff, bounds_pad: hooks.bounds_pad, warnings, ..CustomMaterial::new(vm, draw, plan, Some(program), recipe) })
+        Ok(CustomMaterial {
+            blend: desc.blend,
+            surface_alpha,
+            ibl,
+            shadow,
+            cutoff,
+            bounds_pad: hooks.bounds_pad,
+            warnings,
+            ..CustomMaterial::new(vm, draw, plan, Some(program), recipe)
+        })
     }
 
     fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool, helpers: &[(LiveId, ScriptObject)]) -> Result<DrawShaderId, MaterialError> {
@@ -644,8 +714,10 @@ mod tests {
             let desc = MaterialDesc { ibl: true, blend: Blend::Mask { cutoff: 0.4 }, ..Default::default() };
             let m = DrawSceneCustom::build(vm, &desc, &hooks, HookMask::ALL, vec4(0.5, 0.0, 0.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
             assert!(m.draw.draw_vars.can_instance());
+            assert_eq!(m.surface_alpha, SurfaceAlpha::Base);
             assert_eq!(m.plan.builtins, vec![Builtin::HookedCompose, Builtin::Ibl]);
-            assert!(m.ibl && !m.cuts_no_pixel(vm.cx()), "a surface hook can cut pixels");
+            assert_eq!(m.blend, Blend::Mask { cutoff: 0.4 });
+            assert!(m.ibl && !m.cuts_no_pixel(vm.cx()), "a masked surface hook can cut pixels");
             assert!(m.shadow.is_some(), "displaced, masked caster: {:?}", m.warnings);
             assert_eq!((m.cutoff, m.alpha_mode(vm.cx()), m.bounds_pad), (0.4, 1.0, 0.05));
             // The same program lowers for every backend, not only Metal.
@@ -656,6 +728,19 @@ mod tests {
             for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
                 let errors = frontend_errors_for(vm, prog, backend);
                 assert!(errors.is_empty(), "{backend:?}: {errors:?}");
+            }
+            for (body, expected) in [
+                ("base", SurfaceAlpha::Base),
+                ("vec4(base.xyz, 1.0)", SurfaceAlpha::One),
+                ("vec4(base.xyz, fract(self.world.x))", SurfaceAlpha::Unproven),
+            ] {
+                let code = format!("surface: fn(base: vec4) -> vec4 {{ return {body} }}");
+                let obj = spec(vm, "test://surface-alpha.splash", &code);
+                let hooks = HookSet::from_spec(vm, obj, HookMask::ALBEDO).unwrap();
+                let program = DrawSceneCustom::build(
+                    vm, &MaterialDesc::default(), &hooks, HookMask::ALBEDO, Vec4f::default(),
+                ).unwrap();
+                assert_eq!(program.surface_alpha, expected, "{body}");
             }
             assert!(vm.take_errors().is_empty());
         });
@@ -790,8 +875,8 @@ mod tests {
             let program = m.program.as_ref().unwrap().as_object();
             // Every feature on but `clip`, and every feature off: each has
             // the stock layout (build_variant checks it).
-            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, reflections: false };
-            for features in [all, Features::default()] {
+            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, settled: false, csm_debug: true, cluster: true, local_shadows: true, reflections: false };
+            for features in [all, Features { settled: true, ..all }, Features::default()] {
                 let variant = build_variant(vm, program, stock, features, true).ok().flatten().expect("the stock layout");
                 assert_ne!(stock, variant);
             }

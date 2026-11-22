@@ -42,9 +42,40 @@ impl LayerLane {
     }
 }
 
+/// A draw in one model LOD. Replay uses the same indices as the opaque walk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelLayer {
+    Body(usize),
+    Animated(usize, usize),
+    Driven(usize, usize),
+}
+
+impl LoadedModel {
+    fn part_layers(&self) -> impl Iterator<Item = ModelLayer> + '_ {
+        self.anim_parts.iter().enumerate().flat_map(|(part, p)| {
+            (0..p.draws.len()).map(move |layer| ModelLayer::Animated(part, layer))
+        }).chain(self.driven_parts.iter().enumerate().flat_map(|(part, p)| {
+            (0..p.draws.len()).map(move |layer| ModelLayer::Driven(part, layer))
+        }))
+    }
+
+    fn layer_draw(&self, layer: ModelLayer) -> Option<(GeometryId, &Texture, &Texture, [f32; 2], &LayerMaterial)> {
+        let primary = usize::from(self.triangles > 0);
+        let draw = match layer {
+            ModelLayer::Body(0) if primary == 1 => return Some((
+                self.geometry.geometry_id(), &self.texture, &self.detail, self.detail_scale, &self.material,
+            )),
+            ModelLayer::Body(i) => self.extra_draws.get(i - primary)?,
+            ModelLayer::Animated(part, i) => &self.anim_parts[part].draws[i],
+            ModelLayer::Driven(part, i) => &self.driven_parts[part].draws[i],
+        };
+        Some((draw.0.geometry_id(), &draw.1, &draw.2, draw.3, &draw.4))
+    }
+}
+
 struct BlendedLayer {
     entry: (usize, usize, f32),
-    layer_pass: usize,
+    layer: ModelLayer,
     sequence: usize,
 }
 
@@ -60,6 +91,8 @@ struct BlendedLane {
 pub(super) struct BlendedModels {
     lanes: Vec<BlendedLane>,
     active: Vec<usize>,
+    /// The ordered custom lanes and their installed names during the opaque walk.
+    pub(super) programs: super::realm::ProgramWalk,
 }
 
 impl BlendedModels {
@@ -78,7 +111,7 @@ impl BlendedModels {
         self.lanes.iter().position(|lane| lane.list == list && lane.lane.matches(draw))
     }
 
-    fn record(&mut self, at: &mut Option<usize>, list: WorldModelLane, draw: &ModelDraw<'_>, entry: (usize, usize, f32), layer_pass: usize) {
+    fn record(&mut self, at: &mut Option<usize>, list: WorldModelLane, draw: &ModelDraw<'_>, entry: (usize, usize, f32), layer: ModelLayer) {
         let at = *at.get_or_insert_with(|| self.find(list, draw).unwrap_or_else(|| {
             self.lanes.push(BlendedLane { list, lane: LayerLane::of(draw), layers: Vec::new() });
             self.lanes.len() - 1
@@ -87,7 +120,7 @@ impl BlendedModels {
         if layers.is_empty() {
             self.active.push(at);
         }
-        layers.push(BlendedLayer { entry, layer_pass, sequence: layers.len() });
+        layers.push(BlendedLayer { entry, layer, sequence: layers.len() });
     }
 }
 
@@ -195,8 +228,8 @@ impl PlacedBlocks {
             }
             h.finish()
         };
-        let custom = instances.iter().enumerate().filter(|(_, inst)| inst.custom_material.is_some())
-            .fold(0u64, |h, (i, _)| (h ^ i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let custom = instances.iter().enumerate().filter(|(_, inst)| inst.has_custom())
+            .fold(0u64, |h, (i, _)| (h ^ (i as u64 + 1)).wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let key = signature.map(|signature| (signature, fingerprint, custom, instances.len()));
         if key.is_some() && key == self.key {
             return;
@@ -215,7 +248,7 @@ impl PlacedBlocks {
             let slot = index.get(inst.model.as_str()).copied();
             let root = slot.map(|at| &models[at].1);
             let Some((at, root)) = slot.zip(root).filter(|(_, root)| {
-                !inst.dynamic && inst.custom_material.is_none()
+                !inst.dynamic && !inst.has_custom()
                     && std::iter::once(*root).chain(root.lods.iter().map(|(_, m)| m)).all(|m| m.anim_parts.is_empty() && m.driven_parts.is_empty() && m.morph.is_none())
             }) else {
                 self.loose.push(i as u32);
@@ -330,7 +363,7 @@ impl ModelOrder {
             let slots = &self.slots;
             self.order.retain(|&(i, lod, _)| {
                 let Some(at) = slots[i] else { return false };
-                let (Some(frustum), None) = (frustum, instances[i].custom_material.as_ref()) else { return true };
+                let Some(frustum) = frustum.filter(|_| !instances[i].has_custom()) else { return true };
                 let root = &models[at].1;
                 let loaded = if lod == 0 { root } else { &root.lods[lod - 1].1 };
                 let m = vec3f(0.05, 0.05, 0.05);
@@ -407,10 +440,14 @@ impl Renderer {
                         self.foliage_draw = Some(draw);
                     }
                     LayerLane::Custom(name) => {
-                        let Some((name, mut draw)) = self.custom_draws.remove_entry(name) else { continue };
-                        self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Blended,
-                            eye, lod_scale, &instances, list, fog, sun, frustum, stats);
-                        self.custom_draws.insert(name, draw);
+                        let mut programs = std::mem::take(&mut self.custom_draws);
+                        // Borrow both the key and its draw so replay keeps the registry nodes.
+                        let bound = std::ops::Bound::Included(name.as_str());
+                        if let Some((name, draw)) = programs.range_mut::<str, _>((bound, bound)).next() {
+                            self.draw_models_inner(cx, ModelDraw::Custom(name, draw), LayerPhase::Blended,
+                                eye, lod_scale, &instances, list, fog, sun, frustum, stats);
+                        }
+                        self.custom_draws = programs;
                     }
                 }
             }
@@ -420,6 +457,18 @@ impl Renderer {
             }
         }
         self.blended_models.active = active;
+    }
+
+    /// Install the lane's shader for this pass and return the optional no-clip variant. A draw
+    /// held from before a live edit takes the edit first, so what follows binds the edited shader.
+    fn select_model_shader(
+        &mut self, cx: &mut Cx3d, vars: &mut DrawVars, lane: variants::ModelLane,
+    ) -> Option<DrawShaderId> {
+        vars.refresh_after_reload(cx.cx);
+        let held = vars.draw_shader_id;
+        let (full, opaque) = self.lane_shaders(cx.cx, lane, held);
+        vars.draw_shader_id = self.select_lane_shader(cx.cx, lane, full, held, |id| cx.draw_shader_ready_here(id));
+        opaque
     }
 
     /// Draw one world-model lane. Instances are grouped by model, so N
@@ -444,6 +493,10 @@ impl Renderer {
             self.apply_model_lod_chains();
         }
         if instances.is_empty() {
+            if let (WorldModelLane::Placed, LayerPhase::Opaque, ModelDraw::Diffuse(diffuse)) = (lane, phase, &mut draw) {
+                // Request this pass's fallback pipeline before its first model arrives.
+                let _ = self.select_model_shader(cx, &mut diffuse.draw_vars, variants::ModelLane::Diffuse);
+            }
             return;
         }
         let pbr_lane = draw.is_pbr();
@@ -451,7 +504,6 @@ impl Renderer {
         // compiles asynchronously), rather than vanishing. Decided in the
         // diffuse pass; the PBR pass that follows reads the same answer.
         if phase == LayerPhase::Opaque && !pbr_lane {
-            let hdr = self.hdr_output;
             if self.pbr_materials_enabled && self.pbr_draw.is_none() && self.has_pbr_instances(instances) {
                 // Held VM (a script-driven draw is mid-apply): try again next
                 // frame rather than drawing with no shader.
@@ -468,11 +520,12 @@ impl Renderer {
             if let Some(d) = self.pbr_draw.as_deref_mut() {
                 d.skinned.draw_vars.draw_shader_id = shader;
             }
-            self.pbr_ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
+            self.pbr_ready = shader.is_some_and(|id| cx.draw_shader_ready_here(id));
             // Likewise shiny stock models leave the PBR lane for the
             // engine's IBL program only once its variant for this frame's
             // features can draw (renderer/stock_ibl.rs).
-            self.confirm_stock_ibl(cx.cx);
+            let pass_id = cx.current_pass_id();
+            self.confirm_stock_ibl(cx.cx, pass_id);
         }
         let custom_name = match &draw {
             ModelDraw::Custom(name, _) => Some(*name),
@@ -484,6 +537,9 @@ impl Renderer {
         // them draws them.
         let stock_ibl_on = self.stock_ibl_active();
         let stock_ibl_lane = custom_name == Some(stock_ibl::STOCK_IBL_MATERIAL);
+        // A program's lane draws its layers only once this frame's decision
+        // made it ready (realm.rs `prepare_custom_lanes`).
+        let custom_ready = matches!(&draw, ModelDraw::Custom(_, m) if m.lane_ready);
         self.bind_model_lane(cx, &mut draw, eye, fog, sun);
         // The lane draws through the shader variant for this frame's
         // features, and draws that cut no pixel through the one without
@@ -496,22 +552,15 @@ impl Renderer {
             _ => None,
         };
         let opaque = match (&mut draw, model_lane) {
-            (_, Some(model_lane)) => {
-                // A lane draw held from before a live edit takes it first,
-                // so what follows binds and restores the edited shader.
-                draw.base().draw_vars.refresh_after_reload(cx.cx);
-                let stock = draw.base().draw_vars.draw_shader_id;
-                let (full, opaque) = self.lane_shaders(cx.cx, model_lane, stock);
-                draw.base().draw_vars.draw_shader_id = full;
-                opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
-            }
+            (draw, Some(model_lane)) => self.select_model_shader(cx, &mut draw.base().draw_vars, model_lane)
+                .filter(|id| cx.draw_shader_ready_here(*id)),
             // A Splash material's variants of its own program; the one
             // without `clip` only when no hook of it can cut a pixel
             // (custom_material.rs).
             (ModelDraw::Custom(_, m), None) => {
                 let (full, opaque) = m.shaders(cx.cx, self.lane_features());
                 m.draw.draw_vars.draw_shader_id = full;
-                opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
+                opaque.filter(|id| cx.draw_shader_ready_here(*id))
             }
             _ => None,
         };
@@ -535,6 +584,7 @@ impl Renderer {
         let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) { self.impostor_shader } else { None };
         let impostor_scale = self.impostor_scale;
         let terrain_blend_reach = self.terrain_blend_reach;
+        let relief_steps = self.relief_steps;
         let occluder_focus = self.occluder.focus();
         // Dynamic lights. STATICS share one transient-only block (their
         // lamp light is baked; only the dl_split prefix reaches them, so a
@@ -637,15 +687,20 @@ impl Renderer {
             layered.clear();
         }
         let (mut layer_pass, mut entry_index) = (0, 0);
+        let mut fur_budget = 0;
+        let mut pending_parts = None;
         let mut last: Option<(usize, usize)> = None;
         // One body for the layer-major opaque walk and the distance-major
         // recorded walk. Advancing an opaque pass keeps the old entry order.
         loop {
-            let (i, lod_index, window) = match phase {
-                LayerPhase::Opaque => {
+            let (entry, layer) = match (pending_parts.as_mut().and_then(Iterator::next), phase) {
+                (Some(part), _) => part,
+                (None, LayerPhase::Opaque) => {
+                    pending_parts = None;
                     let pass_order = if layer_pass == 0 { &order[..] } else { &pass_buf[..] };
                     if let Some(&entry) = pass_order.get(entry_index) {
-                        entry
+                        entry_index += 1;
+                        (entry, ModelLayer::Body(layer_pass))
                     } else {
                         layer_pass += 1;
                         if layer_pass >= layer_passes { break; }
@@ -657,14 +712,14 @@ impl Renderer {
                         continue;
                     }
                 }
-                LayerPhase::Blended => {
+                (None, LayerPhase::Blended) => {
                     let Some(layer) = blended.get(entry_index) else { break };
-                    layer_pass = layer.layer_pass;
-                    layer.entry
+                    entry_index += 1;
+                    (layer.entry, layer.layer)
                 }
             };
-            entry_index += 1;
-            let count_copy = phase == LayerPhase::Opaque && layer_pass == 0;
+            let (i, lod_index, window) = entry;
+            let count_copy = phase == LayerPhase::Opaque && layer == ModelLayer::Body(0);
             let inst = &instances[i];
             let dynamic = lane.is_dynamic(inst);
             let Some(at) = slots[i] else {
@@ -673,39 +728,46 @@ impl Renderer {
             let root = &static_models[at].1;
             let inv_height = 1.0 / root.max.y.max(0.5);
             let distance=distances[i];
-            let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
+            if phase == LayerPhase::Blended || matches!(layer, ModelLayer::Body(_)) {
+                fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
+            }
             let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
+            if count_copy {
+                let count = usize::from(loaded.triangles > 0) + loaded.extra_draws.len();
+                if count > 1 {
+                    layered.push((entry, count));
+                }
+                // Schedule the moving layers before any lane can reject the body.
+                if !loaded.anim_parts.is_empty() || !loaded.driven_parts.is_empty() {
+                    pending_parts = Some(loaded.part_layers().map(move |part| (entry, part)));
+                }
+            }
+            let layer_draw = loaded.layer_draw(layer);
+            let layer_material = layer_draw.map(|draw| draw.4);
+            let effective = inst.material_of(layer_material.map_or("", |m| m.name.as_ref()));
             if phase == LayerPhase::Opaque {
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
                     .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
-                // Paint belongs to a layer: an opaque surface can share a
-                // model with an ordinary decal or an untextured LOD.
-                let primary = (loaded.triangles > 0) as usize;
-                let layer_count = primary + loaded.extra_draws.len();
-                if count_copy && layer_count > 1 {
-                    layered.push(((i, lod_index, window), layer_count));
-                }
-                let layer_material = if primary == 1 && layer_pass == 0 {
-                    Some(&loaded.material)
-                } else {
-                    loaded.extra_draws.get(layer_pass - primary).map(|l| &l.4)
-                };
                 let paints = splat_ready && layer_material.is_some_and(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some()));
                 // Lane filter. Both passes walk the same instance list — indices
                 // address `lm_remaps` / `model_ground` / the light-cell key, so
                 // they must not be renumbered — and each takes only the models
                 // its shader owns.
                 let uses_pbr_lane = self.pbr_materials_enabled && loaded.wants_pbr && self.pbr_ready;
-                let wanted_custom = inst.custom_material.as_ref().filter(|m| {
-                    custom_name == Some(m.name.as_str())
-                        || self.custom_draws.get(&m.name).is_some_and(|d| d.draw.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output)))
+                // The layer's own program takes it once this frame's decision
+                // made that program ready, the stock lanes until then: one
+                // lane, never both (a draw the HAL skips would stand in for
+                // one it shows) and never none.
+                let wanted_custom = effective.filter(|m| match custom_name {
+                    Some(name) => custom_ready && name == m.name.as_str(),
+                    None => self.custom_draws.get(&m.name).is_some_and(|d| d.lane_ready),
                 });
                 // A shiny stock model with no material of its own, while an
                 // environment is registered: the stock IBL lane takes it and
                 // the PBR lane leaves it (renderer/stock_ibl.rs). A material
                 // it names is its own only while that one is installed: a
                 // name that is not draws through the stock lanes anyway.
-                let own_material = self.has_own_material(inst, custom_name);
+                let own_material = self.has_own_material(effective, custom_name);
                 // A painted terrain tile stays with the splat lane (its layers).
                 let takes_stock_ibl = !paints && stock_ibl::takes_stock_ibl(stock_ibl_on, uses_pbr_lane, own_material, sways);
                 if let Some(name) = custom_name {
@@ -724,20 +786,24 @@ impl Renderer {
                 } {
                     continue;
                 }
-                if custom_name.is_none() && !pbr_lane
-                    && ((self.pbr_materials_enabled && loaded.wants_pbr && !self.pbr_ready)
-                        || (wanted_custom.is_none() && inst.custom_material.as_ref().is_some_and(|m| self.custom_draws.get(&m.name).is_some())))
+                // Drawn short of whole (`drew_fallback`): a shiny model on the
+                // diffuse lane while the PBR pipeline compiles, or, on any stock
+                // lane, a layer whose own material's pipeline is still being
+                // made. A pipeline that failed draws stock for good: nothing to
+                // wait for.
+                if custom_name.is_none()
+                    && ((!pbr_lane && self.pbr_materials_enabled && loaded.wants_pbr && !self.pbr_ready)
+                        || (wanted_custom.is_none() && effective.is_some_and(|m| self.custom_draws.get(&m.name)
+                            .and_then(|d| d.draw.draw_vars.draw_shader_id).is_some_and(|id| !cx.cx.draw_shader_failed(id)))))
                 {
                     self.items.fallback = true;
                 }
             }
             if !stock_ibl_lane {
-                if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, inst.custom_material.as_ref()) {
+                if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, effective) {
                     d.draw.set_params(cx.cx, material.params);
                 }
             }
-            // Hoisted: `loaded` borrows self, and the per-instance light
-            // block below needs `&mut self` (cell hysteresis).
             // Per draw item: the morph source belongs to this model LOD, the
             // same `loaded` that picks the geometry and binds `morph_map`.
             // The per-instance weights stay on the instance stream.
@@ -776,7 +842,7 @@ impl Renderer {
             // copies all fall outside never opens a draw item at all. The
             // shadow a prop casts is not affected: prop shadows live in the
             // merged static shadow mesh, which is drawn whole regardless.
-            if let Some(frustum) = frustum.filter(|_| phase == LayerPhase::Opaque && inst.custom_material.is_some()) {
+            if let Some(frustum) = frustum.filter(|_| phase == LayerPhase::Opaque && inst.has_custom()) {
                 // Generic node clips can leave the authored rest bounds.
                 // Their small, bounded part sets remain visible until posed
                 // bounds are available; a rest-only cull would hide motion.
@@ -796,19 +862,7 @@ impl Renderer {
                     continue;
                 }
             }
-            // The model's layers, walked in place (this runs per copy per
-            // frame): a model that is ALL anim parts (a lone door asset)
-            // has an empty static stream and nothing to draw for layer 0.
-            let m = loaded;
-            let layer_draws = || {
-                (m.triangles > 0)
-                    .then(|| (m.geometry.geometry_id(), &m.texture, &m.detail, m.detail_scale, &m.material))
-                    .into_iter()
-                    .chain(m.extra_draws.iter().map(|(g, t, d, s, mat)| (g.geometry_id(), t, d, *s, mat)))
-            };
-            let prelit = m.prelit;
-            // Rigid parts ride the PARENT's material: a door is cut from the
-            // level tile it sits in, so its metal/roughness is the model's.
+            let prelit = loaded.prelit;
             let has_lightmap_source = loaded.lm_source.is_some();
             // The pack's baked occlusion, on slot 1. Packs share atlases;
             // a model's copies are adjacent (the order above), so the
@@ -921,23 +975,53 @@ impl Renderer {
                     stats.world_attachment_triangles += tri_count;
                 }
             } }
-            // A model with a far stand-in (impostor.rs) draws that layer
-            // from its distance on (scaled by the quality tier) and every
-            // other layer before it, the two crossfading through
-            // complementary screen-door windows over the band before the
-            // switch (no pop). A copy already crossfading between chain
-            // levels keeps its own window and switches hard.
-            let impostor_at = impostor_shader.map_or(0.0, |_| layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale);
-            for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
-                let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+            let Some((geometry_id, texture, detail, dscale, material)) = layer_draw else { continue };
+            let body_layer = match layer {
+                ModelLayer::Animated(part, _) => {
+                    let target = match lane {
+                        WorldModelLane::Placed => ModelTarget::Instance(i),
+                        WorldModelLane::Attachment => ModelTarget::Attachment(i),
+                    };
+                    let pose = self.model_anim_state.transform(&target, &inst.model, &loaded.anim_parts[part].def);
+                    draw.base().transform = Mat4f::mul(&inst.transform, &pose);
+                    None
+                }
+                ModelLayer::Driven(part, _) => {
+                    let def = &loaded.driven_parts[part].def;
+                    let pose = inst.part_poses.iter().find(|pose| pose.connection == def.connection)
+                        .map(|pose| pose.transform).unwrap_or_else(|| def.rest_transform());
+                    draw.base().transform = Mat4f::mul(&inst.transform, &pose);
+                    None
+                }
+                ModelLayer::Body(index) => Some(index),
+            };
+            if body_layer.is_none() {
+                // Moving layers have no chart in the static light atlas.
+                draw.base().lm_rect = Vec4f::default();
+                last = None;
+                if phase == LayerPhase::Opaque {
+                    let triangles = cx.cx.geometries[geometry_id].index_count / 3;
+                    match lane {
+                        WorldModelLane::Placed => stats.model_triangles += triangles,
+                        WorldModelLane::Attachment => stats.world_attachment_triangles += triangles,
+                    }
+                }
+            }
+            // Only the fixed geometry crossfades to the model's far stand-in.
+            let impostor_at = impostor_shader.filter(|_| body_layer.is_some()).map_or(0.0, |_| {
+                std::iter::once(&loaded.material).chain(loaded.extra_draws.iter().map(|l| &l.4))
+                    .filter_map(|m| m.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale
+            });
+            'submit: {
+                let stand_in = body_layer.is_some() && material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
                 let mut layer_window = 0.0f32;
                 if impostor_at > 0.0 {
                     match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {
                         Some((near, next)) => layer_window = if stand_in { next } else { near },
-                        None => if stand_in != (distance >= impostor_at) { continue; },
+                        None => if stand_in != (distance >= impostor_at) { break 'submit; },
                     }
                 } else if stand_in {
-                    continue;
+                    break 'submit;
                 }
                 draw.base().color_adjust_ctl.w = if layer_window > 0.0 { layer_window } else { adjust.w };
                 draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
@@ -948,7 +1032,7 @@ impl Renderer {
                 // The stand-in itself never takes its own shadow either, so
                 // mesh and stand-in agree where one takes over from the other
                 // (shaders/impostor.rs).
-                let own = match root.stand_in { Some(c) if stand_in || !dynamic => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
+                let own = match root.stand_in { Some(c) if body_layer.is_some() && (stand_in || !dynamic) => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &own);
                 draw.base().draw_vars.set_texture(0, texture);
                 // A painted tile's slot 0 is its layers' albedo array; a
@@ -957,6 +1041,7 @@ impl Renderer {
                 if let Some(p) = material.surface.as_ref().and_then(|s| s.splat.as_ref()).filter(|_| splat_lane) {
                     draw.base().draw_vars.set_texture(0, &p.albedo);
                     draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_blend), &[if tile_distance > terrain_blend_reach { 0.0 } else { 1.0 }]);
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_relief_steps), &[relief_steps]);
                 }
                 draw.base().draw_vars.set_texture(5, detail);
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
@@ -970,8 +1055,8 @@ impl Renderer {
                 }
                 draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
                 if phase == LayerPhase::Opaque && draw.base().draw_vars.options.alpha_blend {
-                    self.blended_models.record(&mut record_lane, lane, &draw, (i, lod_index, window), layer_pass);
-                    continue;
+                    self.blended_models.record(&mut record_lane, lane, &draw, entry, layer);
+                    break 'submit;
                 }
                 // A world item's copy may glow on its own (items.rs).
                 if matches!(lane, WorldModelLane::Placed) {
@@ -1005,12 +1090,16 @@ impl Renderer {
                     _ => material.cutout,
                 };
                 let owner = if cx.draw_owners_armed() {
-                    let label = self.draw_names.model(cx.cx, &inst.model, lod_index, layer_pass, stand_in);
+                    let label = self.draw_names.model(cx.cx, &inst.model, lod_index, body_layer.unwrap_or(0), stand_in);
                     cx.enter_draw_label(label)
                 } else {
                     0
                 };
-                stats.fur_triangles += draw.submit_as(cx, distance, &mut fur_budget, opaque.filter(|_| !cut));
+                stats.fur_triangles += if body_layer.is_some() {
+                    draw.submit_as(cx, distance, &mut fur_budget, opaque.filter(|_| !cut))
+                } else {
+                    draw.submit(cx, distance, &mut fur_budget)
+                };
                 cx.exit_draw_label(owner);
             }
             draw.base().draw_vars.draw_shader_id = lane_shader;
@@ -1018,103 +1107,11 @@ impl Renderer {
             if root.stand_in.is_some() {
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &[0.0; 4]);
             }
-            if phase == LayerPhase::Blended || layer_pass > 0 {
-                continue;
-            }
-            // Rigid parts (doors, lifts). Each is one extra draw on the
-            // PARENT's material — same shader, same textures, usually the
-            // level tile it was cut from — placed at the instance transform
-            // times where the part's state machine has it right now.
-            //
-            // A part carries no baked chart (lm_rect zeroed): it moves, so
-            // the static atlas never had a window for it. Its shadow comes
-            // from the realtime cascades, which see it as a mover.
-            let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2],LayerMaterial)>)> = {
-                let root=&static_models[at].1;
-                let m = if lod_index==0{root}else{&root.lods[lod_index-1].1};
-                let mut parts = Vec::with_capacity(m.anim_parts.len() + m.driven_parts.len());
-                if !m.anim_parts.is_empty() {
-                    let key = match lane {
-                        WorldModelLane::Placed => ModelTarget::Instance(i),
-                        // Attachments are not placed slots — a slot index
-                        // would address someone else's instance — so their
-                        // parts follow the per-MODEL command only.
-                        WorldModelLane::Attachment => ModelTarget::Attachment(i),
-                    };
-                    parts.extend(m.anim_parts.iter().map(|p| {
-                            let (_, _, _) =
-                                self.model_anim_state.clock(&key, &inst.model, &p.def);
-                            (
-                                self.model_anim_state.transform(&key,&inst.model,&p.def),
-                                p.def.indices.len() / 3,
-                                p.draws
-                                    .iter()
-                                    .map(|(g, t, d, s,m)| {
-                                        (g.geometry_id(), t.clone(), d.clone(), *s,m.clone())
-                                    })
-                                    .collect(),
-                            )
-                        }));
-                }
-                parts.extend(m.driven_parts.iter().map(|part| {
-                    let pose = inst
-                        .part_poses
-                        .iter()
-                        .find(|pose| pose.connection == part.def.connection)
-                        .map(|pose| pose.transform)
-                        .unwrap_or_else(|| part.def.rest_transform());
-                    (
-                        pose,
-                        part.def.indices.len() / 3,
-                        part
-                            .draws
-                            .iter()
-                            .map(|(g, t, d, s,m)| (g.geometry_id(), t.clone(), d.clone(), *s,m.clone()))
-                            .collect(),
-                    )
-                }));
-                parts
-            };
-            let owner = if cx.draw_owners_armed() && !parts.is_empty() {
-                let label = self.draw_names.model(cx.cx, &inst.model, lod_index, 0, false);
-                cx.enter_draw_label(label)
-            } else {
-                0
-            };
-            for (pose, part_tris, part_draws) in &parts {
-                draw.base().transform = Mat4f::mul(&inst.transform, pose);
-                draw.base().lm_rect = Vec4f::default();
-                for (geometry_id, texture, detail, dscale,material) in part_draws {
-                    draw.base().draw_vars.geometry_id = Some(*geometry_id);
-                    draw.base().draw_vars.set_texture(0, texture);
-                    draw.base().draw_vars.set_texture(5, detail);
-                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
-                    // An IBL material reads its environment on the detail slot.
-                    if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
-                    draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                    draw.set_material(cx.cx, material);
-                    draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
-                    stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
-                }
-                held_material = std::ptr::null();
-                match lane {
-                    WorldModelLane::Placed => stats.model_triangles += part_tris,
-                    WorldModelLane::Attachment => {
-                        stats.world_attachment_triangles += part_tris
-                    }
-                }
-            }
-            cx.exit_draw_label(owner);
-            // A part opened its own draw item; the next instance of the same
-            // model must re-bind its own transform rather than accumulate
-            // into the part's.
-            if !parts.is_empty() {
-                last = None;
-            }
         }
         if let Some(at) = blended_lane {
             self.blended_models.lanes[at].layers = blended;
         }
+        drop(pending_parts);
         self.static_models = static_models;
         self.model_orders[which] = model_order;
     }
@@ -1506,6 +1503,19 @@ impl Renderer {
         }
     }
 
+    fn draw_view_model_layer(
+        cx: &mut Cx3d, draw: &mut DrawSceneViewModel, geometry_id: GeometryId,
+        texture: &Texture, material: &LayerMaterial,
+    ) {
+        draw.draw_vars.geometry_id = Some(geometry_id);
+        draw.draw_vars.set_texture(0, texture);
+        Self::bind_view_model_material(cx, draw, material);
+        if draw.draw_vars.can_instance() {
+            let new_area = cx.add_instance(&mut draw.draw_vars);
+            draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
+        }
+    }
+
     /// Draw the private FPS presentation list. This path deliberately does
     /// not share world-model setup: no AO/lightmap/top-map/CSM bindings, no
     /// dynamic-light selection, no frustum/caster/receiver work. A typical
@@ -1536,25 +1546,33 @@ impl Renderer {
             else {
                 continue;
             };
-            let layer_draws = {
-                let mut layers = Vec::with_capacity(1 + loaded.extra_draws.len());
-                layers.push((loaded.geometry.geometry_id(), loaded.texture.clone(), loaded.material.clone()));
-                for (g, t, _, _, m) in &loaded.extra_draws {
-                    layers.push((g.geometry_id(), t.clone(), m.clone()));
-                }
-                layers
-            };
+            let layer_draws = std::iter::once((loaded.geometry.geometry_id(), &loaded.texture, &loaded.material))
+                .chain(loaded.extra_draws.iter().map(|(g, t, _, _, m)| (g.geometry_id(), t, m)));
             // The scene draw-list carries Stage for every world draw. Cancel
             // it here: a held model is attached to the physical camera, not
             // scaled into an MR diorama or moved onto its floor anchor.
             draw.transform = Mat4f::mul(&stage_inv, &inst.transform);
-            for (geometry_id, texture, material) in &layer_draws {
-                draw.draw_vars.geometry_id = Some(*geometry_id);
-                draw.draw_vars.set_texture(0, texture);
-                Self::bind_view_model_material(cx, draw, material);
-                if draw.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&mut draw.draw_vars);
-                    draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
+            for (geometry_id, texture, material) in layer_draws {
+                Self::draw_view_model_layer(cx, draw, geometry_id, texture, material);
+            }
+            // The view pass has no animation target, so use the authored rest pose.
+            for part in &loaded.anim_parts {
+                draw.transform = Mat4f::mul(&stage_inv, &Mat4f::mul(&inst.transform, &part.def.rest_transform()));
+                for (geometry, texture, _, _, material) in &part.draws {
+                    let id = geometry.geometry_id();
+                    Self::draw_view_model_layer(cx, draw, id, texture, material);
+                    stats.view_model_triangles += cx.cx.geometries[id].index_count / 3;
+                }
+            }
+            // Driven geometry lives outside the body layers, even at rest.
+            for part in &loaded.driven_parts {
+                let pose = inst.part_poses.iter().find(|pose| pose.connection == part.def.connection)
+                    .map(|pose| pose.transform).unwrap_or_else(|| part.def.rest_transform());
+                draw.transform = Mat4f::mul(&stage_inv, &Mat4f::mul(&inst.transform, &pose));
+                for (geometry, texture, _, _, material) in &part.draws {
+                    let id = geometry.geometry_id();
+                    Self::draw_view_model_layer(cx, draw, id, texture, material);
+                    stats.view_model_triangles += cx.cx.geometries[id].index_count / 3;
                 }
             }
             stats.view_model_instances += 1;
@@ -1582,7 +1600,7 @@ mod chain_fade_tests {
         renderer.set_models(vec![ModelInstance {
             model: "lod".into(), transform, tint: vec4(1.0, 1.0, 1.0, 1.0),
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0,
-            part_poses: Vec::new(), custom_material: None, lamps: Default::default(),
+            part_poses: Vec::new(), custom_material: None, layer_materials: Vec::new(), lamps: Default::default(),
         }]);
         let eye = vec3f(0.0, 0.0, 0.0);
         let view_scale = crate::lod_view::lod_projection_scale(
@@ -1626,7 +1644,7 @@ mod chain_fade_tests {
         renderer.set_models(vec![ModelInstance {
             model: "lod".into(), transform, tint: vec4(1.0, 1.0, 1.0, 1.0),
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0,
-            part_poses: Vec::new(), custom_material: None, lamps: Default::default(),
+            part_poses: Vec::new(), custom_material: None, layer_materials: Vec::new(), lamps: Default::default(),
         }]);
         let scale = |fov| lod_projection_scale(&Mat4f::perspective(fov, 1.5, 0.1, 500.0), LOD_REFERENCE_HEIGHT_PX);
         let eye = vec3f(0.0, 0.0, 0.0);

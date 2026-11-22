@@ -166,7 +166,7 @@ impl Renderer {
         };
         // Metal compiles pipelines asynchronously: no grass until it exists
         // (the terrain's own grass texture is there meanwhile).
-        let ready = draw.pbr.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output));
+        let ready = draw.pbr.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready_here(id));
         if ready {
             self.orm_neutral(cx.cx);
             self.detail_neutral(cx.cx);

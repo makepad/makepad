@@ -32,6 +32,14 @@ use crate::particles::ParticleInstance;
 use crate::shaders::DrawSceneFirework;
 use crate::sun::SunLight;
 use crate::thermometer::{Quality, Thermometer};
+
+/// A pass allocated between clock updates starts on the same clock as its siblings.
+pub(crate) fn new_scene_pass(cx: &mut Cx, name: &str, time: Option<f32>) -> DrawPass {
+    let pass = DrawPass::new_with_name(cx, name);
+    if time.is_some() { pass.set_own_time(cx, time); }
+    pass
+}
+
 #[path = "fast_gi/scene.rs"]
 mod gi_scene;
 
@@ -191,6 +199,12 @@ pub struct RenderStats {
     pub world_attachment_culled: u64,
     pub dyn_culled: u64,
     pub skinned_culled: u64,
+    /// Skinned characters' draw items, and the triangles they submit. Each
+    /// material part of a rig is an item of its own, so a rig of many rigidly
+    /// bound parts costs a draw per part per character; a submission a draw
+    /// item takes in (the next copy of a one-part rig) adds no draw.
+    pub skinned_draws: u64,
+    pub skinned_triangles: usize,
     /// Bytes of skinning data uploaded this frame: the joint-palette texture.
     /// The rest meshes upload once at rig load and never again — this number
     /// replacing the full posed vertex streams is the point of GPU skinning.
@@ -229,6 +243,12 @@ pub struct HostSettings {
     pub lm_debug: bool,
     /// Log the mean particle pass GPU time every 120 frames.
     pub vfx_stats: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct LmRemapOwner {
+    chart_key: u64,
+    transform: [u32; 16],
 }
 
 /// GPU-side caches for one view family: unit shape geometries, the packed
@@ -287,6 +307,7 @@ pub struct Renderer {
     /// vertices never change, so its per-frame cost is one instance. See
     /// model.rs.
     static_models: Vec<(String, LoadedModel)>,
+    model_asset_revision: u64,
     /// The model lanes' draw names for the GPU profiler, made once each.
     draw_names: draw_models::DrawNames,
     preview_originals: std::collections::HashMap<String, (LoadedModel, Option<String>)>,
@@ -296,6 +317,7 @@ pub struct Renderer {
     /// [`SceneDraws`] because a map's sky has nothing for a host to theme,
     /// and every host would have had to adopt a new field to get one.
     sky_draw: Option<Box<DrawSceneSkyMap>>,
+    sky_hook: Option<crate::custom_sky::SkyHook>,
     /// Engine-owned bullet-hole shader. A host gets the default marks merely
     /// by drawing a World; no widget field or per-game wiring is needed.
     decal_draw: Option<Box<DrawSceneDecal>>,
@@ -337,6 +359,8 @@ pub struct Renderer {
     /// CSM directly, rather than waiting for an atlas layout that may never
     /// exist (an imported editor scene commonly has none).
     csm_static_casters: Vec<crate::gpu_lightmap::GpuBakeMesh>,
+    /// Placed bindings to refresh when the layout stays fixed and their parameters change.
+    csm_material_sources: Vec<realm::StaticMaterialSource>,
     /// Runs of `csm_static_casters` with their bounds (rebuilt with it).
     csm_static_blocks: Vec<crate::gpu_lightmap::CasterBlock>,
     /// The streamed world (stream.rs / renderer/stream_draw.rs), its build
@@ -345,6 +369,8 @@ pub struct Renderer {
     stream: Option<Box<stream_draw::StreamState>>,
     stream_workers: Option<stream_draw::Workers>,
     stream_casters: Vec<crate::gpu_lightmap::GpuBakeMesh>,
+    /// Hash of the streamed casters' geometry IDs and bounds in collection order.
+    stream_caster_key: Option<u64>,
     /// Actor-attached presentation meshes in world space. They use the
     /// ordinary world material/depth path, but are deliberately outside the
     /// placed scene's identity, bakes, caster lists, lamp harvest and blob
@@ -419,6 +445,8 @@ pub struct Renderer {
     /// The baked static-light atlas (lightmap.rs): A = sun-visibility SDF,
     /// RGB = lamp light. None until the first background bake delivers.
     lightmap: Option<Texture>,
+    /// A review fork that samples the host's light atlas and never bakes its own.
+    atlas_borrowed: bool,
     /// 1x1 "no lightmap yet": fully sunlit, zero lamp light — bound wherever
     /// a real atlas isn't, so the shader samples unconditionally.
     lm_fallback: Option<Texture>,
@@ -446,6 +474,13 @@ pub struct Renderer {
     /// See [`Self::set_element_reach`].
     element_reach: Option<(Vec3f, Vec3f)>,
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
+    /// Bumped whenever `custom_draws` gains, replaces or drops a program
+    /// with a derived shadow caster; it travels with them through
+    /// `swap_review_materials`.
+    custom_casters_rev: u64,
+    /// The `custom_casters_rev` the static casters resolved their programs'
+    /// derived casters against ([`Self::sync_csm_custom_casters`]).
+    csm_custom_casters_rev: u64,
     /// Image-based lighting for Splash materials (renderer/ibl.rs).
     ibl: ibl::IblState,
     /// Shiny stock models under that environment (renderer/stock_ibl.rs).
@@ -480,6 +515,7 @@ pub struct Renderer {
     grass_pixels: f32,
     /// The tier's reach of terrain paint blending (quality_tier.rs).
     terrain_blend_reach: f32,
+    relief_steps: f32,
     graphics_tier: crate::quality_tier::GraphicsTier,
     grass_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
     grass_flower_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
@@ -503,9 +539,16 @@ pub struct Renderer {
     /// Follow-camera occluder fade (occluder_fade.rs); off unless a host
     /// sets a focus each frame.
     occluder: occluder_fade::OccluderFade,
-    /// Per placed-model uv remap into the atlas, parallel to placed_models
-    /// (zero = unmapped, the shader's disable signal). Rebuilt per delivery.
+    /// A zero remap disables the region for that copy.
     lm_remaps: Vec<Vec4f>,
+    lm_remap_owners: Vec<Option<LmRemapOwner>>,
+    /// The local placed-model revision these slots index.
+    lm_remaps_rev: Option<u64>,
+    lm_remaps_generation: u64,
+    /// The live renderer's generation last copied into this view.
+    copied_lm_remaps_generation: Option<u64>,
+    /// Chart keys by resident model name, shared by all its placed copies.
+    lm_model_charts: std::collections::HashMap<String, u64>,
     /// The terrain's atlas region and the world xz rect it covers — ONE
     /// planar region serves every terrain tile, because tile uvs derive from
     /// world position rather than per-tile data.
@@ -549,6 +592,8 @@ pub struct Renderer {
     fxaa: bool,
     /// The HDR post chain (bloom + auto-exposure), see [`Renderer::run_post`].
     post: makepad_render_graph::BloomPass,
+    scene_time: Option<f32>,
+    last_post_time: Option<f32>,
     /// See [`Renderer::set_bloom`] / [`Renderer::set_auto_exposure`].
     bloom: f32,
     auto_exposure: bool,
@@ -755,6 +800,26 @@ pub use realm::ModelTail;
 pub use frame_util::*;
 pub use stream_draw::StreamStats;
 
+impl Renderer {
+    /// Install or clear this renderer's background program. A second view may borrow it
+    /// for one draw and put the previous program back afterwards.
+    pub fn set_sky_hook(&mut self, hook: Option<crate::custom_sky::SkyHook>) -> Option<crate::custom_sky::SkyHook> {
+        std::mem::replace(&mut self.sky_hook, hook)
+    }
+
+    /// Change the four floats the next sky draw reads.
+    pub fn set_sky_params(&mut self, params: Vec4f) {
+        if let Some(hook) = &mut self.sky_hook {
+            hook.set_params(params);
+        }
+    }
+
+    /// The driver's diagnostic once per installed program. Failed programs draw a hatch.
+    pub fn take_sky_hook_failure<'a>(&mut self, cx: &'a Cx) -> Option<&'a str> {
+        self.sky_hook.as_mut()?.take_failure(cx)
+    }
+}
+
 impl Default for Renderer {
     fn default() -> Self {
         Self {
@@ -777,10 +842,12 @@ impl Default for Renderer {
             skin_palette_texels: 0,
             skin_joint_bases: Vec::new(),
             static_models: Vec::new(),
+            model_asset_revision: 0,
             draw_names: Default::default(),
             preview_originals: std::collections::HashMap::new(),
             preview_new: std::collections::HashSet::new(),
             sky_draw: None,
+            sky_hook: None,
             decal_draw: None,
             sky_draw_wait_logged: false,
             sky_time: 0.0,
@@ -792,10 +859,12 @@ impl Default for Renderer {
             model_anim_state: ModelStates::default(),
             placed_models: Vec::new(),
             csm_static_casters: Vec::new(),
+            csm_material_sources: Vec::new(),
             csm_static_blocks: Vec::new(),
             stream: None,
             stream_workers: None,
             stream_casters: Vec::new(),
+            stream_caster_key: None,
             world_attachments: Vec::new(),
             view_models: Vec::new(),
             view_model_sun: 1.0,
@@ -823,6 +892,7 @@ impl Default for Renderer {
             receiver_boxes: Vec::new(),
             occluder_boxes: Vec::new(),
             lightmap: None,
+            atlas_borrowed: false,
             lm_fallback: None,
             detail_fallback: None,
             orm_fallback: None,
@@ -832,6 +902,8 @@ impl Default for Renderer {
             host_box: None,
             element_reach: None,
             custom_draws: Default::default(),
+            custom_casters_rev: 0,
+            csm_custom_casters_rev: 0,
             ibl: Default::default(),
             stock_ibl: Default::default(),
             items: Default::default(),
@@ -847,6 +919,7 @@ impl Default for Renderer {
             impostor_scale: crate::quality_tier::GraphicsTier::High.budget().impostor_scale,
             grass_pixels: crate::quality_tier::GraphicsTier::High.budget().grass_pixels,
             terrain_blend_reach: f32::MAX,
+            relief_steps: 24.0,
             graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),
             grass_flower_rings: Default::default(),
@@ -858,6 +931,11 @@ impl Default for Renderer {
             ssao: None,
             occluder: Default::default(),
             lm_remaps: Vec::new(),
+            lm_remap_owners: Vec::new(),
+            lm_remaps_rev: None,
+            lm_remaps_generation: 0,
+            copied_lm_remaps_generation: None,
+            lm_model_charts: Default::default(),
             lm_ground: None,
             lm_top: None,
             lm_top_fallback: None,
@@ -879,6 +957,8 @@ impl Default for Renderer {
             hdr_exposure: 1.0,
             fxaa: true,
             post: Default::default(),
+            scene_time: None,
+            last_post_time: None,
             bloom: DEFAULT_BLOOM,
             auto_exposure: true,
             grade: Default::default(),

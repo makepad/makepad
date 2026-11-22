@@ -317,6 +317,16 @@ pub(super) struct IblState {
 }
 
 impl IblState {
+    /// While the full map prepares, its atlas can show through only in a world
+    /// without a regular dome. Paint whichever background the viewer can see.
+    fn painted_background<'a>(
+        &self, cx: &Cx, hook: Option<&'a mut crate::custom_sky::SkyHook>, has_dome: bool, control: Vec4f,
+    ) -> Option<&'a mut DrawEnvBackground> {
+        let hook = hook?;
+        if self.texture.is_none() || (self.dome.is_none() && has_dome) { return None; }
+        hook.environment(cx, control)
+    }
+
     /// Take `live`'s registered maps and bound preparation, exactly as they
     /// are: the same `Arc`s and texture handles (nothing is copied but
     /// pointers and numbers), the numbers, the key and the daylight report
@@ -986,13 +996,15 @@ impl Renderer {
     /// its analytic or gradient dome. Until the dome lands, the atlas
     /// background draws under the dome exactly as before; an MR stage
     /// never shows an environment (the room supplies the horizon).
-    pub(super) fn draw_environment_background(&mut self, cx: &mut Cx3d, env: &Environment, projection: &Mat4f, exposure_ev: f32) -> bool {
+    pub(super) fn draw_environment_background(&mut self, cx: &mut Cx3d, world: &World, projection: &Mat4f, exposure_ev: f32, sky_control: Vec4f) -> bool {
+        let env = &world.environment;
         let Background::Environment { blur, intensity } = env.background else { return false };
         if !self.stage.shows_sky() {
             return false;
         }
         let Some(texture) = self.ibl.texture.clone() else { return false };
-        if self.ibl.background.is_none() {
+        let painted = self.ibl.painted_background(cx.cx, self.sky_hook.as_mut(), world.sky.is_some(), sky_control);
+        if painted.is_none() && self.ibl.background.is_none() {
             // Held VM (a script-driven draw is mid-apply): try again next
             // frame rather than drawing a sky with no shader.
             self.ibl.background = cx.cx.try_with_vm(|vm| {
@@ -1017,7 +1029,7 @@ impl Renderer {
         // meters the rig on the same product).
         let ibl_scale = env.ibl.map_or(0.0, |i| if i.intensity.is_finite() { i.intensity.max(0.0) } else { 0.0 });
         let (bg, bg2) = env_dome_controls(blur, intensity, projection, self.hdr_output, self.ibl.mean_luminance * ibl_scale, exposure_ev, dome_size);
-        let Some(d) = self.ibl.background.as_mut() else { return false };
+        let Some(d) = painted.or(self.ibl.background.as_deref_mut()) else { return false };
         d.bg = bg;
         d.bg2 = bg2;
         d.draw_vars.options.depth_write = false;
@@ -1538,13 +1550,20 @@ mod tests {
     fn the_dome_replaces_the_sky_only_once_it_is_ready_and_never_in_mr() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut renderer = Renderer::default();
+        let control = vec4(0.0, 1.0, 0.0, 1.0);
+        let mut hook = cx.with_vm(|vm| crate::shaders::test_sky_hook(vm, &[crate::custom_sky::SkyKind::Environment]));
+        let shader = hook.environment(&cx, control).unwrap().draw_vars.draw_shader_id.unwrap();
+        renderer.set_sky_hook(Some(hook));
         assert!(!renderer.environment_dome_ready());
         renderer.register_environment(TextureRef(3), grey(16, 0.4));
         let env = env_of(IblSource::Hdri(TextureRef(3)), 1.0, 0.0);
         renderer.resolve_ibl(&mut cx, &env);
         assert!(!renderer.environment_dome_ready(), "preparing: the analytic dome still draws");
+        assert!(renderer.ibl.painted_background(&cx, renderer.sky_hook.as_mut(), true, control).is_none(), "the ordinary dome owns the visible sky while the map prepares");
         settle(&mut renderer, &mut cx, &env);
         assert!(renderer.environment_dome_ready());
+        let painted = renderer.ibl.painted_background(&cx, renderer.sky_hook.as_mut(), true, control).expect("the ready map owns the visible sky");
+        assert_eq!(painted.draw_vars.draw_shader_id, Some(shader), "the ready map uses the host's environment shader");
         assert!(renderer.stage.shows_environment(), "a flat stage shows it");
         renderer.stage.mode = crate::stage::StageMode::MrDiorama;
         assert!(!renderer.stage.shows_environment(), "MR: the room is the horizon");

@@ -2,6 +2,15 @@
 
 use super::*;
 
+impl DrawSceneSky {
+    /// Register the stock domes when a host builds a sky on its own VM.
+    pub(crate) fn register_domes(vm: &mut ScriptVm) {
+        if vm.heap().type_default_for_id(Self::script_type_id_static()).is_none() {
+            script_mod(vm);
+        }
+    }
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*

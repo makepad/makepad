@@ -248,6 +248,9 @@ pub struct ModelInstance {
     pub model: String,
     /// Visual-only opt-in; absent or failed custom shader uses the stock lane.
     pub custom_material: Option<CustomMaterialInstance>,
+    /// A named layer uses its entry in place of the whole-instance material.
+    /// Far-impostor cards skip custom programs, even when an entry names their layer.
+    pub layer_materials: Vec<LayerMaterialInstance>,
     pub transform: Mat4f,
     /// Per-copy albedo multiplier. White preserves the authored material.
     pub tint: Vec4f,
@@ -279,6 +282,24 @@ pub struct CustomMaterialInstance {
     pub params: Vec4f,
 }
 
+/// A custom program and its parameters for layers with this glTF material name.
+#[derive(Debug, PartialEq)]
+pub struct LayerMaterialInstance {
+    pub layer: std::sync::Arc<str>,
+    pub material: CustomMaterialInstance,
+}
+
+impl Clone for LayerMaterialInstance {
+    fn clone(&self) -> Self {
+        Self { layer: self.layer.clone(), material: self.material.clone() }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.layer.clone_from(&source.layer);
+        self.material.clone_from(&source.material);
+    }
+}
+
 pub struct ModelPartPose {
     /// shared with the model's driven part ([`DrivenPartInfo::connection_shared`]): posing a part
     /// every frame copies a reference, not the name
@@ -286,15 +307,24 @@ pub struct ModelPartPose {
     pub transform: Mat4f,
 }
 
+/// Reuse each overlapping element as well as the outer vector's allocation.
+pub(super) fn refill_from_slice<T: Clone>(target: &mut Vec<T>, source: &[T]) {
+    target.truncate(source.len());
+    let kept = target.len();
+    target[..].clone_from_slice(&source[..kept]);
+    target.extend_from_slice(&source[kept..]);
+}
+
 // Field-wise `clone_from`: a host that refills last frame's list in place
 // (`Renderer::rebuild_models`) reuses every copy's strings instead of
 // allocating and freeing thousands of them per frame.
 impl Clone for ModelInstance {
     fn clone(&self) -> Self {
-        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses, lamps } = self;
+        let ModelInstance { model, custom_material, layer_materials, transform, tint, color_adjust, dynamic, depth_order, part_poses, lamps } = self;
         ModelInstance {
             model: model.clone(),
             custom_material: custom_material.clone(),
+            layer_materials: layer_materials.clone(),
             transform: *transform,
             tint: *tint,
             color_adjust: *color_adjust,
@@ -305,16 +335,20 @@ impl Clone for ModelInstance {
         }
     }
     fn clone_from(&mut self, source: &Self) {
-        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses, lamps } = source;
+        let ModelInstance { model, custom_material, layer_materials, transform, tint, color_adjust, dynamic, depth_order, part_poses, lamps } = source;
         self.lamps = *lamps;
         self.model.clone_from(model);
-        self.custom_material.clone_from(custom_material);
+        match (&mut self.custom_material, custom_material) {
+            (Some(dst), Some(src)) => dst.clone_from(src),
+            (dst, src) => *dst = src.clone(),
+        }
+        refill_from_slice(&mut self.layer_materials, layer_materials);
         self.transform = *transform;
         self.tint = *tint;
         self.color_adjust = *color_adjust;
         self.dynamic = *dynamic;
         self.depth_order = *depth_order;
-        self.part_poses.clone_from(part_poses);
+        refill_from_slice(&mut self.part_poses, part_poses);
     }
 }
 
@@ -489,6 +523,29 @@ pub(super) fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
 }
 
 impl ModelInstance {
+    /// The program for a layer. An unnamed layer uses the whole-instance material.
+    pub fn material_of(&self, layer_name: &str) -> Option<&CustomMaterialInstance> {
+        if self.layer_materials.is_empty() {
+            return self.custom_material.as_ref();
+        }
+        if !layer_name.is_empty() {
+            if let Some(entry) = self.layer_materials.iter().find(|entry| entry.layer.as_ref() == layer_name) {
+                return Some(&entry.material);
+            }
+        }
+        self.custom_material.as_ref()
+    }
+
+    pub(super) fn has_custom(&self) -> bool {
+        self.custom_material.is_some() || !self.layer_materials.is_empty()
+    }
+
+    pub(super) fn material_names(&self) -> impl Iterator<Item = &str> {
+        self.custom_material.iter().map(|m| m.name.as_str()).chain(
+            self.layer_materials.iter().filter(|e| !e.layer.is_empty()).map(|e| e.material.name.as_str())
+        )
+    }
+
     /// Explicit authored metre-space attachment. Unlike `on_body`, this
     /// never measures/recentres/fits the mesh: `origin` lands on body origin.
     /// +Z front becomes engine -Z and the full rigid frame carries bank/pitch.
@@ -504,7 +561,7 @@ impl ModelInstance {
         Self {
             model, transform: Mat4f::mul(frame, &local),
             tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
-            dynamic: true, depth_order: 0.0, part_poses: Vec::new(), custom_material: None,
+            dynamic: true, depth_order: 0.0, part_poses: Vec::new(), custom_material: None, layer_materials: Vec::new(),
             lamps: LampSignals::default(),
         }
     }
@@ -570,7 +627,7 @@ impl ModelInstance {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: true,
             depth_order: 0.0,
-            custom_material: None,
+            custom_material: None, layer_materials: Vec::new(),
             part_poses: Vec::new(),
             lamps: LampSignals::default(),
         }

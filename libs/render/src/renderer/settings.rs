@@ -144,6 +144,42 @@ impl Renderer {
         self.grade = grade;
     }
 
+    /// Set the scene clock for every retained pass, including passes allocated on a later draw.
+    pub fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        if time.is_none() && self.scene_time.is_none() { return; }
+        if time < self.scene_time { self.last_post_time = None; }
+        self.scene_time = time;
+        self.gpu_baker.set_scene_time(cx, time);
+        self.clustered.shadows.set_scene_time(cx, time);
+        self.gi.set_scene_time(cx, time);
+        self.trample.set_scene_time(cx, time);
+        if let Some((pass, _)) = &self.vfx.pass { pass.set_own_time(cx, time); }
+        self.ssr.pass.set_scene_time(cx, time);
+        self.volume_fog.pass.set_scene_time(cx, time);
+        self.post.set_scene_time(cx, time);
+    }
+
+    /// Secondary cameras present the same instant as their source.
+    pub fn scene_time(&self) -> Option<f32> { self.scene_time }
+
+    /// Whether lighting, models and the passes that produced the last picture have settled.
+    pub fn scene_settled(&self) -> bool {
+        let bake_done = !self.gpu_baker.has_state() || self.gpu_baker.is_idle();
+        let post_done = !self.hdr_output || (
+            self.ssr.settled()
+            && (!self.volume_fog.params.active() || self.volume_fog.pass.applied().is_some())
+            && ((self.bloom <= 0.0 && !self.auto_exposure) || self.post.draws_ready())
+        );
+        bake_done && post_done && !self.drew_fallback()
+            && !self.gi_wants_frames() && !self.screen_ao_pending() && !self.environment_pending()
+            && self.stream_stats().is_none_or(|s| s.queued == 0 && s.ready == 0)
+    }
+
+    /// Make a host scene or pane pass follow its renderer's clock.
+    pub fn apply_scene_time(&self, cx: &mut Cx, pass: &DrawPass) {
+        pass.set_own_time(cx, self.scene_time);
+    }
+
     /// Record the HDR post chain (reflections, volume fog, bloom + auto-exposure) for this frame.
     /// `scene` is the host's RGBA16F scene target of logical `size`,
     /// `parent` the pass that composites it. Returns the pass the host must
@@ -158,7 +194,14 @@ impl Renderer {
             return ssr_first.or(fog_first);
         }
         let fogged = self.volume_fog.pass.applied().cloned();
-        self.post.run(cx, size, fogged.as_ref().unwrap_or(scene), parent);
+        let source = fogged.as_ref().unwrap_or(scene);
+        let dt = match self.scene_time {
+            Some(now) => self.last_post_time.map_or(0.0, |last| (now - last).max(0.0)),
+            None => self.post.frame_clock_dt(cx),
+        };
+        if self.post.run(cx, size, source, parent, dt) {
+            self.last_post_time = self.scene_time;
+        }
         let post_first = self.post.first_pass_id();
         if let Some(first) = post_first {
             if fog_first.is_some() { self.volume_fog.pass.parent_apply(cx.cx, first); }
@@ -319,6 +362,9 @@ impl Renderer {
     pub fn set_cluster_config(&mut self, config: crate::clustered::ClusterConfig) {
         self.clustered.set_config(config);
     }
+    pub fn cluster_config(&self) -> crate::clustered::ClusterConfig {
+        self.clustered.config()
+    }
     pub fn cluster_stats(&self) -> crate::clustered::ClusterStats {
         if self.clustered_enabled { self.clustered.stats() } else { Default::default() }
     }
@@ -354,18 +400,31 @@ impl Renderer {
         !self.clustered_enabled || self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::OnChange
     }
 
+    /// Whether this renderer uses the baked world atlas for static lighting.
+    pub fn shadows_baked(&self) -> bool {
+        self.world_atlas_required()
+    }
+
     pub(super) fn clear_world_atlas(&mut self) {
         self.gpu_baker.enter_realm();
         // The old CPU sun/probe colours must not survive a mode switch:
         // clustered realtime uses CSM for visibility, not a second sun bake.
         self.bake.enter_realm();
-        self.lightmap = None;
-        self.lm_remaps.clear();
-        self.lm_ground = None;
-        self.lm_top = None;
+        self.clear_delivered_lightmap();
         self.lm_kick_key = None;
         self.lm_kick_sun = None;
         self.shadow_gate = ShadowRebuildGate::default();
+    }
+
+    pub(super) fn clear_delivered_lightmap(&mut self) {
+        self.lightmap = None;
+        self.lm_remaps.clear();
+        self.lm_remap_owners.clear();
+        self.lm_remaps_rev = None;
+        self.lm_remaps_generation = self.lm_remaps_generation.wrapping_add(1);
+        self.copied_lm_remaps_generation = None;
+        self.lm_ground = None;
+        self.lm_top = None;
     }
 
     pub fn gpu_lightmap_mode(&self) -> crate::gpu_lightmap::GpuLightmapMode {
@@ -434,7 +493,9 @@ impl Renderer {
         self.graphics_tier = tier;
         self.impostor_scale = b.impostor_scale;
         self.grass_pixels = b.grass_pixels;
+        self.ssr.gloss_floor = b.reflection_gloss_floor;
         self.terrain_blend_reach = b.terrain_blend_reach;
+        self.relief_steps = b.relief_steps;
         self.trample.set_budget(b.trample);
         self.set_csm_config(b.csm_resolution, b.csm_range);
     }

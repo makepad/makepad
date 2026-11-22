@@ -164,17 +164,22 @@ impl StillAa {
     /// sample then would paint nothing and leave black in the average): no
     /// sample this draw, the host asks again on its next frame.
     pub fn attach(&mut self, cx: &mut Cx2d) -> Option<DrawPassId> {
-        if !self.ensure(cx.cx) || !self.blend_ready(cx.cx) {
+        if !self.ensure(cx.cx) {
             return None;
         }
         let (pass, _) = self.pass.as_ref()?;
+        let write = &self.targets.as_ref()?[self.cur ^ 1];
+        pass.set_color_texture(cx, write, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        if !self.blend_ready(cx.cx, pass.draw_pass_id()) {
+            return None;
+        }
         cx.make_child_pass(pass);
         Some(pass.draw_pass_id())
     }
 
-    fn blend_ready(&self, cx: &Cx) -> bool {
+    fn blend_ready(&self, cx: &Cx, pass: DrawPassId) -> bool {
         let shader = self.draw.as_ref().and_then(|draw| draw.draw_super.draw_vars.draw_shader_id);
-        shader.is_some_and(|shader| cx.draw_shader_ready(shader, true))
+        shader.is_some_and(|shader| cx.draw_shader_ready_in(shader, pass))
     }
 
     fn ensure(&mut self, cx: &mut Cx) -> bool {

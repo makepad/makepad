@@ -67,6 +67,7 @@ script_mod! {
 
         // x: relief metres, y: wet, z: puddle share, w: height quantile.
         splat_relief_on: uniform(0.0)
+        splat_relief_steps: uniform(24.0)
         splat_s0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         splat_s1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         splat_s2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
@@ -597,10 +598,9 @@ script_mod! {
         }
 
         // Linear POM in normalised depth (0 at the top, 1 at the bottom).
-        // A fixed loop bound, 8..24 active steps, then one secant refinement
+        // A fixed loop bound, 1..24 active steps, then one secant refinement
         // between the last two samples. The secant needs no texture read.
-        splat_relief_trace: fn(l: float, wp: vec3, uv: vec2, ray: vec3, uv_ray: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, height: float, nv: float, hex: float) -> float {
-            let steps = ceil(mix(24.0, 8.0, clamp((nv - 0.1391731) / 0.8608269, 0.0, 1.0)))
+        splat_relief_trace: fn(l: float, wp: vec3, uv: vec2, ray: vec3, uv_ray: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, height: float, steps: float, hex: float) -> float {
             var depth = 0.0
             var before_depth = 0.0
             var error = 1.0 - height
@@ -760,28 +760,39 @@ script_mod! {
                     let nv = dot(n, view)
                     // sin(8 degrees)..sin(16 degrees): entirely off below
                     // eight degrees, smoothly restored above it.
-                    let relief_fade = (1.0 - smoothstep(12.0, 20.0, dist)) * smoothstep(0.1391731, 0.2756374, nv)
+                    let outer_fade = (1.0 - smoothstep(12.0, 20.0, dist)) * smoothstep(0.1391731, 0.2756374, nv)
                     let tu = grad_u - n * dot(n, grad_u)
-                    if relief_fade > 0.0 && dot(tu, tu) > 0.00000001 {
+                    if outer_fade > 0.0 && dot(tu, tu) > 0.00000001 {
                         let tangent = normalize(tu)
                         let bitangent = normalize(cross(n, tangent))
                         let view_ts = vec3(dot(view, tangent), dot(view, bitangent), nv)
-                        let depth_metres = surface_param.x * relief_fade
-                        let ray = (tangent * view_ts.x + bitangent * view_ts.y) * (depth_metres / nv)
-                        let uv_ray = vec2(dot(ray, grad_u), dot(ray, grad_v))
-                        let hit = self.splat_relief_trace(l, wp, uv, ray, uv_ray, bw, dx, dy, du1, du2, tex.w, nv, hex)
-                        let hit_wp = wp - ray * hit
-                        uv = uv - uv_ray * hit
-                        tex = self.splat_relief_read(l, hit_wp, uv, bw, dx, dy, du1, du2, hex, 1.0)
-                        if dist < 8.0 {
-                            let light = normalize(self.light_dir)
-                            let nl = dot(n, light)
-                            if nl > 0.0 {
-                                let light_ts = vec3(dot(light, tangent), dot(light, bitangent), nl)
-                                let sun_ray = (tangent * light_ts.x + bitangent * light_ts.y) * (depth_metres / max(nl, 0.0001))
-                                let sun_uv = vec2(dot(sun_ray, grad_u), dot(sun_ray, grad_v))
-                                let visibility = self.splat_relief_shadow(l, hit_wp, uv, sun_ray, sun_uv, hit, bw, dx, dy, du1, du2, hex)
-                                sun_visibility = mix(1.0, visibility, relief_fade * (1.0 - smoothstep(6.0, 8.0, dist)))
+                        let full_depth_metres = surface_param.x * outer_fade
+                        let full_ray = (tangent * view_ts.x + bitangent * view_ts.y) * (full_depth_metres / nv)
+                        let full_uv_ray = vec2(dot(full_ray, grad_u), dot(full_ray, grad_v))
+                        let pixels = length(full_uv_ray) / max(max(length(du1), length(du2)), 0.00000001)
+                        let pixel_fade = smoothstep(0.5, 1.5, pixels)
+                        let relief_fade = outer_fade * pixel_fade
+                        if relief_fade > 0.0 {
+                            let depth_metres = surface_param.x * relief_fade
+                            let ray = full_ray * pixel_fade
+                            let uv_ray = full_uv_ray * pixel_fade
+                            let faded_pixels = pixels * pixel_fade
+                            let angle_steps = ceil(mix(24.0, 8.0, clamp((nv - 0.1391731) / 0.8608269, 0.0, 1.0)))
+                            let steps = clamp(min(ceil(faded_pixels), angle_steps), 1.0, self.splat_relief_steps)
+                            let hit = self.splat_relief_trace(l, wp, uv, ray, uv_ray, bw, dx, dy, du1, du2, tex.w, steps, hex)
+                            let hit_wp = wp - ray * hit
+                            uv = uv - uv_ray * hit
+                            tex = self.splat_relief_read(l, hit_wp, uv, bw, dx, dy, du1, du2, hex, 1.0)
+                            if dist < 8.0 {
+                                let light = normalize(self.light_dir)
+                                let nl = dot(n, light)
+                                if nl > 0.0 {
+                                    let light_ts = vec3(dot(light, tangent), dot(light, bitangent), nl)
+                                    let sun_ray = (tangent * light_ts.x + bitangent * light_ts.y) * (depth_metres / max(nl, 0.0001))
+                                    let sun_uv = vec2(dot(sun_ray, grad_u), dot(sun_ray, grad_v))
+                                    let visibility = self.splat_relief_shadow(l, hit_wp, uv, sun_ray, sun_uv, hit, bw, dx, dy, du1, du2, hex)
+                                    sun_visibility = mix(1.0, visibility, relief_fade * (1.0 - smoothstep(6.0, 8.0, dist)))
+                                }
                             }
                         }
                     }

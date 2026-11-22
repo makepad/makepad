@@ -37,9 +37,7 @@ pub enum ShadowVariant {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariantPlan {
     pub builtins: Vec<Builtin>,
-    /// The colour pass can cut pixels (a surface hook's alpha, or Mask). A
-    /// program that cannot draws through the lane's discard-free variant
-    /// where the base offers one.
+    /// The program declares a mask, so its colour pass can cut pixels by alpha.
     pub can_discard: bool,
     pub shadow: ShadowVariant,
 }
@@ -64,7 +62,6 @@ pub fn plan(desc: &MaterialDesc, hooks: &HookSet) -> Result<VariantPlan, Materia
         }
     }
     let mask = desc.blend.can_discard();
-    let can_discard = mask || hooks.has(Hook::Surface);
     let shadow = if !desc.blend.is_opaque() {
         ShadowVariant::None
     } else if hooks.has(Hook::Vertex) || mask {
@@ -72,7 +69,7 @@ pub fn plan(desc: &MaterialDesc, hooks: &HookSet) -> Result<VariantPlan, Materia
     } else {
         ShadowVariant::Stock
     };
-    Ok(VariantPlan { builtins, can_discard, shadow })
+    Ok(VariantPlan { builtins, can_discard: mask, shadow })
 }
 
 #[cfg(test)]
@@ -100,8 +97,11 @@ mod tests {
     fn displaced_and_masked_materials_derive_a_caster() {
         let p = plan(&MaterialDesc::default(), &hooks(&[Hook::Vertex])).unwrap();
         assert_eq!(p.shadow, ShadowVariant::Derived { vertex: true, mask: false });
+        let surface = hooks(&[Hook::Surface]);
+        let opaque = plan(&MaterialDesc::default(), &surface).unwrap();
+        assert!(!opaque.can_discard, "an opaque surface hook cannot cut pixels");
         let masked = MaterialDesc { blend: Blend::Mask { cutoff: 0.3 }, ..Default::default() };
-        let p = plan(&masked, &hooks(&[Hook::Surface])).unwrap();
+        let p = plan(&masked, &surface).unwrap();
         assert_eq!(p.shadow, ShadowVariant::Derived { vertex: false, mask: true });
         assert!(p.can_discard);
         let over = MaterialDesc { blend: Blend::Over, ..Default::default() };

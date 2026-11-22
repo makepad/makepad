@@ -52,14 +52,7 @@ script_mod! {
         lm_rect: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         lm_world: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         lm_top_decode: uniform(vec4(0.0, 8.0, 0.0, 0.0))
-        // Realtime cascaded shadow maps (shadow_csm.rs): 3 sun-depth tiles
-        // side by side in one Rf32 strip. csm_p = (tier on, one tile's
-        // inverse resolution, cascade-0 texel_world, cascade-1 texel_world);
-        // csm_r*N are cascade N's world->map
-        // rows; csm_bias.xyz = z01 depth bias, .w = cascade-2 texel_world.
-        // When the tier
-        // is on, `csm_vis` REPLACES every baked sun-visibility path — one
-        // receive path for statics, dynamics and characters alike.
+        // Sun cascade depth and receiver uniforms (shaders/csm.rs).
         csm_map: texture_depth(float),
 
         ..mod.draw.SunCascades,
@@ -243,7 +236,7 @@ script_mod! {
             // up-ness): the field stores what lands on top surfaces at that
             // xz — walls would smear it vertically. Dynamics sample it too,
             // deliberately: a crate rolling through a house's shadow should
-            // darken, and this is the only shadow-receiving dynamics get.
+            // darken.
             let lm = self.light_map.sample(self.v_lm_uv)
             let has_lm = step(0.000001, self.lm_rect.z)
                 * clamp(self.v_up * 4.0, 0.0, 1.0) * self.v_lm_in
@@ -255,13 +248,9 @@ script_mod! {
             let top_h = self.lm_top_decode.x
                 + self.top_map.sample(self.v_lm_uv).x * self.lm_top_decode.y
             let occ = 1.0 - smoothstep(top_h - 0.15, top_h + 0.15, self.v_dl_pos.y)
-            // Realtime: the cascades replace the whole baked ground path.
             let ndl_c = max(dot(normalize(self.v_dl_nrm), normalize(self.light_dir)), 0.0)
-            let sun_vis = mix(
-                mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm * occ),
-                self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_c),
-                self.csm_p.x
-            )
+            let field = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm * occ)
+            let sun_vis = self.csm_ground_vis(field, self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_c))
             // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
             let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
             let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)

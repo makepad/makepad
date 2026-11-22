@@ -398,6 +398,36 @@ script_mod! {
             return dl
         }
 
+        model_cascade: fn() -> float {
+            return self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
+        }
+
+        // RGB is baked lamp light, A is sun visibility. A chart lives on
+        // the instance, so copies in the same draw can use different sun sources.
+        model_lightmap: fn() -> vec4 {
+            let has_lm = step(0.000001, self.lm_rect.z)
+            let csm_on = self.csm_p.x >= 0.5
+            let settled = self.csm_p.x >= 1.5
+            var lm = vec4(0.0, 0.0, 0.0, 0.0)
+            if has_lm > 0.5 && (!csm_on || self.cluster_on < 0.5 || settled) {
+                lm = self.light_map.sample(self.v_lm_uv)
+            }
+            var sun = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
+            if csm_on && (!settled || has_lm < 0.5) {
+                sun = self.model_cascade()
+            } else if !csm_on && self.v_lmg.z > 0.0 {
+                // With cascades off, a dynamic copy reads the ground shadow
+                // only below its blocker. Charted statics have v_lmg.z = 0.
+                let lmg = self.light_map.sample(self.v_lmg.xy)
+                let top_g = self.lm_top_decode.x
+                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
+                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
+                sun = sun * mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
+            }
+            // 0.9 = lightmap::LM_LAMP_CEIL, the atlas RGB decode.
+            return vec4(lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on), sun)
+        }
+
         // Sun visibility with a lamp pool's fill of its own shadow folded in.
         // See lightmap::lamp_shadow_fill for the law and why it cannot blow
         // anything out; 0.180 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
@@ -789,50 +819,16 @@ script_mod! {
                 let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
                 sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
             }
-            // Baked light: A gates the analytic sun through a smoothstep over
-            // the signed-distance field — the penumbra width is the decode
-            // WINDOW ([`LM_SUN_SOFT`]), a runtime knob, not a bake product.
-            // RGB adds the lamps (x2: half range stored for overbright).
-            //
-            // Realtime cascades with clustered lamps use none of it: the
-            // cascades replace both sun gates below (mixed in by csm_p.x = 1)
-            // and the atlas lamps are multiplied out by cluster_on, so the
-            // three reads are skipped (a uniform branch).
-            var lm = vec4(0.0, 0.0, 0.0, 0.0)
-            var sun_vis_g = 1.0
-            if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
-                lm = self.light_map.sample(self.v_lm_uv)
-                // Dynamics gate their sun through the GROUND region instead
-                // (statics have v_lmg.z = 0, dynamics have lm_rect = 0, so the
-                // two gates never both engage). The shadow-top plane rejects
-                // the ground's shadow for vertices ABOVE the blocker along the
-                // sun ray: a fence rail shades shins, never the head over it.
-                let lmg = self.light_map.sample(self.v_lmg.xy)
-                let top_g = self.lm_top_decode.x
-                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-                sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
-            }
-            let has_lm = step(0.000001, self.lm_rect.z)
-            let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
-            // Realtime: the cascades replace BOTH baked gates (own chart
-            // and ground projection) — one receive path for every family.
-            let sun_all = mix(
-                sun_vis * sun_vis_g,
-                self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
-                self.csm_p.x
-            )
-            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
+            let lm = self.model_lightmap()
             // Local light — baked pools plus the per-frame slots — reaches
             // this fragment WITHOUT the sun's shadow term, because a shadow
             // is the absence of SUN and of nothing else. Over its bright core
             // a pool additionally fills that shadow back in, so a lamp drowns
             // out the streak its own pole throws across its own pool:
             // lightmap::lamp_shadow_fill.
-            var local = lamps + self.v_dl
+            var local = lm.xyz + self.v_dl
             if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
-            let sun_lit = self.sun_filled(sun_all, local)
+            let sun_lit = self.sun_filled(lm.w, local)
             let analytic = self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * (ao * sao)
                 + self.v_direct * (ao_direct * sun_lit)
                 + local * ao_direct
@@ -890,7 +886,7 @@ script_mod! {
             // so a faint lamp or a misplaced shadow reads instantly.
             if self.lm_debug > 0.5 {
                 return vec4(
-                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_lit) + lamps,
+                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_lit) + lm.xyz,
                     1.0
                 )
             }

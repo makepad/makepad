@@ -270,16 +270,15 @@ fn gpu_guard_the_scatter_fills_the_field() {
     // without rendering extra frames or depending on the worker's wall time.
     eprintln!("GI guard: starting voxels");
     render_frame(&mut session, &scene, &next, Frame::StartVoxels);
-    // One voxel job and the four shaders created by ensure(). Their wakes
-    // can arrive in either order; no extra scene frames are needed.
-    let voxel_turns = 1 + STAGE_NAMES.len();
+    // The job's wake, the four shaders' wakes from ensure() and any other
+    // wake the HAL delivers meanwhile arrive in any order, so serve turns
+    // until the job has finished; no extra scene frames are needed. The HAL
+    // ending before the job finishes fails the guard.
     let voxels_done = || scene.borrow().as_ref().unwrap().gi.voxel_job.as_ref()
         .expect("the first frame launched voxelization").is_finished();
-    for _ in 0..voxel_turns {
-        if voxels_done() { break; }
-        assert!(session.cx.hal_session_turn(u64::MAX, false), "HAL ended during voxelization");
+    while !voxels_done() {
+        assert!(session.cx.hal_session_turn(u64::MAX, false), "HAL ended before the voxel job finished");
     }
-    assert!(voxels_done(), "voxel job unfinished after {voxel_turns} completion turns");
     eprintln!("GI guard: voxels done");
     // 32 / 32 = one sweep frame. No prior GPU batch exists to change the
     // controller's initial budget. Wait for its LAST scatter to finish.

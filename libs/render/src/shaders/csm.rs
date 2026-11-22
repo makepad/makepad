@@ -2,16 +2,15 @@
 //!
 //! Hosts declare `csm_map: texture_depth(float)` themselves, at the texture
 //! slot their binding ABI already fixed, and spread this for the uniforms and
-//! the filter. Realtime cascaded shadow maps (shadow_csm.rs): 4 sun-depth
+//! the filter. Cascaded shadow maps (shadow_csm.rs): 4 sun-depth
 //! tiles in a 2x2 grid of one sampled D32 target, read with hardware compare.
-//! csm_p = (tier on, one tile's inverse resolution, filter seed, the world
-//! texel grid's period: shadow_csm::CSM_CELL_PERIOD); csm_r*N are
+//! `csm_p.x` selects off (0), realtime (1) or settled (2). Its other components
+//! hold the inverse tile resolution, filter seed and world texel grid period
+//! (`shadow_csm::CSM_CELL_PERIOD`). csm_r*N are
 //! cascade N's world->map rows; csm_da/db map a z01 reference to stored
 //! depth per cascade; csm_zw = z01 per world unit; csm_texel = texel size in
 //! world units; csm_gx/csm_gy = each tile's place on its world texel grid
-//! (`CsmCascade::grid`). When the tier is on, `csm_vis` REPLACES every baked
-//! sun-visibility path — one receive path for statics, dynamics and
-//! characters alike.
+//! (`CsmCascade::grid`).
 
 use super::*;
 
@@ -178,6 +177,14 @@ script_mod! {
                 s = s + self.csm_tap(u + d.x * cs.x + d.y * sn.x, v + d.x * cs.y + d.y * sn.y, ci, depth)
             }
             return s * 0.07692308
+        }
+
+        // The ground field carries static shadows beyond the rings and under
+        // cut-outs. Where both see the same caster, take its shadow only once.
+        csm_ground_vis: fn(field: float, cascade: float) -> float {
+            if self.csm_p.x >= 1.5 { return min(field, cascade) }
+            if self.csm_p.x >= 0.5 { return cascade }
+            return field
         }
 
         // Sun visibility: the tightest cascade that contains the point in

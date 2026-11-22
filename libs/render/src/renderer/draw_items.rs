@@ -1,6 +1,37 @@
 //! Per-frame draw payloads: GPU-skinned characters, SDF shadow quads, layer materials.
 
 use super::*;
+use makepad_scene::Blend;
+use std::sync::Arc;
+
+/// An owned draw value or a shared immutable snapshot of the same data.
+pub enum SkinnedDrawData<T: ?Sized + ToOwned> {
+    Owned(T::Owned),
+    Shared(Arc<T>),
+}
+
+impl<T: ?Sized + ToOwned> Clone for SkinnedDrawData<T>
+where
+    T::Owned: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Owned(value) => Self::Owned(value.clone()),
+            Self::Shared(value) => Self::Shared(value.clone()),
+        }
+    }
+}
+
+impl<T: ?Sized + ToOwned> std::ops::Deref for SkinnedDrawData<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        match self {
+            Self::Owned(value) => std::borrow::Borrow::borrow(value),
+            Self::Shared(value) => value,
+        }
+    }
+}
 
 /// One GPU-skinned character instance for [`Renderer::draw_scene_full`].
 /// The per-frame payload is the joint `palette`; the rig's rest mesh is
@@ -23,7 +54,7 @@ pub struct SkinnedDraw {
     /// does not fail — it renders, wrongly, looking like a shading bug.
     pub texture: usize,
     /// This frame's joint palette ([`crate::skin::SkinnedModel::palette`]).
-    pub palette: Vec<Mat4f>,
+    pub palette: SkinnedDrawData<[Mat4f]>,
     /// Posed model-space bounds for frustum culling
     /// ([`crate::skin::SkinnedModel::posed_bounds`]) — no posed vertices
     /// exist on the CPU to measure any more.
@@ -31,7 +62,7 @@ pub struct SkinnedDraw {
     /// Walk-cycle phase, 0..1 through the clip — picks the pose-phase atlas
     /// row pair so the shadow breathes with the stride.
     pub gait_phase: f32,
-    pub morph_clip:Option<String>,
+    pub morph_clip: Option<SkinnedDrawData<str>>,
     pub morph_time:f32,
     pub morph_looping:bool,
     /// 0 = idle stance, 1 = full walk; mixes the idle row toward the
@@ -55,7 +86,7 @@ impl SkinnedDraw {
             tint: vec4(1.0, 1.0, 1.0, 1.0),
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             texture: 0,
-            palette: Vec::new(),
+            palette: SkinnedDrawData::Owned(Vec::new()),
             bounds: None,
             gait_phase: 0.0,
             morph_clip:None,morph_time:0.0,morph_looping:true,
@@ -64,7 +95,13 @@ impl SkinnedDraw {
         }
     }
 
-    pub fn with_morph_time(mut self,clip:Option<String>,time:f32,looping:bool)->Self{self.morph_clip=clip;self.morph_time=time;self.morph_looping=looping;self}
+    pub fn with_morph_time(mut self, clip: Option<String>, time: f32, looping: bool) -> Self {
+        self.morph_clip = clip.map(SkinnedDrawData::Owned);
+        self.morph_time = time;
+        self.morph_looping = looping;
+        self
+    }
+
     pub fn with_tint(mut self, tint: Vec4f) -> Self {
         self.tint = tint;
         self
@@ -82,7 +119,18 @@ impl SkinnedDraw {
     }
 
     pub fn with_palette(mut self, palette: Vec<Mat4f>) -> Self {
-        self.palette = palette;
+        self.palette = SkinnedDrawData::Owned(palette);
+        self
+    }
+
+    /// Submit a retained palette and clip name, including to additional camera views.
+    pub fn with_shared_pose(
+        mut self, palette: Arc<[Mat4f]>, clip: Arc<str>, time: f32, looping: bool,
+    ) -> Self {
+        self.palette = SkinnedDrawData::Shared(palette);
+        self.morph_clip = Some(SkinnedDrawData::Shared(clip));
+        self.morph_time = time;
+        self.morph_looping = looping;
         self
     }
 
@@ -350,6 +398,7 @@ pub(super) fn sdf_quad_ground(anchor: Vec3f, receiver: &Receiver, gx: f32, gz: f
 /// diffuse lobe and render black.
 #[derive(Clone)]
 pub(super) struct LayerMaterial {
+    pub(super) name: std::sync::Arc<str>,
     pub(super) surface: Option<crate::material_surface::UploadedSurface>,
     pub(super) metallic: f32,
     pub(super) roughness: f32,
@@ -473,6 +522,10 @@ impl ModelDraw<'_> {
         base.draw_vars.set_uniform(cx, live_id!(msdf_ctl), &ctl);
         base.draw_vars.set_uniform(cx, live_id!(msdf_plate_cells), &cells);
         base.draw_vars.set_uniform(cx, live_id!(msdf_ink_alpha), &[ink_alpha]);
+        let program_blend = match self {
+            ModelDraw::Custom(_, material) => material.blend,
+            _ => Blend::Opaque,
+        };
         if let Some(d) = self.pbr() {
             let surface_on = if m.surface.is_some() { 1.0 } else { 0.0 };
             let (mut material_alpha, mut alpha_mode, mut alpha_cutoff) = (1.0f32, 0.0f32, 0.5f32);
@@ -492,7 +545,25 @@ impl ModelDraw<'_> {
                 emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
             }
+            // An opaque layer's texture alpha is not coverage: a program that
+            // masks or blends over it starts from alpha 1, not from that data.
+            let tex_alpha = if m.surface.as_ref().is_some_and(|s| s.definition.alpha_mode == 0) { 0.0 } else { 1.0 };
             let vars = &mut d.skinned.draw_vars;
+            // An opaque layer leaves the program's mask or blending in effect.
+            if alpha_mode == 0.0 {
+                match program_blend {
+                    Blend::Mask { cutoff } => {
+                        alpha_mode = 1.0;
+                        alpha_cutoff = cutoff;
+                    }
+                    Blend::Over => {
+                        alpha_mode = 2.0;
+                        vars.options.alpha_blend = true;
+                        vars.options.depth_write = false;
+                    }
+                    _ => {}
+                }
+            }
             vars.set_uniform(cx, live_id!(metallic), &[m.metallic]);
             vars.set_uniform(cx, live_id!(roughness), &[m.roughness]);
             vars.set_uniform(cx, live_id!(orm_on), &[if m.orm_on { 1.0 } else { 0.0 }]);
@@ -500,6 +571,7 @@ impl ModelDraw<'_> {
             vars.set_uniform(cx, live_id!(material_alpha), &[material_alpha]);
             vars.set_uniform(cx, live_id!(alpha_mode), &[alpha_mode]);
             vars.set_uniform(cx, live_id!(alpha_cutoff), &[alpha_cutoff]);
+            vars.set_uniform(cx, live_id!(tex_alpha), &[tex_alpha]);
             vars.set_uniform(cx, live_id!(normal_scale), &[normal_scale]);
             vars.set_uniform(cx, live_id!(occlusion_strength), &[occlusion_strength]);
             vars.set_uniform(cx, live_id!(emissive), &[emissive.x, emissive.y, emissive.z]);

@@ -2,6 +2,117 @@
 
 use super::*;
 use super::draw_models::LayerPhase;
+use super::model_instance::refill_from_slice;
+
+pub(super) struct StaticMaterialSource {
+    caster: usize,
+    instance: usize,
+    /// An instance-wide source uses the empty lookup name. Keep the mesh layer for later overrides.
+    instance_wide: bool,
+    layer: std::sync::Arc<str>,
+    program: String,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ResolvedCaster<'a> {
+    name: &'a String,
+    shader: DrawShaderId,
+    params: Vec4f,
+    cutoff: f32,
+    bounds_pad: f32,
+}
+
+impl ResolvedCaster<'_> {
+    pub(super) fn material(self, texture: &Texture) -> crate::gpu_lightmap::MoverMaterial {
+        crate::gpu_lightmap::MoverMaterial {
+            shader: self.shader, params: self.params, cutoff: self.cutoff, texture: texture.clone(),
+        }
+    }
+}
+
+/// Program names in registry order and the phase in which each was selected.
+#[derive(Default)]
+pub(super) struct ProgramWalk {
+    entries: Vec<(String, Option<LayerPhase>)>,
+    walking: usize,
+}
+
+impl ProgramWalk {
+    pub(super) fn begin(
+        &mut self, programs: &std::collections::BTreeMap<String, Box<CustomMaterial>>,
+        instances: &[ModelInstance], stock_ibl_on: bool,
+    ) {
+        for (index, (name, material)) in programs.iter().enumerate() {
+            let selected = (stock_ibl_on && name == stock_ibl::STOCK_IBL_MATERIAL)
+                || instances.iter().any(|inst| inst.material_names().any(|program| program == name.as_str()));
+            // A draw can change its blend state as it binds layers. Decide the order
+            // before drawing any of them, and keep the stock IBL lane in the opaque group.
+            let order = selected.then(|| {
+                if name != stock_ibl::STOCK_IBL_MATERIAL && material.draw.draw_vars.options.alpha_blend {
+                    LayerPhase::Blended
+                } else {
+                    LayerPhase::Opaque
+                }
+            });
+            if let Some((key, phase)) = self.entries.get_mut(index) {
+                if key.as_str() != name.as_str() {
+                    key.clone_from(name);
+                }
+                *phase = order;
+            } else {
+                self.entries.push((name.clone(), order));
+            }
+        }
+        self.walking = programs.len();
+    }
+
+    pub(super) fn phase(&self, index: usize) -> Option<LayerPhase> {
+        self.entries[index].1
+    }
+
+    pub(super) fn end(&mut self) {
+        self.walking = 0;
+    }
+
+    /// During the opaque walk the draws are borrowed from the detached registry.
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.entries[..self.walking].binary_search_by(|(key, _)| key.as_str().cmp(name)).is_ok()
+    }
+}
+
+impl crate::gpu_lightmap::StaticCasterBindings {
+    /// Inspect only the submitted part. A retained prefix costs no comparisons, and
+    /// a repeated submission reuses its records without hashing or allocating.
+    fn update(&mut self, instances: &[ModelInstance], start: usize, model_index: impl Fn(&str) -> Option<usize>) -> bool {
+        if !self.tracking { return false; }
+        let mut next = self.copies.partition_point(|entry| entry.slot < start);
+        let mut changed = false;
+        for (slot, inst) in instances.iter().enumerate().skip(start).filter(|(_, m)| !m.dynamic && m.has_custom()) {
+            if let Some(copy) = self.copies.get_mut(next) {
+                if copy.slot != slot {
+                    copy.slot = slot;
+                    copy.model = model_index(&inst.model);
+                    changed = true;
+                }
+                if copy.material != inst.custom_material || copy.layers != inst.layer_materials {
+                    copy.material.clone_from(&inst.custom_material);
+                    copy.layers.clone_from(&inst.layer_materials);
+                    changed = true;
+                }
+            } else {
+                self.copies.push(crate::gpu_lightmap::SubmittedCasterBinding {
+                    slot, model: model_index(&inst.model),
+                    material: inst.custom_material.clone(), layers: inst.layer_materials.clone(),
+                });
+                changed = true;
+            }
+            next += 1;
+        }
+        changed |= next != self.copies.len();
+        self.copies.truncate(next);
+        changed
+    }
+}
 
 impl Renderer {
     /// Begin rendering a different realm into this view.
@@ -39,6 +150,7 @@ impl Renderer {
         self.placed_models.clear();
         self.placed_prefix = None;
         self.csm_static_casters.clear();
+        self.csm_material_sources.clear();
         self.csm_static_blocks.clear();
         // The grass stays: the host replaces or removes it (set_grass), so a
         // level re-evaluated in place keeps drawing its field instead of
@@ -61,10 +173,7 @@ impl Renderer {
         self.sky_hour = None;
         self.sky_clock = false;
 
-        self.lightmap = None;
-        self.lm_remaps.clear();
-        self.lm_ground = None;
-        self.lm_top = None;
+        self.clear_delivered_lightmap();
         self.gpu_baker.enter_realm();
         self.csm_scene_bounds = None;
         self.lm_lights.clear();
@@ -106,6 +215,23 @@ impl Renderer {
         // same cross-realm numeric-alias bug.
         self.models_rev = self.models_rev.wrapping_add(1);
         self.bake.enter_realm();
+    }
+
+    /// Begin a revision of the current realm. Keep its baked static lighting
+    /// on screen until the revised realm's first bake delivers. A placed copy
+    /// keeps its atlas region when its chart and transform still match.
+    pub fn enter_revised_realm(&mut self) {
+        let atlas = self.lightmap.take();
+        let remaps = std::mem::take(&mut self.lm_remaps);
+        let owners = std::mem::take(&mut self.lm_remap_owners);
+        let ground = self.lm_ground.take();
+        let top = self.lm_top.take();
+        self.enter_realm();
+        self.lightmap = atlas;
+        self.lm_remaps = remaps;
+        self.lm_remap_owners = owners;
+        self.lm_ground = ground;
+        self.lm_top = top;
     }
 
     /// How this device projects the world. Changing it is free — the stage
@@ -354,6 +480,103 @@ impl Renderer {
         StaticModel::from_aomesh(&std::fs::read(path).ok()?)
     }
 
+    pub(super) fn caster_for<'a>(
+        programs: &'a std::collections::BTreeMap<String, Box<CustomMaterial>>,
+        binding: &CustomMaterialInstance,
+    ) -> Option<ResolvedCaster<'a>> {
+        let (name, program) = programs.get_key_value(&binding.name)?;
+        Some(ResolvedCaster {
+            name, shader: program.shadow?, params: binding.params, cutoff: program.cutoff, bounds_pad: program.bounds_pad,
+        })
+    }
+
+    /// Append a static copy's caster layers. Cascades track their material sources and
+    /// displacement bounds. The atlas keeps the first layer and any additional derived
+    /// casters on the full-detail model. Far stand-ins serve the outer cascades only.
+    pub(super) fn push_static_caster_layers(
+        programs: &std::collections::BTreeMap<String, Box<CustomMaterial>>,
+        model: &LoadedModel,
+        inst: &ModelInstance,
+        bounds: (Vec3f, Vec3f),
+        out: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>,
+        mut sources: Option<(usize, &mut Vec<StaticMaterialSource>)>,
+    ) {
+        use crate::gpu_lightmap::{CasterBand, GpuBakeMesh};
+        let cascades = sources.is_some();
+        let layers = || std::iter::once((model.geometry.as_ref(), &model.texture, &model.material))
+            .chain(model.extra_draws.iter().map(|(g, t, _, _, m)| (g.as_ref(), t, m)));
+        let stand_in = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+        let has_stand_in = cascades && layers().any(|(_, _, m)| stand_in(m));
+        let resolve = |binding: &CustomMaterialInstance| {
+            let caster = Self::caster_for(programs, binding)?;
+            let bounds = if cascades && caster.bounds_pad > 0.0 {
+                let pad = Vec3f::all(caster.bounds_pad);
+                let (lo, hi) = crate::lightmap::world_bounds(&inst.transform, (model.min - pad, model.max + pad));
+                (Vec3f::min_componentwise(bounds.0, lo), Vec3f::max_componentwise(bounds.1, hi))
+            } else {
+                bounds
+            };
+            Some((caster, bounds))
+        };
+        let shared = inst.layer_materials.is_empty().then(|| inst.material_of("").and_then(resolve));
+        for (index, (geometry, texture, layer)) in layers().enumerate() {
+            let caster = shared.unwrap_or_else(|| inst.material_of(&layer.name).and_then(resolve));
+            if !cascades && index != 0 && (caster.is_none() || stand_in(layer)) { continue; }
+            let (material, (min, max)) = match caster {
+                Some((caster, bounds)) => {
+                    if let Some((instance, records)) = &mut sources {
+                        records.push(StaticMaterialSource {
+                            caster: out.len(), instance: *instance, instance_wide: shared.is_some(),
+                            layer: layer.name.clone(), program: caster.name.clone(),
+                        });
+                    }
+                    (Some(caster.material(texture)), bounds)
+                }
+                None => (None, bounds),
+            };
+            let surface = layer.surface.as_ref().filter(|_| cascades);
+            out.push(GpuBakeMesh {
+                geometry: geometry.geometry_id(), transform: inst.transform, min, max, material,
+                band: if !has_stand_in { CasterBand::All } else if stand_in(layer) { CasterBand::Far } else { CasterBand::Near },
+                cutout: surface.is_some_and(|s| s.definition.alpha_mode == 1).then(|| texture.clone()),
+                msdf: surface.and_then(|s| s.definition.msdf.map(|text| (text, s.definition.base_alpha, inst.color_adjust.w))),
+            });
+            if !cascades && matches!(shared, Some(None)) { break; }
+        }
+    }
+
+    /// Resolve the static material inputs when models or programs are submitted. Keep
+    /// the binding layout separate so editing four parameters reuses the cascade blocks.
+    fn static_caster_keys(&self) -> (u64, u64) {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut layout = DefaultHasher::new();
+        let mut values = DefaultHasher::new();
+        let mut bound = false;
+        for copy in &self.gpu_baker.caster_bindings.copies {
+            let inst = &self.placed_models[copy.slot];
+            let Some(index) = copy.model else { continue };
+            let model = &self.static_models[index].1;
+            if model.morph.is_some() { continue; }
+            let mut record = |layer: Option<usize>, binding: Option<&CustomMaterialInstance>| {
+                if let Some(caster) = binding.and_then(|b| Self::caster_for(&self.custom_draws, b)) {
+                    bound = true;
+                    (copy.slot, layer, caster.name, caster.shader.index, caster.cutoff.to_bits()).hash(&mut layout);
+                    let p = caster.params;
+                    [p.x, p.y, p.z, p.w].map(f32::to_bits).hash(&mut values);
+                }
+            };
+            if inst.layer_materials.is_empty() {
+                record(None, inst.material_of(""));
+            } else {
+                let layers = std::iter::once(&model.material).chain(model.extra_draws.iter().map(|draw| &draw.4));
+                for (i, layer) in layers.enumerate() {
+                    record(Some(i), inst.material_of(&layer.name));
+                }
+            }
+        }
+        if bound { (layout.finish(), (layout.finish() ^ values.finish()).max(1)) } else { (0, 0) }
+    }
+
     /// Rebuild the static half of Realtime's CSM caster list.
     ///
     /// With a world atlas, charted models already become `BakeState` meshes;
@@ -364,18 +587,20 @@ impl Renderer {
     pub(super) fn rebuild_csm_static_casters(&mut self) {
         self.gpu_baker.csm_casters_changed();
         self.csm_static_casters.clear();
+        self.csm_material_sources.clear();
         // First entry per id, as the linear find it replaces (a forest is
         // thousands of copies of a few models; every model install rebuilds).
         let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(self.static_models.len());
         for (i, (id, _)) in self.static_models.iter().enumerate() {
             by_id.entry(id.as_str()).or_insert(i);
         }
-        for inst in self.placed_models.iter().filter(|instance| !instance.dynamic) {
+        for (instance, inst) in self.placed_models.iter().enumerate().filter(|(_, inst)| !inst.dynamic) {
             let Some((_, model)) = by_id.get(inst.model.as_str()).map(|&i| &self.static_models[i]) else {
                 continue;
             };
             if model.morph.is_some(){continue;}
             if model.lm_source.is_some() && self.world_atlas_required() {
+                // This copy casts through its region mesh in the realized atlas.
                 continue;
             }
             let (mut min, mut max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
@@ -392,28 +617,10 @@ impl Renderer {
                 min = vec3f(min.x.min(lo.x), min.y.min(lo.y), min.z.min(lo.z));
                 max = vec3f(max.x.max(hi.x), max.y.max(hi.y), max.z.max(hi.z));
             }
-            // A model with a far stand-in casts its own layers into the near
-            // cascade and the stand-in into the others
-            // (gpu_lightmap::CasterBand). A masked layer (leaf cards, the
-            // stand-in) casts through its texture's alpha.
-            let stand_in = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
-            let masked = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.alpha_mode == 1);
-            let layers = || std::iter::once((model.geometry.as_ref(), &model.texture, &model.material))
-                .chain(model.extra_draws.iter().map(|(geometry, texture, _, _, m)| (geometry.as_ref(), texture, m)));
-            let has_stand_in = layers().any(|(_, _, m)| stand_in(m));
-            for (geometry, texture, material) in layers() {
-                use crate::gpu_lightmap::CasterBand;
-                let band = if !has_stand_in { CasterBand::All } else if stand_in(material) { CasterBand::Far } else { CasterBand::Near };
-                self.csm_static_casters.push(crate::gpu_lightmap::GpuBakeMesh {
-                    geometry: geometry.geometry_id(),
-                    transform: inst.transform,
-                    min,
-                    max,
-                    cutout: masked(material).then(|| texture.clone()),
-                    msdf: material.surface.as_ref().and_then(|s|s.definition.msdf.map(|text|(text, s.definition.base_alpha, inst.color_adjust.w))),
-                    band,
-                });
-            }
+            Self::push_static_caster_layers(
+                &self.custom_draws, model, inst, (min, max), &mut self.csm_static_casters,
+                Some((instance, &mut self.csm_material_sources)),
+            );
         }
         // Equal geometry adjacent, opaque first: a cascade then appends a
         // forest's copies of one layer into ONE instanced draw instead of
@@ -434,10 +641,32 @@ impl Renderer {
             };
             spread(c.x) | spread(c.z) << 1
         };
-        // Keys once per caster (a lookup per comparison was seconds of a
-        // city's load: every model install rebuilds this list).
-        self.csm_static_casters.sort_by_cached_key(|m| (m.cutout.is_some(), first[&m.geometry], cell(m)));
+        // Cache keys before comparing (a lookup per comparison was seconds of a city's load).
+        let key = |m: &crate::gpu_lightmap::GpuBakeMesh| {
+            (m.cutout.is_some() || m.material.is_some(), first[&m.geometry], cell(m))
+        };
+        // Both sorts are stable, so even equal keys keep their sources in caster order.
+        self.csm_material_sources.sort_by_cached_key(|s| key(&self.csm_static_casters[s.caster]));
+        self.csm_static_casters.sort_by_cached_key(key);
+        let material_indices = self.csm_static_casters.iter().enumerate().filter_map(|(i, m)| m.material.is_some().then_some(i));
+        for (source, index) in self.csm_material_sources.iter_mut().zip(material_indices) {
+            source.caster = index;
+        }
         self.csm_static_blocks = crate::gpu_lightmap::caster_blocks(&self.csm_static_casters);
+        self.csm_custom_casters_rev = self.custom_casters_rev;
+        let bindings = &mut self.gpu_baker.caster_bindings;
+        bindings.tracking = self.custom_draws.values().any(|program| program.shadow.is_some());
+        if bindings.tracking {
+            bindings.update(&self.placed_models, 0, |id| by_id.get(id).copied());
+            // A model upload or replacement can also move an existing slot in the catalogue.
+            for copy in &mut bindings.copies {
+                copy.model = by_id.get(self.placed_models[copy.slot].model.as_str()).copied();
+            }
+        } else {
+            bindings.copies.clear();
+        }
+        let (layout, key) = self.static_caster_keys();
+        self.gpu_baker.set_caster_keys(layout, key);
     }
 
     /// Hand this frame's stock props to the renderer. Draw submission is
@@ -463,15 +692,31 @@ impl Renderer {
     /// over last frame's ([`ModelTail::push`]), so a stable tail allocates
     /// nothing either.
     pub fn rebuild_models_with_prefix(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>), tail: impl FnOnce(&mut ModelTail)) {
+        self.rebuild_model_parts(prefix_key, |instances| {
+            instances.clear();
+            prefix(instances);
+            instances.len()
+        }, tail);
+    }
+
+    /// Refill changed leading copies and the dynamic tail over their previous slots.
+    pub fn refill_models_with_prefix(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut ModelTail), tail: impl FnOnce(&mut ModelTail)) {
+        self.rebuild_model_parts(prefix_key, |instances| {
+            let mut head = ModelTail { list: instances, start: 0, at: 0 };
+            prefix(&mut head);
+            head.at
+        }, tail);
+    }
+
+    fn rebuild_model_parts(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>) -> usize, tail: impl FnOnce(&mut ModelTail)) {
         let mut instances = std::mem::take(&mut self.placed_models);
-        let (len, signature) = match self.placed_prefix {
+        let (len, signature, kept) = match self.placed_prefix {
             Some((key, len, signature)) if key == prefix_key && instances.len() >= len => {
-                (len, signature)
+                (len, signature, len)
             }
             _ => {
-                instances.clear();
-                prefix(&mut instances);
-                (instances.len(), placed_scene_signature(&instances))
+                let len = prefix(&mut instances);
+                (len, placed_scene_signature(&instances[..len]), 0)
             }
         };
         self.placed_prefix = Some((prefix_key, len, signature));
@@ -480,7 +725,7 @@ impl Renderer {
         let end = t.at;
         instances.truncate(end);
         let signature = signature.rotate_left(17) ^ (len as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ placed_scene_signature(&instances[len..]);
-        if let Err(error) = self.try_set_models_signed(instances, signature) {
+        if let Err(error) = self.try_set_models_signed(instances, signature, kept) {
             self.report_asset_light_error(error);
         }
     }
@@ -488,6 +733,44 @@ impl Renderer {
     /// This frame's placed list (as last set).
     pub fn placed_models(&self) -> &[ModelInstance] {
         &self.placed_models
+    }
+
+    pub(super) fn lm_remap_owner(&self, copy: &ModelInstance) -> Option<LmRemapOwner> {
+        if copy.dynamic { return None; }
+        Some(LmRemapOwner {
+            chart_key: *self.lm_model_charts.get(&copy.model)?,
+            transform: copy.transform.v.map(f32::to_bits),
+        })
+    }
+
+    pub(super) fn rekey_lm_remaps(&mut self) {
+        if self.lightmap.is_none() || self.lm_remaps_rev == Some(self.models_rev) {
+            return;
+        }
+        // Coincident copies can have the same owner. Chain their regions in
+        // slot order so each old region goes to at most one current copy.
+        let mut heads = std::collections::HashMap::new();
+        let mut regions = Vec::with_capacity(self.lm_remaps.len());
+        for (owner, rect) in self.lm_remap_owners.drain(..).zip(self.lm_remaps.drain(..)).rev() {
+            if let Some(owner) = owner {
+                let head = heads.entry(owner).or_insert(None);
+                let next = head.replace(regions.len());
+                regions.push((rect, next));
+            }
+        }
+        for copy in &self.placed_models {
+            let owner = self.lm_remap_owner(copy);
+            let rect = owner.and_then(|owner| {
+                let head = heads.get_mut(&owner)?;
+                let (rect, next) = regions[(*head)?];
+                *head = next;
+                Some(rect)
+            });
+            self.lm_remaps.push(rect.unwrap_or_default());
+            self.lm_remap_owners.push(owner.filter(|_| rect.is_some()));
+        }
+        self.lm_remaps_rev = Some(self.models_rev);
+        self.lm_remaps_generation = self.lm_remaps_generation.wrapping_add(1);
     }
 
     pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
@@ -507,31 +790,72 @@ impl Renderer {
     pub fn try_set_models(&mut self, instances: Vec<ModelInstance>)->Result<(),String> {
         let signature = placed_scene_signature(&instances);
         self.placed_prefix = None;
-        self.try_set_models_signed(instances, signature)
+        self.try_set_models_signed(instances, signature, 0)
     }
 
-    fn try_set_models_signed(&mut self, instances: Vec<ModelInstance>, signature: u64) -> Result<(), String> {
+    fn try_set_models_signed(&mut self, instances: Vec<ModelInstance>, signature: u64, kept: usize) -> Result<(), String> {
         let scene_changed = self.placed_scene_signature != Some(signature);
         // Statics are cached against a key; any meaningful placed-scene
         // change must break it or an equal-length replacement would retain
-        // the previous realm's lamps, lightmap remaps, and shadows.
+        // the previous realm's lamps and shadows.
         if scene_changed {
+            // The lightmap regions are matched to the new list by owner on the
+            // next frame (`rekey_lm_remaps`); the models_rev bump re-kicks the
+            // bake once the world settles.
             self.models_rev = self.models_rev.wrapping_add(1);
-            // The lightmap remaps are indexed by placed position — a changed
-            // list makes them point at the wrong props. Drop them; the
-            // models_rev bump re-kicks the bake once the world settles.
-            self.lm_remaps.clear();
             self.placed_scene_signature = Some(signature);
-            // Per-slot door commands are indexed the same way and go stale
-            // the same way. Per-model ones do not — an imported level keeps
-            // its doors open across a harmless list rebuild.
+            // Per-slot door commands are indexed by placed position and go
+            // stale with a changed list. Per-model ones do not — an imported
+            // level keeps its doors open across a harmless list rebuild.
             self.model_anim_state.forget_slots();
         }
         self.placed_models = instances;
-        if scene_changed {
+        if scene_changed || self.custom_casters_rev != self.csm_custom_casters_rev {
             self.rebuild_csm_static_casters();
+        } else if self.gpu_baker.caster_bindings.update(&self.placed_models, kept, |id| {
+            self.static_models.iter().position(|(name, _)| name == id)
+        }) {
+            let (layout, key) = self.static_caster_keys();
+            if layout != self.gpu_baker.caster_bindings.layout {
+                self.rebuild_csm_static_casters();
+            } else if key != self.gpu_baker.caster_bindings.key {
+                self.gpu_baker.set_caster_keys(layout, key);
+                self.refresh_csm_materials();
+            }
         }
         Ok(())
+    }
+
+    /// Rebuild the static casters when a program with a derived caster was
+    /// installed, replaced or dropped since they resolved theirs: once,
+    /// before the cascades draw.
+    /// A review camera borrows the host's programs only while it draws
+    /// (`swap_review_materials`), so its casters resolve them here too.
+    pub(super) fn sync_csm_custom_casters(&mut self) {
+        if self.csm_custom_casters_rev != self.custom_casters_rev {
+            self.rebuild_csm_static_casters();
+        }
+    }
+
+    fn refresh_csm_materials(&mut self) {
+        let mut params_changed = false;
+        for source in &self.csm_material_sources {
+            let inst = &self.placed_models[source.instance];
+            let layer = if source.instance_wide && inst.layer_materials.is_empty() { "" } else { source.layer.as_ref() };
+            let binding = inst.material_of(layer);
+            let Some(binding) = binding.filter(|binding| binding.name == source.program) else {
+                self.rebuild_csm_static_casters();
+                return;
+            };
+            let material = self.csm_static_casters[source.caster].material.as_mut().expect("registered material caster");
+            if material.params != binding.params {
+                material.params = binding.params;
+                params_changed = true;
+            }
+        }
+        if params_changed {
+            self.gpu_baker.csm_casters_changed();
+        }
     }
 
     /// Independent camera/lighting caches for an on-demand scene review.
@@ -546,6 +870,7 @@ impl Renderer {
         // The review draws the same scene: its uploads follow the host's plan too.
         review.texture_first_level = self.texture_first_level.clone();
         review.static_models = self.static_models.clone();
+        review.lm_model_charts.clone_from(&self.lm_model_charts);
         review.model_casts_shadow = self.model_casts_shadow.clone();
         review.model_anim_state = self.model_anim_state.clone();
         review.ao_textures = self.ao_textures.clone();
@@ -590,8 +915,7 @@ impl Renderer {
         review.set_element_lookup(self.element_lookup.clone(), self.gpu_baker.element_lookup_casters());
         review.set_shadow_budget(self.shadow_budget);
         review.mirror_stream_from(self);
-        review.set_gpu_lightmap_mode(crate::GpuLightmapMode::Realtime);
-        review.set_clustered_lighting(true);
+        review.mirror_review_shadows_from(self, true);
         review.set_gi_mode(crate::GiMode::Off);
         review.mirror_environment_from(self);
         review
@@ -601,6 +925,7 @@ impl Renderer {
     /// review pass, then restore them before encoding the player's pass.
     pub fn swap_review_materials(&mut self, other: &mut Self) {
         std::mem::swap(&mut self.custom_draws, &mut other.custom_draws);
+        std::mem::swap(&mut self.custom_casters_rev, &mut other.custom_casters_rev);
         // UploadedSurface already shares its albedo/normal arrays and
         // weight map. The missing state was the prepared material lane:
         // a fresh fork can fall back while its pipeline is compiling.
@@ -612,11 +937,15 @@ impl Renderer {
         std::mem::swap(&mut self.grass_draw, &mut other.grass_draw);
     }
 
-    /// Lend the live probe field during a secondary scene draw. Call again
-    /// immediately afterwards. No relighting, recentering or voxel work is
-    /// allowed while borrowed; the secondary camera keeps its own SSAO.
+    /// Lend the live GI probe field during a secondary scene draw. An atlas-borrowing
+    /// fork also reads the host's baked entity shade and mover probes for this draw.
+    /// Call again immediately afterwards to restore both. The secondary camera
+    /// keeps its own SSAO and skips relighting, recentering and voxel work.
     pub fn swap_review_gi(&mut self, other: &mut Self) {
         std::mem::swap(&mut self.gi, &mut other.gi);
+        if self.atlas_borrowed {
+            std::mem::swap(&mut self.bake, &mut other.bake);
+        }
         self.review_gi = !self.review_gi;
     }
 
@@ -639,11 +968,55 @@ impl Renderer {
         })
     }
 
+    fn mirror_review_shadows_from(&mut self, live: &Self, live_light: bool) {
+        use crate::GpuLightmapMode::{OnChange, Realtime};
+
+        // Realtime with clustering off casts charted meshes from the baker's
+        // private state. Keep clustered Realtime for that case until it can be shared.
+        // The host's atlas holds its own sun's light: a camera lit some other
+        // way (a neutral map) draws its own realtime shadows instead.
+        let borrow = live_light && live.gpu_lightmap_mode() == OnChange;
+        let mode = if borrow { OnChange } else { Realtime };
+        let clustered = !borrow || live.clustered_lighting();
+        if self.gpu_lightmap_mode() != mode {
+            self.set_gpu_lightmap_mode(mode);
+        }
+        if self.clustered_lighting() != clustered {
+            self.set_clustered_lighting(clustered);
+        }
+        if self.atlas_borrowed != borrow {
+            // The two CPU bakes can have the same generation but different slab colours.
+            self.slab_key = None;
+            self.atlas_borrowed = borrow;
+            self.copied_lm_remaps_generation = None;
+        }
+        if borrow
+            && (self.lightmap.as_ref().map(Texture::texture_id)
+                != live.lightmap.as_ref().map(Texture::texture_id)
+                || self.copied_lm_remaps_generation != Some(live.lm_remaps_generation))
+        {
+            self.lightmap.clone_from(&live.lightmap);
+            self.lm_remaps.clone_from(&live.lm_remaps);
+            self.lm_remap_owners.clone_from(&live.lm_remap_owners);
+            // The live slots may still index its previous list. This view
+            // resolves them against its own copies before drawing.
+            self.lm_remaps_rev = None;
+            self.lm_remaps_generation = self.lm_remaps_generation.wrapping_add(1);
+            self.copied_lm_remaps_generation = Some(live.lm_remaps_generation);
+            self.lm_ground = live.lm_ground;
+            self.lm_top.clone_from(&live.lm_top);
+        }
+    }
+
     /// Current poses and resolved lights for another camera. Called only
     /// when that camera renders, after the source scene has resolved them.
     pub fn mirror_review_frame_from(&mut self, live: &Self) {
-        self.set_models(live.placed_models.clone());
-        self.set_world_attachments(live.world_attachments.clone());
+        // Reuse each placed model's layer list and name storage between frames.
+        self.rebuild_models(|models| refill_from_slice(models, &live.placed_models));
+        self.mirror_review_shadows_from(live, true);
+        let mut attachments = std::mem::take(&mut self.world_attachments);
+        refill_from_slice(&mut attachments, &live.world_attachments);
+        self.set_world_attachments(attachments);
         self.model_anim_state = live.model_anim_state.clone();
         self.sky_time = live.sky_time;
         self.wind = live.wind;
@@ -660,7 +1033,11 @@ impl Renderer {
     /// Refresh uploads that completed between an on-demand camera's warmup
     /// and capture. Geometry/texture handles remain shared; never decode a
     /// second copy or keep a replaced generated surface in the fork.
-    pub fn mirror_review_assets_from(&mut self, live: &Self) {
+    /// `live_light`: the capture draws in the host's light, so it follows the
+    /// host's shadow tier; otherwise (a neutral map) it casts its own.
+    pub fn mirror_review_assets_from(&mut self, live: &Self, live_light: bool) {
+        // A neutral map capture refreshes assets but skips the live pose/light mirror.
+        self.mirror_review_shadows_from(live, live_light);
         let same = self.static_models.len() == live.static_models.len()
             && self.static_models.iter().zip(&live.static_models).all(|((id, a), (other, b))| {
                 id == other && a.geometry.geometry_id() == b.geometry.geometry_id()
@@ -668,6 +1045,7 @@ impl Renderer {
             });
         if same { return; }
         self.static_models.clone_from(&live.static_models);
+        self.lm_model_charts.clone_from(&live.lm_model_charts);
         self.model_casts_shadow.clone_from(&live.model_casts_shadow);
         self.ao_textures.clone_from(&live.ao_textures);
         self.model_pack.clone_from(&live.model_pack);
@@ -700,6 +1078,9 @@ impl Renderer {
     /// the previous draw (or the stock fallback), never a blank model.
     pub fn install_custom_material(&mut self, name: String, material: CustomMaterial) -> bool {
         if !material.draw.draw_vars.can_instance() { return false; }
+        if material.shadow.is_some() || self.custom_draws.get(&name).is_some_and(|old| old.shadow.is_some()) {
+            self.custom_casters_rev += 1;
+        }
         self.custom_draws.insert(name, Box::new(material));
         true
     }
@@ -789,10 +1170,23 @@ impl Renderer {
     /// rest and the next frame under an environment builds it again, also
     /// when its last build failed (renderer/stock_ibl.rs).
     pub fn retain_custom_materials(&mut self, names: &[String]) {
-        self.custom_draws.retain(|name, _| names.contains(name));
+        let mut casters_dropped = false;
+        self.custom_draws.retain(|name, program| {
+            let keep = names.contains(name);
+            casters_dropped |= !keep && program.shadow.is_some();
+            keep
+        });
+        if casters_dropped {
+            self.custom_casters_rev += 1;
+        }
         self.stock_ibl_forget_failure();
     }
 
+    /// The installed material's stock shader (its colour program built for
+    /// every feature). A frame draws through its variant for that frame's
+    /// lighting, made after it, so this pipeline being ready does not mean
+    /// the material draws: a host that waits for its look asks
+    /// [`Self::items_ready`] and [`Self::drew_fallback`].
     pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
         self.custom_draws.get(name).and_then(|m| m.stock_shader())
     }
@@ -851,13 +1245,32 @@ impl Renderer {
         if self.splat_draw.is_none() {
             self.splat_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneSplat::script_new_with_default(vm)));
         }
-        let hdr = self.hdr_output;
         if let Some(d) = self.splat_draw.as_deref_mut() {
             d.pbr.skinned.draw_vars.refresh_after_reload(cx);
         }
         let stock = self.splat_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Splat, stock).0 } else { None };
-        self.splat_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+        self.splat_ready = shader.is_some_and(|id| self.recorded_shader_ready(cx, id));
+    }
+
+    /// Decide once per frame, before any model pass, which installed
+    /// programs draw the layers that name them: those whose variant for
+    /// this frame's features is built and whose pipeline is made. The stock
+    /// lanes draw the other programs' layers (`drew_fallback`) and each
+    /// program's lane leaves them, so every layer has exactly one lane: a
+    /// draw the HAL would skip never stands in for one it would show. Nothing
+    /// is built here; a program's lane builds its variant on first use, as
+    /// it did. One lookup per installed program and frame.
+    pub(super) fn prepare_custom_lanes(&mut self, cx: &mut Cx) {
+        let features = self.lane_features();
+        let pass = self.items.recorded_pass;
+        for material in self.custom_draws.values_mut() {
+            let shader = material.built_shader(features);
+            if shader.is_some() {
+                material.draw.draw_vars.draw_shader_id = shader;
+            }
+            material.lane_ready = shader.is_some_and(|id| super::stock_ibl::material_pipeline_ready(cx, id, pass, self.hdr_output));
+        }
     }
 
     /// Decide once per frame, before any model pass, whether foliage takes
@@ -874,14 +1287,13 @@ impl Renderer {
         if self.foliage_draw.is_none() {
             self.foliage_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneFoliageLit::script_new_with_default(vm)));
         }
-        let hdr = self.hdr_output;
         // Ready: the foliage lane's shader for this frame's features (variants.rs).
         if let Some(d) = self.foliage_draw.as_deref_mut() {
             d.pbr.skinned.draw_vars.refresh_after_reload(cx);
         }
         let stock = self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Foliage, stock).0 } else { None };
-        self.foliage_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+        self.foliage_ready = shader.is_some_and(|id| self.recorded_shader_ready(cx, id));
     }
 
     /// Decide once per frame, before any model pass, whether far stand-ins
@@ -895,8 +1307,7 @@ impl Renderer {
         if !self.pbr_materials_enabled || !self.a_resident_layer(|s| s.definition.impostor > 0.0) {
             return;
         }
-        let hdr = self.hdr_output;
-        self.impostor_shader = self.lane_shaders(cx, super::variants::ModelLane::Impostor, None).0.filter(|id| cx.draw_shader_ready(*id, hdr));
+        self.impostor_shader = self.lane_shaders(cx, super::variants::ModelLane::Impostor, None).0.filter(|id| self.recorded_shader_ready(cx, *id));
     }
 
     pub(super) fn draw_custom_models(
@@ -916,25 +1327,18 @@ impl Renderer {
         let stock_ibl_on = self.stock_ibl_active() && self.lists_a_stock_ibl_model(instances);
         // Keep opaque programs before blended ones, each group in name
         // order; their deferred layers replay the same program order.
-        let mut names: Vec<(bool, String)> = self.custom_draws.iter().filter(|(name, _)| {
-            (stock_ibl_on && name.as_str() == stock_ibl::STOCK_IBL_MATERIAL)
-                || instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
-        }).map(|(name, m)| {
-            // The stock IBL program stands in for the PBR lane: its opaque layers draw
-            // here, and its blended layers are deferred until after the opaque world.
-            // set_material leaves the last layer's blend state on its draw, so that
-            // state must not sort the program.
-            let blended = m.draw.draw_vars.options.alpha_blend && name.as_str() != stock_ibl::STOCK_IBL_MATERIAL;
-            (blended, name.clone())
-        }).collect();
-        names.sort();
-        let names = names.into_iter().map(|(_, name)| name);
-        for name in names {
-            let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
-            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Opaque, eye, lod_scale,
-                instances, lane, fog, sun, frustum, stats);
-            self.custom_draws.insert(name, draw);
+        let mut programs = std::mem::take(&mut self.custom_draws);
+        self.blended_models.programs.begin(&programs, instances, stock_ibl_on);
+        for phase in [LayerPhase::Opaque, LayerPhase::Blended] {
+            for (index, (name, material)) in programs.iter_mut().enumerate() {
+                if self.blended_models.programs.phase(index) == Some(phase) {
+                    self.draw_models_inner(cx, ModelDraw::Custom(name, material), LayerPhase::Opaque,
+                        eye, lod_scale, instances, lane, fog, sun, frustum, stats);
+                }
+            }
         }
+        self.blended_models.programs.end();
+        self.custom_draws = programs;
     }
 
     /// Hand this frame's actor-attached world props to the renderer.
@@ -988,9 +1392,8 @@ impl Renderer {
     }
 }
 
-/// The placed list past its kept prefix, refilled in place by
-/// [`Renderer::rebuild_models_with_prefix`]: each push overwrites last
-/// frame's copy at that position (`clone_from`, reusing its strings).
+/// A portion of the placed list being refilled. Each push overwrites the
+/// previous frame's copy at that position, reusing its string storage.
 pub struct ModelTail<'a> {
     list: &'a mut Vec<ModelInstance>,
     start: usize,
@@ -1005,7 +1408,7 @@ impl ModelTail<'_> {
         }
         self.at += 1;
     }
-    /// This frame's tail so far.
+    /// The copies pushed in this portion of the list so far.
     pub fn pushed(&mut self) -> &mut [ModelInstance] {
         &mut self.list[self.start..self.at]
     }

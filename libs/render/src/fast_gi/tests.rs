@@ -26,6 +26,25 @@ fn trace_end_status(end: Vec3f, (lo, hi): (Vec3f, Vec3f)) -> f32 {
     }
 }
 
+fn skyline_height(map: &Skyline, x: f32, z: f32) -> f32 {
+    let col = (((x - map.min[0]) / map.cell).floor() as usize).min(map.width - 1);
+    let row = (((z - map.min[1]) / map.cell).floor() as usize).min(map.height - 1);
+    map.heights[row * map.width + col]
+}
+
+// CPU mirror of DrawGiTrace.sky_march, starting at the voxel trace endpoint.
+fn sky_march(map: &Skyline, bounds: (Vec3f, Vec3f), p: Vec3f, rd: Vec3f) -> (f32, f32) {
+    let (mut t, mut d) = (0.0, map.cell);
+    for _ in 0..12 {
+        t += d;
+        d *= 1.5;
+        let q = p + rd * t;
+        if trace_end_status(q, bounds) == 0.0 { return (t, 0.0); }
+        if q.y < skyline_height(map, q.x, q.z) { return (t, 0.5); }
+    }
+    (t, 0.25)
+}
+
 #[test]
 fn trace_endings_are_sky_only_outside_the_padded_scene() {
     let bounds = (vec3f(-20.0, -2.0, -20.0), vec3f(20.0, 10.0, 20.0));
@@ -57,8 +76,45 @@ fn trace_endings_are_sky_only_outside_the_padded_scene() {
     assert_eq!(*padded, (vec3f(-5.0, -2.0, -2.0), vec3f(5.0, 4.0, 2.0)), "union world bounds and pad by the coarsest voxel");
     assert_eq!(gi.scene_bounds, old_bounds, "a pending scene must not replace the committed voxel bounds");
     assert_eq!(trace_end_status(vec3f(4.5, 2.0, 0.0), *padded), 0.25, "the padding is still inside");
-    let empty = Snapshot { instances: vec![], triangles: 0 }.padded_bounds(1.0);
+    let empty_scene = snapshot(vec![]);
+    let empty = empty_scene.padded_bounds(1.0);
     assert_eq!(trace_end_status(Vec3f::default(), empty), 0.0, "an empty scene is open");
+    let map = Skyline::build(&empty_scene, empty, 1.0);
+    assert_eq!((map.min, map.cell, map.width, map.height), ([0.0; 2], 1.0, 1, 1));
+    assert_eq!(map.heights, vec![empty.0.y], "the empty map holds the scene floor");
+
+    let floor = unit_box(vec3f(0.0, -0.5, 0.0), vec3f(32.0, 1.0, 16.0));
+    let flat = snapshot(vec![floor.clone()]);
+    let map = Skyline::build(&flat, flat.padded_bounds(0.5), 1.0);
+    assert_eq!((map.min, map.width, map.height), ([-16.5, -8.5], 33, 17));
+    assert!(map.heights.iter().all(|&y| y == floor.hi.y), "the floor covers every column");
+
+    let tall = unit_box(vec3f(5.0, 6.0, 1.0), vec3f(2.0, 12.0, 2.0));
+    let scene = snapshot(vec![tall, floor]);
+    let bounds = scene.padded_bounds(0.5);
+    let map = Skyline::build(&scene, bounds, 1.0);
+    for row in 0..map.height {
+        for col in 0..map.width {
+            let x = map.min[0] + (col as f32 + 0.5) * map.cell;
+            let z = map.min[1] + (row as f32 + 0.5) * map.cell;
+            let top = if (4.0..=6.0).contains(&x) && (0.0..=2.0).contains(&z) { 12.0 } else { 0.0 };
+            assert_eq!(map.heights[row * map.width + col], top, "skyline at ({x}, {z})");
+        }
+    }
+    let up = sky_march(&map, bounds, vec3f(0.0, 1.0, 1.0), vec3f(0.0, 1.0, 0.0));
+    assert_eq!(up.1, 0.0, "one metre above the floor next to the tall box sees sky");
+    let toward = sky_march(&map, bounds, vec3f(0.0, 6.0, 1.0), vec3f(1.0, 0.0, 0.0));
+    assert_eq!(toward, (4.75, 0.5), "the third sample hits the tall box at half height");
+    let away = sky_march(&map, bounds, vec3f(0.0, 0.0, 1.0), vec3f(-1.0, 0.0, 0.0));
+    assert_eq!(away.1, 0.0, "a ray along the floor leaves through the side");
+
+    let wide = snapshot(vec![unit_box(vec3f(0.0, -0.5, 0.0), vec3f(1024.0, 1.0, 4.0))]);
+    let bounds = wide.padded_bounds(0.5);
+    let map = Skyline::build(&wide, bounds, 1.0);
+    assert_eq!((map.cell, map.width, map.height), (1025.0 / 512.0, 512, 3));
+    let (distance, status) = sky_march(&map, bounds, vec3f(-100.0, 0.25, 0.0), vec3f(1.0, 0.0, 0.0));
+    assert_eq!(status, 0.25, "a ray still inside the wide scene is unknown");
+    assert!((distance - map.cell * 2.0 * (1.5_f32.powi(12) - 1.0)).abs() < 0.001, "exactly twelve steps");
 }
 
 #[test]
@@ -84,11 +140,24 @@ fn ran_out_shader_samples_are_excluded_from_gather_sums_and_backfaces() {
     assert!(march.contains("letend=min(t,tmax)returnvec4(end,level,0.0,self.vox_end_status(ro+rd*end))"), "classify the actual clamped endpoint");
 
     let trace = body(&source, "mod.draw.DrawGiTrace=");
-    let invalid = "ifhit.w<0.0||hit.w==0.25";
-    assert_eq!(body(trace, invalid), "returnvec4(0.0,-2.0,0.0,0.0)", "ran out packs as invalid");
-    assert!(trace.find(invalid).unwrap() < trace.find("ifhit.w<0.5").unwrap(), "ran out must be handled before sky");
+    let invalid_ray = "returnvec4(0.0,-2.0,0.0,0.0)";
+    let sky_ray = "returnvec4(self.gi_pass.z,-1.0,0.0,0.0)";
+    assert_eq!(body(trace, "ifhit.w<0.0"), invalid_ray, "a spent voxel step budget stays invalid");
+    assert_eq!(trace.matches("self.sky_march(").count(), 1, "only an unresolved voxel ray marches");
+    let unresolved = body(trace, "ifhit.w==0.25");
+    assert!(unresolved.starts_with("letm=self.sky_march(probe.xyz+rd*hit.x,rd)"), "continue from the voxel endpoint");
+    assert_eq!(body(unresolved, "ifm.y==0.0"), sky_ray, "a skyline escape packs as sky");
+    assert_eq!(body(unresolved, "ifm.y==0.5"), "returnvec4(hit.x+m.x,-3.0,0.0,0.0)", "closed far carries the full distance");
+    assert!(unresolved.ends_with(invalid_ray), "a still-unknown ray packs as invalid");
+    assert_eq!(body(trace, "ifhit.w<0.5"), sky_ray, "a voxel escape packs as sky");
+    for ending in ["ifhit.w<0.0", "ifhit.w==0.25"] {
+        assert!(trace.find(ending).unwrap() < trace.find("ifhit.w<0.5").unwrap(), "handle {ending} before sky");
+    }
     let relight = body(&source, "mod.draw.DrawGiRelight=");
-    let invalid = "ifprobe.w<0.0||hit.y<(-1.5)";
+    let closed_far = "ifhit.y<(-2.5)&&probe.w>=0.0";
+    let invalid = "ifprobe.w<0.0||(hit.y<(-1.5)&&hit.y>(-2.5))";
+    assert_eq!(body(relight, closed_far), "returnvec4(0.0,0.0,0.0,hit.x)", "a valid closed-far ray is black at its distance");
+    assert!(relight.find(closed_far).unwrap() < relight.find(invalid).unwrap(), "handle closed far before invalid rays");
     assert_eq!(body(relight, invalid), "returnvec4(0.0,0.0,0.0,-2.0)", "invalid rays keep negative distance");
     assert!(relight.find(invalid).unwrap() < relight.find("ifhit.y<(-0.5)").unwrap(), "invalid rays must not become sky radiance");
     assert!(relight.contains("ifshadow.w<0.5&&shadow.w>(-0.5){light=self.gi_sun_color*ndl}"), "sun exhaustion keeps its previous visibility");
@@ -238,10 +307,14 @@ fn gi_shaders_compile_without_errors() {
         crate::local_shadows::script_mod(vm);
         let setup = vm.take_errors();
         assert!(setup.is_empty(), "script setup errors: {setup:#?}");
+        let trace = DrawGiTrace::script_new_with_default(vm).quad.draw_vars;
+        let trace_id = trace.draw_shader_id.expect("GI trace registered");
+        assert!(vm.cx().draw_shaders[trace_id.index].mapping.textures.iter().any(|t| t.id == live_id!(gi_skyline)),
+            "the compiled trace exposes the skyline sampler");
         // Hits and radiance carry packed integers and distances (f32); the
         // gathered tiles and the field are filterable f16.
         for (vars, format) in [
-            (DrawGiTrace::script_new_with_default(vm).quad.draw_vars, "Rgba32F"),
+            (trace, "Rgba32F"),
             (DrawGiRelight::script_new_with_default(vm).quad.draw_vars, "Rgba32F"),
             (DrawGiGather::script_new_with_default(vm).quad.draw_vars, "Rgba16F"),
             (DrawGiScatter::script_new_with_default(vm).quad.draw_vars, "Rgba16F"),
@@ -383,15 +456,25 @@ fn incremental_edits_and_scrolls_equal_a_full_rebuild() {
     let mut inc = VoxelWorld::new(l);
     let first = inc.update(Some(snapshot(vec![floor.clone(), a.clone(), b.clone()])), &w0);
     assert!(first.dirty.is_empty(), "the first build is not an edit");
+    let map = first.skyline.as_ref().expect("the first snapshot publishes a skyline");
+    assert_eq!(map.cell, l.voxel_size(l.levels - 1));
+    assert_eq!(skyline_height(map, -1.0, -2.0), floor.hi.y);
+    assert_eq!(skyline_height(map, -3.0, 2.0), b.hi.y);
     // Edit: b moves. Only its old and new boxes are dirty, a is untouched
     // even though the instance order changed.
     let edit = inc.update(Some(snapshot(vec![moved.clone(), a.clone(), floor.clone()])), &w0);
     assert_eq!(edit.dirty.len(), 2);
     assert!(edit.bricks < 2 * 16, "edit re-voxelized {} bricks", edit.bricks);
+    let map = edit.skyline.as_ref().expect("the edited snapshot publishes a skyline");
+    assert_eq!(skyline_height(map, -1.0, -2.0), moved.hi.y, "the added instance raises its column");
+    assert_eq!(skyline_height(map, -3.0, 2.0), floor.hi.y, "the old footprint clears");
+    assert_eq!(map.heights[0], floor.lo.y - map.cell, "uncovered padding holds the scene floor");
     let same = inc.update(Some(snapshot(vec![floor.clone(), moved.clone(), a.clone()])), &w0);
     assert_eq!((same.dirty.len(), same.bricks), (0, 0), "an identical snapshot does nothing");
     assert!(same.rows.iter().all(Option::is_none), "identical static geometry uploads zero texture rows");
+    assert!(same.skyline.is_none(), "an identical snapshot keeps the published skyline");
     let scroll = inc.update(None, &w1);
+    assert!(scroll.skyline.is_none(), "scrolling the voxel windows reuses the published skyline");
     let mut full = VoxelWorld::new(l);
     full.update(Some(snapshot(vec![floor, a, moved])), &w1);
     assert!(scroll.bricks > 0 && scroll.bricks < full.windows.len() * 16);

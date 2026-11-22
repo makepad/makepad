@@ -21,6 +21,7 @@ pub mod asset_lod;
 pub mod lod_view;
 pub mod ao;
 pub mod custom_material;
+pub mod custom_sky;
 pub mod clustered;
 pub mod fast_gi;
 pub mod entity_lights;

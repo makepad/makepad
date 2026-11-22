@@ -17,7 +17,7 @@ impl Renderer {
             if model.morph.is_some(){continue;}
             let (min,max) = crate::lightmap::world_bounds(&inst.transform,(model.min,model.max));
             for geometry in std::iter::once(model.geometry.as_ref()).chain(model.extra_draws.iter().map(|(g,..)|g.as_ref())) {
-                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max, cutout: None, msdf: None, band: Default::default() });
+                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max, material: None, cutout: None, msdf: None, band: Default::default() });
             }
         }
         fn shadow_geometry(cx:&mut Cx,source:&Geometry,cached:&mut Option<Geometry>)->Option<GeometryId> {
@@ -39,14 +39,14 @@ impl Renderer {
                 self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_deref());
                 for tile in &mut self.terrain_tiles {
                     if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
-                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, msdf: None, band: Default::default() });
+                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, material: None, cutout: None, msdf: None, band: Default::default() });
                     }
                 }
             }
             self.ensure_voxel_tiles(cx,world.voxel.as_deref());
             for tile in &mut self.voxel_tiles {
                 if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
-                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, msdf: None, band: Default::default() });
+                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, material: None, cutout: None, msdf: None, band: Default::default() });
                 }
             }
         }
@@ -157,22 +157,31 @@ impl Renderer {
             let lod=if self.is_lod_chain_base(&inst.model)&&!root.lods.is_empty(){root.lods.len()}else{root.lods.partition_point(|(threshold,_)|*threshold<=distance)};
             let m=if lod==0{root}else{&root.lods[lod-1].1};
             let morph=m.morph.as_ref().map(|m|m.depth(self.model_anim_state.morph_weights(&target,&inst.model,&m.source)));
+            let caster_for = |binding: &CustomMaterialInstance| {
+                let program = self.custom_draws.get(&binding.name)?;
+                Some((program.shadow?, binding.params, program.cutoff, program.bounds_pad))
+            };
+            let shared_caster = inst.layer_materials.is_empty().then(|| inst.material_of("").and_then(caster_for));
+            let mut push_layer = |geometry: &Geometry, texture: &Texture, layer: &LayerMaterial,
+                                  transform: Mat4f, min: Vec3f, max: Vec3f| {
+                let caster = shared_caster.unwrap_or_else(|| inst.material_of(&layer.name).and_then(caster_for));
+                let pad = vec3f(1.0, 1.0, 1.0) * caster.map_or(0.0, |c| c.3);
+                out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: caster.map(|(shader, params, cutoff, _)| crate::gpu_lightmap::MoverMaterial {
+                        shader, params, cutoff, texture: texture.clone(),
+                    }),
+                    geometry: geometry.geometry_id(), transform, min: min - pad, max: max + pad,
+                    skin: None, morph: morph.clone(),
+                });
+            };
             // Anim parts cast as MOVERS even when their level is static: the
             // static atlas was baked without them (they are not in its
             // stream), so a door's shadow can only come from the cascades —
             // and it has to follow the door, which is what a mover is.
             for part in &m.anim_parts {
                 let pose = Mat4f::mul(&inst.transform, &self.model_anim_state.transform(&target,&inst.model,&part.def));
-                for (g, ..) in &part.draws {
-                    out.push(crate::gpu_lightmap::GpuLmMover {
-                    material: None,
-                        geometry: g.geometry_id(),
-                        transform: pose,
-                        min: part.def.min,
-                        max: part.def.max,
-                        skin: None,
-                        morph:morph.clone(),
-                    });
+                for (geometry, texture, _, _, layer) in &part.draws {
+                    push_layer(geometry, texture, layer, pose, part.def.min, part.def.max);
                 }
             }
             for part in &m.driven_parts {
@@ -183,16 +192,8 @@ impl Renderer {
                     .map(|pose| pose.transform)
                     .unwrap_or_else(|| part.def.rest_transform());
                 let pose = Mat4f::mul(&inst.transform, &local);
-                for (g, ..) in &part.draws {
-                    out.push(crate::gpu_lightmap::GpuLmMover {
-                    material: None,
-                        geometry: g.geometry_id(),
-                        transform: pose,
-                        min: part.def.min,
-                        max: part.def.max,
-                        skin: None,
-                        morph:morph.clone(),
-                    });
+                for (geometry, texture, _, _, layer) in &part.draws {
+                    push_layer(geometry, texture, layer, pose, part.def.min, part.def.max);
                 }
             }
             if !inst.dynamic && !matches!(target,ModelTarget::Attachment(_)) && morph.is_none() {
@@ -203,23 +204,11 @@ impl Renderer {
             // every visible layer so "dynamic model" means the whole model.
             // A Splash material with a derived caster (a vertex hook or a
             // mask) casts through it: displaced geometry, cut-out holes.
-            let caster = inst.custom_material.as_ref().and_then(|cm| {
-                let m = self.custom_draws.get(&cm.name)?;
-                Some((m.shadow?, cm.params, m.cutoff, m.bounds_pad))
-            });
-            let pad = vec3f(1.0, 1.0, 1.0) * caster.map_or(0.0, |c| c.3);
-            for (geometry, texture) in std::iter::once((m.geometry.as_ref(), &m.texture))
-                .chain(m.extra_draws.iter().map(|(geometry, texture, ..)| (geometry.as_ref(), texture)))
-            {
-                out.push(crate::gpu_lightmap::GpuLmMover {
-                    material: caster.map(|(shader, params, cutoff, _)| crate::gpu_lightmap::MoverMaterial { shader, params, cutoff, texture: texture.clone() }),
-                    geometry: geometry.geometry_id(),
-                    transform: inst.transform,
-                    min: m.min - pad,
-                    max: m.max + pad,
-                    skin: None,
-                    morph:morph.clone(),
-                });
+            if m.triangles > 0 {
+                push_layer(&m.geometry, &m.texture, &m.material, inst.transform, m.min, m.max);
+            }
+            for (geometry, texture, _, _, layer) in &m.extra_draws {
+                push_layer(geometry, texture, layer, inst.transform, m.min, m.max);
             }
         }
         if let (Some(items), Some(palette_tex)) = (skinned_items, &self.skin_palette_tex) {
@@ -309,7 +298,7 @@ impl Renderer {
 
     /// Per-frame GPU bake step: realizes scheduled jobs and encodes this
     /// frame's passes — the whole atlas once per dirty kick (both modes,
-    /// statics only), plus the cascade depth pass every Realtime frame.
+    /// statics only), plus any cascade depth pass due this frame.
     /// Pass ordering guarantees everything renders before the scene pass
     /// that samples it — same-frame delivery.
     pub(super) fn run_gpu_lightmap(
@@ -322,18 +311,14 @@ impl Renderer {
     ) {
         // The materials' `csm_map` slot is a depth texture in every mode.
         self.gpu_baker.ensure_csm_fallback(cx.cx);
-        // A realized atlas is not a precondition for the cascade tier. In
-        // Realtime the cascades ARE the dynamic-shadow contract, and worlds
-        // that own no static lightmap at all — a flat starter terrain with
-        // no props, so `kick_lightmap_bake` finds no AO mesh and no receiver
-        // box and never schedules a job — must still get them. Gating this
-        // on `has_state` is what made F8 read as "realtime deletes every
-        // dynamic shadow" in exactly those worlds.
-        if !self.gpu_baker.has_state()
-            && !crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode()).csm
-        {
+        // Both cascade tiers serve worlds without an atlas. Off can skip the
+        // baker in such a world once it has released the previous tier's targets.
+        let tiers = crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode());
+        if !self.gpu_baker.has_state() && !tiers.csm && !tiers.static_csm {
+            self.gpu_baker.sync_csm_targets(cx.cx);
             return;
         }
+        self.sync_csm_custom_casters();
         // DEBUG (macOS): MAKEPAD_GPU_LM_DUMP=<prefix> writes the settled
         // GPU atlas as `<prefix>.a.pgm` (A = sun SDF) + `<prefix>.rgb.ppm`
         // (lamps) — the byte-level counterpart of the CPU bake's old
@@ -437,6 +422,9 @@ impl Renderer {
                         if std::env::var("MAKEPAD_GPU_LM_REBAKE_MODE").as_deref() == Ok("redirty") {
                             self.gpu_baker.debug_redirty();
                         } else {
+                            if tiers.static_csm {
+                                self.gpu_baker.csm_casters_changed();
+                            }
                             self.kick_lightmap_bake(
                                 world,
                                 &sun,
@@ -489,11 +477,15 @@ impl Renderer {
             }
             self.lightmap = Some(d.atlas);
             self.lm_remaps = vec![Vec4f::default(); self.placed_models.len()];
+            self.lm_remap_owners = vec![None; self.placed_models.len()];
             for (k, pi) in d.mesh_map.iter().enumerate() {
-                if let Some(slot) = self.lm_remaps.get_mut(*pi) {
-                    *slot = d.mesh_rects[k].uv_remap(d.size);
+                if let Some(owner) = self.placed_models.get(*pi).and_then(|copy| self.lm_remap_owner(copy)) {
+                    self.lm_remaps[*pi] = d.mesh_rects[k].uv_remap(d.size);
+                    self.lm_remap_owners[*pi] = Some(owner);
                 }
             }
+            self.lm_remaps_rev = Some(self.models_rev);
+            self.lm_remaps_generation = self.lm_remaps_generation.wrapping_add(1);
             self.lm_ground = match (d.planar_rects.first(), d.terrain_world) {
                 (Some(r), Some(w)) => {
                     // Density in the log so a dump's texels map back to
@@ -624,9 +616,10 @@ impl Renderer {
     /// The decoded pixels are consumed by the upload — `ImageBuffer` is moved
     /// into the texture — so the only host copy that outlives this call is
     /// the encoded PNG inside the `StaticModel`, which the caller drops.
-    pub(super) fn upload_material(&mut self, cx: &mut Cx, pbr: &crate::model::PbrMaterial) -> LayerMaterial {
+    pub(super) fn upload_material(&mut self, cx: &mut Cx, pbr: &crate::model::PbrMaterial, name: std::sync::Arc<str>) -> LayerMaterial {
         if !pbr.is_shiny() {
             return LayerMaterial {
+                name,
                 surface: None,
                 metallic: 0.0,
                 roughness: 1.0,
@@ -644,6 +637,7 @@ impl Renderer {
             .map(|buf| buf.into_new_mip_repeat_texture(cx));
         match orm {
             Some(tex) => LayerMaterial {
+                name,
                 surface: None,
                 metallic: pbr.metallic,
                 roughness: pbr.roughness,
@@ -654,6 +648,7 @@ impl Renderer {
                 cutout: true,
             },
             None => LayerMaterial {
+                name,
                 surface: None,
                 metallic: pbr.metallic,
                 roughness: pbr.roughness,
@@ -723,7 +718,7 @@ impl Renderer {
 
     /// Write this frame's cascade binding into one material family:
     /// `csm_map` (a sampled depth texture) at `slot` plus the shared `csm_*`
-    /// uniforms. An off frame (OnChange / no scene / sun down) writes the
+    /// uniforms. An off frame (Off / no target / sun down) writes the
     /// tier off and parks the baker's 1x1 depth fallback in the slot —
     /// `csm_vis` early-outs before sampling it, but the pipeline still
     /// wants a texture of the slot's kind bound. `fallback` only serves the
@@ -755,7 +750,8 @@ impl Renderer {
             da[i] = gs;
             db[i] = go;
         }
-        dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, frame.seed, crate::shadow_csm::CSM_CELL_PERIOD as f32]);
+        let mode = if frame.settled { 2.0 } else { 1.0 };
+        dv.set_uniform(cx, live_id!(csm_p), &[mode, *inv_res, frame.seed, crate::shadow_csm::CSM_CELL_PERIOD as f32]);
         dv.set_uniform(cx, live_id!(csm_da), &da);
         dv.set_uniform(cx, live_id!(csm_db), &db);
         dv.set_uniform(

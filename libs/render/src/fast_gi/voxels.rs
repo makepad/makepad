@@ -176,8 +176,8 @@ pub(crate) struct Snapshot {
 
 impl Snapshot {
     /// Geometry bounds, not the camera's snapshot region or voxel window.
-    /// Computed once at submission; an empty scene keeps an inverted box
-    /// so every finite ray endpoint is outside it.
+    /// An empty scene keeps an inverted box so every finite ray endpoint
+    /// is outside it.
     pub fn padded_bounds(&self, padding: f32) -> (Vec3f, Vec3f) {
         let mut lo = vec3f(f32::MAX, f32::MAX, f32::MAX);
         let mut hi = vec3f(f32::MIN, f32::MIN, f32::MIN);
@@ -187,6 +187,64 @@ impl Snapshot {
         }
         let pad = vec3f(padding, padding, padding);
         (lo - pad, hi + pad)
+    }
+}
+
+/// Highest surface over each world XZ cell, including geometry beyond the
+/// resident voxel windows. Uncovered cells hold the padded scene floor.
+pub(crate) struct Skyline {
+    pub min: [f32; 2],
+    pub cell: f32,
+    pub width: usize,
+    pub height: usize,
+    pub heights: Vec<f32>,
+}
+
+impl Skyline {
+    pub fn build(snapshot: &Snapshot, (lo, hi): (Vec3f, Vec3f), min_cell: f32) -> Self {
+        if lo.x > hi.x || lo.y > hi.y || lo.z > hi.z {
+            return Self { min: [0.0; 2], cell: 1.0, width: 1, height: 1, heights: vec![lo.y] };
+        }
+        let (dx, dz) = (hi.x - lo.x, hi.z - lo.z);
+        let cell = (dx.max(dz) / 512.0).max(min_cell);
+        let width = ((dx / cell).ceil() as usize).max(1);
+        let height = ((dz / cell).ceil() as usize).max(1);
+        let mut map = Self { min: [lo.x, lo.z], cell, width, height, heights: vec![lo.y; width * height] };
+        let mut world = Vec::new();
+        for inst in &snapshot.instances {
+            match &inst.solid {
+                Solid::Field(_) => map.cover(inst.lo, inst.hi),
+                Solid::Mesh(mesh) => {
+                    world.clear();
+                    world.extend(mesh.vertices.chunks_exact(mesh.stride).map(|v| {
+                        point(&inst.transform, vec3f(v[0], v[1], v[2]))
+                    }));
+                    for ids in mesh.indices.chunks_exact(3) {
+                        let (a, b, c) = (world[ids[0] as usize], world[ids[1] as usize], world[ids[2] as usize]);
+                        let lo = Vec3f::min_componentwise(a, Vec3f::min_componentwise(b, c));
+                        let hi = Vec3f::max_componentwise(a, Vec3f::max_componentwise(b, c));
+                        map.cover(lo, hi);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    fn cover(&mut self, lo: Vec3f, hi: Vec3f) {
+        let index = |p: f32, min: f32, size: usize| {
+            (((p - min) / self.cell).floor() as usize).min(size - 1)
+        };
+        let x0 = index(lo.x, self.min[0], self.width);
+        let x1 = index(hi.x, self.min[0], self.width);
+        let z0 = index(lo.z, self.min[1], self.height);
+        let z1 = index(hi.z, self.min[1], self.height);
+        for z in z0..=z1 {
+            let row = z * self.width;
+            for height in &mut self.heights[row + x0..=row + x1] {
+                *height = height.max(hi.y);
+            }
+        }
     }
 }
 
@@ -257,6 +315,8 @@ impl Accum {
 /// invalidate probes with.
 #[derive(Default)]
 pub(crate) struct VoxelUpdate {
+    /// Full-scene heights, rebuilt only for a new snapshot.
+    pub skyline: Option<Skyline>,
     /// Per level: whether its texture rows changed.
     pub levels: Vec<bool>,
     /// Per level: the first and last changed row of its band.
@@ -322,6 +382,12 @@ impl VoxelWorld {
                 for i in &new.instances {
                     match remaining.get_mut(&i.key) { Some(n) if *n > 0 => *n -= 1, _ => out.dirty.push((i.lo, i.hi)) }
                 }
+            }
+            // The skyline is the snapshot's: rebuilt for the first one and
+            // for an edit, kept when the same instances came back.
+            if self.scene.is_none() || !out.dirty.is_empty() {
+                let coarsest = self.layout.voxel_size(self.layout.levels - 1);
+                out.skyline = Some(Skyline::build(&new, new.padded_bounds(coarsest), coarsest));
             }
             self.keys = new_keys;
             self.scene = Some(new);

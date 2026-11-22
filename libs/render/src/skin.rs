@@ -968,10 +968,14 @@ impl SkinnedModel {
         let loaded = makepad_gltf::load_gltf_from_bytes(bytes, None).map_err(|e| e.to_string())?;
         let doc = &loaded.document;
         struct Tile { image: makepad_draw::ImageBuffer, textured: bool, x: usize, y: usize }
-        let mut tiles: Vec<Tile> = Vec::new();
+        let mut sources = Vec::new();
+        let mut images = std::collections::HashMap::new();
+        let mut inventory = crate::material_surface::ImageBudget::default();
+        let geometry = (model.vertices.len() * SKIN_GPU_VERTEX_FLOATS + model.indices.len()) * 4;
+        inventory.fixed = geometry;
         let mut material_tiles = std::collections::BTreeMap::new();
         let mut ranges = Vec::new();
-        let mut remaining_texture_bytes = 64usize * 1024 * 1024;
+        let budget = 64usize * 1024 * 1024;
         let mut start = 0usize;
         let (raw_json,_)=crate::asset_morph::chunks(bytes)?;let active=crate::asset_morph::active_nodes(&raw_json)?;
         for (_,node) in doc.nodes_slice().iter().enumerate().filter(|(i,node)| active[*i]&&node.skin.is_some()&&node.mesh.is_some()) {
@@ -980,7 +984,7 @@ impl SkinnedModel {
                 if prim.attributes.contains_key("COLOR_0") { return Err("generated skin vertex colors require material baking before export".into()); }
                 let count = doc.accessors_slice().get(*prim.attributes.get("POSITION").ok_or("skin has no positions")?).ok_or("bad skin position accessor")?.count;
                 let tile = if let Some(&tile) = material_tiles.get(&prim.material) { tile } else {
-                    if tiles.len() >= 512 { return Err("generated skin exceeds 512 material atlas tiles".into()); }
+                    if sources.len() >= 512 { return Err("generated skin exceeds 512 material atlas tiles".into()); }
                     let material = prim.material.and_then(|m| doc.materials_slice().get(m));
                     if prim.material.is_some() && material.is_none() { return Err("bad skin material".into()); }
                     if material.and_then(|m| m.alpha_mode.as_deref()).is_some_and(|mode| mode != "OPAQUE") {
@@ -992,37 +996,24 @@ impl SkinnedModel {
                         return Err("generated skin requires finite opaque material color".into());
                     }
                     let texture = pbr.and_then(|p| p.base_color_texture.as_ref());
-                    let mut image = if let Some(texture) = texture {
+                    let source = if let Some(texture) = texture {
                         if texture.tex_coord.unwrap_or(0) != 0 { return Err("generated skin atlas requires TEXCOORD_0".into()); }
                         let tex = doc.textures_slice().get(texture.index).ok_or("bad skin texture")?;
                         let image_index = tex.source.ok_or("skin texture has no image")?;
                         let image = doc.images_slice().get(image_index).ok_or("bad skin image")?;
                         if image.uri.as_deref().is_some_and(|uri| !uri.starts_with("data:")) { return Err("generated skin images must be embedded".into()); }
-                        let data = makepad_gltf::load_image_bytes(&loaded, image_index).map_err(|e| e.to_string())?;
-                        let image = crate::renderer::decode_generated_png(&data, 2048, remaining_texture_bytes)?;
-                        remaining_texture_bytes -= image.data.len() * 4;
-                        if image.width == 0 || image.height == 0 || image.width > 2048 || image.height > 2048 { return Err("generated skin image exceeds atlas bounds".into()); }
-                        image
+                        let data = match images.entry(image_index) {
+                            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                            std::collections::hash_map::Entry::Vacant(e) => e.insert(makepad_gltf::load_image_bytes(&loaded, image_index).map_err(|e| e.to_string())?),
+                        };
+                        inventory.pixels(data, 2048)?;
+                        Some(image_index)
                     } else {
-                        let mut image = makepad_draw::ImageBuffer::default();
-                        image.width = 1; image.height = 1; image.data = vec![0xffff_ffff]; image
+                        inventory.fixed += 4;
+                        None
                     };
-                    for pixel in &mut image.data {
-                        if *pixel >> 24 != 255 { return Err("generated skin atlas requires opaque image pixels".into()); }
-                        let mut out = 0xff00_0000;
-                        // ImageBuffer uses BGRA words; factors are linear RGB.
-                        for (shift, factor) in [(16, factor[0]), (8, factor[1]), (0, factor[2])] {
-                            let encoded = ((*pixel >> shift) & 255) as f32 / 255.0;
-                            let linear = if encoded <= 0.04045 { encoded / 12.92 } else { ((encoded + 0.055) / 1.055).powf(2.4) };
-                            let tinted = linear * factor;
-                            let encoded = if tinted <= 0.0031308 { tinted * 12.92 } else { 1.055 * tinted.powf(1.0 / 2.4) - 0.055 };
-                            out |= ((encoded.clamp(0.0, 1.0) * 255.0).round() as u32) << shift;
-                        }
-                        *pixel = out;
-                    }
-                    let index = tiles.len();
-                    let textured = texture.is_some() && (image.width > 1 || image.height > 1);
-                    tiles.push(Tile { image, textured, x: 0, y: 0 });
+                    let index = sources.len();
+                    sources.push((source, factor));
                     material_tiles.insert(prim.material, index); index
                 };
                 let end = start.checked_add(count).ok_or("skin vertex range overflow")?;
@@ -1031,6 +1022,34 @@ impl SkinnedModel {
             }
         }
         if start != model.vertices.len() { return Err("skin material vertex count mismatch".into()); }
+        let level = inventory.level(budget);
+        let mut remaining = budget.saturating_sub(geometry);
+        let mut tiles = Vec::with_capacity(sources.len());
+        for (source, factor) in sources {
+            let mut image = if let Some(index) = source {
+                crate::renderer::decode_pixels_within(&images[&index], 2048, level, remaining)?
+            } else {
+                let mut image = makepad_draw::ImageBuffer::default();
+                image.width = 1; image.height = 1; image.data = vec![0xffff_ffff]; image
+            };
+            remaining = remaining.saturating_sub(image.data.len() * 4);
+            for pixel in &mut image.data {
+                if *pixel >> 24 != 255 { return Err("generated skin atlas requires opaque image pixels".into()); }
+                let mut out = 0xff00_0000;
+                // ImageBuffer uses BGRA words; factors are linear RGB.
+                for (shift, factor) in [(16, factor[0]), (8, factor[1]), (0, factor[2])] {
+                    let encoded = ((*pixel >> shift) & 255) as f32 / 255.0;
+                    let linear = if encoded <= 0.04045 { encoded / 12.92 } else { ((encoded + 0.055) / 1.055).powf(2.4) };
+                    let tinted = linear * factor;
+                    let encoded = if tinted <= 0.0031308 { tinted * 12.92 } else { 1.055 * tinted.powf(1.0 / 2.4) - 0.055 };
+                    out |= ((encoded.clamp(0.0, 1.0) * 255.0).round() as u32) << shift;
+                }
+                *pixel = out;
+            }
+            let textured = source.is_some() && (image.width > 1 || image.height > 1);
+            tiles.push(Tile { image, textured, x: 0, y: 0 });
+        }
+        drop(images);
         // Portable generated GLBs already carry one shared material atlas.
         // Preserve its exact UVs and image instead of packing a second border
         // around a full atlas or duplicating it for every primitive.
@@ -1548,8 +1567,9 @@ impl SkinnedModel {
 
     /// Preserve material slots and UV0 for rich PBR skins. This creates only
     /// worker upload data; each part reuses the rig's one instance palette.
-    pub fn prepare_material_parts(&self,bytes:&[u8],rest:&SkinRestGpu,mut budget:usize)->Result<Vec<PreparedSkinPart>,String>{
-        use crate::material_surface::{PreparedTexture,PreparedSurface,MaterialSurface,PixelSemantic};
+    pub fn prepare_material_parts(&self,bytes:&[u8],rest:&SkinRestGpu,budget:usize)->Result<Vec<PreparedSkinPart>,String>{
+        use crate::material_surface::{ImageBudget, MapPlan, MaterialSurface, PixelSemantic, Preparing, SurfacePlan};
+        let _preparing = Preparing::begin();
         if self.primitives.len()>2048{return Err("skin exceeds 2048 material primitives".into())}
         let mut at=12usize;let mut json=None;let mut bin=&[][..];
         while at+8<=bytes.len(){
@@ -1559,30 +1579,54 @@ impl SkinnedModel {
             at=end;
         }
         let json=json.ok_or("missing material GLB JSON")?;
-        let mut out=Vec::new();
+        let mut inventory = ImageBudget::default();
+        let mut uses = std::collections::BTreeMap::new();
+        let mut geometry = (rest.vertices.len() + rest.indices.len()) * 4;
         for primitive in &self.primitives {
-            let material=primitive.material.and_then(|i|json.get("materials")?.idx(i));
+            *uses.entry(primitive.material).or_insert(0usize) += 1;
+            geometry += (primitive.vertices.len() * SKIN_GPU_VERTEX_FLOATS + primitive.indices.len()) * 4;
+        }
+        inventory.fixed = geometry;
+        // Resolve each distinct material once. Embedded images and resolver results are owned
+        // bytes, so collecting a fresh copy for every primitive can dwarf the texture budget.
+        let mut materials = Vec::with_capacity(uses.len());
+        for (slot, uses) in uses {
+            let material=slot.and_then(|i|json.get("materials")?.idx(i));
             let pbr=material.and_then(|m|m.get("pbrMetallicRoughness"));
             let texture=|field:&str|pbr.and_then(|m|m.get(field))?.get("index")?.usize()
                 .and_then(|index|json.get("textures")?.idx(index)?.get("source")?.usize())
                 .and_then(|index|crate::model::gltf_embedded_png(&json,bin,index));
-            let mut image=|bytes:Option<Vec<u8>>,semantic|->Result<PreparedTexture,String>{
-                if let Some(texture)=bytes.as_deref().filter(|b|crate::texture_pack::is_ktx2(b)).and_then(|b|crate::material_surface::texture_work(crate::material_surface::TextureWork::Remap,||crate::texture_pack::texture_from_ktx2(b))) {
-                    let texture=texture?;budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;return Ok(texture);
-                }
-                let image=if let Some(bytes)=bytes{crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::renderer::decode_generated_png(&bytes,4096,budget))?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
-                let texture=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||PreparedTexture::prepare(image,semantic));budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
-            };
-            let definition=primitive.material.and_then(|i|crate::model::gltf_material_surface(&json,bin,i)).unwrap_or_else(MaterialSurface::default);
-            let base=image(texture("baseColorTexture"),if definition.msdf.is_some(){PixelSemantic::Data}else{PixelSemantic::Color})?;
-            let orm=image(texture("metallicRoughnessTexture"),PixelSemantic::Data)?;
-            let surface=PreparedSurface::prepare(definition,&mut budget)?;
+            let definition=slot.and_then(|i|crate::model::gltf_material_surface(&json,bin,i)).unwrap_or_else(MaterialSurface::default);
+            let base = texture("baseColorTexture");
+            let orm = texture("metallicRoughnessTexture");
+            let semantic = if definition.msdf.is_some() { PixelSemantic::Data } else { PixelSemantic::Color };
+            let mut charges = ImageBudget::default();
+            let base_plan = MapPlan::new(base.as_deref(), 0xffff_ffff, semantic, false, &mut charges)?;
+            let orm_plan = MapPlan::new(orm.as_deref(), 0xffff_ffff, PixelSemantic::Data, false, &mut charges)?;
+            let surface = SurfacePlan::new(&definition, &mut charges)?;
+            inventory.repeated(charges, uses);
             let metallic=pbr.and_then(|m|m.get("metallicFactor")).and_then(Val::f64).unwrap_or(1.0)as f32;
             let roughness=pbr.and_then(|m|m.get("roughnessFactor")).and_then(Val::f64).unwrap_or(1.0)as f32;
+            materials.push((slot, uses, (base, base_plan), (orm, orm_plan), (definition, surface), metallic, roughness));
+        }
+        let level = inventory.level(budget);
+        let mut remaining = budget.saturating_sub(geometry);
+        let mut prepared = std::collections::BTreeMap::new();
+        for (slot, uses, (base, base_plan), (orm, orm_plan), (definition, surface), metallic, roughness) in materials {
+            let before = remaining;
+            let base = base_plan.prepare(base.as_deref(), level, &mut remaining)?;
+            let orm = orm_plan.prepare(orm.as_deref(), level, &mut remaining)?;
+            let surface = surface.prepare(definition, &mut remaining, level)?;
+            remaining = remaining.saturating_sub((before - remaining).saturating_mul(uses - 1));
+            prepared.insert(slot, (base, orm, surface, metallic, roughness));
+        }
+        let mut out = Vec::with_capacity(self.primitives.len());
+        for primitive in &self.primitives {
+            let (base, orm, surface, metallic, roughness) = &prepared[&primitive.material];
             let vertices=rest.vertices.get(primitive.vertices.start*SKIN_GPU_VERTEX_FLOATS..primitive.vertices.end*SKIN_GPU_VERTEX_FLOATS).ok_or("skin material/rest vertex mismatch")?.to_vec();
             let indices=self.indices[primitive.indices.clone()].iter().map(|index|index-primitive.vertices.start as u32).collect::<Vec<_>>();
-            budget=budget.checked_sub((vertices.len()+indices.len())*4).ok_or("skin material geometry exceeds upload budget")?;
-            out.push(PreparedSkinPart{vertices,indices,base,orm,metallic,roughness,surface});
+            out.push(PreparedSkinPart { vertices, indices, base: (**base).clone(), orm: (**orm).clone(),
+                metallic: *metallic, roughness: *roughness, surface: surface.clone() });
         }
         Ok(out)
     }

@@ -6,16 +6,31 @@ use crate::volume_fog::VolumeFogCamera;
 struct PendingSsr {
     scene: DrawPassId, depth: Texture, surface: Texture, envspec: Texture, size: DVec2,
 }
-#[derive(Default)]
 pub(super) struct SsrState {
     pub settings: SsrSettings,
+    pub gloss_floor: f32,
     pub pass: SsrPass,
     pending: Option<PendingSsr>,
     origin: Vec3f,
     warned_capability: bool,
 }
+impl Default for SsrState {
+    fn default() -> Self {
+        Self {
+            settings: SsrSettings::default(),
+            gloss_floor: 0.35,
+            pass: SsrPass::default(),
+            pending: None,
+            origin: Vec3f::default(),
+            warned_capability: false,
+        }
+    }
+}
 impl SsrState {
     pub fn reset(&mut self) { self.pending = None; self.pass.reset_history(); }
+    pub(super) fn settled(&self) -> bool {
+        !self.settings.active() || self.warned_capability || self.pass.applied().is_some()
+    }
     pub fn active(&self) -> bool { self.settings.active() && self.pending.is_some() }
 }
 impl Renderer {
@@ -99,7 +114,7 @@ impl Renderer {
             if h.w.abs() > 1e-7 { camera.reference = [h.x / h.w, h.y / h.w, h.z / h.w, 0.0]; }
         }
         self.ssr.pass.run(cx, SsrFrame {
-            settings: self.ssr.settings, camera, depth: &pending.depth, scene,
+            settings: self.ssr.settings, gloss_floor: self.ssr.gloss_floor, camera, depth: &pending.depth, scene,
             surface: &pending.surface, envspec: &pending.envspec, size: pending.size, parent,
         })
     }

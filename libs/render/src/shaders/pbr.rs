@@ -103,34 +103,11 @@ script_mod! {
                 let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
                 sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
             }
-            // Realtime cascades with clustered lamps read none of the baked
-            // atlas (DrawSceneSkinned explains): its three reads are skipped.
-            var lm = vec4(0.0, 0.0, 0.0, 0.0)
-            var sun_vis_g = 1.0
-            if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
-                lm = self.light_map.sample(self.v_lm_uv)
-                let lmg = self.light_map.sample(self.v_lmg.xy)
-                let top_g = self.lm_top_decode.x
-                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-                sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
-            }
-            let has_lm = step(0.000001, self.lm_rect.z)
-            let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
-            // Swaying foliage (the wind flag, morph_ctl.w = -1) reads the
-            // cascades with one tap: leaf cards overdraw several deep.
-            var csm = 1.0
-            if self.morph_ctl.w < -0.5 {
-                csm = self.csm_vis_fast(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
-            } else {
-                csm = self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
-            }
-            let sun_all = mix(sun_vis * sun_vis_g, csm, self.csm_p.x) * sun_visibility
-            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
+            let lm = self.model_lightmap()
+            let sun_all = lm.w * sun_visibility
             // Legacy local diffuse; clustered PBR evaluates the same light
             // list once below, including each lamp's GGX specular response.
-            var local = lamps + self.v_dl
+            var local = lm.xyz + self.v_dl
             if self.cluster_on > 0.5 { local = vec3(0.0,0.0,0.0) }
             let sun_lit = self.sun_filled(sun_all, local)
 
@@ -241,6 +218,13 @@ script_mod! {
     //     simply keeps its lit look while they are on).
     mod.draw.DrawScenePbr = mod.std.set_type_default() do #(DrawScenePbr::script_shader(vm)){
         ..mod.draw.DrawSceneSkinned,
+        // Swaying leaf cards overdraw several deep and use the fast sample.
+        model_cascade: fn() -> float {
+            if self.morph_ctl.w < -0.5 {
+                return self.csm_vis_fast(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
+            }
+            return self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
+        }
         // The glTF metallicRoughnessTexture: G = roughness, B = metallic,
         // and the factors multiply what it says. Declared AFTER the whole
         // inherited set, so it takes the slot past ssao_map (slot 8).
@@ -275,6 +259,9 @@ script_mod! {
         material_alpha: uniform(1.0)
         alpha_mode: uniform(0.0)
         alpha_cutoff: uniform(0.5)
+        // 1 when the texture's alpha is coverage; 0 for an opaque layer, whose
+        // texture alpha holds other data (a height), so its pixels start at alpha 1.
+        tex_alpha: uniform(1.0)
         normal_scale: uniform(0.0)
         occlusion_strength: uniform(0.0)
         emissive: uniform(vec3(0.0, 0.0, 0.0))
@@ -487,7 +474,7 @@ script_mod! {
             } else {
                 tex = self.base_texel()
             }
-            var alpha=tex.w*self.material_alpha*mix(1.0,self.v_tint.w,self.surface_on)
+            var alpha=mix(1.0,tex.w,self.tex_alpha)*self.material_alpha*mix(1.0,self.v_tint.w,self.surface_on)
             if self.triplanar != 0.0 && self.alpha_mode>0.5 && self.alpha_mode<1.5 {
                 // A terrain splat overlay (gen terrain_mesh: vertex alpha is
                 // 0.45 + 0.55 * weight, texture alpha is a height). Where two
@@ -520,17 +507,15 @@ script_mod! {
             // The text decoder already used the material factor as ink;
             // multiplying it again would tint the badge fill and border.
             if self.tex_mag.x > 2.5 { material_tint = vec3(1.0, 1.0, 1.0) }
-            // `surface` is the game.material hook (DrawSceneCustom overrides
-            // it; stock PBR keeps the identity). A custom surface that cuts
-            // alpha under 0.5 discards; on the stock lane that case was
-            // already discarded above (tex.w < 0.5), so output is unchanged.
+            // Only the mask test below cuts on hook alpha. On an opaque layer,
+            // set_material keeps the program's declared mask and cutoff.
+            // In opaque mode the hook's alpha never cuts a pixel.
             let surf = self.surface(vec4(self.color_adjust(
                 // the vertex tint is encoded like a texel: both scene-referred lanes decode it
                 base * material_tint,
                 self.tint,
                 self.color_adjust_ctl
             ), alpha))
-            if self.surface_on < 0.5 && surf.w < 0.5 {self.clip()}
             // A Mask material cuts on the alpha its surface hook gives (the
             // stock hook returns the alpha tested above).
             var cut = 1.0
@@ -632,34 +617,11 @@ script_mod! {
                 let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
                 sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
             }
-            // Realtime cascades with clustered lamps read none of the baked
-            // atlas (DrawSceneSkinned explains): its three reads are skipped.
-            var lm = vec4(0.0, 0.0, 0.0, 0.0)
-            var sun_vis_g = 1.0
-            if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
-                lm = self.light_map.sample(self.v_lm_uv)
-                let lmg = self.light_map.sample(self.v_lmg.xy)
-                let top_g = self.lm_top_decode.x
-                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-                sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
-            }
-            let has_lm = step(0.000001, self.lm_rect.z)
-            let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
-            // Swaying foliage (the wind flag, morph_ctl.w = -1) reads the
-            // cascades with one tap: leaf cards overdraw several deep.
-            var csm = 1.0
-            if self.morph_ctl.w < -0.5 {
-                csm = self.csm_vis_fast(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
-            } else {
-                csm = self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
-            }
-            let sun_all = mix(sun_vis * sun_vis_g, csm, self.csm_p.x) * sun_visibility
-            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
+            let lm = self.model_lightmap()
+            let sun_all = lm.w * sun_visibility
             // Legacy local diffuse; clustered PBR evaluates the same light
             // list once below, including each lamp's GGX specular response.
-            var local = lamps + self.v_dl
+            var local = lm.xyz + self.v_dl
             if self.cluster_on > 0.5 { local = vec3(0.0,0.0,0.0) }
             let sun_lit = self.sun_filled(sun_all, local)
 

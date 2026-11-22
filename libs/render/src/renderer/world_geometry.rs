@@ -12,7 +12,14 @@ impl Renderer {
             .and_then(|t| t.floor_under(e.pos, e.half));
         let feet = e.pos.y - e.half.y;
         for s in world.entities.iter() {
-            if s.alpha_primitive || s.hidden || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic) {
+            // The same tops that receive (`refresh_shadow_receivers`): a
+            // hidden solid whose faces are drawn is ground at any thickness,
+            // so a caster on a merged brush platform still casts; any other
+            // hidden collider's top may be an invisible lid and is not.
+            if s.alpha_primitive
+                || !Self::top_is_drawn(s)
+                || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic)
+            {
                 continue;
             }
             let top = s.pos.y + s.half.y;
@@ -24,6 +31,15 @@ impl Renderer {
             }
         }
         ground
+    }
+
+    /// Whether an entity's top is a drawn surface: it is visible, or it is a
+    /// hidden solid its creator declared drawn by another mesh
+    /// ([`Entity::faces_drawn`]: a level brush, a merged floor). The one rule
+    /// for both a caster's ground and the receivers, so a draped shadow never
+    /// lies on a top that a body's own shadow cannot reach, or the reverse.
+    pub(super) fn top_is_drawn(e: &Entity) -> bool {
+        !e.hidden || e.faces_drawn
     }
 
     /// Casters for this frame, tagged with which shadow tier they get.
@@ -432,13 +448,13 @@ impl Renderer {
     /// of them and was deleted.
     pub(super) fn refresh_shadow_receivers(&mut self, world: &World) {
         // Tops that can catch a draped shadow: visible, solid static boxes —
-        // road slabs, platforms, crate lids. TALL hidden colliders stay
-        // excluded (their tops are the invisible lids the roof surfaces
-        // replaced; draping onto those floats shadows mid-air), but THIN
-        // hidden slabs are floor stand-ins for visible model floors — a
-        // generated dungeon's tiles. Without them shadows draped onto the
-        // terrain UNDER the floors and surfaced coplanar with the visible
-        // ground: the arena's floor-wide z-fighting sheets.
+        // road slabs, platforms, crate lids — and hidden solids whose faces
+        // are drawn by another mesh (`top_is_drawn`). Other hidden colliders
+        // stay excluded: their tops may be the invisible lids the roof
+        // surfaces replaced, and draping onto those floats shadows mid-air.
+        // Without the drawn floors, shadows draped onto the terrain UNDER
+        // them and surfaced coplanar with the visible ground: the arena's
+        // floor-wide z-fighting sheets.
         self.occluder_boxes = world
             .entities
             .iter()
@@ -466,22 +482,16 @@ impl Renderer {
             .iter()
             .filter(|e| {
                 // Receivers: what a draped shadow may land on. Visible solid
-                // statics, PLUS the mesh voxel boxes that are genuinely
-                // FLOORS — wide flat slabs (a generated dungeon's walkable
-                // surface lives in the mesh at its true height; the old
-                // mask stand-ins sat 10cm below the drawn floor and every
-                // draped shadow was buried under it). Curbs, decks and
-                // braces stay excluded: wide+flat only.
-                let h = (
-                    e.half.x * e.scale.x,
-                    e.half.y * e.scale.y,
-                    e.half.z * e.scale.z,
-                );
-                let flat_slab = h.1 <= 0.25 && h.0 >= 0.8 && h.2 >= 0.8;
+                // statics, PLUS hidden solids whose faces are drawn (a level
+                // brush, a merged mesh's floor slab: the walkable surface
+                // lives in the mesh at the collider's height). Other hidden
+                // colliders stay out: their tops may be invisible lids, and a
+                // shadow on one floats. Roofs stay out by
+                // `RECEIVER_TOP_MAX` (shadow_mesh.rs).
                 e.kind == BodyKind::Static
                     && !e.alpha_primitive
                     && e.shape == Shape::Box
-                    && (!e.hidden || flat_slab)
+                    && Self::top_is_drawn(e)
             })
             .map(|e| {
                 let h = vec3f(

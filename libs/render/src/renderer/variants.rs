@@ -84,6 +84,8 @@ pub(crate) struct Features {
     pub gi_debug: bool,
     /// The sun cascades (`csm_vis`, `csm_vis_fast`).
     pub csm: bool,
+    /// Use the fast cascade sample throughout the settled tier's shader.
+    pub settled: bool,
     /// The cascade debug view (`csm_debug_view`).
     pub csm_debug: bool,
     /// The clustered lights (`cluster_lights`).
@@ -179,24 +181,30 @@ impl Renderer {
     /// `bind_model_lane` writes), with `clip` on.
     pub(super) fn lane_features(&self) -> Features {
         let (gi, gi_debug) = self.gi.shader_features();
-        let csm = self.gpu_baker.csm_binding().is_some_and(|(frame, _, _)| frame.on);
-        Features { clip: true, gi, gi_debug, csm, csm_debug: csm && self.shadow_debug, cluster: self.clustered.active(self.clustered_enabled), local_shadows: self.clustered.shadows_active(self.clustered_enabled), reflections: self.ssr.active() }
+        let settled = crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode()).static_csm;
+        let csm = settled || self.gpu_baker.csm_binding().is_some_and(|(frame, _, _)| frame.on);
+        Features { clip: true, gi, gi_debug, csm, settled, csm_debug: csm && self.shadow_debug, cluster: self.clustered.active(self.clustered_enabled), local_shadows: self.clustered.shadows_active(self.clustered_enabled), reflections: self.ssr.active() }
     }
 
     /// The feature sets a world's frames draw a lane with, most likely
     /// first. They are this frame's, with the targets a world's first frame
-    /// allocates counted as there: the cascades in Realtime and the cluster
+    /// allocates counted as there: the sun cascades and the cluster
     /// grid, which a load staged before any world drew sees off. The lamps'
     /// shadows stay as this frame has them. In Realtime the cascades come
     /// both on and off: they follow the sun's side of the horizon, which is
     /// the world's and its hour's, and a day cycle crosses it in play.
+    /// The settled tier stages its cascade variant once. At night the uniform switches sampling off.
     pub(super) fn world_frame_features(&self) -> Vec<Features> {
         let now = self.lane_features();
         let cluster = self.clustered_enabled;
         let world = Features { cluster, local_shadows: cluster && self.clustered.shadows.active(), ..now };
         let off = Features { csm: false, csm_debug: false, ..world };
-        if self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::Realtime {
-            vec![Features { csm: true, csm_debug: self.shadow_debug, ..world }, off]
+        let on = Features { csm: true, csm_debug: self.shadow_debug, ..world };
+        let tiers = crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode());
+        if tiers.csm {
+            vec![on, off]
+        } else if tiers.static_csm {
+            vec![on]
         } else {
             vec![off]
         }
@@ -247,6 +255,24 @@ impl Renderer {
         };
         let full = full.or(self.lane_variants.stock.get(&lane).copied()).filter(|id| fits(&*cx, *id));
         (full.or(held), opaque.filter(|id| fits(&*cx, *id)))
+    }
+
+    /// Keep a drawable shader while the pass builds the new features variant.
+    pub(super) fn select_lane_shader(
+        &self, cx: &Cx, lane: ModelLane, full: Option<DrawShaderId>, held: Option<DrawShaderId>,
+        ready: impl Fn(DrawShaderId) -> bool,
+    ) -> Option<DrawShaderId> {
+        let fits = |id| held.is_none_or(|held| held == id || same_layout(cx, held, id));
+        let full = full.filter(|id| fits(*id)).or(held);
+        if full.is_some_and(&ready) {
+            return full;
+        }
+        if held != full && held.is_some_and(&ready) {
+            return held;
+        }
+        let stock = self.lane_variants.stock.get(&lane).copied();
+        stock.filter(|id| Some(*id) != full && Some(*id) != held && fits(*id) && ready(*id))
+            .or(full)
     }
 
     /// A level draw's shader (SceneDraws: slabs, blended slabs, terrain)
@@ -304,16 +330,18 @@ pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Fe
     }
     let stubs = vm.value(draw, id!(scene_variant)).as_object()?;
     let obj = vm.heap_mut().new_with_proto_no_vec(base.into());
-    // (switched off, the function it replaces, the stub it becomes)
-    let replace: [(bool, LiveId, LiveId); 15] = [
+    // The cascade debug view also samples visibility on unlit lanes.
+    let sample_csm = features.csm && (lit || features.csm_debug);
+    // (when to replace, the method, its replacement)
+    let replace: [(bool, LiveId, LiveId); 16] = [
         (!features.clip, id!(clip), id!(clip)),
         (!features.gi || !lit, id!(gi_ambient), id!(gi_ambient)),
         (!features.gi || !lit, id!(gi_specular_occlusion), id!(gi_specular_occlusion)),
         (!features.gi, id!(gi_display), id!(gi_display)),
         (features.gi && !features.gi_debug, id!(gi_display), id!(gi_display_plain)),
-        // The cascade debug view reads csm_vis: kept while it is on.
-        (!features.csm || (!lit && !features.csm_debug), id!(csm_vis), id!(csm_vis)),
-        (!features.csm || (!lit && !features.csm_debug), id!(csm_vis_fast), id!(csm_vis)),
+        (!sample_csm, id!(csm_vis), id!(csm_vis)),
+        (!sample_csm, id!(csm_vis_fast), id!(csm_vis)),
+        (sample_csm && features.settled, id!(csm_vis), id!(csm_vis_fast)),
         (!features.csm_debug, id!(csm_debug_view), id!(csm_debug_view)),
         (!features.cluster || !lit, id!(cluster_lights), id!(cluster_lights)),
         (!features.cluster || !lit, id!(cluster_lights_f0), id!(cluster_lights_f0)),
@@ -325,8 +353,8 @@ pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Fe
         (!lit, id!(shade), id!(shade_unlit)),
     ];
     let mut replaced = false;
-    for (off, method, stub) in replace {
-        if !off {
+    for (apply, method, stub) in replace {
+        if !apply {
             continue;
         }
         // Only a function the program has (a lane without the feature keeps
@@ -575,6 +603,74 @@ mod tests {
     #[test]
     fn every_lane_builds_its_variants_with_the_stock_layout() {
         let mut cx = shader_cx();
+        // Settled stages one cascade variant even across dusk and dawn.
+        // The stock draw's uniform follows the sun, including without an atlas.
+        use crate::gpu_lightmap::GpuLightmapMode::{Off, OnChange, Realtime};
+        let mut renderer = Renderer::default();
+        let mut material = cx.with_vm(|vm| DrawScenePbr::script_new_with_default(vm));
+        let staged = |r: &Renderer| r.world_frame_features().into_iter().map(|f| (f.csm, f.settled)).collect::<Vec<_>>();
+        renderer.gpu_baker.set_mode(OnChange);
+        assert_eq!(staged(&renderer), [(true, true)]);
+        let settled_features = renderer.lane_features();
+        assert!(settled_features.csm && settled_features.settled);
+        let parent = DrawPass::new(&mut cx);
+        let mut world = World::default();
+        for (mode, sun_y, expected, sets) in [
+            (OnChange, 1.0, 2.0, &[(true, true)][..]),
+            (OnChange, -1.0, 0.0, &[(true, true)][..]),
+            (OnChange, 1.0, 2.0, &[(true, true)][..]),
+            (Realtime, 1.0, 1.0, &[(true, false), (false, false)][..]),
+            (Realtime, -1.0, 0.0, &[(true, false), (false, false)][..]),
+            (Off, 1.0, 0.0, &[(false, false)][..]),
+        ] {
+            renderer.gpu_baker.set_mode(mode);
+            world.sun.dir = Some(vec3f(0.0, sun_y, 0.0));
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            draw.begin_pass(&parent, Some(1.0));
+            renderer.run_gpu_lightmap(&mut draw, &world, &[], None, Vec3f::default());
+            if mode == Realtime && sun_y > 0.0 {
+                renderer.set_scene_time(draw.cx, Some(2.0));
+                renderer.apply_scene_time(draw.cx, &parent);
+                let lamp = crate::lightmap::LmLight {
+                    pos: vec3f(0.0, 3.0, 0.0), radius: 12.0, color: Vec3f::all(1.0),
+                    dir: vec3f(0.0, 0.0, -1.0), cone: Some((10.0, 25.0)), shadows: true,
+                    ..Default::default()
+                };
+                renderer.clustered.shadows.render(&mut draw, &[lamp], &[true], Vec3f::default(), &[], &[]);
+                let recorded: Vec<_> = draw.passes.id_iter().filter(|&id|
+                    id == parent.draw_pass_id() || draw.passes[id].main_draw_list_id.is_some()
+                ).collect();
+                assert!(recorded.iter().any(|&id| draw.passes[id].debug_name == "local_shadows"),
+                    "the first shadowed lamp records an atlas after the clock was supplied");
+                let check_clocks = |cx: &Cx, time| {
+                    for &id in &recorded {
+                        assert_eq!(cx.passes[id].own_time, time, "clock on {}", cx.passes[id].debug_name);
+                    }
+                };
+                check_clocks(draw.cx, Some(2.0));
+                for time in [Some(3.0), None] {
+                    renderer.set_scene_time(draw.cx, time);
+                    renderer.apply_scene_time(draw.cx, &parent);
+                    check_clocks(draw.cx, time);
+                }
+            }
+            draw.end_pass(&parent);
+            assert_eq!(staged(&renderer), sets);
+            if mode == OnChange {
+                assert_eq!(renderer.lane_features(), settled_features, "dusk and dawn keep the staged variants");
+            } else {
+                assert_eq!(renderer.lane_features().csm, expected != 0.0);
+            }
+            let vars = &mut material.skinned.draw_vars;
+            renderer.bind_sun_cascades(draw.cx, vars);
+            let mut x = [f32::NAN];
+            vars.get_uniform(draw.cx, live_id!(csm_p), &mut x);
+            assert_eq!(x[0], expected, "{mode:?}, sun y={sun_y}");
+        }
+        renderer.gpu_baker.set_mode(OnChange);
+        assert!(renderer.lane_features().csm, "the settled variant is selected before target allocation");
+        assert!(!renderer.gpu_baker.csm_binding().unwrap().0.on, "Off must have released the targets in the no-atlas draw path");
         cx.with_vm(|vm| {
             let draw = vm.value(vm.modules(), id!(draw)).as_object().unwrap();
             // `build` checks the layout against the stock shader itself; the
@@ -585,9 +681,12 @@ mod tests {
                 Features { clip: true, ..Default::default() },
                 Features { gi: true, ..Default::default() },
                 Features { csm: true, cluster: true, ..Default::default() },
-                Features { gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, clip: false, reflections: false },
+                Features { csm: true, settled: true, cluster: true, ..Default::default() },
+                Features { csm: true, settled: true, cluster: true, reflections: true, ..Default::default() },
+                Features { gi: true, gi_debug: true, csm: true, settled: false, csm_debug: true, cluster: true, local_shadows: true, clip: false, reflections: false },
             ] {
-                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage, ModelLane::Cube, ModelLane::Alpha, ModelLane::Terrain, ModelLane::SkinnedGpu, ModelLane::Splat] {
+                for (lane, _) in STAGED_LANES {
+                    if features.reflections && !matches!(lane, ModelLane::Pbr | ModelLane::Splat) { continue }
                     let name = lane.name();
                     assert!(build(vm, lane, features).is_some(), "{name} variant {features:?}");
                     let base = vm.heap().type_default_for_id(lane.type_id()).unwrap();
@@ -597,6 +696,27 @@ mod tests {
                         let source = script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.variant_under_test, "glsl", false) });
                         let source = vm.heap().string_with(source, |_, s| s.to_string()).unwrap_or_default();
                         assert!(!source.is_empty(), "{name} variant {features:?} lit {lit}: no GLSL source");
+                        assert!(!source.starts_with("ERRORS:"), "{name} variant {features:?} lit {lit}: {source}");
+                        if features.settled {
+                            assert!(!source.contains("io_csm_disk"), "{name}: settled shader includes the disk filter");
+                            // Every read of the mode must compare it. Using it directly as
+                            // a mix weight extrapolates a settled shadow below zero.
+                            for after in source.split("uni_csm_p.x").skip(1) {
+                                let after = after.trim_start();
+                                assert!(after.starts_with('<') || after.starts_with(">="),
+                                    "{name}: settled GLSL uses the raw cascade mode");
+                            }
+                            if lit && matches!(lane, ModelLane::Pbr | ModelLane::Diffuse | ModelLane::Splat) {
+                                assert!(source.contains("uni_csm_p.x >= 1.5"), "{name}: model receiver must distinguish settled copies");
+                            }
+                            if lit && matches!(lane, ModelLane::Cube | ModelLane::Alpha | ModelLane::Terrain | ModelLane::SkinnedGpu) {
+                                assert!(source.contains("min(p_field, p_cascade)"), "{name}: settled ground receiver must keep the darker visibility");
+                            }
+                        }
+                        if lane == ModelLane::Pbr && lit && features.csm {
+                            assert!(source.contains("io_csm_tap1"), "lit PBR must sample cascade depth");
+                            assert_eq!(source.contains("io_csm_disk"), !features.settled, "only Realtime PBR uses the disk filter");
+                        }
                         // `<type> io_name(..){` at the start of a line.
                         let defined: std::collections::HashSet<&str> = source.lines()
                             .filter(|l| l.trim_end().ends_with('{'))

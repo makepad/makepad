@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::stream::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -107,6 +108,7 @@ fn prepared_from_stream(mut mesh: StreamMesh, merge: bool) -> Result<(PreparedSt
     // The layer's surface kind rides the metallic slot (DrawSceneCity reads
     // it); orm_on keeps upload from zeroing it as "not shiny".
     let mut layers = mesh.layers.into_iter().map(|l| PreparedStaticLayer {
+        name: Default::default(),
         detail: l.detail.as_ref().map_or_else(|| detail.clone(), |(t, _)| t.clone()), detail_scale: l.detail.as_ref().map_or([0.0, 0.0], |(_, s)| *s),
         cutout: l.texture.cutout(), vertices: l.vertices, indices: l.indices, texture: l.texture,
         orm: l.material.orm.clone().unwrap_or_else(|| orm.clone()), orm_on: true, surface: None,
@@ -239,13 +241,18 @@ impl StreamState {
 static STREAM_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Renderer {
+    fn clear_stream_casters(&mut self) {
+        self.stream_casters.clear();
+        self.stream_caster_key = None;
+        self.gpu_baker.csm_casters_changed();
+    }
+
     /// Install (or with `None`, drop) a streamed world. Chunk bounds, props
     /// and occluders are read once here; geometry arrives from workers.
     pub fn set_tile_source(&mut self, source: Option<Arc<dyn TileSource>>, settings: StreamSettings) {
         // Keep the worker threads for the next source.
         if let Some(old) = self.stream.take() { if old.workers.is_some() { self.stream_workers = old.workers; } }
-        self.stream_casters.clear();
-        self.gpu_baker.csm_casters_changed();
+        self.clear_stream_casters();
         self.prune_texture_cache();
         let Some(source) = source else { return };
         let chunk_bounds: Vec<_> = (0..source.chunk_count()).map(|i| source.chunk_bounds(i)).collect();
@@ -292,7 +299,10 @@ impl Renderer {
     /// frame before drawing; `live` should stream around every pane's
     /// camera ([`Self::set_stream_foci`]).
     pub fn mirror_stream_from(&mut self, live: &Renderer) {
-        let Some(src) = live.stream.as_ref() else { self.stream = None; return };
+        let Some(src) = live.stream.as_ref() else {
+            if self.stream.take().is_some() { self.clear_stream_casters(); }
+            return;
+        };
         if !self.stream.as_ref().is_some_and(|s| Arc::ptr_eq(&s.source, &src.source)) {
             let n = src.chunk_bounds.len();
             self.stream = Some(Box::new(StreamState {
@@ -461,9 +471,12 @@ impl Renderer {
         st.draw_list.clear();
         let mut casters = std::mem::take(&mut self.stream_casters);
         casters.clear();
+        let mut caster_hash = DefaultHasher::new();
         for &(cell, w) in &selection.cells {
             let (lo, hi) = (st.cells[cell as usize].0, st.cells[cell as usize].1);
-            if let Some((m, n)) = st.cell[cell as usize].casting() { stream_casters_of(&mut casters, m, n); }
+            if let Some((m, n)) = st.cell[cell as usize].casting() {
+                stream_casters_of(&mut casters, &mut caster_hash, m, n);
+            }
             if frustum.is_some_and(|f| !f.intersects_aabb(lo, hi)) { stats.frustum_culled += 1; continue; }
             if occlusion && raster.occluded(lo, hi) { stats.occluded += 1; continue; }
             st.draw_list.push((StreamPiece::Cell(cell), w.encode(), aabb_distance(lo, hi, eye)));
@@ -480,7 +493,9 @@ impl Renderer {
             // selection — only its first entry casts.
             if cast_last != Some(chunk) {
                 cast_last = Some(chunk);
-                if let Some((m, n)) = st.proxy[ci].casting().or_else(|| st.near[ci].casting()) { stream_casters_of(&mut casters, m, n); }
+                if let Some((m, n)) = st.proxy[ci].casting().or_else(|| st.near[ci].casting()) {
+                    stream_casters_of(&mut casters, &mut caster_hash, m, n);
+                }
             }
             if frustum.is_some_and(|f| !f.intersects_aabb(lo, hi)) { stats.frustum_culled += 1; continue; }
             if occlusion && raster.occluded(lo, hi) { stats.occluded += 1; continue; }
@@ -517,8 +532,12 @@ impl Renderer {
         // and a stable sort allocates a scratch half of the list every frame.
         st.prop_list.sort_unstable_by_key(|p| p.0);
         stats.casters = casters.len();
+        let key = (!casters.is_empty()).then(|| caster_hash.finish());
         self.stream_casters = casters;
-        self.gpu_baker.csm_casters_changed();
+        if self.stream_caster_key != key {
+            self.stream_caster_key = key;
+            self.gpu_baker.csm_casters_changed();
+        }
         st.selection = selection;
         st.raster = raster;
         stats.resident_near = st.near.iter().filter(|s| s.resident()).count();
@@ -632,14 +651,13 @@ impl Renderer {
         // Until the city pipeline can draw (Metal compiles it asynchronously
         // after a shader change) or if it failed, the city draws matte
         // rather than not at all.
-        let hdr = self.hdr_output;
         // Ready: the city lane's shader for this frame's features (variants.rs).
         if let Some(c) = city.as_deref_mut() {
             c.pbr.skinned.draw_vars.refresh_after_reload(cx.cx);
         }
         let stock = city.as_ref().and_then(|c| c.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx.cx, super::variants::ModelLane::City, stock).0 } else { None };
-        let ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
+        let ready = shader.is_some_and(|id| cx.draw_shader_ready_here(id));
         let mut draw = match city.as_deref_mut().filter(|_| ready && city_shader_on()) {
             Some(c) => { c.pbr.skinned.draw_vars.set_uniform(cx.cx, live_id!(city), &[night, stream_time, 0.0, 0.0]); ModelDraw::City(c) }
             None => ModelDraw::Diffuse(diffuse),
@@ -662,10 +680,11 @@ impl Renderer {
         let opaque = match model_lane {
             Some(model_lane) => {
                 draw.base().draw_vars.refresh_after_reload(cx.cx);
-                let stock = draw.base().draw_vars.draw_shader_id;
-                let (full, opaque) = self.lane_shaders(cx.cx, model_lane, stock);
-                draw.base().draw_vars.draw_shader_id = full;
-                opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
+                let held = draw.base().draw_vars.draw_shader_id;
+                let (full, opaque) = self.lane_shaders(cx.cx, model_lane, held);
+                draw.base().draw_vars.draw_shader_id =
+                    self.select_lane_shader(cx.cx, model_lane, full, held, |id| cx.draw_shader_ready_here(id));
+                opaque.filter(|id| cx.draw_shader_ready_here(*id))
             }
             None => None,
         };
@@ -758,10 +777,18 @@ fn city_shader_on() -> bool {
 
 /// The shadow-casting layers of a streamed model (`prepared_from_stream`:
 /// its leading casting layers, or their merged caster-only layer).
-fn stream_casters_of(casters: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>, m: &LoadedModel, casting: std::ops::Range<usize>) {
+fn stream_casters_of(
+    casters: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>,
+    hash: &mut DefaultHasher,
+    m: &LoadedModel,
+    casting: std::ops::Range<usize>,
+) {
     for (k, g) in std::iter::once(&m.geometry).chain(m.extra_draws.iter().map(|(g, ..)| g)).enumerate() {
         if !casting.contains(&k) { continue; }
-        casters.push(crate::gpu_lightmap::GpuBakeMesh { geometry: g.geometry_id(), transform: Mat4f::identity(), min: m.min, max: m.max, cutout: None, msdf: None, band: Default::default() });
+        let geometry = g.geometry_id();
+        geometry.hash(hash);
+        [m.min.x, m.min.y, m.min.z, m.max.x, m.max.y, m.max.z].map(f32::to_bits).hash(hash);
+        casters.push(crate::gpu_lightmap::GpuBakeMesh { geometry, transform: Mat4f::identity(), min: m.min, max: m.max, material: None, cutout: None, msdf: None, band: Default::default() });
     }
 }
 

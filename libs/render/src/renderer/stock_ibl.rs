@@ -59,6 +59,7 @@ pub(super) struct StockIblState {
     failed: bool,
     /// This frame routes shiny stock models through the program.
     active: bool,
+    recorded_pass: Option<DrawPassId>,
     /// The scale this draw's lane puts on the IBL lookups
     /// (`sun::env_lane_scale`; `resolve_ibl_lane`).
     scale: f32,
@@ -70,7 +71,7 @@ pub(super) struct StockIblState {
 impl Default for StockIblState {
     fn default() -> Self {
         // No draw yet: the lookups at the map's own scale, the fill the map's.
-        Self { failed: false, active: false, scale: 1.0, authored_fill: false }
+        Self { failed: false, active: false, recorded_pass: None, scale: 1.0, authored_fill: false }
     }
 }
 
@@ -130,11 +131,12 @@ impl Renderer {
     /// features are known only once the lights are clustered, later in the
     /// frame. So each list's diffuse pass decides again (`confirm_stock_ibl`)
     /// before any lane walks that list.
-    pub(super) fn prepare_stock_ibl(&mut self, cx: &mut Cx) {
+    pub(super) fn prepare_stock_ibl(&mut self, cx: &mut Cx, pass: DrawPassId) {
+        self.stock_ibl.recorded_pass = Some(pass);
         self.stock_ibl.active = self.pbr_materials_enabled
             && self.ibl_texture().is_some()
             && self.stock_ibl_install(cx)
-            && self.stock_ibl_shader_ready(cx);
+            && self.stock_ibl_shader_ready(cx, Some(pass));
     }
 
     /// Decide again in a model list's diffuse pass, beside `pbr_ready`
@@ -149,16 +151,17 @@ impl Renderer {
     /// `stock_ibl_ready` (`items_ready`) reads the shader the lane draws
     /// through. Installs nothing: a program `prepare_stock_ibl` did not
     /// install is no route.
-    pub(super) fn confirm_stock_ibl(&mut self, cx: &mut Cx) {
+    pub(super) fn confirm_stock_ibl(&mut self, cx: &mut Cx, pass: DrawPassId) {
+        self.stock_ibl.recorded_pass = Some(pass);
         if !self.pbr_materials_enabled || self.ibl_texture().is_none() {
             self.stock_ibl.active = false;
             return;
         }
-        let (features, hdr) = (self.lane_features(), self.hdr_output);
+        let features = self.lane_features();
         self.stock_ibl.active = self.custom_draws.get_mut(STOCK_IBL_MATERIAL).is_some_and(|m| {
             let full = m.shaders(cx, features).0;
             m.draw.draw_vars.draw_shader_id = full;
-            full.is_some_and(|id| pipeline_ready(cx, id, hdr))
+            full.is_some_and(|id| pipeline_ready(cx, id, pass))
         });
     }
 
@@ -226,25 +229,20 @@ impl Renderer {
         vars.set_uniform(cx, live_id!(ibl_ctl), &ctl);
     }
 
-    /// Whether `inst` has a material of its own for the lanes' routing: it
-    /// names one and that one is installed. `lane` is the program walking
-    /// the list, whose draw is out of `custom_draws` for its pass
-    /// (`draw_custom_models`). A name that is not installed (a replica that
-    /// installs no materials, one dropped by `retain_custom_materials`)
-    /// draws through the stock lanes, so it routes as a stock model.
-    pub(super) fn has_own_material(&self, inst: &ModelInstance, lane: Option<&str>) -> bool {
-        inst.custom_material.as_ref().is_some_and(|m| lane == Some(m.name.as_str()) || self.custom_draws.contains_key(&m.name))
+    /// A layer owns its program while it is installed, including during a walk
+    /// that has borrowed the draws from the registry.
+    pub(super) fn has_own_material(&self, material: Option<&CustomMaterialInstance>, lane: Option<&str>) -> bool {
+        material.is_some_and(|m| lane == Some(m.name.as_str())
+            || self.custom_draws.contains_key(&m.name) || self.blended_models.programs.contains(&m.name))
     }
 
-    /// Whether `instances` lists a model the stock IBL program draws while
-    /// the frame routes: a shiny one with no material of its own
-    /// (`draw_custom_models` draws the program only then). The per-instance
-    /// routing (`takes_stock_ibl`) reads the same `has_own_material`, so a
-    /// model the PBR lane leaves is always one this lists.
+    /// A shiny model with overrides can still have stock layers. The per-layer
+    /// filter decides which of them draw once this walk has been admitted.
     pub(super) fn lists_a_stock_ibl_model(&self, instances: &[ModelInstance]) -> bool {
         let shiny: std::collections::HashSet<&str> = self.static_models.iter()
             .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
-        !shiny.is_empty() && instances.iter().any(|inst| !self.has_own_material(inst, None) && shiny.contains(inst.model.as_str()))
+        !shiny.is_empty() && instances.iter().any(|inst| shiny.contains(inst.model.as_str())
+            && (!inst.layer_materials.is_empty() || !self.has_own_material(inst.material_of(""), None)))
     }
 
     /// Whether a locked-time host has nothing to wait for on this path: no
@@ -261,7 +259,7 @@ impl Renderer {
         self.ibl_texture().is_none()
             || !self.pbr_materials_enabled
             || !self.custom_draws.contains_key(STOCK_IBL_MATERIAL)
-            || self.stock_ibl_shader_ready(cx)
+            || self.stock_ibl_shader_ready(cx, self.stock_ibl.recorded_pass)
     }
 
     /// Whether the shader on the program's draw can draw: the variant the
@@ -270,20 +268,32 @@ impl Renderer {
     /// the lanes draw through, and the stock shader before the first
     /// diffuse pass. Read before the walk it is the last list's variant, a
     /// first estimate only (`prepare_stock_ibl`).
-    fn stock_ibl_shader_ready(&self, cx: &Cx) -> bool {
+    fn stock_ibl_shader_ready(&self, cx: &Cx, pass: Option<DrawPassId>) -> bool {
         self.custom_draws
             .get(STOCK_IBL_MATERIAL)
             .and_then(|m| m.draw.draw_vars.draw_shader_id)
-            .is_some_and(|id| pipeline_ready(cx, id, self.hdr_output))
+            .is_some_and(|id| material_pipeline_ready(cx, id, pass, self.hdr_output))
     }
 }
 
-/// Whether the pipeline of `id` can draw (`Cx::draw_shader_ready`): what
-/// both decisions and `stock_ibl_ready` ask of the HAL. A test runs no
+/// Whether the pipeline of `id` can draw into this pass: what
+/// both decisions, `stock_ibl_ready` and each frame's custom lanes
+/// (realm.rs `prepare_custom_lanes`) ask of the HAL. A test runs no
 /// beat, so there the HAL makes no pipeline and every decision would only
 /// wait; it names the pipelines it treats as made (`tests::Made`), so the
 /// route it decides is seen taken as well as waited for.
-fn pipeline_ready(cx: &Cx, id: DrawShaderId, hdr: bool) -> bool {
+pub(super) fn pipeline_ready(cx: &Cx, id: DrawShaderId, pass: DrawPassId) -> bool {
+    #[cfg(test)]
+    if tests::MADE.with(|made| made.borrow().contains(&id.index)) {
+        return true;
+    }
+    cx.draw_shader_ready_in(id, pass)
+}
+
+pub(super) fn material_pipeline_ready(cx: &Cx, id: DrawShaderId, pass: Option<DrawPassId>, hdr: bool) -> bool {
+    if let Some(pass) = pass {
+        return pipeline_ready(cx, id, pass);
+    }
     #[cfg(test)]
     if tests::MADE.with(|made| made.borrow().contains(&id.index)) {
         return true;
@@ -291,24 +301,20 @@ fn pipeline_ready(cx: &Cx, id: DrawShaderId, hdr: bool) -> bool {
     cx.draw_shader_ready(id, hdr)
 }
 
-/// Whether one instance draws through the stock IBL program this frame:
-/// the frame routes (`active`), the model wants the PBR lane, it has no
-/// material of its own (`Renderer::has_own_material`: none named, or the
-/// named one not installed) and it is not swaying foliage (the foliage lane
-/// keeps those). Read by every lane, so exactly one of them draws the
-/// instance.
+/// A shiny model's layer takes the stock IBL route while that route is active,
+/// the layer has no installed program of its own, and the model does not sway.
 pub(super) fn takes_stock_ibl(active: bool, uses_pbr_lane: bool, own_material: bool, sways: bool) -> bool {
     active && uses_pbr_lane && !own_material && !sways
 }
 
-/// Whether a stock lane (diffuse, PBR or foliage) skips one instance. With
+/// Whether a stock lane (diffuse, PBR or foliage) skips a layer. With
 /// `takes_stock_ibl` false this is the filter the lanes had before.
 pub(super) fn stock_lane_skips(wanted_custom: bool, takes_stock_ibl: bool, sways: bool, foliage_lane: bool, uses_pbr_lane: bool, pbr_lane: bool) -> bool {
     wanted_custom || takes_stock_ibl || sways != foliage_lane || (!foliage_lane && uses_pbr_lane != pbr_lane)
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
     use makepad_render_material::{Builtin, ShadowVariant};
@@ -324,16 +330,16 @@ mod tests {
     /// the pipelines the HAL has made to see the route taken too. None to
     /// begin with, and forgotten when the test ends (the thread may run
     /// another).
-    struct Made;
+    pub(in crate::renderer) struct Made;
 
     impl Made {
-        fn none() -> Made {
+        pub(in crate::renderer) fn none() -> Made {
             MADE.with(|made| made.borrow_mut().clear());
             Made
         }
 
         /// The HAL has made the pipeline of `id`.
-        fn pipeline(&self, id: DrawShaderId) {
+        pub(in crate::renderer) fn pipeline(&self, id: DrawShaderId) {
             MADE.with(|made| made.borrow_mut().push(id.index));
         }
     }
@@ -438,6 +444,7 @@ mod tests {
         use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
         let made = Made::none();
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         // A closed pool prepares on the spot: the call binds the texture.
         cx.use_closed_task_pool();
         let mut renderer = Renderer::default();
@@ -448,27 +455,27 @@ mod tests {
         assert!(renderer.stock_ibl_ready(&cx) && renderer.items_ready(&cx), "no draw has installed the program: nothing to wait for");
 
         renderer.pbr_materials_enabled = false;
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active(), "the PBR lane off: no routing");
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "and no program");
 
         // The control: the same frame with the lane on builds the program
         // and routes once its pipeline can draw.
         renderer.pbr_materials_enabled = true;
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("the lane on: the program is built");
         let active = renderer.stock_ibl_active();
-        assert_eq!(active, pipeline_ready(&cx, id, renderer.hdr_output), "the decision is the program's pipeline");
+        assert_eq!(active, pipeline_ready(&cx, id, pass.draw_pass_id()), "the decision is the program's pipeline");
         // Under the HAL a new shader's pipeline is made at the next beat and
         // compiled off the thread on every backend, so in a test, which runs
         // no beat, it cannot draw yet: the frame waits for it.
         assert!(!active, "the lane on and the program's pipeline not made yet: the frame waits for it");
         // Once the HAL has made it, the frame routes.
         made.pipeline(id);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(renderer.stock_ibl_active(), "the lane on and the program's pipeline made: the frame routes");
         renderer.pbr_materials_enabled = false;
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active(), "the PBR lane off: no routing, the pipeline made or not");
     }
 
@@ -488,12 +495,13 @@ mod tests {
         use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
         let made = Made::none();
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         cx.use_closed_task_pool();
         let mut renderer = Renderer::default();
         let on_draw = |r: &Renderer| r.custom_material(STOCK_IBL_MATERIAL).and_then(|m| m.draw.draw_vars.draw_shader_id);
 
         // No environment: the diffuse pass builds nothing and routes nothing.
-        renderer.confirm_stock_ibl(&mut cx);
+        renderer.confirm_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active());
         assert!(renderer.custom_draws.is_empty(), "no environment, no program");
 
@@ -501,22 +509,22 @@ mod tests {
         let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         let stock = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("an environment builds the program");
         assert_eq!(on_draw(&renderer), Some(stock), "before its first walk the draw holds the stock shader");
         // A test runs no beat, so the HAL has made no pipeline: the first
         // estimate waits. Once the stock shader's is made it is on.
         assert!(!renderer.stock_ibl_active(), "no pipeline made: the first estimate waits");
         made.pipeline(stock);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(renderer.stock_ibl_active(), "the stock shader on the draw can draw: the first estimate is on");
 
-        renderer.confirm_stock_ibl(&mut cx);
+        renderer.confirm_stock_ibl(&mut cx, pass.draw_pass_id());
         let features = renderer.lane_features();
         let variant = renderer.custom_draws.get_mut(STOCK_IBL_MATERIAL).unwrap().shaders(&mut cx, features).0.expect("a variant for this frame's features");
         assert_ne!(variant, stock, "premise: this frame's variant is a shader of its own");
         assert_eq!(on_draw(&renderer), Some(variant), "the variant the lanes draw through is on the draw");
-        assert_eq!(renderer.stock_ibl_active(), pipeline_ready(&cx, variant, renderer.hdr_output), "the decision is that variant's pipeline");
+        assert_eq!(renderer.stock_ibl_active(), pipeline_ready(&cx, variant, pass.draw_pass_id()), "the decision is that variant's pipeline");
         // The stock shader's pipeline is made, the variant's not: a decision
         // read off the stock shader would route the models while their
         // variant compiles.
@@ -524,22 +532,22 @@ mod tests {
         assert!(!renderer.stock_ibl_ready(&cx), "the program is waited for on the shader the lanes draw through");
         assert!(!renderer.items_ready(&cx), "and items_ready waits for it");
         // The next frame's first decision reads the variant off the draw.
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active(), "the next frame's first estimate reads the variant on the draw, not the stock shader");
 
         // The HAL makes the variant's pipeline: the list routes, and nothing
         // is waited for.
         made.pipeline(variant);
-        renderer.confirm_stock_ibl(&mut cx);
+        renderer.confirm_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(renderer.stock_ibl_active(), "the variant's pipeline made: the list routes");
         assert!(renderer.stock_ibl_ready(&cx) && renderer.items_ready(&cx), "the variant can draw: nothing is waited for");
 
         // The next frame's first decision reads the variant off the draw;
         // another list's diffuse pass finds it built and decides the same.
         let built = program_at(&renderer);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(renderer.stock_ibl_active(), "the next frame's first estimate: the variant can draw");
-        renderer.confirm_stock_ibl(&mut cx);
+        renderer.confirm_stock_ibl(&mut cx, pass.draw_pass_id());
         assert_eq!(program_at(&renderer), built, "the next frame builds no other program");
         assert_eq!(on_draw(&renderer), Some(variant), "one variant per feature set");
         assert!(renderer.stock_ibl_active());
@@ -547,12 +555,12 @@ mod tests {
         // The PBR lane off, or the environment gone: the diffuse pass does
         // not route either.
         renderer.pbr_materials_enabled = false;
-        renderer.confirm_stock_ibl(&mut cx);
+        renderer.confirm_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active(), "the PBR lane off: no routing");
         renderer.pbr_materials_enabled = true;
         renderer.resolve_ibl(&mut cx, &Environment::default());
         assert!(renderer.ibl_texture().is_none());
-        renderer.confirm_stock_ibl(&mut cx);
+        renderer.confirm_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active(), "no environment: no routing");
     }
 
@@ -566,6 +574,7 @@ mod tests {
             vertices.extend_from_slice(&[p[0], p[1], p[2], 0.0, 0.0, f32::from_bits(0xffff_ffff), 0.0]);
         }
         StaticModel {
+            material_name: Default::default(),
             vertices, indices: vec![0, 1, 2], texture_uri: None, texture_png: None,
             min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
             parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
@@ -587,7 +596,7 @@ mod tests {
         renderer.load_model_parsed(cx, "test/chrome", triangle(chrome), None, None).expect("the chrome model uploads");
         renderer.load_model_parsed(cx, "test/matte", triangle(PbrMaterial::default()), None, None).expect("the matte model uploads");
         assert!(wants_pbr(&renderer, "test/chrome") && !wants_pbr(&renderer, "test/matte"), "a narrowed roughness is the PBR lane, the default the diffuse lane");
-        let instance = |model: &str| ModelInstance { model: model.into(), custom_material: None, transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(), lamps: Default::default() };
+        let instance = |model: &str| ModelInstance { model: model.into(), custom_material: None, layer_materials: Vec::new(), transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(), lamps: Default::default() };
         renderer.set_models(vec![instance("test/chrome"), instance("test/matte")]);
         renderer
     }
@@ -601,8 +610,9 @@ mod tests {
     #[test]
     fn without_an_environment_resident_stock_models_build_no_program_and_wait_for_nothing() {
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active(), "no environment: the estimate is off");
         assert!(renderer.custom_draws.is_empty(), "no environment: not even the program is built");
         assert!(renderer.items_ready(&cx), "and nothing is waited for");
@@ -626,6 +636,7 @@ mod tests {
         use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
         let made = Made::none();
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
         // A closed pool prepares on the spot: the call binds the texture.
         cx.use_closed_task_pool();
@@ -633,7 +644,7 @@ mod tests {
         let env = Environment { ibl: Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
         renderer.resolve_ibl(&mut cx, &env);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("an environment builds the program");
         // No beat has made the program's pipeline (the HAL makes it at the
         // next one): the estimate waits for it, and so does items_ready.
@@ -642,9 +653,9 @@ mod tests {
         assert!(!renderer.items_ready(&cx), "and items_ready waits for it");
         // The HAL makes it: the next frame's estimate is on.
         made.pipeline(id);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         let active = renderer.stock_ibl_active();
-        assert_eq!(active, pipeline_ready(&cx, id, renderer.hdr_output), "the first estimate is the texture plus the pipeline of the shader on the program's draw");
+        assert_eq!(active, pipeline_ready(&cx, id, pass.draw_pass_id()), "the first estimate is the texture plus the pipeline of the shader on the program's draw");
         assert!(active, "an environment and the program's pipeline made: the estimate is on");
         assert!(renderer.stock_ibl_ready(&cx) && renderer.items_ready(&cx), "and nothing is waited for");
         let (chrome, matte) = (wants_pbr(&renderer, "test/chrome"), wants_pbr(&renderer, "test/matte"));
@@ -658,7 +669,7 @@ mod tests {
         }
         // Another frame finds the program installed and builds no other.
         let built = program_at(&renderer);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert_eq!(program_at(&renderer), built, "one program, built once");
         assert_eq!(renderer.custom_material_shader(STOCK_IBL_MATERIAL), Some(id));
         assert_eq!(renderer.custom_draws.len(), 1);
@@ -666,7 +677,7 @@ mod tests {
         // installed for the next one.
         renderer.resolve_ibl(&mut cx, &Environment::default());
         assert!(renderer.ibl_texture().is_none());
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(!renderer.stock_ibl_active());
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some());
     }
@@ -687,6 +698,7 @@ mod tests {
         ];
         for (reload, run) in reloads {
             let mut cx = headless();
+            let pass = DrawPass::new(&mut cx);
             cx.use_closed_task_pool();
             let mut renderer = Renderer::default();
             renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
@@ -703,18 +715,18 @@ mod tests {
                     }
                 });
             });
-            renderer.prepare_stock_ibl(&mut cx);
+            renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
             assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "{reload}: premise: the program does not build");
             assert!(!renderer.stock_ibl_active() && renderer.items_ready(&cx), "{reload}: no program: nothing routes and nothing is waited for");
             cx.with_vm(|vm| {
                 script_eval!(vm, { mod.draw.mat_ibl_coat_treeline = mod.draw.mat_ibl_coat_treeline_kept });
             });
-            renderer.prepare_stock_ibl(&mut cx);
+            renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
             assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "{reload}: a failed build is remembered: the next frame builds nothing");
 
             run(&mut renderer);
             assert!(renderer.ibl_texture().is_some(), "{reload}: premise: the environment stays bound");
-            renderer.prepare_stock_ibl(&mut cx);
+            renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
             assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some(), "{reload}: the next frame under the environment builds the program");
         }
     }
@@ -727,6 +739,7 @@ mod tests {
     fn a_live_edit_builds_the_stock_ibl_program_again() {
         use makepad_scene::Environment;
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         cx.use_closed_task_pool();
         let mut renderer = Renderer::default();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
@@ -734,7 +747,7 @@ mod tests {
         renderer.resolve_ibl(&mut cx, &env);
         let frame = |cx: &mut Cx, renderer: &mut Renderer| {
             renderer.follow_reload(cx);
-            renderer.prepare_stock_ibl(cx);
+            renderer.prepare_stock_ibl(cx, pass.draw_pass_id());
             renderer.custom_material_shader(STOCK_IBL_MATERIAL)
         };
         let first = frame(&mut cx, &mut renderer).expect("premise: the program is installed");
@@ -833,14 +846,14 @@ mod tests {
     /// scene draw's first decision install the stock IBL program, and give
     /// the world that names the map, with one IBL item in it (a chrome
     /// triangle, drawn through `__item_ibl`).
-    fn bind_map(cx: &mut Cx, renderer: &mut Renderer, map: EnvMap) -> World {
+    fn bind_map(cx: &mut Cx, pass: &DrawPass, renderer: &mut Renderer, map: EnvMap) -> World {
         cx.use_closed_task_pool();
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(map));
         let mut world = World::new();
         world.environment.ibl = Some(Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 });
         renderer.resolve_ibl(cx, &world.environment);
         assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
-        renderer.prepare_stock_ibl(cx);
+        renderer.prepare_stock_ibl(cx, pass.draw_pass_id());
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some(), "premise: the stock IBL program is installed");
         let triangle = GeometryData {
             positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -853,8 +866,8 @@ mod tests {
         world.set_material(MaterialFrame { id: MaterialId(1), kind: MaterialKind::Pbr(PbrParams { metallic: 1.0, roughness: 0.15, ..Default::default() }), ..Default::default() });
         world.items.push(Item::new(ItemKind::Mesh { geometry: GeometryRef::Resident(GeometryId(1)), material: MaterialId(1), transform: Mat4f::identity() }));
         // The frame's item pass picks (and builds) the item's material.
-        renderer.push_item_instances(cx, &world);
-        let named = renderer.placed_models.last().and_then(|inst| inst.custom_material.as_ref()).map(|m| m.name.clone());
+        renderer.push_item_instances(cx, &world, pass.draw_pass_id());
+        let named = renderer.placed_models.last().and_then(|inst| inst.material_of("")).map(|m| m.name.clone());
         renderer.pop_item_instances();
         assert_eq!(named.as_deref(), Some(ITEM_IBL), "premise: under an environment a lit item draws through the item IBL material");
         assert!(renderer.custom_material(ITEM_IBL).is_some_and(|m| m.ibl), "premise: it is an IBL program");
@@ -915,8 +928,9 @@ mod tests {
     fn in_each_lane_the_rigs_fill_is_the_ibl_fill_of_the_lanes_that_take_the_lookups() {
         for (label, level) in [("a clear noon", 2.9), ("a night", 0.006)] {
             let mut cx = headless();
+            let pass = DrawPass::new(&mut cx);
             let mut renderer = Renderer::default();
-            let world = bind_map(&mut cx, &mut renderer, sky_over_ground(level));
+            let world = bind_map(&mut cx, &pass, &mut renderer, sky_over_ground(level));
             let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
             let lighting = renderer.env_lighting(&world).expect("the bound map lights the world");
             let exposure = crate::sun::env_exposure(&lighting);
@@ -945,8 +959,9 @@ mod tests {
     #[test]
     fn the_item_ibl_material_carries_the_lanes_scale() {
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         let mut renderer = Renderer::default();
-        let world = bind_map(&mut cx, &mut renderer, sky_over_ground(2.9));
+        let world = bind_map(&mut cx, &pass, &mut renderer, sky_over_ground(2.9));
         let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
         let lighting = renderer.env_lighting(&world).expect("the bound map lights the world");
         let exposure = crate::sun::env_exposure(&lighting);
@@ -973,8 +988,9 @@ mod tests {
     #[test]
     fn an_authored_fill_keeps_the_stock_lanes_fill_and_the_maps_reflection() {
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         let mut renderer = Renderer::default();
-        let world = bind_map(&mut cx, &mut renderer, sky_over_ground(2.9));
+        let world = bind_map(&mut cx, &pass, &mut renderer, sky_over_ground(2.9));
         let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
         let lighting = renderer.env_lighting(&world).expect("the bound map lights the world");
         // The legacy lane (the default): its scale is the map's exposure.
@@ -1044,20 +1060,50 @@ mod tests {
     fn a_shiny_model_naming_an_uninstalled_material_takes_the_stock_ibl_route() {
         let made = Made::none();
         let mut cx = headless();
+        let pass = DrawPass::new(&mut cx);
         let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
-        bind_map(&mut cx, &mut renderer, EnvMap::constant(16, [0.25; 3]));
+        bind_map(&mut cx, &pass, &mut renderer, EnvMap::constant(16, [0.25; 3]));
         let paint = cx.with_vm(|vm| DrawSceneCustom::unlit(vm, &HookSet::new(), HookMask::ALL, 0.0)).unwrap_or_else(|e| panic!("{e}"));
         assert!(renderer.install_custom_material("paint".to_string(), paint), "a host material, installed");
         let instance = |model: &str, material: Option<&str>| ModelInstance {
             model: model.into(),
             custom_material: material.map(|name| CustomMaterialInstance { name: name.into(), params: Vec4f::default() }),
+            layer_materials: Vec::new(),
             transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(), lamps: Default::default(),
         };
         let (stock, missing, own) = (instance("test/chrome", None), instance("test/chrome", Some("replica/paint")), instance("test/chrome", Some("paint")));
+        let mut panel = triangle(PbrMaterial { metallic: 1.0, roughness: 0.15, ..Default::default() });
+        panel.draw_layers = [("front", [0, 1, 2]), ("back", [2, 1, 0])].into_iter().map(|(name, indices)| {
+            crate::model::StaticDrawLayer {
+                name: name.into(), vertices: panel.vertices.clone(), indices: indices.to_vec(), uvs: Vec::new(),
+                texture_png: None, detail_png: None, detail_scale: [1.0; 2], pbr: panel.pbr.clone(),
+            }
+        }).collect();
+        panel.indices.extend([2, 1, 0]);
+        renderer.load_model_parsed(&mut cx, "test/panel", panel, None, None).expect("two named layers upload");
+        let panel = &renderer.static_models.iter().find(|(name, _)| name == "test/panel").unwrap().1;
+        assert!(panel.wants_pbr);
+        let (front, back) = (panel.material.name.clone(), panel.extra_draws[0].4.name.clone());
+        assert_eq!((front.as_ref(), back.as_ref()), ("front", "back"));
+
+        let mut split = instance("test/panel", None);
+        split.dynamic = false;
+        let signature = Some(placed_scene_signature(std::slice::from_ref(&split)));
+        let blocks = &mut renderer.placed_blocks;
+        blocks.refresh(&renderer.static_models, std::slice::from_ref(&split), signature);
+        assert!(blocks.loose_for(1, signature).unwrap().is_empty(), "the static panel starts in a block");
+        split.layer_materials.push(LayerMaterialInstance {
+            layer: "front".into(),
+            material: CustomMaterialInstance { name: "paint".into(), params: vec4(1.0, 2.0, 3.0, 4.0) },
+        });
+        assert_eq!(Some(placed_scene_signature(std::slice::from_ref(&split))), signature);
+        blocks.refresh(&renderer.static_models, std::slice::from_ref(&split), signature);
+        assert_eq!(blocks.loose_for(1, signature).unwrap(), &[0], "a binding on slot zero makes the panel loose");
+
         let program = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("premise: the program is built");
         assert!(!renderer.stock_ibl_active(), "premise: a test runs no beat, so the HAL has made no pipeline: the frame waits for the program");
         made.pipeline(program);
-        renderer.prepare_stock_ibl(&mut cx);
+        renderer.prepare_stock_ibl(&mut cx, pass.draw_pass_id());
         assert!(renderer.stock_ibl_active(), "premise: the frame routes once the program can draw");
         let chrome = wants_pbr(&renderer, "test/chrome");
         // Each lane's walk: the stock lanes (no program), the stock IBL
@@ -1066,12 +1112,18 @@ mod tests {
         // pipeline.
         for (active, lane) in [true, false].into_iter().flat_map(|active| [None, Some(STOCK_IBL_MATERIAL), Some("paint")].map(|lane| (active, lane))) {
             let walking = lane.and_then(|name| renderer.custom_draws.remove(name).map(|m| (name, m)));
-            assert!(!renderer.has_own_material(&stock, lane), "lane {lane:?}: no name, no material of its own");
-            assert!(!renderer.has_own_material(&missing, lane), "lane {lane:?}: a name that is not installed is no material of its own");
-            assert!(renderer.has_own_material(&own, lane), "lane {lane:?}: an installed material is the model's own");
-            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&missing, lane), false), active, "lane {lane:?}, routing {active}: the shiny model takes the stock IBL route, as the shiny stock prop beside it");
-            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&stock, lane), false), active, "lane {lane:?}, routing {active}");
-            assert!(!takes_stock_ibl(active, chrome, renderer.has_own_material(&own, lane), false), "lane {lane:?}, routing {active}: the model with its own program keeps it");
+            assert!(!renderer.has_own_material(stock.material_of(""), lane), "lane {lane:?}: no name, no material of its own");
+            assert!(!renderer.has_own_material(missing.material_of(""), lane), "lane {lane:?}: a name that is not installed is no material of its own");
+            assert!(renderer.has_own_material(own.material_of(""), lane), "lane {lane:?}: an installed material is the model's own");
+            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(missing.material_of(""), lane), false), active, "lane {lane:?}, routing {active}: the shiny model takes the stock IBL route, as the shiny stock prop beside it");
+            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(stock.material_of(""), lane), false), active, "lane {lane:?}, routing {active}");
+            assert!(!takes_stock_ibl(active, chrome, renderer.has_own_material(own.material_of(""), lane), false), "lane {lane:?}, routing {active}: the model with its own program keeps it");
+            let front_owns = renderer.has_own_material(split.material_of(&front), lane);
+            let back_owns = renderer.has_own_material(split.material_of(&back), lane);
+            assert!(front_owns, "lane {lane:?}: the front owns its installed program");
+            assert!(!back_owns, "lane {lane:?}: the back keeps the stock material");
+            assert!(!takes_stock_ibl(active, chrome, front_owns, false));
+            assert_eq!(takes_stock_ibl(active, chrome, back_owns, false), active);
             if let Some((name, m)) = walking { renderer.custom_draws.insert(name.to_string(), m); }
         }
         // The program's pass draws when such a model is listed, alone too
@@ -1079,9 +1131,31 @@ mod tests {
         assert!(renderer.lists_a_stock_ibl_model(&[instance("test/matte", None), instance("test/chrome", Some("replica/paint"))]), "an uninstalled name on a shiny model is listed for the program");
         assert!(renderer.lists_a_stock_ibl_model(&[instance("test/chrome", None)]));
         assert!(!renderer.lists_a_stock_ibl_model(&[instance("test/chrome", Some("paint")), instance("test/matte", None), instance("test/matte", Some("replica/paint"))]), "its own program, or a matte model: nothing for the stock IBL program");
+        let mut mixed = split.clone().with_custom_material(own.material_of("").cloned());
+        mixed.layer_materials[0].material.name = "replica/paint".into();
+        assert!(renderer.lists_a_stock_ibl_model(std::slice::from_ref(&mixed)),
+            "a missing override needs the stock lane even with an installed whole-instance program");
+        let programs = std::mem::take(&mut renderer.custom_draws);
+        renderer.blended_models.programs.begin(&programs, std::slice::from_ref(&split), true);
+        let paint = programs.keys().position(|name| name == "paint").unwrap();
+        assert!(renderer.blended_models.programs.phase(paint).is_some(), "a layer binding schedules its program");
+        assert!(!renderer.has_own_material(mixed.material_of(&front), Some(STOCK_IBL_MATERIAL)));
+        assert!(renderer.has_own_material(mixed.material_of(&back), Some(STOCK_IBL_MATERIAL)),
+            "while the registry is borrowed for drawing, the back still owns the installed default");
+        renderer.blended_models.programs.end();
+        renderer.custom_draws = programs;
+        mixed.layer_materials[0].layer = Default::default();
+        assert_eq!(mixed.material_of(""), own.material_of(""), "an empty key cannot address an unnamed layer");
+        assert_eq!(mixed.material_of(&front), own.material_of(""), "an unmatched entry leaves the default in place");
         // A material dropped by a reload is not installed any more.
         renderer.retain_custom_materials(&[STOCK_IBL_MATERIAL.to_string()]);
-        assert!(!renderer.has_own_material(&own, None), "dropped by retain_custom_materials: a stock model again");
+        assert!(!renderer.has_own_material(own.material_of(""), None), "dropped by retain_custom_materials: a stock model again");
         assert!(renderer.lists_a_stock_ibl_model(&[own]));
+        for layer in [&front, &back] {
+            let owns = renderer.has_own_material(split.material_of(layer), None);
+            assert!(!owns, "{layer}: uninstalling the override leaves the panel stock");
+            assert!(takes_stock_ibl(true, chrome, owns, false));
+        }
+        assert!(renderer.lists_a_stock_ibl_model(std::slice::from_ref(&split)));
     }
 }

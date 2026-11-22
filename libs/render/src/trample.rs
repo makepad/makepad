@@ -174,6 +174,7 @@ struct TrampleGpu {
 /// through `Renderer::set_ground_stamps`.
 #[derive(Default)]
 pub struct TrampleField {
+    scene_time: Option<f32>,
     budget: Option<TrampleBudget>,
     gpu: Option<TrampleGpu>,
     /// The latest call's contacts and focus (world x, z), and the game
@@ -200,6 +201,11 @@ pub struct TrampleField {
 }
 
 impl TrampleField {
+    pub(crate) fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        if let Some(gpu) = &self.gpu { gpu.pass.set_own_time(cx, time); }
+    }
+
     pub fn new(budget: Option<TrampleBudget>) -> Self {
         Self { budget, quiet: f64::INFINITY, ..Self::default() }
     }
@@ -277,7 +283,7 @@ impl TrampleField {
             self.gpu = Some(TrampleGpu {
                 budget,
                 targets: [target(cx.cx), target(cx.cx)],
-                pass: DrawPass::new_with_name(cx.cx, "trample"),
+                pass: crate::renderer::new_scene_pass(cx.cx, "trample", self.scene_time),
                 list: DrawList::new(cx.cx),
                 feedback,
                 stamp,
@@ -285,9 +291,6 @@ impl TrampleField {
             self.valid = false;
         }
         let g = self.gpu.as_mut().unwrap();
-        // While its pipeline compiles the pass draws nothing: the field
-        // starts at rest once it can.
-        let ready = g.feedback.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, false));
         let n = budget.texels;
         let texel = budget.extent as f64 / n as f64;
         let half = (n / 2) as i64;
@@ -309,6 +312,8 @@ impl TrampleField {
         g.pass.set_size(cx2.cx, size);
         g.pass.clear_color_textures(cx2.cx);
         g.pass.set_color_texture(cx2.cx, &g.targets[self.cur], DrawPassClearColor::ClearWith(vec4(128.0 / 255.0, 128.0 / 255.0, 0.0, 1.0)));
+        // The field starts at rest once the feedback can draw into its target.
+        let ready = g.feedback.draw_vars.draw_shader_id.is_some_and(|id| cx2.draw_shader_ready_here(id));
         g.list.begin_always(&mut cx2);
         cx2.begin_root_turtle(size, Layout::flow_overlay());
         g.feedback.draw_abs(&mut cx2, Rect { pos: dvec2(0.0, 0.0), size });

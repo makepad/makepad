@@ -224,6 +224,10 @@ struct Gpu {
     /// Info texels of slots that changed cells, zeroed in the next scatter.
     clears:Vec<(usize,usize)>,
     vox:[Texture;3], layout:VoxelLayout, capacity:usize,
+    skyline: Texture,
+    skyline_rect: [f32; 4],
+    skyline_size: [usize; 2],
+    skyline_dirty: bool,
     scatter_cache:ScatterCache,
     encode_key:Option<EncodeKey>, light_key:Option<[f32;22]>,
 }
@@ -262,6 +266,7 @@ impl MeshCache {
 }
 
 pub(crate) struct FastGi {
+    scene_time: Option<f32>,
     mode:GiMode, config:GiConfig, debug:GiDebug, linear_albedo:bool, emission_gain:f32,
     gpu:Option<Gpu>,
     probe_counts:diagnostics::ProbeCounts,
@@ -286,6 +291,7 @@ pub(crate) struct FastGi {
     committed:Vec<Option<[i32;3]>>,
     cascades:Vec<Cascade>,
     controller:BatchController, frame_times:FrameTimes, batch:Vec<BatchItem>, frame:u64,
+    stage_samples: [Vec<f32>; STAGE_NAMES.len()],
     /// Settle mode: the light the settled field holds, and whether all the
     /// work is done (nothing queued, nothing building, the scene current).
     light_key:Option<[u32;12]>, settled:bool,
@@ -299,11 +305,20 @@ pub(crate) struct FastGi {
     pub stats:GiStats,
 }
 impl Default for FastGi {
-    fn default()->Self{Self{mode:GiMode::Off,config:GiConfig::default(),debug:GiDebug::Off,linear_albedo:false,emission_gain:1.0,gpu:None,probe_counts:diagnostics::ProbeCounts::default(),retired:Vec::new(),screen:None,voxels:None,voxel_job:None,generation:0,
+    fn default()->Self{Self{scene_time:None,mode:GiMode::Off,config:GiConfig::default(),debug:GiDebug::Off,linear_albedo:false,emission_gain:1.0,gpu:None,probe_counts:diagnostics::ProbeCounts::default(),retired:Vec::new(),screen:None,voxels:None,voxel_job:None,generation:0,
         scene_key:None,scene_center:None,pending_scene:None,scene_bounds:Default::default(),has_scene:false,requested:Vec::new(),committed:Vec::new(),cascades:Vec::new(),
-        controller:BatchController::default(),frame_times:FrameTimes::default(),batch:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:CortaoPass::default(),ao_tables:[None,None],stats:GiStats::default()}}
+        controller:BatchController::default(),frame_times:FrameTimes::default(),stage_samples:Default::default(),batch:Vec::new(),frame:0,light_key:None,settled:false,scene_stale:false,meshes:MeshCache::default(),ao:CortaoPass::default(),ao_tables:[None,None],stats:GiStats::default()}}
 }
 impl FastGi {
+    pub(crate) fn set_scene_time(&mut self, cx: &mut Cx, time: Option<f32>) {
+        self.scene_time = time;
+        if let Some(gpu) = &self.gpu {
+            for stage in &gpu.stages { stage.pass.set_own_time(cx, time); }
+        }
+        if let Some(pass) = self.probe_counts.pass() { pass.set_own_time(cx, time); }
+        self.ao.set_scene_time(cx, time);
+    }
+
     pub fn mode(&self)->GiMode{self.mode}
     pub fn debug(&self)->GiDebug{self.debug}
     pub fn set_debug(&mut self,debug:GiDebug){self.debug=debug;}
@@ -336,7 +351,7 @@ impl FastGi {
         self.generation=self.generation.wrapping_add(1);
         self.probe_counts.release(&mut self.retired);
         if let Some(gpu)=self.gpu.take() {
-            self.retired.extend([gpu.field]);
+            self.retired.extend([gpu.field, gpu.skyline]);
             self.retired.extend(gpu.vox);
             if gpu.capacity>0 {self.retired.extend([gpu.hits,gpu.radiance,gpu.update,gpu.batch]);}
         }
@@ -390,11 +405,16 @@ impl FastGi {
         ))else{return false;};
         let c=self.config;let layout=VoxelLayout::new(c);
         STAGE_NAMES.iter().for_each(|name|makepad_platform::gpu_frame_timer::watch(name));
-        let stages=STAGE_NAMES.into_iter().map(|name|Stage{pass:DrawPass::new_with_name(cx,name),list:DrawList::new(cx),times:StageTimes::default()}).collect();
+        let stages=STAGE_NAMES.into_iter().map(|name|Stage{pass:crate::renderer::new_scene_pass(cx,name,self.scene_time),list:DrawList::new(cx),times:StageTimes::default()}).collect();
         let atlas=c.atlas();
         let field=Texture::new_with_format(cx,TextureFormat::RenderRGBAf16{size:TextureSize::Fixed{width:atlas[0],height:atlas[1]},initial:true});
         let vox=[0,1,2].map(|_|Texture::new_with_format(cx,TextureFormat::VecBGRAu8_32{width:layout.width(),height:layout.height(),data:Some(vec![0;layout.width()*layout.height()]),updated:TextureUpdated::Full}));
-        self.gpu=Some(Gpu{stages,trace,relight,gather,scatter,field,hits:Texture::new(cx),radiance:Texture::new(cx),update:Texture::new(cx),batch:Texture::new(cx),clears:Vec::with_capacity(c.probe_count()*c.cascades),vox,layout,capacity:0,scatter_cache:ScatterCache::default(),encode_key:None,light_key:None});
+        let skyline = Texture::new_with_format(cx, TextureFormat::VecRf32 {
+            width: 1, height: 1, data: Some(vec![-1e30]), updated: TextureUpdated::Full,
+        });
+        self.gpu=Some(Gpu{stages,trace,relight,gather,scatter,field,hits:Texture::new(cx),radiance:Texture::new(cx),update:Texture::new(cx),batch:Texture::new(cx),clears:Vec::with_capacity(c.probe_count()*c.cascades),vox,layout,capacity:0,
+            skyline, skyline_rect: [0.0, 0.0, 1.0, 0.0], skyline_size: [1, 1], skyline_dirty: true,
+            scatter_cache:ScatterCache::default(),encode_key:None,light_key:None});
         self.cascades=(0..c.cascades).map(|k|Cascade::new(c.grid,c.cascade_spacing(k),c.settle)).collect();
         self.committed=vec![None;c.cascades];
         let capacity=cascades::batch_capacity(c.probe_count(),c.cascades);
@@ -416,6 +436,23 @@ impl FastGi {
         if generation!=self.generation{return;}
         let gpu=self.gpu.as_mut().unwrap();
         let layout=world.layout;
+        if let Some(map) = update.skyline {
+            let size = [map.width, map.height];
+            self.stats.uploads_bytes += map.heights.len() * 4;
+            if gpu.skyline_size == size {
+                drop(gpu.skyline.take_vec_f32(cx));
+                gpu.skyline.put_back_vec_f32(cx, map.heights, None);
+            } else {
+                let map_texture = Texture::new_with_format(cx, TextureFormat::VecRf32 {
+                    width: map.width, height: map.height, data: Some(map.heights), updated: TextureUpdated::Full,
+                });
+                // The old map may still be bound in a recorded trace draw: retire it like `release` does.
+                self.retired.push(std::mem::replace(&mut gpu.skyline, map_texture));
+            }
+            gpu.skyline_rect = [map.min[0], map.min[1], map.cell, 0.0];
+            gpu.skyline_size = size;
+            gpu.skyline_dirty = true;
+        }
         for (level,rows) in update.rows.iter().enumerate() {
             let Some((first,last))=*rows else{continue};
             let y=level*layout.level_height()+first;let height=last+1-first;
@@ -537,15 +574,16 @@ impl FastGi {
             if self.light_key.is_some_and(|k|k!=key) {self.cascades.iter_mut().for_each(|c|c.restart());}
             self.light_key=Some(key);
         }
-        // HAL currently exposes only name-based samples (no submission tag
-        // or reusable drain). Consume every arrival, including delayed ones;
+        // HAL currently exposes only name-based samples. Consume every arrival, including delayed ones;
         // only equally sized streams can supply complete frame sums.
-        // Its Vec transfer still allocates in platform's watcher; replacing
-        // that API belongs in platform, not this render-library change.
         // HAL publishes these streams together on the UI thread; take them
         // before processing any further completions. GI issues four render
         // passes: voxel changes are texture uploads, not a fifth GI pass.
-        let samples=STAGE_NAMES.map(makepad_platform::gpu_frame_timer::take_watched);
+        let samples = &mut self.stage_samples;
+        for (stage, out) in STAGE_NAMES.into_iter().zip(samples.iter_mut()) {
+            out.clear();
+            makepad_platform::gpu_frame_timer::drain_watched(stage, out);
+        }
         let sample=self.frame_times.push(std::array::from_fn(|i|samples[i].as_slice()),previous_batch);
         if gi_stats_enabled() {
             for (i,stage) in self.gpu.as_mut().unwrap().stages.iter_mut().enumerate() {
@@ -579,6 +617,7 @@ impl FastGi {
         let l=gpu.layout;
         let a=self.config.atlas();
         a[0]*a[1]*8+(RAYS*2+1+2)*gpu.capacity*16+GATHER_WIDTH*gpu.capacity*8
+            +gpu.skyline_size[0]*gpu.skyline_size[1]*4*2
             +l.width()*l.height()*4*3*2+self.meshes.bytes()+gpu.scatter_cache.instances.as_ref().map_or(0,|r|r.byte_len()*2)
     }
 
@@ -626,6 +665,12 @@ impl FastGi {
                     if static_dirty {bind_texture(cx2.cx,dv,live_id!(gi_batch),&batch_tex);}
                 }
                 if i<2&&static_dirty {Self::voxel_uniforms(cx2.cx,dv,layout,&vox,committed,*scene_bounds);}
+                if i == 0 && (static_dirty || gpu.skyline_dirty) {
+                    bind_texture(cx2.cx, dv, live_id!(gi_skyline), &gpu.skyline);
+                    dv.set_uniform(cx2.cx, live_id!(gi_skyline_rect), &gpu.skyline_rect);
+                    dv.set_uniform(cx2.cx, live_id!(gi_skyline_size), &gpu.skyline_size.map(|n| n as f32));
+                    gpu.skyline_dirty = false;
+                }
                 if (i==1||i==2)&&static_dirty {
                     // Producers read last frame's field: feedback, history.
                     dv.set_uniform(cx2.cx,live_id!(gi_on),&[1.0]);

@@ -82,6 +82,8 @@ impl Renderer {
         if let Some(mut d) = draw {
             stats.particles += self.emit_particles(cx, &mut d, &frame, frustum, None);
             self.vfx.draw_scene = Some(d);
+        } else if !self.vfx.records.is_empty() {
+            self.items.fallback = true;
         }
         self.vfx.records.clear();
     }
@@ -93,7 +95,7 @@ impl Renderer {
         if self.vfx.draw_decal.is_none() {
             self.vfx.draw_decal = cx.cx.try_with_vm(|vm| Box::new(DrawSceneVfxDecal::script_new_with_default(vm)));
         }
-        let Some(mut d) = self.vfx.draw_decal.take() else { return };
+        let Some(mut d) = self.vfx.draw_decal.take() else { self.items.fallback = true; return };
         let geometry_id = self.ensure_flare_geometry(cx.cx);
         d.draw_vars.geometry_id = Some(geometry_id);
         d.depth_clip = 1.0;
@@ -180,6 +182,8 @@ impl Renderer {
         let explicit_order = back_to_front(&explicit);
 
         let (atlas, atlas_on) = self.vfx.atlas_texture(cx.cx);
+        // A retained picture needs the finished flipbook when these particles use its placeholder.
+        if !atlas_on { self.items.fallback = true; }
         let l = &frame.light;
         let dv = &mut draw.draw_vars;
         dv.set_texture(0, &atlas);
@@ -247,9 +251,12 @@ impl Renderer {
         if self.vfx.draw_pass.is_none() {
             self.vfx.draw_pass = cx.cx.try_with_vm(|vm| Box::new(DrawSceneVfx::script_new_with_default(vm)));
         }
-        let mut draw = self.vfx.draw_pass.take()?;
+        let Some(mut draw) = self.vfx.draw_pass.take() else {
+            self.items.fallback = true;
+            return None;
+        };
         let (pass, mut list) = self.vfx.pass.take().unwrap_or_else(|| {
-            let pass = DrawPass::new_with_name(cx.cx, "vfx");
+            let pass = super::new_scene_pass(cx.cx, "vfx", self.scene_time);
             pass.set_gpu_timing_enabled(cx.cx, true);
             (pass, DrawList::new(cx.cx))
         });
@@ -263,8 +270,8 @@ impl Renderer {
         pass.set_keep_camera_matrix(cx.cx, true);
         pass.insert_after(cx.cx, scene_id);
         crate::scene::set_pass_camera(cx.cx, &pass, &frame.scene);
-        if let Some(ms) = pass.take_gpu_times_ms(cx.cx).last() {
-            self.vfx.note_gpu_ms(*ms);
+        if let Some(ms) = pass.gpu_times_ms(cx.cx).last() {
+            self.vfx.note_gpu_ms(ms);
         }
         let p = frame.scene.projection.v;
         // Metal, Vulkan and D3D keep clip z/w as the stored depth; only GL

@@ -26,6 +26,11 @@ const HDR_FOG_SCALE_HEIGHT: f32 = 40.0;
 const AERIAL_FORWARD: f32 = 0.12;
 const AERIAL_SPREAD: f32 = 1.0;
 
+pub(super) enum DomeDraw<'a> {
+    Gradient(&'a mut DrawSceneSky),
+    Analytic(&'a mut DrawSceneSkyAnalytic, &'a crate::sky::SkyFrame, f32),
+}
+
 impl Renderer {
     /// HDR lane: the fill comes from the sky that is actually drawn. Under
     /// the analytic dome (and no authored `ambient`) the up-hemisphere fill
@@ -158,8 +163,8 @@ impl Renderer {
         self.env_sun_rig(world, sun)
     }
 
-    /// The analytic sky the frame draws and fogs with (`None` where the
-    /// world keeps its painted gradient), given the frame's final rig `sun`
+    /// The sun direction for all backgrounds and the analytic sky the frame
+    /// draws and fogs with (`None` for a gradient), given the frame's final rig `sun`
     /// (the world's own Sun and Sky applied) and its daylight direction.
     /// - When the light is the sun (a world's own Sun, or an environment
     ///   whose key is its own sun: `env_key_is_its_sun`), the sky's sun is
@@ -171,10 +176,25 @@ impl Renderer {
     ///   moonlit map, or between the sun's fade and the moon's rise, the sky
     ///   follows the map's own sun while the moon (or nothing) lights.
     /// Without an environment both are the rig's direction, as before.
-    pub(super) fn frame_sky(&self, world: &World, sun: &SunLight, daylight: Vec3f, shows_environment: bool) -> Option<crate::sky::SkyFrame> {
+    pub(super) fn frame_sky(&self, world: &World, sun: &SunLight, daylight: Vec3f, shows_environment: bool) -> (Vec3f, Option<crate::sky::SkyFrame>) {
         let light_is_the_sun = crate::world_lights::world_sun_dir(world).is_some() || self.env_key_is_its_sun(world);
-        let sky_dir = if light_is_the_sun { sun.dir } else { daylight };
-        analytic_sky_frame(world, sky_dir, shows_environment, self.hdr_output, self.sky_clock)
+        let dir = if light_is_the_sun { sun.dir } else { daylight };
+        (dir, analytic_sky_frame(world, dir, shows_environment, self.hdr_output, self.sky_clock))
+    }
+
+    pub(super) fn dome_draw<'a>(
+        &'a mut self, cx: &mut Cx, frame: Option<&'a crate::sky::SkyFrame>, control: Vec4f,
+        gradient: &'a mut DrawSceneSky, analytic: Option<&'a mut DrawSceneSkyAnalytic>,
+    ) -> DomeDraw<'a> {
+        if let (Some(frame), Some(stock)) = (frame, analytic) {
+            let (stars, gain) = self.star_binding(cx);
+            let draw = self.sky_hook.as_mut().and_then(|h| h.analytic(cx, control)).unwrap_or(stock);
+            draw.cube.draw_vars.set_texture(0, &stars);
+            DomeDraw::Analytic(draw, frame, gain)
+        } else {
+            let draw = self.sky_hook.as_mut().and_then(|h| h.gradient(cx, control)).unwrap_or(gradient);
+            DomeDraw::Gradient(draw)
+        }
     }
 
     /// Encode the whole 3D scene for one view. `draw_list` is the host's
@@ -259,8 +279,9 @@ impl Renderer {
         self.follow_reload(cx.cx);
         self.restore_textures(cx.cx);
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
-        self.prepare_stock_ibl(cx.cx);
-        self.push_item_instances(cx.cx, world);
+        let pass_id = cx.current_pass_id();
+        self.prepare_stock_ibl(cx.cx, pass_id);
+        self.push_item_instances(cx.cx, world, pass_id);
         // The trampled-grass field once per host update, for the scene's
         // own draw (an aux draw's camera never moves it).
         if matches!(scope, EnvScope::Scene) {
@@ -458,7 +479,7 @@ impl Renderer {
         // corners of the host's stable projection or this view, unprojected
         // (far = clip z +w in every backend). Flat stage only — in XR the runtime owns
         // the eye matrices, and the baker falls back to eye-centered rings.
-        let csm_view = (self.stage.mode == StageMode::Flat)
+        let csm_view = (tiers.csm && self.stage.mode == StageMode::Flat)
             .then(|| {
                 let clip = Mat4f::mul(
                     self.csm_fit_projection.as_ref().unwrap_or(&scene_state.projection),
@@ -503,7 +524,8 @@ impl Renderer {
             ));
             self.stream_prepare(cx.cx, camera_pos, clip.as_ref(), frustum);
         }
-        self.run_gpu_lightmap(cx.cx, world, &lm_movers, csm_view.as_ref(), camera_pos);
+        let sun_movers = if tiers.csm { lm_movers.as_slice() } else { &[] };
+        self.run_gpu_lightmap(cx.cx, world, sun_movers, csm_view.as_ref(), camera_pos);
         let (csm_statics, csm_movers, csm_us) = self.gpu_baker.csm_frame_stats();
         stats.csm_static_casters = csm_statics as u64;
         stats.csm_movers = csm_movers as u64;
@@ -535,8 +557,26 @@ impl Renderer {
         // replaces the dome below once its full-resolution map is up; the
         // legacy lane meters it with the sky's exposure compensation.
         let exposure_ev = world.sky.as_ref().map(|s| s.exposure_ev).filter(|ev| ev.is_finite()).unwrap_or(0.0);
+        // MR puts the game on your real floor: the room supplies the
+        // horizon, so the game's own environment would only paint over the
+        // passthrough feed.
+        let shows_environment = self.stage.shows_environment();
+        // The analytic (Preetham) sky replaces the hand-painted gradient
+        // wherever the script kept the DEFAULT dome colours — a script that
+        // authored its own top/ground colours keeps its gradient. The
+        // horizon colour stays customisable either way: it only ever tinted
+        // the FOG, and in analytic mode the fog instead comes from the
+        // model's own tone-mapped horizon so sky and haze agree.
+        // Its sun sits where the light is when the light is the sun, else
+        // where the daylight switches say (N1: `frame_sky`). A host's sky
+        // hook reads that same direction.
+        let (sky_sun, sky_frame) = self.frame_sky(world, &sun, daylight, shows_environment);
+        let sky_control = self.sky_hook.as_ref().map_or(Vec4f::default(), |_| {
+            let dir = sky_sun.normalize();
+            vec4(dir.x, dir.y, dir.z, if self.hdr_output { 1.0 } else { 0.0 })
+        });
         let owner = cx.enter_draw_name("sky");
-        let env_dome = self.draw_environment_background(cx, &world.environment, &scene_state.projection, exposure_ev);
+        let env_dome = self.draw_environment_background(cx, world, &scene_state.projection, exposure_ev, sky_control);
         cx.exit_draw_label(owner);
         // Camera-relative rendering: world geometry shifts by the render
         // origin on the GPU (the pass view was rebuilt around it by the
@@ -573,11 +613,6 @@ impl Renderer {
                 None => uniforms.xr_clip_on = 0.0,
             }
         }
-        // MR puts the game on your real floor: the room supplies the
-        // horizon, so the game's own environment would only paint over the
-        // passthrough feed.
-        let shows_environment = self.stage.shows_environment();
-
         // One sun for every shader this frame (sun.rs): the frame's rig from
         // above (its lane, the environment's sun, fill and legacy exposure,
         // the world's own lights last), the one the lamps, the cascades and
@@ -602,16 +637,6 @@ impl Renderer {
                 self.model_sdf_tex.clear();
             }
         }
-
-        // The analytic (Preetham) sky replaces the hand-painted gradient
-        // wherever the script kept the DEFAULT dome colours — a script that
-        // authored its own top/ground colours keeps its gradient. The
-        // horizon colour stays customisable either way: it only ever tinted
-        // the FOG, and in analytic mode the fog instead comes from the
-        // model's own tone-mapped horizon so sky and haze agree.
-        // Its sun sits where the light is when the light is the sun, else
-        // where the daylight switches say (N1: `frame_sky`).
-        let sky_frame = self.frame_sky(world, &sun, daylight, shows_environment);
 
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {
@@ -798,8 +823,9 @@ impl Renderer {
         ] {
             let Some(dv) = dv else { continue };
             dv.refresh_after_reload(cx.cx);
-            if let Some(id) = self.level_shader(cx.cx, lane, dv.draw_shader_id) {
-                dv.draw_shader_id = Some(id);
+            let held = dv.draw_shader_id;
+            if let Some(full) = self.level_shader(cx.cx, lane, held) {
+                dv.draw_shader_id = self.select_lane_shader(cx.cx, lane, Some(full), held, |id| cx.draw_shader_ready_here(id));
             }
         }
         // The screen AO on the level's opaque boxes and its terrain, as on the model lanes
@@ -837,8 +863,10 @@ impl Renderer {
             transform.v[12] = camera_pos.x;
             transform.v[13] = camera_pos.y;
             transform.v[14] = camera_pos.z;
-            match (&sky_frame, &mut draws.sky_analytic) {
-                (Some(f), Some(sa)) => {
+            let hdr = self.hdr_output;
+            let exposure = self.hdr_exposure;
+            match self.dome_draw(cx.cx, sky_frame.as_ref(), sky_control, draws.sky, draws.sky_analytic.as_deref_mut()) {
+                DomeDraw::Analytic(sa, f, gain) => {
                     sa.cube.transform = transform;
                     sa.cube.cube_pos = vec3(0.0, 0.0, 0.0);
                     sa.cube.cube_size = vec3(800.0, 800.0, 800.0);
@@ -854,15 +882,13 @@ impl Renderer {
                     sa.sun_e = f.sun;
                     sa.sun_true = f.sun_true;
                     // w > 0: the HDR lane's linear radiance dome at this gain.
-                    sa.sun_true.w = if self.hdr_output { HDR_SKY_GAIN } else { 0.0 };
+                    sa.sun_true.w = if hdr { HDR_SKY_GAIN } else { 0.0 };
                     // The star dome: panorama texture (or the 1x1 black
                     // stand-in) plus the celestial rotation, derived from
                     // the SAME hour that placed the sun — no host has to
                     // drive it, so every path that sets a time of day gets
                     // a sky that wheels correctly. A world with no hour
                     // (an authored sun direction) keeps a fixed dome.
-                    let (star_tex, gain) = self.star_binding(cx.cx);
-                    sa.cube.draw_vars.set_texture(0, &star_tex);
                     let rows = match world.sun.time_of_day {
                         Some(hours) => crate::sun::star_rows(hours, world.sun.latitude),
                         None => [
@@ -892,24 +918,24 @@ impl Renderer {
                     sa.cube.draw_vars.set_uniform(cx.cx, live_id!(sky_fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
                     sa.cube.draw(cx);
                 }
-                _ => {
-                    draws.sky.cube.transform = transform;
-                    draws.sky.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                    draws.sky.cube.cube_size = vec3(800.0, 800.0, 800.0);
-                    draws.sky.cube.color = vec4(1.0, 1.0, 1.0, 1.0);
-                    draws.sky.cube.depth_clip = 1.0;
+                DomeDraw::Gradient(draw) => {
+                    draw.cube.transform = transform;
+                    draw.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                    draw.cube.cube_size = vec3(800.0, 800.0, 800.0);
+                    draw.cube.color = vec4(1.0, 1.0, 1.0, 1.0);
+                    draw.cube.depth_clip = 1.0;
                     // An authored dome is art: the HDR lane shows it at its
                     // authored brightness (linear, pre-divided by exposure).
                     let dome = |c: Vec3f| {
-                        if self.hdr_output { srgb_to_linear(c) * (1.0 / self.hdr_exposure) } else { c }
+                        if hdr { srgb_to_linear(c) * (1.0 / exposure) } else { c }
                     };
-                    draws.sky.sky_top = dome(vec3(sky.top.x, sky.top.y, sky.top.z));
-                    draws.sky.sky_horizon =
+                    draw.sky_top = dome(vec3(sky.top.x, sky.top.y, sky.top.z));
+                    draw.sky_horizon =
                         dome(vec3(sky.horizon.x, sky.horizon.y, sky.horizon.z));
-                    draws.sky.sky_ground = dome(vec3(sky.ground.x, sky.ground.y, sky.ground.z));
-                    draws.sky.sky_bottom =
+                    draw.sky_ground = dome(vec3(sky.ground.x, sky.ground.y, sky.ground.z));
+                    draw.sky_bottom =
                         dome(vec3(sky.ground_bottom.x, sky.ground_bottom.y, sky.ground_bottom.z));
-                    draws.sky.cube.draw(cx);
+                    draw.cube.draw(cx);
                 }
             }
             stats.sky_drawn = true;
@@ -1014,7 +1040,7 @@ impl Renderer {
         // refreshes whenever the sun swings, so a day cycle moves the baked
         // shadows instead of freezing them at dawn. Both land in the colours
         // packed below — the GPU never learns this happened.
-        if self.world_atlas_required() {
+        if !self.atlas_borrowed && self.world_atlas_required() {
             self.bake.update(world, &sun);
         }
         stats.bake = self.bake.stats();
@@ -1073,11 +1099,15 @@ impl Renderer {
             // enough to change it has changed the atlas, not just the shade
             // term. Quantized, so a day cycle pays a bake per 3% of pool —
             // not one per frame.
+            self.sync_csm_custom_casters();
+            self.rekey_lm_remaps();
+            self.gpu_baker.poll_caster_readiness(cx.cx);
             let day_key = self.lamp_daylight_key(&sun);
+            let models = self.models_rev ^ self.gpu_baker.caster_bindings.key;
             let key = (
                 world.render_rev,
-                self.bake.generation(),
-                self.models_rev,
+                self.bake.generation().wrapping_add(self.gpu_baker.caster_ready_revision),
+                models,
                 day_key,
             );
             if self
@@ -1091,9 +1121,9 @@ impl Renderer {
                 // only a WORLD change (or a sun change that moves the lamps)
                 // re-schedules the whole job; OnChange re-kicks on every
                 // settle, sun changes included.
-                let world_key = lightmap_world_key(world, self.models_rev, day_key);
+                let world_key = lightmap_world_key(world, models, day_key);
                 if self.world_atlas_required() && (self.lm_kick_key != Some(world_key)
-                    || lightmap_sun_changed(self.lm_kick_sun, sun.dir, self.gpu_baker.mode()))
+                    || self.gpu_baker.caster_ready_kick || lightmap_sun_changed(self.lm_kick_sun, sun.dir, self.gpu_baker.mode()))
                 {
                     // Name the cause in the bake's own log line: a blowout
                     // that pops in has to be attributable to the run that
@@ -1103,10 +1133,16 @@ impl Renderer {
                         Some((rev, models, _)) if (rev, models) != (world_key.0, world_key.1) => {
                             crate::gpu_lightmap::BakeTrigger::WorldEdit
                         }
+                        Some(_) if self.gpu_baker.caster_ready_kick => crate::gpu_lightmap::BakeTrigger::CasterReady,
                         Some(_) => crate::gpu_lightmap::BakeTrigger::SunChange,
                     };
                     self.lm_kick_key = Some(world_key);
                     self.lm_kick_sun = Some(sun.dir);
+                    // A kick also refreshes the settled sun pass when the
+                    // world has no chart or planar receiver to bake.
+                    if tiers.static_csm {
+                        self.gpu_baker.csm_casters_changed();
+                    }
                     self.kick_lightmap_bake(world, &sun, trigger);
                 }
                 self.shadow_gate.mark_built(key);
@@ -1699,6 +1735,7 @@ impl Renderer {
                 * (scene_state.viewport_rect.size.y * cx.current_dpi_factor()).max(1.0) as f32;
             self.prepare_foliage_lane(cx.cx);
             self.prepare_splat_lane(cx.cx);
+            self.prepare_custom_lanes(cx.cx);
             self.prepare_impostor_lane(cx.cx);
             self.draw_models_inner(
                 cx,

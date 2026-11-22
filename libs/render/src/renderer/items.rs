@@ -141,6 +141,7 @@ pub(super) struct ItemState {
     pub(super) glow: Vec<Vec3f>,
     /// The custom materials this frame's items draw through.
     used_custom: Vec<String>,
+    pub(super) recorded_pass: Option<DrawPassId>,
     /// This frame drew an item through another lane than its own because
     /// its own lane's pipeline was not ready.
     pub(super) fallback: bool,
@@ -263,6 +264,14 @@ impl Renderer {
         Some(t)
     }
 
+    pub(super) fn recorded_shader_ready(&self, cx: &Cx, id: DrawShaderId) -> bool {
+        match self.items.recorded_pass {
+            Some(pass) => cx.draw_shader_ready_in(id, pass),
+            // A fresh renderer can borrow material draws before it records a view.
+            None => cx.draw_shader_ready(id, self.hdr_output),
+        }
+    }
+
     /// Whether every custom material the last frame's items used, and the
     /// PBR lane, has its pipeline, and the world's environment is prepared:
     /// until then those items draw through the stock (matte) lane, and
@@ -282,18 +291,20 @@ impl Renderer {
         }
         // A material that is not installed (it did not build) draws through
         // the stock lane for good: nothing to wait for.
-        let custom = self.items.used_custom.iter().all(|name| self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)));
+        let custom = self.items.used_custom.iter().all(|name| self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_none_or(|id| self.recorded_shader_ready(cx, id)));
         // Shiny models draw matte (no emission, no maps) until the PBR
         // pipeline exists; it is made once a frame has any.
-        let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)));
+        let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| self.recorded_shader_ready(cx, id)));
         // Shadowed lamps render their faces without casters until the depth pipelines exist.
         custom && pbr && self.stock_ibl_ready(cx) && !self.clustered.shadows.draws_waiting(cx)
     }
 
-    /// Whether this frame drew short of whole: an item through a fallback lane, or the lamps'
-    /// shadow faces before their depth pipelines were made (the next frame draws them again).
+    /// Whether this frame drew short of whole (the next frame draws it again): an item or
+    /// model through a stock lane while its material's pipeline is made, a shiny model on the
+    /// diffuse lane while the PBR pipeline is, or the lamps' shadow faces before their depth
+    /// pipelines were made, or VFX while their draws or particle atlas were being made.
     pub fn drew_fallback(&self) -> bool {
-        self.items.fallback || self.clustered.shadows.drew_unready()
+        self.items.fallback || !self.clustered.shadows.settled()
     }
 
     /// What `items_ready` waits for, by name (empty: nothing), for a host's
@@ -305,11 +316,11 @@ impl Renderer {
             waits.push(if self.environment_needs_draw() { "the environment (waits for a draw)" } else { "the environment (preparing)" }.to_string());
         }
         for name in &self.items.used_custom {
-            if self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_some_and(|id| !cx.draw_shader_ready(id, self.hdr_output)) {
+            if self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_some_and(|id| !self.recorded_shader_ready(cx, id)) {
                 waits.push(format!("material {name}'s pipeline"));
             }
         }
-        if self.pbr_draw.as_ref().is_some_and(|d| !d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output))) {
+        if self.pbr_draw.as_ref().is_some_and(|d| !d.skinned.draw_vars.draw_shader_id.is_some_and(|id| self.recorded_shader_ready(cx, id))) {
             waits.push("the PBR lane's pipeline".to_string());
         }
         if !self.stock_ibl_ready(cx) {
@@ -370,6 +381,7 @@ impl Renderer {
         }
         pbr.surface = Some(Arc::new(surface));
         let model = crate::model::StaticModel {
+            material_name: Default::default(),
             vertices,
             indices: data.indices.clone(),
             texture_uri: None,
@@ -487,11 +499,12 @@ impl Renderer {
 
     /// Append this frame's item instances to the placed models (removed
     /// again by [`Self::pop_item_instances`]).
-    pub(super) fn push_item_instances(&mut self, cx: &mut Cx, world: &World) {
+    pub(super) fn push_item_instances(&mut self, cx: &mut Cx, world: &World, pass: DrawPassId) {
         self.items.appended = 0;
         self.items.glow.clear();
         self.items.skipped = 0;
         self.items.used_custom.clear();
+        self.items.recorded_pass = Some(pass);
         self.items.fallback = false;
         if world.items.is_empty() {
             return;
@@ -549,6 +562,7 @@ impl Renderer {
                 out.push(ModelInstance {
                     model: model.clone(),
                     custom_material: custom.clone().map(|name| CustomMaterialInstance { name, params }),
+                    layer_materials: Vec::new(),
                     transform,
                     tint: vec4(shade.x, shade.y, shade.z, color.w * tint.w),
                     color_adjust: vec4(0.0, 1.0, 1.0, 0.0),

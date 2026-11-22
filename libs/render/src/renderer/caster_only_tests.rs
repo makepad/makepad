@@ -22,6 +22,21 @@ fn a_prop_casts_and_a_level_does_not() {
             "a {span} m level must not shadow its own interior"
         );
     }
+    // A prop's footprint joins the baked ground light field, padded so the
+    // shadow it casts beside it lands inside.
+    use super::lights::{ground_field_window, GROUND_FIELD_MAX_SPAN};
+    let (lo, hi) = bounds(4.0);
+    assert_eq!(ground_field_window([(lo, hi)]), Some((-6.0, -6.0, 16.0, 16.0)));
+    assert_eq!(ground_field_window(std::iter::empty()), None);
+    // Statics spread past the field's span: it centres on the bulk of their
+    // footprint (a town), not on the low corner a lone prop far off sets.
+    let town = (vec3f(0.0, 0.0, 0.0), vec3f(100.0, 5.0, 100.0));
+    let lone = (vec3f(-900.0, 0.0, 0.0), vec3f(-899.0, 1.0, 1.0));
+    let (x0, z0, span, full) = ground_field_window([lone, town]).unwrap();
+    assert_eq!(span, GROUND_FIELD_MAX_SPAN);
+    assert!(full > span, "the cap bit: {full}");
+    assert!(x0 <= 0.0 && x0 + span >= 100.0, "the town stays inside along x: {x0}");
+    assert!(z0 <= 0.0 && z0 + span >= 100.0, "and along z: {z0}");
 }
 
 #[test]

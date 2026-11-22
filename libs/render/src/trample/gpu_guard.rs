@@ -191,8 +191,10 @@ fn gpu_guard_trample_lands_recovers_and_scrolls() {
     let ready = |session: &Session| {
         let guard = rig.borrow();
         let f = &guard.as_ref().unwrap().field;
-        let shader_in = |dv: &DrawVars| dv.draw_shader_id.is_some_and(|id| session.cx.draw_shader_ready(id, false));
-        f.valid && f.gpu.as_ref().is_some_and(|g| shader_in(&g.feedback.draw_vars) && shader_in(&g.stamp.draw_vars))
+        f.valid && f.gpu.as_ref().is_some_and(|g| {
+            let shader_in = |dv: &DrawVars| dv.draw_shader_id.is_some_and(|id| session.cx.draw_shader_ready_in(id, g.pass.draw_pass_id()));
+            shader_in(&g.feedback.draw_vars) && shader_in(&g.stamp.draw_vars)
+        })
     };
     let mut warm = 0;
     while !ready(&session) {

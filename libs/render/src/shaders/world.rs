@@ -438,13 +438,9 @@ script_mod! {
         pixel: fn() {
             let lm = self.light_map.sample(self.v_lm_uv)
             let has_lm = step(0.000001, self.lm_rect.z) * self.v_lm_in
-            // Realtime: the cascades replace the baked A channel.
             let ndl_t = max(dot(normalize(self.v_dl_nrm), normalize(self.light_dir)), 0.0)
-            let sun_vis = mix(
-                mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm),
-                self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_t),
-                self.csm_p.x
-            )
+            let field = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
+            let sun_vis = self.csm_ground_vis(field, self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_t))
             // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
             let lamps = lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on)
             // Local light reaches the ground WITHOUT the sun's shadow term,
