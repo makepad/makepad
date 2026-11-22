@@ -8,6 +8,8 @@ relax_api::option_layouts! {
 }
 
 pub use makepad_live_id;
+pub mod return_facts;
+pub use return_facts::{FnReturnFacts, ReturnComponent, return_facts};
 pub mod shader_ids;
 pub mod shader_schema;
 pub mod shader_backend;

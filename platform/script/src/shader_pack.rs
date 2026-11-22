@@ -649,6 +649,7 @@ impl ShaderPackEntry {
                 bindings
             },
             uses_time: self.uses_time,
+            return_facts: Box::default(),
         }
     }
 }

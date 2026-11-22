@@ -114,7 +114,37 @@ fn a_cached_shader_follows_its_helpers_and_field_kinds() {
         vm.eval(module("gen://helper", &format!("use mod.pod.*\nmod.lib.shade = fn(v: f32) {{ return v * {k} }}\nnil")));
     };
     helper(&mut vm, "2.0");
-    vm.eval(module("gen://base", "use mod.pod.*\nuse mod.math.*\nuse mod.shader\nuse mod.lib.*\nmod.lib.Base = {\nvertex_pos: shader.vertex_position(vec4f)\npixel: shader.fragment_output(0, vec4f)\ntint: shader.uniform(1.0)\nvertex: fn() { self.vertex_pos = vec4(0.0) }\nfragment: fn() { self.pixel = vec4(shade(self.tint)) }\n}\nnil"));
+    vm.eval(module("gen://base", r#"
+        use mod.pod.*
+        use mod.math.*
+        use mod.shader
+        use mod.lib.*
+        mod.lib.Base = {
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            tint: shader.uniform(1.0)
+            scaled: fn(base: vec4) -> vec4 {
+                let result = vec4(base.xyz * 0.5, base.w)
+                return result
+            }
+            solid: fn() -> vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }
+            changed: fn(base: vec4) -> vec4 {
+                let mut result = base
+                result.x = 0.0
+                return result
+            }
+            choice: fn(base: vec4) -> vec4 {
+                if base.x > 0.0 { return base }
+                return vec4(base.xyz, 1.0)
+            }
+            vertex: fn() { self.vertex_pos = vec4(0.0) }
+            fragment: fn() {
+                let v = self.scaled(vec4(shade(self.tint)))
+                self.pixel = self.choice(v) + self.solid() + self.changed(v)
+            }
+        }
+        nil
+    "#));
     let mut keep = Vec::new();
     let mut derived = |vm: &mut ScriptVm, tint: &str| {
         let o = vm.eval(module(&format!("gen://derived/{}", keep.len()), &format!("use mod.shader\nuse mod.lib.*\nBase{{tint: {tint}}}"))).as_object().expect("an object");
@@ -127,6 +157,18 @@ fn a_cached_shader_follows_its_helpers_and_field_kinds() {
     assert_ne!(derived(&mut vm, "shader.instance(1.0)").1, uniform);
     let output = compile_shader(&mut vm, shader, &ShaderCompileOptions::new(makepad_script::shader_backend::ShaderBackend::Glsl, false, false, true, false));
     assert!(!output.has_errors(), "{}", output.error_report());
+    use makepad_shader::ReturnComponent::{Const, Param, Unknown};
+    let desc = makepad_script::shader_reflection::DrawShaderDesc::from_output(vm.heap(), &output);
+    let components = |name| {
+        let facts = desc.return_facts().iter().find(|f| f.key_name == name).unwrap();
+        assert_eq!(facts.len, 4, "{name}");
+        facts.components
+    };
+    let base = |component| Param { name: id!(base), component };
+    assert_eq!(components(id!(scaled)), [Unknown, Unknown, Unknown, base(3)]);
+    assert_eq!(components(id!(solid)), [Const(1.0), Const(0.0), Const(0.0), Const(1.0)]);
+    assert_eq!(components(id!(changed)), [Unknown; 4]);
+    assert_eq!(components(id!(choice)), [base(0), base(1), base(2), Unknown]);
     let mut ips = Vec::new();
     output.reached_bodies_into(vm.heap(), &mut makepad_script::object_heap::ScriptIpsOut::new(&mut ips));
     let key = shader_reached_key(vm.bx.code_ref(), &ips);

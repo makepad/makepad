@@ -149,17 +149,14 @@ echo(md)
         vm,
         "ctl_concat",
         r#"
+use mod.pod.*
 let w = 170.0
-"" + ((w >= 280.0) && (w < 999.0))
+let s = [1]
+s.push(s)
+"" + ((w >= 280.0) && (w < 999.0)) + " " + vec3(1, 2.5, 0) + " " + ["a", [2, 3]] + " " + s
 "#,
     );
-    assert!(
-        vm.bx.heap.temp_string_with(|heap, out| {
-            heap.cast_to_string(v, out);
-            out == "false"
-        }),
-        "concat: expected \"false\""
-    );
+    assert_eq!(vm.bx.heap.string_view(v), Some("false vec3(1, 2.5, 0) [a, [2, 3]] [1, [...]]"));
 
     // If condition.
     let v = eval_str(

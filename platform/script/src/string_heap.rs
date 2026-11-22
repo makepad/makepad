@@ -1,10 +1,31 @@
 use relax_api::relax_api;
 use crate::array::*;
 use crate::heap::*;
+use crate::pod::ScriptPodVec;
 use crate::string::*;
 use crate::value::*;
 use crate::vm_api::ScriptTextOut;
 use std::fmt::{self, Write};
+
+const MAX_ARRAY_TEXT_DEPTH: usize = 8;
+const ARRAY_SEPARATOR: &str = ", ";
+const ELIDED_ARRAY: &str = "[...]";
+
+#[derive(Default)]
+struct TextLength(usize);
+
+impl Write for TextLength {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0 = self.0.saturating_add(text.len());
+        Ok(())
+    }
+}
+
+impl ScriptStringSink for TextLength {
+    fn is_full(&self) -> bool {
+        self.0 == usize::MAX
+    }
+}
 
 /// A sink used while the VM converts values into strings.
 ///
@@ -343,11 +364,9 @@ impl ScriptHeap {
                 } else if let Some(value) = value.as_string() {
                     self.string(value).len()
                 } else {
-                    // Non-string casts are all small, fixed-shape values. Formatting one
-                    // here cannot scale with script-controlled container contents.
-                    let mut out = String::new();
+                    let mut out = TextLength::default();
                     self.cast_to_string(value, &mut out);
-                    out.len()
+                    out.0
                 };
             }
         }
@@ -703,7 +722,20 @@ impl ScriptHeap {
         return arr;
     }
 
+    /// Writes `v` as text. An array writes its elements in brackets; one that
+    /// contains itself, or sits deeper than `MAX_ARRAY_TEXT_DEPTH`, writes `[...]`.
     pub fn cast_to_string<S: ScriptStringSink>(&self, v: ScriptValue, out: &mut S) {
+        self.write_value_text(v, out, &mut [ScriptArray::default(); MAX_ARRAY_TEXT_DEPTH], 0);
+    }
+
+    // `path[..depth]` holds the arrays being written around `v`.
+    fn write_value_text<S: ScriptStringSink>(
+        &self,
+        v: ScriptValue,
+        out: &mut S,
+        path: &mut [ScriptArray; MAX_ARRAY_TEXT_DEPTH],
+        depth: usize,
+    ) {
         if v.as_inline_string(|s| out.append_str(s)).is_some() {
             return;
         }
@@ -761,6 +793,46 @@ impl ScriptHeap {
         }
         if v.is_err() {
             write!(out, "[Error:{}]", v).ok();
+            return;
+        }
+        // Heap data is read through the heap's ops (pod_data, arr_view), never
+        // its fields: a JIT-compiled caller monomorphises this writer.
+        if let Some(pod) = v.as_pod() {
+            let (ty, words) = self.pod_data(pod);
+            if let Some(
+                vec @ (ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f),
+            ) = ty.ty().as_vec()
+            {
+                let dims = vec.dims();
+                write!(out, "vec{dims}(").ok();
+                for (i, word) in words[..dims].iter().enumerate() {
+                    if i != 0 {
+                        out.append_str(", ");
+                    }
+                    write!(out, "{}", f32::from_bits(*word)).ok();
+                }
+                out.append_char(')');
+                return;
+            }
+        }
+        if let Some(array) = v.as_array() {
+            if depth == MAX_ARRAY_TEXT_DEPTH || path[..depth].contains(&array) {
+                out.append_str(ELIDED_ARRAY);
+                return;
+            }
+            path[depth] = array;
+            out.append_char('[');
+            let view = self.arr_view(array);
+            for i in 0..view.len_all() {
+                if out.is_full() {
+                    return;
+                }
+                if i != 0 {
+                    out.append_str(ARRAY_SEPARATOR);
+                }
+                self.write_value_text(view.index(i).unwrap_or(NIL), out, path, depth + 1);
+            }
+            out.append_char(']');
             return;
         }
         write!(out, "[Unknown]").ok();

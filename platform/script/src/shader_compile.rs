@@ -181,6 +181,15 @@ pub fn compile_shader(
             }
         }
     }
+    if !state.has_errors() {
+        let ir = &state.ir;
+        state.compiled.return_facts = ir
+            .functions
+            .iter()
+            .filter(|func| func.entry.is_none())
+            .filter_map(|func| makepad_shader::return_facts(func, ir))
+            .collect();
+    }
     let bindings = state.get_uniform_buffer_bindings(vm.heap());
     let diagnostics = if state.has_errors() {
         state.error_report()
@@ -348,6 +357,9 @@ impl CompiledShader {
     }
     pub(crate) fn uses_time(&self) -> bool {
         self.state.uses_time()
+    }
+    pub(crate) fn return_facts(&self) -> &[makepad_shader::FnReturnFacts] {
+        self.state.return_facts()
     }
     #[relax_api(run)]
     pub fn find_vertex_buffer_object(

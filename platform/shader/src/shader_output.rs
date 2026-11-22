@@ -194,6 +194,7 @@ pub struct ShaderOutput {
     pub uses_derivatives: bool,
     /// The shader reads `draw_pass.time`, so its pass repaints every frame.
     pub uses_time: bool,
+    pub return_facts: Box<[crate::FnReturnFacts]>,
     pub last_call_cost: u64,
     pub emitted_bytes: usize,
     pub size_exceeded: bool,
@@ -397,6 +398,9 @@ impl ShaderOutput {
 impl ShaderOutput {
     pub fn uses_derivatives(&self) -> bool { self.uses_derivatives }
     pub fn uses_time(&self) -> bool { self.uses_time }
+    pub fn return_facts(&self) -> &[crate::FnReturnFacts] {
+        &self.return_facts
+    }
     pub fn backend(&self) -> ShaderBackend { self.backend }
     pub fn set_backend(&mut self, backend: ShaderBackend) { self.backend = backend; }
     pub fn has_errors(&self) -> bool { self.has_errors }

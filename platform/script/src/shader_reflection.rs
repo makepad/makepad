@@ -8,6 +8,7 @@ use crate::{
     value::{ScriptObject, ScriptPodType},
 };
 use makepad_live_id::LiveId;
+use makepad_shader::FnReturnFacts;
 /// One io row. Plain data (fixed-layout fields, the pod type boxed): JIT code reads it
 /// without crossing into the VM (relax_api.txt `jit`).
 #[relax_api(plain, run)]
@@ -65,6 +66,7 @@ pub struct DrawShaderDesc {
     pub(crate) uniform_buffer_bindings: UniformBufferBindings,
     /// The shader reads `draw_pass.time`.
     pub(crate) uses_time: bool,
+    pub(crate) return_facts: Box<[FnReturnFacts]>,
 }
 
 #[relax_api(run)]
@@ -128,6 +130,7 @@ impl DrawShaderDesc {
             folded_sites: output.folded_sites().to_vec(),
             uniform_buffer_bindings: output.uniform_buffer_bindings().clone(),
             uses_time: output.uses_time(),
+            return_facts: output.return_facts().into(),
         }
     }
 }
@@ -144,6 +147,7 @@ pub struct DrawShaderDescView<'a> {
     pub folded_sites: &'a [LiteralSite],
     pub uniform_buffer_bindings: &'a UniformBufferBindings,
     pub uses_time: bool,
+    pub return_facts: &'a [FnReturnFacts],
 }
 
 #[relax_api(run)]
@@ -161,6 +165,7 @@ impl DrawShaderDesc {
             folded_sites: &self.folded_sites,
             uniform_buffer_bindings: &self.uniform_buffer_bindings,
             uses_time: self.uses_time,
+            return_facts: &self.return_facts,
         }
     }
     #[inline(always)]
@@ -190,6 +195,10 @@ impl DrawShaderDesc {
     #[inline(always)]
     pub fn uses_time(&self) -> bool {
         self.view().uses_time
+    }
+    #[inline(always)]
+    pub fn return_facts(&self) -> &[FnReturnFacts] {
+        self.view().return_facts
     }
 }
 impl DrawShaderDescIo {
