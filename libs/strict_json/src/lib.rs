@@ -12,6 +12,13 @@
 //! The writer half exists for request bodies (search) and test fixtures.
 
 pub const MAX_DEPTH: u32 = 8;
+/// The depth for AI tool schemas and tool-call streams, parsed with
+/// `parse_depth(.., TOOL_JSON_DEPTH)`. A tool's argument schema nests about
+/// a dozen levels and a call inside a provider's stream line sits a few more
+/// below its envelope, so `MAX_DEPTH` refused real tools and calls. The
+/// parser recurses once per level: this is the stack guard, far past any
+/// real schema or call.
+pub const TOOL_JSON_DEPTH: u32 = 64;
 const MAX_INT_DIGITS: usize = 19;
 const MAX_FRAC_DIGITS: usize = 32;
 const MAX_EXP_DIGITS: usize = 3;
@@ -159,6 +166,26 @@ fn escape_into(out: &mut String, s: &str) {
 
 pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
     parse_depth(bytes, MAX_DEPTH)
+}
+
+/// How many arrays and objects deep `bytes` nests (0 for a scalar), counted
+/// without recursion, so a refusal can say how deep a document went. Brackets
+/// inside strings do not count; the bytes need not be valid JSON.
+pub fn nesting_depth(bytes: &[u8]) -> u32 {
+    let (mut depth, mut deepest, mut in_string, mut escaped) = (0u32, 0u32, false, false);
+    for &b in bytes {
+        if in_string {
+            if escaped { escaped = false; } else if b == b'\\' { escaped = true; } else if b == b'"' { in_string = false; }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'[' | b'{' => { depth += 1; deepest = deepest.max(depth); }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// `parse` with an explicit nesting cap, for bodies whose schema is known to
@@ -806,6 +833,13 @@ mod tests {
         let deep_bad = b"[[[[[[[[[1]]]]]]]]]";
         assert!(parse(deep_ok).is_ok());
         assert!(parse(deep_bad).is_err());
+        // Tool JSON: a scalar inside TOOL_JSON_DEPTH containers parses; one more level is refused.
+        let nested = |levels: u32| format!("{}1{}", "[".repeat(levels as usize), "]".repeat(levels as usize));
+        assert!(parse_depth(nested(TOOL_JSON_DEPTH).as_bytes(), TOOL_JSON_DEPTH).is_ok());
+        assert_eq!(parse_depth(nested(TOOL_JSON_DEPTH + 1).as_bytes(), TOOL_JSON_DEPTH), Err("nesting too deep"));
+        assert_eq!(nesting_depth(nested(TOOL_JSON_DEPTH + 1).as_bytes()), TOOL_JSON_DEPTH + 1);
+        assert_eq!(nesting_depth(br#"{"a":"[{\"[","b":[{}]}"#), 3, "brackets in strings and escaped quotes do not count");
+        assert_eq!(nesting_depth(b"7"), 0);
     }
 
     #[test]
