@@ -34,7 +34,7 @@
 use super::conf::SyncConf;
 use super::jits;
 use crate::proto::{self, hub_record, Sev};
-use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchKind, Runner};
+use makepad_app_registry::{AppLaunch, BuildPolicy, ChildMode, LaunchKind, Runner};
 use makepad_remote::json_str;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -197,7 +197,7 @@ pub fn start(conf: &SyncConf, s: &Spec, lease: &str, publish: &crate::local::Pub
     let spawn = |mut cmd: std::process::Command, _kind: LaunchKind| {
         allowlisted(&mut cmd);
         if visible {
-            // as the WM's spawn_jit: the window becomes the WM's tile through its socket
+            // As with a WM launch, the window becomes the WM's tile through its socket.
             cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
         } else {
             cmd.env("MAKEPAD_HIDE_WINDOWS", "1").env("MAKEPAD_MUTE", "1");
@@ -211,7 +211,8 @@ pub fn start(conf: &SyncConf, s: &Spec, lease: &str, publish: &crate::local::Pub
     let (_launch, run) = if s.release {
         AppLaunch::start_release(app, Some(conf.checkout.clone()), s.args.clone(), spawn)?
     } else {
-        AppLaunch::start(app, Runner::Jit, Some(conf.checkout.clone()), s.args.clone(), BuildPolicy::IfMissing, false, spawn)?
+        let mode = if cfg!(target_os = "linux") { ChildMode::Window } else { ChildMode::Wire };
+        AppLaunch::start(app, Runner::Jit, mode, Some(conf.checkout.clone()), s.args.clone(), BuildPolicy::IfMissing, false, spawn)?
     };
     // (a run that ended already leaves an entry `ledger` drops: its start no longer matches)
     let start = makepad_remote::relay::proc_start(run.app).unwrap_or(0);
@@ -271,7 +272,7 @@ fn instance_of(apps: &[makepad_remote::discovery::App], pid: u32, app: &str) -> 
 /// running launch of this hub", its show knowing the pid by the node's ps alone (11-21).
 fn quit_instance(pid: u32, app: &str) -> Result<String, String> {
     if !instance_of(&makepad_remote::discovery::apps(), pid, app) {
-        return Err(format!("pid {pid} is not a running launch of this hub, nor a running {app} no lease started"));
+        return unknown_pid(pid, app, makepad_remote::relay::proc_start(pid).is_some());
     }
     #[cfg(unix)]
     {
@@ -297,6 +298,17 @@ fn quit_instance(pid: u32, app: &str) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok("quit through its remote".into())
+}
+
+/// A stop of `pid`, which no launch here started and no instance of `app` answers to: refused while
+/// a process runs at that pid (`runs`: it is no instance this hub may quit), done when none does
+/// (it ended between the asker's look and its stop: a person closed it, or a stop before this one
+/// quit it).
+fn unknown_pid(pid: u32, app: &str, runs: bool) -> Result<String, String> {
+    match runs {
+        true => Err(format!("pid {pid} is not a running launch of this hub, nor a running {app} no lease started")),
+        false => Ok(format!("{app} (pid {pid}) had ended already")),
+    }
 }
 
 /// The pids of `app`'s compiled instances here that no lease started: what `show <app> native`
@@ -950,6 +962,9 @@ mod tests {
         let apps = [app(1, "clock", &[]), app(2, "clock", &[("run", "r1")]), app(3, "clock", &[("lease", "L1")]), app(4, "other", &[]), behind];
         let quits: Vec<u32> = (1..=8).filter(|&pid| instance_of(&apps, pid, "clock")).collect();
         assert_eq!(quits, [1, 2, 6, 7], "the dock's and a run's instances, by its pid or the parent it runs behind");
+        // a pid nothing here answers to: refused while a process runs there; done once none does
+        assert!(unknown_pid(8, "clock", true).is_err(), "some other process: never quit");
+        assert_eq!(unknown_pid(8, "clock", false), Ok("clock (pid 8) had ended already".to_string()), "it ended before its stop");
     }
 
     #[test]

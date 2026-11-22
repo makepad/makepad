@@ -193,7 +193,14 @@ impl Src {
     pub fn as_str(self) -> &'static str { match self { Self::Tree => "tree", Self::Overlay => "overlay" } }
     pub fn parse(s: &str) -> Option<Self> { match s { "tree" => Some(Self::Tree), "overlay" => Some(Self::Overlay), _ => None } }
     /// Lane JIT commands default to overlays; CI gate overlays are selected separately and keyed per pin.
-    pub fn for_run(kind: Kind, argv: &[String], tree: bool) -> Self {
+    /// A look (`run --look`: a command that touches neither the tree nor build output, `ps` or a
+    /// log's tail) runs on an overlay whatever it is: it holds no tree, so it never waits behind the
+    /// lane's own tree lease (a `--tree` live session held one box's tree while the lane's listing
+    /// of that box queued behind it, 11-22).
+    pub fn for_run(kind: Kind, argv: &[String], tree: bool, look: bool) -> Self {
+        if look {
+            return Self::Overlay;
+        }
         if !tree && matches!(kind, Kind::Test | Kind::Screen | Kind::Gpu | Kind::Long | Kind::Build) && loaders::cargo_run_args(argv).is_some() { Self::Overlay } else { Self::Tree }
     }
 }
@@ -541,6 +548,10 @@ pub struct Caps {
     /// busier than its leases' charges names a lease past its charge and these as what took the rest
     pub busy_leases: Vec<(String, f64)>,
     pub busy_outside: Vec<(String, u32, f64)>,
+    /// the compilers at work in each lease's tree ([`crate::top::CpuSplit::builds`]): (lease,
+    /// cores, the crate the busiest builds). A live session's app's builds keep the session from
+    /// its idle end (`orch::live`).
+    pub lease_builds: Vec<(String, f64, String)>,
     /// `cpu_wait` by lease: each lease's share of it by its run scopes' runnable threads at the
     /// look. A box's waiting tasks read as work outside its leases while a tests shard's own
     /// threads made them (22 waiting beside a 12-core shard, L1447930, 11-19).
@@ -728,6 +739,7 @@ pub const FEATURES: &[&str] = &[
     "live-threads", // a live session that asked its cores runs its JIT and app on them, `cost.threads`
     "pool-cores", // a live test session's long-lived pools size from its call's charge, `cost.pool_cores`
     "serial", // its USB serial devices, their claims and sessions (`crate::serial`)
+    "start-unquiet", // a timed start past its wait for a quiet box starts beside the work outside every lease, `unquiet`
 ];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
@@ -823,10 +835,11 @@ impl Caps {
             self.hub_rss_mb,
             self.hub_heap_mb,
             self.features.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
-            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"wait_leases\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
+            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"wait_leases\":[{}],\"lease_builds\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
                 self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
                 self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(","),
-                self.wait_leases.iter().map(|(lease, tasks)| format!("{{\"lease\":{},\"tasks\":{tasks:.2}}}", json_str(lease))).collect::<Vec<_>>().join(",")),
+                self.wait_leases.iter().map(|(lease, tasks)| format!("{{\"lease\":{},\"tasks\":{tasks:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
+                self.lease_builds.iter().map(|(lease, cores, what)| format!("{{\"lease\":{},\"cores\":{cores:.2},\"what\":{}}}", json_str(lease), json_str(what))).collect::<Vec<_>>().join(",")),
             self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.input_idle_ms.map_or("null".to_string(), |m| m.to_string()),
@@ -914,6 +927,10 @@ impl Caps {
         }
         for b in v.get("busy_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
             c.busy_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("cores").and_then(num).unwrap_or(0.0)));
+        }
+        for b in v.get("lease_builds").and_then(|x| x.as_arr()).unwrap_or(&[]) {
+            let text = |k: &str| b.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            c.lease_builds.push((text("lease"), b.get("cores").and_then(num).unwrap_or(0.0), text("what")));
         }
         for b in v.get("wait_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
             c.wait_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("tasks").and_then(num).unwrap_or(0.0)));
@@ -1229,8 +1246,11 @@ mod tests {
         assert_eq!(lease_class("test cargo test", "test git rev-parse HEAD"), "test cargo test", "otherwise the asked class stays");
         // and the JIT past an env prefix runs on the overlay, never a native checkout's build
         let jit = argv(&["env", "RELAX_O3=1", "cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "live", "a"]);
-        assert_eq!(Src::for_run(Kind::Test, &jit, false), Src::Overlay);
-        assert_eq!(Src::for_run(Kind::Test, &jit, true), Src::Tree);
+        assert_eq!(Src::for_run(Kind::Test, &jit, false, false), Src::Overlay);
+        assert_eq!(Src::for_run(Kind::Test, &jit, true, false), Src::Tree);
+        // a look runs on an overlay whatever its command: it holds no tree (11-22)
+        let look = argv(&["sh", "-c", "systemctl --user list-units 'makepad-wm-app-*'"]);
+        assert_eq!((Src::for_run(Kind::Test, &look, false, false), Src::for_run(Kind::Test, &look, false, true)), (Src::Tree, Src::Overlay));
     }
 
     #[test]
@@ -1262,6 +1282,7 @@ mod tests {
             cpu_wait: Some(3.25),
             busy_leases: vec![("L7".into(), 11.5), ("L9".into(), 0.25)],
             busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
+            lease_builds: vec![("L7".into(), 9.5, "makepad_widgets".into())],
             wait_leases: vec![("L7".into(), 2.75)],
             mac_gpu: Some((14.0, vec![("dumper".into(), 4_000_020, 14.0)])),
             display: Some("wm".into()),

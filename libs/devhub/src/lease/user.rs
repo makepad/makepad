@@ -108,6 +108,13 @@ impl UserTrack {
         self.last_input_ms.is_some_and(|l| self.watched_now.saturating_sub(l) < VIEWER_HOLDS_MIN * 60_000) && (self.viewers || !self.desk_link)
     }
 
+    /// A Desk Link viewer shows the node now (its tab selected in a visible window), input or
+    /// not: a WM restart waits on it while apps run there, which the person sees
+    /// (`sync::serve` restart_blockers). Watching a picture takes no input.
+    pub fn shown(&self) -> bool {
+        self.viewers
+    }
+
     /// Wall ms of the last person input this hub saw (None: none since it started).
     pub fn last_input_ms(&self) -> Option<u64> {
         self.last_input_ms
@@ -159,6 +166,9 @@ mod tests {
         assert!(v.watched(), "back on its tab");
         v.update(11 * MIN, Ok(&link(10 * MIN, 1)));
         assert!(!v.watched(), "10 min without input");
+        assert!(v.shown(), "its viewer still shows the node: a person may be watching a picture");
+        v.update(11 * MIN + 2000, Ok(&link(10 * MIN, 0)));
+        assert!(!v.shown(), "its tab went to another node");
         let mut d = UserTrack::default();
         d.update(MIN, Ok(&input(0)));
         assert!(d.watched(), "the box's own keyboard");

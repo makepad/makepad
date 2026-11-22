@@ -21,9 +21,11 @@
 //! process holds them, never on a user machine. Delete the category once no node has one.
 //!
 //! Reclaim order (stops at floor + 10 GB): 1 targets, native trees and job inputs no lease or process uses (LRU), 2 JIT
-//! run dirs no run uses and the stores of builds that are not a run dir's newest (LRU), 3 ended
+//! run dirs no run uses and the stores of builds that are not a run dir's newest (LRU), a tree
+//! run's relax dir's in the deployment and work targets alike ([`tree_jit_items`]), 3 ended
 //! leases' tmp + orphaned gate dirs, 4 rotated logs, 5 (work nodes only) a run dir's newest build's
-//! stores, 6 (work nodes only, no lease on the box) the target of
+//! stores and the deployment and work targets' cargo units by their day of last use
+//! ([`cargo_items`]), 6 (work nodes only, no lease on the box) the rest of the target of
 //! deployment and work trees. Never automatic: retired trees, worktrees (lease end owns them,
 //! with recovery), weights, Desk Link history, screencaps and other user data; on a user machine
 //! still short after reclaim, the user data is a `disk_ask` (inbox).
@@ -103,6 +105,9 @@ pub struct Item {
     /// a JIT run dir's stores of this Relax build alone (`path` is the run dir): retired under
     /// the build's live lock ([`crate::jitcache::retire`]), never the dir
     pub build: Option<u64>,
+    /// a cargo profile dir's units last used on this day (unix days; `path` is the profile dir):
+    /// removed under the dir's build lock ([`cargo_items`], [`remove_units`]), never the dir
+    pub units: Option<u64>,
 }
 
 /// What is in use right now: live leases' paths and every process's cwd.
@@ -316,7 +321,7 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
             (Some(_), Some(u)) => (None, format!("in use: {u}")),
             (s, _) => (s, note.to_string()),
         };
-        out.push(Item { cat, path, bytes, mtime, step, user_data, note, build: None });
+        out.push(Item { cat, path, bytes, mtime, step, user_data, note, build: None, units: None });
     };
     for p in children(&r.work.join("wt")) {
         add(Cat::Worktrees, p, None, false, "lease worktree: its lease end cleans it");
@@ -372,6 +377,12 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     }
     jit_items(&mut out, &dev.join("run-home"), live);
     jit_items(&mut out, &r.run_home, live);
+    for (cat, target) in [(Cat::DeployTarget, r.deploy.as_ref().map(|t| t.join("target"))), (Cat::WorkTarget, Some(r.work.join("ci-target")))] {
+        if let Some(t) = target {
+            tree_jit_items(&mut out, cat, &t);
+            cargo_items(&mut out, cat, &t);
+        }
+    }
     #[cfg(feature = "checkout")]
     {
         let mut lanes: std::collections::BTreeMap<_, _> = super::tree::natives(&r.work).into_iter().collect();
@@ -383,7 +394,7 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
             let target = super::tree::native_target(&r.work, &lane);
             let bytes = dir_size(&path).0 + dir_size(&target).0;
             let used = live.user_of(&path).or_else(|| live.user_of(&target)).or_else(|| super::tree::held(&path).then(|| "tree hold".into()));
-            out.push(Item { cat: Cat::Native, path, bytes, mtime: mtime / 1000, step: used.is_none().then_some(1), user_data: false, note: used.map_or_else(|| "native tree and target".into(), |u| format!("in use: {u}")), build: None });
+            out.push(Item { cat: Cat::Native, path, bytes, mtime: mtime / 1000, step: used.is_none().then_some(1), user_data: false, note: used.map_or_else(|| "native tree and target".into(), |u| format!("in use: {u}")), build: None, units: None });
         }
     }
     out
@@ -414,23 +425,162 @@ fn jit_items(out: &mut Vec<Item>, home: &Path, live: &Live) {
                 Some(u) => (None, format!("in use: {u}")),
                 None => (Some(2), "a JIT run dir no run uses".to_string()),
             };
-            out.push(Item { cat: Cat::JitCache, path: p, bytes, mtime, step, user_data: false, note, build: None });
+            out.push(Item { cat: Cat::JitCache, path: p, bytes, mtime, step, user_data: false, note, build: None, units: None });
             continue;
         }
-        let builds = crate::jitcache::builds(&p);
-        let newest = builds.first().map(|b| b.build);
-        let stores: u64 = builds.iter().map(|b| b.bytes).sum();
-        for b in builds {
-            let (step, note) = if b.running {
-                (None, format!("in use: a run of build {:016x} holds its live lock", b.build))
-            } else if Some(b.build) == newest {
-                (Some(5), format!("build {:016x}: the run dir's newest build, {} stores", b.build, b.files))
-            } else {
-                (Some(2), format!("build {:016x}: another build's {} stores", b.build, b.files))
-            };
-            out.push(Item { cat: Cat::JitCache, path: p.clone(), bytes: b.bytes, mtime: b.used, step, user_data: false, note, build: Some(b.build) });
+        let stores = build_items(out, &p);
+        out.push(Item { cat: Cat::JitCache, path: p, bytes: bytes.saturating_sub(stores), mtime, step: None, user_data: false, note: "the run dir's other files: the JIT keeps them by use".into(), build: None, units: None });
+    }
+}
+
+/// Relax dir `dir`'s stores as one item per build: a running build's never, the dir's newest
+/// build last (step 5), every other build's at step 2. Their bytes.
+fn build_items(out: &mut Vec<Item>, dir: &Path) -> u64 {
+    let builds = crate::jitcache::builds(dir);
+    let newest = builds.first().map(|b| b.build);
+    let stores: u64 = builds.iter().map(|b| b.bytes).sum();
+    for b in builds {
+        let (step, note) = if b.running {
+            (None, format!("in use: a run of build {:016x} holds its live lock", b.build))
+        } else if Some(b.build) == newest {
+            (Some(5), format!("build {:016x}: the run dir's newest build, {} stores", b.build, b.files))
+        } else {
+            (Some(2), format!("build {:016x}: another build's {} stores", b.build, b.files))
+        };
+        out.push(Item { cat: Cat::JitCache, path: dir.to_path_buf(), bytes: b.bytes, mtime: b.used, step, user_data: false, note, build: Some(b.build), units: None });
+    }
+    stores
+}
+
+const DAY: u64 = 86_400;
+
+/// The profile dirs of cargo target `target` (`<target>/<profile>`, `<target>/<triple>/<profile>`):
+/// those holding cargo's build lock `.cargo-lock`.
+fn profile_dirs(target: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for c in children(target).into_iter().filter(|p| p.is_dir()) {
+        if c.join(".cargo-lock").is_file() {
+            out.push(c);
+        } else {
+            out.extend(children(&c).into_iter().filter(|p| p.join(".cargo-lock").is_file()));
         }
-        out.push(Item { cat: Cat::JitCache, path: p, bytes: bytes.saturating_sub(stores), mtime, step: None, user_data: false, note: "the run dir's other files: the JIT keeps them by use".into(), build: None });
+    }
+    out
+}
+
+/// One cargo unit of a profile dir: its paths, their bytes on disk, and its last use (unix
+/// seconds: the newest atime or mtime of its files; relatime keeps an atime within a day of a
+/// read, so a unit a build only checked counts as used that day).
+struct Unit {
+    paths: Vec<PathBuf>,
+    bytes: u64,
+    used: u64,
+}
+
+/// Bytes on disk under `p`, and the newest atime or mtime of its files (a dir's own times are its
+/// entries', not a use).
+fn used_size(p: &Path) -> (u64, u64) {
+    let secs = |t: std::io::Result<std::time::SystemTime>| t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let (mut bytes, mut used) = (0, 0);
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(q) = stack.pop() {
+        let Ok(m) = std::fs::symlink_metadata(&q) else { continue };
+        bytes += crate::os::on_disk(&m).0;
+        if m.is_dir() {
+            stack.extend(std::fs::read_dir(&q).into_iter().flatten().flatten().map(|e| e.path()));
+        } else {
+            used = used.max(secs(m.accessed())).max(secs(m.modified()));
+        }
+    }
+    (bytes, used)
+}
+
+/// The cargo units of profile dir `p`, in both layouts: cargo 1.100's build dir keeps one whole in
+/// `build/<package>/<hash>/` (its fingerprint, build script output); the older layout's is
+/// `.fingerprint/<package>-<hash>/` with `build/<package>-<hash>/` and the `deps/` files of that
+/// hash; a `deps/` file of no fingerprint's hash is a unit of its own, and each
+/// `incremental/<crate>-<hash>/` is one. A box's work target kept its older layout's 25 GB whole,
+/// unused since the 1.100 move (11-22).
+fn units(p: &Path) -> Vec<Unit> {
+    let hash = |n: &str| -> Option<String> {
+        let (_, h) = n.split('.').next()?.rsplit_once('-')?;
+        (h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| h.to_string())
+    };
+    let mut by: std::collections::BTreeMap<String, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    let mut whole: Vec<Vec<PathBuf>> = Vec::new();
+    for d in children(&p.join("build")) {
+        match hash(&name(&d)) {
+            Some(h) => by.entry(h).or_default().push(d),
+            None if d.is_dir() => whole.extend(children(&d).into_iter().filter(|u| u.is_dir()).map(|u| vec![u])),
+            None => {}
+        }
+    }
+    for d in children(&p.join(".fingerprint")).into_iter().chain(children(&p.join("deps"))) {
+        if let Some(h) = hash(&name(&d)) {
+            by.entry(h).or_default().push(d);
+        }
+    }
+    whole.extend(by.into_values());
+    whole.extend(children(&p.join("incremental")).into_iter().filter(|d| d.is_dir()).map(|d| vec![d]));
+    whole.into_iter().map(|paths| {
+        let (bytes, used) = paths.iter().map(|q| used_size(q)).fold((0, 0), |a, b| (a.0 + b.0, a.1.max(b.1)));
+        Unit { paths, bytes, used }
+    }).collect()
+}
+
+/// Cargo target `target`'s units (`cat`: the deployment's or the work tree's) as one item per
+/// profile dir and day of last use, the oldest first by their newest use (step 5, work nodes only:
+/// a build that needs one builds it again); the target's own item counts the rest. A box's
+/// deployment target held 87 GB of incremental dirs and 44 GB of deps unused for one to four weeks,
+/// none of it reclaimable while a lease ran (11-22).
+fn cargo_items(out: &mut Vec<Item>, cat: Cat, target: &Path) {
+    let mut taken = 0;
+    for p in profile_dirs(target) {
+        let mut days: std::collections::BTreeMap<u64, (u64, usize, u64)> = std::collections::BTreeMap::new();
+        for u in units(&p) {
+            let d = days.entry(u.used / DAY).or_default();
+            d.0 += u.bytes;
+            d.1 += 1;
+            d.2 = d.2.max(u.used);
+        }
+        for (day, (bytes, n, used)) in days {
+            taken += bytes;
+            let note = format!("{n} cargo units last used on day {day}: a build that needs one builds it again");
+            out.push(Item { cat, path: p.clone(), bytes, mtime: used, step: Some(5), user_data: false, note, build: None, units: Some(day) });
+        }
+    }
+    if let Some(t) = out.iter_mut().find(|i| i.cat == cat && i.path == target && i.units.is_none()) {
+        t.bytes = t.bytes.saturating_sub(taken);
+    }
+}
+
+/// Removes profile dir `p`'s units last used on `day` ([`cargo_items`]) holding its build lock, as
+/// cargo holds it while it builds there: refused while a build runs, and a build that starts
+/// meanwhile waits for it. The bytes freed.
+pub fn remove_units(p: &Path, day: u64) -> Result<u64, String> {
+    let lock = p.join(".cargo-lock");
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&lock).map_err(|e| format!("{}: {e}", lock.display()))?;
+    if f.try_lock().is_err() {
+        return Err(format!("a cargo build holds {}", lock.display()));
+    }
+    let mut freed = 0;
+    for u in units(p).into_iter().filter(|u| u.used / DAY == day) {
+        if u.paths.iter().all(|q| remove(q).is_ok()) {
+            freed += u.bytes;
+        }
+    }
+    let _ = f.unlock();
+    Ok(freed)
+}
+
+/// A tree run's JIT stores in cargo target `target` (`<target>/relax`, [`crate::jitcache::tree_runs`]),
+/// by build as in a run dir ([`build_items`]); the target's own item (`cat`: step 6 on a box
+/// with no lease) counts the rest. A work target held 709 GB of stores, 698 GB of them from the
+/// last day, and a busy box's guard could take none of it while its leases ran (11-22).
+fn tree_jit_items(out: &mut Vec<Item>, cat: Cat, target: &Path) {
+    let stores = build_items(out, &target.join("relax"));
+    if let Some(t) = out.iter_mut().find(|i| i.cat == cat && i.path == target) {
+        t.bytes = t.bytes.saturating_sub(stores);
     }
 }
 
@@ -441,12 +591,12 @@ pub fn mac_items(repo: &Path) -> Vec<Item> {
     for i in super::wt::infos(repo).unwrap_or_default() {
         let t = i.entry.path.join("target");
         let (bytes, mtime) = dir_size(&i.entry.path);
-        out.push(Item { cat: Cat::Worktrees, path: i.entry.path.clone(), bytes, mtime, step: None, user_data: false, note: "lane worktree: wt prune owns it".into(), build: None });
+        out.push(Item { cat: Cat::Worktrees, path: i.entry.path.clone(), bytes, mtime, step: None, user_data: false, note: "lane worktree: wt prune owns it".into(), build: None, units: None });
         if t.is_dir() {
             let (bytes, mtime) = dir_size(&t);
             let step = (i.merged && i.live.is_empty()).then_some(1);
             let note = if step.is_some() { "landed lane" } else { "lane not landed or busy" };
-            out.push(Item { cat: Cat::Targets, path: t, bytes, mtime, step, user_data: false, note: note.into(), build: None });
+            out.push(Item { cat: Cat::Targets, path: t, bytes, mtime, step, user_data: false, note: note.into(), build: None, units: None });
         }
     }
     out
@@ -674,7 +824,7 @@ impl Guard {
             };
             // looked at again at the moment of deletion: a lease may have started using it (a
             // build's stores: a run of it, which holds its live lock; retire refuses then)
-            if let Some(u) = live.user_of(&i.path).filter(|_| i.build.is_none()) {
+            if let Some(u) = live.user_of(&i.path).filter(|_| i.build.is_none() && i.units.is_none()) {
                 return keep(&mut lines, &mut kept, u);
             }
             let _lock = match i.build.map_or_else(|| item_lock(&dev, i), |_| Ok(None)) {
@@ -689,6 +839,8 @@ impl Guard {
             #[cfg(feature = "checkout")]
             let removed = if let Some(b) = i.build {
                 crate::jitcache::retire(&i.path, b).map(|_| ())
+            } else if let Some(day) = i.units {
+                remove_units(&i.path, day).map(|_| ())
             } else if i.cat == Cat::Native {
                 let target = super::tree::native_target(&self.roots.work, &name(&i.path));
                 if let Some(u) = live.user_of(&target) {
@@ -700,9 +852,10 @@ impl Guard {
                 })
             } else { remove(&i.path).map_err(|e| e.to_string()) };
             #[cfg(not(feature = "checkout"))]
-            let removed = match i.build {
-                Some(b) => crate::jitcache::retire(&i.path, b).map(|_| ()),
-                None => remove(&i.path).map_err(|e| e.to_string()),
+            let removed = match (i.build, i.units) {
+                (Some(b), _) => crate::jitcache::retire(&i.path, b).map(|_| ()),
+                (None, Some(day)) => remove_units(&i.path, day).map(|_| ()),
+                (None, None) => remove(&i.path).map_err(|e| e.to_string()),
             };
             match removed {
                 Ok(()) => {
@@ -714,7 +867,7 @@ impl Guard {
                     self.emit(Sev::Info, line);
                     true
                 }
-                Err(e) if i.build.is_some() => keep(&mut lines, &mut kept, e),
+                Err(e) if i.build.is_some() || i.units.is_some() => keep(&mut lines, &mut kept, e),
                 Err(e) => {
                     lines.push(format!("{{\"failed\":{},\"err\":{}}}", json_str(&i.path.to_string_lossy()), json_str(&e.to_string())));
                     false
@@ -781,7 +934,7 @@ mod tests {
     use super::*;
 
     fn item(cat: Cat, path: &str, gbs: u64, mtime: u64, step: Option<u8>) -> Item {
-        Item { cat, path: PathBuf::from(path), bytes: gbs << 30, mtime, step, user_data: false, note: String::new(), build: None }
+        Item { cat, path: PathBuf::from(path), bytes: gbs << 30, mtime, step, user_data: false, note: String::new(), build: None, units: None }
     }
 
     /// A box warns under its JIT's floor less a margin, never under its own floor: the JIT filling
@@ -943,6 +1096,15 @@ mod tests {
         std::fs::write(dir.join("build/out/lib.a"), b"x").unwrap();
         // the old build's live lock, free, stamped when its last run took it
         store(&dir.join("cache/live/00000000000000a1"), 0, 3 * 3600);
+        // a tree run's stores in the work tree's target go by build too, while a lease runs on the
+        // box (a CI box's guard took none of 709 GB, 11-22); the target's own item counts the rest
+        let ci = work.join("ci-target");
+        for d in [ci.join("relax/cache"), ci.join("release")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(ci.join("release/bin"), vec![1u8; 10_000]).unwrap();
+        store(&ci.join("relax/cache/serde-00000000000000f1.rcs"), 0xf1, 9000);
+        store(&ci.join("relax/cache/serde-00000000000000f2.rcs"), 0xf2, 60);
         let running = std::fs::File::options().read(true).write(true).create(true).truncate(false).open(dir.join("cache/live/00000000000000c3")).unwrap();
         running.lock_shared().unwrap();
         let t = std::time::SystemTime::now() - Duration::from_secs(5 * 3600);
@@ -954,6 +1116,9 @@ mod tests {
         assert_eq!((of(old).step, of(mid).step, of(run).step), (Some(2), Some(2), None), "the running build's stores stay; the others go at step 2: {items:?}");
         assert!(of(old).path == dir && of(old).bytes >= 8192 && of(old).mtime < of(mid).mtime, "a build's two store files, used before the other's: {:?}", of(old));
         assert!(of(run).note.contains("live lock") && !of(old).note.contains("L1"), "the overlay lease's pin keeps no build's stores");
+        assert_eq!((of(0xf1).step, of(0xf2).step, of(0xf1).path.clone()), (Some(2), Some(5), ci.join("relax")), "the work target's stores by build: {items:?}");
+        let target = items.iter().find(|i| i.cat == Cat::WorkTarget).unwrap();
+        assert!(target.step.is_none() && target.bytes + of(0xf1).bytes + of(0xf2).bytes == dir_size(&ci).0, "the work target, kept while a lease runs, counts the rest: {target:?}");
         let whole = items.iter().find(|i| i.path == idle).unwrap();
         assert_eq!((whole.build, whole.step), (None, None), "a run dir no run uses is one item, and the dev run home's stays while an overlay lease runs: {whole:?}");
         assert!(items.iter().any(|i| i.path == dir && i.build.is_none() && i.step.is_none()), "the run dir's other files are listed, never taken");
@@ -968,7 +1133,7 @@ mod tests {
         });
         assert_eq!(took, vec![old], "the oldest build's stores, no more");
         assert!(!dir.join("cache/serde-00000000000000a1.rcs").exists() && !dir.join("cache/serde-00000000000000a1.rcs.2").exists() && !dir.join("cache/live/00000000000000a1").exists(), "its store files and its live lock went");
-        assert!(items.iter().all(|i| i.build.is_none_or(|b| [old, mid, run].contains(&b))), "an older format's store is no build's: {items:?}");
+        assert!(items.iter().all(|i| i.build.is_none_or(|b| [old, mid, run, 0xf1, 0xf2].contains(&b))), "an older format's store is no build's: {items:?}");
         for f in ["cache/bitflags-00000000000000b2.rcs", "cache/serde-00000000000000c3.rcs", "cache/serde-00000000000000a1.rcs.tmp", "cache/serde-00000000000000e5.rcs", "build/out/lib.a"] {
             assert!(dir.join(f).exists(), "{f} stays");
         }
@@ -1019,6 +1184,39 @@ mod tests {
         assert_eq!(find("home/devhub/inputs/bb").step, None);
         assert!(find("home/devhub/inputs/bb").note.contains("L8"));
         assert!(rotated_log("x.log.10") && rotated_log("x.log.1.gz") && !rotated_log("x.log") && !rotated_log("x.logs"));
+        // the work target's cargo units, in both layouts, by their day of last use (a box's
+        // targets held 131 GB of units unused for weeks, none reclaimable while a lease ran,
+        // 11-22); the target's own item counts the rest, and a unit goes under the build lock
+        let rel = base.join("home/devhub/ci-target/release");
+        let now = crate::proto::wall_ms() / 1000;
+        let file = |f: &str, len: usize, days_ago: u64| {
+            let q = rel.join(f);
+            std::fs::create_dir_all(q.parent().unwrap()).unwrap();
+            std::fs::write(&q, vec![1u8; len]).unwrap();
+            let at = std::time::UNIX_EPOCH + Duration::from_secs(now - days_ago * DAY);
+            std::fs::File::options().write(true).open(&q).unwrap().set_times(std::fs::FileTimes::new().set_accessed(at).set_modified(at)).unwrap();
+        };
+        file(".cargo-lock", 0, 0);
+        file("build/foo/0123456789abcdef/fingerprint/lib-foo", 1000, 3);
+        file(".fingerprint/bar-fedcba9876543210/lib-bar", 100, 10);
+        file("deps/libbar-fedcba9876543210.rlib", 20_000, 10);
+        file("build/bar-fedcba9876543210/output", 100, 10);
+        file("incremental/baz-1x2y3z/s-a/dep-graph.bin", 5000, 0);
+        let items = list(&r, &live);
+        let units: Vec<&Item> = items.iter().filter(|i| i.units.is_some()).collect();
+        let day = |ago: u64| (now - ago * DAY) / DAY;
+        assert_eq!(units.iter().map(|i| (i.units.unwrap(), i.step, i.cat, i.path.clone())).collect::<Vec<_>>(), [10, 3, 0].map(|a| (day(a), Some(5), Cat::WorkTarget, rel.clone())).to_vec(), "{units:?}");
+        let bar = units[0];
+        assert!(bar.bytes >= 20_200 && bar.note.starts_with("1 cargo units"), "the older layout's unit is its fingerprint, build dir and deps files: {bar:?}");
+        let target = items.iter().find(|i| i.cat == Cat::WorkTarget && i.units.is_none()).unwrap();
+        assert_eq!(target.bytes + units.iter().map(|i| i.bytes).sum::<u64>(), dir_size(&base.join("home/devhub/ci-target")).0, "the target's own item counts the rest");
+        let held = std::fs::File::options().write(true).open(rel.join(".cargo-lock")).unwrap();
+        held.lock().unwrap();
+        assert!(remove_units(&rel, day(10)).unwrap_err().contains("a cargo build holds"), "never under a running build");
+        drop(held);
+        assert!(remove_units(&rel, day(10)).unwrap() >= 20_200);
+        assert!(!rel.join("deps/libbar-fedcba9876543210.rlib").exists() && !rel.join(".fingerprint/bar-fedcba9876543210").exists() && !rel.join("build/bar-fedcba9876543210").exists(), "the unit went whole");
+        assert!(rel.join("build/foo/0123456789abcdef/fingerprint/lib-foo").exists() && rel.join("incremental/baz-1x2y3z/s-a/dep-graph.bin").exists(), "the other days' units stay");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

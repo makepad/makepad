@@ -48,7 +48,7 @@ fn restart_role_nodes() {
         std::fs::create_dir_all(&dir).unwrap();
         // (beside the test binary: a build lease asks for more disk than /tmp may hold)
         let work = work_dir(&base, name);
-        let ci = if NODES[..2].contains(&name) { "slots.ci = 1\n" } else { "" };
+        let ci = if NODES[..2].contains(&name) { "" } else { "slots.ci = 0\n" };
         let conf = crate::lease::caps::LeaseConf::parse(&format!("work = {}\nrole = pool\ndisk_floor_gb = 0\n{ci}", work.display()), &dir);
         let x = Exec::new(name, conf, dir.join("leases"), Opts { watch_memory: false, scopes: Some(false), no_beat: NO_BEAT, tick: Duration::from_millis(100), box_look: Some(BoxLook::quiet()), ..Opts::default() }, Arc::new(|_| {}));
         let ep = Endpoint::new(name);

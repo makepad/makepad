@@ -64,7 +64,10 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
   live act <id> <inspect cmd..>           any inspect command in the app (ui, key, click, grab, test hooks, stacks); a
                                           master or hub restart that cuts one goes round again if it reads, and a cut
                                           `session relaunch` is sent again only if an edit still waits for it; any
-                                          other cut act exits 75: whether it reached the app isn't known
+                                          other cut act exits 75: whether it reached the app isn't known.
+                                          `session relaunch` lets the app postpone it (unsaved work, a turn in
+                                          flight: the reply names it); `session relaunch --anyway` restarts it now,
+                                          its state carried over, as the window caption's restart does
   live wait <id> patched|verdict|settled|frame [timeout_s]   the newest edit's patch or test verdict, the JIT idle,
                                           or a frame drawn; verdict gives save → shipped → patched → tests times; the
                                           timeout (default 120 s) counts from the first ask through restarts
@@ -82,9 +85,11 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           per app per device, tracked; a running one is replaced only with --replace
                                           (ask the user first: it may hold unsaved work); closing it ends the show
   show stop <app> [--on <device>] | shows [--all]   stop one; what runs on each device
-  lane new <name> [--from work] [--no-commercial]
+  lane new <name> [--from work] [--no-commercial] [--with <repo>]..
                                           a lane worktree: <lanes root>/<name> on rc-<name> from work, with
-                                          apps/commercial on rc-<name> from main; prints its path. Lanes never run
+                                          apps/commercial on rc-<name> from main, and each --with nested
+                                          repository's apps/<repo> on rc-<name> from the branch its checkout is
+                                          on (Fab's makepad/apps: --with apps); prints its path. Lanes never run
                                           git worktree themselves; once it lands the master cleans its node dirs
                                           after 30 min idle, its worktree and branches once its agents are idle 1 h
   lane drop <name>                        abandon a lane: unlanded commits (uncommitted work committed first) are
@@ -1084,7 +1089,7 @@ fn shows(c: &Client, all: bool, json: bool) -> i32 {
                 let held = if x.held.is_empty() || !x.active() { String::new() } else { format!("\n           {}", x.held) };
                 // landed edits its JIT holds for the person's restart: its sha is not all it runs
                 let restart = if x.restart.is_empty() || !x.active() { String::new() } else { format!("\n           {}", x.restart) };
-                format!("{:<10} {:<24} {}{}{pinned}{wait}{args} pid={} sha={}{ran}{panic}{}{held}{restart}{stages}\n", x.device, x.app, x.state, if x.held.is_empty() || !x.active() { "" } else { " HELD" }, x.pid, super::short(&x.sha), if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) })
+                format!("{:<10} {:<24} {}{}{pinned}{wait}{args} pid={} sha={}{ran}{panic}{}{held}{restart}{stages}\n", x.device, x.app, x.state, if x.held.is_empty() || !x.active() { "" } else { " HELD" }, x.pid, super::show::sha_said(x), if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) })
             })
             .collect();
         format!("{rows}{stale}")
@@ -1217,7 +1222,7 @@ fn clean_offers(c: &Client, json: bool) -> i32 {
 fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
     match words {
         ["new", name, rest @ ..] => {
-            let (mut from, mut commercial) = ("work".to_string(), true);
+            let (mut from, mut commercial, mut with) = ("work".to_string(), true, Vec::new());
             let mut i = 0;
             while i < rest.len() {
                 match (rest[i], rest.get(i + 1)) {
@@ -1226,14 +1231,18 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
                         i += 1;
                     }
                     ("--no-commercial", _) => commercial = false,
+                    ("--with", Some(r)) => {
+                        with.push(json_str(r));
+                        i += 1;
+                    }
                     (w, _) => {
-                        eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial]: unknown `{w}`");
+                        eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] [--with <repo>]..: unknown `{w}`");
                         return 2;
                     }
                 }
                 i += 1;
             }
-            let req = format!("{{\"name\":{},\"from\":{},\"commercial\":{commercial}}}", json_str(name), json_str(&from));
+            let req = format!("{{\"name\":{},\"from\":{},\"commercial\":{commercial},\"with\":[{}]}}", json_str(name), json_str(&from), with.join(","));
             done(one(c, "lane", &format!("lane new {req}")), json, &|v| format!("{}\n", v.get("path").and_then(|p| p.as_str()).unwrap_or("")))
         }
         ["retire", "--clean-offers"] => clean_offers(c, json),
@@ -1324,7 +1333,7 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             out
         }),
         _ => {
-            eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] | drop <name> | stop <name> | keep|unkeep <name> | park <name> [why] | unpark <name> | retire <name> | offers [--check] | live <name> on|off | adopt | remove <name> | sweep [--dry] | sweep status | dormant");
+            eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] [--with <repo>].. | drop <name> | stop <name> | keep|unkeep <name> | park <name> [why] | unpark <name> | retire <name> | offers [--check] | live <name> on|off | adopt | remove <name> | sweep [--dry] | sweep status | dormant");
             2
         }
     }

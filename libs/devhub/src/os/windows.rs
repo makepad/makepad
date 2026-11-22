@@ -403,7 +403,7 @@ pub fn procs_running() -> Option<u32> { None }
 /// What a run has done so far ([`super::Activity`]): its job's CPU (its I/O is not counted).
 /// None: a run taken back from the ledger has no job to ask.
 pub fn activity(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path, hold: &Hold) -> Option<super::Activity> {
-    Some(super::Activity { cpu_us: hold.0.as_ref()?.cpu()? / 10, io_bytes: 0 })
+    Some(super::Activity { cpu_us: hold.0.as_ref()?.cpu()? / 10, io_bytes: 0, wait_us: 0 })
 }
 
 pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>, Option<u64>)> { child.wait().map(|s| (s, None, None)) }

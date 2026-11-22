@@ -2,10 +2,11 @@
 //! main (commercial) moves, each `rc-*` branch checked out in a worktree under the lanes root
 //! (`lanes_root` in autosync.conf, default `~/wt.noindex`) that is not yet in the tip gets the tip
 //! merged into it, in the lane's own worktree. Both repos' halves of a lane are handled the same
-//! way, each against its own tip (makepad against work, commercial against main), and as a PAIR:
-//! a lane's makepad half and the commercial half nested in it merge in one step or not at all (a
-//! makepad half newer than its commercial code may not build). If either half is held, conflicts
-//! or fails, neither merges and the other says why (`waiting`).
+//! way, each against its own tip (makepad against work, commercial against main, each other nested
+//! repository the checkout follows against the branch its checkout is on: a lane's `--with` half),
+//! and as ONE UNIT: a lane's makepad half and the halves nested in it merge in one step or not at
+//! all (a makepad half newer than its commercial code may not build). If any half is held,
+//! conflicts or fails, none merges and the others say why (`waiting`).
 //! - No merge while a job or live job of the lane runs at its worktree, or while a timed lease of
 //!   the lane is queued, live, or ended in the last 5 minutes (a timed or bench series pins a
 //!   binary built from the tree). A series with longer gaps uses `devhub hold`.
@@ -88,8 +89,10 @@ impl Outcome {
 /// One lane half: a branch of one repo in one worktree.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lane {
-    /// makepad | commercial
+    /// makepad | commercial | another nested repository's name
     pub repo: String,
+    /// the branch it merges and lands onto (work, main, a nested repository's own)
+    pub onto: String,
     pub branch: String,
     pub worktree: PathBuf,
     /// the branch's commit when last looked at (after a merge: the merge)
@@ -111,9 +114,10 @@ impl Lane {
             _ => ("null".into(), String::new(), String::new()),
         };
         format!(
-            "{{\"branch\":{},\"repo\":{},\"worktree\":{},\"tip\":{},\"base\":{},\"result\":\"{}\",\"merge\":{merge},\"files\":[{files}],\"why\":{},\"at_ms\":{},\"active_ms\":{},\"ahead\":{}}}",
+            "{{\"branch\":{},\"repo\":{},\"onto\":{},\"worktree\":{},\"tip\":{},\"base\":{},\"result\":\"{}\",\"merge\":{merge},\"files\":[{files}],\"why\":{},\"at_ms\":{},\"active_ms\":{},\"ahead\":{}}}",
             json_str(&self.branch),
             json_str(&self.repo),
+            json_str(&self.onto),
             json_str(&self.worktree.display().to_string()),
             json_str(&self.tip),
             json_str(&self.base),
@@ -141,12 +145,13 @@ impl Lane {
             "dormant" => Outcome::Dormant(v.get("ahead").and_then(|x| x.as_u64()).unwrap_or(0) as u32),
             _ => return None,
         };
-        Some(Lane { repo: s("repo"), branch: s("branch"), worktree: PathBuf::from(s("worktree")), tip: s("tip"), base: s("base"), outcome, at_ms: v.get("at_ms").and_then(|x| x.as_u64()).unwrap_or(0), active_ms: v.get("active_ms").and_then(|x| x.as_u64()).unwrap_or(0) })
+        let onto = match s("onto") { o if !o.is_empty() => o, _ if s("repo") == "makepad" => "work".into(), _ => "main".into() };
+        Some(Lane { repo: s("repo"), onto, branch: s("branch"), worktree: PathBuf::from(s("worktree")), tip: s("tip"), base: s("base"), outcome, at_ms: v.get("at_ms").and_then(|x| x.as_u64()).unwrap_or(0), active_ms: v.get("active_ms").and_then(|x| x.as_u64()).unwrap_or(0) })
     }
 
     /// The one-line event text for this result.
     fn event(&self) -> (Sev, String) {
-        let tip_name = if self.repo == "commercial" { "main" } else { "work" };
+        let tip_name = &self.onto;
         let b = &self.base[..self.base.len().min(10)];
         match &self.outcome {
             Outcome::Merged(c) => (Sev::Info, format!("lanes: merged {tip_name} ({b}) into {} ({}): now {}", self.branch, self.repo, &c[..c.len().min(10)])),
@@ -164,6 +169,31 @@ impl Lane {
             Outcome::Dormant(n) => (Sev::Info, format!("lanes: {} ({}) dormant: no commits, leases or jobs in {} h; {n} commit(s) not in {tip_name}: no merges until it is used again (`devhub lane dormant`)", self.branch, self.repo, DORMANT_MS / 3_600_000)),
         }
     }
+}
+
+/// The repositories whose lane halves the bot keeps merged: makepad (onto work), the paired nested
+/// one (onto main) and each other nested one the checkout follows (onto the branch its checkout is
+/// on, [`crate::nested::branches`]): (name, its checkout, its tip's branch).
+fn repos(w: &Where) -> Vec<(String, PathBuf, String)> {
+    std::iter::once(("makepad".to_string(), w.repo.clone(), "work".to_string()))
+        .chain(crate::nested::branches(&w.repo).into_iter().map(|(n, b)| { let d = w.repo.join(crate::nested::dir(&n)); (n, d, b) }))
+        .filter(|(n, d, _)| n == "makepad" || n == crate::state::PAIRED || crate::nested::public(n) || has_lanes(d, &w.root))
+        .collect()
+}
+
+/// Whether the repository at `dir` has a lane half: a worktree of it on an rc- branch under the
+/// lanes' `root`. The bot follows a private nested repository other than the paired one only then;
+/// one no lane changes keeps its own hooks, maintenance and history as they were (Source Library,
+/// 11-22). A public one it always follows: its private check's hooks hold a commit made in its
+/// checkout too, with no lane (apps' first root and its cut-over, 11-22; crate::nested::PUBLIC).
+/// Per round: one directory read and two small files per worktree of it.
+fn has_lanes(dir: &Path, root: &Path) -> bool {
+    let Some(p) = crate::gitread::paths(dir) else { return false };
+    std::fs::read_dir(p.common_dir.join("worktrees")).into_iter().flatten().flatten().any(|e| {
+        let at = e.path();
+        std::fs::read_to_string(at.join("HEAD")).is_ok_and(|h| h.trim().starts_with("ref: refs/heads/rc-"))
+            && std::fs::read_to_string(at.join("gitdir")).is_ok_and(|g| Path::new(g.trim()).starts_with(root))
+    })
 }
 
 /// Where the lanes are: the repo (its `apps/commercial` is the commercial repo) and the root
@@ -210,7 +240,7 @@ fn first_err(err: &str) -> String {
 
 /// One lane half as found this round.
 struct Half {
-    repo: &'static str,
+    repo: String,
     /// the repo's main checkout (plumbing runs there)
     dir: PathBuf,
     /// its repo's [`Graph`] this round
@@ -221,7 +251,7 @@ struct Half {
     head_id: ObjectId,
     /// the tip's commit (work or main)
     base: String,
-    tip_branch: &'static str,
+    tip_branch: String,
 }
 
 /// (with the shared reader of the half's store and the store on a second look,
@@ -317,7 +347,7 @@ impl History {
 
 /// One repo this round: its plumbing reads and its [`History`] (taken from the bot for the round).
 struct Graph {
-    name: &'static str,
+    name: String,
     /// the repo's shared reader ([`crate::gitread`]), locked per question
     repo: std::sync::Arc<Mutex<Repository>>,
     hist: History,
@@ -467,7 +497,7 @@ pub struct Lanes {
     busy: Busy,
     seen: Seen,
     /// per repo (makepad | commercial)
-    histories: Mutex<BTreeMap<&'static str, History>>,
+    histories: Mutex<BTreeMap<String, History>>,
     /// worktrees whose merge driver this process checked: once per worktree, never per round
     installed: Mutex<HashSet<PathBuf>>,
     watch: Watch,
@@ -606,7 +636,7 @@ impl Lanes {
     /// a round sees it whole or not at all. Read apart, a round between the two moves merges work
     /// with the landing into a lane's makepad half and main without it into its commercial half:
     /// a pair that never landed together, which every run of the lane is then refused.
-    fn capture_tips(&self, w: &Where, pass: &mut crate::gitread::Pass) -> Result<[Option<String>; 2], String> {
+    fn capture_tips(&self, w: &Where, repos: &[(String, PathBuf, String)], pass: &mut crate::gitread::Pass) -> Result<Vec<Option<String>>, String> {
         let held = match makepad_git::repository_paths(&w.repo) {
             Ok(Some(p)) => Some(FfLock::take(&p.common_dir.join("land-ff.lock"), || {
                 (self.publish)(hub_record(&self.machine, "", 0, "lanes", Sev::Warn, "lanes: waiting 30 s for land-ff.lock: a landing moving work and main holds it (a master restart clears one a stopped landing left)".into(), String::new()));
@@ -614,15 +644,15 @@ impl Lanes {
             Ok(None) => None,
             Err(e) => return Err(format!("makepad: {e}")),
         };
-        let mut tips = [None, None];
-        for (tip, (repo, dir, branch)) in tips.iter_mut().zip([("makepad", w.repo.clone(), "work"), ("commercial", w.repo.join("apps").join("commercial"), "main")]) {
-            match makepad_git::repository_paths(&dir) {
+        let mut tips = vec![None; repos.len()];
+        for (tip, (repo, dir, branch)) in tips.iter_mut().zip(repos) {
+            match makepad_git::repository_paths(dir) {
                 Ok(Some(_)) => {}
                 Ok(None) => continue,
                 Err(e) => return Err(format!("{repo}: {e}")),
             }
             let name = format!("refs/heads/{branch}");
-            *tip = Some(pass.rev(&dir, &name).ok_or_else(|| format!("{repo}: cannot capture {branch}: {}", pass.why_not(&dir, &name)))?);
+            *tip = Some(pass.rev(dir, &name).ok_or_else(|| format!("{repo}: cannot capture {branch}: {}", pass.why_not(dir, &name)))?);
         }
         drop(held);
         Ok(tips)
@@ -632,8 +662,9 @@ impl Lanes {
         let mut pass = crate::gitread::Pass::default();
         let mut halves: Vec<Half> = Vec::new();
         let mut listed: HashSet<PathBuf> = HashSet::new();
-        let tips = self.capture_tips(w, &mut pass)?;
-        for ((repo, dir, tip_branch), base) in [("makepad", w.repo.clone(), "work"), ("commercial", w.repo.join("apps").join("commercial"), "main")].into_iter().zip(tips) {
+        let repos = repos(w);
+        let tips = self.capture_tips(w, &repos, &mut pass)?;
+        for ((repo, dir, tip_branch), base) in repos.into_iter().zip(tips) {
             let paths = match makepad_git::repository_paths(&dir) {
                 Ok(Some(p)) => p,
                 Ok(None) => continue,
@@ -643,6 +674,12 @@ impl Lanes {
                 // the repository's commit-msg hook (all its lane worktrees share it), with the
                 // main checkout's scanner: a lane's own is gone with the lane
                 crate::private_check::install_message_check(&dir, &crate::private_check::scan_in(&w.repo))?;
+                // and a public one's staged diffs and pushes (said, never a stop: the other
+                // repositories' lanes go on)
+                let checked = if crate::nested::public(&repo) { crate::private_check::install_checks(&dir, &crate::private_check::scan_in(&w.repo)) } else { Vec::new() };
+                for said in checked {
+                    (self.publish)(hub_record(&self.machine, "", 0, "lanes", Sev::Warn, format!("lanes: {repo}: {said}"), String::new()));
+                }
                 // and its maintenance is devhub's: a lane's commit never packs other lanes' branches
                 crate::gitlock::own_maintenance(&dir)?;
             }
@@ -652,7 +689,7 @@ impl Lanes {
             let base = base.ok_or_else(|| format!("{repo}: {tip_branch} was not captured"))?;
             let base_id = ObjectId::from_hex(&base).map_err(|e| e.to_string())?;
             let shared = crate::gitread::handle(&paths.common_dir).ok_or_else(|| format!("{repo}: cannot read {}", paths.common_dir.display()))?;
-            let mut g = Graph { name: repo, repo: shared, hist: self.histories.lock().unwrap().remove(repo).unwrap_or_default() };
+            let mut g = Graph { name: repo.clone(), repo: shared, hist: self.histories.lock().unwrap().remove(&repo).unwrap_or_default() };
             g.hist.advance(&mut g.repo.lock().unwrap_or_else(|e| e.into_inner()), base_id).map_err(|e| format!("{repo}: {tip_branch}'s history: {e}"))?;
             let old = format!("refs/heads/{tip_branch}-old-");
             let retired = match pass.direct_refs(&dir, &old) { Some(r) => r, None => return Err(format!("{repo}: cannot capture retired refs: {}", pass.why_not(&dir, &tip_ref))) };
@@ -664,12 +701,12 @@ impl Lanes {
                 let (Some(branch), Some(head_id)) = (wt.branch, wt.head) else { continue };
                 let path = wt.path;
                 if !wt.main && branch.starts_with("rc-") && path.starts_with(&w.root) && path.is_dir() {
-                    let root = if repo != "commercial" { &path }
-                        else if path.ends_with("apps/commercial") { path.parent().and_then(Path::parent).unwrap_or(&w.repo) }
+                    let root = if repo == "makepad" { &path }
+                        else if path.ends_with(crate::nested::dir(&repo)) { path.parent().and_then(Path::parent).unwrap_or(&w.repo) }
                         else { &w.repo };
                     self.install_once(&path, root)?;
                     listed.insert(path.clone());
-                    halves.push(Half { repo, dir: dir.clone(), graph, wt: path, branch, head: head_id.to_hex(), head_id, base: base.clone(), tip_branch });
+                    halves.push(Half { repo: repo.clone(), dir: dir.clone(), graph, wt: path, branch, head: head_id.to_hex(), head_id, base: base.clone(), tip_branch: tip_branch.clone() });
                 }
             }
         }
@@ -680,19 +717,20 @@ impl Lanes {
         for (i, g) in graphs.iter_mut().enumerate() {
             g.hist.owns.retain(|o, _| heads.contains(&(i, *o)));
         }
-        // the pairs: a commercial half goes with the makepad lane it is nested in
+        // the units: each nested half goes with the makepad lane it is nested in (commercial first)
         let mut units: Vec<Vec<Half>> = Vec::new();
-        let (mk, com): (Vec<Half>, Vec<Half>) = halves.into_iter().partition(|h| h.repo == "makepad");
-        let mut com: Vec<Option<Half>> = com.into_iter().map(Some).collect();
+        let (mk, nested): (Vec<Half>, Vec<Half>) = halves.into_iter().partition(|h| h.repo == "makepad");
+        let mut nested: Vec<Option<Half>> = nested.into_iter().map(Some).collect();
         for m in mk {
-            let nested = m.wt.join("apps").join("commercial");
             let mut unit = vec![m];
-            if let Some(c) = com.iter_mut().find(|c| c.as_ref().is_some_and(|c| c.wt == nested)) {
-                unit.push(c.take().unwrap());
+            for c in nested.iter_mut() {
+                if c.as_ref().is_some_and(|c| c.wt == unit[0].wt.join(crate::nested::dir(&c.repo))) {
+                    unit.push(c.take().unwrap());
+                }
             }
             units.push(unit);
         }
-        units.extend(com.into_iter().flatten().map(|c| vec![c]));
+        units.extend(nested.into_iter().flatten().map(|c| vec![c]));
 
         // Keep records of the other units when only one lane asked for a round.
         let seen: HashSet<_> = units.iter().flatten().map(Half::key).collect();
@@ -736,7 +774,7 @@ impl Lanes {
                     Outcome::Merged(c) => c.clone(),
                     _ => h.head.clone(),
                 };
-                let lane = Lane { repo: h.repo.into(), branch: h.branch, worktree: h.wt, tip, base: h.base, outcome, at_ms: now, active_ms };
+                let lane = Lane { repo: h.repo, onto: h.tip_branch, branch: h.branch, worktree: h.wt, tip, base: h.base, outcome, at_ms: now, active_ms };
                 if asked {
                     results.push(lane.clone());
                 }
@@ -965,7 +1003,7 @@ impl Lanes {
     /// Whether every commit of a half beyond its tip is the bot's merge of the tip ([`only_bot_merges`]).
     fn only_bot(&self, graphs: &mut [Graph], h: &Half) -> bool {
         let g = &mut graphs[h.graph];
-        g.hist.own(&mut g.repo.lock().unwrap_or_else(|e| e.into_inner()), h.head_id).is_ok_and(|own| only_bot_merges(own.commits.iter().map(|c| c.3.as_str()), h.tip_branch, &h.branch))
+        g.hist.own(&mut g.repo.lock().unwrap_or_else(|e| e.into_inner()), h.head_id).is_ok_and(|own| only_bot_merges(own.commits.iter().map(|c| c.3.as_str()), &h.tip_branch, &h.branch))
     }
 
     /// A half's result when it has nothing to merge (or is held): None when it needs the tip.
@@ -990,7 +1028,7 @@ impl Lanes {
         };
         // landed but for the bot's own merges of the tip: merging the tip in again would only add
         // another merge (and make the lane look pending) for ever
-        if only_bot_merges(own.commits.iter().map(|c| c.3.as_str()), h.tip_branch, &h.branch) {
+        if only_bot_merges(own.commits.iter().map(|c| c.3.as_str()), &h.tip_branch, &h.branch) {
             return Some(Outcome::Landed);
         }
         if own.holds_tip {
@@ -1297,7 +1335,7 @@ pub fn unhold_in(store: &crate::state::Store, branch: &str) -> Result<bool, Stri
 
 /// One lane half as (sev word, its line) for the panel and the CLI.
 pub fn row(lane: &Lane) -> (&'static str, String) {
-    let tip_name = if lane.repo == "commercial" { "main" } else { "work" };
+    let tip_name = &lane.onto;
     let base = &lane.base[..lane.base.len().min(10)];
     let (sev, detail) = match &lane.outcome {
         Outcome::Merged(_) => ("info", format!("merged {tip_name} {base}")),
@@ -2104,6 +2142,33 @@ mod tests {
     fn a_pair_merges_both_halves_or_neither() {
         let f = Fix::new("pair");
         let (c, wt, cw) = paired(&f, "p");
+        // and a third half (`lane new --with`, Fab's makepad/apps, 11-22): a nested repository the
+        // checkout follows on its own branch, one unit with the other two
+        let x = f.repo.join("apps").join("extra");
+        f.write(&f.repo, ".gitignore", "apps/commercial/\napps/extra/\napps/idle/\napps/apps/\n");
+        f.commit(&f.repo, "ignore the other nested repos");
+        // and one no lane changes: not followed, its hooks and maintenance as they were; a public
+        // one (apps) with no lane is, its private check's hooks in place
+        let public = f.repo.join("apps").join("apps");
+        std::fs::create_dir_all(&public).unwrap();
+        f.g(&public, &["init", "-q", "-b", "main"]);
+        f.write(&public, "p.txt", "p\n");
+        f.commit(&public, "public base");
+        let idle = f.repo.join("apps").join("idle");
+        std::fs::create_dir_all(&idle).unwrap();
+        f.g(&idle, &["init", "-q", "-b", "main"]);
+        f.write(&idle, "i.txt", "i\n");
+        f.commit(&idle, "idle base");
+        std::fs::create_dir_all(&x).unwrap();
+        f.g(&x, &["init", "-q", "-b", "side"]);
+        f.write(&x, "x.txt", "x\n");
+        f.commit(&x, "x base");
+        let xw = wt.join("apps").join("extra");
+        f.g(&x, &["worktree", "add", "-q", "-b", "rc-p", xw.to_str().unwrap(), "side"]);
+        f.write(&xw, "lane.txt", "lane\n");
+        let x_tip = f.commit(&xw, "lane extra work");
+        f.write(&x, "y.txt", "side moves\n");
+        f.commit(&x, "side moves");
         f.write(&wt, "lane.txt", "lane\n");
         let mk_tip = f.commit(&wt, "lane work");
         f.write(&cw, "s.txt", "one\nLANE\n");
@@ -2119,6 +2184,11 @@ mod tests {
         assert!(matches!(half(&bot, "makepad", "rc-p"), Outcome::Waiting(w) if w.contains("commercial half conflict")), "{:?}", bot.list());
         assert_eq!(f.g(&wt, &["rev-parse", "HEAD"]), mk_tip, "the makepad half must not move alone");
         assert_eq!(f.g(&cw, &["rev-parse", "HEAD"]), c_tip);
+        assert!(matches!(half(&bot, "extra", "rc-p"), Outcome::Waiting(w) if w.contains("commercial half conflict")), "{:?}", bot.list());
+        assert_eq!(f.g(&xw, &["rev-parse", "HEAD"]), x_tip, "nor the third");
+        assert!(!idle.join(".git/hooks/commit-msg").exists() && !std::fs::read_to_string(idle.join(".git/config")).unwrap().contains("maintenance"), "a nested repository no lane changes is not followed");
+        let hook = |h: &str| std::fs::read_to_string(public.join(".git/hooks").join(h)).unwrap_or_default();
+        assert!(hook("pre-commit").contains("installed by devhub") && hook("pre-push").contains("installed by devhub") && !hook("commit-msg").is_empty(), "a public one with no lane is followed, its hooks in place");
         // the lane resolves its commercial half: both merge in the next round
         f.g(&cw, &["merge", "-q", "main", "-X", "ours", "-m", "resolve"]);
         f.write(&c, "t.txt", "main again\n");
@@ -2126,7 +2196,14 @@ mod tests {
         bot.pass(&f.w()).unwrap();
         assert!(matches!(half(&bot, "makepad", "rc-p"), Outcome::Merged(_)), "{:?}", bot.list());
         assert!(matches!(half(&bot, "commercial", "rc-p"), Outcome::Merged(_)), "{:?}", bot.list());
-        assert!(wt.join("b.txt").is_file() && cw.join("t.txt").is_file());
+        assert!(matches!(half(&bot, "extra", "rc-p"), Outcome::Merged(_)), "{:?}", bot.list());
+        assert!(wt.join("b.txt").is_file() && cw.join("t.txt").is_file() && xw.join("y.txt").is_file(), "each half took its own tip");
+        let extra = bot.list().into_iter().find(|l| l.repo == "extra").unwrap();
+        assert_eq!(extra.onto, "side");
+        assert!(x.join(".git/hooks/commit-msg").is_file() && !x.join(".git/hooks/pre-commit").exists() && !x.join(".git/hooks/pre-push").exists(), "a private repository keeps the message check alone");
+        assert_eq!(Lane::parse(&extra.to_json()), Some(extra.clone()), "its record reads back");
+        assert!(f.events.lock().unwrap().iter().any(|(_, l)| l.starts_with("lanes: merged side (") && l.contains("into rc-p (extra)")), "{:?}", f.events.lock().unwrap());
+        assert_eq!(Lane::parse(r#"{"branch":"rc-o","repo":"commercial","worktree":"/w","tip":"a","base":"b","result":"up-to-date"}"#).map(|l| l.onto).as_deref(), Some("main"), "an older record's commercial half merges main");
     }
 
     #[test]

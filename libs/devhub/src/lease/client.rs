@@ -89,7 +89,7 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           at its step's end, its holder asking again for the rest; a bench box is lent it
                                           between timed series whatever its length (other runs: 10 min at most by estimate),
                                           and its file appears as timed work comes for the box
-  run <lane> <kind> [--node N [--series S|--pin-why R]|--needs ..] [--rev R] [--with-uncommitted] [--tree] [--patch <diff> ..]
+  run <lane> <kind> [--node N [--series S|--pin-why R]|--needs ..] [--rev R] [--with-uncommitted] [--tree|--look] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
         [--for <node>] [--rounds N] -- cmd...
@@ -108,7 +108,7 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           run can find the lane's tree already handed to another lane.
                                           A lease's end stops an app its run `open`s too: no run (re)starts a user's app.
                                           JIT commands of kinds test, screen, gpu, long and build use overlays by default;
-                                          --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
+                                          --tree uses the work tree. CI, gates, timed and non-JIT commands use trees, but --look runs any command on an overlay, holding no tree: one that touches neither the tree nor build output (`ps`, a log's tail) never waits behind a lane's tree lease. A look asks no cores or RAM until its class measures some, is outside its lane's cap, and passes every hold but exclusive work's.
                                           Main checkout edits need --with-uncommitted. --rev R: those commits
                                           alone (`work@<sha>[,commercial=main@<sha>]`), none of the worktree's files.
                                           --patch <diff>: each diff (`git diff`) applies to the file as the run
@@ -220,7 +220,8 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
   node <n> probe                          its toolchain probe now (a compile and a link): a box a toolchain move left
                                           out of rotation comes back at once (it probes again as a lease there ends too)
   node <n> [role pool|hot|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
-                                          the node's role and budgets (its lease.conf, kept on the node)
+                                          the node's role and budgets (its lease.conf, kept on the node);
+                                          `key=` unsets a key, so the box's default applies
   disk <node> [--need GB] [--dry-run]     the node's disk categories and reclaim, to its floor plus
                                           GB (default: the largest need of a queued ask its disk
                                           keeps off, as that ask's own reclaim aims for)
@@ -620,6 +621,7 @@ const FLAG_FIELDS: &[(&[&str], &str)] = &[
     (&["--run-since", "5"], "run_ms"),
     (&["--whole"], "whole"),
     (&["--yields"], "yields"),
+    (&["--look"], "look"),
 ];
 
 /// The flags shared by `lease` and `run`.
@@ -643,6 +645,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
                 break;
             }
             "--tree" => { tree = true; i += 1; continue; }
+            "--look" => { req.look = true; i += 1; continue; }
             "--whole" => { req.whole = true; i += 1; continue; }
             "--yields" => { req.yields = true; i += 1; continue; }
             "--cost" => { req.cost = CostClass::parse(val(i)?).ok_or("--cost is small, medium or large")?; req.cost_asked = true; }
@@ -707,6 +710,9 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     if let Some(what) = super::argv::changes_toolchain(&cmd).filter(|_| !req.whole) {
         eprintln!("makepad devhub: `{what}` changes its box's toolchain: the lease takes the box whole");
         req.whole = true;
+    }
+    if req.look && tree {
+        return Err("--look holds no tree: drop --tree".into());
     }
     Ok(Opts { req, watch, keep, cmd, tree, native, patches: Vec::new(), commits_only, inputs, for_node, exit_to, start_within: None, env: Vec::new() })
 }
@@ -1685,7 +1691,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     // a JIT `makepad test` of a package whose tests read the checkout itself (cargo on it, its
     // history: `test-tree`) takes the lane's tree, as `devhub test` gives it (`test`: it did): an
     // overlay's tree is one only the JIT process reads
-    if test.is_none() && !o.tree && Src::for_run(o.req.kind, &o.cmd, false) == Src::Overlay {
+    if test.is_none() && !o.tree && !o.req.look && Src::for_run(o.req.kind, &o.cmd, false, false) == Src::Overlay {
         let rev = o.req.rev.clone().unwrap_or_default();
         let Some(pin) = super::Pin::of_rev(&rev) else {
             eprintln!("makepad devhub {word}: rev `{rev}` is not pinned");
@@ -1703,7 +1709,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
             }
         }
     }
-    o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree);
+    o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree, o.req.look);
     // what it ships, read now: the worktree as its grant finds it is not what was asked ([`Snap`])
     let snapped = match snap(&root, o.req.rev.as_deref().unwrap_or(""), uncommitted, o.commits_only, &o.patches) {
         Ok(s) => s,
@@ -4541,6 +4547,11 @@ mod tests {
         assert_eq!(super::super::master::box_line(&gpu(110.0, 3.0)), "load1 max 4.0; outside it 110% of a core (max 150%): mds_stores 60%; its GPU busy outside it 3% (max 21%): helper 3%");
         let unmeasured = makepad_strict_json::parse(br#"{"samples":3,"load1_max":4,"outside_cpu_pct":110,"outside_cpu_pct_max":150,"busiest":[],"gpu":true}"#).unwrap();
         assert_eq!(unquiet(&unmeasured), None, "no GPU use told: not judged on its CPU");
+        // an exact look's: a program's waited-for children, the hub and what no process showed
+        // are figures beside it, and only the programs outside it are its verdict
+        let exact = makepad_strict_json::parse(br#"{"samples":4,"secs":40,"load1_max":2.3,"outside_cpu_pct":30,"outside_cpu_pct_max":45,"busiest":[["makepad-app-aihub (under makepad-app-wm)",17,13],["makepad-app-wm",5,0]],"hub_cpu_pct":0.7,"unseen_cpu_pct":6.2,"irq_cpu_pct":4.2}"#).unwrap();
+        assert_eq!(super::super::master::box_line(&exact), "load1 max 2.3; outside it 30% of a core (max 45%): makepad-app-aihub (under makepad-app-wm) 17% (13% in its child processes), makepad-app-wm 5%; its hub 1%; no process showed 6% (interrupts 4%)");
+        assert_eq!(unquiet(&exact), None, "30% of a core outside it: quiet, its hub and the unseen apart");
     }
 
     /// `--keep` says what came back, an empty copy too (an empty one said nothing, 11-07).

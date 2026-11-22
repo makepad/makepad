@@ -13,18 +13,20 @@ mod windows;
 pub use self::windows::*;
 
 /// What a run's processes have done so far: CPU time, µs (user and system, with the children
-/// they reaped), and bytes read and written. Only a change means anything: the node's idle look
-/// compares two of them.
+/// they reaped), bytes read and written, and how long they waited for a CPU, µs (runnable while
+/// others ran: Linux only, else 0). Only a change means anything: the node's idle look compares
+/// two of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Activity {
     pub cpu_us: u64,
     pub io_bytes: u64,
+    pub wait_us: u64,
 }
 
 impl std::ops::Add for Activity {
     type Output = Activity;
     fn add(self, o: Activity) -> Activity {
-        Activity { cpu_us: self.cpu_us + o.cpu_us, io_bytes: self.io_bytes + o.io_bytes }
+        Activity { cpu_us: self.cpu_us + o.cpu_us, io_bytes: self.io_bytes + o.io_bytes, wait_us: self.wait_us + o.wait_us }
     }
 }
 

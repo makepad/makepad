@@ -55,7 +55,9 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           hand-in); timer buckets check the landed tips afterwards
   land [...] --wire-change                a hand-in that changes the hosted wire's files (platform/studio,
                                           key_code: a WM and apps of different builds refuse each other;
-                                          the AI bus: they drop each other's tool calls);
+                                          the AI bus's frames, libs/ai/services wire.rs: they
+                                          drop each other's tool calls; micro_serde's JSON and
+                                          binary encoding: they misread each other's frames);
                                           without it such a hand-in fails, naming the files
   land [...] --supersede                  re-pin this branch's hand-in that is still queued to the branch's
                                           commits now; without it a second hand-in of a queued branch is
@@ -1228,7 +1230,20 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             // (a run after its last verdict that had none: said first, so "27h ago" is not read as
             // the bucket not running, 11-20)
             let runs = last.iter().map(|(name, r)| {
-                let verdict = r.get("ended_ms").and_then(Value::as_u64).map(|ms| format!("{} ago {}", ago(ms), if r.get("ok").and_then(Value::as_bool) == Some(true) { "ok" } else { "FAILED" }));
+                // a failed run's reds since: passed by a later run of another bucket, or their
+                // package changed after it (as a STILL FAILING line marks an open one)
+                let ms = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let reds = match r.get("reds") {
+                    Some(Value::Obj(reds)) => reds.iter().map(|(unit, m)| {
+                        let mut marks = Vec::new();
+                        if let Some(by) = m.get("passed").and_then(Value::as_str) { marks.push(format!("passed since in {by} {} ago", ago(ms(m, "passed_ms")))); }
+                        if let Some(c) = m.get("changed") { marks.push(format!("{} changed since that run: {} {} ago", text(c, "package"), text(c, "first"), ago(ms(c, "first_ms")))); }
+                        format!("{unit} {}", marks.join(", "))
+                    }).collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                let reds = if reds.is_empty() { String::new() } else { format!(" ({})", reds.join("; ")) };
+                let verdict = r.get("ended_ms").and_then(Value::as_u64).map(|ms| format!("{} ago {}{}", ago(ms), if r.get("ok").and_then(Value::as_bool) == Some(true) { "ok" } else { "FAILED" }, reds));
                 match (r.get("no_verdict"), verdict) {
                     (Some(n), verdict) => format!("{name} {} ago no verdict ({}){}", ago(n.get("ended_ms").and_then(Value::as_u64).unwrap_or(0)),
                         crate::proto::clean(n.get("why").and_then(Value::as_str).unwrap_or(""), 60), verdict.map_or(String::new(), |v| format!(", its last verdict {v}"))),

@@ -174,6 +174,7 @@ pub fn blocker(reason: &str) -> String {
     if r.starts_with("in a gap of ") { return "timed gap".into(); }
     if r.starts_with("yields to ") { return "yields to a head".into(); }
     if r.starts_with("shaky link") { return "shaky link".into(); }
+    if r.starts_with("settling after drops") { return "settling after drops".into(); }
     if let Some(held) = r.strip_prefix("held by ") {
         let kind = held.split_once('(').map_or(held, |(_, k)| k).split_whitespace().next().unwrap_or("lease");
         return format!("held by {kind}");

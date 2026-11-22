@@ -741,8 +741,12 @@ pub struct Show {
     /// devhub's): `restart pending since <sha>: N landed edit(s) not running (first: <why>)`, its
     /// `sha` then no longer what it wholly runs; empty: none wait
     pub restart: String,
-    /// the sha it was listed at when the first of them was seen (kept while any waits)
+    /// the sha it wholly ran when the first of them was seen (`ran_before`: the listing moved
+    /// before the JIT took the move's edits), kept while any waits
     pub restart_since: String,
+    /// the sha it was listed at before its listing last moved: what it wholly runs while that
+    /// move's edits wait for a restart
+    pub ran_before: String,
     /// when its launch began (its --after met)
     pub launch_ms: u64,
     /// what the launch took, stage by stage (`box 3 s, jit reused, first frame 6 s, settle 8 s`)
@@ -854,6 +858,10 @@ pub struct Live {
     /// stayed): its starter has gone, and the session ends after [`crate::orch::live::LEFT_MS`]
     /// with no call or save
     pub left_ms: u64,
+    /// what its app's builds built when they last kept it past its idle end, and when
+    /// (`orch::live::kept_by_build`): `live list` says "kept by a build" while no call came since
+    pub kept_by: String,
+    pub kept_ms: u64,
     pub ended_ms: u64,
     /// The timed lease it was parked for while in use: once that lease ends it starts again by
     /// itself, under its id ([`crate::lease::sched::Sched::park_live`]); empty: none.
@@ -1830,6 +1838,8 @@ fn live_state_value(x: &Live) -> Value {
         ("started_ms", int(x.started_ms)),
         ("touched_ms", int(x.touched_ms)),
         ("left_ms", int(x.left_ms)),
+        ("kept_by", s(&x.kept_by)),
+        ("kept_ms", int(x.kept_ms)),
         ("ended_ms", int(x.ended_ms)),
         ("patch", patch),
         ("restart_since_ms", int(x.restart_since_ms)),
@@ -1900,6 +1910,8 @@ fn live_state_from(v: &Value) -> Live {
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         left_ms: uint(o, "left_ms"),
+        kept_by: text(o, "kept_by"),
+        kept_ms: uint(o, "kept_ms"),
         ended_ms: uint(o, "ended_ms"),
         patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), patches_at_ship: p.get("patches_at_ship").and_then(Value::as_u64), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), reason: String::new() }),
         restart_since_ms: uint(o, "restart_since_ms"),
@@ -1928,6 +1940,7 @@ pub fn show_value(x: &Show) -> Value {
         ("held", s(&x.held)),
         ("restart", s(&x.restart)),
         ("restart_since", s(&x.restart_since)),
+        ("ran_before", s(&x.ran_before)),
         ("took_red", strs(&x.took_red)),
         ("added_ms", int(x.added_ms)),
         ("started_ms", int(x.started_ms)),
@@ -1961,6 +1974,7 @@ pub fn show_from(v: &Value) -> Show {
         held: text(o, "held"),
         restart: text(o, "restart"),
         restart_since: text(o, "restart_since"),
+        ran_before: text(o, "ran_before"),
         took_red: strs_from(o, "took_red"),
         added_ms: uint(o, "added_ms"),
         started_ms: uint(o, "started_ms"),
@@ -2734,7 +2748,7 @@ mod tests {
                 Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, ..Default::default() },
             ],
             lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, active_ms: 6, dirs_ms: 7, agent_ms: 8, keep: true, waited: true, first: true, parked: "waits".into(), ended_ms: 0, note: "n".into() }],
-            shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), main: "m".into(), held: "held at s: tip t waits".into(), restart: "restart pending since s: 1 landed edit not running".into(), restart_since: "s".into(), took_red: vec!["check a".into()], exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
+            shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), main: "m".into(), held: "held at s: tip t waits".into(), restart: "restart pending since s: 1 landed edit not running".into(), restart_since: "s".into(), ran_before: "r".into(), took_red: vec!["check a".into()], exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
             shows_next: 1,
             lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, ask: "18a-7-1".into(), patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
             lives_next: 1,

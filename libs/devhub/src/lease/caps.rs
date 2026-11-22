@@ -2,7 +2,7 @@
 //! `nvidia-smi`; macOS `sysctl` + `statfs`), policy from `~/.makepad/devhub/lease.conf`.
 //!
 //! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device` (`bench`: the
-//! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; CI only with `slots.ci`),
+//! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; `slots.ci = 0` keeps CI off a box),
 //! `disk_floor_gb` (its warning follows the JIT's floor: [`super::disk::warn_gb`]), `timed = on|off|spare` (`spare`: a pool box that takes a timed lease
 //! while the bench boxes that meet it are taken by timed work), `spec = <text>`, `work = <dir>` (default
 //! [`WORK_DIR`] in home) and CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`).
@@ -90,17 +90,24 @@ impl LeaseConf {
         c
     }
 
-    /// One slot per kind by default; CI only where `slots.ci` opts in, never on a user's box.
+    /// One slot per kind by default, CI among them: every box takes any work unless its conf
+    /// says `slots.<kind> = 0` (an opt-in left CI on one box per OS, its runs crawling there while
+    /// the others idled, 11-22). Never CI on a user's box.
     /// `inspect` is not counted.
     pub fn slots(&self, gpus: u32) -> Vec<(Kind, u32)> {
-        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32), (Kind::Ci, 0)];
+        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32), (Kind::Ci, 1)];
         defaults.iter().map(|(k, d)| (*k, if *k == Kind::Ci && self.role.users() { 0 } else { self.slots.iter().find(|(x, _)| x == k).map_or(*d, |(_, n)| *n) })).collect()
     }
 }
 
 /// Whether the master may set `key = value` in a node's lease.conf (`work` stays the node's own:
 /// moving the work dir under running leases is not a remote switch).
+/// An empty value unsets the key ([`conf_with`]): the box's default applies again.
 pub fn settable(key: &str, value: &str) -> Result<(), String> {
+    let known = matches!(key, "role" | "disk_floor_gb" | "native_trees" | "timed" | "spec" | "cpus.shared" | "cpus.timed") || key.strip_prefix("slots.").and_then(Kind::parse).is_some();
+    if known && value.is_empty() {
+        return Ok(());
+    }
     let num = || value.parse::<f64>().map(|_| ()).map_err(|_| format!("{key} takes a number"));
     match key {
         "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|hot|suite|bench|user-wm|device".to_string()),
@@ -117,13 +124,18 @@ pub fn settable(key: &str, value: &str) -> Result<(), String> {
 }
 
 /// `text` with each `key = value` of `pairs` set: the key's line replaced in place (comments
-/// kept), or appended.
+/// kept), or appended; an empty value removes the key's line, so the default applies (a setting
+/// the default came to match stays behind as the box's own otherwise).
 pub fn conf_with(text: &str, pairs: &[(String, String)]) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     for (k, v) in pairs {
         let at = lines.iter().position(|l| l.split('#').next().and_then(|b| b.split_once('=')).is_some_and(|(lk, _)| lk.trim() == k));
         let line = format!("{k} = {v}");
         match at {
+            Some(i) if v.is_empty() => {
+                lines.remove(i);
+            }
+            None if v.is_empty() => {}
             Some(i) => {
                 let comment = lines[i].find('#').map(|c| format!("  {}", &lines[i][c..])).unwrap_or_default();
                 lines[i] = format!("{line}{comment}");
@@ -238,7 +250,7 @@ fn installed_targets(sysroot: &Path) -> Vec<String> {
 
 /// The same live WM display reported in caps, without reprobing the hardware/toolchain.
 #[cfg(target_os = "linux")]
-pub(super) fn display() -> Option<String> {
+pub(crate) fn display() -> Option<String> {
     os::display()
 }
 
@@ -1444,7 +1456,9 @@ mod tests {
         let d = LeaseConf::parse("", home);
         assert_eq!((d.role, d.disk_floor_gb, d.timed), (Role::Pool, 25.0, true));
         assert_eq!(d.work, home.join(WORK_DIR));
-        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 0)]);
+        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 1)]);
+        let ci = |conf: &str| LeaseConf::parse(conf, home).slots(0).into_iter().find(|(k, _)| *k == Kind::Ci).map(|(_, n)| n);
+        assert_eq!((ci("slots.ci = 0\n"), ci("role = user-wm\nslots.ci = 1\n"), ci("role = bench\n")), (Some(0), Some(0), Some(1)), "a box opts out of CI, a user's box never takes it, any other takes it by default");
         let c = LeaseConf::parse("# a node's conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = CPU-A+GPU-A  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
         assert_eq!(c.role, Role::UserWm);
         assert_eq!(c.disk_floor_gb, 40.0);
@@ -1470,6 +1484,9 @@ mod tests {
         assert_eq!(t, "# a node\nrole = user-wm  # was\nslots.build = 2\ncpus.shared = 8-15,24-31\n");
         let c = LeaseConf::parse(&t, Path::new("/h"));
         assert_eq!((c.role, c.cpus_shared.as_str()), (Role::UserWm, "8-15,24-31"));
+        assert!(settable("slots.ci", "").is_ok() && settable("cpus.timed", "").is_ok() && settable("nope", "").is_err(), "an empty value unsets a key the master sets, and only such a key");
+        let unset = conf_with("# a node\nslots.ci = 1  # opted in\nrole = pool\n", &[("slots.ci".into(), String::new()), ("timed".into(), String::new())]);
+        assert_eq!(unset, "# a node\nrole = pool\n", "an empty value removes the key's line, and adds none for a key the conf did not have");
     }
 
     #[test]

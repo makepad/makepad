@@ -299,22 +299,30 @@ pub(crate) fn builds(dir: &Path) -> Vec<BuildStores> {
     v
 }
 
-/// The deployment moved on this box: the dev run dirs ([`dev_runs`]) retire the stores of every
-/// Relax build older than the previous one ([`superseded`]), and this move's time is kept for the
-/// next. Relax's own prune keeps another build's stores a day, or until the volume is down to its
-/// free floor (relax cache.rs OTHER_UNUSED_FOR); each landing that changes the JIT writes a cold
-/// set of 2-22 GB, so one dir held 67 builds, 134 GB, and a box sat at that floor (11-19).
+/// The deployment moved on this box: the dev run dirs ([`dev_runs`]) and the tree runs' relax
+/// dirs ([`tree_runs`], of the deployment checkout `checkout`) retire the stores of every Relax
+/// build older than the previous one ([`superseded`]), and this move's time is kept for the next.
+/// Relax's own prune keeps another build's stores a day, or until the volume is down to its free
+/// floor (relax cache.rs OTHER_UNUSED_FOR); each landing that changes the JIT writes a cold set of
+/// 2-22 GB, so one dir held 67 builds, 134 GB, and a box sat at that floor (11-19).
 /// (builds retired, bytes freed)
-pub fn deployment_moved() -> (usize, u64) {
+pub fn deployment_moved(checkout: &Path) -> (usize, u64) {
     let keep = kept_builds();
     let stamp = crate::proto::home().join("deployed-at");
     let since = std::fs::read_to_string(&stamp).ok().and_then(|s| s.trim().parse::<u64>().ok());
     let _ = std::fs::write(&stamp, (crate::proto::wall_ms() / 1000).to_string());
     // (the first move a box records has no earlier one to measure use from)
     let Some(since) = since else { return (0, 0) };
+    let conf = crate::lease::caps::LeaseConf::load();
+    let dirs = std::fs::read_dir(dev_runs()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir());
+    retire_superseded(dirs.chain(tree_runs(&conf.work, checkout, conf.role.users())), since, &keep)
+}
+
+/// Each dir's [`superseded`] builds retired: (builds retired, bytes freed).
+fn retire_superseded(dirs: impl Iterator<Item = PathBuf>, since: u64, keep: &std::collections::HashSet<u64>) -> (usize, u64) {
     let (mut n, mut freed) = (0, 0);
-    for dir in std::fs::read_dir(dev_runs()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-        for b in superseded(&builds(&dir), since, &keep) {
+    for dir in dirs {
+        for b in superseded(&builds(&dir), since, keep) {
             if let Ok(f) = retire(&dir, b) {
                 n += 1;
                 freed += f;
@@ -322,6 +330,21 @@ pub fn deployment_moved() -> (usize, u64) {
         }
     }
     (n, freed)
+}
+
+/// The relax dirs a tree run keeps its stores in (`<cargo target>/relax`, relax dirs.rs): the
+/// work tree's target, `<work>/ci-target` (every CI leg and gate a tree lease runs there), and
+/// on a box that is no person's own (`users`: its role's) the deployment checkout's `target`. A
+/// landing that changes the JIT writes a cold set there as in the dev run dirs; a CI box's work
+/// target held 709 GB of stores, 698 GB of them from the last day, and its disk guard could take
+/// none of it while a lease ran (11-22).
+pub(crate) fn tree_runs(work: &Path, checkout: &Path, users: bool) -> Vec<PathBuf> {
+    let mut dirs = vec![work.join("ci-target").join("relax")];
+    if !users {
+        dirs.push(checkout.join("target").join("relax"));
+    }
+    dirs.retain(|d| d.join("cache").is_dir());
+    dirs
 }
 
 /// What a deployment's move retires of one run dir's `builds` (the most recently used first):
@@ -719,5 +742,32 @@ mod tests {
         assert_eq!(superseded(&builds, since, &[6].into()), vec![5], "a timed series' last build stays between its runs");
         assert_eq!(superseded(&builds[..2], u64::MAX, &none), Vec::<u64>::new(), "the current and the previous build stay however long unused");
         assert_eq!(superseded(&[b(1, 10, false), b(2, 5, false), b(3, 1, false)], since, &none), vec![3], "an idle box keeps its two newest builds");
+        // the tree runs' relax dirs too: the work tree's target, and the deployment's on a box
+        // that is no person's own
+        let d = std::env::temp_dir().join(format!("devhub-tree-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (work, checkout) = (d.join("devhub"), d.join("makepad"));
+        let (ci, deploy) = (work.join("ci-target/relax"), checkout.join("target/relax"));
+        for c in [&ci, &deploy] {
+            std::fs::create_dir_all(c.join("cache")).unwrap();
+        }
+        assert_eq!(tree_runs(&work, &checkout, false), vec![ci.clone(), deploy.clone()]);
+        assert_eq!(tree_runs(&work, &checkout, true), vec![ci.clone()], "a person's own checkout keeps its JIT's stores");
+        assert_eq!(tree_runs(&d.join("none"), &d.join("none"), false), Vec::<PathBuf>::new());
+        let now = crate::proto::wall_ms() / 1000;
+        let store = |name: &str, build: u64, ago: u64| {
+            let mut h = vec![0u8; header::HEADER];
+            h[..4].copy_from_slice(header::MAGIC);
+            h[4..8].copy_from_slice(&header::FORMAT.to_le_bytes());
+            h[header::BUILD_AT..header::BUILD_AT + 8].copy_from_slice(&build.to_le_bytes());
+            let p = ci.join("cache").join(name);
+            std::fs::write(&p, h).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now - ago)).unwrap();
+            p
+        };
+        let (old, prev, cur) = (store("serde-00000000000000a1.rcs", 0xa1, 3 * 3600), store("serde-00000000000000b2.rcs", 0xb2, 2 * 3600), store("serde-00000000000000c3.rcs", 0xc3, 60));
+        assert_eq!(retire_superseded(tree_runs(&work, &checkout, false).into_iter(), now - 600, &none).0, 1, "the work target's oldest build goes");
+        assert!(!old.exists() && prev.exists() && cur.exists(), "the current and the previous build stay");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

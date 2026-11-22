@@ -274,6 +274,9 @@ pub(super) fn lease_start_line(l: &Lease, rev: &str, cores: f64, weighed: f64, p
     let peak = peak.map_or("null".to_string(), |g| g.to_string());
     // (only a hub with `gpu-quiet` takes a GPU timing, [`super::sched::Req::required`])
     let warms = if l.req.gpu { format!("{warms},\"gpu\":true") } else { warms };
+    // past its wait for a quiet box, what it starts beside ([`super::sched::Sched::starts_unquiet`]):
+    // its node's look holds it no longer (a hub without it holds it, and the master asks again)
+    let warms = match &l.unquiet { Some(beside) => format!("{warms},\"unquiet\":{}", json_str(beside)), None => warms };
     // (only to a hub with `jit-jobs`: [`super::sched::Sched::jit_jobs`])
     let peak = match l.jit_jobs { Some(jobs) => format!("{peak},\"jit_jobs\":{jobs}"), None => peak };
     // (only to a hub with `live-threads`: [`super::sched::Sched::live_threads`])
@@ -689,19 +692,24 @@ pub fn unquiet(b: &makepad_strict_json::Value) -> Option<String> {
     (outside >= NOISY_CPU_PCT).then(|| format!("{outside:.0}% of a core ran outside it on average"))
 }
 
-/// A timed lease's `box` (what shared its box, the node's look every 10 s) in a line:
-/// `load1 max 27.0; outside it 140% of a core (max 210%): mds_stores 120%, XprotectService 30%`.
+/// A timed lease's `box` (what shared its box, the node's looks every 10 s) in a line: `load1 max
+/// 2.3; outside it 30% of a core (max 45%): makepad-app-aihub (under makepad-app-wm) 17% (13% in
+/// its child processes), makepad-app-wm 5%; its hub 1%; no process showed 6% (interrupts 4%)`.
+/// What no process showed is Linux's; a box from an older hub has neither it nor the hub's.
 pub fn box_line(b: &makepad_strict_json::Value) -> String {
     let n = |k: &str| b.get(k).and_then(super::num).unwrap_or(0.0);
     let busiest = |key: &str| {
         let by: Vec<String> = b.get(key).and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|p| {
             let p = p.as_arr()?;
-            Some(format!("{} {:.0}%", p.first()?.as_str()?, p.get(1).and_then(super::num)?))
+            let kids = p.get(2).and_then(super::num).filter(|k| *k >= 1.0).map_or(String::new(), |k| format!(" ({k:.0}% in its child processes)"));
+            Some(format!("{} {:.0}%{kids}", p.first()?.as_str()?, p.get(1).and_then(super::num)?))
         }).collect();
         if by.is_empty() { String::new() } else { format!(": {}", by.join(", ")) }
     };
+    let hub = b.get("hub_cpu_pct").and_then(super::num).map_or(String::new(), |h| format!("; its hub {h:.0}%"));
+    let unseen = b.get("unseen_cpu_pct").and_then(super::num).map_or(String::new(), |u| format!("; no process showed {u:.0}% (interrupts {:.0}%)", n("irq_cpu_pct")));
     let gpu = if b.get("outside_gpu_pct").is_some() { format!("; its GPU busy outside it {:.0}% (max {:.0}%){}", n("outside_gpu_pct"), n("outside_gpu_pct_max"), busiest("gpu_busiest")) } else { String::new() };
-    format!("load1 max {:.1}; outside it {:.0}% of a core (max {:.0}%){}{gpu}", n("load1_max"), n("outside_cpu_pct"), n("outside_cpu_pct_max"), busiest("busiest"))
+    format!("load1 max {:.1}; outside it {:.0}% of a core (max {:.0}%){}{hub}{unseen}{gpu}", n("load1_max"), n("outside_cpu_pct"), n("outside_cpu_pct_max"), busiest("busiest"))
 }
 
 /// The tests a libtest output names under its last `failures:`, at most 20.
@@ -1741,6 +1749,8 @@ impl LeaseMaster {
         // Wait for the accepted command and its marks before sending cleanup.
         let marks = marks.as_ref().map(|m| m.lock().unwrap());
         let mut summary = "{\"cleanup\":\"nothing to clean\"}".to_string();
+        // what shared a timed run's box, as its node measured it: its ledger row keeps it
+        let mut noise_box: Option<String> = None;
         let (mut teardown, mut cleanup_ok, mut freed_early) = (0u64, true, false);
         if let (Some(node), Some(l)) = (node, l.as_ref()) {
             // an inspect lease that changed nothing has nothing to undo
@@ -1832,6 +1842,7 @@ impl LeaseMaster {
                         // a timed run's box: in the release answer, its verdict too, and the inbox when it
                         // was not quiet
                         let noise = v.get("box").filter(|_| l.req.kind == Kind::Timed);
+                        noise_box = noise.map(|b| b.to_json());
                         let unquiet = noise.and_then(unquiet);
                         if let (Some(b), Some(why)) = (noise, &unquiet) {
                             self.event(Sev::Warn, format!("{} of {} on {node} was not quiet ({why}): {}", l.tag(), l.req.lane, box_line(b)));
@@ -1878,6 +1889,7 @@ impl LeaseMaster {
         let l = self.sched.lock().unwrap().get(id).cloned().or(l);
         if let Some(mut l) = l {
             l.node_phases = node_phases;
+            if noise_box.is_some() { l.noise = noise_box; }
             l.phases.push("report", report_start, reported);
             l.reported_ms = Some(reported);
             if l.req.class.is_empty() { l.req.class = run_class; }
@@ -2389,6 +2401,12 @@ impl LeaseMaster {
         self.sched.lock().unwrap().never_places(req)
     }
 
+    /// When lease `id`'s compilers were last seen at work, and what they built
+    /// ([`super::sched::Sched::built`]).
+    pub fn built(&self, id: &str) -> Option<(u64, String)> {
+        self.sched.lock().unwrap().built(id)
+    }
+
     /// When a person last gave input at the node ([`super::sched::Sched::user_input_ms`]).
     pub fn user_input_ms(&self, node: &str) -> Option<u64> {
         self.sched.lock().unwrap().user_input_ms(node)
@@ -2542,6 +2560,12 @@ impl LeaseMaster {
     /// The boxes that run older code than their checkout ([`super::sched::Sched::stale_rows`]).
     pub fn stale_boxes(&self, now: u64) -> Vec<String> {
         self.sched.lock().unwrap().stale_rows(now)
+    }
+
+    /// devhub's own legs past their measure kept because their processes work
+    /// ([`super::sched::Sched::legs_at_work_rows`]).
+    pub fn legs_at_work(&self, now: u64) -> Vec<String> {
+        self.sched.lock().unwrap().legs_at_work_rows(now)
     }
 
     /// The running leases whose output grew none for [`super::sched::OUTPUT_SILENT_MS`] or more
@@ -3352,6 +3376,7 @@ mod tests {
             live_over: None,
             whole: None,
             past_grant: None,
+            settling: None,
         };
         let nodes = [view("headset", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("node-a", "192.0.2.89", true, None)];
         assert_eq!(desk_links(&nodes), "headset 192.0.2.85:8790\n");

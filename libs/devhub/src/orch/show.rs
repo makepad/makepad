@@ -230,7 +230,7 @@ fn tick(ctx: &Arc<Ctx>, work: &mut String) {
                 let x = if wm { follow_deploy(ctx, x) } else { x };
                 let x = if landed && x.device != "quest" && !wm && !x.pinned && x.held.is_empty() {
                     let main = pass.rev(&ctx.commercial(), "refs/heads/main").unwrap_or_default();
-                    let x = set(ctx, &x.id, |s| (s.sha, s.main) = (now_work.clone(), main.clone())).unwrap_or(x);
+                    let x = set(ctx, &x.id, |s| move_to(s, &now_work, &main)).unwrap_or(x);
                     event(ctx, Sev::Info, format!("show {} on {}: work moved to {}; the JIT patches it live (`devhub show {} --on {} --replace` restarts it)", x.app, x.device, super::short(&now_work), x.app, x.device), Some(&x));
                     x
                 } else {
@@ -297,10 +297,40 @@ fn note_restart(ctx: &Ctx, x: &Show, n: u32, first: &str) {
 }
 
 /// A show's restart line and since when (`restart`, `restart_since`) with `n` edits waiting: the
-/// sha it is listed at when the first is seen, kept while any waits.
+/// sha it wholly ran when the first is seen, kept while any waits. Its listing moves before its
+/// JIT takes the move's edits, so that is the sha it was listed at before the move
+/// ([`move_to`]), not the one it is listed at.
 fn restart_now(x: &Show, n: u32, first: &str) -> (String, String) {
-    let since = if n == 0 { String::new() } else if x.restart_since.is_empty() { x.sha.clone() } else { x.restart_since.clone() };
+    let since = if n == 0 {
+        String::new()
+    } else if !x.restart_since.is_empty() {
+        x.restart_since.clone()
+    } else if !x.ran_before.is_empty() {
+        x.ran_before.clone()
+    } else {
+        x.sha.clone()
+    };
     (restart_said(&since, n, first), since)
+}
+
+/// A running show's listing moves to `work` and `main` (a landing, or its node's deployment).
+/// Unless edits already wait for a restart, the sha it was listed at is what it wholly runs
+/// until its JIT takes the move's edits, and where a restart they need starts.
+fn move_to(s: &mut Show, work: &str, main: &str) {
+    if s.restart_since.is_empty() {
+        s.ran_before = s.sha.clone();
+    }
+    (s.sha, s.main) = (work.to_string(), main.to_string());
+}
+
+/// The sha a show's row says it runs: the listed one, or while landed edits wait for a restart,
+/// the one it wholly runs, with the listed one pending (`d24ae23a38 (c2a8cd5fdd pending a
+/// restart)`).
+pub(super) fn sha_said(x: &Show) -> String {
+    if !x.active() || x.restart_since.is_empty() || x.restart_since == x.sha {
+        return super::short(&x.sha).to_string();
+    }
+    format!("{} ({} pending a restart)", super::short(&x.restart_since), super::short(&x.sha))
 }
 
 /// `restart pending since <sha>: N landed edit(s) not running (first: <why>)`; empty for none.
@@ -330,7 +360,7 @@ fn follow_deploy(ctx: &Ctx, x: Show) -> Show {
     let shown = set(ctx, &x.id, |s| {
         s.held = hold.clone();
         if let Some(p) = moved {
-            (s.sha, s.main) = (p.work.clone(), p.main.clone());
+            move_to(s, &p.work, &p.main);
         }
     });
     if hold != x.held && !hold.is_empty() {
@@ -543,18 +573,25 @@ fn show_jit<'a>(jits: &'a [crate::explorer::JitRow], x: &Show, now: u64) -> Opti
 /// stop keeps the launch from happening: a replace stopped only the pid of a show still running,
 /// and with that show ended while its app ran on, a second instance started beside the first and
 /// quit at once on the port it held (V151, V152, 11-21).
-fn stop_instances(dev: &str, app: &str) -> Result<(), String> {
+fn stop_instances(dev: &str, app: &str, stopped: Option<u32>) -> Result<(), String> {
     let row = crate::explorer::parse_ps(dev, &crate::cli::ask(&ctl(), Some(dev), "ps", "ps")?);
     if let Some(e) = row.err {
         return Err(format!("{dev} did not say what of {app} runs there, so nothing was launched: {e}"));
     }
-    for pid in row.jits.iter().filter(|j| same_app(&j.app, app)).map(|j| j.pid) {
+    for pid in to_stop(&row.jits, app, stopped) {
         let said = crate::cli::ask(&ctl(), Some(dev), "launch", &format!("stop {pid} {app}"))?;
         if let Some(e) = said.first().filter(|l| l.starts_with("{\"err\":")) {
             return Err(format!("{app} runs on {dev} (pid {pid}) and did not stop, so nothing was launched: {e}"));
         }
     }
     Ok(())
+}
+
+/// The instances of `app` in a node's `jits` (its ps) a replace stops: each but `stopped`, the old
+/// show's, which its own stop just quit. The node's ps still listed that one while its hub saw it
+/// end: a replace quit the old Party, stopped it again, was refused, and launched nothing (11-21).
+fn to_stop(jits: &[crate::explorer::JitRow], app: &str, stopped: Option<u32>) -> Vec<u32> {
+    jits.iter().filter(|j| same_app(&j.app, app) && Some(j.pid) != stopped).map(|j| j.pid).collect()
 }
 
 fn cargo() -> PathBuf {
@@ -632,6 +669,7 @@ fn launch(ctx: &Arc<Ctx>, x: &Show) {
                 s.state = "running".into();
                 s.pid = pid;
                 s.sha = sha.clone();
+                s.ran_before.clear();
                 s.main = main.clone();
                 s.took_red = took_red;
                 s.started_ms = wall_ms();
@@ -1640,6 +1678,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if let Some(old) = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == app && x.device == dev && x.device == "mac" && x.state == "running").cloned()) {
                 mac_watch(ctx, &old);
             }
+            // the old show's pid its own stop just quit (the replace's sweep leaves it: [`to_stop`])
+            let mut stopped = None;
             if let Some(old) = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == app && x.device == dev).cloned()) {
                 // (a pin leaves it running: nothing of it is at risk)
                 if matches!(old.state.as_str(), "running" | "paused") && !replace && pin && args.is_empty() {
@@ -1667,6 +1707,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 }
                 if matches!(old.state.as_str(), "running" | "paused") {
                     stop(&old).map_err(|e| format!("{app} runs on {dev} (pid {}) and did not stop, so nothing was launched: {e}", old.pid))?;
+                    stopped = (old.pid > 0).then_some(old.pid);
                 }
                 try_set(ctx, &old.id, |s| {
                     s.state = "replaced".into();
@@ -1674,7 +1715,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 })?;
             }
             if replace && !matches!(dev.as_str(), "mac" | "quest") {
-                stop_instances(&dev, &app)?;
+                stop_instances(&dev, &app, stopped)?;
             }
             // its own unit red at the tip: it waits for a tip that is not
             let red = if cond == Cond::None && dev == "mac" { launch_red(ctx, &app).unwrap_or_default() } else { String::new() };
@@ -1947,6 +1988,23 @@ mod tests {
         assert_eq!(since, "b518cd2ffb0123");
         assert_eq!(restart_now(&x, 0, ""), (String::new(), String::new()), "restarted: nothing waits");
         assert_eq!(restart_now(&x, 1, "").0, "restart pending since b518cd2ffb: 1 landed edit not running", "a JIT that names none");
+        // its listing moves before its JIT takes the edits (11-21: a relaunch ran d24ae23a38, the
+        // deployment moved to c2a8cd5fdd, whose edit waits): since the sha it ran, and its row says
+        // that sha with the listed one pending
+        let mut y = Show { state: "running".into(), sha: "d24ae23a380000".into(), ..Default::default() };
+        assert_eq!(sha_said(&y), "d24ae23a38", "nothing waits: the listed sha");
+        move_to(&mut y, "c2a8cd5fdd0000", "m");
+        let (line, since) = restart_now(&y, 1, "");
+        assert_eq!(line, "restart pending since d24ae23a38: 1 landed edit not running", "since the sha it ran, not the moved listing");
+        (y.restart, y.restart_since) = (line, since);
+        assert_eq!(sha_said(&y), "d24ae23a38 (c2a8cd5fdd pending a restart)");
+        // a later move while it waits keeps where the restart started
+        move_to(&mut y, "e0e0e0e0e00000", "m");
+        assert_eq!(restart_now(&y, 2, "").1, "d24ae23a380000");
+        assert_eq!(sha_said(&y), "d24ae23a38 (e0e0e0e0e0 pending a restart)");
+        // restarted: nothing waits, and the row says the listed sha again
+        (y.restart, y.restart_since) = restart_now(&y, 0, "");
+        assert_eq!(sha_said(&y), "e0e0e0e0e0");
     }
 
     #[test]
@@ -2189,6 +2247,9 @@ mod tests {
         assert_eq!(super::show_jit(&jits, &x, now).map(|j| j.pid), None, "none started since its launch yet");
         x.pid = 10;
         assert_eq!(super::show_jit(&jits, &x, now).map(|j| j.pid), Some(10), "its own pid, however long it ran");
+        // a replace stops each instance of the app, but the old show's its own stop just quit
+        assert_eq!(super::to_stop(&jits, "makepad-app-party", None), [10, 12]);
+        assert_eq!(super::to_stop(&jits, "makepad-app-party", Some(10)), [12], "the old show's, quit already");
     }
 }
 

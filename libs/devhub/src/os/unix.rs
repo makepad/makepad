@@ -220,15 +220,17 @@ fn scope_dir(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Option<P
     group.filter(|g| g.starts_with("/sys/fs/cgroup") && g.file_name().is_some_and(|n| n == format!("{unit}.scope").as_str()))
 }
 
-/// What a run has done so far ([`super::Activity`]): a scoped run its scope's (`cpu.stat`, and
-/// `io.stat`'s bytes), any other the processes of its group and their descendants; one measure
-/// per run, as two are not comparable. None: nothing (yet, or left) to measure.
+/// What a run has done so far ([`super::Activity`]): a scoped run its scope's (`cpu.stat`,
+/// `io.stat`'s bytes, and `cpu.pressure`'s `some` total: the time a task of it waited for a CPU),
+/// any other the processes of its group and their descendants; one measure per run, as two are
+/// not comparable. None: nothing (yet, or left) to measure.
 pub fn activity(pid: u32, start: u64, unit: Option<&str>, usage: &Path, _hold: &Hold) -> Option<super::Activity> {
     if cfg!(target_os = "linux") && unit.is_some() {
         let group = scope_dir(pid, start, unit, usage)?;
         let cpu = std::fs::read_to_string(group.join("cpu.stat")).ok()?.lines().find_map(|s| s.strip_prefix("usage_usec ").and_then(|s| s.trim().parse().ok()))?;
         let io = std::fs::read_to_string(group.join("io.stat")).unwrap_or_default().split_whitespace().filter_map(|w| w.strip_prefix("rbytes=").or_else(|| w.strip_prefix("wbytes="))).filter_map(|n| n.parse::<u64>().ok()).sum();
-        return Some(super::Activity { cpu_us: cpu, io_bytes: io });
+        let wait = std::fs::read_to_string(group.join("cpu.pressure")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("some ")).and_then(|l| l.split_whitespace().find_map(|w| w.strip_prefix("total="))).and_then(|n| n.parse().ok()).unwrap_or(0);
+        return Some(super::Activity { cpu_us: cpu, io_bytes: io, wait_us: wait });
     }
     let members = group_members(&[(pid, start)])?;
     Some(members.into_iter().filter_map(proc_activity).fold(super::Activity::default(), |a, b| a + b))
@@ -238,6 +240,7 @@ pub fn activity(pid: u32, start: u64, unit: Option<&str>, usage: &Path, _hold: &
 /// 100 Hz of `/proc`), and `io`'s read_bytes and write_bytes: storage I/O, as a scope's `io.stat`
 /// counts it. A socket's or a pipe's traffic is none (rchar and wchar count it): a test polling its
 /// parked app's remote every 50 ms moved 10-20 KB/s within its own processes and read as work (11-07).
+/// Its threads' run delay (`task/*/schedstat`'s second field, ns) is its wait for a CPU.
 #[cfg(target_os = "linux")]
 fn proc_activity(pid: u32) -> Option<super::Activity> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -245,7 +248,11 @@ fn proc_activity(pid: u32) -> Option<super::Activity> {
     // f[11..15] = fields 14-17
     let ticks: u64 = f.get(11..15)?.iter().filter_map(|t| t.parse::<u64>().ok()).sum();
     let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default().lines().filter_map(|l| l.strip_prefix("read_bytes: ").or_else(|| l.strip_prefix("write_bytes: "))).filter_map(|n| n.trim().parse::<u64>().ok()).sum();
-    Some(super::Activity { cpu_us: ticks * 10_000, io_bytes: io })
+    let wait_ns: u64 = std::fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().filter_map(Result::ok)
+        .filter_map(|t| std::fs::read_to_string(t.path().join("schedstat")).ok())
+        .filter_map(|s| s.split_whitespace().nth(1).and_then(|n| n.parse::<u64>().ok()))
+        .sum();
+    Some(super::Activity { cpu_us: ticks * 10_000, io_bytes: io, wait_us: wait_ns / 1000 })
 }
 
 /// One process's [`super::Activity`] (`rusage_info_v2`): its own and its reaped children's CPU,
@@ -292,7 +299,7 @@ fn proc_activity(pid: u32) -> Option<super::Activity> {
     unsafe { mach_timebase_info(&mut tb) };
     let ticks = (r.user_time + r.system_time + r.child_user_time + r.child_system_time) as u128;
     let ns = ticks * tb.numer as u128 / tb.denom.max(1) as u128;
-    Some(super::Activity { cpu_us: (ns / 1000) as u64, io_bytes: r.diskio_bytesread + r.diskio_byteswritten })
+    Some(super::Activity { cpu_us: (ns / 1000) as u64, io_bytes: r.diskio_bytesread + r.diskio_byteswritten, wait_us: 0 })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

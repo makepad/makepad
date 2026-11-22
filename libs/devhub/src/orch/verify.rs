@@ -905,9 +905,15 @@ mod tests {
         let gate = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/run/fixture/land_gate.sh")).unwrap();
         let steps = |name: &str| gate.lines().find_map(|l| l.strip_prefix(&format!("{name}=\""))).map(|s| s.trim_end_matches('"').split_whitespace().map(str::to_string).collect::<Vec<_>>()).unwrap_or_else(|| panic!("no {name}"));
         let (a, b, t) = (steps("STEPS_A"), steps("STEPS_B"), steps("STEPS_T"));
-        for timed in ["step_warm_app_edit", "step_warm_zero", "step_warm_hal", "step_inspect_cold", "step_relaunch"] {
+        for timed in ["step_warm_app_edit", "step_warm_zero", "step_warm_hal", "step_inspect_cold", "step_relaunch", "step_rt_lock_copies"] {
             assert!(t.iter().any(|s| s == timed) && !a.iter().chain(&b).any(|s| s == timed), "{timed} runs timed only");
         }
+        // the real-time case's three copies (a verdict on its thread's longest call) run in their timed step alone; its
+        // single copy stays in the shared checks' live cases, which run every case not marked `timed`
+        let body = |f: &str| gate.split(&format!("\n{f}() {{\n")).nth(1).and_then(|r| r.split("\n}\n").next()).unwrap_or_else(|| panic!("no {f}"));
+        assert!(body("step_rt_lock_copies").contains("--only rt_lock --copies 3") && !body("step_checks").contains("--copies"), "the copies run only timed");
+        assert!(body("step_checks").contains("tests/live/run_cases.py --makepad \"$jit\" > \"$log/live-cases\""), "the shared checks keep the live cases");
+        assert!(!Path::new(env!("CARGO_MANIFEST_DIR")).join("../relax/compiler/tests/live/rt_lock/timed").exists(), "and with them rt_lock's single copy");
         let mut split: Vec<String> = a.into_iter().chain(b).chain(t).collect();
         let mut full = steps("STEPS_FULL");
         split.sort();

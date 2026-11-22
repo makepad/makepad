@@ -149,10 +149,11 @@ pub fn lease_held(ctx: &super::Ctx, id: &str) -> bool {
 }
 
 /// What a run's holder hears of a lease that ended under it. Disk: why too, it is the job's result.
+/// Hung too: how long it sat idle and how starved its box was, for whoever reads the red.
 fn ended_error(id: &str, st: &Value) -> String {
     let how = s(st, "how");
     // (a lease devhub ended for its app's parked panic says the panic: a job's result carries it)
-    if matches!(how.as_str(), "disk" | "memory" | "panicked") { format!("{id} ended ({how}): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
+    if matches!(how.as_str(), "disk" | "memory" | "panicked" | "hung") { format!("{id} ended ({how}): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
 }
 
 /// [`ended_error`] of a granted lease that ended `how` for `reason`, as a run hears it.
@@ -336,10 +337,12 @@ impl Held {
             }
             if owed() && req.prio != OWED_PRIO {
                 req.prio = OWED_PRIO;
-                // Re-asks keep their place from when the run became owed and age with lane work.
+                // Re-asks keep their place from when the run became owed and age with lane work: a
+                // place given to the ask (`place_ms`), apart from its first ask (`since_ms`), so a
+                // timed ask that waited before it keeps the box it drains (Sched::drains_for)
                 if let Some(t) = since {
                     let owed_ms = t + owed_after(&spec.agent).as_millis() as u64;
-                    req.since_ms = req.since_ms.map(|s| s.min(owed_ms));
+                    req.place_ms = Some(req.place_ms.map_or(owed_ms, |p| p.min(owed_ms)));
                 }
                 on_wait(&format!("owed a box: its run is {} min old; asks ahead of new lane leases", waited().as_secs() / 60));
             }

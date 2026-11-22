@@ -271,6 +271,18 @@ fn files(dir: &Path, rel: &str, out: &mut Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes the folders above `rel` in `dir` that its removal left empty, up to `dir`.
+fn prune_up(dir: &Path, rel: &str) -> Result<(), String> {
+    let mut at = Path::new(rel).parent();
+    while let Some(p) = at.filter(|p| !p.as_os_str().is_empty()) {
+        let full = dir.join(p);
+        if std::fs::read_dir(&full).map_err(io)?.next().is_some() { break; }
+        std::fs::remove_dir(&full).map_err(io)?;
+        at = p.parent();
+    }
+    Ok(())
+}
+
 fn prune_empty(dir: &Path) -> Result<bool, String> {
     let mut empty = true;
     for e in std::fs::read_dir(dir).map_err(io)? {
@@ -281,8 +293,20 @@ fn prune_empty(dir: &Path) -> Result<bool, String> {
     Ok(empty)
 }
 
+/// The paths the lease's last ship shipped or deleted, kept in its overlay beside the ledger
+/// ([`finish`]): what the next ship may take back. The VFS hides `.makepad-run-*` from the program.
+const SHIPPED: &str = ".makepad-run-shipped";
+
 /// A ship is the entire uncommitted set, including whiteouts and each path's pinned base blob.
 /// `dir`: the lease's overlay. Returns which source that makes ([`super::ship::source_id`]).
+///
+/// The overlay also holds what the program wrote into its virtual folders (the VFS puts those
+/// writes there, each with its record or whiteout in the ledger: an app's asset store, a game's
+/// session files). A ship takes back only what the lease's last ship put there ([`SHIPPED`]) and
+/// this one does not ship, and what it deletes; the program's own files, records and whiteouts
+/// stay. A live session that took every file but the ship's away lost its asset store and its
+/// game's session at its next save: "not found: server object", and every game edit after it
+/// "could not save ...: entity not found" until a relaunch (11-22).
 pub fn finish(work: &Path, dir: &Path, pin: &Pin, staged: &Path, shipped: &[String], deleted: &[String], sent_bases: &makepad_strict_json::Value) -> Result<String, String> {
     let dir = dir.to_path_buf();
     let asked: HashSet<&str> = shipped.iter().chain(deleted).map(String::as_str).collect();
@@ -297,12 +321,14 @@ pub fn finish(work: &Path, dir: &Path, pin: &Pin, staged: &Path, shipped: &[Stri
     let keep: HashSet<_> = shipped.iter().map(String::as_str).collect();
     if let Some(p) = deleted.iter().find(|p| keep.contains(p.as_str())) { return Err(format!("overlay: {p} is both shipped and deleted")); }
     for p in shipped { if !std::fs::symlink_metadata(staged.join(p)).is_ok_and(|m| !m.is_dir()) { return Err(format!("overlay: {p} was not shipped")); } }
-    let mut held = Vec::new();
-    files(&dir, "", &mut held)?;
-    for p in held.iter().filter(|p| !keep.contains(p.as_str()) && !matches!(p.as_str(), ".makepad-run-edits" | ".makepad-run-deleted")) {
-        std::fs::remove_file(dir.join(p)).map_err(io)?;
+    let before: BTreeSet<String> = std::fs::read_to_string(dir.join(SHIPPED)).unwrap_or_default().lines().map(str::to_string).collect();
+    for p in before.iter().map(String::as_str).chain(deleted.iter().map(String::as_str)).filter(|p| !keep.contains(p)) {
+        let at = dir.join(p);
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| !m.is_dir()) {
+            std::fs::remove_file(&at).map_err(io)?;
+            prune_up(&dir, p)?;
+        }
     }
-    prune_empty(&dir)?;
     for p in shipped {
         let (src, dst) = (staged.join(p), dir.join(p));
         std::fs::create_dir_all(dst.parent().unwrap()).map_err(io)?;
@@ -320,9 +346,16 @@ pub fn finish(work: &Path, dir: &Path, pin: &Pin, staged: &Path, shipped: &[Stri
             std::fs::rename(&tmp, &dst).map_err(io)?;
         }
     }
+    // the program's own records and whiteouts (none a ship's, now or before) stay beside the ship's
+    let ours = |p: &str| !before.contains(p) && !asked.contains(p);
+    let theirs = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+    let records: String = theirs(".makepad-run-edits").lines().filter(|l| l.split_once('\t').is_some_and(|(p, _)| ours(p))).map(|l| format!("{l}\n")).chain(std::iter::once(records)).collect();
+    let gone: String = theirs(".makepad-run-deleted").lines().filter(|p| ours(p)).map(|p| format!("{p}\n")).chain(deleted.iter().map(|p| format!("{p}\n"))).collect();
+    let mut now: Vec<&str> = asked.iter().copied().collect();
+    now.sort_unstable();
     // the edits ledger last: its rename commits the ship (a live JIT that sees it moved takes
     // every file and the deleted list as whole, without waiting for them to settle)
-    for (name, text) in [(".makepad-run-deleted", deleted.iter().map(|p| format!("{p}\n")).collect()), (".makepad-run-edits", records)] {
+    for (name, text) in [(SHIPPED, now.iter().map(|p| format!("{p}\n")).collect()), (".makepad-run-deleted", gone), (".makepad-run-edits", records)] {
         let tmp = dir.join(format!("{name}.tmp"));
         std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, dir.join(name))).map_err(io)?;
     }

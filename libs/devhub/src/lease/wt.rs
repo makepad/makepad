@@ -67,13 +67,14 @@ pub fn in_work(repo: &Path, rev: &str) -> bool {
     m.lines().next().map(str::trim) == Some(w.trim())
 }
 
-/// Tracked changes or untracked files (ignored ones do not count), apart from `except`: what
-/// `git status --porcelain` lists, read by makepad-git (the lane cleanup asks it of every landed
-/// lane's trees each pass). A tree whose status cannot be read counts as dirty.
-pub fn dirty(dir: &Path, except: Option<&str>) -> bool {
+/// Tracked changes or untracked files (ignored ones do not count), apart from those in the dirs
+/// `except` (a lane's nested halves): what `git status --porcelain` lists, read by makepad-git (the
+/// lane cleanup asks it of every landed lane's trees each pass). A tree whose status cannot be
+/// read counts as dirty.
+pub fn dirty(dir: &Path, except: &[String]) -> bool {
     let Ok(Some(paths)) = makepad_git::repository_paths(dir) else { return true };
     let Ok(status) = crate::gitread::worktree(paths).and_then(|mut r| r.status()) else { return true };
-    status.entries.iter().any(|e| except.is_none_or(|x| e.path.strip_prefix(x).is_none_or(|rest| !rest.is_empty() && !rest.starts_with('/'))))
+    status.entries.iter().any(|e| !except.iter().any(|x| e.path.strip_prefix(x.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))))
 }
 
 /// Every live process's cwd: Linux `/proc/*/cwd`, macOS one `lsof -a -d cwd -Fn`.
@@ -206,13 +207,13 @@ pub fn infos(repo: &Path) -> Result<Vec<Info>, String> {
         }
         let exists = e.path.is_dir();
         let nested = e.path.join("apps/commercial");
-        let commercial = (exists && nested.join(".git").exists()).then(|| (dirty(&nested, None), unique_commits(&nested)));
+        let commercial = (exists && nested.join(".git").exists()).then(|| (dirty(&nested, &[]), unique_commits(&nested)));
         out.push(Info {
             lane,
             merged,
             ahead,
             behind,
-            dirty: !exists || dirty(&e.path, Some("apps/commercial")),
+            dirty: !exists || dirty(&e.path, &crate::nested::dirs(&e.path)),
             live: live_in(&cwds, &e.path),
             commercial,
             entry: e,
@@ -484,10 +485,11 @@ mod tests {
         std::fs::create_dir_all(root.join("ahead/apps/commercial")).unwrap();
         std::fs::write(root.join("ahead/apps/commercial/x.txt"), "x").unwrap();
         let spawned = crate::git_exec::on_this_thread();
-        assert!(!dirty(&root.join("merged"), None), "an ignored target dir made the tree dirty");
-        assert!(dirty(&root.join("dirty"), None), "an untracked file did not make the tree dirty");
-        assert!(dirty(&root.join("ahead"), None) && !dirty(&root.join("ahead"), Some("apps/commercial")), "the excepted dir was not skipped alone");
-        assert!(dirty(&root.join("ahead"), Some("apps/comm")), "a prefix of the excepted dir's name skipped it");
+        let except = |d: &str| vec![d.to_string()];
+        assert!(!dirty(&root.join("merged"), &[]), "an ignored target dir made the tree dirty");
+        assert!(dirty(&root.join("dirty"), &[]), "an untracked file did not make the tree dirty");
+        assert!(dirty(&root.join("ahead"), &[]) && !dirty(&root.join("ahead"), &except("apps/commercial")), "the excepted dir was not skipped alone");
+        assert!(dirty(&root.join("ahead"), &except("apps/comm")), "a prefix of the excepted dir's name skipped it");
         assert_eq!(crate::git_exec::on_this_thread(), spawned, "dirty started a git process");
         std::fs::remove_dir_all(root.join("ahead/apps")).unwrap();
         // a process working in a worktree keeps it (Unix: its cwd is seen; Windows: an open cwd

@@ -2056,8 +2056,14 @@ mod tests {
         assert!(row.get("passed").and_then(|v| v.as_arr()).is_some_and(|p| p.iter().any(|u| u.as_str() == Some("suite y"))));
         {
             let fed = fed.lock().unwrap();
-            let red = fed.iter().find(|r| r.kind == "bucket").expect("a bucket line on the feed");
+            // (its lines in the order sent: each red's own note first, then the bucket's summary)
+            let lines: Vec<&str> = fed.iter().filter(|r| r.kind == "bucket").map(|r| r.line.as_str()).collect();
+            let red = fed.iter().find(|r| r.kind == "bucket" && r.line.contains(" FAILED ")).expect("the bucket's red line on the feed");
             assert!(red.sev == Sev::Err && red.line.contains("bucket prebuild") && red.line.contains("FAILED suite x, suite z (exit after listing; its output: devhub job result L7)"), "{}", red.line);
+            // a listing red at its first run here (no earlier row of the bucket) is told on its own
+            // as its target's owner's, here nobody's (#8163)
+            let first = format!("bucket prebuild aaaaaaaaaa,bbbbbbbbbb: suite x {} (x:lib): its owner unknown", crate::bucket::FIRST_RUN);
+            assert!(fed.iter().any(|r| r.kind == "bucket" && r.sev == Sev::Err && r.line.starts_with(&first)), "{first}: {lines:?}");
         }
         // the next JIT's listings pass: an ok row; a plan that listed nothing is none
         super::judge(&ctx, &plan(vec![node("b", &["y"], 5, vec![fine])]), false);

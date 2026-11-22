@@ -15,6 +15,16 @@ pub fn prefix(name: &str) -> String {
     format!("apps/{name}/")
 }
 
+/// The public nested repositories (Fab's makepad/apps, 11-22): the private check runs on what their
+/// commits, pushes and landings bring, as on makepad's. Commercial and Source Library are private:
+/// their lanes keep the message check alone (main, 11-22: no refusals of their data at land).
+pub const PUBLIC: &[&str] = &["apps"];
+
+/// Whether nested repository `name` is public ([`PUBLIC`]).
+pub fn public(name: &str) -> bool {
+    PUBLIC.contains(&name)
+}
+
 /// Whether `name` can name a nested repository: lowercase letters, digits and dashes, and not
 /// makepad's own name.
 pub fn valid(name: &str) -> bool {
@@ -33,6 +43,13 @@ pub fn names(root: &Path) -> Vec<String> {
         .collect();
     out.sort();
     out
+}
+
+/// The dirs of the nested repositories in the tree at `root` (`apps/<name>`): the paired one's
+/// always, and each other one checked out there. Their files are their own halves', never the
+/// outer tree's.
+pub fn dirs(root: &Path) -> Vec<String> {
+    std::iter::once(dir(crate::state::PAIRED)).chain(names(root).into_iter().filter(|n| n != crate::state::PAIRED).map(|n| dir(&n))).collect()
 }
 
 /// The nested repositories the checkout at `root` follows, each with its branch: the paired one's

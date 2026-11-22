@@ -1,5 +1,5 @@
 //! `devhub ci`: independent regression and sweep runs, each planned from its pair's tree. One worker
-//! per allowed CI box (a lease.conf with `slots.ci`: a Linux and a Windows box) pulls shards
+//! per CI box (every box but a user's, unless its lease.conf says `slots.ci = 0`) pulls shards
 //! longest first, behind lane work.
 //! Smoke boots use the separate CI tree;
 //! sweep shards use their own lease kinds at background priority, with the background cap and
@@ -2244,7 +2244,7 @@ impl BoxInfo {
     }
 }
 
-/// A CI box: its lease.conf opts in (`slots.ci`).
+/// A CI box: any but a user's, unless its lease.conf opts out (`slots.ci = 0`).
 /// The allowed CI boxes that are up, dev on, with capabilities.
 pub fn boxes(ctx: &Ctx) -> Vec<BoxInfo> {
     ci_boxes(ctx, BoxAvailability::Ready)
@@ -2378,6 +2378,30 @@ impl Pool {
 
     /// Shard `i` failed on `node`. With no failure before and another box of that OS in the run it
     /// waits for that box (true); otherwise the failure stands.
+    /// What shard `i`, ended `state` on `node`, comes to when devhub ended it (hung, its disk) and
+    /// no second box asks for it ([`Self::second_box`]): devhub's verdict, not the code's. Its first
+    /// such end has no verdict (no box of its OS could run it again), never a red; ended so on the
+    /// second box too, it is a red, with both boxes' lines, for its owner to read (a deadlock reads
+    /// the same), saying when both boxes were past their cores then. Four legs devhub ended hung on
+    /// the one Linux CI box read as a red run and went to bisects (11-22). None: not devhub's end,
+    /// or a failure of its own came first (that red stands).
+    fn ended_by_devhub(&self, i: usize, node: &str, state: &'static str, summary: &str) -> Option<(&'static str, String)> {
+        if state != "fail" || !summary.starts_with(ENDED_BY_DEVHUB) {
+            return None;
+        }
+        let s = &self.state[i];
+        if s.failed_on.is_empty() {
+            return Some(("incomplete", format!("{summary}; no second box of its OS could run it: no verdict")));
+        }
+        if !s.failed_why.starts_with(ENDED_BY_DEVHUB) {
+            return None;
+        }
+        let past = crate::lease::sched::PAST_CORES;
+        let starved = if summary.contains(past) && s.failed_why.contains(past) { "; both boxes were past their cores then: a starved build, maybe no deadlock" } else { "" };
+        let strip = |w: &str| w.strip_prefix(ENDED_BY_DEVHUB).unwrap_or(w).trim_start_matches(':').trim_start().to_string();
+        Some(("fail", format!("{ENDED_BY_DEVHUB} on {} and on {node}{starved}: {}; on {}: {}", s.failed_on, strip(summary), s.failed_on, strip(&s.failed_why))))
+    }
+
     fn second_box(&mut self, i: usize, node: &str, boxes: &[BoxInfo], why: &str, errors: Vec<String>) -> bool {
         let Some(os) = boxes.iter().find(|b| b.node == node).map(|b| b.os.as_str()) else { return false };
         if !self.state[i].failed_on.is_empty() {
@@ -2405,16 +2429,37 @@ impl Pool {
     /// per box, and a shard queued on a busy box holds no other box. (A count of the run's shards
     /// across its boxes, boxes less two for a sweep, ran a sweep one shard at a time on the two CI
     /// boxes: the Linux box idled while a Windows shard waited in its queue, 11-03.)
-    fn next_for(&self, b: &BoxInfo) -> Option<usize> {
+    /// `held_back`: lane work holds this box's background asks back now ([`super::leg::background_block`]),
+    /// as it does a test or screen shard's at the run's priority: a shard of the CI kind, which
+    /// runs on the box's own CI slot beside lane work, goes first. (Each of four Linux boxes spent
+    /// its turns on `live:` shards that sat 300 s each behind lane work and gave up, one after
+    /// another, while 35 smoke shards never asked, 11-22.)
+    fn next_for(&self, b: &BoxInfo, held_back: bool) -> Option<usize> {
         if (0..self.shards.len()).any(|i| self.reserved[i].as_deref() == Some(b.node.as_str()) || (self.state[i].state == "run" && self.state[i].node == b.node)) {
             return None;
         }
         // an ask that gave up here goes behind the rest: a whole-box shard on a busy box kept the
         // 31 shards that fit beside lane work waiting for 97 min (11-04)
         let gave_up = |i: usize| self.state[i].spans.iter().filter(|x| x.node == b.node && x.granted_ms == 0).count();
+        let beside = |i: usize| held_back && self.shards[i].kind == Kind::Ci;
         (0..self.shards.len())
             .filter(|&i| self.state[i].state == "wait" && self.reserved[i].is_none() && self.can(b, i))
-            .max_by(|&a, &c| gave_up(c).cmp(&gave_up(a)).then_with(|| (self.urgency[a], self.shards[a].est).partial_cmp(&(self.urgency[c], self.shards[c].est)).unwrap_or(std::cmp::Ordering::Equal)))
+            .max_by(|&a, &c| beside(a).cmp(&beside(c)).then_with(|| gave_up(c).cmp(&gave_up(a))).then_with(|| (self.urgency[a], self.shards[a].est).partial_cmp(&(self.urgency[c], self.shards[c].est)).unwrap_or(std::cmp::Ordering::Equal)))
+    }
+
+    /// A waiting shard a box of `bs` can take now says it waits for its turn there, not what it
+    /// said while none could: "waits for a box of linux (0 s)", written as a master restart had
+    /// heard no node yet, stood for 80 min over shards four Linux boxes could take (11-22).
+    fn refresh_waits(&mut self, bs: &[BoxInfo]) {
+        for i in 0..self.shards.len() {
+            if self.state[i].state != "wait" || self.reserved[i].is_some() || !self.state[i].summary.starts_with("waits for ") {
+                continue;
+            }
+            let on: Vec<&str> = bs.iter().filter(|b| self.can(b, i)).map(|b| b.node.as_str()).collect();
+            if !on.is_empty() {
+                self.state[i].summary = format!("waits for a box's turn on {}: each runs or asks for one shard of the run at a time", on.join(", "));
+            }
+        }
     }
 }
 
@@ -2911,6 +2956,21 @@ pub(crate) fn leg_shard(tree: &Tree, id: &str, timing: &dyn Fn(&str) -> Option<f
         .or_else(|| sweep_plan(tree, timing, rotation).into_iter().chain(test_shards(tree, timing)).find(|s| s.id == id))
 }
 
+/// How far the CI bucket's run is, on its board line ([`crate::bucket::progress`]): its log is
+/// written as the run ends, so the line says its shards' count by state and where their logs are
+/// (a daily run read as wedged for hours, its named log not there yet, 11-22). None: no run going.
+pub fn bucket_progress() -> Option<String> {
+    let ctx = super::ctx()?;
+    let run = ctx.store.read(|d| d.ci.slot(false).clone())?;
+    if run.ended_ms != 0 {
+        return None;
+    }
+    let count = |st: &str| run.shards.iter().filter(|s| s.state == st).count();
+    let ended = run.shards.len() - count("run") - count("wait");
+    Some(format!("its log is written as it ends; {ended} of {} shards ended ({} ok, {} failed), {} running, {} waiting; their logs in {}",
+        run.shards.len(), count("ok"), count("fail"), count("run"), count("wait"), ctx.logs("ci").join(&run.id).display()))
+}
+
 /// The CI bucket's run: [`ci`], then the tests of the crates that changed ([`own_tests_after`]),
 /// unless someone stopped it.
 pub fn regression(repo: PathBuf) -> crate::bucket::Run {
@@ -3344,6 +3404,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 cv.notify_all();
                 break;
             }
+            g.refresh_waits(&bs);
             let takeable = |g: &Pool, i: usize| bs.iter().any(|b| g.can(b, i));
             let stuck: Vec<usize> = (0..g.shards.len()).filter(|&i| g.state[i].state == "wait" && g.reserved[i].is_none() && !takeable(&g, i)).collect();
             let others = (0..g.shards.len()).any(|i| g.state[i].state == "wait" && takeable(&g, i));
@@ -3557,17 +3618,19 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
         let i = loop {
             // lane work goes first between a sweep's shards
             let lanes_first = sweep && lane_queued_for(&ctx.leases.view(), ctx.leases.nodes().iter().find(|n| n.name == b.node).and_then(|n| n.hold.as_deref()), &b.node);
+            // what holds a background ask of this box back now holds the run's test and screen shards
+            let held_back = super::leg::background_block(&ctx.leases, None, &crate::lease::sched::parse_needs(&format!("os={},arch={}", b.os.as_str(), b.arch)), Some(&b.node)).is_some();
             let mut g = p.lock().unwrap();
             if g.all_done() || g.stopped {
                 return;
             }
-            let waits = lanes_first && box_up(ctx, &b.node) && g.next_for(&b).is_some();
+            let waits = lanes_first && box_up(ctx, &b.node) && g.next_for(&b, held_back).is_some();
             g.waits_turn.retain(|node| *node != b.node);
             if waits {
                 g.waits_turn.push(b.node.clone());
             }
             if !lanes_first && idle_until.is_none_or(|t| Instant::now() >= t) && box_up(ctx, &b.node) {
-                if let Some(i) = g.next_for(&b) {
+                if let Some(i) = g.next_for(&b, held_back) {
                     g.reserved[i] = Some(b.node.clone());
                     break i;
                 }
@@ -3917,7 +3980,10 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         cv.notify_all();
         return false;
     }
-    if state == "incomplete" && !judge_fault && g.state[i].lost.iter().map(|(_, k)| *k).sum::<u32>() < 2 * LOST_TRIES {
+    let devhub = g.ended_by_devhub(i, &node, state, &summary);
+    let by_devhub = devhub.is_some();
+    let (state, summary) = devhub.unwrap_or((state, summary));
+    if state == "incomplete" && !judge_fault && !by_devhub && g.state[i].lost.iter().map(|(_, k)| *k).sum::<u32>() < 2 * LOST_TRIES {
         // a lost lease: the shard is asked again (twice on one box, then elsewhere)
         // an unfit box is not asked again; a lost lease is, once
         let n = if summary.starts_with("unfit:") { LOST_TRIES } else { 1 };
@@ -3937,13 +4003,17 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
             g.state[i].errors = errors;
         } else if state == "ok" {
             // the pass stands; what the first box said stays, loudly
-            let line = format!("ci: {} FAILED on {first} and passed on {node}: {}", g.state[i].id, g.state[i].errors.first().unwrap_or(&g.state[i].failed_why));
+            let how = if g.state[i].failed_why.starts_with(ENDED_BY_DEVHUB) { "was ended by devhub" } else { "FAILED" };
+            let line = format!("ci: {} {how} on {first} and passed on {node}: {}", g.state[i].id, g.state[i].errors.first().unwrap_or(&g.state[i].failed_why));
             ctx.store.event("ci", Sev::Err, line, None);
             g.state[i].summary = format!("passed on {node}; {summary}; FAILED on {first}: {}", g.state[i].failed_why);
             let n = g.failed_only_on(&first);
             if n == BOX_OUT {
                 ctx.store.event("ci", Sev::Err, format!("ci: {first} is out of this run: {n} shards failed there and passed elsewhere (its toolchain or cache?)"), None);
             }
+        } else if by_devhub {
+            g.state[i].summary = summary;
+            g.state[i].errors = errors;
         } else {
             g.state[i].summary = format!("failed on {first} and on {node}: {summary}");
             g.state[i].errors = errors;
@@ -4139,6 +4209,10 @@ enum Judged { Pass(usize), Miss(String), NoVerdict(String) }
 /// app, and it is not asked again.
 const JUDGE_FAULT: &str = "no verdict, the vision judge's fault (not the app's)";
 
+/// How a shard's line starts when devhub ended its lease (hung, its disk): devhub's verdict, run
+/// again on a second box, and a red only when it ends so there too ([`Pool::ended_by_devhub`]).
+pub(crate) const ENDED_BY_DEVHUB: &str = "ended by devhub";
+
 fn judge_deferred(repo: &Path, grabs: &[DeferredGrab], log: &Path) -> Judged {
     let pairs: Vec<_> = grabs.iter().map(|g| (g.image.clone(), g.prompt_path.clone())).collect();
     match run_judge(repo, &pairs) {
@@ -4242,9 +4316,11 @@ fn run_steps(held: &Held, shard: &Shard, log: &Path, at: &CiShard, note: &mut dy
                 }
                 note(k + 1, 0, &failed, took);
             }
-            // a result, not a lost box: run again, it hangs again
-            Err(e) if e.ends_with(" ended (hung)") => {
-                let why = format!("{}: hung, every process idle (the hub's inbox has its stacks: `{} stalled`)", step_name(step), e.split(' ').next().unwrap_or(""));
+            // devhub's verdict, not the code's: a second box runs it ([`Pool::ended_by_devhub`])
+            Err(e) if e.contains(" ended (hung)") => {
+                let lease = e.split(' ').next().unwrap_or("");
+                let idle = e.split_once(" ended (hung): ").map_or("every process idle", |(_, why)| why);
+                let why = format!("{ENDED_BY_DEVHUB}: {}: hung, {idle} (the hub's inbox has its stacks: `{lease} stalled`)", step_name(step));
                 let _ = writeln!(f, "== hung: {e}");
                 took.push((k, 0.0, false));
                 failed.push(why);
@@ -4255,7 +4331,7 @@ fn run_steps(held: &Held, shard: &Shard, log: &Path, at: &CiShard, note: &mut dy
             Err(e) if e.contains(" ended (disk): ") => {
                 let _ = writeln!(f, "== ended: {e}");
                 took.push((k, 0.0, false));
-                failed.push(format!("{}: {e}", step_name(step)));
+                failed.push(format!("{ENDED_BY_DEVHUB}: {}: {e}", step_name(step)));
                 note(k + 1, 0, &failed, took);
                 return ("fail", failed.join("; "));
             }
@@ -5041,19 +5117,24 @@ mod tests {
         // tree no cargo ran in yet has none (a JIT run's in the lane's tree, 11-07). One there is
         // read as it is; with none, cargo writes the one any build here would in a temp dir that
         // links the checkout's top-level entries: the checkout is never written (the test rewrote
-        // the checkout's lock under its builds, and wrote one into a tree that had none)
+        // the checkout's lock under its builds, and wrote one into a tree that had none). Another
+        // test's cargo may write the checkout's lock meanwhile (the roll's `cargo tree` in
+        // `devhub_rolls_for_its_own_graph_and_not_its_panels`): the farm never links it, and the
+        // proof is the farm's own lock, not the checkout's state (that race failed this, 11-22)
         let lock = match std::fs::read_to_string(repo.join("Cargo.lock")) {
             Ok(lock) => lock,
             Err(_) => {
                 let copy = std::env::temp_dir().join(format!("devhub-digests-lock-{}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&copy);
                 std::fs::create_dir_all(&copy).unwrap();
-                for name in std::fs::read_dir(&repo).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n != ".git" && n != "target") {
+                for name in std::fs::read_dir(&repo).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n != ".git" && n != "target" && n != "Cargo.lock") {
                     std::os::unix::fs::symlink(repo.join(&name), copy.join(&name)).unwrap();
                 }
                 let made = std::process::Command::new(crate::orch::roll::cargo_bin()).current_dir(&copy).args(["metadata", "--offline", "--format-version", "1"]).stdout(std::process::Stdio::null()).output().unwrap();
-                assert!(made.status.success(), "cargo metadata: {}", String::from_utf8_lossy(&made.stderr));
-                assert!(!repo.join("Cargo.lock").exists(), "cargo wrote the checkout's lock");
+                let said = String::from_utf8_lossy(&made.stderr);
+                assert!(made.status.success(), "cargo metadata: {said}");
+                let own = std::fs::symlink_metadata(copy.join("Cargo.lock")).is_ok_and(|m| m.file_type().is_file());
+                assert!(own, "cargo wrote no lock of its own in the farm (the checkout's, through a link?); cargo said: {said}");
                 let lock = std::fs::read_to_string(copy.join("Cargo.lock")).unwrap();
                 // (the links go, never what they link to)
                 std::fs::remove_dir_all(&copy).unwrap();
@@ -5593,7 +5674,7 @@ shared = { workspace = true }
         let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; n], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
         assert!(!p.getting_on(), "nothing runs or asks yet");
         // the Windows shard is stuck in its box's queue
-        assert_eq!(p.next_for(&win), Some(0));
+        assert_eq!(p.next_for(&win, false), Some(0));
         p.reserved[0] = Some("w".into());
         p.state[0].summary = format!("{QUEUED}w: held back: lane work waits for a box this could take");
         assert!(p.getting_on(), "a shard queued behind lane work waits its turn: no stall");
@@ -5605,15 +5686,15 @@ shared = { workspace = true }
         p.state[0].state = "run".into();
         p.state[0].node = "w".into();
         p.state[0].summary = format!("{QUEUED}w: L1 queued");
-        assert_eq!(p.next_for(&win), None, "one shard per box");
-        assert_eq!(p.next_for(&lin), Some(2), "the Linux box works on, the crate whose own files changed first");
+        assert_eq!(p.next_for(&win, false), None, "one shard per box");
+        assert_eq!(p.next_for(&lin, false), Some(2), "the Linux box works on, the crate whose own files changed first");
         p.reserved[2] = Some("l".into());
-        assert_eq!(p.next_for(&lin), None, "its ask holds the box: no second shard races past it");
+        assert_eq!(p.next_for(&lin, false), None, "its ask holds the box: no second shard races past it");
         p.reserved[2] = None;
         p.state[2].state = "ok".into();
-        assert_eq!(p.next_for(&lin), Some(3), "then a crate with no proof");
+        assert_eq!(p.next_for(&lin, false), Some(3), "then a crate with no proof");
         p.state[3].state = "ok".into();
-        assert_eq!(p.next_for(&lin), Some(1));
+        assert_eq!(p.next_for(&lin, false), Some(1));
         assert!(!p.all_done());
         assert_eq!(p.verdict(), Verdict::Incomplete, "waiting shards still prevent a verdict");
         p.state[0].state = crate::state::NOT_RUN.into();
@@ -5652,16 +5733,25 @@ shared = { workspace = true }
 
     #[test]
     fn a_shard_that_could_not_get_its_box_goes_behind_the_rest() {
-        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, work: BoxWork::All };
+        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: true, gpu: true, ci: true, work: BoxWork::All };
         let shard = |id: &str, est: f64| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
-        let shards = vec![shard("whole", 300.0), shard("small", 20.0)];
+        let smoke = Shard { kind: Kind::Ci, gui: true, judge: Judge::Exit, ..shard("smoke:linux:apps/a", 10.0) };
+        let shards = vec![shard("whole", 300.0), shard("small", 20.0), smoke];
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 2], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; 2], overdue: vec![false; 2], run_id: "r".into(), sweep: false, leg: None };
-        assert_eq!(p.next_for(&lin), Some(0), "the longest first");
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 3], waits_turn: Vec::new(), stopped: false, prio: 0, urgency: vec![Urgency::Deps; 3], overdue: vec![false; 3], run_id: "r".into(), sweep: false, leg: None };
+        assert_eq!(p.next_for(&lin, false), Some(0), "the longest first");
+        assert_eq!(p.next_for(&lin, true), Some(2), "while lane work holds the box's background asks back, a shard on its own CI slot goes first");
+        // a line from when no box could take it gives way to its turn
+        p.state[2].summary = "waits for a box of linux (0 s)".into();
+        p.refresh_waits(std::slice::from_ref(&lin));
+        assert_eq!(p.state[2].summary, "waits for a box's turn on l: each runs or asks for one shard of the run at a time");
+        p.refresh_waits(&[]);
+        assert!(p.state[2].summary.starts_with("waits for a box's turn on l"), "no box now: the line stays until the run says why");
+        p.state[2].state = "ok".into();
         p.state[0].spans.push(CiSpan { node: "l".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 });
-        assert_eq!(p.next_for(&lin), Some(1), "its ask gave up: the other goes");
+        assert_eq!(p.next_for(&lin, false), Some(1), "its ask gave up: the other goes");
         p.state[1].state = "ok".into();
-        assert_eq!(p.next_for(&lin), Some(0), "and it asks again when nothing else can run");
+        assert_eq!(p.next_for(&lin, false), Some(0), "and it asks again when nothing else can run");
     }
 
     #[test]
@@ -5768,6 +5858,24 @@ shared = { workspace = true }
             s.kept = "w,m".into();
         }
         assert!(!p.out("a") && one_box_failures(&p.state).is_empty());
+        // devhub ending a shard is its verdict, not the code's (11-22): a first end no second box
+        // takes has no verdict; ended so on the second box too, a red for its owner with both
+        // boxes' lines, saying when both were past their cores; a failure of its own stands
+        let past = crate::lease::sched::PAST_CORES;
+        let hung = format!("{ENDED_BY_DEVHUB}: build: hung, every process idle for 8m37s; {past}: cpu 100% + 18 waiting on 16 cores");
+        let i = BOX_OUT;
+        p.state[i].failed_on.clear();
+        assert_eq!(p.ended_by_devhub(i, "b", "fail", "exit 1"), None, "the code's own failure");
+        assert_eq!(p.ended_by_devhub(i, "b", "ok", "3 steps ok"), None);
+        let (state, line) = p.ended_by_devhub(i, "b", "fail", &hung).unwrap();
+        assert!(state == "incomplete" && line.contains("no second box of its OS could run it: no verdict"), "{state}: {line}");
+        (p.state[i].failed_on, p.state[i].failed_why) = ("a".into(), hung.clone());
+        let (state, line) = p.ended_by_devhub(i, "b", "fail", &hung).unwrap();
+        assert!(state == "fail" && line.starts_with("ended by devhub on a and on b; both boxes were past their cores then") && line.contains("; on a: build: hung"), "{state}: {line}");
+        let within = format!("{ENDED_BY_DEVHUB}: build: hung, every process idle for 8m37s");
+        assert!(!p.ended_by_devhub(i, "b", "fail", &within).unwrap().1.contains("past their cores then:"), "one box within its cores: no starved note");
+        p.state[i].failed_why = "exit 1".into();
+        assert_eq!(p.ended_by_devhub(i, "b", "fail", &hung), None, "a failure of its own came first: that red stands");
     }
 
     /// A licence, a readme or a test's `ci.splash` re-proved every crate holding one (11-05: 26

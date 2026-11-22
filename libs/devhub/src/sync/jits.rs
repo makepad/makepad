@@ -72,6 +72,18 @@ pub fn exe_replaced(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p.to_string_lossy().ends_with(" (deleted)"))
 }
 
+/// Whether what the JIT `pid` itself is built from changed since the binary it runs (its `session
+/// pending`'s `inputs_changed`). A build that replaced its loader for sources it does not run
+/// (devhub's own, which the makepad binary links, and which no running app takes as an update)
+/// changed nothing it runs. None: it did not answer, or it is from before that field.
+pub fn own_inputs_changed(pid: u32) -> Option<bool> {
+    let client = Client::connect(&pid.to_string()).ok()?;
+    client.set_timeout(Some(Duration::from_secs(1)));
+    let said = client.cmd("session pending").ok().and_then(|lines| lines.map_while(Result::ok).find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("inputs_changed")?.as_bool()));
+    client.close();
+    said
+}
+
 /// When the process started (wall ms; 0: gone, or this platform cannot tell): the code it runs
 /// is at least that old. Not its binary's replacement: each later build rewrites the file again.
 pub fn started_ms(pid: u32) -> u64 {

@@ -1343,7 +1343,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         }
         lane_from.push(s(r, "lane_from"));
         let prio = r.get("prio").and_then(|p| p.as_i64()).unwrap_or(crate::lease::sched::DEFAULT_PRIO as i64) as i32;
-        let mut src = Src::for_run(Kind::parse(&kind).unwrap(), &cmd, r.get("tree").and_then(|v| v.as_bool()).unwrap_or(false));
+        let mut src = Src::for_run(Kind::parse(&kind).unwrap(), &cmd, r.get("tree").and_then(|v| v.as_bool()).unwrap_or(false), false);
         // a JIT test of a package whose tests read the checkout itself (cargo on it, its history)
         // takes the lane's tree, as `devhub test` gives it: an overlay's tree is one only the JIT
         // process reads (a batch's app-run test failed there, 11-08)

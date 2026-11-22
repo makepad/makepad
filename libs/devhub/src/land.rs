@@ -48,16 +48,35 @@ pub const WIRE_SOURCES: [&str; 10] = [
     "platform/studio/src/native_app.rs",
 ];
 
-/// The files of the AI bus between the WM and its hosted apps: what they send each other has no
-/// fingerprint, so a WM and an app of different builds drop each other's tool calls without a
-/// word (#7751 made `ServiceCall.origin` required and landed unmarked, 11-21). A landing that
-/// changes one needs the `wire-change` mark as one of [`WIRE_SOURCES`] does.
-pub const AI_BUS_SOURCES: [&str; 5] = [
-    "libs/ai/services/src/wire.rs",
+/// The file that defines the frames of the AI bus between the WM and its hosted apps: what they
+/// send each other has no fingerprint, so a WM and an app of different builds drop each other's
+/// tool calls without a word (#7751 made `ServiceCall.origin` required and landed unmarked,
+/// 11-21). A landing that changes it needs the `wire-change` mark as one of [`WIRE_SOURCES`] does.
+/// The transports that carry the frames ([`AI_BUS_TRANSPORTS`]) define none of their own, and
+/// `wire.rs` names no type of another module, so an edit of a transport changes where a frame goes,
+/// never what a running peer has to read (a test holds both).
+pub const AI_BUS_SOURCES: [&str; 1] = ["libs/ai/services/src/wire.rs"];
+
+/// The files that carry the AI bus's frames without defining them: the app's port and service
+/// sink, the WM's bus and the AI pane's bus. They land unmarked.
+pub const AI_BUS_TRANSPORTS: [&str; 4] = [
     "libs/ai/services/src/port.rs",
     "libs/ai/services/src/app_service.rs",
     "apps/wm/src/ai_bus.rs",
     "apps/aichat/src/bus.rs",
+];
+
+/// The files that decide how micro_serde writes a frame: its JSON and binary encoders and their
+/// derives, which name and order the fields and variants. The AI bus's frames are its JSON and the
+/// hosted wire's frames are its binary, and neither fingerprint hashes these files, so an edit of
+/// one changes what a running peer of another build reads, without a word. A landing that changes
+/// one needs the `wire-change` mark as one of [`WIRE_SOURCES`] does. RON writes no frame of either
+/// and lands unmarked.
+pub const ENCODING_SOURCES: [&str; 4] = [
+    "libs/micro_serde/src/serde_bin.rs",
+    "libs/micro_serde/src/serde_json.rs",
+    "libs/micro_serde/derive_impl/src/derive_bin.rs",
+    "libs/micro_serde/derive_impl/src/derive_json.rs",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,7 +168,8 @@ pub struct Entry {
     pub agent: String,
     /// Only ci.toml changes.
     pub proof: bool,
-    /// It may change the hosted wire ([`WIRE_SOURCES`], [`AI_BUS_SOURCES`]): `land --wire-change`.
+    /// It may change the hosted wire ([`WIRE_SOURCES`], [`AI_BUS_SOURCES`], [`ENCODING_SOURCES`]):
+    /// `land --wire-change`.
     pub wire: bool,
     /// the land rule's ledger witness as this landing left it (empty: none)
     pub witness: String,
@@ -483,6 +503,11 @@ fn merge_halves<'a>(halves: impl Iterator<Item = &'a mut Half>) -> Result<(), Ve
     for h in halves {
         let tree = |f: Vec<String>| f.into_iter().map(|p| if p.starts_with("merge-tree failed") { format!("{}: {p}", h.name) } else { format!("{}{p}", crate::nested::prefix(&h.name)) }).collect::<Vec<_>>();
         let m = prepare_merge(&h.dir, &h.tip, &h.sha).map_err(tree)?;
+        // commit-tree runs no hook: the private check the hooks run, on what a public half adds
+        // (Fab's makepad/apps, 11-22), as on makepad's
+        if !m.unchanged && crate::nested::public(&h.name) {
+            crate::private_check::merge_gate(&h.dir, &h.tip, &h.sha, &m.tree).map_err(|hits| hits.into_iter().map(|l| format!("{}: {l}", h.name)).collect::<Vec<_>>())?;
+        }
         h.merged = finish_merge(&h.dir, &m, &format!("Merge branch '{}' into {} (devhub land)", h.branch, h.target))?;
     }
     Ok(())
@@ -614,12 +639,13 @@ pub fn merges_checked(dir: &Path, target: &str, sha: &str, branch: &str) -> Resu
     if refused.is_empty() { Ok(said) } else { Err(refused.join("; ")) }
 }
 
-/// The hosted wire's files ([`WIRE_SOURCES`], [`AI_BUS_SOURCES`]) that differ between makepad
-/// commits `from` and `to`; Err: the diff did not read.
+/// The hosted wire's files ([`WIRE_SOURCES`], [`AI_BUS_SOURCES`], [`ENCODING_SOURCES`]) that differ
+/// between makepad commits `from` and `to`; Err: the diff did not read.
 fn wire_changed(dir: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
     let mut args = vec!["diff", "--name-only", "--no-renames", from, to, "--"];
     args.extend(WIRE_SOURCES);
     args.extend(AI_BUS_SOURCES);
+    args.extend(ENCODING_SOURCES);
     let (ok, files) = git(dir, &args);
     if !ok {
         return Err(format!("the hosted wire's files from {from:.10} to {to:.10} did not read: {files}"));
@@ -641,7 +667,10 @@ fn wire_refusal(dir: &Path, from: &str, to: &str, marked: bool) -> Option<Vec<St
                 said.push("an edit of the studio and key_code files (a comment too) changes the wire fingerprint: every WM built before it refuses every app built after it, and the reverse, until both are rebuilt".into());
             }
             if files.iter().any(|f| AI_BUS_SOURCES.contains(&f.as_str())) {
-                said.push("the AI bus files say what the WM and its apps send each other, with no fingerprint: a WM and an app of different builds drop each other's tool calls without a word until both are rebuilt".into());
+                said.push("the AI bus's frames (wire.rs) are what the WM and its apps send each other, with no fingerprint: a WM and an app of different builds drop each other's tool calls without a word until both are rebuilt".into());
+            }
+            if files.iter().any(|f| ENCODING_SOURCES.contains(&f.as_str())) {
+                said.push("micro_serde's JSON and binary encoding writes the AI bus's and the hosted wire's frames, and no fingerprint hashes it: a WM and an app of different builds misread each other's frames without a word until both are rebuilt".into());
             }
             said.push("if that is meant: makepad devhub land --wire-change (each node's WM then restarts on the new wire as its deployment moves); if not, leave these files as work has them".into());
             Some(said)
@@ -1570,7 +1599,7 @@ impl Train {
         }, Some((if wire_note.is_empty() { Sev::Info } else { Sev::Warn }, format!("land landed {label}: work {tm:.10} main {tc:.10}{nested}{wire_note}"))));
         unlock();
         // the maintenance its writes call for, kept from the lanes' commits (gitlock::own_maintenance)
-        for repo in [r, &c] { crate::gitlock::maintain(repo); }
+        for repo in [r, &c].into_iter().chain(halves.iter().map(|h| &h.dir)) { crate::gitlock::maintain(repo); }
         if proof {
             for (repo, branch, pin, tip) in [(r, &branch, ms, &tm), (&c, &cbranch, cs, &tc)] {
                 if branch.starts_with("ci-proof-") && rev(repo, branch).as_deref() == Some(pin) && is_ancestor(repo, pin, tip) {
@@ -2172,18 +2201,19 @@ mod tests {
         let d = std::env::temp_dir().join(format!("devhub-land-nested-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let (r, home) = (d.join("repo"), d.join("home"));
-        let (c, x) = (r.join("apps/commercial"), r.join("apps/extra"));
-        std::fs::create_dir_all(&c).unwrap();
-        std::fs::create_dir_all(&x).unwrap();
+        let (c, x, a) = (r.join("apps/commercial"), r.join("apps/extra"), r.join("apps/apps"));
+        for dir in [&c, &x, &a] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         std::fs::create_dir_all(&home).unwrap();
         let g = |dir: &Path, args: &[&str]| assert!(git(dir, args).0, "git {args:?} in {}", dir.display());
-        for (dir, main) in [(&r, "work"), (&c, "main"), (&x, "trunk")] {
+        for (dir, main) in [(&r, "work"), (&c, "main"), (&x, "trunk"), (&a, "main")] {
             g(dir, &["init", "-q", "-b", main]);
             g(dir, &["config", "user.email", "t@t"]);
             g(dir, &["config", "user.name", "t"]);
         }
-        std::fs::write(r.join(".gitignore"), "apps/commercial\napps/extra\n").unwrap();
-        for dir in [&r, &c, &x] {
+        std::fs::write(r.join(".gitignore"), "apps/commercial\napps/extra\napps/apps\n").unwrap();
+        for dir in [&r, &c, &x, &a] {
             std::fs::write(dir.join("base"), "1\n").unwrap();
             g(dir, &["add", "."]);
             g(dir, &["commit", "-qm", "base"]);
@@ -2194,10 +2224,15 @@ mod tests {
             g(dir, &["add", "."]);
             g(dir, &["commit", "-qm", b]);
         };
-        // rc-n: makepad + its extra half; rc-o: extra alone; rc-k: extra conflicts with trunk
+        // rc-n: makepad + its extra half; rc-o: extra alone; rc-k: extra conflicts with trunk; rc-p:
+        // a home path in the public apps repository, refused as in makepad. A private repository's
+        // history is its own (rc-o's home path lands).
+        let home_path = format!("/{}/somebody/x\n", "home");
         branch(&r, "rc-n", "n", "n\n", "work");
         branch(&x, "rc-n", "xn", "n\n", "trunk");
-        branch(&x, "rc-o", "xo", "o\n", "trunk");
+        branch(&x, "rc-o", "xo", &home_path, "trunk");
+        branch(&a, "rc-p", "pa", &home_path, "main");
+        g(&a, &["checkout", "-q", "main"]);
         branch(&x, "rc-k", "base", "k\n", "trunk");
         g(&r, &["checkout", "-q", "work"]);
         g(&x, &["checkout", "-q", "trunk"]);
@@ -2222,6 +2257,7 @@ mod tests {
         assert!(ask("add - extra=rc-k")[0].contains("\"id\":3"));
         // the same halves again: the same entry
         assert!(ask("add - extra=rc-o")[0].contains("\"id\":2"));
+        assert!(ask("add - apps=rc-p")[0].contains("\"id\":4"));
         assert!(t.start_ready());
         let st = |b: &str| Entry::parse(&ask(&format!("status {b}"))[0]).unwrap();
         let (n, o, k) = (st("rc-n+extra=rc-n"), st("-+extra=rc-o"), st("-+extra=rc-k"));
@@ -2229,6 +2265,9 @@ mod tests {
         // one red here, 11-08, left its second entry queued untouched with nothing said)
         assert_eq!((n.state, o.state), (St::Landed, St::Landed), "{n:?} {o:?}; the train said: {:?}", events.lock().unwrap());
         assert_eq!((k.state, k.detail.clone()), (St::Conflict, vec!["apps/extra/base".to_string()]));
+        let p = st("-+apps=rc-p");
+        assert!(p.state == St::Conflict && p.detail.iter().any(|l| l.starts_with("apps: ") && l.contains("home-path")), "the public half's private data is refused: {p:?}");
+        assert!(!a.join("pa").exists() && rev(&a, "refs/heads/main") != rev(&a, "rc-p"), "apps' main stays as it was");
         // trunk has both extra halves, work the makepad one; the user's checkouts moved with them
         let trunk = rev(&x, "refs/heads/trunk").unwrap();
         assert!(is_ancestor(&x, &rev(&x, "rc-n").unwrap(), &trunk) && is_ancestor(&x, &rev(&x, "rc-o").unwrap(), &trunk));
@@ -2240,7 +2279,10 @@ mod tests {
     }
 
     /// [`WIRE_SOURCES`] is every file the hosted wire's fingerprint hashes: the `include_bytes!` of
-    /// the studio crate's `WIRE` and of key_code's `SOURCE_FINGERPRINT`.
+    /// the studio crate's `WIRE` and of key_code's `SOURCE_FINGERPRINT`. [`AI_BUS_SOURCES`] is every
+    /// file that defines an AI bus frame: `wire.rs` names no type of another module, and the
+    /// [`AI_BUS_TRANSPORTS`] derive no codec and write no envelope of their own.
+    /// [`ENCODING_SOURCES`] is every module of micro_serde and its derive but RON's.
     #[test]
     fn the_wire_sources_are_the_files_the_wire_fingerprint_hashes() {
         // the files a const's `include_bytes!` names, from `from` to its end `to`
@@ -2255,11 +2297,51 @@ mod tests {
         let mut want = included(key_code, "pub const SOURCE_FINGERPRINT", ";\n", "platform/key_code/src");
         want.extend(included(studio, "pub const WIRE: u64", "\n};", "platform/studio/src"));
         assert_eq!(want, WIRE_SOURCES, "the wire's files and WIRE_SOURCES, in that order");
+
+        // a file's code before its test modules
+        let code = |text: &'static str| &text[..text.find("\n#[cfg(test)]").unwrap_or(text.len())];
+        let wire = include_str!("../../ai/services/src/wire.rs");
+        assert_eq!(AI_BUS_SOURCES, ["libs/ai/services/src/wire.rs"]);
+        for line in code(wire).lines().filter(|l| !l.trim_start().starts_with("//")) {
+            let imports = line.starts_with("use ") || line.starts_with("pub use ");
+            assert!(
+                !(imports && !line.starts_with("use makepad_micro_serde::") && !line.starts_with("use std::"))
+                    && !line.contains("crate::")
+                    && !line.contains("super::"),
+                "wire.rs names a type of another module, so a frame may be defined outside the file the land gate watches: {line}"
+            );
+        }
+        let transports = [
+            include_str!("../../ai/services/src/port.rs"),
+            include_str!("../../ai/services/src/app_service.rs"),
+            include_str!("../../../apps/wm/src/ai_bus.rs"),
+            include_str!("../../../apps/aichat/src/bus.rs"),
+        ];
+        for (file, text) in AI_BUS_TRANSPORTS.iter().zip(transports) {
+            for codec in ["SerJson", "DeJson", "SerBin", "DeBin", "HOSTED_KEY", "\"wm_ai\"", "wm_ai:"] {
+                assert!(
+                    !code(text).contains(codec),
+                    "{file} carries the AI bus's frames and lands without the wire-change mark, so it may define none: `{codec}` belongs in wire.rs"
+                );
+            }
+        }
+
+        // the modules a crate root declares, but RON's, which writes no frame
+        let modules = |text: &str, dir: &str| -> Vec<String> {
+            text.lines()
+                .filter_map(|l| l.trim().strip_prefix("mod ")?.strip_suffix(';'))
+                .filter(|m| !m.ends_with("ron"))
+                .map(|m| format!("{dir}/{m}.rs"))
+                .collect()
+        };
+        let mut encoding = modules(include_str!("../../micro_serde/src/lib.rs"), "libs/micro_serde/src");
+        encoding.extend(modules(include_str!("../../micro_serde/derive_impl/src/lib.rs"), "libs/micro_serde/derive_impl/src"));
+        assert_eq!(encoding, ENCODING_SOURCES, "micro_serde's encoding modules and ENCODING_SOURCES, in that order: a module that writes a frame lands only marked");
     }
 
     /// A hand-in that changes a file of the hosted wire fails, naming the files and the mark; the
     /// same hand-in marked `wire-change` lands and says it changes the wire. Other files of the
-    /// same crate land as ever.
+    /// same crate land as ever, and so does an AI bus transport.
     #[cfg(unix)]
     #[test]
     fn a_change_of_the_hosted_wire_lands_only_marked() {
@@ -2269,6 +2351,7 @@ mod tests {
         let c = r.join("apps/commercial");
         std::fs::create_dir_all(r.join("platform/studio/src")).unwrap();
         std::fs::create_dir_all(r.join("libs/ai/services/src")).unwrap();
+        std::fs::create_dir_all(r.join("libs/micro_serde/src")).unwrap();
         std::fs::create_dir_all(&c).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         let g = |dir: &Path, args: &[&str]| assert!(git(dir, args).0, "git {args:?} in {}", dir.display());
@@ -2281,12 +2364,20 @@ mod tests {
         std::fs::write(r.join("platform/studio/src/studio.rs"), "pub struct Hosted;\n").unwrap();
         std::fs::write(r.join("platform/studio/src/other.rs"), "pub struct Other;\n").unwrap();
         std::fs::write(r.join("libs/ai/services/src/wire.rs"), "pub struct ServiceCall;\n").unwrap();
+        std::fs::write(r.join("libs/ai/services/src/port.rs"), "pub struct AiServicePort;\n").unwrap();
+        std::fs::write(r.join("libs/micro_serde/src/serde_bin.rs"), "pub trait SerBin {}\n").unwrap();
         g(&r, &["add", "."]);
         g(&r, &["commit", "-qm", "base"]);
         std::fs::write(c.join("s"), "1\n").unwrap();
         g(&c, &["add", "."]);
         g(&c, &["commit", "-qm", "cbase"]);
-        for (b, file) in [("rc-wire", "platform/studio/src/studio.rs"), ("rc-plain", "platform/studio/src/other.rs"), ("rc-bus", "libs/ai/services/src/wire.rs")] {
+        for (b, file) in [
+            ("rc-wire", "platform/studio/src/studio.rs"),
+            ("rc-plain", "platform/studio/src/other.rs"),
+            ("rc-bus", "libs/ai/services/src/wire.rs"),
+            ("rc-port", "libs/ai/services/src/port.rs"),
+            ("rc-codec", "libs/micro_serde/src/serde_bin.rs"),
+        ] {
             g(&r, &["checkout", "-qb", b, "work"]);
             std::fs::write(r.join(file), "// a comment\n").unwrap();
             g(&r, &["commit", "-qam", b]);
@@ -2304,14 +2395,21 @@ mod tests {
         assert!(ask("add rc-wire")[0].contains("\"id\":1"));
         assert!(ask("add rc-plain")[0].contains("\"id\":2"));
         assert!(ask("add rc-bus")[0].contains("\"id\":3"));
+        assert!(ask("add rc-port")[0].contains("\"id\":4"));
+        assert!(ask("add rc-codec")[0].contains("\"id\":5"));
         t.start_ready();
-        let (wire, plain, bus) = (st("rc-wire"), st("rc-plain"), st("rc-bus"));
+        let (wire, plain, bus, port, codec) = (st("rc-wire"), st("rc-plain"), st("rc-bus"), st("rc-port"), st("rc-codec"));
         assert_eq!((wire.state, wire.detail[0].as_str()), (St::Failed, "it changes the hosted wire: platform/studio/src/studio.rs"), "{wire:?}");
         assert!(wire.detail.iter().any(|l| l.contains("makepad devhub land --wire-change")), "{wire:?}");
         // the AI bus's wire has no fingerprint: an unmarked change of it fails the same way, saying so
         assert_eq!((bus.state, bus.detail[0].as_str()), (St::Failed, "it changes the hosted wire: libs/ai/services/src/wire.rs"), "{bus:?}");
         assert!(bus.detail.iter().any(|l| l.contains("drop each other's tool calls")) && !bus.detail.iter().any(|l| l.contains("wire fingerprint")), "{bus:?}");
+        // micro_serde's encoding writes both wires' frames and no fingerprint hashes it: the same
+        assert_eq!((codec.state, codec.detail[0].as_str()), (St::Failed, "it changes the hosted wire: libs/micro_serde/src/serde_bin.rs"), "{codec:?}");
+        assert!(codec.detail.iter().any(|l| l.contains("misread each other's frames")) && !codec.detail.iter().any(|l| l.contains("wire fingerprint")), "{codec:?}");
         assert_eq!(plain.state, St::Landed, "{plain:?}");
+        // a transport of the AI bus defines no frame: its edit lands unmarked
+        assert_eq!(port.state, St::Landed, "{port:?}");
         assert!(!is_ancestor(&r, &rev(&r, "rc-wire").unwrap(), &rev(&r, "refs/heads/work").unwrap()), "work has no wire change");
         // marked, it lands, and says so
         assert!(ask("add rc-wire wire-change")[0].contains("\"id\":1"), "the same entry, now marked");

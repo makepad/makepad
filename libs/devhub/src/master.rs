@@ -518,6 +518,7 @@ impl Master {
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2), quiet_queue: None };
             // each new red leg runs once more at its tip: flaky goes to its owner (main, 11-18)
             let probe = Some(crate::orch::ci::leg_probe(repo.clone()));
+            crate::bucket::progress("ci", crate::orch::ci::bucket_progress);
             crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);

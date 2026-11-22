@@ -90,6 +90,15 @@ fn runs_jit(w: &[String]) -> bool {
     })
 }
 
+/// The command calls the bare `makepad` a run gets on its PATH (`exec.rs` job_makepad) with a word
+/// after it: in its words, or a shell's or Python's `-c` text (a script file it names is not
+/// read). A path to a binary of its own (`target/host/makepad`), or the word alone (`command -v
+/// makepad`), is no such call.
+#[cfg(feature = "checkout")]
+pub(super) fn calls_makepad(cmd: &[String]) -> bool {
+    words(&cmd.join(" ")).windows(2).any(|p| p[0] == "makepad" && p[1] != ";")
+}
+
 /// The command builds a tree it made: cargo after a `cd` into a `mktemp` dir of its own, an export
 /// under its own workspace manifest (another repository's tree, built as a fresh clone of it
 /// builds), which no JIT run of the lane's workspace stands in for. Such builds before each push
@@ -549,5 +558,15 @@ mod tests {
         assert_eq!(builds(&argv("bash drive.sh"), &script), vec![built("makepad-run", "build", ""), built("app", "run", "")]);
         let py = |_: &str| Some("subprocess.run([\"cargo\", \"test\", \"--release\", \"-p\", \"demo-model\"], check=True)".to_string());
         assert_eq!(builds(&argv("python3 t.py"), &py), vec![built("demo-model", "test", "")]);
+        // the bare `makepad` a run gets, called in a `-c` text: a gate unit's repro as a lane runs it
+        #[cfg(feature = "checkout")]
+        {
+            let c = |text: &str| calls_makepad(&["bash".to_string(), "-c".to_string(), text.to_string()]);
+            assert!(c("cd apps/x && MAKEPAD_HIDE_WINDOWS=1 timeout 240 makepad run --report-to r app -- --remote > out.log"));
+            assert!(c("echo a;makepad check app"), "after a separator");
+            assert!(!c("cat \"$(command -v makepad)\"") && !c("exit 0"), "the word alone, or none");
+            assert!(!c("./target/host/makepad run app"), "a binary of its own");
+            assert!(!calls_makepad(&argv("bash tools/run/fixture/land_gate.sh fast a b")), "a script file is not read");
+        }
     }
 }

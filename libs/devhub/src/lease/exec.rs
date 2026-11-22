@@ -166,6 +166,10 @@ pub struct BoxLook {
     /// the CI shards' asks out of both CI boxes while the test's other work held them, and the
     /// restart test timed out with no shard running (11-19).
     pub cpu: Arc<dyn Fn() -> Option<(f64, f64)> + Send + Sync>,
+    /// what a timed lease's looks count between them ([`Noise`], [`crate::top::ticks`]), and the
+    /// hub's pid among them
+    #[cfg(unix)]
+    pub ticks: Arc<dyn Fn() -> (crate::top::Ticks, u32) + Send + Sync>,
 }
 
 impl BoxLook {
@@ -181,13 +185,22 @@ impl BoxLook {
             }),
             gpu: Arc::new(crate::top::gpu_look),
             cpu: Arc::new(|| None),
+            #[cfg(unix)]
+            ticks: Arc::new(|| (crate::top::ticks(), std::process::id())),
         }
     }
 
     /// A box with nothing on it beyond the hub's leases: a test hub's.
     #[cfg(test)]
     pub(crate) fn quiet() -> BoxLook {
-        BoxLook { procs: Arc::new(|| (Vec::new(), 0)), moved_ago: Arc::new(|| None), gpu: Arc::new(|| None), cpu: Arc::new(|| Some((0.0, 0.0))) }
+        BoxLook {
+            procs: Arc::new(|| (Vec::new(), 0)),
+            moved_ago: Arc::new(|| None),
+            gpu: Arc::new(|| None),
+            cpu: Arc::new(|| Some((0.0, 0.0))),
+            #[cfg(unix)]
+            ticks: Arc::new(|| (crate::top::Ticks { at: Instant::now(), per_s: 100.0, procs: Default::default(), cpu: None }, 0)),
+        }
     }
 }
 
@@ -913,7 +926,7 @@ impl Lease {
 
 const START_KEYS: &[&str] = &[
     "id", "lane", "warms", "kind", "src", "rev", "cpu_target", "env", "needs",
-    "cost", "live", "loader", "priority", "gpu",
+    "cost", "live", "loader", "priority", "gpu", "unquiet",
 ];
 const START_COST_KEYS: &[&str] = &["cores", "ram_gb", "ram_max_gb", "weighed_gb", "peak_gb", "jit_jobs", "threads", "pool_cores"];
 
@@ -1157,6 +1170,9 @@ pub struct Exec {
     /// process groups to tell a run's own processes by)
     #[cfg(unix)]
     noise: Mutex<std::collections::HashMap<String, Noise>>,
+    /// the box at the timed leases' last look ([`box_look`]): what the next look counts from
+    #[cfg(unix)]
+    span: Mutex<Option<crate::top::Ticks>>,
     /// The AI hub process a timed run's quiet was asked of ([`Exec::hold_quiet`]): one that
     /// came back since (the WM started it again) holds none, and is asked again.
     quiet_hub: Mutex<Option<u32>>,
@@ -1610,18 +1626,33 @@ const BOX_EVERY: Duration = Duration::from_secs(10);
 /// ran beside its rustc at 808% and 576% of a core, 11-10).
 const MOVE_SETTLE: Duration = Duration::from_secs(10);
 
-/// What shared a timed lease's box, a look every [`BOX_EVERY`]: the load and the CPU (% of one
-/// core) of every process outside the lease's process groups and this hub. Its report carries it
-/// (`box`), so a noisy run is seen: a Mac's Spotlight indexed what builds wrote at 180% of a core
-/// under a timed lease (11-03).
+/// What shared a timed lease's box, a look every [`BOX_EVERY`]: the load, and the CPU (% of one
+/// core) outside the lease's process groups between looks, exact ([`crate::top::outside_between`]):
+/// each program's with what the children it waited for took, this hub's, and on Linux what no
+/// process showed (interrupts among it). Its report carries it (`box`), so a noisy run is seen: a
+/// Mac's Spotlight indexed what builds wrote at 180% of a core under a timed lease (11-03). Half
+/// a second's sample of the processes at each look missed what came and went between them: a GPU
+/// box's floor of 35% of a core read 10%, its AI hub's `nvidia-smi` runs (13%) unseen (11-22).
+/// Each look weighs by its span; a span begun before the lease's start is partly another's and
+/// counts not (`from`).
 #[cfg(unix)]
 #[derive(Default)]
 struct Noise {
     samples: u32,
+    /// the counted looks' spans, s
+    secs: f64,
     load1_max: f64,
+    /// what ran outside it (% of a core) times each span, and its most at a look
     outside_sum: f64,
     outside_max: f64,
-    by_name: BTreeMap<String, f64>,
+    /// by program: (its CPU, the part its waited-for children took) times each span
+    by_name: BTreeMap<String, (f64, f64)>,
+    /// this hub's own CPU times each span
+    hub_sum: f64,
+    /// Linux: (what no process showed, interrupts' part) times each span
+    unseen_sum: Option<(f64, f64)>,
+    /// from when its looks count: its start
+    from: Option<Instant>,
     /// a GPU timing's (`gpu` in its start): what it is judged by is the GPU used outside it
     /// ([`super::master::unquiet`])
     gpu: bool,
@@ -1634,14 +1665,23 @@ struct Noise {
 
 #[cfg(unix)]
 impl Noise {
-    fn add(&mut self, load1: f64, outside: &[(String, f64)]) {
-        let total: f64 = outside.iter().map(|(_, c)| c).sum();
+    fn add(&mut self, o: &crate::top::Outside) {
+        let total: f64 = o.by.iter().map(|b| b.1).sum();
         self.samples += 1;
-        self.load1_max = self.load1_max.max(load1);
-        self.outside_sum += total;
+        self.secs += o.secs;
+        self.load1_max = self.load1_max.max(o.load1);
+        self.outside_sum += total * o.secs;
         self.outside_max = self.outside_max.max(total);
-        for (name, cpu) in outside {
-            *self.by_name.entry(name.clone()).or_default() += cpu;
+        for (name, cpu, kids) in &o.by {
+            let e = self.by_name.entry(name.clone()).or_default();
+            e.0 += cpu * o.secs;
+            e.1 += kids * o.secs;
+        }
+        self.hub_sum += o.hub * o.secs;
+        if let Some((rest, irq)) = o.unseen {
+            let e = self.unseen_sum.get_or_insert((0.0, 0.0));
+            e.0 += rest * o.secs;
+            e.1 += irq * o.secs;
         }
     }
 
@@ -1654,22 +1694,28 @@ impl Noise {
         }
     }
 
-    /// `{"samples":n,"load1_max":x,"outside_cpu_pct":mean,"outside_cpu_pct_max":max,"busiest":[[name,mean],..]}`:
-    /// the five busiest outside processes by their mean over the looks; a GPU timing's adds
-    /// `"gpu":true`, and a Mac's the GPU outside it the same way (`outside_gpu_pct`,
-    /// `outside_gpu_pct_max`, `gpu_busiest`).
+    /// `{"samples":n,"secs":s,"load1_max":x,"outside_cpu_pct":mean,"outside_cpu_pct_max":max,
+    /// "busiest":[[name,mean,children's mean],..],"hub_cpu_pct":mean}`: the five busiest programs
+    /// outside it by their mean over its span; Linux's adds what no process showed
+    /// (`unseen_cpu_pct`, `irq_cpu_pct`); a GPU timing's adds `"gpu":true`, and a Mac's the GPU
+    /// outside it the same way (`outside_gpu_pct`, `outside_gpu_pct_max`, `gpu_busiest`).
     fn json(&self) -> String {
-        let top = |by: &BTreeMap<String, f64>, n: f64| {
-            let mut busiest: Vec<(&String, f64)> = by.iter().map(|(k, v)| (k, v / n)).collect();
-            busiest.sort_by(|a, b| b.1.total_cmp(&a.1));
-            busiest.iter().take(5).map(|(k, v)| format!("[{},{v:.0}]", json_str(k))).collect::<Vec<_>>().join(",")
-        };
-        let n = self.samples.max(1) as f64;
+        let s = self.secs.max(0.001);
+        let mut busiest: Vec<(&String, f64, f64)> = self.by_name.iter().map(|(k, (cpu, kids))| (k, cpu / s, kids / s)).collect();
+        busiest.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let busiest = busiest.iter().take(5).map(|(k, cpu, kids)| format!("[{},{cpu:.0},{kids:.0}]", json_str(k))).collect::<Vec<_>>().join(",");
+        let unseen = self.unseen_sum.map_or(String::new(), |(rest, irq)| format!(",\"unseen_cpu_pct\":{:.1},\"irq_cpu_pct\":{:.1}", rest / s, irq / s));
         let gpu = if self.gpu_samples == 0 { String::new() } else {
             let g = self.gpu_samples as f64;
-            format!(",\"outside_gpu_pct\":{:.1},\"outside_gpu_pct_max\":{:.1},\"gpu_busiest\":[{}]", self.gpu_sum / g, self.gpu_max, top(&self.gpu_by_name, g))
+            let mut by: Vec<(&String, f64)> = self.gpu_by_name.iter().map(|(k, v)| (k, v / g)).collect();
+            by.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let by = by.iter().take(5).map(|(k, v)| format!("[{},{v:.0}]", json_str(k))).collect::<Vec<_>>().join(",");
+            format!(",\"outside_gpu_pct\":{:.1},\"outside_gpu_pct_max\":{:.1},\"gpu_busiest\":[{by}]", self.gpu_sum / g, self.gpu_max)
         };
-        format!("{{\"samples\":{},\"load1_max\":{:.1},\"outside_cpu_pct\":{:.0},\"outside_cpu_pct_max\":{:.0},\"busiest\":[{}]{}{gpu}}}", self.samples, self.load1_max, self.outside_sum / n, self.outside_max, top(&self.by_name, n), if self.gpu { ",\"gpu\":true" } else { "" })
+        format!(
+            "{{\"samples\":{},\"secs\":{:.0},\"load1_max\":{:.1},\"outside_cpu_pct\":{:.0},\"outside_cpu_pct_max\":{:.0},\"busiest\":[{busiest}],\"hub_cpu_pct\":{:.1}{unseen}{}{gpu}}}",
+            self.samples, self.secs, self.load1_max, self.outside_sum / s, self.outside_max, self.hub_sum / s, if self.gpu { ",\"gpu\":true" } else { "" }
+        )
     }
 }
 
@@ -1685,8 +1731,10 @@ fn timed_box_loop(w: Weak<Exec>) {
     }
 }
 
-/// One look at the box for each timed lease's [`Noise`]; the processes of its runs' groups are
-/// its own work.
+/// One look at the box for each timed lease's [`Noise`]: what ran outside since the last look
+/// (the first look of a timed lease alone is its start's, [`Exec::first_span`]); the processes of
+/// its runs' groups are its own work. With no timed lease the span ends, so the next one's
+/// first span begins at its start.
 #[cfg(unix)]
 fn box_look(x: &Exec) {
     // each run's process group, by whose it is: the timed leases' own (""), another lease's
@@ -1699,15 +1747,25 @@ fn box_look(x: &Exec) {
         }).collect();
         (timed, groups)
     };
-    if timed.is_empty() { return; }
+    if timed.is_empty() {
+        *x.span.lock().unwrap() = None;
+        return;
+    }
     let whose = |pgid: u32| groups.get(&pgid).cloned();
-    let rows = crate::top::processes();
-    let (load1, outside) = crate::top::outside_in(&rows, &whose);
+    let look = x.opts.box_look.clone().unwrap_or_else(BoxLook::this_box);
+    let (now, me) = (look.ticks)();
+    let mut span = x.span.lock().unwrap();
+    let (Some(then), Some(now)) = (span.replace(now), span.as_ref()) else { return };
+    let (outside, rows) = crate::top::outside_between(&then, now, me, &whose);
+    drop(span);
     let gpu = crate::top::gpu_outside(&rows, &whose);
     let mut noise = x.noise.lock().unwrap();
     for id in &timed {
         let n = noise.entry(id.clone()).or_default();
-        n.add(load1, &outside);
+        if n.from.is_some_and(|from| then.at < from) {
+            continue;
+        }
+        n.add(&outside);
         if let Some((total, by)) = &gpu { n.add_gpu(*total, by); }
     }
 }
@@ -1930,14 +1988,18 @@ pub const SLOW_CPU_PCT: u64 = 50;
 /// [`IDLE_CPU_PCT`] of a core (and past 0.2 s), more than 1 MB read from or written to storage
 /// (not a socket's or a pipe's traffic: os/unix.rs `proc_activity`), or a process
 /// gone with what it had done. A hung JIT waits at 0% CPU (a CI test sat 50 min so, unseen,
-/// 11-04), or polls at 1%.
+/// 11-04), or polls at 1%. Its time waiting for a CPU counts as the CPU it wanted: on a box
+/// past its cores, a run at work gets a sliver of one. A stop's exit write starved so read as
+/// a run that sat, and was KILLed before it wrote (a gate's devhub tests beside a live session's
+/// builds, 18 tasks on 16 cores, 11-22); a leg starved so would read as slow.
 fn busy(from: os::Activity, to: os::Activity, over: Duration) -> bool {
     busy_past(from, to, over, IDLE_CPU_PCT)
 }
 
 /// [`busy`] with the CPU bound at `pct` of a core.
 fn busy_past(from: os::Activity, to: os::Activity, over: Duration, pct: u64) -> bool {
-    to.cpu_us < from.cpu_us || to.io_bytes < from.io_bytes || to.cpu_us - from.cpu_us > (over.as_micros() as u64 * pct / 100).max(200_000) || to.io_bytes - from.io_bytes > 1 << 20
+    let wanted = |a: os::Activity| a.cpu_us + a.wait_us;
+    to.cpu_us < from.cpu_us || to.io_bytes < from.io_bytes || wanted(to).saturating_sub(wanted(from)) > (over.as_micros() as u64 * pct / 100).max(200_000) || to.io_bytes - from.io_bytes > 1 << 20
 }
 
 /// No process walks under the lease table lock. Sum RSS at the same beat; scope high-water
@@ -2093,6 +2155,10 @@ fn merge_scope_cpu(mut split: crate::top::CpuSplit, scopes: &BTreeMap<String, f6
     });
     split.leases = leases.into_iter().collect();
     split.leases.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    // (a measured run scope's compilers are its lease's builds)
+    for b in &mut split.builds {
+        if let Some(id) = b.0.strip_prefix(SCOPE_CPU) { b.0 = id.to_string(); }
+    }
     split
 }
 
@@ -2112,7 +2178,7 @@ impl Exec {
         let units = unit_tag(&state);
         if scopes { os::reset_failed_units(&format!("devhub-jit-{units}-*")); }
         let x = Arc::new_cyclic(|_this| Exec { this: _this.clone(), machine: machine.to_string(), publish, dev: AtomicBool::new(true), dev_req: Default::default(), conf: std::sync::RwLock::new(conf), state, opts, scopes, units, leases: crate::held::Held::new("leases", BTreeMap::new()),
-            starting: crate::held::Held::new("lease start", ()), cleaning: Default::default(), series: Default::default(), dark_said: Default::default(), thermal: Default::default(), endings: Mutex::new(BTreeMap::new()), over_disk: Mutex::new(None), #[cfg(feature = "checkout")] store_builds: Default::default(), #[cfg(target_os = "linux")] memory_unexplained: AtomicBool::new(false), orphans: Default::default(), #[cfg(target_os = "linux")] scope_cpu: Default::default(), guard, disk_use: Default::default(), #[cfg(unix)] noise: Default::default(), quiet_hub: Mutex::new(None), timed_said: Default::default(), user: Default::default(), hand: Default::default(), restarting: AtomicBool::new(false), #[cfg(feature = "checkout")] hub_build: Default::default(), last_resident_gb: Mutex::new(0.0), trouble: Mutex::new(String::new()), master_seen: Mutex::new(Instant::now()), master_away_said: AtomicBool::new(false) });
+            starting: crate::held::Held::new("lease start", ()), cleaning: Default::default(), series: Default::default(), dark_said: Default::default(), thermal: Default::default(), endings: Mutex::new(BTreeMap::new()), over_disk: Mutex::new(None), #[cfg(feature = "checkout")] store_builds: Default::default(), #[cfg(target_os = "linux")] memory_unexplained: AtomicBool::new(false), orphans: Default::default(), #[cfg(target_os = "linux")] scope_cpu: Default::default(), guard, disk_use: Default::default(), #[cfg(unix)] noise: Default::default(), #[cfg(unix)] span: Default::default(), quiet_hub: Mutex::new(None), timed_said: Default::default(), user: Default::default(), hand: Default::default(), restarting: AtomicBool::new(false), #[cfg(feature = "checkout")] hub_build: Default::default(), last_resident_gb: Mutex::new(0.0), trouble: Mutex::new(String::new()), master_seen: Mutex::new(Instant::now()), master_away_said: AtomicBool::new(false) });
         #[cfg(all(windows, feature = "checkout"))]
         drop_aside();
         // what a hub that stopped left in the trash
@@ -2677,7 +2743,7 @@ impl Exec {
                 self.note_temps(&mut c);
                 c.ram_resident_gb = self.resident_gb();
                 let split = self.cpu_split();
-                (c.busy_leases, c.busy_outside) = (split.leases, split.outside);
+                (c.busy_leases, c.busy_outside, c.lease_builds) = (split.leases, split.outside, split.builds);
                 c.wait_leases = self.lease_waits(c.cpu_wait);
                 static GPU_LAST: Mutex<Option<(Instant, Vec<(u32, u64)>)>> = Mutex::new(None);
                 c.mac_gpu = crate::top::gpu_since(&GPU_LAST).map(|rates| {
@@ -2831,7 +2897,10 @@ impl Exec {
             let _ = std::fs::create_dir_all(self.quiet());
             let _ = std::fs::write(&mark, format!("timed lease {id} of {lane}\n"));
             quiet.0 = Some(mark);
-            if let Some(why) = self.builds_here().or_else(|| self.timed_waits(gpu)) {
+            // past its wait for a quiet box, its master starts it beside what runs outside every
+            // lease ([`super::sched::Sched::starts_unquiet`]): that holds it no longer here
+            let unquiet = v.get("unquiet").and_then(|u| u.as_str());
+            if let Some(why) = self.builds_here().or_else(|| self.timed_waits(gpu, unquiet.is_some())) {
                 // said once for each thing it waits on, not at each of the master's retries: the
                 // same reason with other seconds, pids or loads is the same thing
                 let what: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
@@ -2841,8 +2910,11 @@ impl Exec {
                 return err(format!("{why}: {}", super::TIMED_AFTER));
             }
             self.timed_said.lock().unwrap().remove(&id);
+            if let Some(beside) = unquiet {
+                self.emit("lease", Sev::Warn, format!("timed lease {id} of {lane} starts on {} beside work outside every lease, past its wait for a quiet box ({beside}): its release measures it", self.machine));
+            }
             #[cfg(unix)]
-            { self.noise.lock().unwrap().entry(id.clone()).or_default().gpu = gpu; }
+            self.first_span(&id, gpu);
             self.hold_quiet(&format!("timed lease {id} of {lane}"));
         }
         // a real lease preempts the background pre-warm at once (its processes are gone before
@@ -3185,7 +3257,9 @@ impl Exec {
         let argv = super::loaders::cargo_form(cmd.to_vec());
         if l.first_run.is_empty() { l.first_run = super::run_class(&l.lane, l.kind, &argv); }
         l.toolchain_own |= super::argv::changes_toolchain(&argv).is_some();
-        if l.src == Src::Overlay {
+        // an overlay's JIT run resolves its JIT first; any other command (a look, `run --look`:
+        // `ps`, a log's tail) runs as given in the overlay's run folder, as a tree lease's would
+        if l.src == Src::Overlay && super::loaders::cargo_run_args(&argv).is_some() {
             #[cfg(not(feature = "checkout"))]
             { return err("overlay: this node has no bare git store"); }
             #[cfg(feature = "checkout")]
@@ -3290,9 +3364,15 @@ impl Exec {
         if offline && found.loader.is_none() && super::loaders::cargo_run_args(&cmd.argv).is_some() {
             return err(format!("lease-run {id}: an offline run builds no JIT: {} holds none of this tree's yet, and its build would run outside the sandbox", self.machine));
         }
-        // no binary of its tree on the box: cargo's build of its JIT is a step of its own first
+        // no binary of its tree on the box: cargo's build of its JIT is a step of its own first,
+        // for a script that calls the bare `makepad` its run gets too ([`job_makepad`]): else that
+        // `makepad` is cargo's quiet build of the JIT on the run's cores, at every call (a gate
+        // present's repro sat silent for 300 s at it, its JIT not built yet, 11-22). An offline
+        // script keeps that build in its sandbox.
         #[cfg(feature = "checkout")]
-        if found.loader.is_none() && super::loaders::cargo_run_args(&cmd.argv).is_some() {
+        let script_jit = l.src != Src::Overlay && !offline && super::native::calls_makepad(&cmd.argv);
+        #[cfg(feature = "checkout")]
+        if found.loader.is_none() && (super::loaders::cargo_run_args(&cmd.argv).is_some() || script_jit) {
             let resolution = OverlayResolution { request: request_id, cwd: cwd.to_string(), argv: request, pending: String::new(), answer: None, reported: false, run: None };
             return self.jit_step(l, rel, cmd, found, (run_env, unset), resolution);
         }
@@ -3339,7 +3419,7 @@ impl Exec {
         #[cfg(feature = "checkout")]
         let (mut own, mut note) = (None, None);
         #[cfg(feature = "checkout")]
-        let loader = if loader.is_none() && l.work == super::tree::native_root(&conf.work, l.tree_lane()) && super::loaders::cargo_run_args(argv).is_some() {
+        let loader = if loader.is_none() && l.work == super::tree::native_root(&conf.work, l.tree_lane()) && (super::loaders::cargo_run_args(argv).is_some() || super::native::calls_makepad(argv)) {
             let asked = super::loaders::file_clock_now(&conf.work.join("dev/jit")).map_err(|e| format!("lease-run {id}: {e}"))?;
             if let Some(tree_key) = super::loaders::tree_id(&l.work) {
                 note = converted_note(&tree_key);
@@ -3546,7 +3626,9 @@ impl Exec {
     fn jit_step(&self, l: &mut Lease, rel: &Path, cmd: RunCommand, found: Found, env: (Vec<(String, String)>, Vec<String>), mut resolution: OverlayResolution) -> String {
         let id = l.id.clone();
         let Some(this) = self.this.upgrade() else { return err("lease-run: hub stopped") };
-        let Some(build) = super::loaders::cargo_build_argv(&cmd.argv) else { return err(format!("lease-run {id}: not the JIT's cargo run")) };
+        // (a script that calls the bare `makepad`: the build of what that runs)
+        let build = super::loaders::cargo_build_argv(&cmd.argv).or_else(|| super::native::calls_makepad(&cmd.argv).then(|| super::loaders::cargo_build_argv(&["makepad".to_string()])).flatten());
+        let Some(build) = build else { return err(format!("lease-run {id}: not the JIT's cargo run")) };
         let dir = match run_dir(l, rel) {
             Ok(dir) => dir,
             Err(e) => return err(e),
@@ -3963,6 +4045,24 @@ impl Exec {
         None
     }
 
+    /// A timed lease's start ([`Noise`]): its looks count from now, and with no other timed
+    /// lease's looks running here its first span begins now, so a run of a few seconds is
+    /// measured too.
+    #[cfg(unix)]
+    fn first_span(&self, id: &str, gpu: bool) {
+        {
+            let mut noise = self.noise.lock().unwrap();
+            let n = noise.entry(id.to_string()).or_default();
+            n.gpu = gpu;
+            n.from.get_or_insert_with(Instant::now);
+        }
+        let mut span = self.span.lock().unwrap();
+        if span.is_none() {
+            let look = self.opts.box_look.clone().unwrap_or_else(BoxLook::this_box);
+            *span = Some((look.ticks)().0);
+        }
+    }
+
     /// `lease-box <id>`: what shared a timed lease's box so far ([`Noise`]), null before its first
     /// look: its job's result says whether it was quiet before its release, which a series' next
     /// job's start waits for.
@@ -3981,8 +4081,9 @@ impl Exec {
     /// running under a timed gate, 11-10), as its [`BoxLook`] sees the box: the start comes once
     /// the box is quiet again. A GPU timing (`gpu`) waits for its GPU in place of that CPU: busy
     /// [`super::master::NOISY_GPU_PCT`] or more, its users named among what runs outside every
-    /// lease. Nothing is stopped.
-    fn timed_waits(&self, gpu: bool) -> Option<String> {
+    /// lease. Nothing is stopped. Past its wait for a quiet box (`unquiet`: its master starts it
+    /// beside that work) only a move and a compiler outside every lease hold it: those end soon.
+    fn timed_waits(&self, gpu: bool, unquiet: bool) -> Option<String> {
         let look = self.opts.box_look.clone().unwrap_or_else(BoxLook::this_box);
         if let Some(ago) = (look.moved_ago)().filter(|d| *d < MOVE_SETTLE) {
             return Some(format!("its deployment moved {:.1} s ago under the apps that run from it, which take the move", ago.as_secs_f64()));
@@ -3993,6 +4094,7 @@ impl Exec {
         let (rows, me) = (look.procs)();
         let busy = crate::top::compilers_among(&rows, me, &|pgid| groups.get(&pgid).cloned());
         if !busy.is_empty() { return Some(format!("{} outside every lease", busy.join(", "))); }
+        if unquiet { return None; }
         if gpu {
             let rates = (look.gpu)()?;
             let (pct, on) = crate::top::gpu_split(&rates, &rows, me, &|pgid| groups.contains_key(&pgid).then(String::new));
@@ -5968,6 +6070,11 @@ pub fn user_watching() -> bool {
     EXEC.get().is_some_and(|x| x.user.lock().unwrap().watched())
 }
 
+/// A Desk Link viewer shows this node now, input or not ([`super::user::UserTrack::shown`]).
+pub fn viewer_shows() -> bool {
+    EXEC.get().is_some_and(|x| x.user.lock().unwrap().shown())
+}
+
 /// [`user_watching`], said as what a restart waits on.
 pub fn watched_said() -> Option<String> {
     user_watching().then(|| format!("someone watches this node's screen (a Desk Link viewer showing it, or its own devices; input within {} min)", super::user::VIEWER_HOLDS_MIN))
@@ -5990,6 +6097,21 @@ pub fn user_blockers() -> Vec<String> {
     return makepad_app_registry::machine::unsaved_work().into_iter().map(|(pid, app, what)| format!("unsaved work in {app} (pid {pid}): {what}")).collect();
     #[cfg(not(all(unix, feature = "checkout")))]
     Vec::new()
+}
+
+/// Whether app process `pid` has unsaved work ([`user_blockers`]).
+pub fn unsaved_in(pid: u32) -> bool {
+    #[cfg(all(unix, feature = "checkout"))]
+    return makepad_app_registry::machine::unsaved_work().into_iter().any(|(p, _, _)| p == pid);
+    #[cfg(not(all(unix, feature = "checkout")))]
+    { let _ = pid; false }
+}
+
+/// A dev box: its dev switch on and its role no user's ([`super::Role::users`]). It always runs
+/// the latest (the user, 11-22: "yes all dev linux boxes can always update to latest"): its WM
+/// and its apps restart for a landing whatever a person has open there ([`crate::sync::serve`]).
+pub fn dev_box() -> bool {
+    EXEC.get().is_some_and(|x| !x.conf.read().unwrap().role.users()) && writes_allowed()
 }
 
 /// The user flips this node's dev switch on the node itself (tray / task view): shown at once,
@@ -6652,6 +6774,8 @@ mod tests {
         // (a build admitted on fewer cores than it measures is told its jobs)
         let mut l = sched.get(&id).unwrap().clone();
         l.jit_jobs = Some(3);
+        // (a timed start past its wait for a quiet box hears what it starts beside)
+        l.unquiet = Some("box: 67% of a core runs outside its leases".into());
         let line = super::super::master::lease_start_line(&l, "null", l.run_cores(), 2.0, Some(3.0), Some(4), Some(5));
         let json = line.strip_prefix("lease-start ").unwrap();
         let v = makepad_strict_json::parse(json.as_bytes()).unwrap();
@@ -6735,16 +6859,67 @@ mod tests {
         assert_eq!(conf_set_args("role=bench".split_whitespace()), (vec![("role".into(), "bench".into())], None));
     }
 
-    /// A timed lease's box report: the outside CPU's mean and peak over the looks, and the busiest
-    /// outside processes by their mean.
+    /// A timed lease's box report: the outside CPU's mean and peak over the looks, each look
+    /// weighed by its span, the busiest programs outside it by their mean with what their
+    /// waited-for children took, the hub's and what no process showed. Its looks count from its
+    /// start: the first span begins there when no other timed lease's looks run, and a span begun
+    /// before it is not its own; with no timed lease the span ends.
     #[cfg(unix)]
     #[test]
     fn a_timed_box_report_names_what_shared_it() {
+        let o = |load1: f64, secs: f64, by: &[(&str, f64, f64)], hub: f64, unseen: Option<(f64, f64)>| crate::top::Outside { secs, load1, by: by.iter().map(|(n, c, k)| (n.to_string(), *c, *k)).collect(), hub, unseen };
+        let line = |n: &Noise| super::super::master::box_line(&makepad_strict_json::parse(n.json().as_bytes()).unwrap());
         let mut n = Noise::default();
-        n.add(20.0, &[("mds_stores".into(), 180.0), ("XprotectService".into(), 40.0)]);
-        n.add(27.0, &[("mds_stores".into(), 60.0)]);
-        let v = makepad_strict_json::parse(n.json().as_bytes()).unwrap();
-        assert_eq!(super::super::master::box_line(&v), "load1 max 27.0; outside it 140% of a core (max 220%): mds_stores 120%, XprotectService 20%");
+        n.add(&o(20.0, 10.0, &[("mds_stores", 180.0, 0.0), ("XprotectService", 40.0, 0.0)], 2.0, None));
+        n.add(&o(27.0, 10.0, &[("mds_stores", 60.0, 0.0)], 4.0, None));
+        assert_eq!(line(&n), "load1 max 27.0; outside it 140% of a core (max 220%): mds_stores 120%, XprotectService 20%; its hub 3%");
+        // a GPU box's floor (11-22): its AI hub's nvidia-smi runs are its children's part, and a
+        // look of 30 s weighs three of 10 s
+        let mut l = Noise::default();
+        let aihub = "makepad-app-aihub (under makepad-app-wm)";
+        l.add(&o(2.0, 10.0, &[(aihub, 17.0, 13.0), ("kcompactd0", 5.0, 0.0)], 0.7, Some((4.0, 4.0))));
+        l.add(&o(1.0, 30.0, &[(aihub, 17.0, 13.0)], 0.7, Some((8.0, 4.0))));
+        assert_eq!(line(&l), format!("load1 max 2.0; outside it 18% of a core (max 22%): {aihub} 17% (13% in its child processes), kcompactd0 1%; its hub 1%; no process showed 7% (interrupts 4%)"));
+        assert_eq!(super::super::master::unquiet(&makepad_strict_json::parse(l.json().as_bytes()).unwrap()), None);
+
+        // a hub's looks: an outside process's CPU grows 10 ticks at each look
+        const HUB: u32 = 5_000_000;
+        let looks = Arc::new(AtomicU64::new(0));
+        let n2 = looks.clone();
+        let look = BoxLook {
+            ticks: Arc::new(move || {
+                let k = n2.fetch_add(1, Ordering::AcqRel) + 1;
+                let procs = [(5_000_100, crate::top::ProcTicks { name: "indexer".into(), ppid: 1, pgid: 5_000_100, own: 10 * k, ..Default::default() })].into_iter().collect();
+                (crate::top::Ticks { at: Instant::now(), per_s: 100.0, procs, cpu: Some((20 * k, 0)) }, HUB)
+            }),
+            ..BoxLook::quiet()
+        };
+        let (x, base, _) = test_exec("timed-box", Opts { scopes: Some(false), box_look: Some(look), ..Opts::default() });
+        let start = |id: &str| x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"timedl","kind":"timed","rev":null}}"#));
+        let samples = |id: &str| x.noise.lock().unwrap().get(id).map_or(0, |n| n.samples);
+        assert!(!start("T1")[0].contains("\"err\""));
+        assert_eq!(looks.load(Ordering::Acquire), 1, "its first span begins at its start");
+        box_look(&x);
+        assert_eq!(samples("T1"), 1);
+        assert!(!start("T2")[0].contains("\"err\""));
+        assert_eq!(looks.load(Ordering::Acquire), 2, "T1's looks run: T2's start begins no span");
+        box_look(&x);
+        assert_eq!((samples("T1"), samples("T2")), (2, 0), "a span begun before T2's start is not T2's");
+        box_look(&x);
+        assert_eq!((samples("T1"), samples("T2")), (3, 1));
+        let b = x.noise.lock().unwrap()["T1"].json();
+        let v = makepad_strict_json::parse(b.as_bytes()).unwrap();
+        let busiest = super::super::master::strs(v.get("busiest").and_then(|a| a.as_arr()).and_then(|a| a.first()));
+        assert_eq!(busiest.first().map(String::as_str), Some("indexer"), "{b}");
+        assert!(v.get("unseen_cpu_pct").is_some() && v.get("hub_cpu_pct").is_some(), "{b}");
+        assert!(x.handle("lease-end", "T1 released")[0].contains("\"box\":{\"samples\":3,"));
+        assert!(x.handle("lease-end", "T2 released")[0].contains("\"box\":{\"samples\":1,"));
+        box_look(&x);
+        assert!(x.span.lock().unwrap().is_none(), "no timed lease: the span ends");
+        assert!(!start("T3")[0].contains("\"err\""));
+        assert!(x.span.lock().unwrap().is_some(), "the next timed lease's first span begins at its start");
+        assert!(!x.handle("lease-end", "T3 released")[0].contains("\"box\""), "ended before its first look: no figure");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -7110,7 +7285,8 @@ mod tests {
     /// `jit`, its run 1), then the command runs on the binary built (run 2), cargo's output before
     /// its own. The lease's class names that build ([`super::super::JIT_BUILD_RUN`]); a run of
     /// anything else keeps its own. A build that fails is the answer's run: cargo's output and
-    /// exit. (Its cargo builds a stand-in `makepad-run` of a few lines here.)
+    /// exit. A script that calls the bare `makepad` its run gets builds it the same way first.
+    /// (Its cargo builds a stand-in `makepad-run` of a few lines here.)
     #[cfg(all(unix, feature = "checkout"))]
     #[test]
     fn a_jit_run_with_no_kept_binary_builds_it_as_a_step_first() {
@@ -7190,11 +7366,29 @@ mod tests {
         let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap_or_else(|| panic!("{r:?}")) as u32;
         assert_eq!(log_until_exit(&x, "J2", n).1, 0);
         assert!(!class("J2").ends_with(super::super::JIT_BUILD_RUN), "{}", class("J2"));
+        // a script that calls the bare `makepad` its run gets: the same build first, then that
+        // `makepad` is what was built (it was cargo's quiet build at the call, silent for minutes)
+        x.handle("lease-start", r#"{"id":"J5","lane":"jitscript","kind":"test","rev":null}"#);
+        stand_in("J5", "fn main() { println!(\"stand-in JIT {:?}\", std::env::args().skip(1).collect::<Vec<_>>()); }\n");
+        let line = format!("J5 . {} {{\"request_id\":\"q5\"}}", b64(&["sh", "-c", "echo before; makepad --version"]));
+        let first = x.handle("lease-run", &line)[0].clone();
+        assert!(first.contains("cargo builds this tree's JIT first;"), "a script's makepad is built as a step: {first}");
+        let t = Instant::now();
+        let n = loop {
+            let a = x.handle("lease-run", &line)[0].clone();
+            if !a.contains("\"pending\"") { break field(&a, "n").and_then(|v| super::super::num(&v)).unwrap_or_else(|| panic!("{a}")) as u32; }
+            assert!(t.elapsed() < Duration::from_secs(600), "still {a}");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let (text, code) = log_until_exit(&x, "J5", n);
+        assert_eq!(code, 0, "{text}");
+        let ran = text.find("stand-in JIT [\"--version\"]").unwrap_or_else(|| panic!("the script's makepad ran what was built: {text}"));
+        assert!(text.find("devhub: cargo built this tree's JIT").is_some_and(|b| b < ran), "the build first: {text}");
         // what its build held is measured apart from its command, for a lease that built one only
         let peak = |id: &str| { let r = x.handle("lease-end", &format!("{id} released"))[0].clone(); field(&r, "jit_peak_gb").and_then(|v| super::super::num(&v)) };
         assert!(peak("J1").is_some_and(|gb| gb > 0.0), "J1 built");
         assert_eq!(peak("J2"), None, "J2 built nothing");
-        for id in ["J3", "J4"] { x.handle("lease-end", &format!("{id} released")); }
+        for id in ["J3", "J4", "J5"] { x.handle("lease-end", &format!("{id} released")); }
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -7263,7 +7457,7 @@ mod tests {
     fn a_calls_meter_takes_its_peak_by_window_and_its_mean_over_the_call() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let cpu = |us: u64| os::Activity { cpu_us: us, io_bytes: 0 };
+        let cpu = |us: u64| os::Activity { cpu_us: us, ..Default::default() };
         // the launch: a core for 2 s, then nothing for a second
         let mut m = CallMeter::new(true, t0, cpu(0));
         m.look(at(1_000), cpu(1_000_000));
@@ -7603,7 +7797,7 @@ mod tests {
         x.handle("lease-start", r#"{"id":"Q1","lane":"quiet","kind":"test","rev":null}"#);
         let t0 = Instant::now();
         let quiet = |secs: u64, done: Option<(f64, u64)>| {
-            let look = done.map(|(cpu_s, io_bytes)| os::Activity { cpu_us: (cpu_s * 1e6) as u64, io_bytes });
+            let look = done.map(|(cpu_s, io_bytes)| os::Activity { cpu_us: (cpu_s * 1e6) as u64, io_bytes, ..Default::default() });
             let samples = BTreeMap::from([("Q1".to_string(), (None, None, look))]);
             let a = x.beat_from("Q1", &samples, t0 + Duration::from_secs(secs));
             let v = makepad_strict_json::parse(a.as_bytes()).unwrap();
@@ -7621,6 +7815,18 @@ mod tests {
         assert_eq!(quiet(800, Some((32.0, 8 << 20))), (Some(0), Some(60)), "a fifth of a core: at work, but slow");
         assert_eq!(quiet(820, Some((80.0, 8 << 20))), (Some(0), Some(0)), "past half a core since the slow start: at work");
         assert_eq!(quiet(830, None), (None, None), "a look that cannot measure ends the quiet");
+        // on a box past its cores: its wait for a CPU is the CPU it wanted
+        let starved = |secs: u64, cpu_s: f64, wait_s: f64| {
+            let look = os::Activity { cpu_us: (cpu_s * 1e6) as u64, io_bytes: 8 << 20, wait_us: (wait_s * 1e6) as u64 };
+            let samples = BTreeMap::from([("Q1".to_string(), (None, None, Some(look)))]);
+            let a = x.beat_from("Q1", &samples, t0 + Duration::from_secs(secs));
+            let v = makepad_strict_json::parse(a.as_bytes()).unwrap();
+            let of = |k: &str| v.get("info").and_then(|i| i.get("Q1")).and_then(|i| i.get(k)).and_then(|s| s.as_u64());
+            (of("idle_s"), of("slow_s"))
+        };
+        assert_eq!(starved(840, 80.0, 0.0), (Some(0), Some(0)), "the first look starts the quiet");
+        assert_eq!(starved(900, 83.0, 55.0), (Some(0), Some(0)), "3 s of CPU in a minute it spent 55 s waiting for one: at work, neither quiet nor slow");
+        assert_eq!(starved(960, 84.0, 56.0), (Some(60), Some(60)), "a poller's short waits for a CPU are still nothing");
         x.handle("lease-end", "Q1 released");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -7693,6 +7899,7 @@ mod tests {
             leases: vec![(format!("{SCOPE_CPU}L1"), 0.2), ("L1".into(), 0.5), ("L2".into(), 0.25)],
             outside: vec![("test child".into(), 101, 1.0), ("leftover".into(), 102, 0.8), ("other".into(), 103, 0.6)],
             apps: vec![(103, "other".into())],
+            builds: vec![(format!("{SCOPE_CPU}L1"), 3.0, "makepad_widgets".into())],
         };
         let scopes = BTreeMap::from([("L1".to_string(), 4.5)]);
         let scope_lease = |pid, measured| match pid {
@@ -7704,6 +7911,7 @@ mod tests {
         let here = |id: &str| matches!(id, "L1" | "L2");
         let merged = merge_scope_cpu(ticks.clone(), &scopes, &|pid| scope_lease(pid, true), &live, &here);
         assert_eq!(merged.leases, vec![("L1".into(), 5.0), ("L2".into(), 0.25)], "4.5 scoped cores plus 0.5 store-group cores; no second count of the scope's ticks or detached child");
+        assert_eq!(merged.builds, vec![("L1".into(), 3.0, "makepad_widgets".into())], "a measured scope's compilers are its lease's builds");
         assert_eq!(merged.outside, vec![("leftover (left by ended lease L3)".into(), 102, 0.8), ("other".into(), 103, 0.6)], "a live scope is no outside work; ended and unrelated work stay");
         // the same leftover while its lease still runs: its run ended, not its lease (L1446804's JIT,
         // left by its live test's restart, was said "left by ended lease" while that lease ran, 11-19)
@@ -8297,12 +8505,11 @@ mod tests {
         g(&["bundle", "create", "-q", &bundle.to_string_lossy(), "refs/heads/work"]);
         store.fetch_bundle(&bundle, "work").unwrap();
         store.set_ref(crate::sync::git::SYNCED_REF, &pin).unwrap();
-        let (x, exec_base, _) = test_exec("own-sources", Opts::default());
+        let (x, exec_base, _) = test_exec("own-sources", Opts { scopes: Some(false), ..Opts::default() });
         std::fs::create_dir_all(x.conf().work.join("dev/git")).unwrap();
 
-        let ship = |id: &str, files: &[(&str, &str)], deleted: &[&str]| {
-            let a = x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"lanex","kind":"test","src":"overlay","rev":{{"makepad":"{pin}","commercial":null}}}}"#));
-            assert!(!a[0].starts_with("{\"err\""), "{a:?}");
+        // a ship into a lease that holds one already: a live save
+        let save = |id: &str, files: &[(&str, &str)], deleted: &[&str]| {
             let staged = x.leases.lock().unwrap()[id].tmp.join("ship");
             std::fs::create_dir_all(&staged).unwrap();
             for (p, text) in files { std::fs::write(staged.join(p), text).unwrap(); }
@@ -8312,6 +8519,11 @@ mod tests {
             let d = x.handle("ship-done", &format!("{id} {}", makepad_network::digest::base64_encode(body.as_bytes())));
             assert!(d[0].contains(&format!("\"overlay\":{}", files.len() + deleted.len())), "{d:?}");
             d[0].clone()
+        };
+        let ship = |id: &str, files: &[(&str, &str)], deleted: &[&str]| {
+            let a = x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"lanex","kind":"test","src":"overlay","rev":{{"makepad":"{pin}","commercial":null}}}}"#));
+            assert!(!a[0].starts_with("{\"err\""), "{a:?}");
+            save(id, files, deleted)
         };
         let one = ship("O1", &[("a.rs", "one a"), ("b.rs", "one b")], &[]);
         let two = ship("O2", &[("a.rs", "two a"), ("c.rs", "two c")], &["b.rs"]);
@@ -8323,6 +8535,31 @@ mod tests {
         assert_eq!(gone("O1"), "", "the second's deletion is not the first's");
         assert_eq!((read("O2", "a.rs").as_deref(), read("O2", "b.rs"), read("O2", "c.rs").as_deref()), (Some("two a"), None, Some("two c")));
         assert_eq!(gone("O2"), "b.rs\n");
+        // what the program writes in its virtual folders is in its overlay, with the VFS's record
+        // (`new`) or whiteout of it: a save's ship takes back only what an earlier ship put there
+        // and this one does not ship (c.rs, b.rs's whiteout), never the program's own (a live
+        // session lost its asset store and its game's session at its next save, 11-22)
+        let own = edits("O2").join("local/store/objects/x1");
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(&own, "the app's").unwrap();
+        std::fs::create_dir_all(edits("O2").join("local/session/w1")).unwrap();
+        let ledger = |id: &str| std::fs::read_to_string(edits(id).join(".makepad-run-edits")).unwrap_or_default();
+        std::fs::write(edits("O2").join(".makepad-run-edits"), ledger("O2") + "local/store/objects/x1\tnew\n").unwrap();
+        std::fs::write(edits("O2").join(".makepad-run-deleted"), gone("O2") + "z.rs\n").unwrap();
+        save("O2", &[("a.rs", "three a")], &[]);
+        assert_eq!((read("O2", "a.rs").as_deref(), read("O2", "c.rs")), (Some("three a"), None), "the save's file, and the earlier ship's it does not ship is gone");
+        assert_eq!(read("O2", "local/store/objects/x1").as_deref(), Some("the app's"), "the program's file stays");
+        assert!(edits("O2").join("local/session/w1").is_dir(), "and the folder it made");
+        assert!(ledger("O2").lines().any(|l| l == "local/store/objects/x1\tnew") && ledger("O2").lines().any(|l| l.starts_with("a.rs\t")) && !ledger("O2").contains("c.rs"), "the program's record beside the ship's: {}", ledger("O2"));
+        assert_eq!(gone("O2"), "z.rs\n", "the program's whiteout stays; the earlier ship's goes");
+        // a look (`run --look`): a command that is no JIT cargo run runs as given, in the overlay's
+        // run folder (a node refused it: "overlay: run requires the JIT cargo invocation", 11-22)
+        if cfg!(unix) {
+            let r = x.handle("lease-run", &format!("O2 . {}", b64(&["sh", "-c", "echo look"])));
+            let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap_or_else(|| panic!("a look runs on an overlay: {r:?}")) as u32;
+            let (log, exit) = log_until_exit(&x, "O2", n);
+            assert_eq!((log.trim_end().lines().last(), exit), (Some("look"), 0), "{log}");
+        }
         // each says which source it took: the same files say the same, whichever lease ships them
         let source = |answer: &str| field(answer, "source").and_then(|s| s.as_str().map(str::to_string)).unwrap_or_default();
         assert!(!source(&one).is_empty() && source(&one) != source(&two), "{one} {two}");
@@ -8335,7 +8572,7 @@ mod tests {
         let t = Instant::now();
         while first.exists() && t.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(20)); }
         assert!(!first.exists(), "its folder left with it");
-        assert_eq!(read("O2", "a.rs").as_deref(), Some("two a"));
+        assert_eq!(read("O2", "a.rs").as_deref(), Some("three a"));
         x.handle("lease-end", "O2 released");
         x.handle("lease-end", "O3 released");
         let _ = std::fs::remove_dir_all(&base);
@@ -9525,7 +9762,7 @@ mod tests {
         let moved = Arc::new(Mutex::new(Some(Duration::from_secs(2))));
         let gpu = Arc::new(Mutex::new(None::<Vec<(u32, f64)>>));
         let (r2, m2, g2) = (rows.clone(), moved.clone(), gpu.clone());
-        let look = BoxLook { procs: Arc::new(move || (r2.lock().unwrap().clone(), HUB)), moved_ago: Arc::new(move || *m2.lock().unwrap()), gpu: Arc::new(move || g2.lock().unwrap().clone()), cpu: Arc::new(|| None) };
+        let look = BoxLook { procs: Arc::new(move || (r2.lock().unwrap().clone(), HUB)), moved_ago: Arc::new(move || *m2.lock().unwrap()), gpu: Arc::new(move || g2.lock().unwrap().clone()), cpu: Arc::new(|| None), ..BoxLook::quiet() };
         let (x, base, events) = test_exec("timed-look", Opts { scopes: Some(false), box_look: Some(look), ..Opts::default() });
         let start = r#"{"id":"T1","lane":"timedl","kind":"timed","rev":null}"#;
         let said = || events.lock().unwrap().iter().filter(|l| l.contains("timed lease T1 of timedl waits on t:")).count();
@@ -9554,6 +9791,13 @@ mod tests {
         let answer = x.handle("lease-start", start);
         assert!(answer[0].contains("67% of a core runs outside every lease (WindowServer 34%, coreaudiod 18%, Musicplayer 13%)"), "a desktop left running: {answer:?}");
         assert_eq!(said(), 3, "the desktop, said once");
+        // past its wait for a quiet box its master starts it beside that work, said as a warning
+        let anyway = r#"{"id":"T2","lane":"timedl","kind":"timed","unquiet":"t: 67% of a core runs outside its leases","rev":null}"#;
+        let answer = x.handle("lease-start", anyway);
+        assert!(!answer[0].contains("\"err\""), "its master's bound starts it beside the desktop: {answer:?}");
+        let beside = "timed lease T2 of timedl starts on t beside work outside every lease, past its wait for a quiet box (t: 67% of a core runs outside its leases)";
+        assert!(events.lock().unwrap().iter().any(|l| l.contains(beside)), "{:?}", events.lock().unwrap());
+        x.handle("lease-end", "T2 released");
         // a GPU timing waits for per-process GPU use outside every lease, not for their CPU
         let gpu_start = r#"{"id":"G1","lane":"gpul","kind":"timed","gpu":true,"rev":null}"#;
         *gpu.lock().unwrap() = Some(vec![(5_000_030, 4.0), (5_000_032, 30.0), (5_000_020, 80.0)]);
