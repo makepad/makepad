@@ -35,6 +35,14 @@ use super::{alpha, darker, CtrlState, ShellTokens};
 #[cfg(target_os = "linux")]
 #[path = "panels_linux.rs"]
 mod linux;
+
+/// The restart row's words and its confirm step's, by what happens to the apps: a keeping WM's
+/// restart leaves them open and the new WM takes them back (`adopt::leaves_apps`); a WM that keeps
+/// nothing closes them.
+#[cfg(target_os = "linux")]
+pub(crate) fn restart_row_label(keeps_apps: bool) -> (&'static str, &'static str) {
+    if keeps_apps { ("Restart desktop (apps stay open)", "Apps stay open") } else { ("Restart desktop now \u{b7} apps will close", "Apps will close") }
+}
 /// The temperature tray's flyout.
 #[path = "temps_panel.rs"]
 mod temps_view;
@@ -668,6 +676,11 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pub restart_waiting: bool,
+    /// The WM keeps its apps through its restart (`adopt::leaves_apps`): the restart row says
+    /// they stay open, else that they close (`restart_row_label`).
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub restart_keeps_apps: bool,
     /// The saved render-on GPU (`None` is Auto): the WM's working layout,
     /// so a pick shows at once. The render-on list checks it.
     #[cfg(target_os = "linux")]

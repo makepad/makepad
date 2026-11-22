@@ -90,8 +90,9 @@ impl App {
         }
     }
 
-    pub(crate) fn launch_domain(&mut self, cx: &mut Cx, app: &clients::AppDef) {
-        let client = self.start_domain_client(cx, app, &[], false);
+    /// `extra`: the asking app's launch arguments (`WmRequest::Launch`), after the app's own.
+    pub(crate) fn launch_domain(&mut self, cx: &mut Cx, app: &clients::AppDef, extra: &[String]) {
+        let client = self.start_domain_client(cx, app, extra, false);
         self.seat_domain(cx, client);
     }
 
@@ -167,7 +168,12 @@ impl App {
             let l = self.state_mut().layout_of(client);
             l.workspace_of(client) == Some(l.active)
         };
-        if shown { self.focus_client(cx, client); } else { self.pending_focus = None; }
+        if shown {
+            log!("wm: client {client}'s pending focus lands at its window");
+            self.focus_client(cx, client);
+        } else {
+            self.drop_pending_focus("its window came on a workspace not shown");
+        }
     }
 
     pub(crate) fn domain_event(&mut self, cx: &mut Cx, event: &Event) {

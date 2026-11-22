@@ -123,7 +123,7 @@ use std::collections::{HashMap, HashSet};
 
 use binds::{match_bind_armed, WmAction};
 use desk::{WmDesk, WmDeskAction, WmState};
-use clients::{spawn_client, ClientLine, LaunchPolicy, WarmPool, WarmStatus};
+use clients::{closes_at_shutdown, spawn_client, ClientLine, LaunchPolicy, WarmPool, WarmStatus};
 use makepad_app_registry::{BuildPolicy, LaunchEvent};
 use makepad_app_registry::machine::Launcher;
 use makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
@@ -618,6 +618,11 @@ pub struct App {
     /// its exit is 75, which its unit restarts.
     #[rust]
     session_restart: bool,
+    /// A termination signal asked this WM to quit (SIGTERM: a deploy's or `devhub wm-restart`'s
+    /// unit restart, a `systemctl stop`): the node's keeping WM then goes away for a next one and
+    /// leaves its apps waiting (`adopt::leaves_apps`).
+    #[rust]
+    quit_by_signal: bool,
     /// What the session restart waits for, as last told.
     #[rust]
     session_restart_said: Option<String>,
@@ -1111,7 +1116,7 @@ impl App {
     }
 
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
-        self.open_app(cx, app_id, false, None);
+        self.open_app(cx, app_id, false, None, &[]);
     }
 
     /// `native`: the app's compiled build, whatever runs it otherwise (`devhub show --native`): as
@@ -1119,7 +1124,12 @@ impl App {
     /// `by`: who asks (the WM socket's devhub `show`); else an agent when the input being handled
     /// was injected over remote, else the person at the WM. Its process's log and, an agent's,
     /// its environment say so (`clients::note_launcher`).
-    fn open_app(&mut self, cx: &mut Cx, app_id: &str, native: bool, by: Option<Launcher>) {
+    /// `args`: what the asking app wants the new one started with (`WmRequest::Launch`: Files'
+    /// "Open in Terminal" asks for `--cwd <its folder>`). A `--cwd` among them is the launch's
+    /// folder, which the WM passes as it passes an inherited one ([`launch_request`]); the rest
+    /// follow the app's own arguments. A launch with arguments takes no warm instance: none was
+    /// started with them.
+    fn open_app(&mut self, cx: &mut Cx, app_id: &str, native: bool, by: Option<Launcher>, args: &[String]) {
         let by = by.unwrap_or_else(|| match cx.injected_by() {
             Some(who) => Launcher::Agent(who),
             None => Launcher::Person("at the WM".to_string()),
@@ -1167,7 +1177,7 @@ impl App {
 
         #[cfg(not(target_arch = "wasm32"))]
         if self.domains.enabled && !native {
-            self.launch_domain(cx, app);
+            self.launch_domain(cx, app, args);
             return;
         }
 
@@ -1191,13 +1201,14 @@ impl App {
 
         // THE POOL: a standby instance of this app becomes the window now,
         // already drawn, and the pool tops itself back up behind it.
-        if !native && self.adopt_warm(cx, app_id, &by) {
+        if !native && args.is_empty() && self.adopt_warm(cx, app_id, &by) {
             return;
         }
 
         let id = self.next_id;
         self.next_id += 1;
-        let cwd = self.launch_cwd(app_id, true);
+        let (asked_cwd, extra) = launch_request(args);
+        let cwd = asked_cwd.or_else(|| self.launch_cwd(app_id, true));
         let runner = if native { makepad_app_registry::Runner::Native } else { self.apps.runner(app_id) };
         let state = self.state_mut();
         let term_env = state.term_env.clone();
@@ -1210,7 +1221,7 @@ impl App {
         clients::note_launcher(id, by.clone());
         let spawned = spawn_client(
             &pool, &cx.thread_spawner(), app, id, hub_port, cwd.as_ref(),
-            (app.id == "terminal").then_some(term_env.as_str()), &[], false, policy, runner, lines,
+            (app.id == "terminal").then_some(term_env.as_str()), &extra, false, policy, runner, lines,
         );
         match spawned {
             Ok(slot) => {
@@ -1758,9 +1769,9 @@ impl App {
                     self.hide_active_preview(cx);
                 }
             }
-            WmRequest::Launch { app, .. } => {
-                let app = app.clone();
-                self.launch_app(cx, &app);
+            WmRequest::Launch { app, args } => {
+                let (app, args) = (app.clone(), args.clone());
+                self.open_app(cx, &app, false, None, &args);
             }
             WmRequest::Title { title } => {
                 if let Some(slot) = self.state_mut().clients.get_mut(&client) {
@@ -2465,6 +2476,13 @@ impl App {
         self.focus_client(cx, client);
     }
 
+    /// No focus stays pending, for `why` (said when one was).
+    fn drop_pending_focus(&mut self, why: &str) {
+        if let Some(client) = self.pending_focus.take() {
+            log!("wm: client {client}'s pending focus dropped: {why}");
+        }
+    }
+
     fn focus_client(&mut self, cx: &mut Cx, client: ClientId) {
         // The pane's child is not in the layout: it has its own focus path.
         if self.ai_bus.is_pane(client) {
@@ -2501,6 +2519,7 @@ impl App {
         if state.screens.activate_screen_of(client).is_none() && state.screens.screen_of(client).is_some() {
             // On a screen waiting out its removal: not drawn, so it must
             // not take the keyboard.
+            log!("wm: client {client} not given the keyboard: its screen is waiting out its removal");
             return;
         }
         if let Some(ws) = self.state_mut().layout().workspace_of(client) {
@@ -2526,7 +2545,15 @@ impl App {
             .borrow_mut::<WmDesk>()
             .and_then(|mut d| d.with_tile(cx, client, |cx, v| v.focus_keyboard(cx)))
             .unwrap_or(false);
-        self.pending_focus = if focused { None } else { Some(client) };
+        match (focused, self.pending_focus) {
+            (false, was) => {
+                if was.is_some_and(|w| w != client) { log!("wm: client {}'s pending focus gives way to client {client}'s", was.unwrap_or_default()); }
+                if was != Some(client) { log!("wm: client {client}'s focus is pending: its tile has not drawn"); }
+                self.pending_focus = Some(client);
+            }
+            (true, Some(was)) if was != client => self.drop_pending_focus(&format!("client {client} took the keyboard")),
+            (true, _) => self.pending_focus = None,
+        }
         self.update_bar(cx);
         self.redraw_all(cx);
     }
@@ -3031,21 +3058,37 @@ impl App {
         }
     }
 
-    /// The WM is going down: the pane's child has no window of its own
-    /// and no tile, so nothing else would reap it.
     /// The WM goes and its apps go with it: each is asked what a closed tile is (`request_close`)
     /// and has the time to save and leave, then what is left is killed. A kept service stays for
     /// the next WM, and a client not connected yet has nothing to save (its slot's drop ends it).
-    fn end_apps_at_shutdown(&mut self) {
+    /// With `leave` (`adopt::leaves_apps`) the apps stay instead, in their scopes, and wait for the
+    /// next WM; only the WM's own (its warm standby instances, the AI pane's child) close. Returns
+    /// the apps it left waiting (each app and its pid) and which of them had the keyboard.
+    fn end_apps_at_shutdown(&mut self, leave: bool) -> (Vec<(String, u32)>, Option<u32>) {
+        let warm = self.warm_pool.clients();
+        let focused = self.state_mut().screens.focused_client();
         let mut children = Vec::new();
-        for slot in self.state_mut().clients.values_mut() {
+        let (mut left, mut focus) = (Vec::new(), None);
+        for (id, slot) in self.state_mut().clients.iter_mut() {
             let Some(sender) = slot.sender.as_ref().filter(|_| slot.parent.is_none() && !slot.service) else {
                 continue;
             };
+            if !closes_at_shutdown(leave, warm.contains(id), slot.pane) {
+                if let Some(pid) = slot.external.or(slot.child.as_ref().map(|c| c.id())) {
+                    left.push((slot.app.clone(), pid));
+                    if focused == Some(*id) { focus = Some(pid); }
+                }
+                continue;
+            }
             send_to_app(sender, vec![StudioToApp::Custom(WmEvent::CloseRequested.to_json()), StudioToApp::Kill]);
             children.extend(slot.child.take());
         }
         makepad_app_host::launch::end_asked_children(&mut children, makepad_app_host::launch::CLOSE_GRACE);
+        #[cfg(target_os = "linux")]
+        if !leave {
+            adopt::stop_app_scopes();
+        }
+        (left, focus)
     }
 
     // ---- in-process instances (module_host.rs) ----
@@ -3320,7 +3363,7 @@ impl App {
                         // window takes the layout's focus, not their keys
                         // — including the focus a tile that has not drawn
                         // yet would otherwise claim on its first frame.
-                        self.pending_focus = None;
+                        self.drop_pending_focus("the AI pane keeps the keyboard");
                         self.focus_pane(cx);
                         os_launch_answer(id, &def.label, running)
                     }
@@ -3342,13 +3385,13 @@ impl App {
                     None => ToolResult::failed(id, format!("{app} is not running")),
                     Some(client) if call.tool == "maximize" => {
                         self.apply_snap(cx, client, crate::snap::Zone::Maximize);
-                        self.pending_focus = None;
+                        self.drop_pending_focus("the AI pane keeps the keyboard");
                         self.focus_pane(cx);
                         ToolResult::ok(id, format!("{app} fills the desktop"), "maximized")
                     }
                     Some(client) if call.tool == "focus" => {
                         self.focus_client(cx, client);
-                        self.pending_focus = None;
+                        self.drop_pending_focus("the AI pane keeps the keyboard");
                         self.focus_pane(cx);
                         ToolResult::ok(id, format!("{app} is in front"), "focused")
                     }
@@ -3572,6 +3615,13 @@ impl App {
         if window.op == op::SIZE {
             let tile = self.client_windows.route(client, window.window_id);
             self.apply_requested_size(cx, tile, window.x, window.y);
+            return;
+        }
+        // Any window's word on its window buttons: none of its own shown, the WM gives it its
+        // plain caption in full screen.
+        if window.op == op::HOST_BUTTONS {
+            let tile = self.client_windows.route(client, window.window_id);
+            if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.set_host_buttons(cx, tile, window.x != 0.0); }
             return;
         }
         // Any window's keep-on-top request: the app's first window, or a later one with a tile.
@@ -3810,9 +3860,10 @@ impl App {
                         l.workspace_of(client) == Some(l.active)
                     };
                     if shown {
+                        log!("wm: client {client}'s pending focus lands at its frame");
                         self.focus_client(cx, client);
                     } else {
-                        self.pending_focus = None;
+                        self.drop_pending_focus("its frame came on a workspace not shown");
                     }
                 }
             }
@@ -5094,7 +5145,7 @@ impl App {
         if self.ai_pane_is_open(cx) {
             return;
         }
-        self.pending_focus = None;
+        self.drop_pending_focus(&format!("the active screen left screen {old} for one with no window to focus"));
         let client = self
             .state
             .as_ref()
@@ -6446,6 +6497,24 @@ fn os_list_result(call_id: &str, rows: &[OsAppRow]) -> ToolResult {
     .with_data(rows.to_vec().serialize_json())
 }
 
+/// A launch request's arguments as the WM starts the app with them: the folder a `--cwd <dir>`
+/// names (the WM passes it as `--cwd` and, to a compiled app, as its working directory, as it
+/// does an inherited one, so the app never gets two), and the other arguments in their order.
+fn launch_request(args: &[String]) -> (Option<std::path::PathBuf>, Vec<String>) {
+    let (mut cwd, mut rest) = (None, Vec::new());
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match (arg.as_str(), cwd.is_none()) {
+            ("--cwd", true) => match it.next() {
+                Some(dir) => cwd = Some(std::path::PathBuf::from(dir)),
+                None => rest.push(arg.clone()),
+            },
+            _ => rest.push(arg.clone()),
+        }
+    }
+    (cwd, rest)
+}
+
 #[cfg(test)]
 mod os_service_tests {
     use super::*;
@@ -6470,6 +6539,13 @@ mod os_service_tests {
         assert!(running.text.contains("already running") && running.note == "already running");
         let starting = os_launch_answer("c2", "Photos", false);
         assert!(starting.text.contains("starting") && starting.note == "starting");
+        // an app's launch request: its `--cwd` is the launch's folder, the rest follow in order
+        let words = |s: &str| s.split(' ').filter(|w| !w.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(launch_request(&words("--cwd /home/a/src")), (Some("/home/a/src".into()), vec![]), "Files' Open in Terminal opens in its folder");
+        assert_eq!(launch_request(&words("--x --cwd /d --y")), (Some("/d".into()), words("--x --y")), "the other arguments keep their order");
+        assert_eq!(launch_request(&words("--cwd /d --cwd /e")), (Some("/d".into()), words("--cwd /e")), "one folder: a second --cwd stays an argument");
+        assert_eq!(launch_request(&words("--x --cwd")), (None, words("--x --cwd")), "a --cwd with no folder is not one");
+        assert_eq!(launch_request(&[]), (None, vec![]), "a plain launch asks for nothing");
     }
 
     #[test]
@@ -7533,18 +7609,43 @@ impl AppMain for App {
                 }
             }
         }
+        if let Event::QuitRequested(e) = event {
+            self.quit_by_signal |= e.reason == QuitReason::Signal;
+        }
         if let Event::Shutdown = event {
             // The node's AI Hub app keeps running for the next WM (hub_app; Windows: it ends).
             let pool = cx.task_pool();
             self.hub_link.shutdown(&pool);
             self.devhub_link.shutdown(&pool);
-            if self.state.is_some() {
+            // A keeping WM restarted (a signal, the person's Restart desktop) goes away for a next
+            // WM: its apps wait for it.
+            #[cfg(target_os = "linux")]
+            let leave = self.adoptions.as_ref().is_some_and(|socket| {
+                let close_flag = adopt::take_close_flag(&socket.path);
+                adopt::leaves_apps(adopt::keeping(), hub_app::host_lane().is_empty(), adopt::goes_for_next(self.quit_by_signal, self.restart_requested()), close_flag)
+            });
+            #[cfg(not(target_os = "linux"))]
+            let leave = false;
+            let (left, focus) = if self.state.is_some() {
                 self.kill_warm_previews(cx);
-                self.end_apps_at_shutdown();
+                self.end_apps_at_shutdown(leave)
+            } else {
+                (Vec::new(), None)
+            };
+            if leave {
+                log!("wm: going away for a next WM and leaving {} apps waiting for it (a stop meant to close them writes the final stop's flag first: <socket>.close-apps)", left.len());
             }
+            #[cfg(not(target_os = "linux"))]
+            let _ = focus;
             self.wifi_shutdown();
             #[cfg(target_os = "linux")]
             {
+                if let Some(socket) = &self.adoptions {
+                    let kept = if leave { adopt::note_left(&socket.path, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64), &left, focus) } else { adopt::remove_socket_state(&socket.path) };
+                    if let Err(e) = kept {
+                        log!("wm: cannot {} the state of {}: {e}", if leave { "update" } else { "remove" }, socket.path.display());
+                    }
+                }
                 self.shutdown_linux_controls();
                 // "Restart desktop now": exit 75, which the systemd units
                 // restart (`RestartForceExitStatus`/`SuccessExitStatus`).

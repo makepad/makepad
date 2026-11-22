@@ -388,6 +388,10 @@ impl AiBus {
         };
         // The sender's claim is never used: the link IS the identity.
         up.from = Some(Self::endpoint_of(client));
+        // once per app open (and per re-announce): whether the WM knows an app's tools
+        if let ServiceUp::Register { manifest, .. } = &up.msg {
+            makepad_widgets::log!("wm: client {client} joined the AI bus as `{}` ({} tools)", manifest.id, manifest.tools.len());
+        }
         if self.to_registry(client, &up) {
             return Route::Drop;
         }

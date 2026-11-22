@@ -14,11 +14,163 @@ use std::sync::mpsc::{channel, Receiver};
 /// Ids the socket hands out: far above the WM's own counter, so the two never meet.
 const FIRST_ADOPTED_CLIENT: ClientId = 1 << 32;
 
-/// Processes the WM launched itself that will ask the socket for their window (a JIT run:
-/// `makepad run`'s HAL finds the WM by its socket, it is not a `--stdin-loop` child): pid -> the
+/// Processes the WM launched itself that will ask the socket for their window: pid -> the
 /// client slot the launch already made. Their request is admitted as that client, so the
 /// launch's tile is the window; anything else gets a new tile.
-static EXPECTED: std::sync::Mutex<Vec<(u32, ClientId)>> = std::sync::Mutex::new(Vec::new());
+pub(super) static EXPECTED: std::sync::Mutex<Vec<(u32, ClientId)>> = std::sync::Mutex::new(Vec::new());
+
+/// Scopes started by this WM, including any systemd has already collected.
+static APP_SCOPES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(super) fn record_scope(unit: String) {
+    APP_SCOPES.lock().unwrap_or_else(|e| e.into_inner()).push(unit);
+}
+
+pub(super) fn stop_scopes_command(units: &[String]) -> Option<std::process::Command> {
+    if units.is_empty() { return None; }
+    let mut cmd = std::process::Command::new("systemctl");
+    cmd.args(["--user", "stop", "--no-block"]).args(units);
+    Some(cmd)
+}
+
+pub(super) fn stop_app_scopes() {
+    let units = std::mem::take(&mut *APP_SCOPES.lock().unwrap_or_else(|e| e.into_inner()));
+    if let Some(mut cmd) = stop_scopes_command(&units) {
+        match cmd.status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => log!("wm: systemctl stop of app scopes exited with {status}"),
+            Err(e) => log!("wm: cannot stop app scopes: {e}"),
+        }
+    }
+}
+
+/// Keep socket admission waiting until the spawned process's pid names its launch slot.
+pub(super) fn spawn_expected(client: ClientId, spawn: impl FnOnce() -> std::io::Result<std::process::Child>) -> std::io::Result<std::process::Child> {
+    let mut expected = EXPECTED.lock().unwrap_or_else(|e| e.into_inner());
+    let child = spawn()?;
+    let pid = child.id();
+    expected.retain(|(p, c)| *p != pid && *c != client);
+    expected.push((pid, client));
+    Ok(child)
+}
+
+/// Set once the WM has published its notice and can accept returning clients.
+pub(super) static KEEP_APPS: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub(crate) fn remove_socket_state(socket: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(socket.with_added_extension("state")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// Publish this WM's notice beside its socket (`<socket>.state`), replacing a crashed WM's: a
+/// keeping WM's epoch and `keep=1`, else `keep=0`, and always its kind, `lane=` (empty for the
+/// node's own WM, [`hub_app::host_lane`]), so a detached app joins only a WM of the kind it left.
+pub(crate) fn write_socket_state(socket: &std::path::Path, keep: bool, lane: &str) -> std::io::Result<Option<String>> {
+    use std::hash::{BuildHasher, RandomState};
+    let epoch = keep.then(|| format!("{:016x}", RandomState::new().hash_one((std::process::id(), std::time::SystemTime::now()))));
+    let text = match &epoch {
+        Some(epoch) => format!("epoch={epoch}\nkeep=1\nlane={lane}\n"),
+        None => format!("keep=0\nlane={lane}\n"),
+    };
+    let state = socket.with_added_extension("state");
+    let temp = state.with_added_extension("new");
+    std::fs::write(&temp, text)?;
+    std::fs::rename(temp, state)?;
+    Ok(epoch)
+}
+
+/// Whether this WM keeps its apps: it published `keep=1` ([`write_socket_state`]).
+pub(super) fn keeping() -> bool {
+    KEEP_APPS.get().is_some_and(Option::is_some)
+}
+
+/// Whether the WM, going, leaves its apps waiting for the next WM instead of closing them: the
+/// node's own keeping WM (`own`: no lane's test WM, which ends with its lease and has no next)
+/// going for a next WM (`for_next`, [`goes_for_next`]), unless the final stop's flag asks it to
+/// close them (`close_flag`, [`take_close_flag`]). A WM that keeps nothing closes them.
+pub(crate) fn leaves_apps(keeping: bool, own: bool, for_next: bool, close_flag: bool) -> bool {
+    keeping && own && for_next && !close_flag
+}
+
+/// Whether the WM goes for a next WM: a termination signal (`by_signal`: SIGTERM from a deploy's
+/// or `devhub wm-restart`'s unit restart, or a `systemctl stop`) or the person's "Restart desktop"
+/// (`desktop_restart`, which its unit restarts), the main case: a restart to pick up an update.
+/// Its session restart for its services waits for unsaved work and closes the apps.
+pub(crate) fn goes_for_next(by_signal: bool, desktop_restart: bool) -> bool {
+    by_signal || desktop_restart
+}
+
+/// The final stop's flag beside the socket (`<socket>.close-apps`): a stop meant to be final
+/// writes it first (`touch "$XDG_RUNTIME_DIR/makepad-wm-0.close-apps"`, then stops the unit), and
+/// the WM then closes its apps as it goes. Taken (removed) when read: whether it was there. A WM
+/// takes it at its start too, so one a WM never read binds no later WM.
+pub(crate) fn take_close_flag(socket: &std::path::Path) -> bool {
+    std::fs::remove_file(socket.with_added_extension("close-apps")).is_ok()
+}
+
+/// The keeping WM goes and leaves its apps waiting (`apps`: each app and its pid): its notice stays
+/// for them and says since when (`left_ms=`, wall ms, which `devhub sync status` reports while no WM
+/// takes them back), which apps it left (`left=`, pids) and which had the keyboard (`focus=`, a
+/// pid): the next WM reads those before it publishes its own notice ([`take_left`]). Apps read only
+/// its `keep=` and `lane=` lines. The same goes, one line, into the WM's log beside its socket
+/// (`<socket>.log`), which devhub and lanes read as files.
+pub(crate) fn note_left(socket: &std::path::Path, left_ms: u64, apps: &[(String, u32)], focus: Option<u32>) -> std::io::Result<()> {
+    let state = socket.with_added_extension("state");
+    let text = std::fs::read_to_string(&state)?;
+    let mut lines: Vec<String> = text.lines().filter(|l| !["left_ms=", "left=", "focus="].iter().any(|k| l.starts_with(k))).map(str::to_string).collect();
+    lines.push(format!("left_ms={left_ms}"));
+    lines.push(format!("left={}", apps.iter().map(|(_, pid)| pid.to_string()).collect::<Vec<_>>().join(",")));
+    lines.extend(focus.map(|pid| format!("focus={pid}")));
+    let temp = state.with_added_extension("new");
+    std::fs::write(&temp, lines.join("\n") + "\n")?;
+    std::fs::rename(temp, state)?;
+    let named = apps.iter().map(|(app, pid)| format!("{app}#{pid}{}", if focus == Some(*pid) { " (had the keyboard)" } else { "" })).collect::<Vec<_>>();
+    log_beside(socket, &format!("left_ms={left_ms} wm pid {} went away for a next WM, leaving {} apps waiting{}{}", std::process::id(), apps.len(), if named.is_empty() { "" } else { ": " }, named.join(", ")));
+    Ok(())
+}
+
+/// One line into the WM's log beside its socket (`<socket>.log`): what a WM did with the apps it
+/// keeps (left them waiting, took them back), for devhub and lanes, which cannot read a session
+/// WM's journal entries. One line per WM restart and per app taken back.
+pub(crate) fn log_beside(socket: &std::path::Path, line: &str) {
+    use std::io::Write;
+    let path = socket.with_added_extension("log");
+    if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| writeln!(f, "{line}")) {
+        log!("wm: cannot write {}: {e}", path.display());
+    }
+}
+
+/// The apps the last WM left waiting for this one (its notice's `left=` and `focus=` pids), read
+/// before this WM replaces its notice. Each app is taken once, as it comes back.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct LeftApps {
+    pub pids: Vec<u32>,
+    pub focus: Option<u32>,
+}
+
+static RETURNING: std::sync::Mutex<LeftApps> = std::sync::Mutex::new(LeftApps { pids: Vec::new(), focus: None });
+
+/// [`LeftApps`] of a notice's text.
+pub(crate) fn left_apps(notice: &str) -> LeftApps {
+    let pids = notice.lines().find_map(|l| l.strip_prefix("left=")).map_or(Vec::new(), |v| v.split(',').filter_map(|p| p.parse().ok()).collect());
+    LeftApps { pids, focus: notice.lines().find_map(|l| l.strip_prefix("focus=")?.parse().ok()) }
+}
+
+/// The apps the last WM left, to take back as they come ([`take_returning`]).
+pub(crate) fn expect_returning(left: LeftApps) {
+    *RETURNING.lock().unwrap_or_else(|e| e.into_inner()) = left;
+}
+
+/// Whether `pid` comes back from the last WM: `Some(true)` for the app that had the keyboard there,
+/// `Some(false)` for another app it left, `None` for an app new to this WM. Taken: asked once.
+pub(crate) fn take_returning(pid: u32) -> Option<bool> {
+    let mut left = RETURNING.lock().unwrap_or_else(|e| e.into_inner());
+    let at = left.pids.iter().position(|p| *p == pid)?;
+    left.pids.remove(at);
+    Some(left.focus.take_if(|f| *f == pid).is_some())
+}
 
 /// The WM started `pid` as client `client`; it will come to the socket by itself.
 pub(crate) fn expect(pid: u32, client: ClientId) {
@@ -84,6 +236,20 @@ impl Adoptions {
             }
         };
         let path = socket.path.clone();
+        let keep = hub_app::keep_apps_at_start(&path, &dir);
+        // the apps the last WM left waiting for this one, read before this WM's notice replaces its
+        let left = std::fs::read_to_string(path.with_added_extension("state")).map_or_else(|_| LeftApps::default(), |t| left_apps(&t));
+        if keep && !left.pids.is_empty() {
+            log!("wm: the last WM left {} apps waiting for this one (pids {:?}; the keyboard was pid {:?}'s)", left.pids.len(), left.pids, left.focus);
+            expect_returning(left);
+        }
+        let epoch = match write_socket_state(&path, keep, &hub_app::host_lane()) {
+            Ok(epoch) => epoch,
+            Err(e) => {
+                log!("wm: cannot publish the keep policy for {}: {e}", path.display());
+                return None;
+            }
+        };
         host::set_child_env(wm_socket::SOCKET_ENV, path.as_os_str());
         let (tx, rx) = channel();
         let (launch_tx, launches) = channel();
@@ -127,10 +293,17 @@ impl Adoptions {
         match worker {
             Ok(worker) => worker.detach(),
             Err(e) => {
+                if let Err(error) = remove_socket_state(&path) {
+                    log!("wm: cannot remove the state of {}: {error}", path.display());
+                }
                 log!("wm: cannot serve the WM socket: {e:?}");
                 return None;
             }
         }
+        if take_close_flag(&path) {
+            log!("wm: a final stop's flag beside {} was never read by its WM: dropped", path.display());
+        }
+        let _ = KEEP_APPS.set(epoch);
         log!("wm: published {} for apps started in this session", path.display());
         Some(Adoptions { path, rx, launches, toasts })
     }
@@ -150,7 +323,7 @@ impl App {
         }
         for (app, native) in launches {
             log!("wm: socket asks for the dock's {app}{}", if native { ", compiled" } else { "" });
-            self.open_app(cx, &app, native, Some(makepad_app_registry::machine::Launcher::Agent("devhub show, through the WM socket".to_string())));
+            self.open_app(cx, &app, native, Some(makepad_app_registry::machine::Launcher::Agent("devhub show, through the WM socket".to_string())), &[]);
         }
         for Adopted { client, pid, crate_name, launched, test_lane } in adopted {
             if launched {
@@ -194,7 +367,18 @@ impl App {
                 .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
             return;
         }
-        log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}{}", test_lane.as_ref().map_or(String::new(), |l| format!(" (TEST instance of lane {l})")));
+        // an app the last WM left waiting: back in its tile, and only the one that had the keyboard
+        // there takes it, unless something has taken the keyboard since this WM started
+        let returning = take_returning(pid);
+        match returning {
+            Some(had_keys) => {
+                log!("wm: {label} (pid {pid}) came back from the last WM; client {client}{}{}", if had_keys { ", which had the keyboard there" } else { "" }, test_lane.as_ref().map_or(String::new(), |l| format!(" (TEST instance of lane {l})")));
+                if let Some(socket) = &self.adoptions {
+                    log_beside(&socket.path, &format!("wm pid {} took back {app}#{pid} as client {client}{}", std::process::id(), if had_keys { ", which had the keyboard" } else { "" }));
+                }
+            }
+            None => log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}{}", test_lane.as_ref().map_or(String::new(), |l| format!(" (TEST instance of lane {l})"))),
+        }
         let mut slot = clients::ClientSlot::adopted(client, &app, pid);
         if let Some(lane) = test_lane {
             slot.test_lane = Some(lane);
@@ -209,7 +393,30 @@ impl App {
         self.desk(cx)
             .borrow_mut::<WmDesk>()
             .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
-        self.activate_client(cx, client);
+        let keys_taken = self.state_mut().screens.screens.iter().any(|s| s.layout.has_focus_history());
+        let takes = takes_keys_back(returning, keys_taken);
+        if let Some(had_keys) = returning {
+            let focused = self.state_mut().screens.focused_client();
+            log!("wm: client {client} (pid {pid}) {}", match (takes, had_keys) {
+                (true, _) => "takes the keyboard back".to_string(),
+                (false, false) => "comes back without the keyboard: it did not have it there".to_string(),
+                (false, true) => format!("comes back without the keyboard: something took it since this WM started (focused now: {focused:?})"),
+            });
+        }
+        if takes {
+            self.activate_client(cx, client);
+        }
         self.redraw_all(cx);
+    }
+}
+
+/// Whether an adopted app is activated (shown in front, given the keyboard): an app new to this WM
+/// is, as ever; one the last WM left waiting (`returning`, [`take_returning`]) comes back to its tile
+/// without taking the keyboard, but the one that had it there takes it back, unless something has
+/// taken the keyboard since this WM started (`keys_taken`: a click, a launch).
+pub(crate) fn takes_keys_back(returning: Option<bool>, keys_taken: bool) -> bool {
+    match returning {
+        None => true,
+        Some(had_keys) => had_keys && !keys_taken,
     }
 }

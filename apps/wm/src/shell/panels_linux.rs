@@ -1917,8 +1917,8 @@ impl ShellPanel {
         right
     }
 
-    /// "Restart desktop now · apps will close", then, once pressed,
-    /// "Cancel" and "Restart": restarting closes every running app. Once
+    /// "Restart desktop (apps stay open)" (or that they close: `restart_row_label`),
+    /// then, once pressed, "Cancel" and "Restart". Once
     /// confirmed and waiting for the display layout save to land
     /// (`restart_waiting`), the row shows "Restarting…" instead, with no
     /// hit: the confirm has already been sent and there is nothing left
@@ -1939,7 +1939,7 @@ impl ShellPanel {
             self.d.cursor_surface(cx, row, &tok.controls, self.hot == Some(hit), false);
             self.d.icon_centered(cx, Ico::Refresh, rect(row.pos.x, row.pos.y, 22.0, row.size.y), 12.0, tok.bar.active);
             self.d.label_elided(cx, rect(row.pos.x + 24.0, row.pos.y, (row.size.x - 28.0).max(0.0), row.size.y),
-                false, tok.font.body_small, tok.bar.active, HAlign::Left, "Restart desktop now \u{b7} apps will close");
+                false, tok.font.body_small, tok.bar.active, HAlign::Left, super::restart_row_label(self.restart_keeps_apps).0);
             self.hits.push((hit, row));
             return;
         }
@@ -1950,7 +1950,7 @@ impl ShellPanel {
         let cancel = rect(restart.pos.x - gap - button_w, inner.pos.y, button_w, inner.size.y);
         let caption_w = (cancel.pos.x - gap - inner.pos.x - 5.0).max(0.0);
         self.d.label_elided(cx, rect(inner.pos.x + 5.0, row.pos.y, caption_w, row.size.y),
-            false, tok.font.body_small, dim, HAlign::Left, "Apps will close");
+            false, tok.font.body_small, dim, HAlign::Left, super::restart_row_label(self.restart_keeps_apps).1);
         self.small_button(cx, cancel, Some(Hit::RestartCancel), false, None, "Cancel");
         self.small_button(cx, restart, Some(Hit::RestartConfirm), true, Some(Ico::Refresh), "Restart");
     }

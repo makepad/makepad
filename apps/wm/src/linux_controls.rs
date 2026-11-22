@@ -932,6 +932,11 @@ impl App {
                 panel.render_on_saved = render_on;
                 changed = true;
             }
+            let keeps = crate::adopt::leaves_apps(crate::adopt::keeping(), crate::hub_app::host_lane().is_empty(), true, false);
+            if panel.restart_keeps_apps != keeps {
+                panel.restart_keeps_apps = keeps;
+                changed = true;
+            }
             if panel.restart_waiting != state.restart_requested {
                 // `draw_restart_row` checks `restart_waiting` first, so a
                 // leftover `restart_confirm` from the click that led here

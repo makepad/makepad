@@ -204,6 +204,27 @@ fn second_on_session(exported: Option<&Path>, dir: Option<&Path>) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn keep_apps(linux: bool, test: bool, second: bool, manager: Option<Manager>, opt_in: bool) -> bool {
+    linux && manager == Some(Manager::Up) && if test { opt_in } else { !second }
+}
+
+/// The kind of host this WM is, as its socket notice names it: empty for the node's own WM, else
+/// the lane a test desktop runs for (`test` when it states none).
+#[cfg(target_os = "linux")]
+pub(crate) fn host_lane() -> String {
+    use makepad_widgets::makepad_platform::makepad_hal::wm_socket;
+    if !test_wm() { return String::new(); }
+    wm_socket::test_lane().unwrap_or_else(|| "test".into())
+}
+
+/// MAKEPAD_WM_KEEP_APPS=1 lets a test WM on its own socket keep its apps for crash proofs.
+#[cfg(target_os = "linux")]
+pub(crate) fn keep_apps_at_start(socket: &Path, dir: &Path) -> bool {
+    let opt_in = std::env::var_os("MAKEPAD_WM_KEEP_APPS").as_deref() == Some(std::ffi::OsStr::new("1"));
+    keep_apps(cfg!(target_os = "linux"), test_wm(), second_on_session(Some(socket), Some(dir)), user_manager(), opt_in)
+}
+
 /// A guest WM stays out of the service `conf_env` would name settings for, unless it does.
 pub fn stays_out(conf_env: &str) -> bool {
     guest_wm() && std::env::var_os(conf_env).is_none()
@@ -386,7 +407,7 @@ fn app_alive(kind: &Kind, pid: u32) -> bool {
 /// Linux under systemd: the WM's session ends with the WM, so an app that is to outlive a WM
 /// restart runs in a scope of the user's service manager (`systemd-run --user --scope`, which
 /// execs it: the child's pid is the app's).
-const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
+pub(super) const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
 
 /// The user's service manager (`user@<uid>.service`) as pid1 reports it. A service starts in a
 /// scope of it, so it must run: on 11-03 a global OOM killed it, its bus socket stayed behind,
@@ -1660,9 +1681,61 @@ mod tests {
         assert_eq!(first.path, wm_socket::socket_path(&dir, 0));
         assert!(!second_at(&first.path));
         assert!(second_at(&second.path));
+        let state = dir.join("makepad-wm-0.state");
+        let kept_epoch = crate::adopt::write_socket_state(&first.path, true, "").unwrap();
+        let text = std::fs::read_to_string(&state).unwrap();
+        let epoch = text.lines().next().and_then(|l| l.strip_prefix("epoch=")).unwrap();
+        assert_eq!(kept_epoch.as_deref(), Some(epoch), "the WM keeps the epoch published in its socket notice");
+        assert!(epoch.len() == 16 && epoch.bytes().all(|b| b.is_ascii_hexdigit()), "the epoch is a 16-digit hexadecimal value");
+        assert_eq!(text, format!("epoch={epoch}\nkeep=1\nlane=\n"), "a keeping WM publishes an exact keep line and its kind beside its socket");
+        // going away: whether the WM asks an app to close (CloseRequested, then Kill)
+        use crate::{adopt::leaves_apps, clients::closes_at_shutdown};
+        use crate::adopt::goes_for_next;
+        let asks = |keeping, own, for_next, close_flag| closes_at_shutdown(leaves_apps(keeping, own, for_next, close_flag), false, false);
+        assert!(!asks(true, true, goes_for_next(true, false), false), "SIGTERM on the node's keeping WM sends its apps no CloseRequested: they wait for the next WM");
+        assert!(!asks(true, true, goes_for_next(false, true), false), "the person's Restart desktop leaves them open for the next WM too");
+        assert!(asks(true, true, goes_for_next(false, false), false), "the WM's other own quit (a session restart for its services) still asks them");
+        use crate::shell::panels::restart_row_label;
+        assert_eq!((restart_row_label(leaves_apps(true, true, true, false)), restart_row_label(leaves_apps(false, true, true, false))),
+            (("Restart desktop (apps stay open)", "Apps stay open"), ("Restart desktop now \u{b7} apps will close", "Apps will close")),
+            "the restart row and its confirm step say what happens to the apps");
+        assert!(asks(true, true, true, true), "a stop with the final stop's flag asks them too");
+        assert!(asks(true, false, true, false), "a lane's test WM ends with its lease, with no next WM: it asks them");
+        assert!(asks(false, true, true, false), "a WM that keeps nothing asks them");
+        assert!(closes_at_shutdown(true, true, false), "leaving its apps waiting, the WM still closes its own warm standby instances");
+        assert!(closes_at_shutdown(true, false, true), "and its AI pane's child: the next WM starts its own pane, and a left one came back as a window");
+        let flag = dir.join("makepad-wm-0.close-apps");
+        std::fs::write(&flag, "").unwrap();
+        assert!(crate::adopt::take_close_flag(&first.path) && !flag.try_exists().unwrap(), "the final stop's flag is read once, and taken");
+        assert!(!crate::adopt::take_close_flag(&first.path), "no flag: no final stop");
+        let apps = [("terminal".to_string(), 320848), ("calculator".to_string(), 320900)];
+        crate::adopt::note_left(&first.path, 1_700_000_000_000, &apps, Some(320848)).unwrap();
+        let left_text = std::fs::read_to_string(&state).unwrap();
+        assert_eq!(left_text, format!("epoch={epoch}\nkeep=1\nlane=\nleft_ms=1700000000000\nleft=320848,320900\nfocus=320848\n"),
+            "leaving its apps, the WM keeps its notice for them and says since when, which it left and which had the keyboard");
+        let log = std::fs::read_to_string(dir.join("makepad-wm-0.log")).unwrap();
+        assert!(log.ends_with(&format!("left_ms=1700000000000 wm pid {} went away for a next WM, leaving 2 apps waiting: terminal#320848 (had the keyboard), calculator#320900\n", std::process::id())),
+            "the leaving line is readable beside the socket: {log}");
+        // the next WM takes them back: only the one that had the keyboard takes it, unless something took it since
+        use crate::adopt::{left_apps, take_returning, takes_keys_back, LeftApps};
+        assert_eq!(left_apps(&left_text), LeftApps { pids: vec![320848, 320900], focus: Some(320848) });
+        crate::adopt::expect_returning(left_apps(&left_text));
+        assert_eq!((take_returning(320900), take_returning(320848), take_returning(320848), take_returning(1)), (Some(false), Some(true), None, None),
+            "each app left is taken back once; the one that had the keyboard says so; an app new to the WM is none of them");
+        assert!(!takes_keys_back(Some(false), false), "an app back from the last WM that did not have the keyboard does not take it");
+        assert!(takes_keys_back(Some(true), false), "the one that had the keyboard there takes it back");
+        assert!(!takes_keys_back(Some(true), true), "unless something took the keyboard since this WM started (a click, a launch)");
+        assert!(takes_keys_back(None, true), "an app new to the WM comes to the front as ever");
         drop(first);
         let next = WmSocket::bind(&dir, 0).unwrap();
         assert!(!second_at(&next.path), "{:?}", next.path);
+        crate::adopt::write_socket_state(&next.path, false, "lane-a").unwrap();
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), "keep=0\nlane=lane-a\n",
+            "a non-keeping start replaces the crashed WM's notice: it keeps nothing and still names its kind");
+        crate::adopt::write_socket_state(&next.path, true, "").unwrap();
+        assert_ne!(std::fs::read_to_string(&state).unwrap(), text, "a new keeping WM publishes a fresh epoch");
+        crate::adopt::remove_socket_state(&next.path).unwrap();
+        assert!(!state.try_exists().unwrap(), "quit removes the notice");
         // no socket published: no other WM to tell it from
         assert!(!second_on_session(None, Some(&dir)));
         assert!(!second_on_session(Some(&second.path), None));
@@ -1717,6 +1790,14 @@ mod tests {
         assert_eq!(Manager::parse("ActiveState=activating\n"), Manager::Changing("activating".into()));
         assert_eq!(Manager::parse("ActiveState=failed\nInactiveEnterTimestampMonotonic=4242\n"), Manager::Down { state: "failed".into(), down: "4242".into() });
         assert!(matches!(Manager::parse(""), Manager::Unknown(_)));
+        assert!(keep_apps(true, false, false, Some(Manager::Up), false), "the Linux node WM keeps with a running manager");
+        assert!(!keep_apps(true, true, false, Some(Manager::Up), false), "a test WM needs the proof opt-in");
+        assert!(keep_apps(true, true, true, Some(Manager::Up), true), "an opted-in test WM keeps on its test socket");
+        assert!(!keep_apps(true, false, true, Some(Manager::Up), true), "a second ordinary WM cannot opt in");
+        assert!(!keep_apps(false, false, false, Some(Manager::Up), true), "only Linux can keep apps");
+        for manager in [Some(Manager::parse("ActiveState=failed")), Some(Manager::parse("ActiveState=activating")), Some(Manager::parse("")), None] {
+            assert!(!keep_apps(true, true, false, manager, true), "an opted-in WM still needs a manager known to be up");
+        }
     }
 
     #[cfg(target_os = "linux")]

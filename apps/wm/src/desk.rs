@@ -1180,6 +1180,10 @@ pub struct WmDesk {
     /// its own chrome (`own_chrome.rs`); a foreign (Wayland) window and an in-process
     /// module get the desk's.
     #[rust] desk_chrome: HashSet<ClientId>,
+    /// Makepad clients that show no window buttons of their own now (a chromeless window, or one
+    /// in full screen with no caption: `hosted_window_op::HOST_BUTTONS`): in full screen the
+    /// WM's plain caption is theirs too.
+    #[rust] host_buttons: HashSet<ClientId>,
     /// FULLSCREEN CAPTION (design). A fullscreen window uses the whole screen.
     /// Its caption comes in two kinds. PLAIN: only a title and the window
     /// buttons (the WM draws it for every app that does not draw its own):
@@ -1189,7 +1193,9 @@ pub struct WmDesk {
     /// that carries the app's own UI (mode tabs, transport, toolbars) is drawn
     /// by the app inside its client area and stays where it is. The kind is
     /// decided by the caption, not by an app list: an app that draws its own
-    /// caption (`own_chrome`) is persistent; the WM-drawn caption is plain.
+    /// caption (`own_chrome`) is persistent; the WM-drawn caption is plain, and so
+    /// is a makepad window's that shows no window buttons of its own there (it says
+    /// so: `host_buttons`): a picture-only window had no way out but keys.
     /// (An app with a plain own caption can later report it, and be sent the
     /// reveal progress to slide itself, over the same hosted channel.)
     #[rust] fullscreen_reveal: Option<crate::motion::Ease>,
@@ -1485,6 +1491,7 @@ impl WmDesk {
                 self.items.remove(&client);
                 self.module_clients.remove(&client);
                 self.domain_clients.remove(&client);
+                self.host_buttons.remove(&client);
             }
         }
     }
@@ -1502,6 +1509,7 @@ impl WmDesk {
             self.items.remove(&client);
             self.module_clients.remove(&client);
             self.domain_clients.remove(&client);
+            self.host_buttons.remove(&client);
         }
     }
 
@@ -2477,7 +2485,12 @@ impl WmDesk {
     }
     /// The fullscreen window shown now whose caption is the WM's (plain).
     fn fullscreen_plain_client(&self) -> Option<ClientId> {
-        self.zorder.iter().rev().copied().find(|c| self.spanned_tiles.contains(c) && !self.draws_own_chrome(*c) && !self.minimized.contains(c))
+        self.zorder.iter().rev().copied().find(|c| self.spanned_tiles.contains(c) && takes_plain_caption(self.draws_own_chrome(*c), self.host_buttons.contains(c)) && !self.minimized.contains(c))
+    }
+    /// A makepad client says whether it shows window buttons of its own now (`host_buttons`).
+    pub(crate) fn set_host_buttons(&mut self, cx: &mut Cx, client: ClientId, on: bool) {
+        let changed = if on { self.host_buttons.insert(client) } else { self.host_buttons.remove(&client) };
+        if changed { self.redraw(cx); }
     }
     /// An event started something that moves: the clock of the animation
     /// loop starts now, so its first step is one frame, not the time since
@@ -3423,6 +3436,13 @@ impl Widget for WmDesk {
 /// Does the pointer at `y` want the plain fullscreen caption out? It comes
 /// when the pointer touches the top edge and stays while it is over the
 /// caption (`h` high, with a little room), then goes.
+/// Whether a full-screen window takes the WM's plain caption: one whose caption is the desk's
+/// (`draws_own` false: a foreign window, a module, an ended domain app), or a makepad window that
+/// shows no window buttons of its own now (`leaves_buttons`).
+pub fn takes_plain_caption(draws_own: bool, leaves_buttons: bool) -> bool {
+    !draws_own || leaves_buttons
+}
+
 pub fn fullscreen_caption_wanted(open: bool, y: f64, h: f64) -> bool {
     if open { y < h + 8.0 } else { y <= 1.0 }
 }
@@ -3446,6 +3466,11 @@ mod tests {
         assert!(!fullscreen_caption_wanted(false, 40.0, 28.0));
         assert!(!fullscreen_caption_wanted(false, 5.0, 28.0), "near the edge is not touching it");
         assert!(fullscreen_caption_wanted(false, 0.0, 28.0));
+        // whose it is: the desk's caption's, and a makepad window's that shows no window buttons
+        // of its own (a picture-only full-screen window); never one with its own
+        assert!(takes_plain_caption(false, false));
+        assert!(takes_plain_caption(true, true), "a makepad window that leaves its buttons to the WM");
+        assert!(!takes_plain_caption(true, false), "a makepad window with its own buttons");
         assert!(fullscreen_caption_wanted(true, 30.0, 28.0), "stays while over the caption");
         assert!(!fullscreen_caption_wanted(true, 80.0, 28.0));
     }

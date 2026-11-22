@@ -722,6 +722,12 @@ impl WmLayout {
         None
     }
 
+    /// Whether anything has taken the keyboard in this layout (`note_focus`).
+    #[cfg(target_os = "linux")]
+    pub fn has_focus_history(&self) -> bool {
+        !self.focus_history.is_empty()
+    }
+
     /// Remove a client wherever it is; collapses its parent split.
     /// Record `client` as the most recently focused (call on every focus
     /// change — the close fallback walks this history newest-first).

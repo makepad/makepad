@@ -436,6 +436,9 @@ impl MpRunView {
         let focused = self.host_focused && self.takes_key_focus && self.area.is_valid(cx) && cx.has_key_focus(self.area);
         if self.sent_focus != Some(focused) {
             self.sent_focus = Some(focused);
+            let why = if focused { "" } else if !self.host_focused { ": the WM's own window is not focused" } else if !self.takes_key_focus { ": it takes no keyboard" }
+                else if !self.area.is_valid(cx) { ": its tile has not drawn" } else { ": its tile does not hold the keyboard" };
+            log!("wm: client {} window {} told focused={focused}{why}", self.hosted.client().map_or("?".to_string(), |c| c.to_string()), target.window_id);
             self.hosted.send(vec![makepad_studio_protocol::StudioToApp::WindowFocus {
                 window_id: target.window_id, focused,
             }]);
