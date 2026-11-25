@@ -38,7 +38,7 @@
 //! scripted clock and scripted reads.
 
 use crate::{FileSystemEvent, FileSystemEventKind};
-use makepad_git::oid::{hash_object, ObjectId};
+use makepad_git_oid::{hash_object, ObjectId};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

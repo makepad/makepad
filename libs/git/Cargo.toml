@@ -6,3 +6,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-git-oid = { path = "../git_oid" }

@@ -9,6 +9,7 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "Fjf_rJTOgvZXwyU7Yb-CZMF6Hmo="
 
 [dependencies]
+makepad-thread-local = { path = "../thread_local", version = "1.0.0" }
 relax-api = { path = "../relax_api", version = "1.0.0" }
 makepad-live-id-macros = { path = "id_macros", version = "1.0.0" }
 #makepad-error-log = { path = "../error_log", version = "0.4.0" }

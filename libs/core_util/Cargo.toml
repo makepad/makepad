@@ -2,7 +2,7 @@
 name = "makepad-core-util"
 version = "0.1.0"
 edition = "2021"
-description = "Small std-only primitives shared across Makepad and the applications built on it: streaming SHA-256, a reuse-address UDP bind and how a process ends"
+description = "Small std-only primitives shared across Makepad and the applications built on it: streaming SHA-256, a reuse-address UDP bind, how a process ends and a value computed once whose waiters hold no CPU"
 license = "MIT OR Apache-2.0"
 
 # Zero dependencies, on purpose. The AI hub, the model document, the asset

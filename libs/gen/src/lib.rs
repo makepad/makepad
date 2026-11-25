@@ -9,8 +9,10 @@
 pub mod catalog;
 pub mod character;
 pub mod digest;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod host;
 pub mod nodes;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod service;
 pub mod tools;
 

@@ -99,10 +99,12 @@ pub fn interfaces() -> Vec<Interface> {
 
 /// The default gateways in `/proc/net/route` (Linux; on Android apps may be
 /// denied it, and it is then empty).
+#[cfg(not(target_os = "macos"))]
 pub fn route_gateways() -> Vec<Ipv4Addr> {
     std::fs::read_to_string("/proc/net/route").map(|text| parse_route_gateways(&text)).unwrap_or_default()
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn parse_route_gateways(text: &str) -> Vec<Ipv4Addr> {
     let mut out = Vec::new();
     for line in text.lines().skip(1) {
@@ -122,6 +124,77 @@ fn parse_route_gateways(text: &str) -> Vec<Ipv4Addr> {
         }
     }
     out
+}
+
+/// The IPv4 default gateways in Darwin's routing socket table.
+#[cfg(target_os = "macos")]
+pub fn route_gateways() -> Vec<Ipv4Addr> {
+    use std::ffi::{c_int, c_uint, c_void};
+    use std::ptr::null_mut;
+
+    extern "C" {
+        fn sysctl(name: *mut c_int, n: c_uint, old: *mut c_void, size: *mut usize,
+                  new: *mut c_void, new_len: usize) -> c_int;
+    }
+    // CTL_NET, PF_ROUTE, protocol, AF_INET, NET_RT_FLAGS, RTF_GATEWAY.
+    let mut mib = [4, 17, 0, 2, 2, 2];
+    let mut read = |buffer: &mut [u8]| -> std::io::Result<usize> {
+        let mut size = buffer.len();
+        let out = if buffer.is_empty() { null_mut() } else { buffer.as_mut_ptr().cast() };
+        // SAFETY: mib and size live across the call. A null out queries the size;
+        // a non-null out has exactly size writable bytes. This is a read-only MIB.
+        let rc = unsafe { sysctl(mib.as_mut_ptr(), 6, out, &mut size, null_mut(), 0) };
+        if rc == 0 { Ok(size) } else { Err(std::io::Error::last_os_error()) }
+    };
+    loop {
+        let Ok(size) = read(&mut []) else { return Vec::new() };
+        if size == 0 { return Vec::new(); }
+        let mut data = vec![0; size];
+        match read(&mut data) {
+            Ok(used) => return parse_darwin_gateways(&data[..used]),
+            Err(e) if e.raw_os_error() == Some(12) => continue, // ENOMEM: table grew
+            Err(_) => return Vec::new(),
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_darwin_gateways(mut data: &[u8]) -> Vec<Ipv4Addr> {
+    // Darwin net/route.h: rt_msghdr (36 bytes plus 56 bytes of rt_metrics),
+    // then sockaddrs in address-mask bit order, each rounded to four bytes.
+    fn sockaddr<'a>(tail: &mut &'a [u8]) -> Option<&'a [u8]> {
+        let len = *tail.first()? as usize;
+        let addr = tail.get(..len)?;
+        let padded = (len.max(1) + 3) & !3;
+        *tail = tail.get(padded..)?;
+        Some(addr)
+    }
+    fn ipv4(addr: &[u8]) -> Option<Ipv4Addr> {
+        if addr.get(1) != Some(&2) { return None; }
+        Some(Ipv4Addr::from(<[u8; 4]>::try_from(addr.get(4..8)?).ok()?))
+    }
+
+    let mut gateways = Vec::new();
+    while data.len() >= 2 {
+        let len = u16::from_ne_bytes([data[0], data[1]]) as usize;
+        if len == 0 || len > data.len() { break; }
+        let (record, rest) = data.split_at(len);
+        data = rest;
+        let Some(mut addrs) = record.get(92..) else { continue };
+        let flags = u32::from_ne_bytes(record[8..12].try_into().unwrap());
+        let mask = u32::from_ne_bytes(record[12..16].try_into().unwrap());
+        // RTM_VERSION, RTF_GATEWAY without RTF_HOST, RTA_DST and RTA_GATEWAY.
+        if record[2] != 5 || flags & 6 != 2 || mask & 3 != 3 { continue; }
+        let dest = sockaddr(&mut addrs).and_then(ipv4);
+        let Some(gateway) = sockaddr(&mut addrs).and_then(ipv4) else { continue };
+        if dest != Some(Ipv4Addr::UNSPECIFIED) || gateway.is_unspecified() { continue; }
+        if mask & 4 != 0 {
+            let Some(netmask) = sockaddr(&mut addrs) else { continue };
+            if netmask.iter().skip(4).take(4).any(|b| *b != 0) { continue; }
+        }
+        if !gateways.contains(&gateway) { gateways.push(gateway); }
+    }
+    gateways
 }
 
 /// Where a gateway may be: every default gateway the routing table names,
@@ -161,9 +234,45 @@ mod tests {
     }
 
     #[test]
+    fn darwin_default_routes() {
+        let mut route = vec![0; 92];
+        route[2] = 5;
+        route[8..12].copy_from_slice(&3u32.to_ne_bytes());
+        route[12..16].copy_from_slice(&7u32.to_ne_bytes());
+        route.extend_from_slice(&[16, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        route.extend_from_slice(&[16, 2, 0, 0, 192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        route.extend_from_slice(&[0; 4]); // compact default netmask
+        let len = (route.len() as u16).to_ne_bytes();
+        route[..2].copy_from_slice(&len);
+        for end in 0..route.len() {
+            assert!(parse_darwin_gateways(&route[..end]).is_empty(), "accepted truncated route {end}");
+        }
+        let mut table = route.clone();
+        table[96] = 1; // non-default destination
+        table[115] = 8;
+        let mut split = route.clone();
+        split.truncate(124);
+        split.extend_from_slice(&[5, 0, 0, 0, 128, 0, 0, 0]); // 0.0.0.0/1
+        split[..2].copy_from_slice(&132u16.to_ne_bytes());
+        split[115] = 9;
+        table.extend_from_slice(&split);
+        table.extend_from_slice(&route);
+        table.extend_from_slice(&route);
+        route[115] = 2;
+        table.extend_from_slice(&route);
+        table.extend_from_slice(&[0, 0]);
+        assert_eq!(parse_darwin_gateways(&table), [Ipv4Addr::new(192, 0, 2, 1), Ipv4Addr::new(192, 0, 2, 2)],
+                   "distinct default gateways in routing order");
+    }
+
+    #[test]
     fn this_machine_has_interfaces_or_none() {
         for i in interfaces() {
             assert!(!i.addr.is_loopback());
+        }
+        // A host can be offline. Exercise the OS query in either case.
+        for gateway in route_gateways() {
+            assert!(!gateway.is_unspecified(), "unspecified address reported as a gateway");
         }
     }
 }

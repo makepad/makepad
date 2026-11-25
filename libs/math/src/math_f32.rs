@@ -1,4 +1,5 @@
 use {
+    crate::deterministic as det,
     crate::math_f64::*,
     makepad_micro_serde::*,
     //    crate::colorhex::*
@@ -227,11 +228,11 @@ impl Vec2f {
     }
 
     pub fn angle_in_radians(&self) -> f32 {
-        self.y.atan2(self.x)
+        det::atan2(self.y, self.x)
     }
 
     pub fn angle_in_degrees(&self) -> f32 {
-        self.y.atan2(self.x) * (360.0 / (2. * std::f32::consts::PI))
+        det::atan2(self.y, self.x) * (360.0 / (2. * std::f32::consts::PI))
     }
 
     pub fn length(&self) -> f32 {
@@ -730,7 +731,7 @@ impl Quat {
 
     pub fn get_angle_with(&self, other: Quat) -> f32 {
         let dot = self.dot(other);
-        (2.0 * dot * dot - 1.0).acos() * TODEG
+        det::acos(2.0 * dot * dot - 1.0) * TODEG
     }
 
     pub fn from_slerp(n: Quat, mut m: Quat, t: f32) -> Quat {
@@ -744,9 +745,9 @@ impl Quat {
         // calculate coefficients
         let (scale0, scale1) = if 1.0 - cosom > 0.000001 {
             // standard case (slerp)
-            let omega = cosom.acos();
-            let sinom = omega.sin();
-            (((1.0 - t) * omega).sin() / sinom, (t * omega).sin() / sinom)
+            let omega = det::acos(cosom);
+            let sinom = det::sin(omega);
+            (det::sin((1.0 - t) * omega) / sinom, det::sin(t * omega) / sinom)
         } else {
             (1.0 - t, t)
         };
@@ -780,8 +781,8 @@ impl Quat {
 
     pub fn from_axis_angle(axis: Vec3f, angle: f32) -> Self {
         let half = angle * 0.5;
-        let s = half.sin();
-        let c = half.cos();
+        let s = det::sin(half);
+        let c = det::cos(half);
         Quat {
             x: axis.x * s,
             y: axis.y * s,
@@ -894,11 +895,11 @@ impl Mat4f {
     }
 
     pub fn txyz_s_ry_rx_txyz(t1: Vec3f, s: f32, ry: f32, rx: f32, t2: Vec3f) -> Mat4f {
-        let cx = f32::cos(rx * TORAD);
-        let cy = f32::cos(ry * TORAD);
+        let cx = det::cos(rx * TORAD);
+        let cy = det::cos(ry * TORAD);
         //let cz = f32::cos(r.z * TORAD);
-        let sx = f32::sin(rx * TORAD);
-        let sy = f32::sin(ry * TORAD);
+        let sx = det::sin(rx * TORAD);
+        let sy = det::sin(ry * TORAD);
         //let sz = f32::sin(r.z * TORAD);
         // y first, then x, then z
 
@@ -994,7 +995,7 @@ impl Mat4f {
     }
 
     pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4f {
-        let f = 1.0 / f32::tan(fov_y * TORAD / 2.0);
+        let f = 1.0 / det::tan(fov_y * TORAD / 2.0);
         let nf = 1.0 / (near - far);
         Mat4f {
             v: [
@@ -1019,10 +1020,10 @@ impl Mat4f {
     }
 
     pub fn from_camera_fov(fov: &CameraFov, near: f32, far: f32) -> Mat4f {
-        let tan_left = fov.angle_left.tan();
-        let tan_right = fov.angle_right.tan();
-        let tan_down = fov.angle_down.tan();
-        let tan_up = fov.angle_up.tan();
+        let tan_left = det::tan(fov.angle_left);
+        let tan_right = det::tan(fov.angle_right);
+        let tan_down = det::tan(fov.angle_down);
+        let tan_up = det::tan(fov.angle_up);
 
         let tan_height = tan_up - tan_down;
         let tan_width = tan_right - tan_left;
@@ -1106,12 +1107,12 @@ impl Mat4f {
 
     pub fn rotation(r: Vec3f) -> Mat4f {
         //const TORAD: f32 = 0.017453292;
-        let cx = f32::cos(r.x);
-        let cy = f32::cos(r.y);
-        let cz = f32::cos(r.z);
-        let sx = f32::sin(r.x);
-        let sy = f32::sin(r.y);
-        let sz = f32::sin(r.z);
+        let cx = det::cos(r.x);
+        let cy = det::cos(r.y);
+        let cz = det::cos(r.z);
+        let sx = det::sin(r.x);
+        let sy = det::sin(r.y);
+        let sz = det::sin(r.z);
         let m0 = cy * cz + sx * sy * sz;
         let m1 = -sz * cy + cz * sx * sy;
         let m2 = sy * cx;

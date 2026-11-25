@@ -330,13 +330,13 @@ impl Vec2d {
     }
 
     pub fn angle_in_radians(&self) -> f64 {
-        self.y.atan2(self.x)
+        crate::deterministic_f64::atan2(self.y, self.x)
     }
     pub fn swapxy(&self) -> Vec2d {
         dvec2(self.y, self.x)
     }
     pub fn angle_in_degrees(&self) -> f64 {
-        self.y.atan2(self.x) * (360.0 / (2. * std::f64::consts::PI))
+        crate::deterministic_f64::atan2(self.y, self.x) * (360.0 / (2. * std::f64::consts::PI))
     }
 
     pub fn length(&self) -> f64 {

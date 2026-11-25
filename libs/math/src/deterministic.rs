@@ -54,30 +54,30 @@ fn reduce_pio2(x: f64) -> (i64, f64) {
     (n as i64 & 3, r)
 }
 
+/// (sin, cos) of x = r + q·π/2 from the kernels at r: quadrant 0 (s, c), 1 (c, -s), 2 (-s, -c),
+/// 3 (-c, s). Selected with masks rather than a branch: x86 has no float conditional move, and
+/// a branch on the quadrant of a random angle mispredicts often (there, sin cost 15 ns a call
+/// against libm's 4.5; masked, 4.8). Flipping the sign bit is exactly `-x`, so the results are
+/// bit-identical to the branching form.
+#[inline]
+fn quadrant(q: i64, s: f64, c: f64) -> (f64, f64) {
+    let q = q as u64;
+    let swap = 0u64.wrapping_sub(q & 1);
+    let (sb, cb) = (s.to_bits(), c.to_bits());
+    let sin = (sb & !swap) | (cb & swap);
+    let cos = (cb & !swap) | (sb & swap);
+    (
+        f64::from_bits(sin ^ (((q >> 1) & 1) << 63)),
+        f64::from_bits(cos ^ ((((q + 1) >> 1) & 1) << 63)),
+    )
+}
+
 pub fn sin(x: f32) -> f32 {
-    if !x.is_finite() {
-        return f32::NAN;
-    }
-    let (q, r) = reduce_pio2(x as f64);
-    (match q {
-        0 => k_sin(r),
-        1 => k_cos(r),
-        2 => -k_sin(r),
-        _ => -k_cos(r),
-    }) as f32
+    sincos(x).0
 }
 
 pub fn cos(x: f32) -> f32 {
-    if !x.is_finite() {
-        return f32::NAN;
-    }
-    let (q, r) = reduce_pio2(x as f64);
-    (match q {
-        0 => k_cos(r),
-        1 => -k_sin(r),
-        2 => -k_cos(r),
-        _ => k_sin(r),
-    }) as f32
+    sincos(x).1
 }
 
 pub fn sincos(x: f32) -> (f32, f32) {
@@ -85,13 +85,7 @@ pub fn sincos(x: f32) -> (f32, f32) {
         return (f32::NAN, f32::NAN);
     }
     let (q, r) = reduce_pio2(x as f64);
-    let (s, c) = (k_sin(r), k_cos(r));
-    let (s, c) = match q {
-        0 => (s, c),
-        1 => (c, -s),
-        2 => (-s, -c),
-        _ => (-c, s),
-    };
+    let (s, c) = quadrant(q, k_sin(r), k_cos(r));
     (s as f32, c as f32)
 }
 
@@ -362,6 +356,39 @@ pub fn fmod_floor(a: f32, b: f32) -> f32 {
     (ad - (ad / bd).floor() * bd) as f32
 }
 
+/// These functions evaluate the f64 kernel and round once to f32.
+pub fn sinh(x: f32) -> f32 {
+    crate::deterministic_f64::sinh(x as f64) as f32
+}
+
+pub fn cosh(x: f32) -> f32 {
+    crate::deterministic_f64::cosh(x as f64) as f32
+}
+
+pub fn tanh(x: f32) -> f32 {
+    crate::deterministic_f64::tanh(x as f64) as f32
+}
+
+pub fn asinh(x: f32) -> f32 {
+    crate::deterministic_f64::asinh(x as f64) as f32
+}
+
+pub fn acosh(x: f32) -> f32 {
+    crate::deterministic_f64::acosh(x as f64) as f32
+}
+
+pub fn atanh(x: f32) -> f32 {
+    crate::deterministic_f64::atanh(x as f64) as f32
+}
+
+pub fn exp2(x: f32) -> f32 {
+    crate::deterministic_f64::exp2(x as f64) as f32
+}
+
+pub fn log2(x: f32) -> f32 {
+    crate::deterministic_f64::log2(x as f64) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +494,35 @@ mod tests {
         assert_eq!(pow(-2.0, 2.0), 4.0);
         assert!(pow(-2.0, 0.5).is_nan());
         assert_eq!(ln(0.0), f32::NEG_INFINITY);
+
+        for i in 0..4096 {
+            let x = sweep_at(i, 4096, -50.0, 50.0);
+            let c = sweep_at(i, 4096, -89.0, 89.0);
+            let a = sweep_at(i, 4096, 1.0, 1e6);
+            let t = sweep_at(2 * i + 1, 8192, -1.0, 1.0);
+            let e = sweep_at(i, 4096, -149.0, 128.0);
+            // Sweep positive float encodings to cover subnormal through maximum finite inputs.
+            let bits = 1 + ((f32::MAX.to_bits() - 1) as u64 * i as u64 / 4095) as u32;
+            let l = f32::from_bits(bits);
+            // The reference is std in f64, rounded once: std's f32 atanh, asinh and acosh are computed
+            // in f32 and lose precision near their poles (atanh(-0.99975586) is off by about 1500 ulp).
+            for (name, input, got, want) in [
+                ("sinh", x, sinh(x), (x as f64).sinh() as f32),
+                ("cosh", c, cosh(c), (c as f64).cosh() as f32),
+                ("tanh", x, tanh(x), (x as f64).tanh() as f32),
+                ("asinh", x, asinh(x), (x as f64).asinh() as f32),
+                ("acosh", a, acosh(a), (a as f64).acosh() as f32),
+                ("atanh", t, atanh(t), (t as f64).atanh() as f32),
+                ("exp2", e, exp2(e), (e as f64).exp2() as f32),
+                ("log2", l, log2(l), (l as f64).log2() as f32),
+            ] {
+                assert!(
+                    got == want || (got.is_finite() && want.is_finite()
+                        && got.to_bits().abs_diff(want.to_bits()) <= 1),
+                    "{name}({input:?}) got {got:?}, expected {want:?} (std in f64, rounded) within 1 f32 ulp"
+                );
+            }
+        }
     }
 
     #[test]

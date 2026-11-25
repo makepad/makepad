@@ -2,7 +2,9 @@ pub use bytemuck;
 mod gpu_pod;
 pub mod complex;
 pub mod deterministic;
+pub mod deterministic_f64;
 mod geometry;
+mod ik;
 pub mod math_f32;
 pub mod math_f64;
 pub mod math_usize;
@@ -11,6 +13,7 @@ pub mod shader_runtime;
 pub mod vertex_format;
 
 pub use geometry::*;
+pub use ik::two_bone_knee;
 pub use makepad_micro_serde;
 pub use math_f32::*;
 pub use math_f64::*;

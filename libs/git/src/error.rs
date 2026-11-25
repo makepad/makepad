@@ -48,3 +48,9 @@ impl From<io::Error> for GitError {
         GitError::Io(e)
     }
 }
+
+impl From<makepad_git_oid::OidError> for GitError {
+    fn from(e: makepad_git_oid::OidError) -> Self {
+        GitError::InvalidObjectId(e.0)
+    }
+}

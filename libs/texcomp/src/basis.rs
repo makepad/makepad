@@ -109,12 +109,22 @@ impl<'a> UastcView<'a> {
 /// Encode an RGBA8 mip chain (largest first, each `w*h*4` bytes) to UASTC.
 /// Each level uses `run` (see [`crate::run_inline`]).
 pub fn encode_mips(mips: &[(u32, u32, &[u8])], quality: uastc::Quality, srgb: bool, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Result<UastcTexture, String> {
-    let alpha = mips.iter().any(|(_, _, rgba)| rgba.chunks_exact(4).any(|p| p[3] != 255));
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let alpha = AtomicBool::new(false);
     let mut levels = Vec::with_capacity(mips.len());
     for &(width, height, rgba) in mips {
+        if !rgba.is_empty() && !alpha.load(Relaxed) {
+            const CHUNK_BYTES: usize = 16384 * 4;
+            run(rgba.len().div_ceil(CHUNK_BYTES), &|i| {
+                let rest = &rgba[i * CHUNK_BYTES..];
+                if !alpha.load(Relaxed) && rest[..rest.len().min(CHUNK_BYTES)].chunks_exact(4).any(|p| p[3] != 255) {
+                    alpha.store(true, Relaxed);
+                }
+            });
+        }
         levels.push(Level { width, height, blocks: uastc::encode_image(rgba, width, height, quality, run)? });
     }
-    Ok(UastcTexture { levels, alpha, srgb })
+    Ok(UastcTexture { levels, alpha: alpha.into_inner(), srgb })
 }
 
 #[cfg(test)]

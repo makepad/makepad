@@ -12,12 +12,16 @@ pub mod ignore;
 pub mod index;
 pub mod merge;
 pub mod object;
-pub mod oid;
 pub mod pack;
 pub mod reach;
 pub mod refs;
 pub mod repo;
-mod sha1;
+pub mod oid {
+    pub use makepad_git_oid::oid::*;
+}
+mod sha1 {
+    pub use makepad_git_oid::Sha1;
+}
 #[doc(hidden)]
 pub mod test_support;
 pub mod text_clean;

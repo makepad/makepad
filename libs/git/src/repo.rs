@@ -929,7 +929,7 @@ impl Repository {
             let line = bytes.data.split(|b| *b == b'\n').next().unwrap_or_default();
             let tree = line.strip_prefix(b"tree ").and_then(|s| std::str::from_utf8(s).ok())
                 .ok_or_else(|| GitError::InvalidObject("commit: missing tree header".into()))?;
-            ObjectId::from_hex(tree).map(Some)
+            ObjectId::from_hex(tree).map(Some).map_err(GitError::from)
         };
         let trees = tree(old).and_then(|old| tree(new).map(|new| (old, new)));
         self.blob_reads = self.blob_reads.saturating_add(scratch.blob_reads.get());
