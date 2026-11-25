@@ -21,7 +21,7 @@ use super::plan::{Endpoint, LivePlanSpec, OwnerSlice, PlanError};
 use super::value::{EndpointValue, ProbeValue, WriteRefusal};
 use crate::document::ident::{Generation, InstanceId};
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicU32, AtomicUsize, Ordering}, Arc};
 
 /// An owner-typed command for one admitted trigger endpoint: what a write
 /// cannot say with a number, a toggle, a note or a pulse (a decoded track
@@ -93,7 +93,53 @@ pub struct BaseInfo {
     pub layout: Arc<dyn Any + Send + Sync>,
 }
 
+/// One prepare's cancellation and execution state, shared by the host and its workers.
+#[derive(Clone, Default)]
+pub struct PrepareControl(Arc<PrepareState>);
+
+#[derive(Default)]
+struct PrepareState {
+    cancelled: AtomicU32,
+    executions: AtomicUsize,
+}
+
+/// Keeps a prepare marked as executing for the lifetime of this scope.
+#[must_use = "hold the guard while the work executes"]
+pub struct ExecutionGuard<'a>(&'a AtomicUsize);
+
+impl Drop for ExecutionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl PrepareControl {
+    pub fn cancel(&self) {
+        self.word().store(1, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.word().load(Ordering::Relaxed) != 0
+    }
+
+    pub fn word(&self) -> &AtomicU32 {
+        &self.0.cancelled
+    }
+
+    /// True while any worker holds an execution guard for this prepare.
+    pub fn executing(&self) -> bool {
+        self.0.executions.load(Ordering::Relaxed) != 0
+    }
+
+    /// Mark work as executing until the returned guard drops, including during unwind.
+    pub fn enter_execution(&self) -> ExecutionGuard<'_> {
+        self.0.executions.fetch_add(1, Ordering::Relaxed);
+        ExecutionGuard(&self.0.executions)
+    }
+}
+
 pub struct PrepareRequest<'a> {
+    pub control: &'a PrepareControl,
     pub session: &'a SessionKey,
     pub generation: Generation,
     pub plan: &'a LivePlanSpec,
@@ -214,4 +260,44 @@ pub trait OwnerRuntime {
     /// and drop it here. Returns whether the context changed (a device
     /// format), in which case the host prepares the running sessions again.
     fn pump(&mut self) -> bool;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrepareControl;
+
+    #[test]
+    fn execution_guard_clears_on_every_exit() {
+        let control = PrepareControl::default();
+        let worker = control.clone();
+        let run = |work: fn(&PrepareControl) -> Result<(), &'static str>| {
+            let _guard = worker.enter_execution();
+            assert!(control.executing(), "the host sees its worker executing");
+            work(&control)
+        };
+        assert!(!control.executing(), "a new prepare is idle");
+
+        assert_eq!(run(|control| {
+            drop(control.enter_execution());
+            assert!(control.executing(), "the outer scope is still executing");
+            Ok(())
+        }), Ok(()));
+        assert!(!control.executing(), "execution ended on success");
+
+        assert_eq!(run(|_| Err("failed")), Err("failed"));
+        assert!(!control.executing(), "execution ended on error");
+
+        let unwind = std::panic::catch_unwind(|| run(|_| panic!("prepare unwound")));
+        assert!(unwind.is_err());
+        assert!(!control.executing(), "execution ended on unwind");
+        assert!(!control.is_cancelled(), "execution scopes leave the cancellation word clear");
+
+        assert_eq!(run(|control| {
+            control.cancel();
+            assert!(control.executing(), "the worker is still leaving its cancelled scope");
+            Err("cancelled")
+        }), Err("cancelled"));
+        assert!(!control.executing(), "execution ended on cancellation");
+        assert!(worker.is_cancelled(), "leaving the scope preserves cancellation");
+    }
 }

@@ -9,6 +9,13 @@ mod.widgets.hw_palette.screen_bg = #x140d07
 mod.widgets.hw_palette.screen_text = #xf3dcae
 mod.widgets.hw_palette.screen_muted = #xa88a60
 mod.widgets.hw_palette.accent = #xffa338
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: 70s receiver: ember red, amber, brass-cream.
+mod.widgets.hw_palette.picture_low = #x9a3d16
+mod.widgets.hw_palette.picture_mid = #xffa338
+mod.widgets.hw_palette.picture_high = #xffe6b0
+mod.widgets.hw_palette.picture_peak = #xfff3d6
+mod.widgets.hw_palette.picture_ink = #xa88a60
 
 // ---- the front: brushed brass inside an oiled walnut frame ----
 mod.widgets.HwChassis.draw_bg.ground = #xa9843c

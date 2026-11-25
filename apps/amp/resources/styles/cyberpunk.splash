@@ -15,6 +15,13 @@ mod.widgets.hw_palette.screen_bg = #x07080c
 mod.widgets.hw_palette.screen_text = #xe6fbff
 mod.widgets.hw_palette.screen_muted = #x6b8499
 mod.widgets.hw_palette.accent = #x14f0ff
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: cyan, magenta, yellow.
+mod.widgets.hw_palette.picture_low = #x14f0ff
+mod.widgets.hw_palette.picture_mid = #xff24b8
+mod.widgets.hw_palette.picture_high = #xffe024
+mod.widgets.hw_palette.picture_peak = #xff40cc
+mod.widgets.hw_palette.picture_ink = #x3fb8cc
 mod.widgets.hw_palette.panel_text = #xe6fbff
 mod.widgets.hw_palette.panel_muted = #x7390a6
 mod.widgets.hw_palette.menu_bg = #x0b0d12
@@ -451,44 +458,43 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let sz = self.rect_size
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     if self.part > 0.5 && self.part < 1.5 {
-        // The well: black, a fine cyan grid.
+        // The well: black with a fine grid in picture_ink.
         let f = fract(p / vec2(20.0, 20.0))
         let g = max(1.0 - smoothstep(0.0, 0.03, f.x), 1.0 - smoothstep(0.0, 0.03, f.y))
-        let col = vec3(0.015, 0.02, 0.03) + vec3(0.08, 0.94, 1.0) * g * 0.05
+        let col = vec3(0.015, 0.02, 0.03) + self.picture_ink.xyz * g * 0.05
         return vec4(col, 1.0)
     }
     if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
-        // Level rules: dashed cyan.
+        // Dashed level rules in picture_ink.
         let a = step(0.5, fract(p.x / 6.0)) * 0.22
-        return vec4(vec3(0.08, 0.94, 1.0) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 2.5 && self.part < 3.5 {
         // The empty slot: ghost cells.
         let cell = step(1.0, fract((sz.y - p.y) / 4.0) * 4.0)
         let a = 0.07 * cell
-        return vec4(vec3(0.08, 0.94, 1.0) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 4.5 && self.part < 5.5 {
-        // The peak mark: hot magenta.
-        return vec4(1.0, 0.25, 0.80, 1.0)
+        return self.picture_peak
     }
-    // A lit bar: stacked cells, cyan at the floor to magenta to yellow at
-    // the top of the scale, a magenta fringe on its left and cyan on its right.
+    // Stacked cells rise from picture_low through picture_mid to picture_high,
+    // with a picture_mid fringe on the left and picture_low on the right.
     let yb = sz.y - p.y
     let cell = smoothstep(0.9, 1.0 + px, fract(yb / 4.0) * 4.0)
     let t = clamp(yb / 150.0, 0.0, 1.0)
-    var col = mix(vec3(0.06, 0.90, 1.0), vec3(1.0, 0.14, 0.72), smoothstep(0.22, 0.55, t))
-    col = mix(col, vec3(1.0, 0.88, 0.14), smoothstep(0.68, 0.85, t))
+    var col = mix(self.picture_low.xyz, self.picture_mid.xyz, smoothstep(0.22, 0.55, t))
+    col = mix(col, self.picture_high.xyz, smoothstep(0.68, 0.85, t))
     let lx = 1.0 - smoothstep(0.0, 1.0, p.x)
     let rx = smoothstep(sz.x - 1.0, sz.x, p.x)
-    col = mix(col, vec3(1.0, 0.1, 0.6), lx * 0.8)
-    col = mix(col, vec3(0.7, 1.0, 1.0), rx * 0.8)
+    col = mix(col, self.picture_mid.xyz, lx * 0.8)
+    col = mix(col, self.picture_low.xyz, rx * 0.8)
     let top = 1.0 - smoothstep(0.0, 3.0, p.y)
     col = col + vec3(0.5, 0.5, 0.5) * top
     return vec4(col * cell, cell)
 }
-// The waveform: a white-hot trace with a magenta ghost above-left and a
-// cyan one below-right.
+// The waveform: a picture_high core with a picture_mid ghost above-left
+// and a picture_low ghost below-right.
 mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let p = self.pos * self.rect_size
     let a = self.seg_a
@@ -504,7 +510,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let core = 1.0 - smoothstep(0.2, 0.9, d)
     let gm = (1.0 - smoothstep(0.3, 1.1, dm)) * 0.75
     let gc = (1.0 - smoothstep(0.3, 1.1, dc)) * 0.75
-    let rgb = vec3(1.0, 0.14, 0.72) * gm + vec3(0.08, 0.94, 1.0) * gc + vec3(0.9, 1.0, 1.0) * core
+    let rgb = self.picture_mid.xyz * gm + self.picture_low.xyz * gc + self.picture_high.xyz * core
     let al = clamp(max(core, max(gm, gc)), 0.0, 1.0)
     return vec4(rgb * min(al, 1.0), al * 0.9)
 }

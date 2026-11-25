@@ -12,6 +12,13 @@ mod.widgets.hw_palette.screen_bg = #x07080a
 mod.widgets.hw_palette.screen_text = #xe9ecef
 mod.widgets.hw_palette.screen_muted = #x8a929c
 mod.widgets.hw_palette.accent = #xff4a22
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: 2001 station: blue screen, white panel, HAL red.
+mod.widgets.hw_palette.picture_low = #x2f6bff
+mod.widgets.hw_palette.picture_mid = #xdfe4ea
+mod.widgets.hw_palette.picture_high = #xff4a22
+mod.widgets.hw_palette.picture_peak = #xff4a22
+mod.widgets.hw_palette.picture_ink = #x8a929c
 
 // ---- the front: matte white moulding, soft panel seams ----
 mod.widgets.HwChassis.draw_bg.ground = #xe9eae7

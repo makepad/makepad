@@ -11,6 +11,13 @@ mod.widgets.hw_palette.screen_bg = #x0a0907
 mod.widgets.hw_palette.screen_text = #xf3e7c9
 mod.widgets.hw_palette.screen_muted = #xa9935f
 mod.widgets.hw_palette.accent = #xf0c35a
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: bronze, gold, cream.
+mod.widgets.hw_palette.picture_low = #x8a5a1c
+mod.widgets.hw_palette.picture_mid = #xcc9942
+mod.widgets.hw_palette.picture_high = #xfff2d1
+mod.widgets.hw_palette.picture_peak = #xfff5d6
+mod.widgets.hw_palette.picture_ink = #xa9935f
 mod.widgets.hw_palette.panel_text = #x1b150b
 mod.widgets.hw_palette.panel_muted = #x6b5a38
 mod.widgets.hw_palette.menu_bg = #x0e0c09
@@ -187,7 +194,7 @@ mod.widgets.HwMilk.light_knee = 1.0
 mod.widgets.HwMilk.tint = vec4(1.0, 0.80, 0.46, 0.28)
 mod.widgets.HwSpectrum.light = 4.0
 
-// ---- the spectrum: a skyline of stepped gold towers under a sunburst ----
+// ---- the spectrum: a skyline of stepped towers under a sunburst ----
 // Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
 mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let s = self.rect_size
@@ -212,41 +219,41 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         return vec4(col * c.w, c.w)
     }
     if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
-        // Level rules: dotted gold.
+        // Dotted level rules in picture_ink.
         let dot = step(0.55, fract(p.x / 5.0))
         let a = dot * 0.30
-        return vec4(vec3(0.85, 0.65, 0.30) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 2.5 && self.part < 3.5 {
         // The empty slot: faint window rows where a tower will rise.
         let row = step(fract(p.y / 5.0), 0.2)
         let a = row * 0.07
-        return vec4(vec3(0.9, 0.72, 0.36) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 4.5 && self.part < 5.5 {
-        // The peak: a cream beacon atop the tower.
+        // A picture_peak beacon atop the tower.
         let a = c.w * (1.0 - smoothstep(s.x * 0.18, s.x * 0.18 + px, abs(p.x - s.x * 0.5)))
-        return vec4(vec3(1.0, 0.95, 0.82) * a, a)
+        return vec4(self.picture_peak.xyz * a, a)
     }
     // A tower: a stepped crown (three tiers narrowing to a spire), floors
-    // of lit windows, a bright central pier, bronze at the foot.
+    // of lit windows, a bright central pier, picture_low at the foot.
     let tier = floor(p.y / max(s.x * 0.28, 2.0))
     let hw = s.x * 0.5 * clamp(0.22 + tier * 0.26, 0.0, 1.0)
     let dx = abs(p.x - s.x * 0.5)
     let inside = 1.0 - smoothstep(hw - px, hw + px, dx)
     let up = clamp(1.0 - p.y / 160.0, 0.0, 1.0)
-    var col = mix(vec3(0.45, 0.28, 0.08), c.xyz * 1.05, 0.35 + 0.65 * up)
+    var col = mix(self.picture_low.xyz, c.xyz * 1.05, 0.35 + 0.65 * up)
     let floors = step(0.82, fract(p.y / 7.0)) * step(7.0, p.y)
     col = col * (1.0 - floors * 0.45)
     let win = step(abs(abs(p.x - s.x * 0.5) - s.x * 0.24), 0.6) * step(fract(p.y / 7.0), 0.6) * step(9.0, p.y)
     col = col * (1.0 - win * 0.35)
     let pier = 1.0 - smoothstep(0.4, 0.4 + px, dx)
-    col = mix(col, vec3(1.0, 0.94, 0.78), pier * 0.6)
+    col = mix(col, self.picture_high.xyz, pier * 0.6)
     let edge = smoothstep(hw - 1.6, hw - 0.4, dx)
     col = col * (1.0 - edge * 0.35)
     return vec4(col * inside, inside)
 }
-// The waveform: a double gold pinstripe.
+// The waveform: a double pinstripe in picture_mid and picture_high.
 mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let p = self.pos * self.rect_size
     let a = self.seg_a
@@ -258,7 +265,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let outer = 1.0 - smoothstep(0.3, 0.9, abs(d - 1.7))
     let core = 1.0 - smoothstep(0.2, 0.7, d)
     let al = clamp(outer + core, 0.0, 1.0)
-    let col = mix(vec3(0.95, 0.74, 0.34), vec3(1.0, 0.96, 0.84), core)
+    let col = mix(self.picture_mid.xyz, self.picture_high.xyz, core)
     return vec4(col * al, al)
 }
 

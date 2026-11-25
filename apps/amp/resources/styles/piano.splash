@@ -11,6 +11,13 @@ mod.widgets.hw_palette.screen_bg = #x07090c
 mod.widgets.hw_palette.screen_text = #xe8eef4
 mod.widgets.hw_palette.screen_muted = #x7f8b99
 mod.widgets.hw_palette.accent = #x74d2ff
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: AV front: royal blue, ice, white.
+mod.widgets.hw_palette.picture_low = #x4a5fe0
+mod.widgets.hw_palette.picture_mid = #x74d2ff
+mod.widgets.hw_palette.picture_high = #xf2fbff
+mod.widgets.hw_palette.picture_peak = #xffffff
+mod.widgets.hw_palette.picture_ink = #x7f8b99
 
 // ---- the front: piano-black lacquer ----
 mod.widgets.HwChassis.draw_bg.ground = #x0a0b0d

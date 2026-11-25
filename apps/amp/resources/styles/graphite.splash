@@ -14,6 +14,13 @@ mod.widgets.hw_palette.screen_bg = #x0e0f10
 mod.widgets.hw_palette.screen_text = #xd9dadc
 mod.widgets.hw_palette.screen_muted = #x75787d
 mod.widgets.hw_palette.accent = #xff7a1c
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: graphite, silver, orange top.
+mod.widgets.hw_palette.picture_low = #x8c8f94
+mod.widgets.hw_palette.picture_mid = #xcccfd4
+mod.widgets.hw_palette.picture_high = #xff7a1c
+mod.widgets.hw_palette.picture_peak = #xededf0
+mod.widgets.hw_palette.picture_ink = #x7f8287
 mod.widgets.hw_palette.panel_text = #xd4d6d9
 mod.widgets.hw_palette.panel_muted = #x7d8086
 mod.widgets.hw_palette.menu_bg = #x1a1b1d
@@ -173,7 +180,7 @@ mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
     return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
 }
 
-// ---- the spectrum: hairline white bars, tiny peak ticks, one orange ----
+// ---- the spectrum: hairline bars, tiny peak ticks, one picture_high accent ----
 // Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline, 7 fill).
 mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let p = self.pos * self.rect_size
@@ -191,18 +198,17 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         let w = self.rect_pos.x + p.x
         let dm = step(fract(w / 3.0), 0.34)
         let a = self.color.w * dm * 1.2
-        return vec4(vec3(0.55, 0.56, 0.58) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 6.5 {
         return vec4(self.color.xyz * self.color.w, self.color.w)
     }
-    // A peak: a small tick over the bar, orange on the accent band.
+    // A small picture_peak tick over each bar.
     if self.part > 4.5 && self.part < 5.5 {
         let cx = s.x * 0.5
         let m = 1.0 - smoothstep(0.9 - px * 0.5, 0.9 + px * 0.5, abs(p.x - cx))
-        let c = mix(vec3(0.80, 0.81, 0.83), vec3(1.0, 0.48, 0.11), accent)
         let a = m * 0.9
-        return vec4(c * a, a)
+        return vec4(self.picture_peak.xyz * a, a)
     }
     let cx = s.x * 0.5
     if self.part > 2.5 && self.part < 3.5 {
@@ -210,13 +216,13 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         let fb = s.y - p.y
         let m = (1.0 - smoothstep(0.4, 0.4 + px, abs(p.x - cx))) * step(fb, 3.0)
         let a = m * 0.35
-        return vec4(vec3(0.6, 0.61, 0.63) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     // A bar: a hairline, brighter toward its top.
     let m = 1.0 - smoothstep(0.85 - px * 0.5, 0.85 + px * 0.5, abs(p.x - cx))
     let v = 1.0 - p.y / max(s.y, 1.0)
-    var c = vec3(0.93, 0.93, 0.94) * (0.72 + 0.28 * (1.0 - v))
-    c = mix(c, vec3(1.0, 0.48, 0.11), accent)
+    var c = mix(self.picture_low.xyz, self.picture_mid.xyz, v) * (0.72 + 0.28 * (1.0 - v))
+    c = mix(c, self.picture_high.xyz, accent)
     return vec4(c * m, m)
 }
 mod.widgets.HwSpectrum.draw_line.pixel = fn() {
@@ -228,11 +234,9 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
     let d = length(pa - ba * h)
     let al = (1.0 - smoothstep(0.35, 1.0, d)) * 0.62
-    return vec4(vec3(0.86, 0.87, 0.89) * al, al)
+    return vec4(self.picture_mid.xyz * al, al)
 }
 mod.widgets.HwSpectrum.light = 2.4
-mod.widgets.HwSpectrum.light_low = vec4(0.55, 0.56, 0.58, 0.6)
-mod.widgets.HwSpectrum.light_high = vec4(1.0, 0.55, 0.20, 1.6)
 mod.widgets.HwSpectrum.wave_thickness = 1.2
 mod.widgets.HwSpectrum.wave_fill = 0.0
 mod.widgets.HwSpectrum.draw_label.text_style = theme.font_regular{font_size: 7.5}

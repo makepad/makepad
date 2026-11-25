@@ -12,6 +12,13 @@ mod.widgets.hw_palette.screen_bg = #x06080a
 mod.widgets.hw_palette.screen_text = #xe2eef2
 mod.widgets.hw_palette.screen_muted = #x7f9098
 mod.widgets.hw_palette.accent = #x27d9ff
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: studio rack meters: green, amber, red clip.
+mod.widgets.hw_palette.picture_low = #x2fd65a
+mod.widgets.hw_palette.picture_mid = #xffc21a
+mod.widgets.hw_palette.picture_high = #xff3b30
+mod.widgets.hw_palette.picture_peak = #xff6a5c
+mod.widgets.hw_palette.picture_ink = #x7f9098
 // The device's floor is dark: display type sits on it bare.
 mod.widgets.hw_palette.dark_floor = 1.0
 

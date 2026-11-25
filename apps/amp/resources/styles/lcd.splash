@@ -14,6 +14,13 @@ mod.widgets.hw_palette.screen_bg = #x9dac92
 mod.widgets.hw_palette.screen_text = #x141b16
 mod.widgets.hw_palette.screen_muted = #x2f3d34
 mod.widgets.hw_palette.accent = #x1d3470
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: dark segments, amber filter on top (light screen).
+mod.widgets.hw_palette.picture_low = #x1d4a44
+mod.widgets.hw_palette.picture_mid = #x090f0f
+mod.widgets.hw_palette.picture_high = #x5a3410
+mod.widgets.hw_palette.picture_peak = #x090f0f
+mod.widgets.hw_palette.picture_ink = #x2f3d34
 mod.widgets.hw_palette.panel_text = #x141b16
 mod.widgets.hw_palette.panel_muted = #x4f5e4a
 mod.widgets.hw_palette.menu_bg = #x9dac92
@@ -404,15 +411,13 @@ mod.widgets.HwReadout.draw_text.text_style = theme.font_code{font_size: 11.0}
 
 // ---- the spectrum: an LCD bar graph, every segment's ghost showing ----
 mod.widgets.HwSpectrum.light = 3.0
-mod.widgets.HwSpectrum.light_low = vec4(0.30, 0.80, 0.70, 0.6)
-mod.widgets.HwSpectrum.light_high = vec4(0.45, 1.0, 0.85, 1.4)
 mod.widgets.HwSpectrum.wave_thickness = 1.4
 mod.widgets.HwSpectrum.wave_fill = 0.0
 mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let p = self.pos * self.rect_size
     let s = self.rect_size
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let ink = vec3(0.035, 0.06, 0.06)
+    let ink = self.picture_ink.xyz
     if self.part > 0.5 && self.part < 1.5 {
         // The glass, EL backlit: blue-green, brightest in the middle where
         // the panel sits over the lamp, falling off to the frame.
@@ -451,26 +456,26 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let cx = abs(p.x - s.x * 0.5) - (s.x * 0.5 - 1.0)
     let segm = step(0.14, fy) * step(fy, 0.78) * (1.0 - smoothstep(-px, px, cx))
     if self.part > 2.5 && self.part < 3.5 {
-        // The unlit column: a printed amber filter over its top fifth,
+        // The unlit column: a printed picture_high filter over its top fifth,
         // and every segment's ghost faintly there.
         let t = fb / max(s.y, 1.0)
         let hot = smoothstep(0.70, 0.72, t)
         let fa = hot * 0.42 * (1.0 - smoothstep(-px, px, abs(p.x - s.x * 0.5) - s.x * 0.5 - 0.5))
         let ga = segm * 0.24
-        let col = mix(vec3(0.95, 0.62, 0.20), ink, ga / max(ga + fa, 0.001))
+        let col = mix(self.picture_high.xyz, ink, ga / max(ga + fa, 0.001))
         let a = clamp(fa + ga, 0.0, 1.0)
         return vec4(col * a, a)
     }
     if self.part > 4.5 && self.part < 5.5 {
         // The held peak: one hollow segment.
         let a = step(1.0, p.x) * step(p.x, s.x - 1.0) * 0.95
-        return vec4(ink * a, a)
+        return vec4(self.picture_peak.xyz * a, a)
     }
     // A lit segment, and its shadow on the reflector just below.
     let fy2 = fract((fb + 1.2) / pitch)
     let shm = step(0.14, fy2) * step(fy2, 0.78) * (1.0 - segm) * 0.22
     let a = segm * 0.96 + shm
-    return vec4(ink * a, a)
+    return vec4(self.picture_mid.xyz * a, a)
 }
 mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     // The waveform on a 3 pt dot matrix: every pixel near the trace is on.
@@ -488,7 +493,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let f = fract(w / 3.0)
     let sq = step(0.12, f.x) * step(f.x, 0.88) * step(0.12, f.y) * step(f.y, 0.88)
     let al = on * sq * 0.92
-    return vec4(vec3(0.035, 0.06, 0.06) * al, al)
+    return vec4(self.picture_mid.xyz * al, al)
 }
 mod.widgets.HwSpectrum.draw_label.text_style = theme.font_code{font_size: 7.5}
 
@@ -709,6 +714,8 @@ mod.widgets.HwEqGraph.draw_curve.curve_ink = vec4(0.72, 0.82, 0.66, 1.0)
 mod.widgets.HwEqGraph.draw_grid.grid = vec4(1.0, 0.25, 0.35, 0.0)
 mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.72, 0.82, 0.66, 1.0)
 mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.30, 2.0, 0.0, 0.0)
+// The EQ sits on dark glass, not the light screen: its backdrop keeps a
+// light ink, as the picture's dark segments would not read there.
 mod.widgets.HwEqGraph.draw_spectrum.spec_ink = vec4(0.62, 0.72, 0.58, 1.0)
 mod.widgets.HwEqGraph.label_ink = vec4(0.72, 0.82, 0.66, 0.9)
 mod.widgets.HwEqGraph.scale_ink = vec4(0.72, 0.82, 0.66, 0.9)

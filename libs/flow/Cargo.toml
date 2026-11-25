@@ -11,7 +11,10 @@ license = "MIT OR Apache-2.0"
 #   runtime   the run scheduler, the shared flow store and the bounded
 #             embedding engine (`runtime::Engine`). Builds without widgets,
 #             platform, HTTP, the AI hub, the asset client or video.
-#   ai        Chat and Gen executors over makepad-ai-hub.
+#   ai        Chat and Gen executors over makepad-ai-hub: its CLI, MCP and cloud
+#             backends, this machine's hub node and the LAN fleet. A model in this
+#             process only in an app whose own `localai` turns on the hub's
+#             (AGENTS.md).
 #   http      the Http node executor (the hub's bounded HTTP client).
 #   media     preview/probe decoders and the Publish and archive executors
 #             over a `ResultStore` (implies `ai`: publication names the
@@ -52,8 +55,7 @@ makepad-strict-json = { path = "../strict_json" }
 # Zero-dependency shared primitives; the core takes its SHA-256 from here so
 # hashing a value links neither the AI hub nor a store crate.
 makepad-core-util = { path = "../core_util" }
-makepad-lock-free = { path = "../lock_free" }
-makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["llm"], optional = true }
+makepad-ai-hub = { path = "../ai/hub", default-features = false, optional = true }
 makepad-audio-decode = { path = "../audio_decode", optional = true }
 makepad-mp4-index = { path = "../mp4_index", optional = true }
 makepad-video = { package = "makepad-platform-video", path = "../../platform/video", optional = true }
@@ -62,4 +64,6 @@ makepad-zune-png = { path = "../zune/zune-png", optional = true }
 makepad-zune-jpeg = { path = "../zune/zune-jpeg", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The runtime's snapshots (src/runtime, native only).
+makepad-lock-free = { path = "../lock_free" }
 makepad-bounded-http = { path = "../bounded_http", optional = true }

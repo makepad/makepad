@@ -9,6 +9,13 @@ mod.widgets.hw_palette.screen_bg = #x120d06
 mod.widgets.hw_palette.screen_text = #xffb347
 mod.widgets.hw_palette.screen_muted = #xd99d48
 mod.widgets.hw_palette.accent = #xffa21f
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: amber phosphor, monochrome.
+mod.widgets.hw_palette.picture_low = #x8a4300
+mod.widgets.hw_palette.picture_mid = #xffa21f
+mod.widgets.hw_palette.picture_high = #xffdc98
+mod.widgets.hw_palette.picture_peak = #xfff0c8
+mod.widgets.hw_palette.picture_ink = #xd99d48
 
 // ---- the front: khaki putty, riveted plates, worn ----
 mod.widgets.HwChassis.draw_bg.ground = #xa9a288

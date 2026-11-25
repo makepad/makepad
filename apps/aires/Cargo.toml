@@ -6,6 +6,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "The user's question inbox in the menu bar"
 
+# The platforms aires is built for (devhub ci reads this; one place): the desktop.
+# A menu-bar tool that reads devhub through makepad-remote, which is native only (unix sockets, TLS,
+# process control); not meant for a browser.
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [[bin]]
 name = "makepad-app-aires"
 path = "src/main.rs"

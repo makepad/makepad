@@ -9,6 +9,13 @@ mod.widgets.hw_palette.screen_bg = #x0a0e0a
 mod.widgets.hw_palette.screen_text = #xb8f5a8
 mod.widgets.hw_palette.screen_muted = #x5f8f58
 mod.widgets.hw_palette.accent = #x5dff4a
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: green phosphor, monochrome.
+mod.widgets.hw_palette.picture_low = #x2a8a24
+mod.widgets.hw_palette.picture_mid = #x5dff4a
+mod.widgets.hw_palette.picture_high = #xd8ffcc
+mod.widgets.hw_palette.picture_peak = #xeaffe0
+mod.widgets.hw_palette.picture_ink = #x5f8f58
 // The device's floor is dark: display type sits on it bare.
 mod.widgets.hw_palette.dark_floor = 1.0
 

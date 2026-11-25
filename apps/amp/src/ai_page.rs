@@ -412,6 +412,15 @@ impl App {
         if auto.active(cx) != self.ai.auto {
             auto.set_active(cx, self.ai.auto, Animate::No);
         }
+        // The worker keeps the model list current while the page is shown.
+        let page_shown = self.ui.hw_stage(cx, ids!(stage)).panels().1 == "ai";
+        if page_shown != self.ai_watching {
+            if let Some(workers) = &self.workers {
+                if workers.ai_music(AiCommand::Watch(page_shown)) {
+                    self.ai_watching = page_shown;
+                }
+            }
+        }
         if !self.ai_models_shown {
             self.ai_models_shown = true;
             let mut labels: Vec<String> = self.ai.models.iter().map(|m| m.label()).collect();

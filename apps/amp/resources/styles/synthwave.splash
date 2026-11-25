@@ -14,6 +14,13 @@ mod.widgets.hw_palette.screen_bg = #x0c0620
 mod.widgets.hw_palette.screen_text = #xffe3fb
 mod.widgets.hw_palette.screen_muted = #xa98ad8
 mod.widgets.hw_palette.accent = #xff2fa8
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: violet, hot pink, sunset orange, cyan-white peak.
+mod.widgets.hw_palette.picture_low = #x9e4cff
+mod.widgets.hw_palette.picture_mid = #xff29a8
+mod.widgets.hw_palette.picture_high = #xff9e33
+mod.widgets.hw_palette.picture_peak = #xbfffff
+mod.widgets.hw_palette.picture_ink = #xa98ad8
 mod.widgets.hw_palette.panel_text = #xf8dcff
 mod.widgets.hw_palette.panel_muted = #xa88cd6
 mod.widgets.hw_palette.menu_bg = #x170a30
@@ -386,9 +393,8 @@ mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
 }
 
 // ---- the spectrum: an Outrun sunset behind a wall of neon LED columns ----
-// The bars' colour carries their level (Rust mixes the accent toward the
-// screen text by 0.1 + 0.35 * level), so each bar can find its own height
-// in the picture and light its LED rows by absolute height.
+// Each bar knows its `level`, so it can find its own height in the
+// picture and light its LED rows by absolute height.
 // Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
 mod.widgets.HwSpectrum.draw_round = mod.widgets.DrawMusicRound{
     pixel: fn() {
@@ -436,40 +442,41 @@ mod.widgets.HwSpectrum.draw_round = mod.widgets.DrawMusicRound{
             return vec4(col * cov, cov)
         }
         if self.part > 3.5 && self.part < 4.5 {
-            // A lit bar: LED rows on a 4.5 pt pitch, cyan at the floor
-            // through magenta to a sunset orange at full scale.
+            // LED rows on a 4.5 pt pitch, from picture_low at the floor
+            // through picture_mid to picture_high at full scale.
             let level = clamp(self.level, 0.02, 1.0)
             let hb = (1.0 - self.pos.y) * sz.y
             let f = (1.0 - self.pos.y) * level
             let cell = step(fract(hb / 4.5), 0.70)
-            var col = mix(vec3(0.15, 0.90, 1.0), vec3(0.62, 0.30, 1.0), smoothstep(0.0, 0.35, f))
-            col = mix(col, vec3(1.0, 0.16, 0.66), smoothstep(0.30, 0.62, f))
-            col = mix(col, vec3(1.0, 0.62, 0.20), smoothstep(0.62, 0.92, f))
+            let lower_stop = mix(self.picture_low.xyz, self.picture_mid.xyz, 0.35)
+            var col = mix(self.picture_low.xyz, lower_stop, smoothstep(0.0, 0.35, f))
+            col = mix(col, self.picture_mid.xyz, smoothstep(0.30, 0.62, f))
+            col = mix(col, self.picture_high.xyz, smoothstep(0.62, 0.92, f))
             let core = 1.0 - abs(self.pos.x - 0.5) * 2.0
             col = col * (0.80 + 0.35 * core)
             let top = 1.0 - smoothstep(0.0, 4.5, p.y)
-            col = mix(col, vec3(1.0, 0.95, 1.0), top * 0.55)
+            col = mix(col, vec3(1.0, 1.0, 1.0), top * 0.55)
             let a = cov * mix(0.10, 1.0, cell)
             return vec4(col * a, a)
         }
         if self.part > 4.5 && self.part < 5.5 {
-            // A peak mark: a hot white-cyan tick.
+            // A picture_peak tick.
             let a = cov
-            return vec4(vec3(0.75, 1.0, 1.0) * a, a)
+            return vec4(self.picture_peak.xyz * a, a)
         }
         if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
             // The level rules and the waveform's centre line.
             let a = cov * 0.10
-            return vec4(vec3(0.4, 0.8, 1.0) * a, a)
+            return vec4(self.picture_ink.xyz * a, a)
         }
         // An empty slot: the ghost of every LED row.
         let hb = (1.0 - self.pos.y) * sz.y
         let cell = step(fract(hb / 4.5), 0.70)
         let a = cov * cell * 0.10
-        return vec4(vec3(0.55, 0.30, 0.90) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
 }
-// The waveform: a neon tube, a white-hot core in a pink halo.
+// The waveform: a neon tube with a picture_high core in a picture_mid halo.
 mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let p = self.pos * self.rect_size
     let pa = p - self.seg_a
@@ -478,7 +485,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let d = length(pa - ba * h)
     let core = 1.0 - smoothstep(0.25, 0.9, d)
     let halo = exp(-d / 1.2) * 0.55
-    let col = mix(vec3(1.0, 0.20, 0.72), vec3(1.0, 0.92, 1.0), core * 0.7)
+    let col = mix(self.picture_mid.xyz, self.picture_high.xyz, core * 0.7)
     let a = clamp(core + halo, 0.0, 1.0)
     return vec4(col * a, a)
 }

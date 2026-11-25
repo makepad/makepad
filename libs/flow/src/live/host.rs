@@ -14,7 +14,7 @@
 //! here knows which package or pane a window shows.
 
 use super::owner::{
-    BaseInfo, LiveOwner, OwnerCommand, OwnerRuntime, PrepareRequest, PreparedSlice, ResourceState, SessionKey, StageRefusal,
+    BaseInfo, LiveOwner, OwnerCommand, OwnerRuntime, PrepareControl, PrepareRequest, PreparedSlice, ResourceState, SessionKey, StageRefusal,
 };
 use super::plan::{normalize_control, partition, Endpoint, EndpointKind, LivePlanSpec, PlanError};
 use super::value::{EndpointValue, ProbeValue, WriteRefusal};
@@ -126,6 +126,12 @@ struct Committed {
     pumps: u32,
 }
 
+struct Preparing {
+    generation: Generation,
+    revision: u64,
+    control: PrepareControl,
+}
+
 struct Session {
     key: SessionKey,
     wanted: Option<ApplyRevision>,
@@ -133,7 +139,7 @@ struct Session {
     /// Reconciliation and context invalidation must never fall back to an
     /// older running revision while a newer edit is being prepared.
     latest: Option<ApplyRevision>,
-    preparing: Option<(Generation, u64)>,
+    preparing: Option<Preparing>,
     committed: Option<Committed>,
     running: Option<Live>,
     error: Option<(u64, PlanError)>,
@@ -142,6 +148,7 @@ struct Session {
 }
 
 struct Job {
+    control: PrepareControl,
     session: SessionKey,
     generation: Generation,
     request: ApplyRevision,
@@ -150,6 +157,7 @@ struct Job {
 }
 
 enum Outcome {
+    Cancelled,
     Ready { plan: Arc<LivePlanSpec>, slices: Vec<(String, Box<dyn PreparedSlice>)> },
     /// The plan has a slice of an owner whose runtime was not ready.
     NeedsContext,
@@ -278,6 +286,7 @@ impl LiveHost {
             session.latest = Some(request);
             return Ok(());
         }
+        if let Some(preparing) = &session.preparing { preparing.control.cancel(); }
         session.latest = Some(request.clone());
         session.wanted = Some(request);
         session.retry_in = 0;
@@ -294,7 +303,7 @@ impl LiveHost {
         let Some(session) = self.sessions.get_mut(instance) else { return };
         session.stopping = true;
         session.wanted = None;
-        session.preparing = None;
+        if let Some(preparing) = session.preparing.take() { preparing.control.cancel(); }
         for runtime in self.runtimes.values_mut() {
             runtime.stop(&session.key);
         }
@@ -308,8 +317,8 @@ impl LiveHost {
         let session = self.sessions.get(instance)?;
         let pending = if let Some(committed) = &session.committed {
             Some((committed.live.generation, committed.live.plan.revision, "committed"))
-        } else if let Some((generation, revision)) = session.preparing {
-            Some((generation, revision, "preparing"))
+        } else if let Some(preparing) = &session.preparing {
+            Some((preparing.generation, preparing.revision, "preparing"))
         } else {
             session.wanted.as_ref().map(|request| (Generation(0), request.revision, "wanted"))
         };
@@ -518,7 +527,7 @@ impl LiveHost {
                 session.wanted = session.latest.clone();
                 // Old completions are discarded even if they are already in
                 // the result queue. A newer authored edit retains precedence.
-                session.preparing = None;
+                if let Some(preparing) = session.preparing.take() { preparing.control.cancel(); }
                 session.retry_in = 0;
             }
             for (owner, runtime) in &mut self.runtimes {
@@ -562,14 +571,17 @@ impl LiveHost {
             // A result for another life of the instance, for a prepare that
             // was abandoned, or for a revision a newer request replaced, is
             // dropped here; its slices were never staged anywhere.
-            if session.key != key || session.preparing.map(|(generation, _)| generation) != Some(generation) || session.stopping {
+            let Some(preparing) = &session.preparing else { continue };
+            if session.key != key || preparing.generation != generation || session.stopping {
                 continue;
             }
+            let superseded = preparing.control.is_cancelled() || session.wanted.is_some();
             session.preparing = None;
-            if session.wanted.is_some() {
+            if superseded {
                 continue;
             }
             match outcome {
+                Outcome::Cancelled => continue,
                 Outcome::Failed(error) => {
                     session.error = Some((request.revision, error.clone()));
                     self.events.push(LiveEvent::Failed { instance: key.instance.clone(), revision: request.revision, error });
@@ -709,7 +721,8 @@ impl LiveHost {
         }
         let generation = Generation(self.next_generation);
         self.next_generation += 1;
-        let job = Job { session: session.key.clone(), generation, request, contexts, bases };
+        let control = PrepareControl::default();
+        let job = Job { control: control.clone(), session: session.key.clone(), generation, request, contexts, bases };
         let revision = job.request.revision;
         let sent = match self.ensure_worker() {
             Ok(()) => self.jobs.as_ref().expect("worker started").try_send(job),
@@ -723,12 +736,12 @@ impl LiveHost {
         };
         let session = self.sessions.get_mut(instance).expect("session retained");
         match sent {
-            Ok(()) => session.preparing = Some((generation, revision)),
+            Ok(()) => session.preparing = Some(Preparing { generation, revision, control }),
             Err(TrySendError::Full(job)) => session.wanted = Some(job.request),
             Err(TrySendError::Disconnected(_job)) => {
                 // Include this unsent job and every other abandoned job;
                 // none may remain indefinitely marked as preparing.
-                session.preparing = Some((generation, revision));
+                session.preparing = Some(Preparing { generation, revision, control });
                 self.worker_disconnected();
             }
         }
@@ -738,7 +751,8 @@ impl LiveHost {
         self.jobs = None;
         self.done = None;
         for session in self.sessions.values_mut() {
-            if let Some((_, revision)) = session.preparing.take() {
+            if let Some(Preparing { revision, control, .. }) = session.preparing.take() {
+                if control.is_cancelled() { continue; }
                 let error = PlanError::general("the live preparation worker disconnected");
                 session.error = Some((revision, error.clone()));
                 self.events.push(LiveEvent::Failed { instance: session.key.instance.clone(), revision, error });
@@ -793,6 +807,7 @@ fn owners_used(authored: &Graph, registry: &Registry, owners: &BTreeMap<String, 
 }
 
 fn prepare(registry: &Registry, owners: &BTreeMap<String, Arc<dyn LiveOwner>>, job: &Job) -> Outcome {
+    if job.control.is_cancelled() { return Outcome::Cancelled; }
     let authored = &job.request.authored;
     for graph in std::iter::once(authored.as_ref()).chain(authored.components.iter().map(|component| &component.graph)) {
         if let Err(error) = crate::graph::validate_projection_with_registry(graph, &authored.components, registry) {
@@ -810,9 +825,11 @@ fn prepare(registry: &Registry, owners: &BTreeMap<String, Arc<dyn LiveOwner>>, j
     };
     let mut slices = Vec::with_capacity(plan.slices.len());
     for slice in &plan.slices {
+        if job.control.is_cancelled() { return Outcome::Cancelled; }
         let Some(context) = job.contexts.get(&slice.owner) else { return Outcome::NeedsContext };
         let owner = &owners[&slice.owner];
         let request = PrepareRequest {
+            control: &job.control,
             session: &job.session,
             generation: job.generation,
             plan: &plan,
@@ -820,10 +837,125 @@ fn prepare(registry: &Registry, owners: &BTreeMap<String, Arc<dyn LiveOwner>>, j
             base: job.bases.get(&slice.owner).cloned(),
             context: context.clone(),
         };
-        match owner.prepare(request) {
+        let result = owner.prepare(request);
+        if job.control.is_cancelled() { return Outcome::Cancelled; }
+        match result {
             Ok(prepared) => slices.push((slice.owner.clone(), prepared)),
             Err(error) => return Outcome::Failed(error),
         }
     }
     Outcome::Ready { plan, slices }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{closure::Closure, TypeDescriptor};
+    use crate::live::NotReady;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    struct Owner {
+        block: Arc<AtomicBool>,
+        entered: SyncSender<Generation>,
+        left: SyncSender<Generation>,
+    }
+
+    struct Prepared;
+
+    impl PreparedSlice for Prepared {
+        fn base(&self) -> Option<Generation> { None }
+        fn into_any(self: Box<Self>) -> Box<dyn Any + Send> { self }
+    }
+
+    impl LiveOwner for Owner {
+        fn key(&self) -> &str { "test.owner" }
+
+        fn prepare(&self, request: PrepareRequest<'_>) -> Result<Box<dyn PreparedSlice>, PlanError> {
+            if self.block.swap(false, Ordering::Relaxed) {
+                self.entered.try_send(request.generation).unwrap();
+                let deadline = Instant::now() + WAIT;
+                while !request.control.is_cancelled() {
+                    assert!(Instant::now() < deadline, "the host did not cancel the running prepare");
+                    std::thread::yield_now();
+                }
+                self.left.try_send(request.generation).unwrap();
+                if request.plan.revision != 1 { return Err(PlanError::general("obsolete prepare")); }
+            }
+            Ok(Box::new(Prepared))
+        }
+    }
+
+    struct Runtime {
+        changed: Arc<AtomicBool>,
+        active: Option<Generation>,
+    }
+
+    impl OwnerRuntime for Runtime {
+        fn key(&self) -> &str { "test.owner" }
+        fn context(&mut self) -> Result<Arc<dyn Any + Send + Sync>, NotReady> { Ok(Arc::new(())) }
+        fn base(&self, _: &SessionKey) -> Option<BaseInfo> { None }
+        fn stage(&mut self, _: &SessionKey, _: Generation, _: Box<dyn PreparedSlice>) -> Result<(), (StageRefusal, Box<dyn PreparedSlice>)> { Ok(()) }
+        fn commit(&mut self, _: &SessionKey, generation: Generation) { self.active = Some(generation); }
+        fn abort(&mut self, _: &SessionKey, _: Generation) {}
+        fn active(&self, _: &SessionKey) -> Option<Generation> { self.active }
+        fn write(&mut self, _: &SessionKey, _: Generation, _: &Endpoint, _: EndpointValue) -> Result<Option<f64>, WriteRefusal> { unreachable!() }
+        fn probe(&self, _: &SessionKey, _: Generation, _: &Endpoint) -> Option<ProbeValue> { None }
+        fn control(&self, _: &SessionKey, _: Generation, _: &Endpoint) -> Option<f64> { None }
+        fn stop(&mut self, _: &SessionKey) { self.active = None; }
+        fn stopped(&self, _: &SessionKey) -> bool { self.active.is_none() }
+        fn pump(&mut self) -> bool { self.changed.swap(false, Ordering::Relaxed) }
+    }
+
+    #[test]
+    fn superseded_stopped_and_invalidated_prepares_are_cancelled_silently() {
+        let mut registry = Registry::with_builtins();
+        registry.register(TypeDescriptor::provider("TestNode", "test.owner", vec![], vec![])).unwrap();
+        let graph = crate::graph::evaluate_with_registry("use mod.flow.*\nlet n = TestNode{}\nFlow{n}",
+            "live.splash", &Closure { modules: vec![] }, &registry).unwrap();
+        let block = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(AtomicBool::new(false));
+        let (entered, start) = sync_channel(1);
+        let (left, finish) = sync_channel(1);
+        let owner = Owner { block: block.clone(), entered, left };
+        let runtime = Runtime { changed: changed.clone(), active: None };
+        let mut host = LiveHost::new(Arc::new(registry), vec![(Arc::new(owner), Box::new(runtime))], LiveLimits::default()).unwrap();
+        let instance = InstanceId("cancel".into());
+        let apply = |host: &mut LiveHost, revision: u64| {
+            let mut graph = graph.clone();
+            graph.label = revision.to_string();
+            host.apply(ApplyRevision { instance: instance.clone(), definition: "live".into(), revision, authored: Arc::new(graph) }).unwrap();
+        };
+        for revision in [1, 3, 4] {
+            block.store(true, Ordering::Relaxed);
+            apply(&mut host, revision);
+            assert!(host.pump().is_empty());
+            let obsolete = start.recv_timeout(WAIT).expect("owner entered prepare");
+            match revision {
+                1 => apply(&mut host, 2),
+                3 => changed.store(true, Ordering::Relaxed),
+                _ => host.stop(&instance),
+            }
+            let mut events = host.pump();
+            assert_eq!(finish.recv_timeout(WAIT).expect("prepare observed cancellation"), obsolete);
+            let deadline = Instant::now() + WAIT;
+            while events.is_empty() {
+                assert!(Instant::now() < deadline, "replacement or stop did not settle");
+                events = host.pump();
+                std::thread::yield_now();
+            }
+            match &events[..] {
+                [LiveEvent::Installed { generation, revision: installed, .. }] => {
+                    assert_ne!(*generation, obsolete);
+                    assert_eq!(*installed, if revision == 1 { 2 } else { 3 });
+                    assert!(revision != 4 && host.status(&instance).unwrap().error.is_none());
+                }
+                [LiveEvent::Stopped { .. }] => assert_eq!(revision, 4),
+                other => panic!("unexpected events from the cancelled prepare: {other:?}"),
+            }
+        }
+        assert!(host.pump().is_empty());
+    }
 }

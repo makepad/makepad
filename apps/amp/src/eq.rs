@@ -89,7 +89,9 @@ script_mod! {
     // The sound playing, faintly behind the curve. `data` row 1 holds
     // `spec_count` levels (0..1) across the width. `spectrum` = strength,
     // kind (0 bars, 1 a smooth filled area, 2 dots), bar gap (0..1), -.
-    // `spec_ink` = rgb and how much of it over the accent.
+    // It paints the style's sound picture from the floor up (`picture_low`
+    // .. `picture_high`, as the spectrum's bars); `spec_ink` = rgb and how
+    // much of it over that.
     set_type_default() do #(DrawEqSpectrum::script_shader(vm)){
         ..mod.draw.DrawQuad
         data: texture_2d(float)
@@ -97,7 +99,11 @@ script_mod! {
         spec_count: uniform(96.0)
         spectrum: uniform(vec4(0.20, 0.0, 0.25, 0.0))
         spec_ink: uniform(vec4(0.0, 0.0, 0.0, 0.0))
-        ink_accent: uniform(vec4(0.2, 0.8, 1.0, 1.0))
+        picture_low: uniform(vec4(0.12, 0.5, 0.3, 1.0))
+        picture_mid: uniform(vec4(0.12, 0.84, 0.38, 1.0))
+        picture_high: uniform(vec4(0.6, 0.9, 0.7, 1.0))
+        picture_peak: uniform(vec4(0.9, 0.95, 0.9, 1.0))
+        picture_ink: uniform(vec4(0.6, 0.62, 0.65, 1.0))
         level_at: fn(i: float) -> float {
             return self.data.sample_nearest(vec2((clamp(i, 0.0, self.spec_count - 1.0) + 0.5) / self.count, 0.75)).x
         }
@@ -105,11 +111,12 @@ script_mod! {
             let s = self.rect_size
             let p = self.pos * s
             let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-            let ink = mix(self.ink_accent.xyz, self.spec_ink.xyz, self.spec_ink.w)
+            let up = (1.0 - self.pos.y)
+            let low = mix(self.picture_low.xyz, self.picture_mid.xyz, clamp(up * 2.0, 0.0, 1.0))
+            let ink = mix(mix(low, self.picture_high.xyz, clamp(up * 2.0 - 1.0, 0.0, 1.0)), self.spec_ink.xyz, self.spec_ink.w)
             let n = self.spec_count
             let fx = self.pos.x * n
             let i = floor(fx)
-            let up = (1.0 - self.pos.y)
             var a = 0.0
             if self.spectrum.y < 0.5 {
                 let lv = self.level_at(i)
@@ -954,7 +961,7 @@ impl Widget for HwEqGraph {
         dv.set_uniform(cx, live_id!(bands), &[BANDS as f32]);
         self.draw_grid.draw_abs(cx, geo.plot);
         let dv = &mut self.draw_spectrum.draw_vars;
-        dv.set_uniform(cx, live_id!(ink_accent), &accent);
+        theme.picture.set_uniforms(cx, dv);
         dv.set_uniform(cx, live_id!(count), &[CURVE_POINTS as f32]);
         dv.set_uniform(cx, live_id!(spec_count), &[SPEC_BANDS as f32]);
         self.draw_spectrum.draw_abs(cx, geo.plot);

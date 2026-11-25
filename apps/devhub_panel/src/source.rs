@@ -20,9 +20,8 @@
 //!
 //! A lost master (its restart) is redialled every 2 s, and the panel's header says so meanwhile.
 //! The UI gets a new fleet only when something it shows changed (not the clock, not a holder's
-//! beat): an idle fleet once a caps round. A hidden panel (its window closed to the tray) asks
-//! every 5 s instead of every second, each cadence above five times as far apart, and goes back
-//! to a second within one when it is shown again.
+//! beat): an idle fleet once a caps round. The source runs while the panel shows: a closed panel
+//! drops it, and asks nothing.
 
 use crate::demo::Demo;
 use crate::model::{Bucket, Fleet, InboxCounts, InboxEntry, JobBrief, JobDetail, LaneBrief, Link, Marks, Merge, Past, Side, ViewReq, ViewSink, EXACT_COL_MS, KEEP_MS, PAST_FIELDS, ROWS_SPAN_MS};
@@ -40,8 +39,6 @@ use std::time::{Duration, Instant};
 /// How long one answer may take before the master counts as lost.
 const ANSWER_WAIT: Duration = Duration::from_secs(20);
 const TICK: Duration = Duration::from_secs(1);
-/// A hidden panel's round: its tray glyph only needs the fleet's state, not each second of it.
-const HIDDEN_TICK: Duration = Duration::from_secs(5);
 /// What a plain `land status` keeps of the landed: its last hour.
 const LAND_RECENT_MS: u64 = 3_600_000;
 
@@ -96,11 +93,6 @@ impl Source {
     pub fn view_sink(&self) -> Arc<ViewSink> {
         self.shared.sink.clone()
     }
-
-    /// The panel's window is closed to the tray (true) or shown: a hidden panel asks less often.
-    pub fn set_hidden(&self, hidden: bool) {
-        self.shared.hidden.store(hidden, Ordering::Relaxed);
-    }
 }
 
 /// What the UI and the worker share.
@@ -109,7 +101,6 @@ struct Ask {
     latest: Mutex<Option<Arc<Fleet>>>,
     /// the job whose detail is open (its output is asked for while it is)
     want: Mutex<Option<String>>,
-    hidden: AtomicBool,
     stop: AtomicBool,
     /// what the timeline shows, and the oldest time the live window holds
     sink: Arc<ViewSink>,
@@ -126,18 +117,14 @@ impl Ask {
         SignalToUI::set_ui_signal();
     }
 
-    /// Waits out the round that began at `t`: a second, or while the panel is hidden up to
-    /// [`HIDDEN_TICK`] (a second at most once it is shown again); a view moved before the live
-    /// window ends it at once.
+    /// Waits out the round that began at `t`: a second; a view moved before the live window ends
+    /// it at once.
     fn rest(&self, t: Instant) {
         while !self.stopped() && t.elapsed() < TICK {
             std::thread::sleep(TICK.saturating_sub(t.elapsed()).min(Duration::from_millis(50)));
             if self.sink.moved_before(self.live_from.load(Ordering::Relaxed)) {
                 return;
             }
-        }
-        while self.hidden.load(Ordering::Relaxed) && !self.stopped() && t.elapsed() < HIDDEN_TICK {
-            std::thread::sleep(TICK.min(HIDDEN_TICK.saturating_sub(t.elapsed())));
         }
     }
 }

@@ -10,6 +10,13 @@ mod.widgets.hw_palette.screen_bg = #x010508
 mod.widgets.hw_palette.screen_text = #xd9fbff
 mod.widgets.hw_palette.screen_muted = #x5fb3c4
 mod.widgets.hw_palette.accent = #x38e8ff
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: deep blue, cyan, ice.
+mod.widgets.hw_palette.picture_low = #x0573d9
+mod.widgets.hw_palette.picture_mid = #x40d9ff
+mod.widgets.hw_palette.picture_high = #xe6ffff
+mod.widgets.hw_palette.picture_peak = #xccffff
+mod.widgets.hw_palette.picture_ink = #x5fb3c4
 mod.widgets.hw_palette.panel_text = #xc8f7ff
 mod.widgets.hw_palette.panel_muted = #x4f9fb0
 mod.widgets.hw_palette.menu_bg = #x03101a
@@ -389,7 +396,7 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         // Level rules: dotted light.
         let dotm = step(0.5, fract(p.x / 4.0))
         let a = cov * 0.45 * dotm
-        return vec4(vec3(0.25, 0.80, 1.0) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     // Segments, counted up from the foot of the column.
     let yb = sz.y - p.y
@@ -399,19 +406,19 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     if self.part > 2.5 && self.part < 3.5 {
         // An empty slot: a ghost of the column.
         let a = cov * segm * 0.10
-        return vec4(vec3(0.25, 0.80, 1.0) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 4.5 && self.part < 5.5 {
-        // A peak mark: a white-hot tick.
+        // A picture_peak tick.
         let a = cov
-        return vec4(vec3(0.85, 1.0, 1.0) * a, a)
+        return vec4(self.picture_peak.xyz * a, a)
     }
-    // A lit column: cyan light with a white-hot head.
+    // A lit column rises from picture_low to picture_mid with a picture_high head.
     let head = exp(-p.y / 5.0)
     let core = 1.0 - abs(p.x / max(sz.x, 1.0) - 0.5) * 1.2
     let lift = smoothstep(0.0, 110.0, yb)
-    let deep = mix(vec3(0.02, 0.45, 0.85), vec3(0.35, 0.95, 1.0), lift)
-    var col = deep * (0.75 + 0.45 * core) + vec3(0.8, 1.0, 1.0) * head * 0.9
+    let deep = mix(self.picture_low.xyz, self.picture_mid.xyz, lift)
+    var col = deep * (0.75 + 0.45 * core) + self.picture_high.xyz * head * 0.9
     let a = cov * mix(segm, 1.0, head * 0.6)
     return vec4(col * a, a)
 }
@@ -426,7 +433,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let core = 1.0 - smoothstep(0.35, 1.0, d)
     let halo = exp(-d / 1.1) * 0.35
     let al = clamp(core + halo, 0.0, 1.0) * self.color.w
-    let col = mix(self.color.xyz, vec3(0.9, 1.0, 1.0), core * 0.6)
+    let col = mix(self.picture_mid.xyz, self.picture_high.xyz, core * 0.6)
     return vec4(col * al, al)
 }
 

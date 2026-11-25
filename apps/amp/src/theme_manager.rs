@@ -202,6 +202,11 @@ script_mod! {
 /// The knobs the Tweak editor offers: (assigned path, label).
 const TWEAK_FIELDS: &[(&str, &str)] = &[
     ("mod.widgets.hw_palette.accent", "Accent (lights, selection)"),
+    ("mod.widgets.hw_palette.picture_low", "Sound picture: quiet"),
+    ("mod.widgets.hw_palette.picture_mid", "Sound picture: middle"),
+    ("mod.widgets.hw_palette.picture_high", "Sound picture: loud"),
+    ("mod.widgets.hw_palette.picture_peak", "Sound picture: peak marks"),
+    ("mod.widgets.hw_palette.picture_ink", "Sound picture: grid and scale"),
     ("mod.widgets.hw_palette.screen_bg", "List glass"),
     ("mod.widgets.hw_palette.screen_text", "List text"),
     ("mod.widgets.hw_palette.screen_muted", "List text, secondary"),

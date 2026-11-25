@@ -1,0 +1,10 @@
+[package]
+name = "makepad-app-robot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "UF850 workspace teaching and articulated motion preview"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-gltf = { path = "../../libs/gltf" }

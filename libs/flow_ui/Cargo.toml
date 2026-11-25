@@ -13,6 +13,7 @@ default = ["remote-values"]
 remote-values = ["makepad-flow/client", "dep:makepad-media-view"]
 
 [dependencies]
+makepad-canvas = { path = "../canvas" }
 makepad-flow = { path = "../flow", default-features = false, features = ["document"] }
 makepad-flowgraph = { path = "../flowgraph" }
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }

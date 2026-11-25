@@ -16,8 +16,15 @@ script_mod! {
     use mod.widgets.*
 
     // A filled rounded box: the bar tracks, the handle, the art frame.
+    // The spectrum hands it the style's sound-picture palette
+    // (`hw::Picture`): quiet to loud, the peak marks, the grid's ink.
     mod.widgets.DrawMusicRound = set_type_default() do #(DrawMusicRound::script_shader(vm)) {
         ..mod.draw.DrawQuad
+        picture_low: uniform(vec4(0.12, 0.5, 0.3, 1.0))
+        picture_mid: uniform(vec4(0.12, 0.84, 0.38, 1.0))
+        picture_high: uniform(vec4(0.6, 0.9, 0.7, 1.0))
+        picture_peak: uniform(vec4(0.9, 0.95, 0.9, 1.0))
+        picture_ink: uniform(vec4(0.6, 0.62, 0.65, 1.0))
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             let r = min(self.radius, min(self.rect_size.x, self.rect_size.y) * 0.5)

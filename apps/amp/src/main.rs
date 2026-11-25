@@ -953,6 +953,9 @@ pub struct Theme {
     pub foreground: Vec4f,
     /// Secondary text.
     pub muted: Vec4f,
+    /// The sound pictures' palette (the spectrum, the waveform, the EQ's
+    /// backdrop, the visualiser's made colour map), made once per style.
+    pub picture: hw::Picture,
     /// A key's legend while its switch is on, and while off.
     pub legend_on: Vec4f,
     pub legend_off: Vec4f,
@@ -980,11 +983,13 @@ impl Default for Theme {
     fn default() -> Self {
         let accent = color("#1ed760");
         let muted = color("#9b9ea6");
+        let (background, foreground) = (color("#18191b"), color("#e8e9eb"));
         Self {
             accent,
-            background: color("#18191b"),
-            foreground: color("#e8e9eb"),
+            background,
+            foreground,
             muted,
+            picture: hw::Picture::of(background, foreground, muted, accent, [None; 4], [None; 5]),
             legend_on: accent,
             legend_off: muted,
             caps: false,
@@ -1145,6 +1150,9 @@ pub struct App {
     /// The model picker shows `ai.models`.
     #[rust]
     ai_models_shown: bool,
+    /// The ai-music worker was told the AI page is shown.
+    #[rust]
+    ai_watching: bool,
     /// The AI page's frames while a song is made (its bar, the elapsed time).
     #[rust]
     ai_frame: NextFrame,

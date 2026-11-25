@@ -1,19 +1,18 @@
 //! The control panel: a header (how the master is reached, the fleet in numbers, the window
 //! and follow controls), the occupancy timeline, and at the right what needs a look, the
-//! detail of what was picked, and the queue; the landing strip at the bottom. It starts its
-//! data source when it first sees an event, judges each new fleet's needs once, and hands the
-//! fleet and its needs to its views; apps/devhub can embed it as it is.
+//! detail of what was picked, and the queue; the landing strip at the bottom. It judges each new
+//! fleet's needs once and hands the fleet and its needs to its views; apps/devhub shows it in a
+//! window of its own (its menu-bar item's Open panel).
 //!
 //! A pick (a need, or a lease clicked on the timeline) frames its lease on the timeline, opens
 //! its detail, and asks the master for its job's output while the detail stays open.
 //!
-//! A hidden panel (its window closed to a tray) keeps taking fleets for its [`Glance`] but hands
-//! none to its views, asks for no job output and has its source ask less often; shown again,
-//! its views get the newest fleet.
+//! Its data source runs only while the panel shows ([`DevhubPanel::set_shown`]): a closed panel
+//! asks the master nothing, and shown again it starts another and shows the fleet it last had
+//! until the new one comes.
 
 use crate::detail::{DetailPane, DetailPaneAction, Subject};
 use crate::fmt::{clock, dur, local_offset_s};
-use crate::glance::Glance;
 use crate::model::{Fleet, Link};
 use crate::needs::{needs, Need, Sev};
 use crate::needs_list::{NeedsList, NeedsListAction};
@@ -94,15 +93,13 @@ pub struct DevhubPanel {
     fleet: Option<Arc<Fleet>>,
     #[rust]
     needs: Arc<Vec<Need>>,
+    /// whether it shows (its source runs only then)
     #[rust]
-    started: bool,
-    #[rust]
-    hidden: bool,
+    shown: bool,
 }
 
 impl DevhubPanel {
     fn start(&mut self, cx: &mut Cx) {
-        self.started = true;
         match Source::start(&cx.thread_spawner(), Mode::from_env()) {
             Ok(s) => {
                 let sink = s.view_sink();
@@ -118,9 +115,7 @@ impl DevhubPanel {
         // the needs, once per fleet: the list shows them, the timeline makes their leases glow
         self.needs = Arc::new(if f.now_ms > 0 { needs(&f) } else { Vec::new() });
         self.fleet = Some(f);
-        if !self.hidden {
-            self.show_fleet(cx);
-        }
+        self.show_fleet(cx);
     }
 
     /// Hands the newest fleet and its needs to the views.
@@ -155,34 +150,29 @@ impl DevhubPanel {
         self.header(cx);
     }
 
-    /// The fleet at a glance, for a tray (None: nothing read yet).
-    pub fn glance(&self) -> Option<Glance> {
-        self.fleet.as_ref().map(|f| Glance::of(f, &self.needs))
+    /// Whether it shows a fleet (or word that the master is not there), not an empty page.
+    pub fn has_fleet(&self) -> bool {
+        self.shown && self.fleet.is_some()
     }
 
-    /// The panel's window was closed to a tray (false) or shown again (true).
+    /// The panel shows (its source starts and asks the master) or was closed (its source stops).
     pub fn set_shown(&mut self, cx: &mut Cx, shown: bool) {
-        let hidden = !shown;
-        if self.hidden == hidden {
+        if self.shown == shown {
             return;
         }
-        self.hidden = hidden;
-        if let Some(d) = &self.data {
-            d.set_hidden(hidden);
-        }
+        self.shown = shown;
         if shown {
+            self.start(cx);
             self.show_fleet(cx);
-        } else if let Some(d) = &self.data {
-            d.want_job(None);
+        } else {
+            // (its worker ends at its next round)
+            self.data = None;
         }
     }
 
     /// Asks for the open detail's job output (its job can appear after the pick: jobs are
     /// asked for every 5 s), or for none.
     fn want_output(&mut self, cx: &mut Cx) {
-        if self.hidden {
-            return;
-        }
         let subject = self.view.widget(cx, ids!(panel_detail)).borrow::<DetailPane>().and_then(|d| d.subject().cloned());
         let job = match (subject, self.fleet.as_ref()) {
             (Some(s), Some(f)) => s.lease.as_deref().and_then(|l| f.job_of(l)).map(|j| j.id.clone()).or_else(|| s.need.and_then(|n| n.job)),
@@ -250,9 +240,6 @@ impl Widget for DevhubPanel {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.started {
-            self.start(cx);
-        }
         if let Event::Signal = event {
             self.take(cx);
         }

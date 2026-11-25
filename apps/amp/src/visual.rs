@@ -21,9 +21,15 @@ script_mod! {
     // A style's own bar: one quad per band over the band's whole column,
     // drawn instead of the classic bars when `custom_bars` is on. Its
     // pixel gets the band's `band` index, the `bands` count, the `level`
-    // and falling `peak` (0..1), and `color` (the classic bar's colour).
+    // and falling `peak` (0..1), `color` (the classic bar's colour) and the
+    // style's sound-picture palette, `picture_low` .. `picture_ink`.
     set_type_default() do #(DrawSpectrumBar::script_shader(vm)){
         ..mod.draw.DrawQuad
+        picture_low: uniform(vec4(0.12, 0.5, 0.3, 1.0))
+        picture_mid: uniform(vec4(0.12, 0.84, 0.38, 1.0))
+        picture_high: uniform(vec4(0.6, 0.9, 0.7, 1.0))
+        picture_peak: uniform(vec4(0.9, 0.95, 0.9, 1.0))
+        picture_ink: uniform(vec4(0.6, 0.62, 0.65, 1.0))
         pixel: fn() {
             let h = self.rect_size.y
             let y = (1.0 - self.pos.y) * h
@@ -40,9 +46,15 @@ script_mod! {
     // (x = band, row y 0.25 = level, y 0.75 = peak) are textures;
     // `split` is where the spectrum ends and the waveform strip starts
     // (0..1 down the quad), `band_count` the bands, `loud` the overall
-    // level (0..1), `ink` the accent and `ink2` the text colour.
+    // level (0..1), `ink` the waveform's colour (`picture_mid`) and `ink2`
+    // the loud end (`picture_high`), with the whole palette beside them.
     set_type_default() do #(DrawScope::script_shader(vm)){
         ..mod.draw.DrawQuad
+        picture_low: uniform(vec4(0.12, 0.5, 0.3, 1.0))
+        picture_mid: uniform(vec4(0.12, 0.84, 0.38, 1.0))
+        picture_high: uniform(vec4(0.6, 0.9, 0.7, 1.0))
+        picture_peak: uniform(vec4(0.9, 0.95, 0.9, 1.0))
+        picture_ink: uniform(vec4(0.6, 0.62, 0.65, 1.0))
         samples: texture_2d(float)
         levels: texture_2d(float)
         split: uniform(0.7)
@@ -53,19 +65,39 @@ script_mod! {
         // Where the picture sits in this quad (x0, y0, x1, y1, 0..1): the
         // quad is larger by the Visualizer's `scope_pad`.
         inner_rect: uniform(vec4(0.0, 0.0, 1.0, 1.0))
+        // Sample `i` (0..511) as a point on a `w` by `h` pixel strip.
+        trace_at: fn(i: float, w: float, h: float) -> vec2 {
+            let c = clamp(i, 0.0, 511.0)
+            let v = self.samples.sample_nearest(vec2((c + 0.5) / 512.0, 0.5)).x
+            return vec2((c + 0.5) / 512.0 * w, (0.5 - v * 0.5) * h)
+        }
+        // How far `p` is from the segment `a`..`b`.
+        segment_distance: fn(p: vec2, a: vec2, b: vec2) -> float {
+            let pa = p - a
+            let ba = b - a
+            let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+            return length(pa - ba * t)
+        }
         pixel: fn() {
-            // The classic line, as a trace over the strip.
+            // The classic line, as a trace over the strip: the distance to
+            // the segments joining neighbouring samples (not the height
+            // under this column alone), so a steep stretch stays one stroke.
             let q = (self.pos - self.inner_rect.xy) / max(self.inner_rect.zw - self.inner_rect.xy, vec2(0.001, 0.001))
             let strip = (q.y - self.split) / max(1.0 - self.split, 0.001)
             if strip < 0.0 || strip > 1.0 || q.x < 0.0 || q.x > 1.0 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
-            let v = self.samples.sample_nearest(vec2(q.x, 0.5)).x
-            let y = 0.5 - v * 0.5
+            let w = self.rect_size.x * max(self.inner_rect.z - self.inner_rect.x, 0.001)
             let hpx = self.rect_size.y * (self.inner_rect.w - self.inner_rect.y) * (1.0 - self.split)
-            let d = abs(strip - y) * hpx
-            let a = 1.0 - smoothstep(0.75, 1.75, d)
-            return vec4(self.ink.xyz * a * 0.9, a * 0.9)
+            let p = vec2(q.x * w, strip * hpx)
+            let i = floor(q.x * 512.0 - 0.5)
+            let a = self.trace_at(i - 1.0, w, hpx)
+            let b = self.trace_at(i, w, hpx)
+            let c = self.trace_at(i + 1.0, w, hpx)
+            let e = self.trace_at(i + 2.0, w, hpx)
+            let d = min(min(self.segment_distance(p, a, b), self.segment_distance(p, b, c)), self.segment_distance(p, c, e))
+            let al = 1.0 - smoothstep(0.75, 1.75, d)
+            return vec4(self.ink.xyz * al * 0.9, al * 0.9)
         }
     }
 
@@ -73,8 +105,38 @@ script_mod! {
     mod.widgets.Visualizer = set_type_default() do mod.widgets.VisualizerBase{
         width: Fill
         height: Fill
-        draw_round: mod.widgets.DrawMusicRound{}
+        // The spectrum's parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar,
+        // 5 peak, 6 waveform midline, 7 waveform fill). A bar paints the
+        // style's picture from the floor up: `picture_low` at the floor,
+        // `picture_mid` half way up the spectrum (`span` is its height),
+        // `picture_high` at the top; every other part its `color`. A style
+        // that replaces `pixel` reads the same uniforms.
+        draw_round: mod.widgets.DrawMusicRound{
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let r = min(self.radius, min(self.rect_size.x, self.rect_size.y) * 0.5)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, r)
+                if self.part > 3.5 && self.part < 4.5 {
+                    let t = clamp((1.0 - self.pos.y) * self.rect_size.y / max(self.span, 1.0), 0.0, 1.0)
+                    let low = mix(self.picture_low.xyz, self.picture_mid.xyz, clamp(t * 2.0, 0.0, 1.0))
+                    let c = mix(low, self.picture_high.xyz, clamp(t * 2.0 - 1.0, 0.0, 1.0))
+                    sdf.fill(vec4(c, self.color.w))
+                } else {
+                    sdf.fill(self.color)
+                }
+                return sdf.result
+            }
+        }
         draw_light: mod.widgets.DrawMusicRound{}
+        // The waveform: its `color` is `picture_mid`; a style that replaces
+        // its `pixel` reads the palette here too.
+        draw_line +: {
+            picture_low: uniform(vec4(0.12, 0.5, 0.3, 1.0))
+            picture_mid: uniform(vec4(0.12, 0.84, 0.38, 1.0))
+            picture_high: uniform(vec4(0.6, 0.9, 0.7, 1.0))
+            picture_peak: uniform(vec4(0.9, 0.95, 0.9, 1.0))
+            picture_ink: uniform(vec4(0.6, 0.62, 0.65, 1.0))
+        }
         draw_label +: {text_style: theme.font_regular{font_size: 8.5}}
     }
 }
@@ -274,6 +336,12 @@ impl Widget for Visualizer {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         let Some(model) = scope.data_mut().get::<Model>() else { return DrawStep::done() };
         let theme = model.theme;
+        // The style's palette, made when the style loaded: copied into each
+        // shader's uniforms (no lookups per bar).
+        theme.picture.set_uniforms(cx, &mut self.draw_round.draw_vars);
+        theme.picture.set_uniforms(cx, &mut self.draw_line.draw_vars);
+        theme.picture.set_uniforms(cx, &mut self.draw_bar.draw_vars);
+        theme.picture.set_uniforms(cx, &mut self.draw_scope.draw_vars);
         let now = cx.seconds_since_app_start();
         let compact = self.compact;
         let state = self.state.get_or_insert_with(|| Analysis::new(compact));
@@ -316,7 +384,7 @@ impl Visualizer {
         let wave = Rect { pos: dvec2(inner.pos.x, spectrum.pos.y + spectrum.size.y + 24.0), size: dvec2(inner.size.x, inner.size.y - spectrum.size.y - 24.0) };
 
         // Level lines every 12 dB, frequency marks along the bottom.
-        let rule = with_alpha(theme.foreground, 0.06);
+        let rule = with_alpha(theme.picture.ink, 0.10);
         for step in 1..(-FLOOR_DB / 12.0) as i32 + 1 {
             let y = spectrum.pos.y + spectrum.size.y * (step as f64 * 12.0 / -FLOOR_DB as f64);
             self.draw_round.color = rule;
@@ -324,7 +392,7 @@ impl Visualizer {
             self.draw_round.part = 2.0;
             self.draw_round.draw_abs(cx, Rect { pos: dvec2(spectrum.pos.x, y.floor()), size: dvec2(spectrum.size.x, 1.0) });
         }
-        self.draw_label.color = with_alpha(theme.muted, 0.8);
+        self.draw_label.color = with_alpha(theme.picture.ink, 0.85);
         let ratio = (HIGH_HZ / LOW_HZ) as f64;
         for (hz, text) in [(50.0, "50"), (100.0, "100"), (200.0, "200"), (500.0, "500"), (1000.0, "1k"), (2000.0, "2k"), (5000.0, "5k"), (10000.0, "10k")] {
             let x = spectrum.pos.x + spectrum.size.x * ((hz / LOW_HZ as f64).ln() / ratio.ln());
@@ -368,7 +436,7 @@ impl Visualizer {
         let samples = &state.samples[state.samples.len() - take..];
         let gain = state.wave_gain as f64;
         let half = wave.size.y * 0.5;
-        self.draw_line.color = with_alpha(theme.accent, 0.9);
+        self.draw_line.color = with_alpha(theme.picture.mid, 0.9);
         self.draw_line.thickness = self.wave_thickness as f32;
         self.draw_line.mode = 0.0;
         let at = |point: usize| {
@@ -377,7 +445,7 @@ impl Visualizer {
         };
         if self.wave_fill > 0.0 {
             // The area between the midline and the trace.
-            self.draw_round.color = with_alpha(theme.accent, self.wave_fill as f32);
+            self.draw_round.color = with_alpha(theme.picture.low, self.wave_fill as f32);
             self.draw_round.radius = 0.0;
             self.draw_round.part = 7.0;
             let step = wave.size.x / (points - 1) as f64;
@@ -428,8 +496,9 @@ impl Visualizer {
         dv.set_uniform(cx, live_id!(split), &[split]);
         dv.set_uniform(cx, live_id!(band_count), &[count as f32]);
         dv.set_uniform(cx, live_id!(loud), &[loud]);
-        dv.set_uniform(cx, live_id!(ink), &[theme.accent.x, theme.accent.y, theme.accent.z, theme.accent.w]);
-        dv.set_uniform(cx, live_id!(ink2), &[theme.foreground.x, theme.foreground.y, theme.foreground.z, theme.foreground.w]);
+        let (ink, ink2) = (theme.picture.mid, theme.picture.high);
+        dv.set_uniform(cx, live_id!(ink), &[ink.x, ink.y, ink.z, ink.w]);
+        dv.set_uniform(cx, live_id!(ink2), &[ink2.x, ink2.y, ink2.z, ink2.w]);
         let pad = self.scope_pad.max(0.0);
         let quad = Rect { pos: inner.pos - dvec2(pad, pad), size: inner.size + dvec2(pad * 2.0, pad * 2.0) };
         let ir = [
@@ -454,7 +523,7 @@ impl Visualizer {
             let level = state.level[band] as f64;
             if self.custom_bars {
                 // The style's bar over the whole column.
-                let color = mix(theme.accent, theme.foreground, 0.1 + 0.35 * state.level[band]);
+                let color = theme.picture.at(state.level[band]);
                 self.draw_bar.color = color;
                 self.draw_bar.band = band as f32;
                 self.draw_bar.bands = count as f32;
@@ -476,12 +545,12 @@ impl Visualizer {
             }
             // A faint slot shows where every bar lives, even at rest.
             self.draw_round.radius = radius;
-            self.draw_round.color = with_alpha(theme.foreground, 0.05);
+            self.draw_round.color = with_alpha(theme.picture.ink, 0.08);
             self.draw_round.part = 3.0; self.draw_round.band = band as f32; self.draw_round.bands = count as f32; self.draw_round.level = state.level[band]; self.draw_round.span = rect.size.y as f32;
             self.draw_round.draw_abs(cx, Rect { pos: dvec2(x, rect.pos.y), size: dvec2(width, rect.size.y) });
             if level > 0.0 {
                 let height = (rect.size.y * level).max(width.min(2.0));
-                let color = mix(theme.accent, theme.foreground, 0.1 + 0.35 * state.level[band]);
+                let color = theme.picture.at(state.level[band]);
                 self.draw_round.color = color;
                 self.draw_round.part = 4.0;
                 self.draw_round.draw_abs(cx, Rect { pos: dvec2(x, bottom - height), size: dvec2(width, height) });
@@ -497,7 +566,7 @@ impl Visualizer {
             if peak > 0.0 {
                 let y = bottom - rect.size.y * peak;
                 self.draw_round.radius = 1.0;
-                self.draw_round.color = with_alpha(theme.foreground, 0.7);
+                self.draw_round.color = with_alpha(theme.picture.peak, 0.9);
                 self.draw_round.part = 5.0;
                 self.draw_round.draw_abs(cx, Rect { pos: dvec2(x, y - 2.0), size: dvec2(width, 2.0) });
             }

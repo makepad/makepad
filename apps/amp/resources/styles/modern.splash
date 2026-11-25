@@ -14,6 +14,13 @@ mod.widgets.hw_palette.screen_bg = #x040405
 mod.widgets.hw_palette.screen_text = #xf1f1ee
 mod.widgets.hw_palette.screen_muted = #x7c8189
 mod.widgets.hw_palette.accent = #x3b82ff
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: blue, green, signal orange.
+mod.widgets.hw_palette.picture_low = #x3b82ff
+mod.widgets.hw_palette.picture_mid = #x33d17a
+mod.widgets.hw_palette.picture_high = #xff5c1f
+mod.widgets.hw_palette.picture_peak = #xffffff
+mod.widgets.hw_palette.picture_ink = #x7c8189
 mod.widgets.hw_palette.panel_text = #x17181a
 mod.widgets.hw_palette.panel_muted = #x5d6168
 mod.widgets.hw_palette.menu_bg = #x111214
@@ -392,10 +399,10 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         let dm = step(fract(w / 4.0), 0.3)
         return vec4(self.color.xyz * self.color.w * dm * 2.0, self.color.w * dm * 2.0)
     }
-    // A peak mark (2 pt high): a white chip.
+    // A 2 pt chip in picture_peak.
     if self.part > 4.5 && self.part < 5.5 {
         let a = 0.95
-        return vec4(vec3(1.0, 1.0, 1.0) * a, a)
+        return vec4(self.picture_peak.xyz * a, a)
     }
     // A bar or its empty slot: square chips stacked from the bottom.
     let pitch = 4.0
@@ -408,18 +415,18 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         // Empty slot: a faint pip per chip, so the grid reads at rest.
         let pip = chip * step(abs(p.x - s.x * 0.5), 0.6)
         let a = 0.18 * pip
-        return vec4(vec3(0.5, 0.5, 0.55) * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
-    // Zones by height: blue low, green, white, signal orange on top.
+    // Four height zones, with a half-step between picture_mid and picture_high.
     let h = row * pitch
-    var c = vec3(0.23, 0.51, 1.0)
-    c = mix(c, vec3(0.20, 0.82, 0.48), step(28.0, h))
-    c = mix(c, vec3(0.96, 0.96, 0.94), step(56.0, h))
-    c = mix(c, vec3(1.0, 0.36, 0.12), step(76.0, h))
+    var c = self.picture_low.xyz
+    c = mix(c, self.picture_mid.xyz, step(28.0, h))
+    c = mix(c, mix(self.picture_mid.xyz, self.picture_high.xyz, 0.5), step(56.0, h))
+    c = mix(c, self.picture_high.xyz, step(76.0, h))
     let a = chip
     return vec4(c * a, a)
 }
-// The waveform: a dotted scope trace in white.
+// The waveform: a dotted scope trace in picture_mid.
 mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let p = self.pos * self.rect_size
     let a = self.seg_a
@@ -432,7 +439,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let w = self.rect_pos.x + p.x
     let dm = 0.35 + 0.65 * step(fract(w / 3.0), 0.55)
     let al = aa * dm
-    return vec4(vec3(0.97, 0.97, 0.95) * al, al)
+    return vec4(self.picture_mid.xyz * al, al)
 }
 mod.widgets.HwSpectrum.light = 4.6
 mod.widgets.HwMilk.light = 2.6

@@ -11,6 +11,12 @@ license = "MIT OR Apache-2.0"
 description = "Makepad Code: a local coding agent with a GPU-rendered workspace"
 default-run = "makepad-app-code"
 
+# The platforms Code is built for (devhub ci reads this; one place): the desktop.
+# Its agent (makepad-code-agent) drives apps and runs through makepad-remote, which is native only
+# (unix sockets, TLS, process control); not meant for a browser.
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [[bin]]
 name = "makepad-app-code"
 path = "src/main.rs"

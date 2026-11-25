@@ -12,6 +12,13 @@ mod.widgets.hw_palette.screen_bg = #x171816
 mod.widgets.hw_palette.screen_text = #xe9e6dc
 mod.widgets.hw_palette.screen_muted = #x9a968a
 mod.widgets.hw_palette.accent = #x46e07a
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: 80s boombox EQ: blue, green, yellow, red peak.
+mod.widgets.hw_palette.picture_low = #x3a86ff
+mod.widgets.hw_palette.picture_mid = #x46e07a
+mod.widgets.hw_palette.picture_high = #xffd23a
+mod.widgets.hw_palette.picture_peak = #xff5a3a
+mod.widgets.hw_palette.picture_ink = #x9a968a
 
 // ---- the front: warm grey ABS, spark-eroded texture ----
 mod.widgets.HwChassis.draw_bg.ground = #xa7a193

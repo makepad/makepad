@@ -5,14 +5,14 @@
 //! `inbox`, `bucket`, `job`, `lanes`) and never writes, serves or takes a lease.
 //! `DEVHUB_PANEL_DEMO=1` shows a synthetic fleet instead.
 //!
-//! The views are widgets (`DevhubPanel`, and its `FleetTimeline`, `NeedsList`, `DetailPane`,
-//! `FleetQueue`, `LandStrip`): register them with [`script_mod`] to embed the panel elsewhere.
+//! A library: devhub's app (apps/devhub) shows it in a window, opened from its menu-bar item. The
+//! views are widgets (`DevhubPanel`, and its `FleetTimeline`, `NeedsList`, `DetailPane`,
+//! `FleetQueue`, `LandStrip`): register them with [`script_mod`].
 
 pub mod demo;
 pub mod detail;
 pub mod float;
 pub mod fmt;
-pub mod glance;
 pub mod model;
 pub mod needs;
 pub mod needs_list;

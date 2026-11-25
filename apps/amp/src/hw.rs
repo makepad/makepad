@@ -32,12 +32,21 @@ script_mod! {
     // ---- palette ----
     // Read by Rust after the style runs (`palette`): the lists, the spectrum,
     // the bars and the album well paint with these.
+    //
+    // The sound pictures (the spectrum, the waveform, the EQ's backdrop and
+    // the visualiser's colour map) paint with the picture keys a style may
+    // name: `picture_low`, `picture_mid`, `picture_high` (quiet to loud: the
+    // bars from the floor up, the waveform in the mid), `picture_peak` (the
+    // falling peak marks) and `picture_ink` (the grid and the scale). A key
+    // left out is made from the style's colour map (`map1..map3`) or its
+    // accent, and every one is kept readable on `screen_bg` (`Picture::of`).
+    // A colour map left out is made of the picture (`read_map`).
     mod.widgets.hw_palette = {
         // Lists and the display: their glass, text and secondary text.
         screen_bg: #x0e1012
         screen_text: #xe6e8ea
         screen_muted: #x868c95
-        // Selection, the playing row, the spectrum's bars, lit marks.
+        // Selection, the playing row, lit marks.
         accent: #x39c6ff
         // Type on recessed panels (headings, the sidebar's buttons, the
         // presets tree): dark on a light floor, light on a dark one.
@@ -842,6 +851,17 @@ script_mod! {
     // bevels).
     mod.widgets.HwSpectrum = Visualizer{
         light: 2.5
+        // Every field a style may set, at its default: a style switch
+        // applies only what this template and the new style name, so a
+        // field one style turns on (Y2K's `custom_bars` and `custom_scope`)
+        // would otherwise stay on in every style picked after it.
+        custom_bars: false
+        custom_scope: false
+        light_low: vec4(0.0, 0.0, 0.0, 0.0)
+        light_high: vec4(0.0, 0.0, 0.0, 0.0)
+        wave_thickness: 1.5
+        wave_fill: 0.0
+        scope_pad: 0.0
     }
     mod.widgets.HwMilk = MilkdropView{
         light: 1.3
@@ -1434,20 +1454,19 @@ pub fn apply_style(vm: &mut ScriptVm) {
 }
 
 /// The style's colour map, from its palette (`map0`..`map3`, `map_strength`,
-/// `map_default`).
+/// `map_default`). A stop left out comes from the map made of the style's
+/// picture (`Picture::color_map`), and the map is on unless the style says
+/// `map_default = 0`: the visualiser takes every style's colours.
 fn read_map(vm: &mut ScriptVm) {
+    let theme = palette(vm);
+    let made = theme.picture.color_map(theme.background);
     let widgets = vm.module(id!(widgets));
     let value = vm.heap().value(widgets, id!(hw_palette).into(), NoTrap);
     let Some(obj) = value.as_object() else { return };
     let color = |vm: &mut ScriptVm, key: &str, d: Vec4f| vm.heap().value(obj, LiveId::from_str(key).into(), NoTrap).as_color().map(Vec4f::from_u32).unwrap_or(d);
-    let map = [
-        color(vm, "map0", vec4(0.0, 0.0, 0.0, 1.0)),
-        color(vm, "map1", vec4(0.33, 0.33, 0.33, 1.0)),
-        color(vm, "map2", vec4(0.66, 0.66, 0.66, 1.0)),
-        color(vm, "map3", vec4(1.0, 1.0, 1.0, 1.0)),
-    ];
+    let map = [color(vm, "map0", made[0]), color(vm, "map1", made[1]), color(vm, "map2", made[2]), color(vm, "map3", made[3])];
     let strength = vm.heap().value(obj, id!(map_strength).into(), NoTrap).as_f64().unwrap_or(0.75) as f32;
-    let default = vm.heap().value(obj, id!(map_default).into(), NoTrap).as_f64().unwrap_or(0.0) > 0.5;
+    let default = vm.heap().value(obj, id!(map_default).into(), NoTrap).as_f64().unwrap_or(1.0) > 0.5;
     let float = |vm: &mut ScriptVm, key: &str, d: f64| vm.heap().value(obj, LiveId::from_str(key).into(), NoTrap).as_f64().unwrap_or(d) as f32;
     let filter = vec4(
         float(vm, "screen_filter", 0.0),
@@ -1574,6 +1593,97 @@ fn hex(c: Vec4f) -> String {
 fn with_a(mut c: Vec4f, a: f32) -> Vec4f {
     c.w = a;
     c
+}
+
+// ---- the sound pictures' palette ----
+
+/// The palette the sound pictures paint with (the spectrum, its waveform,
+/// the EQ's backdrop, and the visualiser's colour map when the style names
+/// none): `low`, `mid`, `high` from quiet to loud (the bars from the floor
+/// up), the falling `peak` marks, and the `ink` of the grid and the scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Picture {
+    pub low: Vec4f,
+    pub mid: Vec4f,
+    pub high: Vec4f,
+    pub peak: Vec4f,
+    pub ink: Vec4f,
+}
+
+/// The palette keys of a [`Picture`], in its field order.
+pub const PICTURE_KEYS: [&str; 5] = ["picture_low", "picture_mid", "picture_high", "picture_peak", "picture_ink"];
+
+/// How far each picture colour must stand off the screen's floor (WCAG
+/// contrast): the quiet end of the bars a little, the rest as UI marks,
+/// the scale's ink as text.
+const PICTURE_CONTRAST: [f32; 5] = [2.0, 3.0, 3.0, 3.0, 4.5];
+
+impl Picture {
+    /// The style's picture: the colours it names, the others made from its
+    /// colour map (`map1..map3`) when it names one, else from its accent (a
+    /// deep accent, the accent, the accent paled toward the text); the peak
+    /// from the loud end and the text, the ink from the secondary text.
+    /// Each colour that does not stand off `bg` is moved toward `text`
+    /// until it does.
+    pub fn of(bg: Vec4f, text: Vec4f, muted: Vec4f, accent: Vec4f, map: [Option<Vec4f>; 4], named: [Option<Vec4f>; 5]) -> Self {
+        let low = named[0].or(map[1]).unwrap_or_else(|| mix_v(accent, bg, 0.45));
+        let mid = named[1].or(map[2]).unwrap_or(accent);
+        let high = named[2].or(map[3]).unwrap_or_else(|| mix_v(accent, text, 0.6));
+        let peak = named[3].unwrap_or_else(|| mix_v(high, text, 0.5));
+        let ink = named[4].unwrap_or(muted);
+        let [low, mid, high, peak, ink] = [low, mid, high, peak, ink].map(|c| with_a(c, 1.0));
+        let fit = |c: Vec4f, min: f32| stand_off(c, bg, text, min);
+        Self {
+            low: fit(low, PICTURE_CONTRAST[0]),
+            mid: fit(mid, PICTURE_CONTRAST[1]),
+            high: fit(high, PICTURE_CONTRAST[2]),
+            peak: fit(peak, PICTURE_CONTRAST[3]),
+            ink: fit(ink, PICTURE_CONTRAST[4]),
+        }
+    }
+
+    /// The colour at `t`, 0 quiet .. 1 loud.
+    pub fn at(&self, t: f32) -> Vec4f {
+        let t = t.clamp(0.0, 1.0) * 2.0;
+        if t < 1.0 {
+            mix_v(self.low, self.mid, t)
+        } else {
+            mix_v(self.mid, self.high, t - 1.0)
+        }
+    }
+
+    /// The visualiser's colour map made of the picture: the screen's floor
+    /// and the three picture colours, dark to bright, so the picture's
+    /// light and shade keep their order on a dark screen and a light one.
+    /// The bright end is paled half way to white (as the styles' own maps
+    /// end in a cream): a white frame is a pale tint, not a flood of the
+    /// picture's strongest colour.
+    pub fn color_map(&self, bg: Vec4f) -> [Vec4f; 4] {
+        let mut stops = [with_a(bg, 1.0), self.low, self.mid, self.high];
+        stops.sort_by(|a, b| luminance(*a).total_cmp(&luminance(*b)));
+        stops[3] = mix_v(stops[3], vec4(1.0, 1.0, 1.0, 1.0), 0.5);
+        stops
+    }
+
+    /// The five colours to a shader that paints with them: its
+    /// `picture_low` .. `picture_ink` uniforms (a style's own shaders read
+    /// them too). A shader without them ignores them.
+    pub fn set_uniforms(&self, cx: &Cx, draw_vars: &mut DrawVars) {
+        let v = |c: Vec4f| [c.x, c.y, c.z, c.w];
+        draw_vars.set_uniform(cx, live_id!(picture_low), &v(self.low));
+        draw_vars.set_uniform(cx, live_id!(picture_mid), &v(self.mid));
+        draw_vars.set_uniform(cx, live_id!(picture_high), &v(self.high));
+        draw_vars.set_uniform(cx, live_id!(picture_peak), &v(self.peak));
+        draw_vars.set_uniform(cx, live_id!(picture_ink), &v(self.ink));
+    }
+}
+
+/// `c`, or `c` moved toward `toward` until it stands `min` off `bg`.
+fn stand_off(c: Vec4f, bg: Vec4f, toward: Vec4f, min: f32) -> Vec4f {
+    if contrast(c, bg) >= min {
+        return c;
+    }
+    (1..=10).map(|step| mix_v(c, toward, step as f32 / 10.0)).find(|m| contrast(*m, bg) >= min).unwrap_or(with_a(toward, 1.0))
 }
 
 /// Splash giving the palette-driven templates their colours from the
@@ -1777,7 +1887,7 @@ pub fn current(cx: &mut Cx) -> String {
     cx.global::<HwStyle>().name.clone()
 }
 
-/// The lists' and the spectrum's palette, from the style.
+/// The lists' and the sound pictures' palette, from the style.
 pub fn palette(vm: &mut ScriptVm) -> Theme {
     let fallback = Theme::default();
     let widgets = vm.module(id!(widgets));
@@ -1792,13 +1902,18 @@ pub fn palette(vm: &mut ScriptVm) -> Theme {
     };
     let accent = read("accent", fallback.accent);
     let muted = read("screen_muted", fallback.muted);
+    let background = read("screen_bg", fallback.background);
+    let foreground = read("screen_text", fallback.foreground);
+    let named = |key: &str| vm.heap().value(obj, LiveId::from_str(key).into(), NoTrap).as_color().map(Vec4f::from_u32);
+    let picture = Picture::of(background, foreground, muted, accent, ["map0", "map1", "map2", "map3"].map(|k| named(k)), PICTURE_KEYS.map(|k| named(k)));
     let caps = vm.heap().value(obj, id!(caps).into(), NoTrap).as_f64().unwrap_or(0.0) > 0.5;
     let float = |key: &str, d: f32| vm.heap().value(obj, LiveId::from_str(key).into(), NoTrap).as_f64().map(|v| v as f32).unwrap_or(d);
     Theme {
-        background: read("screen_bg", fallback.background),
-        foreground: read("screen_text", fallback.foreground),
+        background,
+        foreground,
         muted,
         accent,
+        picture,
         legend_on: read("legend_on", accent),
         legend_off: read("legend_off", muted),
         caps,
@@ -2128,9 +2243,13 @@ mod contrast_tests {
     use super::*;
 
     /// Every style: the rows' text, a playing row's accent and the muted
-    /// text over the list floor, the hover and the selection.
+    /// text over the list floor, the hover and the selection; and its sound
+    /// pictures' palette: named in full, readable on its screen as the
+    /// style wrote it, made readable when a style names none, and its own
+    /// (switching style changes the picture); and every spectrum field it
+    /// sets is one the next style switch puts back.
     #[test]
-    fn every_style_reads_on_its_row_tints() {
+    fn every_style_reads_on_its_row_tints_and_paints_its_own_picture() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/styles");
         let hexv = |t: &str| {
             let h = t.trim().trim_start_matches("#x");
@@ -2138,23 +2257,72 @@ mod contrast_tests {
             vec4(v(0), v(2), v(4), 1.0)
         };
         let mut bad = Vec::new();
+        let mut pictures: Vec<(String, Picture)> = Vec::new();
+        // The spectrum's template in this file's script: a style switch
+        // re-applies only the fields it names.
+        let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hw.rs")).unwrap();
+        let template = source.split("mod.widgets.HwSpectrum = Visualizer{").nth(1).and_then(|t| t.split("\n    }").next()).unwrap();
         let mut paths: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "splash")).collect();
         paths.sort();
         for path in paths {
             let text = std::fs::read_to_string(&path).unwrap();
-            let key = |k: &str, d: &str| {
+            let named = |k: &str| {
                 let at = format!("mod.widgets.hw_palette.{k} = ");
-                text.lines().find_map(|l| l.strip_prefix(at.as_str())).map(hexv).unwrap_or_else(|| hexv(d))
+                text.lines().find_map(|l| l.strip_prefix(at.as_str())).map(hexv)
             };
+            let key = |k: &str, d: &str| named(k).unwrap_or_else(|| hexv(d));
             let (bg, fg, accent) = (key("screen_bg", "#x0e1012"), key("screen_text", "#xe6e8ea"), key("accent", "#x39c6ff"));
+            let muted = key("screen_muted", "#x868c95");
             let (sel, hover) = row_tint_alphas(bg, fg, accent);
             let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            // A field a style sets that the template does not name stays
+            // set in every style picked after it (Y2K's `custom_scope` once
+            // left the next styles drawing its scope path). Draw objects are
+            // made anew on each switch, so they need no name there.
+            let fields = text.lines().filter_map(|l| l.strip_prefix("mod.widgets.HwSpectrum.")?.split_once(" = ")).map(|(f, _)| f).filter(|f| !f.contains('.') && !f.starts_with("draw_"));
+            for field in fields {
+                let named = template.lines().map(str::trim).any(|l| l.starts_with(&format!("{field}:")) || l.starts_with(&format!("{field} +:")));
+                if !named {
+                    bad.push(format!("{name}: sets HwSpectrum.{field}, which the HwSpectrum template does not name"));
+                }
+            }
             for (what, alpha) in [("hover", hover), ("selection", sel)] {
                 let floor = mix_v(bg, accent, alpha);
                 let (t, a) = (contrast(fg, floor), contrast(accent, floor));
                 println!("{name:10} {what:9} a={alpha:.2} text {t:5.2} accent {a:5.2}");
                 if t < 4.5 || a < 3.0 {
                     bad.push(format!("{name} {what}: text {t:.2} accent {a:.2}"));
+                }
+            }
+            let map = ["map0", "map1", "map2", "map3"].map(|k| named(k));
+            let keys = PICTURE_KEYS.map(|k| named(k));
+            if keys.iter().any(Option::is_none) {
+                bad.push(format!("{name}: names only some of {PICTURE_KEYS:?}"));
+                continue;
+            }
+            let picture = Picture::of(bg, fg, muted, accent, map, keys);
+            let own = [picture.low, picture.mid, picture.high, picture.peak, picture.ink];
+            for ((k, want), got) in PICTURE_KEYS.iter().zip(keys).zip(own) {
+                if want != Some(got) {
+                    bad.push(format!("{name}: {k} does not read on screen_bg ({:.2}:1)", contrast(want.unwrap(), bg)));
+                }
+            }
+            // A style that named nothing (a person's own) still gets a picture that reads.
+            let made = Picture::of(bg, fg, muted, accent, [None; 4], [None; 5]);
+            for (k, (c, min)) in PICTURE_KEYS.iter().zip([made.low, made.mid, made.high, made.peak, made.ink].into_iter().zip(PICTURE_CONTRAST)) {
+                if contrast(c, bg) < min {
+                    bad.push(format!("{name}: a made {k} reads {:.2}:1 on screen_bg", contrast(c, bg)));
+                }
+            }
+            // The visualiser's map made of the picture runs dark to bright.
+            let stops = picture.color_map(bg);
+            assert!(stops.windows(2).all(|w| luminance(w[0]) <= luminance(w[1])), "{name}: its made colour map runs dark to bright");
+            pictures.push((name, picture));
+        }
+        for (at, (a, pa)) in pictures.iter().enumerate() {
+            for (b, pb) in &pictures[at + 1..] {
+                if pa == pb {
+                    bad.push(format!("{a} and {b} paint the same picture"));
                 }
             }
         }

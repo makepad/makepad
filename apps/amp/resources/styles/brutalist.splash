@@ -12,6 +12,13 @@ mod.widgets.hw_palette.screen_bg = #x0d0a08
 mod.widgets.hw_palette.screen_text = #xffa060
 mod.widgets.hw_palette.screen_muted = #x9a6440
 mod.widgets.hw_palette.accent = #xff5a14
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: rust, signal orange, pale amber.
+mod.widgets.hw_palette.picture_low = #x8c471f
+mod.widgets.hw_palette.picture_mid = #xff450a
+mod.widgets.hw_palette.picture_high = #xffc780
+mod.widgets.hw_palette.picture_peak = #xffdba8
+mod.widgets.hw_palette.picture_ink = #xae7650
 mod.widgets.hw_palette.panel_text = #xd9dccf
 mod.widgets.hw_palette.panel_muted = #x8d968a
 mod.widgets.hw_palette.menu_bg = #x1d221f
@@ -409,14 +416,14 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         // Peak marks: the glowing cathode tip, left behind.
         let c = abs(p.x - s.x * 0.5) / max(s.x * 0.5, 0.5)
         let a = (1.0 - c * c) * 0.9
-        return vec4(vec3(1.0, 0.62, 0.30) * a, a)
+        return vec4(self.picture_peak.xyz * a, a)
     }
     let x = abs(p.x - s.x * 0.5) / max(s.x * 0.5, 0.5)
     let base_h = 5.0
     if self.part > 2.5 && self.part < 3.5 {
         // An unlit IN-9 tube: a glass cylinder with a bright rim, a glint
         // down one side, the cathode wire in its axis, a round top and a
-        // black socket at the foot.
+        // dark picture_ink socket at the foot.
         let top = clamp(1.0 - (p.y - s.x * 0.5) / max(s.x * 0.5, 0.5), 0.0, 1.0)
         let rr = length(vec2(x, max(top, 0.0)))
         let inside = 1.0 - smoothstep(0.92, 1.0, rr)
@@ -424,24 +431,24 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         let glint = (1.0 - smoothstep(0.0, 0.12, abs(p.x - s.x * 0.28) / max(s.x, 1.0) * 2.0)) * inside
         let wire = (1.0 - smoothstep(0.0, 0.14, x)) * inside
         let gl = rim * 0.30 + glint * 0.22 + 0.05
-        var col = vec3(0.70, 0.64, 0.56) * gl + vec3(0.55, 0.28, 0.12) * wire * 0.25
+        var col = self.picture_ink.xyz * gl + self.picture_ink.xyz * wire * 0.25
         var al = clamp(gl + wire * 0.2, 0.0, 1.0) * inside
         let sock = step(s.y - base_h, p.y)
-        col = mix(col, vec3(0.13, 0.12, 0.11) * (0.6 + 0.6 * (1.0 - x)) + vec3(0.25, 0.22, 0.2) * (1.0 - smoothstep(0.0, 1.2, p.y - (s.y - base_h))), sock)
+        col = mix(col, self.picture_ink.xyz * 0.24 * (0.6 + 0.6 * (1.0 - x)) + self.picture_ink.xyz * 0.45 * (1.0 - smoothstep(0.0, 1.2, p.y - (s.y - base_h))), sock)
         al = mix(al, 1.0, sock)
         return vec4(col * al, al)
     }
-    // A lit column of neon: a white-hot core in a saturated orange sheath
+    // A lit column of neon: a picture_high core in a picture_mid sheath
     // that fades to the glass, brightest at the glowing end.
     if p.y > s.y - base_h {
         return vec4(0.0, 0.0, 0.0, 0.0)
     }
-    let neon = mix(vec3(1.0, 0.27, 0.04), self.color.xyz, 0.15)
+    let neon = mix(self.picture_mid.xyz, self.color.xyz, 0.15)
     let core = exp(-x * x * 14.0)
     let sheath = exp(-x * x * 4.0)
     let tip = exp(-p.y / 3.0)
     let hot = clamp(core * 0.55 + tip * 0.9, 0.0, 1.0)
-    let col = neon * (0.45 + sheath * 0.8) + vec3(1.0, 0.78, 0.50) * hot * 0.5
+    let col = neon * (0.45 + sheath * 0.8) + self.picture_high.xyz * hot * 0.5
     let al = clamp(sheath * 0.92 + tip * 0.4 + 0.08, 0.0, 1.0)
     return vec4(col * al, al)
 }
@@ -457,7 +464,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let core = 1.0 - smoothstep(0.2, 1.0, d)
     let glow = exp(-d * d / 3.0) * 0.55
     let al = clamp(core + glow, 0.0, 1.0)
-    let col = mix(self.color.rgb, vec3(1.0, 0.86, 0.66), core * 0.6)
+    let col = mix(self.picture_mid.xyz, self.picture_high.xyz, core * 0.6)
     return vec4(col * al, al)
 }
 

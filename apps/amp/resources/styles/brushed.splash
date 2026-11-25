@@ -1,4 +1,4 @@
-// Brushed Aluminium — a Braun-era hi-fi: a satin brushed-aluminium front,
+// Brushed Aluminium — a 1960s hi-fi: a satin brushed-aluminium front,
 // light aluminium key caps with dark printed glyphs, black anodised screen
 // surround, dark display glass for the lists, orange indicator light.
 //
@@ -12,6 +12,13 @@ mod.widgets.hw_palette.screen_bg = #x15171a
 mod.widgets.hw_palette.screen_text = #xe4e6e8
 mod.widgets.hw_palette.screen_muted = #x8b9098
 mod.widgets.hw_palette.accent = #xff8a2b
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: steel grey, the orange signal, warm white.
+mod.widgets.hw_palette.picture_low = #x6c7480
+mod.widgets.hw_palette.picture_mid = #xff8a2b
+mod.widgets.hw_palette.picture_high = #xfff2e4
+mod.widgets.hw_palette.picture_peak = #xffffff
+mod.widgets.hw_palette.picture_ink = #x8b9098
 
 // ---- the front ----
 mod.widgets.HwChassis.draw_bg.ground = #xc9cbcd

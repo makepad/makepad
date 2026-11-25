@@ -38,6 +38,7 @@
 
 use crate::lyrics::{self, Timing};
 use crate::worker::{send, Message};
+use makepad_ai_hub::discovery;
 use makepad_ai_hub::job::{self, FixedRouter, FleetRouter, GenRouter, GenerateError, Want};
 use makepad_ai_hub::protocol::{ChatMessageJson, GenerateRequestJson, SongTimingJson, SONG_TIMING_FORMAT};
 use makepad_ai_hub::registry::Domain;
@@ -167,6 +168,9 @@ pub enum AiCommand {
     NewConversation,
     /// List the fleet's music models.
     Models,
+    /// The AI page is shown (`true`) or not: while shown the worker keeps the model list
+    /// current as hubs come and go.
+    Watch(bool),
 }
 
 /// What the worker says. `epoch` is the Next's: the UI drops what belongs
@@ -498,6 +502,7 @@ pub fn run(rx: Receiver<AiCommand>, epoch: Arc<AtomicU64>, tx: SyncSender<Messag
     if let Some((request, model, minutes, language)) = load_settings(&dir) {
         send(&tx, Message::AiMusic(AiEvent::Restored { request, model, minutes, language }));
     }
+    let mut watch = ModelWatch::default();
     loop {
         let command = match rx.recv_timeout(POLL) {
             Ok(command) => Some(command),
@@ -520,9 +525,23 @@ pub fn run(rx: Receiver<AiCommand>, epoch: Arc<AtomicU64>, tx: SyncSender<Messag
             session.save(&dir);
             send(&tx, Message::AiMusic(AiEvent::Songs(session.songs.clone())));
         }
+        if watch.shown {
+            let heard = heard_nodes();
+            if should_reask(&watch, &heard) {
+                let models = fleet_models();
+                watch.asked(heard, models.is_empty());
+                send(&tx, Message::AiMusic(AiEvent::Models(models)));
+            }
+        }
         match command {
             None => {}
-            Some(AiCommand::Models) => send(&tx, Message::AiMusic(AiEvent::Models(fleet_models()))),
+            Some(AiCommand::Models) => {
+                let heard = heard_nodes();
+                let models = fleet_models();
+                watch.asked(heard, models.is_empty());
+                send(&tx, Message::AiMusic(AiEvent::Models(models)));
+            }
+            Some(AiCommand::Watch(on)) => watch.shown = on,
             Some(AiCommand::NewConversation) => {
                 Session::archive(&dir);
                 session = Session::default();
@@ -832,11 +851,58 @@ impl GenRouter for NamingRouter {
     }
 }
 
+/// What the model-list watcher knows of its last ask.
+#[derive(Default)]
+struct ModelWatch {
+    /// The AI page is shown.
+    shown: bool,
+    /// The hubs heard and when the list was last asked for.
+    last: Option<(Vec<u64>, Instant, bool)>,
+}
+
+impl ModelWatch {
+    fn asked(&mut self, heard: Vec<u64>, empty: bool) {
+        self.last = Some((heard, Instant::now(), empty));
+    }
+}
+
+/// An empty list is asked for again after this, a list after the longer one.
+const MODELS_RETRY: Duration = Duration::from_secs(5);
+const MODELS_STALE: Duration = Duration::from_secs(30);
+
+/// Whether the model list is asked for now: while the page is shown, at first, when the
+/// set of heard hubs changed, when the list came back empty (the hubs may still be
+/// starting) and every so often since a hub can turn a model on without changing the set.
+fn should_reask(watch: &ModelWatch, heard: &[u64]) -> bool {
+    if !watch.shown {
+        return false;
+    }
+    let Some((then, at, empty)) = &watch.last else { return true };
+    then.as_slice() != heard || at.elapsed() >= if *empty { MODELS_RETRY } else { MODELS_STALE }
+}
+
+/// The ids of the hubs heard on the LAN now, sorted. A set lookup, no network.
+fn heard_nodes() -> Vec<u64> {
+    let mut ids: Vec<u64> = discovery::start_listener().nodes().into_iter().map(|n| n.node_id).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Starts the discovery listener and, when it started less than one beacon expiry ago and
+/// has heard no hub, waits for the first beacon (or the expiry) so a job at startup does not
+/// fail before the hubs had a round to be heard.
+fn settle_discovery() {
+    while heard_nodes().is_empty() && discovery::listener_age().is_some_and(|age| age < discovery::BEACON_EXPIRY) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The claude-cli hub: the first pinned hub (`MAKEPAD_AI_HUB`, the client's `pinned`
 /// file) that serves it, else a hub heard on the LAN that does (an AI Hub app with Claude
 /// on beacons like any hub). The reason says which: no AI Hub running at the pin, or one
 /// running without Claude turned on.
 fn writer_hub() -> Result<String, String> {
+    settle_discovery();
     let pins = makepad_ai_hub::hub_order::pinned_bases();
     let mut down = Vec::new();
     let mut without = Vec::new();
@@ -1133,6 +1199,22 @@ pub fn uri_of(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_list_is_asked_again_when_hubs_change_or_it_is_empty() {
+        use super::*;
+        let ago = |secs: u64, heard: Vec<u64>, empty| Some((heard, Instant::now() - Duration::from_secs(secs), empty));
+        let watch = |shown, last| ModelWatch { shown, last };
+        assert!(!should_reask(&watch(false, None), &[1]), "page hidden");
+        assert!(should_reask(&watch(true, None), &[]), "page just shown");
+        assert!(!should_reask(&watch(true, ago(1, vec![1], false)), &[1]), "fresh list, same hubs");
+        assert!(should_reask(&watch(true, ago(1, vec![1], false)), &[1, 2]), "a hub came");
+        assert!(should_reask(&watch(true, ago(1, vec![1, 2], false)), &[1]), "a hub went");
+        assert!(!should_reask(&watch(true, ago(1, vec![], true)), &[]), "empty, asked a moment ago");
+        assert!(should_reask(&watch(true, ago(6, vec![], true)), &[]), "empty, retried");
+        assert!(!should_reask(&watch(true, ago(6, vec![1], false)), &[1]), "full list is not retried that soon");
+        assert!(should_reask(&watch(true, ago(31, vec![1], false)), &[1]), "stale list");
+    }
+
     use super::*;
 
     #[test]

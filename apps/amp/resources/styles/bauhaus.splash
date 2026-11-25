@@ -14,6 +14,13 @@ mod.widgets.hw_palette.screen_bg = #x151412
 mod.widgets.hw_palette.screen_text = #xf1ebdb
 mod.widgets.hw_palette.screen_muted = #x8f8878
 mod.widgets.hw_palette.accent = #xe23b26
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: blue, red, yellow.
+mod.widgets.hw_palette.picture_low = #x386bd9
+mod.widgets.hw_palette.picture_mid = #xe03321
+mod.widgets.hw_palette.picture_high = #xfac21f
+mod.widgets.hw_palette.picture_peak = #xf1ebdb
+mod.widgets.hw_palette.picture_ink = #x8f8878
 mod.widgets.hw_palette.panel_text = #x14130f
 mod.widgets.hw_palette.panel_muted = #x4a463d
 mod.widgets.hw_palette.menu_bg = #xefe9da
@@ -301,7 +308,7 @@ mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
 }
 
 // ---- spectrum: stacks of square painted blocks, each capped with a disc,
-// cycling red, yellow, blue across the bands; an off-white peak bar ----
+// cycling picture_mid, picture_high and picture_low under a picture_peak bar ----
 // Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
 mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let s = self.rect_size
@@ -319,27 +326,27 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     }
     if (self.part > 1.5 && self.part < 3.5) || (self.part > 5.5 && self.part < 6.5) {
         if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
-            // Level rules: dashed off-white.
+            // Dashed level rules in picture_ink.
             let d = step(0.5, fract(p.x / 8.0))
-            return vec4(0.9, 0.87, 0.8, 1.0) * 0.10 * d
+            return self.picture_ink * 0.10 * d
         }
         // A bar's empty slot: a column of faint square outlines.
         let pitch = s.x + 2.0
         let k = fract((s.y - p.y) / pitch) * pitch
         let box = step(k, s.x)
-        return vec4(0.9, 0.87, 0.8, 1.0) * 0.045 * box
+        return self.picture_ink * 0.045 * box
     }
     if self.part > 4.5 && self.part < 5.5 {
-        // The peak mark: a heavy off-white bar.
-        return vec4(0.95, 0.92, 0.85, 1.0)
+        // A heavy picture_peak bar.
+        return self.picture_peak
     }
     // A lit bar: square blocks from the foot, the top one a disc.
     let pitch = s.x + 2.0
     let band = floor((self.rect_pos.x + 1.0) / pitch)
     let tri = band - 3.0 * floor(band / 3.0)
-    var ink = vec3(0.88, 0.20, 0.13)
-    if tri > 0.5 { ink = vec3(0.98, 0.76, 0.12) }
-    if tri > 1.5 { ink = vec3(0.22, 0.42, 0.85) }
+    var ink = self.picture_mid.xyz
+    if tri > 0.5 { ink = self.picture_high.xyz }
+    if tri > 1.5 { ink = self.picture_low.xyz }
     let y = s.y - p.y
     let nblk = max(floor((s.y + 2.0) / pitch), 1.0)
     let idx = floor(y / pitch)
@@ -371,9 +378,9 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let x = self.rect_pos.x + p.x
     let band = floor(x / 36.0)
     let tri = band - 3.0 * floor(band / 3.0)
-    var ink = vec3(0.88, 0.20, 0.13)
-    if tri > 0.5 { ink = vec3(0.98, 0.76, 0.12) }
-    if tri > 1.5 { ink = vec3(0.22, 0.42, 0.85) }
+    var ink = self.picture_mid.xyz
+    if tri > 0.5 { ink = self.picture_high.xyz }
+    if tri > 1.5 { ink = self.picture_low.xyz }
     return vec4(ink * aa, aa)
 }
 
@@ -463,5 +470,4 @@ mod.widgets.HwEqGraph.draw_curve.curve = vec4(4.0, 2.0, 4.0, 0.0)
 mod.widgets.HwEqGraph.draw_curve.curve_ink = vec4(0.95, 0.92, 0.86, 1.0)
 mod.widgets.HwEqGraph.draw_grid.grid = vec4(3.0, 0.12, 0.35, 0.0)
 mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.14, 0.0, 0.1, 0.0)
-mod.widgets.HwEqGraph.draw_spectrum.spec_ink = vec4(0.96, 0.78, 0.12, 1.0)
 true

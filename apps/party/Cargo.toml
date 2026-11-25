@@ -14,6 +14,12 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 default-run = "makepad-app-party"
 
+# The platforms Party is built for (devhub ci reads this; one place): the desktop.
+# The party box serves its guests one HTTPS page (makepad_network's TLS server, native only); guests
+# use that page on their phones, not a web build of Party.
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [lib]
 name = "makepad_app_party"
 path = "src/lib.rs"

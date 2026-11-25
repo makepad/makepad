@@ -12,6 +12,13 @@ mod.widgets.hw_palette.screen_bg = #x120a05
 mod.widgets.hw_palette.screen_text = #xf2dcb0
 mod.widgets.hw_palette.screen_muted = #xb8915c
 mod.widgets.hw_palette.accent = #x5cf08a
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: phosphor green to white-hot.
+mod.widgets.hw_palette.picture_low = #x1f9a3e
+mod.widgets.hw_palette.picture_mid = #x38ff61
+mod.widgets.hw_palette.picture_high = #xd9ffcc
+mod.widgets.hw_palette.picture_peak = #xf0fff0
+mod.widgets.hw_palette.picture_ink = #xb8915c
 mod.widgets.hw_palette.panel_text = #xf0dcb4
 mod.widgets.hw_palette.panel_muted = #xb89a70
 mod.widgets.hw_palette.menu_bg = #x2a160b
@@ -172,13 +179,12 @@ mod.widgets.HwMilk.light = 3.0
 mod.widgets.HwMilk.light_knee = 0.95
 mod.widgets.HwSpectrum.light = 4.0
 
-// ---- the spectrum: an oscilloscope in green phosphor ----
+// ---- the spectrum: a phosphor oscilloscope ----
 // Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
 mod.widgets.HwSpectrum.draw_round.pixel = fn() {
     let p = self.pos * self.rect_size
     let sz = self.rect_size
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let phos = vec3(0.22, 1.0, 0.38)
     if self.part > 0.5 && self.part < 1.5 {
         // The well: a phosphor tube above, a lit dial strip, a scope below.
         let c = sz * 0.5
@@ -196,6 +202,7 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         let inw = inx * step(w0, p.y) * step(p.y, w1)
         var col = vec3(0.03, 0.018, 0.01)
         // The tube faces: black-green with a faint phosphor haze.
+        let phos = vec3(0.22, 1.0, 0.38)
         let hs = (p - vec2(sz.x * 0.5, (s0 + s1) * 0.5)) / vec2(sz.x * 0.6, sh * 0.8)
         let tube = vec3(0.012, 0.03, 0.02) + phos * exp(-dot(hs, hs) * 1.5) * 0.035
         col = mix(col, tube, ins)
@@ -208,43 +215,43 @@ mod.widgets.HwSpectrum.draw_round.pixel = fn() {
         let gys = max(w1 - w0, 1.0) / 4.0
         let gy = abs(fract((p.y - w0) / gys + 0.5) - 0.5) * gys
         let hline = (1.0 - smoothstep(0.0, px, gy - 0.4)) * step(0.5, fract(p.x / 3.0))
-        col = col + phos * vline * 0.07 * (ins + inw) + phos * hline * 0.07 * inw
+        col = col + self.picture_ink.xyz * vline * 0.07 * (ins + inw) + self.picture_ink.xyz * hline * 0.07 * inw
         // A tube's own edge: darker toward its rim.
         let es = min(min(p.x - x0, x1 - p.x), min(p.y - s0, s1 - p.y))
         let ew = min(min(p.x - x0, x1 - p.x), min(p.y - w0, w1 - p.y))
         col = col * (1.0 - (1.0 - smoothstep(0.0, 8.0, es)) * 0.5 * ins - (1.0 - smoothstep(0.0, 8.0, ew)) * 0.5 * inw)
-        // The dial strip between them: a warm backlit band, a gold scale.
+        // The dial strip between them: a warm backlit band, a picture_ink scale.
         let ind = inx * step(s1 + 2.0, p.y) * step(p.y, w0 - 3.0)
         let dy = (p.y - s1 - 2.0) / max(w0 - s1 - 5.0, 1.0)
         let band = vec3(0.13, 0.065, 0.025) + vec3(0.30, 0.13, 0.03) * exp(-(dy - 0.5) * (dy - 0.5) / 0.08)
         col = mix(col, band, ind)
         let tk = abs(fract((p.x - x0) / ((x1 - x0) / 60.0) + 0.5) - 0.5) * (x1 - x0) / 60.0
         let tick = (1.0 - smoothstep(0.0, px, tk - 0.35)) * ind * (1.0 - smoothstep(0.0, px, p.y - s1 - 5.5))
-        col = mix(col, vec3(0.95, 0.72, 0.36), tick * 0.8)
+        col = mix(col, self.picture_ink.xyz, tick * 0.8)
         return vec4(col * cov, cov)
     }
     if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
-        // Level rules and the scope's zero line: dotted phosphor.
+        // Level rules and the scope's zero line: dots in picture_ink.
         let dot_on = step(0.45, fract(p.x / 4.0))
         let a = 0.22 * dot_on
-        return vec4(phos * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     let yb = sz.y - p.y
     if self.part > 2.5 && self.part < 3.5 {
         // An empty column: unlit phosphor cells.
         let cellv = step(0.3, fract(yb / 4.0))
         let a = cellv * 0.07
-        return vec4(phos * a, a)
+        return vec4(self.picture_ink.xyz * a, a)
     }
     if self.part > 4.5 && self.part < 5.5 {
-        // Peak marks: white-hot phosphor.
-        return vec4(0.85, 1.0, 0.88, 1.0)
+        return self.picture_peak
     }
-    // A lit column: stacked phosphor cells, white-hot at the top.
+    // Stacked phosphor cells rise from picture_low to picture_mid, with a picture_high tip.
     let cellv = step(0.28, fract(yb / 4.0))
     let hot = 1.0 - smoothstep(0.0, 10.0, p.y)
     let side = 1.0 - abs(self.pos.x - 0.5) * 0.7
-    let col = mix(phos * 0.95, vec3(0.85, 1.0, 0.8), hot * 0.6) * side
+    let body = mix(self.picture_low.xyz, self.picture_mid.xyz, 1.0 - self.pos.y)
+    let col = mix(body * 0.95, self.picture_high.xyz, hot * 0.6) * side
     let a = mix(0.25, 1.0, cellv)
     return vec4(col * a, a)
 }
@@ -258,7 +265,7 @@ mod.widgets.HwSpectrum.draw_line.pixel = fn() {
     let d = length(pa - ba * h)
     let core = 1.0 - smoothstep(0.2, 1.0, d)
     let glow = exp(-d * d / 3.0) * 0.5
-    let rgb = vec3(0.36, 1.0, 0.55) * glow + vec3(0.8, 1.0, 0.85) * core
+    let rgb = self.picture_mid.xyz * glow + self.picture_high.xyz * core
     let al = clamp(core + glow, 0.0, 1.0)
     return vec4(rgb, al)
 }

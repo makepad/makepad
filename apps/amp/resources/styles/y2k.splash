@@ -13,6 +13,13 @@ mod.widgets.hw_palette.screen_bg = #x06243d
 mod.widgets.hw_palette.screen_text = #xe8f7ff
 mod.widgets.hw_palette.screen_muted = #xc4e4f4
 mod.widgets.hw_palette.accent = #x2ed3ff
+// The sound pictures: quiet to loud (the bars from the floor up), the peak
+// marks, the grid and scale: aqua, lime, orange, tangerine peak rings.
+mod.widgets.hw_palette.picture_low = #x1ab2ff
+mod.widgets.hw_palette.picture_mid = #x8cff59
+mod.widgets.hw_palette.picture_high = #xff9e26
+mod.widgets.hw_palette.picture_peak = #xff9e26
+mod.widgets.hw_palette.picture_ink = #xc4e4f4
 mod.widgets.hw_palette.panel_text = #x06304d
 mod.widgets.hw_palette.panel_muted = #x3f6f8c
 mod.widgets.hw_palette.menu_bg = #x0a2e4a
@@ -324,9 +331,8 @@ mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
 }
 
 // ---- the spectrum: bars rise as columns of soap bubbles ----
-// Each band is a column of soap bubbles: lit ones rise to the level and
-// warm from Aqua through lime to Tangerine as they climb; the rest stay
-// as faint empty bubbles, and the falling peak is a Tangerine ring.
+// Lit bubbles rise from picture_low through picture_mid to picture_high.
+// Above them, faint empty bubbles surround the falling picture_peak ring.
 mod.widgets.HwSpectrum.custom_bars = true
 mod.widgets.HwSpectrum.draw_bar.pixel = fn() {
     let sz = self.rect_size
@@ -345,19 +351,19 @@ mod.widgets.HwSpectrum.draw_bar.pixel = fn() {
     let f = (k + 0.5) * d / max(sz.y, 1.0)
     let lit = step((k + 0.5) * d, sz.y * self.level + d * 0.5) * step(0.004, self.level)
     let pk = step(abs((k + 0.5) * d - sz.y * self.peak), d * 0.5) * step(0.004, self.peak) * (1.0 - lit)
-    var tint = mix(vec3(0.15, 0.82, 1.0), vec3(0.55, 1.0, 0.35), smoothstep(0.40, 0.62, f))
-    tint = mix(tint, vec3(1.0, 0.56, 0.10), smoothstep(0.62, 0.85, f))
+    var tint = mix(self.picture_low.xyz, self.picture_mid.xyz, smoothstep(0.40, 0.62, f))
+    tint = mix(tint, self.picture_high.xyz, smoothstep(0.62, 0.85, f))
     let rim = smoothstep(0.50, 0.97, rn)
     let hl = 1.0 - smoothstep(0.0, 0.30, length(q / max(rr, 0.5) - vec2(-0.30, -0.36)))
     // A lit bubble: tinted gel with a bright rim and a white lick.
     let c1 = tint * (0.55 + 0.9 * rim) + vec3(1.0, 1.0, 1.0) * (hl * 0.95 + rim * rim * 0.25)
     let a1 = cov * (0.58 + 0.42 * rim + hl * 0.6)
-    // The peak: a Tangerine ring. The empties: a ghost rim.
+    // The peak has a picture_peak ring and the empties have picture_ink rims.
     let ring = cov * smoothstep(0.62, 0.9, rn)
-    let c2 = vec3(1.0, 0.62, 0.15) + vec3(1.0, 1.0, 1.0) * hl * 0.6
+    let c2 = self.picture_peak.xyz + vec3(1.0, 1.0, 1.0) * hl * 0.6
     let a2 = ring * 0.95 + cov * hl * 0.5
     let a3 = cov * (rim * 0.10 + hl * 0.06)
-    var o = vec4(vec3(0.6, 0.85, 1.0) * a3, a3)
+    var o = vec4(self.picture_ink.xyz * a3, a3)
     o = mix(o, vec4(c2 * a2, a2), pk)
     o = mix(o, vec4(c1 * min(a1, 1.0), min(a1, 1.0)), lit)
     return o
@@ -403,7 +409,7 @@ mod.widgets.HwSpectrum.draw_scope.pixel = fn() {
     let fill = inside * (0.30 - 0.18 * depth)
     let core = 1.0 - smoothstep(0.5, 1.4, d)
     let glow = exp(-d * 0.9) * 0.6
-    let c = vec3(0.10, 0.70, 1.0) * fill + vec3(0.85, 1.0, 1.0) * core + vec3(0.15, 0.80, 1.0) * glow * (1.0 - core)
+    let c = self.picture_low.xyz * fill + self.picture_mid.xyz * core + self.picture_low.xyz * glow * (1.0 - core)
     let al = clamp(fill + core + glow * (1.0 - core), 0.0, 1.0)
     return vec4(c, al)
 }
